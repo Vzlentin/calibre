@@ -12,17 +12,16 @@ This is a Python project. Update this section as tooling is added (e.g., pyproje
 
 ## Commands
 
-
-
+> **Always use `uv` to run Python tools.** Never invoke `python`, `pytest`, `ruff`, `mypy`, or any other Python tool directly — always prefix with `uv run`.
 
 | Task            | Command                                                   |
 | --------------- | --------------------------------------------------------- |
-| Install deps    | `pip install -e .` (or `uv pip install -e .` if using uv) |
-| Run tests       | `pytest`                                                  |
-| Run single test | `pytest path/to/test_file.py::test_name`                  |
-| Lint            | `ruff check .`                                            |
-| Format          | `ruff format .`                                           |
-| Type check      | `mypy .`                                                  |
+| Install deps    | `uv pip install`                                          |
+| Run tests       | `uv run pytest`                                           |
+| Run single test | `uv run pytest path/to/test_file.py::test_name`           |
+| Lint            | `uv run ruff check .`                                     |
+| Format          | `uv run ruff format .`                                    |
+| Type check      | `uv run mypy .`                                           |
 
 
 ## Obsidian Vault
