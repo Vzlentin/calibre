@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+from typing import Any, Callable
+
+import numpy as np
+import pandas as pd
+import fugue.api as fa
+
+from calibre.contracts.forecast_frame import (
+    DS,
+    FORECAST_ORIGIN,
+    H,
+    MODEL_NAME,
+    REQUIRED_COLUMNS,
+    UNIQUE_ID,
+    Y,
+    Y_HAT,
+)
+from calibre.engine.ledger import Ledger
+from calibre.engine.scoring import compute_row_errors, resolve_actuals
+from calibre.models.registry import resolve_adapter
+from calibre.tasks.forecast_task import ForecastTask
+
+
+class BackendEngine:
+    def __init__(
+        self,
+        freq: str = "W",
+        metrics: list[Callable] | None = None,
+        engine: Any = None,
+    ) -> None:
+        self.freq = freq
+        self.metrics = metrics
+        self.engine = engine
+
+    def execute(
+        self,
+        tasks: list[ForecastTask],
+        actuals: pd.DataFrame,
+        origins: list[pd.Timestamp],
+    ) -> Ledger:
+        ledger = Ledger()
+
+        tasks_by_uid: dict[str, list[ForecastTask]] = {}
+        for task in tasks:
+            tasks_by_uid.setdefault(task.unique_id, []).append(task)
+
+        for origin in origins:
+            origin_preds = self._run_origin(tasks_by_uid, origin)
+
+            if not origin_preds.empty:
+                ledger.append(origin_preds)
+
+            current = ledger.to_df()
+            if current.empty:
+                continue
+
+            updated, newly_resolved = resolve_actuals(current, actuals, origin)
+
+            if newly_resolved.empty:
+                continue
+
+            scored = compute_row_errors(newly_resolved)
+            for col in ("error", "abs_error", "pct_error"):
+                if col not in updated.columns:
+                    updated[col] = np.nan
+                updated.loc[scored.index, col] = scored[col]
+
+            ledger.update_resolved(updated)
+
+        return ledger
+
+    def _run_origin(
+        self,
+        tasks_by_uid: dict[str, list[ForecastTask]],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        uids = list(tasks_by_uid.keys())
+        if not uids:
+            return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+        uid_df = pd.DataFrame({UNIQUE_ID: uids})
+        freq = self.freq
+
+        def _process_partition(df: pd.DataFrame) -> pd.DataFrame:
+            uid = df[UNIQUE_ID].iloc[0]
+            results: list[pd.DataFrame] = []
+
+            for task in tasks_by_uid[uid]:
+                history = task.history[task.history["ds"] < origin]
+                if history.empty:
+                    continue
+
+                origin_task = ForecastTask(
+                    unique_id=task.unique_id,
+                    history=history,
+                    horizon=task.horizon,
+                    model_config={**task.model_config, "freq": freq},
+                    forecast_origin=origin,
+                    future_x=task.future_x,
+                )
+
+                adapter = resolve_adapter(origin_task.model_config)
+                adapter.fit(origin_task)
+                preds = adapter.predict(origin_task)
+
+                preds[UNIQUE_ID] = uid
+                preds[FORECAST_ORIGIN] = origin
+                preds[MODEL_NAME] = origin_task.model_name
+                preds[Y] = np.nan
+
+                results.append(preds[[UNIQUE_ID, DS, Y, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]])
+
+            if not results:
+                return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+            return pd.concat(results, ignore_index=True)
+
+        schema = (
+            f"{UNIQUE_ID}:str,{DS}:datetime,{Y}:double,"
+            f"{Y_HAT}:double,{H}:long,"
+            f"{FORECAST_ORIGIN}:datetime,{MODEL_NAME}:str"
+        )
+
+        result = fa.transform(
+            uid_df,
+            _process_partition,
+            schema=schema,
+            partition={"by": UNIQUE_ID},
+            engine=self.engine,
+        )
+
+        return pd.DataFrame(result)
