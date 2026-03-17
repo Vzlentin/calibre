@@ -69,7 +69,7 @@ def test_y_hat_dtype_is_float64(lgbm_task):
     assert result["y_hat"].dtype == np.float64
 
 
-def test_custom_lags_respected(repeating_history):
+def test_custom_lags_produces_valid_output(repeating_history):
     task = ForecastTask(
         unique_id="SKU_001",
         history=repeating_history,
