@@ -12,14 +12,20 @@ def _ensure_registry() -> None:
     if _ADAPTER_REGISTRY:
         return
     from calibre.models.mlforecast import MLForecastAdapter
+    from calibre.models.neuralforecast import NeuralForecastAdapter
     from calibre.models.nixtla import StatsForecastAdapter
 
     _ADAPTER_REGISTRY.update(
         {
             "SeasonalNaive": StatsForecastAdapter,
             "AutoARIMA": StatsForecastAdapter,
+            "AutoETS": StatsForecastAdapter,
+            "MFLES": StatsForecastAdapter,
             "LightGBM": MLForecastAdapter,
             "XGBoost": MLForecastAdapter,
+            "NHiTS": NeuralForecastAdapter,
+            "TiDE": NeuralForecastAdapter,
+            "PatchTST": NeuralForecastAdapter,
         }
     )
 
