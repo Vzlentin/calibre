@@ -13,12 +13,20 @@ dependencies = [
     "pyarrow",
     "fugue",
     "statsforecast",
+]
+
+[project.optional-dependencies]
+ml = [
     "mlforecast",
     "lightgbm",
     "xgboost",
 ]
-
-[project.optional-dependencies]
+neural = [
+    "neuralforecast",
+]
+all = [
+    "calibre[ml,neural]",
+]
 dev = [
     "pytest",
     "ruff",
