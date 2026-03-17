@@ -4,6 +4,8 @@ import pandas as pd
 
 from calibre.tasks.forecast_task import ForecastTask
 
+_RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps"})
+
 
 class NeuralForecastAdapter:
     def __init__(self, model_config: dict) -> None:
@@ -19,8 +21,6 @@ class NeuralForecastAdapter:
             "TiDE": TiDE,
             "PatchTST": PatchTST,
         }
-        reserved_keys = frozenset({"model", "name", "freq", "input_size", "max_steps"})
-
         model_name = self._config["model"]
         model_cls = neural_models[model_name]
 
@@ -28,7 +28,7 @@ class NeuralForecastAdapter:
         max_steps = self._config.get("max_steps", 100)
         freq = self._config.get("freq", "W")
 
-        params = {k: v for k, v in self._config.items() if k not in reserved_keys}
+        params = {k: v for k, v in self._config.items() if k not in _RESERVED_KEYS}
         model = model_cls(
             h=task.horizon,
             input_size=input_size,
