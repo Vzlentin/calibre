@@ -181,51 +181,40 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fugue" },
+    { name = "lightgbm" },
+    { name = "mlforecast" },
+    { name = "neuralforecast" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "statsforecast", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
     { name = "statsforecast", version = "2.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or sys_platform != 'win32'" },
+    { name = "xgboost" },
 ]
 
 [package.optional-dependencies]
-all = [
-    { name = "lightgbm" },
-    { name = "mlforecast" },
-    { name = "neuralforecast" },
-    { name = "xgboost" },
-]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
 ]
-ml = [
-    { name = "lightgbm" },
-    { name = "mlforecast" },
-    { name = "xgboost" },
-]
-neural = [
-    { name = "neuralforecast" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "calibre", extras = ["ml", "neural"], marker = "extra == 'all'" },
     { name = "fugue" },
-    { name = "lightgbm", marker = "extra == 'ml'" },
-    { name = "mlforecast", marker = "extra == 'ml'" },
+    { name = "lightgbm" },
+    { name = "mlforecast" },
     { name = "mypy", marker = "extra == 'dev'" },
-    { name = "neuralforecast", marker = "extra == 'neural'" },
+    { name = "neuralforecast" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "statsforecast" },
-    { name = "xgboost", marker = "extra == 'ml'" },
+    { name = "xgboost" },
 ]
-provides-extras = ["ml", "neural", "all", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "certifi"

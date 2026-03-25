@@ -9,7 +9,9 @@
       "Bash(git commit:*)",
       "Bash(uv run:*)",
       "Bash(git ls-tree:*)",
-      "Bash(uv pip:*)"
+      "Bash(uv pip:*)",
+      "Read(//c/Users/a933186/.claude/plugins/**)",
+      "Read(//c/Users/a933186/.claude/**)"
     ]
   }
 }
