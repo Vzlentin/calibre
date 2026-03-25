@@ -1,7 +1,6 @@
 """Integration tests for calibre.pipeline.runner."""
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -16,33 +15,6 @@ _MODEL_CONFIGS = [
 _SERIES_FILTER = ["0_126"]
 _HORIZON = 4
 _WEEK = 0
-
-
-def _find_data_dir() -> Path:
-    """Locate the data/ directory, handling git worktrees."""
-    candidate = Path(__file__).parent.parent / "data"
-    if candidate.is_dir():
-        return candidate
-    try:
-        common_dir = subprocess.check_output(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=Path(__file__).parent,
-            text=True,
-        ).strip()
-        project_root = Path(common_dir).parent
-        candidate = project_root / "data"
-        if candidate.is_dir():
-            return candidate
-    except subprocess.CalledProcessError:
-        pass
-    raise FileNotFoundError(
-        f"Cannot find data/ directory. Tried {Path(__file__).parent.parent / 'data'}"
-    )
-
-
-@pytest.fixture(scope="module")
-def data_dir() -> Path:
-    return _find_data_dir()
 
 
 @pytest.fixture(scope="module")
