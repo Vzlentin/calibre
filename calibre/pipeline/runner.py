@@ -21,7 +21,7 @@ _DEFAULT_METRICS: list[Callable] = [mae, rmse, smape, wape]
 @dataclass(frozen=True)
 class PipelineResult:
     ledger: Ledger
-    scores: pd.DataFrame | None
+    scores: pd.DataFrame
     sales: pd.DataFrame
 
     def to_parquet(self, path: str | Path) -> None:
@@ -29,10 +29,14 @@ class PipelineResult:
         self.ledger.to_parquet(str(path))
 
 
-def _derive_origins(sales: pd.DataFrame, n: int, horizon: int) -> list[pd.Timestamp]:
+def _derive_origins(all_dates: list, n: int, horizon: int) -> list[pd.Timestamp]:
     """Return last N origin timestamps that have horizon-worth of actuals after them."""
-    all_dates = sorted(sales[DS].unique())
-    return list(all_dates[-(n + horizon): -horizon])
+    if len(all_dates) < n + horizon:
+        raise ValueError(
+            f"Not enough dates to derive {n} origins with horizon {horizon}: "
+            f"need at least {n + horizon} dates, got {len(all_dates)}"
+        )
+    return [pd.Timestamp(d) for d in all_dates[-(n + horizon): -horizon]]
 
 
 def run_backtest(
@@ -61,7 +65,8 @@ def run_backtest(
     tasks = build_tasks(sales, model_configs, horizon, series_filter)
 
     if isinstance(origins, int):
-        origins = _derive_origins(sales, origins, horizon)
+        all_dates = sorted(sales[DS].unique())
+        origins = _derive_origins(all_dates, origins, horizon)
 
     ledger = BackendEngine(freq=freq, engine=engine).execute(tasks, sales, origins)
 
@@ -69,11 +74,7 @@ def run_backtest(
         metrics = _DEFAULT_METRICS
 
     ledger_df = ledger.to_df()
-    scores: pd.DataFrame | None
-    if ledger_df.empty:
-        scores = pd.DataFrame()
-    else:
-        scores = compute_metrics(ledger_df, metrics)
+    scores = compute_metrics(ledger_df, metrics)
 
     return PipelineResult(ledger=ledger, scores=scores, sales=sales)
 
@@ -91,7 +92,7 @@ def run_forecast(
     sales = load_week(data_dir, week)
     tasks = build_tasks(sales, model_configs, horizon, series_filter)
 
-    latest_origin = pd.Timestamp(sales[DS].max())
+    latest_origin = sales[DS].max()
     origins = [latest_origin]
 
     return BackendEngine(freq=freq, engine=engine).execute(tasks, sales, origins)
