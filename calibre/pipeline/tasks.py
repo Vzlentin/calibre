@@ -29,7 +29,7 @@ def build_tasks(
 
     # Determine which series to include
     if series_filter is None:
-        series_to_include = sales[UNIQUE_ID].unique()
+        series_to_include = sales[UNIQUE_ID].unique().tolist()
     else:
         series_to_include = series_filter
 
