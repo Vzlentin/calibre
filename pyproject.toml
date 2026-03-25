@@ -17,6 +17,7 @@ dependencies = [
     "lightgbm",
     "xgboost",
     "neuralforecast",
+    "pandas-stubs>=3.0.0.260204",
 ]
 
 [project.optional-dependencies]

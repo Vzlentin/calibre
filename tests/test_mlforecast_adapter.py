@@ -20,7 +20,7 @@ def lgbm_task(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"model": "LightGBM", "freq": "W"},
+        model_config={"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "freq": "W"},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
 
@@ -31,7 +31,7 @@ def xgb_task(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"model": "XGBoost", "freq": "W"},
+        model_config={"backend": "mlforecast", "model": "xgboost.XGBRegressor", "freq": "W"},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
 
@@ -74,7 +74,7 @@ def test_custom_lags_produces_valid_output(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"model": "LightGBM", "freq": "W", "lags": [1, 2]},
+        model_config={"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "freq": "W", "lags": [1, 2]},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
     adapter = MLForecastAdapter(task.model_config)

@@ -1,18 +1,30 @@
 from __future__ import annotations
 
-import lightgbm as lgb
+import importlib
 import pandas as pd
-import xgboost as xgb
 from mlforecast import MLForecast
 
 from calibre.tasks.forecast_task import ForecastTask
 
-_ML_MODELS: dict[str, type] = {
-    "LightGBM": lgb.LGBMRegressor,
-    "XGBoost": xgb.XGBRegressor,
-}
+_RESERVED_KEYS = frozenset({"model", "name", "freq", "lags", "lag_transforms", "target_transforms", "backend"})
 
-_RESERVED_KEYS = frozenset({"model", "name", "freq", "lags", "lag_transforms", "target_transforms"})
+
+def _resolve_model_cls(dotted_path: str) -> type:
+    """Resolve a dotted import path like 'lightgbm.LGBMRegressor' to its class."""
+    try:
+        module_path, class_name = dotted_path.rsplit(".", 1)
+    except ValueError:
+        raise ValueError(
+            f"model must be a dotted import path (e.g. 'lightgbm.LGBMRegressor'), got: {dotted_path!r}"
+        )
+    try:
+        mod = importlib.import_module(module_path)
+    except ImportError as e:
+        raise ImportError(f"Could not import module {module_path!r}: {e}") from e
+    cls = getattr(mod, class_name, None)
+    if cls is None:
+        raise ValueError(f"Module {module_path!r} has no attribute {class_name!r}")
+    return cls
 
 
 class MLForecastAdapter:
@@ -21,8 +33,7 @@ class MLForecastAdapter:
         self._mlf: MLForecast | None = None
 
     def fit(self, task: ForecastTask) -> None:
-        model_name = self._config["model"]
-        model_cls = _ML_MODELS[model_name]
+        model_cls = _resolve_model_cls(self._config["model"])
         params = {k: v for k, v in self._config.items() if k not in _RESERVED_KEYS}
         model = model_cls(**params)
 

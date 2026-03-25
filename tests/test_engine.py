@@ -30,7 +30,7 @@ def single_series_setup(weekly_dates, repeating_pattern):
         unique_id="SKU_001",
         history=pd.DataFrame({"ds": weekly_dates, "y": repeating_pattern}),
         horizon=4,
-        model_config={"model": "SeasonalNaive", "season_length": 4},
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
     )
 
     origins = [weekly_dates[7], weekly_dates[11]]
@@ -111,13 +111,13 @@ def test_multi_series():
             unique_id="A",
             history=pd.DataFrame({"ds": dates, "y": pattern_a}),
             horizon=4,
-            model_config={"model": "SeasonalNaive", "season_length": 4},
+            model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
         ),
         ForecastTask(
             unique_id="B",
             history=pd.DataFrame({"ds": dates, "y": pattern_b}),
             horizon=4,
-            model_config={"model": "SeasonalNaive", "season_length": 4},
+            model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
         ),
     ]
 

@@ -20,7 +20,7 @@ def nhits_task(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"model": "NHiTS", "freq": "W", "max_steps": 5},
+        model_config={"backend": "neuralforecast", "model": "NHITS", "freq": "W", "max_steps": 5},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
 
@@ -31,7 +31,7 @@ def tide_task(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"model": "TiDE", "freq": "W", "max_steps": 5},
+        model_config={"backend": "neuralforecast", "model": "TiDE", "freq": "W", "max_steps": 5},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
 
@@ -42,7 +42,7 @@ def patchtst_task(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"model": "PatchTST", "freq": "W", "max_steps": 5},
+        model_config={"backend": "neuralforecast", "model": "PatchTST", "freq": "W", "max_steps": 5},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
 

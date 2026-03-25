@@ -1,17 +1,10 @@
 from __future__ import annotations
 
+import statsforecast.models
 import pandas as pd
 from statsforecast import StatsForecast
-from statsforecast.models import AutoARIMA, AutoETS, MFLES, SeasonalNaive
 
 from calibre.tasks.forecast_task import ForecastTask
-
-_NIXTLA_MODELS: dict[str, type] = {
-    "SeasonalNaive": SeasonalNaive,
-    "AutoARIMA": AutoARIMA,
-    "AutoETS": AutoETS,
-    "MFLES": MFLES,
-}
 
 
 class StatsForecastAdapter:
@@ -21,8 +14,10 @@ class StatsForecastAdapter:
 
     def fit(self, task: ForecastTask) -> None:
         model_name = self._config["model"]
-        model_cls = _NIXTLA_MODELS[model_name]
-        params = {k: v for k, v in self._config.items() if k not in ("model", "name", "freq")}
+        model_cls = getattr(statsforecast.models, model_name, None)
+        if model_cls is None:
+            raise ValueError(f"Unknown statsforecast model: {model_name!r}")
+        params = {k: v for k, v in self._config.items() if k not in ("model", "name", "freq", "backend")}
         model = model_cls(**params)
 
         freq = self._config.get("freq", "W")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import pandas as pd
+import neuralforecast.models
+from neuralforecast import NeuralForecast
 
 from calibre.tasks.forecast_task import ForecastTask
 
-_RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps"})
+_RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", "backend"})
 
 
 class NeuralForecastAdapter:
@@ -13,16 +15,12 @@ class NeuralForecastAdapter:
         self._nf: object | None = None
 
     def fit(self, task: ForecastTask) -> None:
-        from neuralforecast import NeuralForecast
-        from neuralforecast.models import NHITS, PatchTST, TiDE
 
-        neural_models: dict[str, type] = {
-            "NHiTS": NHITS,
-            "TiDE": TiDE,
-            "PatchTST": PatchTST,
-        }
+
         model_name = self._config["model"]
-        model_cls = neural_models[model_name]
+        model_cls = getattr(neuralforecast.models, model_name, None)
+        if model_cls is None:
+            raise ValueError(f"Unknown neuralforecast model: {model_name!r}")
 
         input_size = self._config.get("input_size", 2 * task.horizon)
         max_steps = self._config.get("max_steps", 100)
