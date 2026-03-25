@@ -81,10 +81,10 @@ def melt_wide_instock(path: str | Path) -> pd.DataFrame:
     return long[[UNIQUE_ID, DS, IN_STOCK]]
 
 
-def load_week(data_dir: str | Path, week: int) -> pd.DataFrame:
-    """Find 'Week {week} - * - Sales.csv' in data_dir (glob), return melt_wide_sales result."""
+def load_period(data_dir: str | Path, period: int) -> pd.DataFrame:
+    """Find 'Week {period} - * - Sales.csv' in data_dir (glob), return melt_wide_sales result."""
     data_dir = Path(data_dir)
-    matches = list(data_dir.glob(f"Week {week} - * - Sales.csv"))
+    matches = list(data_dir.glob(f"Week {period} - * - Sales.csv"))
     if not matches:
-        raise FileNotFoundError(f"No Sales file found for week {week} in {data_dir}")
+        raise FileNotFoundError(f"No Sales file found for period {period} in {data_dir}")
     return melt_wide_sales(matches[0])

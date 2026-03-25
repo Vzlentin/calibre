@@ -12,7 +12,7 @@ from calibre.engine.backend import BackendEngine
 from calibre.engine.ledger import Ledger
 from calibre.engine.scoring import compute_metrics
 from calibre.metrics import mae, rmse, smape, wape
-from calibre.pipeline.loading import load_week
+from calibre.pipeline.loading import load_period
 from calibre.pipeline.tasks import build_tasks
 
 _DEFAULT_METRICS: list[Callable] = [mae, rmse, smape, wape]
@@ -41,7 +41,7 @@ def _derive_origins(all_dates: list, n: int, horizon: int) -> list[pd.Timestamp]
 
 def run_backtest(
     data_dir: str | Path,
-    week: int,
+    period: int,
     model_configs: list[dict],
     horizon: int,
     origins: list[pd.Timestamp] | int,
@@ -53,7 +53,7 @@ def run_backtest(
     """End-to-end backtest pipeline.
 
     Steps:
-    1. Load sales data for the given week.
+    1. Load sales data for the given period.
     2. Build forecast tasks (optionally filtered to a subset of series).
     3. Resolve origins: if an int N is given, derive the last N origin timestamps
        that still have horizon-worth of actuals ahead of them.
@@ -61,7 +61,7 @@ def run_backtest(
     5. Compute aggregate metrics over resolved rows.
     6. Return a PipelineResult.
     """
-    sales = load_week(data_dir, week)
+    sales = load_period(data_dir, period)
     tasks = build_tasks(sales, model_configs, horizon, series_filter)
 
     if isinstance(origins, int):
@@ -81,7 +81,7 @@ def run_backtest(
 
 def run_forecast(
     data_dir: str | Path,
-    week: int,
+    period: int,
     model_configs: list[dict],
     horizon: int,
     series_filter: list[str] | None = None,
@@ -89,7 +89,7 @@ def run_forecast(
     engine: Any = None,
 ) -> Ledger:
     """Forward-looking forecast. Single origin = latest date in sales. No scoring."""
-    sales = load_week(data_dir, week)
+    sales = load_period(data_dir, period)
     tasks = build_tasks(sales, model_configs, horizon, series_filter)
 
     latest_origin = sales[DS].max()

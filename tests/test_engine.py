@@ -16,24 +16,24 @@ from calibre.tasks.forecast_task import ForecastTask
 
 
 @pytest.fixture
-def single_series_setup(weekly_dates, repeating_pattern):
+def single_series_setup(dates, repeating_pattern):
     """Single series, single model, two origins."""
     actuals = pd.DataFrame(
         {
             "unique_id": "SKU_001",
-            "ds": weekly_dates,
+            "ds": dates,
             "y": repeating_pattern,
         }
     )
 
     task = ForecastTask(
         unique_id="SKU_001",
-        history=pd.DataFrame({"ds": weekly_dates, "y": repeating_pattern}),
+        history=pd.DataFrame({"ds": dates, "y": repeating_pattern}),
         horizon=4,
         model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
     )
 
-    origins = [weekly_dates[7], weekly_dates[11]]
+    origins = [dates[7], dates[11]]
 
     return task, actuals, origins
 

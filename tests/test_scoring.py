@@ -36,7 +36,7 @@ def _make_ledger_df() -> pd.DataFrame:
 
 
 def _make_actuals() -> pd.DataFrame:
-    """Actuals covering weeks 2024-01-07 through 2024-03-31."""
+    """Actuals covering 2024-01-07 through 2024-03-31."""
     dates = pd.date_range("2024-01-07", periods=13, freq="W")
     return pd.DataFrame(
         {

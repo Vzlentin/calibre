@@ -14,14 +14,14 @@ _MODEL_CONFIGS = [
 ]
 _SERIES_FILTER = ["0_126"]
 _HORIZON = 4
-_WEEK = 0
+_PERIOD = 0
 
 
 @pytest.fixture(scope="module")
 def backtest_result(data_dir: Path) -> PipelineResult:
     return run_backtest(
         data_dir=data_dir,
-        week=_WEEK,
+        period=_PERIOD,
         model_configs=_MODEL_CONFIGS,
         horizon=_HORIZON,
         origins=2,
@@ -51,7 +51,7 @@ def test_run_forecast_returns_ledger(data_dir: Path) -> None:
     """run_forecast returns a Ledger with non-empty to_df() and y_hat values."""
     ledger = run_forecast(
         data_dir=data_dir,
-        week=_WEEK,
+        period=_PERIOD,
         model_configs=_MODEL_CONFIGS,
         horizon=_HORIZON,
         series_filter=_SERIES_FILTER,

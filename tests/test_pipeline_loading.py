@@ -7,15 +7,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from calibre.pipeline.loading import load_master, load_week, melt_wide_instock, melt_wide_sales
+from calibre.pipeline.loading import load_master, load_period, melt_wide_instock, melt_wide_sales
 
 STORE_PRODUCT_PAIRS = 599
-WEEK0_DATE_COLS = 157
-WEEK1_DATE_COLS = 158
+PERIOD0_DATE_COLS = 157
+PERIOD1_DATE_COLS = 158
 
 
 @pytest.fixture
-def week0_sales_path(data_dir: Path) -> Path:
+def period0_sales_path(data_dir: Path) -> Path:
     return data_dir / "Week 0 - 2024-04-08 - Sales.csv"
 
 
@@ -30,40 +30,40 @@ def instock_path(data_dir: Path) -> Path:
 
 
 class TestMeltWideSales:
-    def test_shape(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(week0_sales_path)
-        assert df.shape == (STORE_PRODUCT_PAIRS * WEEK0_DATE_COLS, 3)
+    def test_shape(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(period0_sales_path)
+        assert df.shape == (STORE_PRODUCT_PAIRS * PERIOD0_DATE_COLS, 3)
 
-    def test_columns(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(week0_sales_path)
+    def test_columns(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(period0_sales_path)
         assert list(df.columns) == ["unique_id", "ds", "y"]
 
-    def test_ds_dtype(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(week0_sales_path)
+    def test_ds_dtype(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(period0_sales_path)
         assert pd.api.types.is_datetime64_any_dtype(df["ds"])
 
-    def test_y_dtype(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(week0_sales_path)
+    def test_y_dtype(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(period0_sales_path)
         assert df["y"].dtype == "float64"
 
-    def test_unique_id_dtype(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(week0_sales_path)
+    def test_unique_id_dtype(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(period0_sales_path)
         assert df["unique_id"].dtype == object
 
-    def test_unique_id_format(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(week0_sales_path)
+    def test_unique_id_format(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(period0_sales_path)
         pattern = re.compile(r"^\d+_\d+$")
         sample = df["unique_id"].drop_duplicates().head(20)
         assert all(pattern.match(uid) for uid in sample)
 
-    def test_sorted_by_unique_id_then_ds(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(week0_sales_path)
+    def test_sorted_by_unique_id_then_ds(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(period0_sales_path)
         expected = df.sort_values(["unique_id", "ds"]).reset_index(drop=True)
         pd.testing.assert_frame_equal(df.reset_index(drop=True), expected)
 
-    def test_accepts_string_path(self, week0_sales_path: Path) -> None:
-        df = melt_wide_sales(str(week0_sales_path))
-        assert df.shape == (STORE_PRODUCT_PAIRS * WEEK0_DATE_COLS, 3)
+    def test_accepts_string_path(self, period0_sales_path: Path) -> None:
+        df = melt_wide_sales(str(period0_sales_path))
+        assert df.shape == (STORE_PRODUCT_PAIRS * PERIOD0_DATE_COLS, 3)
 
 
 class TestLoadMaster:
@@ -114,19 +114,19 @@ class TestMeltWideInstock:
         assert all(pattern.match(uid) for uid in sample)
 
 
-class TestLoadWeek:
-    def test_week0_matches_melt_wide_sales(self, data_dir: Path, week0_sales_path: Path) -> None:
-        from_load_week = load_week(data_dir, 0)
-        from_melt = melt_wide_sales(week0_sales_path)
+class TestLoadPeriod:
+    def test_period0_matches_melt_wide_sales(self, data_dir: Path, period0_sales_path: Path) -> None:
+        from_load_period = load_period(data_dir, 0)
+        from_melt = melt_wide_sales(period0_sales_path)
         pd.testing.assert_frame_equal(
-            from_load_week.reset_index(drop=True),
+            from_load_period.reset_index(drop=True),
             from_melt.reset_index(drop=True),
         )
 
-    def test_week1_has_one_more_date(self, data_dir: Path) -> None:
-        df = load_week(data_dir, 1)
-        assert df.shape == (STORE_PRODUCT_PAIRS * WEEK1_DATE_COLS, 3)
+    def test_period1_has_one_more_date(self, data_dir: Path) -> None:
+        df = load_period(data_dir, 1)
+        assert df.shape == (STORE_PRODUCT_PAIRS * PERIOD1_DATE_COLS, 3)
 
     def test_accepts_string_path(self, data_dir: Path) -> None:
-        df = load_week(str(data_dir), 0)
-        assert df.shape == (STORE_PRODUCT_PAIRS * WEEK0_DATE_COLS, 3)
+        df = load_period(str(data_dir), 0)
+        assert df.shape == (STORE_PRODUCT_PAIRS * PERIOD0_DATE_COLS, 3)

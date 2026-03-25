@@ -8,7 +8,7 @@ from calibre.tasks.forecast_task import ForecastTask
 
 @pytest.fixture
 def repeating_history():
-    """24 weeks of repeating [10, 20, 30, 40] pattern."""
+    """24 periods of repeating [10, 20, 30, 40] pattern."""
     dates = pd.date_range("2024-01-07", periods=24, freq="W")
     pattern = [10.0, 20.0, 30.0, 40.0] * 6
     return pd.DataFrame({"ds": dates, "y": pattern})
