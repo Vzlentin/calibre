@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import numpy as np
@@ -19,9 +20,19 @@ from calibre.contracts.forecast_frame import (
 )
 from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.engine.ledger import Ledger
+from calibre.engine.order_ledger import OrderLedger
 from calibre.engine.scoring import compute_row_errors, resolve_actuals
 from calibre.models.registry import resolve_adapter
+from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.tasks.forecast_task import ForecastTask
+
+
+@dataclass
+class BackendResult:
+    """Result returned by BackendEngine.execute()."""
+
+    ledger: Ledger
+    order_ledger: OrderLedger | None = None
 
 
 class BackendEngine:
@@ -31,19 +42,22 @@ class BackendEngine:
         metrics: list[Callable] | None = None,
         engine: Any = None,
         conformal_config: ConformalPolicyConfig | None = None,
+        order_config: OrderPolicyConfig | None = None,
     ) -> None:
         self.freq = freq
         self.metrics = metrics
         self.engine = engine
         self.conformal_config = conformal_config
+        self.order_config = order_config
 
     def execute(
         self,
         tasks: list[ForecastTask],
         actuals: pd.DataFrame,
         origins: list[pd.Timestamp],
-    ) -> Ledger:
+    ) -> BackendResult:
         ledger = Ledger()
+        order_ledger = OrderLedger() if self.order_config is not None else None
         conformal_runtime = (
             ConformalRuntime(self.conformal_config)
             if self.conformal_config is not None
@@ -62,12 +76,17 @@ class BackendEngine:
             if conformal_runtime is not None and not origin_preds.empty:
                 origin_preds = conformal_runtime.apply(origin_preds)
 
+            # Apply order policy AFTER conformal (needs interval columns)
+            if self.order_config is not None and not origin_preds.empty:
+                order_result = apply_order_policy(origin_preds, self.order_config)
+                order_ledger.append(order_result)  # type: ignore[union-attr]
+
             if not origin_preds.empty:
                 ledger.append(origin_preds)
 
             self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
 
-        return ledger
+        return BackendResult(ledger=ledger, order_ledger=order_ledger)
 
     def _resolve_ledger(
         self,

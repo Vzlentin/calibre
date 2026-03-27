@@ -15,7 +15,10 @@ from calibre.contracts.forecast_frame import (
     FORECAST_ORIGIN,
     MODEL_NAME,
 )
-from calibre.engine.backend import BackendEngine
+from calibre.engine.backend import BackendEngine, BackendResult
+from calibre.engine.order_ledger import OrderLedger
+from calibre.order.config import OrderPolicyConfig
+from calibre.order.types import NewsvendorPolicyParameters, RsPolicyParameters
 from calibre.tasks.forecast_task import ForecastTask
 
 
@@ -42,21 +45,22 @@ def single_series_setup(dates, repeating_pattern):
     return task, actuals, origins
 
 
-def test_execute_returns_ledger(single_series_setup):
+def test_execute_returns_backend_result(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine(freq="W")
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
-    df = ledger.to_df()
+    assert isinstance(result, BackendResult)
+    df = result.ledger.to_df()
     assert len(df) == 8
 
 
 def test_forecast_frame_columns_present(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine(freq="W")
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
     for col in [UNIQUE_ID, DS, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]:
         assert col in df.columns
 
@@ -64,9 +68,9 @@ def test_forecast_frame_columns_present(single_series_setup):
 def test_partial_resolution(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine(freq="W")
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
 
     resolved = df[Y].notna().sum()
     unresolved = df[Y].isna().sum()
@@ -77,9 +81,9 @@ def test_partial_resolution(single_series_setup):
 def test_error_columns_on_resolved(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine(freq="W")
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
     resolved = df[df[Y].notna()]
 
     assert "error" in resolved.columns
@@ -90,9 +94,9 @@ def test_error_columns_on_resolved(single_series_setup):
 def test_model_name_stamped(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine(freq="W")
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
     assert (df[MODEL_NAME] == "SeasonalNaive").all()
 
 
@@ -105,9 +109,9 @@ def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
         gamma=0.05,
     )
     engine = BackendEngine(freq="W", conformal_config=conformal_config)
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
     lower_col, upper_col = conformal_config.interval_columns
     assert lower_col in df.columns
     assert upper_col in df.columns
@@ -126,9 +130,9 @@ def test_execute_with_mscp_config_enriches_ledger(single_series_setup):
         calibration_window=4,
     )
     engine = BackendEngine(freq="W", conformal_config=conformal_config)
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
     lower_col, upper_col = conformal_config.interval_columns
     assert lower_col in df.columns
     assert upper_col in df.columns
@@ -155,9 +159,9 @@ def test_conformal_updates_before_next_origin():
         gamma=0.05,
     )
     engine = BackendEngine(freq="W", conformal_config=conformal_config)
-    ledger = engine.execute([task], actuals, origins=[dates[7], dates[8]])
+    result = engine.execute([task], actuals, origins=[dates[7], dates[8]])
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
     lower_col, upper_col = conformal_config.interval_columns
     widths = df[upper_col] - df[lower_col]
     second_origin_mask = df[FORECAST_ORIGIN] == dates[8]
@@ -195,9 +199,9 @@ def test_multi_series():
     ]
 
     engine = BackendEngine(freq="W")
-    ledger = engine.execute(tasks, actuals, origins=[dates[11]])
+    result = engine.execute(tasks, actuals, origins=[dates[11]])
 
-    df = ledger.to_df()
+    df = result.ledger.to_df()
     assert len(df) == 8
     assert set(df[UNIQUE_ID].unique()) == {"A", "B"}
 
@@ -205,9 +209,69 @@ def test_multi_series():
 def test_to_parquet_roundtrip(single_series_setup, tmp_path):
     task, actuals, origins = single_series_setup
     engine = BackendEngine(freq="W")
-    ledger = engine.execute([task], actuals, origins)
+    result = engine.execute([task], actuals, origins)
 
     path = str(tmp_path / "backtest.parquet")
-    ledger.to_parquet(path)
+    result.ledger.to_parquet(path)
     loaded = pd.read_parquet(path)
     assert len(loaded) == 8
+
+
+def test_engine_without_order_config_returns_none_order_ledger(single_series_setup):
+    task, actuals, origins = single_series_setup
+    engine = BackendEngine(freq="W")
+    result = engine.execute([task], actuals, origins)
+
+    assert isinstance(result, BackendResult)
+    assert result.order_ledger is None
+
+
+def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup):
+    task, actuals, origins = single_series_setup
+    conformal_config = ConformalPolicyConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    params = [
+        RsPolicyParameters(
+            unique_id="SKU_001",
+            inventory_position=50.0,
+            lead_time=1,
+            review_period=1,
+        )
+    ]
+    order_config = OrderPolicyConfig(policy="rs", params=params, coverage=0.9)
+    engine = BackendEngine(freq="W", conformal_config=conformal_config, order_config=order_config)
+    result = engine.execute([task], actuals, origins)
+
+    assert isinstance(result.order_ledger, OrderLedger)
+    order_df = result.order_ledger.to_df()
+    assert not order_df.empty
+    assert "order_qty" in order_df.columns
+
+
+def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setup):
+    task, actuals, origins = single_series_setup
+    conformal_config = ConformalPolicyConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    params = [
+        NewsvendorPolicyParameters(
+            unique_id="SKU_001",
+            underage_cost=3.0,
+            overage_cost=1.0,
+            inventory_position=50.0,
+        )
+    ]
+    order_config = OrderPolicyConfig(policy="newsvendor", params=params, coverage=0.9)
+    engine = BackendEngine(freq="W", conformal_config=conformal_config, order_config=order_config)
+    result = engine.execute([task], actuals, origins)
+
+    assert isinstance(result.order_ledger, OrderLedger)
+    order_df = result.order_ledger.to_df()
+    assert not order_df.empty

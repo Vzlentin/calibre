@@ -9,10 +9,12 @@ import pandas as pd
 
 from calibre.conformal import ConformalPolicyConfig
 from calibre.contracts.forecast_frame import DS
-from calibre.engine.backend import BackendEngine
+from calibre.engine.backend import BackendEngine, BackendResult
 from calibre.engine.ledger import Ledger
+from calibre.engine.order_ledger import OrderLedger
 from calibre.engine.scoring import compute_metrics
 from calibre.metrics import mae, rmse, smape, wape
+from calibre.order.config import OrderPolicyConfig
 from calibre.pipeline.loading import load_period
 from calibre.pipeline.tasks import build_tasks
 
@@ -24,6 +26,7 @@ class PipelineResult:
     ledger: Ledger
     scores: pd.DataFrame
     sales: pd.DataFrame
+    order_ledger: OrderLedger | None = None
 
     def to_parquet(self, path: str | Path) -> None:
         """Export ledger predictions to parquet."""
@@ -51,6 +54,7 @@ def run_backtest(
     freq: str = "W",
     engine: Any = None,
     conformal_config: ConformalPolicyConfig | None = None,
+    order_config: OrderPolicyConfig | None = None,
 ) -> PipelineResult:
     """End-to-end backtest pipeline.
 
@@ -70,11 +74,14 @@ def run_backtest(
         all_dates = sorted(sales[DS].unique())
         origins = _derive_origins(all_dates, origins, horizon)
 
-    ledger = BackendEngine(
+    result = BackendEngine(
         freq=freq,
         engine=engine,
         conformal_config=conformal_config,
+        order_config=order_config,
     ).execute(tasks, sales, origins)
+
+    ledger = result.ledger
 
     if metrics is None:
         metrics = _DEFAULT_METRICS
@@ -83,7 +90,7 @@ def run_backtest(
     interval_bounds = conformal_config.interval_columns if conformal_config is not None else None
     scores = compute_metrics(ledger_df, metrics, interval_bounds=interval_bounds)
 
-    return PipelineResult(ledger=ledger, scores=scores, sales=sales)
+    return PipelineResult(ledger=ledger, scores=scores, sales=sales, order_ledger=result.order_ledger)
 
 
 def run_forecast(
@@ -95,7 +102,8 @@ def run_forecast(
     freq: str = "W",
     engine: Any = None,
     conformal_config: ConformalPolicyConfig | None = None,
-) -> Ledger:
+    order_config: OrderPolicyConfig | None = None,
+) -> BackendResult:
     """Forward-looking forecast. Single origin = latest date in sales. No scoring."""
     sales = load_period(data_dir, period)
     tasks = build_tasks(sales, model_configs, horizon, series_filter)
@@ -107,4 +115,5 @@ def run_forecast(
         freq=freq,
         engine=engine,
         conformal_config=conformal_config,
+        order_config=order_config,
     ).execute(tasks, sales, origins)

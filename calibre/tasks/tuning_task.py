@@ -72,10 +72,11 @@ class TuningTask:
                 horizon=horizon,
                 model_config=candidate_config,
             )
-            ledger = BackendEngine(
+            result = BackendEngine(
                 freq=freq,
                 conformal_config=conformal_config,
             ).execute([task], actuals, origins)
+            ledger = result.ledger
             resolved = ledger.to_df().dropna(subset=[Y, Y_HAT])
             if resolved.empty:
                 return float("inf")

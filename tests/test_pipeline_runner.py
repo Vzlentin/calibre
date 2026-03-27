@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from calibre.conformal import ConformalPolicyConfig
+from calibre.engine.backend import BackendResult
 from calibre.engine.ledger import Ledger
 from calibre.pipeline.runner import PipelineResult, run_backtest, run_forecast
 
@@ -48,9 +49,9 @@ def test_run_backtest_scores(backtest_result: PipelineResult) -> None:
     assert "mae" in scores.columns, f"Expected 'mae' column, got: {list(scores.columns)}"
 
 
-def test_run_forecast_returns_ledger(data_dir: Path) -> None:
-    """run_forecast returns a Ledger with non-empty to_df() and y_hat values."""
-    ledger = run_forecast(
+def test_run_forecast_returns_backend_result(data_dir: Path) -> None:
+    """run_forecast returns a BackendResult with non-empty ledger and y_hat values."""
+    result = run_forecast(
         data_dir=data_dir,
         period=_PERIOD,
         model_configs=_MODEL_CONFIGS,
@@ -58,8 +59,9 @@ def test_run_forecast_returns_ledger(data_dir: Path) -> None:
         series_filter=_SERIES_FILTER,
         freq="W-MON",
     )
-    assert isinstance(ledger, Ledger)
-    df = ledger.to_df()
+    assert isinstance(result, BackendResult)
+    assert isinstance(result.ledger, Ledger)
+    df = result.ledger.to_df()
     assert not df.empty, "Forecast Ledger DataFrame should not be empty"
     assert "y_hat" in df.columns, f"Expected 'y_hat' column, got: {list(df.columns)}"
     assert df["y_hat"].notna().any(), "At least some y_hat values should be non-null"

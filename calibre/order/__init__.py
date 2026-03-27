@@ -1,11 +1,28 @@
-"""Pure order-policy helpers for forecast-frame recommendations.
+"""Pure order-policy helpers for forecast-frame recommendations."""
 
-This package intentionally stops at policy computation. It does not wire order
-recommendations into the engine/ledger flow yet, and it does not implement
-`(R,s,S)` or `Newsvendor` policies in this first slice.
-"""
-
+from calibre.order.config import OrderPolicyConfig, apply_order_policy
+from calibre.order.newsvendor import apply_newsvendor_policy
 from calibre.order.rs import apply_rs_policy
-from calibre.order.types import RsPolicyParameters
+from calibre.order.rss import apply_rss_policy
+from calibre.order.types import (
+    NewsvendorPolicyParameters,
+    RsPolicyParameters,
+    RssPolicyParameters,
+    normalize_newsvendor_policy_parameters,
+    normalize_rs_policy_parameters,
+    normalize_rss_policy_parameters,
+)
 
-__all__ = ["RsPolicyParameters", "apply_rs_policy"]
+__all__ = [
+    "RsPolicyParameters",
+    "apply_rs_policy",
+    "RssPolicyParameters",
+    "apply_rss_policy",
+    "NewsvendorPolicyParameters",
+    "apply_newsvendor_policy",
+    "OrderPolicyConfig",
+    "apply_order_policy",
+    "normalize_rs_policy_parameters",
+    "normalize_rss_policy_parameters",
+    "normalize_newsvendor_policy_parameters",
+]
