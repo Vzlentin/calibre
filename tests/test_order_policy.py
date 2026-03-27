@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from calibre.contracts.forecast_frame import (
+    DS,
+    FORECAST_ORIGIN,
+    H,
+    MODEL_NAME,
+    UNIQUE_ID,
+    Y,
+    Y_HAT,
+    interval_column_names,
+)
+from calibre.order import RsPolicyParameters, apply_rs_policy
+
+
+def _forecast_frame(
+    *,
+    unique_id: str,
+    upper_bounds: tuple[float, ...],
+    forecast_origin: pd.Timestamp = pd.Timestamp("2024-02-04"),
+    model_name: str = "SeasonalNaive",
+    coverage: float = 0.9,
+) -> pd.DataFrame:
+    lower_col, upper_col = interval_column_names(coverage)
+    horizon = len(upper_bounds)
+    ds = pd.date_range("2024-02-11", periods=horizon, freq="W")
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: [unique_id] * horizon,
+            DS: ds,
+            Y: [np.nan] * horizon,
+            Y_HAT: [bound - 2.0 for bound in upper_bounds],
+            H: list(range(1, horizon + 1)),
+            FORECAST_ORIGIN: [forecast_origin] * horizon,
+            MODEL_NAME: [model_name] * horizon,
+            lower_col: [bound - 5.0 for bound in upper_bounds],
+            upper_col: list(upper_bounds),
+        }
+    )
+    frame[H] = frame[H].astype("int64")
+    return frame
+
+
+def test_apply_rs_policy_returns_order_quantity_from_upper_bounds() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0, 40.0))
+    params = pd.DataFrame(
+        {
+            UNIQUE_ID: ["SKU_001"],
+            "inventory_position": [5.0],
+            "lead_time": [1],
+            "review_period": [2],
+        }
+    )
+
+    result = apply_rs_policy(frame, params)
+
+    row = result.iloc[0]
+    assert row["protection_period"] == 3
+    assert row["target_stock_level"] == 60.0
+    assert row["order_qty"] == 55.0
+
+
+def test_apply_rs_policy_uses_per_series_parameters_and_preserves_metadata() -> None:
+    frame = pd.concat(
+        [
+            _forecast_frame(unique_id="SKU_A", upper_bounds=(10.0, 10.0, 10.0)),
+            _forecast_frame(
+                unique_id="SKU_B",
+                upper_bounds=(4.0, 4.0, 4.0),
+                forecast_origin=pd.Timestamp("2024-03-03"),
+                model_name="AutoARIMA",
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    result = apply_rs_policy(
+        frame,
+        [
+            RsPolicyParameters(
+                unique_id="SKU_A",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            ),
+            RsPolicyParameters(
+                unique_id="SKU_B",
+                inventory_position=20.0,
+                lead_time=2,
+                review_period=1,
+            ),
+        ],
+    ).sort_values(UNIQUE_ID, ignore_index=True)
+
+    assert list(result[UNIQUE_ID]) == ["SKU_A", "SKU_B"]
+    assert list(result[MODEL_NAME]) == ["SeasonalNaive", "AutoARIMA"]
+    assert list(result[FORECAST_ORIGIN]) == [
+        pd.Timestamp("2024-02-04"),
+        pd.Timestamp("2024-03-03"),
+    ]
+    assert list(result["order_qty"]) == [25.0, 0.0]
+
+
+def test_apply_rs_policy_requires_interval_columns_for_requested_coverage() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    _, upper_col = interval_column_names(0.9)
+    frame = frame.drop(columns=[upper_col])
+
+    with pytest.raises(ValueError, match="Missing conformal interval columns"):
+        apply_rs_policy(
+            frame,
+            [
+                RsPolicyParameters(
+                    unique_id="SKU_001",
+                    inventory_position=5.0,
+                    lead_time=1,
+                    review_period=2,
+                )
+            ],
+        )
+
+
+def test_apply_rs_policy_rejects_protection_period_longer_than_available_horizon() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0))
+
+    with pytest.raises(ValueError, match="Protection period 3 exceeds available horizon"):
+        apply_rs_policy(
+            frame,
+            [
+                RsPolicyParameters(
+                    unique_id="SKU_001",
+                    inventory_position=5.0,
+                    lead_time=2,
+                    review_period=1,
+                )
+            ],
+        )
+
+
+def test_apply_rs_policy_rejects_missing_horizons_with_clear_error() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    frame = frame.loc[frame[H] != 2].copy()
+
+    with pytest.raises(ValueError, match="Missing horizons within protection period 3: \\[2\\]"):
+        apply_rs_policy(
+            frame,
+            [
+                RsPolicyParameters(
+                    unique_id="SKU_001",
+                    inventory_position=5.0,
+                    lead_time=1,
+                    review_period=2,
+                )
+            ],
+        )
+
+
+def test_apply_rs_policy_rejects_duplicate_horizons_per_decision_group() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    duplicate_row = frame.iloc[[0]].copy()
+    frame = pd.concat([frame, duplicate_row], ignore_index=True)
+
+    with pytest.raises(ValueError, match="Duplicate horizons for decision group: \\[1\\]"):
+        apply_rs_policy(
+            frame,
+            [
+                RsPolicyParameters(
+                    unique_id="SKU_001",
+                    inventory_position=5.0,
+                    lead_time=1,
+                    review_period=2,
+                )
+            ],
+        )
