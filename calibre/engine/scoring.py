@@ -56,6 +56,7 @@ def compute_metrics(
     ledger_df: pd.DataFrame,
     metrics: list[Callable],
     group_by: list[str] | None = None,
+    interval_bounds: tuple[str, str] | None = None,
 ) -> pd.DataFrame:
     """Compute aggregate metrics on resolved rows, grouped by specified columns."""
     if group_by is None:
@@ -78,6 +79,20 @@ def compute_metrics(
             if name is None:
                 name = getattr(metric_fn.func, "__name__", str(metric_fn))
             row[name] = metric_fn(actual, predicted)
+
+        if interval_bounds is not None:
+            lower_col, upper_col = interval_bounds
+            if lower_col in group.columns and upper_col in group.columns:
+                interval_group = group.dropna(subset=[lower_col, upper_col, Y])
+                if not interval_group.empty:
+                    covered = (
+                        (interval_group[lower_col] <= interval_group[Y])
+                        & (interval_group[Y] <= interval_group[upper_col])
+                    )
+                    row["coverage"] = float(covered.mean())
+                    row["mean_interval_width"] = float(
+                        (interval_group[upper_col] - interval_group[lower_col]).mean()
+                    )
         results.append(row)
 
     return pd.DataFrame(results)

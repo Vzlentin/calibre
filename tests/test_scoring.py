@@ -2,6 +2,7 @@ from functools import partial
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from calibre.contracts.forecast_frame import (
     UNIQUE_ID,
@@ -11,6 +12,7 @@ from calibre.contracts.forecast_frame import (
     H,
     FORECAST_ORIGIN,
     MODEL_NAME,
+    interval_column_names,
 )
 from calibre.engine.scoring import (
     compute_metrics,
@@ -158,3 +160,27 @@ def test_compute_metrics_skips_unresolved():
     result = compute_metrics(df, metrics=[mae], group_by=[UNIQUE_ID, H])
 
     assert len(result) == 1
+
+
+def test_compute_metrics_adds_interval_diagnostics_when_bounds_are_provided():
+    lower_col, upper_col = interval_column_names(0.9)
+    df = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "A"],
+            H: [1, 1],
+            Y: [10.0, 12.0],
+            Y_HAT: [11.0, 11.0],
+            lower_col: [9.0, 10.0],
+            upper_col: [12.0, 13.0],
+        }
+    )
+
+    result = compute_metrics(
+        df,
+        metrics=[mae],
+        group_by=[UNIQUE_ID],
+        interval_bounds=(lower_col, upper_col),
+    )
+
+    assert result["coverage"].iloc[0] == pytest.approx(1.0)
+    assert result["mean_interval_width"].iloc[0] == pytest.approx(3.0)

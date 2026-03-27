@@ -4,10 +4,10 @@ from typing import Callable, Iterable, Literal
 
 import numpy as np
 
-from forecast.conformal.intervals import symmetric_interval, symmetric_intervals
-from forecast.conformal.policies import OnlineConformalController
-from forecast.conformal.scores import absolute_error
-from forecast.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
+from calibre.conformal.intervals import symmetric_interval, symmetric_intervals
+from calibre.conformal.policies import OnlineConformalController
+from calibre.conformal.scores import absolute_error
+from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 
 
 def _as_scalar_score(score) -> float:
@@ -64,6 +64,21 @@ def _finite_sample_radius(
     default_radius: float,
     quantile_rule: Literal["conformal", "higher"] = "conformal",
 ) -> float:
+    """Compute the (1-alpha) quantile of *scores* under the chosen rule.
+
+    **Coverage semantics differ between the two rules:**
+
+    - ``"higher"`` (standard split-conformal): returns ``np.inf`` when
+      ``alpha <= 1/(n+1)``, i.e. the calibration set is too small to provide
+      a finite radius at the requested coverage level.  This gives exact
+      finite-sample coverage guarantees.
+
+    - ``"conformal"`` (clipped rank formula): clamps the rank to ``[0, n-1]``
+      and always returns a finite value (the maximum observed score).  Use
+      this rule when ``np.inf`` radii are unacceptable (e.g. for plotting or
+      downstream arithmetic), but note that coverage guarantees no longer
+      hold for very small calibration sets with small ``alpha``.
+    """
     scores = np.asarray(list(scores), dtype=float)
     if scores.size == 0:
         return float(default_radius)
@@ -125,6 +140,12 @@ class AdaptiveConformalInference(OnlineConformalController):
     @property
     def error_history(self) -> np.ndarray:
         return np.asarray(self._error_history, dtype=int)
+
+    def trim_scores(self, window: int) -> None:
+        if window < 1:
+            raise ValueError("window must be at least 1")
+        if len(self._score_history) > window:
+            self._score_history = self._score_history[-window:]
 
     def get_radius(self, alpha: float | None = None) -> float:
         alpha = self._alpha if alpha is None else float(alpha)
@@ -300,7 +321,8 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
 
         alpha_before = self._alpha.copy()
         alpha_after = self.update(error_vector)
-        self._error_history.append(error_vector.copy())
+        history_vector = np.where(observed_mask, error_vector, np.nan)
+        self._error_history.append(history_vector)
         return {
             "error_vector": error_vector.copy(),
             "scores": scores,

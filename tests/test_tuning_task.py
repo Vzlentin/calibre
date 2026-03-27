@@ -5,6 +5,7 @@ import pytest
 
 import optuna
 
+from calibre.conformal import ConformalPolicyConfig
 from calibre.metrics import mae, smape
 from calibre.tasks.tuning_task import TuningTask
 
@@ -100,3 +101,31 @@ def test_optimize_with_mae_metric(series_df, dates):
     )
     best_config = task.optimize()
     assert best_config["season_length"] == 4
+
+
+def test_optimize_accepts_conformal_config(series_df, dates):
+    task = TuningTask(
+        unique_id="test_series",
+        history=series_df,
+        horizon=4,
+        base_model_config={
+            "backend": "statsforecast",
+            "model": "SeasonalNaive",
+            "name": "sn_tuning",
+        },
+        search_space=_space_season_length,
+        actuals=series_df,
+        origins=[dates[15]],
+        metric=smape,
+        n_trials=1,
+        freq="W",
+        conformal_config=ConformalPolicyConfig(
+            method="aci",
+            coverage=0.9,
+            calibration_window=4,
+            gamma=0.05,
+        ),
+    )
+    result = task.optimize()
+    assert isinstance(result, dict)
+    assert "season_length" in result

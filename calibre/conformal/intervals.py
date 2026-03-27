@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from forecast.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
+from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 
 
 def symmetric_interval(

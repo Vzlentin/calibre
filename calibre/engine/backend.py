@@ -11,11 +11,13 @@ from calibre.contracts.forecast_frame import (
     FORECAST_ORIGIN,
     H,
     MODEL_NAME,
+    NONCONFORMITY_SCORE,
     REQUIRED_COLUMNS,
     UNIQUE_ID,
     Y,
     Y_HAT,
 )
+from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.engine.ledger import Ledger
 from calibre.engine.scoring import compute_row_errors, resolve_actuals
 from calibre.models.registry import resolve_adapter
@@ -28,10 +30,12 @@ class BackendEngine:
         freq: str = "W",
         metrics: list[Callable] | None = None,
         engine: Any = None,
+        conformal_config: ConformalPolicyConfig | None = None,
     ) -> None:
         self.freq = freq
         self.metrics = metrics
         self.engine = engine
+        self.conformal_config = conformal_config
 
     def execute(
         self,
@@ -40,35 +44,59 @@ class BackendEngine:
         origins: list[pd.Timestamp],
     ) -> Ledger:
         ledger = Ledger()
+        conformal_runtime = (
+            ConformalRuntime(self.conformal_config)
+            if self.conformal_config is not None
+            else None
+        )
 
         tasks_by_uid: dict[str, list[ForecastTask]] = {}
         for task in tasks:
             tasks_by_uid.setdefault(task.unique_id, []).append(task)
 
         for origin in origins:
+            if conformal_runtime is not None:
+                self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
+
             origin_preds = self._run_origin(tasks_by_uid, origin)
+            if conformal_runtime is not None and not origin_preds.empty:
+                origin_preds = conformal_runtime.apply(origin_preds)
 
             if not origin_preds.empty:
                 ledger.append(origin_preds)
 
-            current = ledger.to_df()
-            if current.empty:
-                continue
-
-            updated, newly_resolved = resolve_actuals(current, actuals, origin)
-
-            if newly_resolved.empty:
-                continue
-
-            scored = compute_row_errors(newly_resolved)
-            for col in ("error", "abs_error", "pct_error"):
-                if col not in updated.columns:
-                    updated[col] = np.nan
-                updated.loc[scored.index, col] = scored[col]
-
-            ledger.update_resolved(updated)
+            self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
 
         return ledger
+
+    def _resolve_ledger(
+        self,
+        ledger: Ledger,
+        actuals: pd.DataFrame,
+        origin: pd.Timestamp,
+        conformal_runtime: ConformalRuntime | None,
+    ) -> None:
+        current = ledger.to_df()
+        if current.empty:
+            return
+
+        updated, newly_resolved = resolve_actuals(current, actuals, origin)
+        if newly_resolved.empty:
+            return
+
+        if conformal_runtime is not None:
+            newly_resolved = conformal_runtime.observe(newly_resolved)
+            if NONCONFORMITY_SCORE not in updated.columns:
+                updated[NONCONFORMITY_SCORE] = np.nan
+            updated.loc[newly_resolved.index, NONCONFORMITY_SCORE] = newly_resolved[NONCONFORMITY_SCORE]
+
+        scored = compute_row_errors(newly_resolved)
+        for col in ("error", "abs_error", "pct_error"):
+            if col not in updated.columns:
+                updated[col] = np.nan
+            updated.loc[scored.index, col] = scored[col]
+
+        ledger.update_resolved(updated)
 
     def _run_origin(
         self,

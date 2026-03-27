@@ -9,6 +9,10 @@ Y_HAT = "y_hat"
 H = "h"
 FORECAST_ORIGIN = "forecast_origin"
 MODEL_NAME = "model_name"
+NONCONFORMITY_SCORE = "nonconformity_score"
+CALIBRATION_STATE = "calibration_state"
+CONFORMAL_METHOD = "conformal_method"
+CONFORMAL_ALPHA = "conformal_alpha"
 
 REQUIRED_COLUMNS = [UNIQUE_ID, DS, Y, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]
 
@@ -22,6 +26,44 @@ _EXPECTED_DTYPES = {
     MODEL_NAME: "object",
 }
 
+_OPTIONAL_DTYPES = {
+    NONCONFORMITY_SCORE: "float64",
+    CALIBRATION_STATE: "object",
+    CONFORMAL_METHOD: "object",
+    CONFORMAL_ALPHA: "float64",
+}
+
+
+def _format_coverage_suffix(coverage: float) -> str:
+    value = f"{float(coverage):.12g}"
+    return value.replace(".", "p")
+
+
+def lower_interval_column(coverage: float) -> str:
+    return f"lo_{_format_coverage_suffix(coverage)}"
+
+
+def upper_interval_column(coverage: float) -> str:
+    return f"hi_{_format_coverage_suffix(coverage)}"
+
+
+def interval_column_names(coverage: float) -> tuple[str, str]:
+    return lower_interval_column(coverage), upper_interval_column(coverage)
+
+
+def _is_interval_column(column: str) -> bool:
+    return column.startswith("lo_") or column.startswith("hi_")
+
+
+def _validate_dtype(df: pd.DataFrame, col: str, expected: str) -> None:
+    actual = str(df[col].dtype)
+    if expected == "datetime64[ns]":
+        if not pd.api.types.is_datetime64_any_dtype(df[col]):
+            raise ValueError(f"Column '{col}' expected datetime64, got {actual}")
+        return
+    if actual != expected:
+        raise ValueError(f"Column '{col}' expected {expected}, got {actual}")
+
 
 def validate_forecast_frame(df: pd.DataFrame) -> None:
     """Validate that a DataFrame conforms to the forecast-frame contract.
@@ -33,9 +75,13 @@ def validate_forecast_frame(df: pd.DataFrame) -> None:
         raise ValueError(f"Missing required columns: {missing}")
 
     for col, expected in _EXPECTED_DTYPES.items():
-        actual = str(df[col].dtype)
-        if expected == "datetime64[ns]":
-            if not pd.api.types.is_datetime64_any_dtype(df[col]):
-                raise ValueError(f"Column '{col}' expected datetime64, got {actual}")
-        elif actual != expected:
-            raise ValueError(f"Column '{col}' expected {expected}, got {actual}")
+        _validate_dtype(df, col, expected)
+
+    for col, expected in _OPTIONAL_DTYPES.items():
+        if col in df.columns:
+            _validate_dtype(df, col, expected)
+
+    for col in df.columns:
+        if _is_interval_column(col) and not pd.api.types.is_numeric_dtype(df[col]):
+            actual = str(df[col].dtype)
+            raise ValueError(f"Column '{col}' expected numeric interval bounds, got {actual}")

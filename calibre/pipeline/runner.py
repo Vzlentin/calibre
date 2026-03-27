@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from calibre.conformal import ConformalPolicyConfig
 from calibre.contracts.forecast_frame import DS
 from calibre.engine.backend import BackendEngine
 from calibre.engine.ledger import Ledger
@@ -49,6 +50,7 @@ def run_backtest(
     series_filter: list[str] | None = None,
     freq: str = "W",
     engine: Any = None,
+    conformal_config: ConformalPolicyConfig | None = None,
 ) -> PipelineResult:
     """End-to-end backtest pipeline.
 
@@ -68,13 +70,18 @@ def run_backtest(
         all_dates = sorted(sales[DS].unique())
         origins = _derive_origins(all_dates, origins, horizon)
 
-    ledger = BackendEngine(freq=freq, engine=engine).execute(tasks, sales, origins)
+    ledger = BackendEngine(
+        freq=freq,
+        engine=engine,
+        conformal_config=conformal_config,
+    ).execute(tasks, sales, origins)
 
     if metrics is None:
         metrics = _DEFAULT_METRICS
 
     ledger_df = ledger.to_df()
-    scores = compute_metrics(ledger_df, metrics)
+    interval_bounds = conformal_config.interval_columns if conformal_config is not None else None
+    scores = compute_metrics(ledger_df, metrics, interval_bounds=interval_bounds)
 
     return PipelineResult(ledger=ledger, scores=scores, sales=sales)
 
@@ -87,6 +94,7 @@ def run_forecast(
     series_filter: list[str] | None = None,
     freq: str = "W",
     engine: Any = None,
+    conformal_config: ConformalPolicyConfig | None = None,
 ) -> Ledger:
     """Forward-looking forecast. Single origin = latest date in sales. No scoring."""
     sales = load_period(data_dir, period)
@@ -95,4 +103,8 @@ def run_forecast(
     latest_origin = sales[DS].max()
     origins = [latest_origin]
 
-    return BackendEngine(freq=freq, engine=engine).execute(tasks, sales, origins)
+    return BackendEngine(
+        freq=freq,
+        engine=engine,
+        conformal_config=conformal_config,
+    ).execute(tasks, sales, origins)

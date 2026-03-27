@@ -2,9 +2,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from calibre.conformal import ConformalPolicyConfig
 from calibre.contracts.forecast_frame import (
+    CALIBRATION_STATE,
+    CONFORMAL_METHOD,
     UNIQUE_ID,
     DS,
+    NONCONFORMITY_SCORE,
     Y,
     Y_HAT,
     H,
@@ -90,6 +94,75 @@ def test_model_name_stamped(single_series_setup):
 
     df = ledger.to_df()
     assert (df[MODEL_NAME] == "SeasonalNaive").all()
+
+
+def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
+    task, actuals, origins = single_series_setup
+    conformal_config = ConformalPolicyConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    engine = BackendEngine(freq="W", conformal_config=conformal_config)
+    ledger = engine.execute([task], actuals, origins)
+
+    df = ledger.to_df()
+    lower_col, upper_col = conformal_config.interval_columns
+    assert lower_col in df.columns
+    assert upper_col in df.columns
+    assert CONFORMAL_METHOD in df.columns
+    assert CALIBRATION_STATE in df.columns
+    assert df[CONFORMAL_METHOD].eq("aci").all()
+    assert df[CALIBRATION_STATE].str.startswith("{").all()
+    assert df.loc[df[Y].notna(), NONCONFORMITY_SCORE].notna().all()
+
+
+def test_execute_with_mscp_config_enriches_ledger(single_series_setup):
+    task, actuals, origins = single_series_setup
+    conformal_config = ConformalPolicyConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=4,
+    )
+    engine = BackendEngine(freq="W", conformal_config=conformal_config)
+    ledger = engine.execute([task], actuals, origins)
+
+    df = ledger.to_df()
+    lower_col, upper_col = conformal_config.interval_columns
+    assert lower_col in df.columns
+    assert upper_col in df.columns
+    assert df[CONFORMAL_METHOD].eq("mscp").all()
+    assert df[lower_col].isna().all()
+    assert df[upper_col].isna().all()
+
+
+def test_conformal_updates_before_next_origin():
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 5
+    pattern[7] = 41.0
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
+    task = ForecastTask(
+        unique_id="SKU_001",
+        history=pd.DataFrame({"ds": dates, "y": pattern}),
+        horizon=2,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    conformal_config = ConformalPolicyConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    engine = BackendEngine(freq="W", conformal_config=conformal_config)
+    ledger = engine.execute([task], actuals, origins=[dates[7], dates[8]])
+
+    df = ledger.to_df()
+    lower_col, upper_col = conformal_config.interval_columns
+    widths = df[upper_col] - df[lower_col]
+    second_origin_mask = df[FORECAST_ORIGIN] == dates[8]
+
+    assert widths.loc[second_origin_mask & (df[H] == 1)].iloc[0] > 0.0
 
 
 def test_multi_series():

@@ -6,6 +6,7 @@ from typing import Callable
 import optuna
 import pandas as pd
 
+from calibre.conformal import ConformalPolicyConfig
 from calibre.contracts.forecast_frame import Y, Y_HAT
 from calibre.tasks.forecast_task import ForecastTask
 
@@ -48,6 +49,7 @@ class TuningTask:
     metric: Callable  # (np.ndarray, np.ndarray) -> float
     n_trials: int = 50
     freq: str = "W"
+    conformal_config: ConformalPolicyConfig | None = None
 
     def optimize(self) -> dict:
         """Run HPO via Optuna. Returns best model_config dict."""
@@ -60,6 +62,7 @@ class TuningTask:
         origins = self.origins
         metric = self.metric
         freq = self.freq
+        conformal_config = self.conformal_config
 
         def _objective(trial: optuna.Trial) -> float:
             candidate_config = {**base_cfg, **search_space(trial)}
@@ -69,7 +72,10 @@ class TuningTask:
                 horizon=horizon,
                 model_config=candidate_config,
             )
-            ledger = BackendEngine(freq=freq).execute([task], actuals, origins)
+            ledger = BackendEngine(
+                freq=freq,
+                conformal_config=conformal_config,
+            ).execute([task], actuals, origins)
             resolved = ledger.to_df().dropna(subset=[Y, Y_HAT])
             if resolved.empty:
                 return float("inf")
