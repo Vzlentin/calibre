@@ -15,6 +15,8 @@ from calibre.contracts.forecast_frame import (
     interval_column_names,
 )
 from calibre.order import RsPolicyParameters, apply_rs_policy
+from calibre.order.rss import apply_rss_policy
+from calibre.order.types import RssPolicyParameters
 
 
 def _forecast_frame(
@@ -176,3 +178,84 @@ def test_apply_rs_policy_rejects_duplicate_horizons_per_decision_group() -> None
                 )
             ],
         )
+
+
+# ── (R,s,S) policy tests ──────────────────────────────────────────────────────
+
+
+def _rss_params(
+    *,
+    unique_id: str = "SKU_001",
+    inventory_position: float,
+    reorder_point: float,
+    lead_time: int = 1,
+    review_period: int = 2,
+) -> list[RssPolicyParameters]:
+    return [
+        RssPolicyParameters(
+            unique_id=unique_id,
+            inventory_position=inventory_position,
+            reorder_point=reorder_point,
+            lead_time=lead_time,
+            review_period=review_period,
+        )
+    ]
+
+
+def test_apply_rss_policy_orders_when_inventory_below_reorder_point() -> None:
+    # protection_period = 1 + 2 = 3, upper bounds sum to 10+20+30 = 60
+    # inventory_position=5 < reorder_point=20 → order_qty = max(60 - 5, 0) = 55
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+
+    result = apply_rss_policy(frame, _rss_params(inventory_position=5.0, reorder_point=20.0))
+
+    row = result.iloc[0]
+    assert row["protection_period"] == 3
+    assert row["target_stock_level"] == 60.0
+    assert row["order_qty"] == 55.0
+
+
+def test_apply_rss_policy_no_order_when_inventory_above_reorder_point() -> None:
+    # inventory_position=25 >= reorder_point=20 → order_qty = 0
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+
+    result = apply_rss_policy(frame, _rss_params(inventory_position=25.0, reorder_point=20.0))
+
+    assert result.iloc[0]["order_qty"] == 0.0
+
+
+def test_apply_rss_policy_no_order_when_inventory_equals_reorder_point() -> None:
+    # inventory_position=20 >= reorder_point=20 → order_qty = 0
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+
+    result = apply_rss_policy(frame, _rss_params(inventory_position=20.0, reorder_point=20.0))
+
+    assert result.iloc[0]["order_qty"] == 0.0
+
+
+def test_apply_rss_policy_requires_interval_columns_for_requested_coverage() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    _, upper_col = interval_column_names(0.9)
+    frame = frame.drop(columns=[upper_col])
+
+    with pytest.raises(ValueError, match="Missing conformal interval columns"):
+        apply_rss_policy(frame, _rss_params(inventory_position=5.0, reorder_point=20.0))
+
+
+def test_apply_rss_policy_rejects_protection_period_longer_than_available_horizon() -> None:
+    # lead_time=2, review_period=1 → protection_period=3, but only 2 horizons available
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0))
+
+    with pytest.raises(ValueError, match="Protection period 3 exceeds available horizon"):
+        apply_rss_policy(
+            frame,
+            _rss_params(inventory_position=5.0, reorder_point=20.0, lead_time=2, review_period=1),
+        )
+
+
+def test_apply_rss_policy_rejects_missing_horizons_within_protection_period() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    frame = frame.loc[frame[H] != 2].copy()
+
+    with pytest.raises(ValueError, match="Missing horizons within protection period 3: \\[2\\]"):
+        apply_rss_policy(frame, _rss_params(inventory_position=5.0, reorder_point=20.0))
