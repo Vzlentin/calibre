@@ -1,0 +1,52 @@
+{
+    "files": [
+        {
+            "file_name": "week_0_initial_state.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6ImYwZjc3ZDFkNWJjODU0YjE4ODVlMDY2YmU1ZWM2NjlkLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayAwIC0gMjAyNC0wNC0wOCAtIEluaXRpYWwgU3RhdGUuY3N2Iiwic2l6ZSI6MTY3NzUsIm1pbWVfdHlwZSI6InRleHQvY3N2In19"
+        },
+        {
+            "file_name": "week_0_master.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6IjA3MjVkYzRjMDlhZDlkYzViN2ZmOTI0NjY2YjAyNDQ4LmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayAwIC0gTWFzdGVyLmNzdiIsInNpemUiOjE4MzY1LCJtaW1lX3R5cGUiOiJ0ZXh0L2NzdiJ9fQ"
+        },
+        {
+            "file_name": "week_0_in_stock.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6IjQ0OGM2MTRiNzJlN2JiZDAzZjliN2RmYTcxNGU2NzE4LmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayAwIC0gSW4gU3RvY2suY3N2Iiwic2l6ZSI6NTExMDc3LCJtaW1lX3R5cGUiOiJ0ZXh0L2NzdiJ9fQ"
+        },
+        {
+            "file_name": "week_0_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6ImQ1MjhmZmY5NDk0MmFjNjhiZWExMzM2YjBmMjE1ZTQ0LmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayAwIC0gMjAyNC0wNC0wOCAtIFNhbGVzLmNzdiIsInNpemUiOjM4ODE0OSwibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_1_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6IjVmYmY2MWZjNTI1ZDQ1MThhYzhkOWNkMDU4OTc0OGFiLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayAxIC0gMjAyNC0wNC0xNSAtIFNhbGVzLmNzdiIsInNpemUiOjM5MDU5NSwibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_2_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6Ijc2MGU0MWU5MjkxNmVjMDU3MmMyYWFiYjc3NjU1ZTZhLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayAyIC0gMjAyNC0wNC0yMiAtIFNhbGVzLmNzdiIsInNpemUiOjM5MzA0NCwibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_3_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6Ijg3Y2U5NmQ3OTM4Yjc0YmU2MzM4N2I5M2FmODE5OGU1LmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayAzIC0gMjAyNC0wNC0yOSAtIFNhbGVzLmNzdiIsInNpemUiOjM5NTQ4NywibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_4_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6ImE4Yjg2YjIyZDM0NjFiZmJkNjZmMTViNDU3MjQ3ZGUzLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayA0IC0gMjAyNC0wNS0wNiAtIFNhbGVzLmNzdiIsInNpemUiOjM5Nzk1NCwibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_5_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6ImI0MmJiNGNlOGNmYmViYmI3MTczMzYzOTA4M2ViMjRlLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayA1IC0gMjAyNC0wNS0xMyAtIFNhbGVzLmNzdiIsInNpemUiOjQwMDQwNywibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_6_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6IjNjYmU4MmNmMjgzNDA5YzRjOTJiYzRjNzcyYzk5YmNlLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayA2IC0gMjAyNC0wNS0yMCAtIFNhbGVzLmNzdiIsInNpemUiOjQwMjg0NywibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_7_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6IjYyNTgyOGM0ZWU4OTQ5YWRlMjA3NDA4YTM4NTU1MTdjLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayA3IC0gMjAyNC0wNS0yNyAtIFNhbGVzLmNzdiIsInNpemUiOjQwNTI5NSwibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        },
+        {
+            "file_name": "week_8_sales.csv",
+            "url": "https://www.datasource.ai/attachments/eyJpZCI6IjZmNGUxYzdhYTc4OWMxYzY0N2JhNjRhOTk0Y2IyOThjLmNzdiIsInN0b3JhZ2UiOiJzdG9yZSIsIm1ldGFkYXRhIjp7ImZpbGVuYW1lIjoiV2VlayA4IC0gMjAyNC0wNi0wMyAtIFNhbGVzLmNzdiIsInNpemUiOjQwNzczMywibWltZV90eXBlIjoidGV4dC9jc3YifX0"
+        }
+    ]
+}
