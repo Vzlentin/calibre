@@ -275,3 +275,4 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
     assert isinstance(result.order_ledger, OrderLedger)
     order_df = result.order_ledger.to_df()
     assert not order_df.empty
+    assert "order_qty" in order_df.columns
