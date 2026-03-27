@@ -1,0 +1,303 @@
+{
+  "params": {
+    "dataset": "AMZN",
+    "model": "ar",
+    "ahead": 1,
+    "alpha": 0.1,
+    "tail_alpha": 0.05,
+    "T_burnin": 100,
+    "score_function_name": "signed-residual",
+    "window_length": 10000000,
+    "lrs": [
+      0.1,
+      0.05,
+      0.01,
+      0.005,
+      0.0001
+    ],
+    "local_quantile_rule": "higher",
+    "local_alpha_bounds": null,
+    "config_path": "experiments\\cp\\aci\\conformal-time-series\\tests\\configs\\AMZN.yaml",
+    "config_text": "real: True\nquantiles_given: False\nmultiple_series: False \nT_burnin: 100 \nalpha: 0.1\nseasonal_period: 5 \nscore_function_name: \"signed-residual\"\nsequences:\n  0:\n    dataset: \"AMZN\"\n    fit_every: 1 \n    log: True\n    model_names: \n      - \"transformer\"\n      - \"ar\"\n      - \"theta\"\n      - \"prophet\"\n    overwrite: False \nmethods:\n  Trail:\n    weight_length: 50 \n  ACI:\n    lrs:\n      - 0.1\n      - 0.05\n      - 0.01\n      - 0.005\n      - 0.0001\n    window_length: 10000000 \n  ACI (clipped):\n    lrs:\n      - 0.1\n      - 0.05\n      - 0.01\n      - 0.005\n      - 0.0001\n    window_length: 10000000 \n  Quantile:\n    lrs:\n      - 1\n      - 0.5\n      - 0.1\n      - 0.05\n      - 0\n  Quantile+Integrator (log):\n    lrs:\n      - 1\n      - 0.5\n      - 0.1\n      - 0.05\n      - 0\n    Csat: 1 \n    KI: 200 \n  Quantile+Integrator (log)+Scorecaster:\n    lrs:\n      - 1 \n      - 0.5 \n      - 0.1\n      - 0.05\n      - 0\n    Csat: 1 \n    KI: 200 \n    steps_ahead: 1\n",
+    "forecast_artifact": "experiments\\cp\\aci\\conformal-time-series\\tests\\datasets\\proc\\AMZN\\ar.npz",
+    "reference_repo_commit": "b729c3f5ff633bfc43f0f7ca08199b549c2573ac",
+    "output_dir": "experiments\\cp\\aci\\artifacts\\amzn_ar"
+  },
+  "lrs": [
+    {
+      "lr": 0.1,
+      "q_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "q_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "miss": {
+        "exact_match": true,
+        "first_difference": null
+      },
+      "width": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "reference_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 1434,
+        "empirical_coverage_eval": 0.8999657416923604,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 22.88361164768899
+      },
+      "local_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 1434,
+        "empirical_coverage_eval": 0.8999657416923604,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 22.88361164768899
+      },
+      "metrics_delta": {
+        "empirical_coverage_eval_delta": 0.0,
+        "average_width_eval_delta": "n/a",
+        "average_width_eval_finite_only_delta": 0.0
+      },
+      "diagnosis": "No divergence detected.",
+      "verdict": "exact"
+    },
+    {
+      "lr": 0.05,
+      "q_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "q_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "miss": {
+        "exact_match": true,
+        "first_difference": null
+      },
+      "width": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "reference_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 1957,
+        "empirical_coverage_eval": 0.8996231586159644,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 22.143158785175178
+      },
+      "local_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 1957,
+        "empirical_coverage_eval": 0.8996231586159644,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 22.143158785175178
+      },
+      "metrics_delta": {
+        "empirical_coverage_eval_delta": 0.0,
+        "average_width_eval_delta": "n/a",
+        "average_width_eval_finite_only_delta": 0.0
+      },
+      "diagnosis": "No divergence detected.",
+      "verdict": "exact"
+    },
+    {
+      "lr": 0.01,
+      "q_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "q_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "miss": {
+        "exact_match": true,
+        "first_difference": null
+      },
+      "width": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "reference_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 2759,
+        "empirical_coverage_eval": 0.8975676601575883,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 19.062892654770113
+      },
+      "local_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 2759,
+        "empirical_coverage_eval": 0.8975676601575883,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 19.062892654770113
+      },
+      "metrics_delta": {
+        "empirical_coverage_eval_delta": 0.0,
+        "average_width_eval_delta": "n/a",
+        "average_width_eval_finite_only_delta": 0.0
+      },
+      "diagnosis": "No divergence detected.",
+      "verdict": "exact"
+    },
+    {
+      "lr": 0.005,
+      "q_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "q_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "miss": {
+        "exact_match": true,
+        "first_difference": null
+      },
+      "width": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "reference_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 2890,
+        "empirical_coverage_eval": 0.89482699554642,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 19.581709045051653
+      },
+      "local_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 2890,
+        "empirical_coverage_eval": 0.89482699554642,
+        "average_width_eval": "inf",
+        "average_width_eval_finite_only": 19.581709045051653
+      },
+      "metrics_delta": {
+        "empirical_coverage_eval_delta": 0.0,
+        "average_width_eval_delta": "n/a",
+        "average_width_eval_finite_only_delta": 0.0
+      },
+      "diagnosis": "No divergence detected.",
+      "verdict": "exact"
+    },
+    {
+      "lr": 0.0001,
+      "q_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "q_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_lower": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "alpha_upper": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "miss": {
+        "exact_match": true,
+        "first_difference": null
+      },
+      "width": {
+        "exact_match": true,
+        "first_difference": null,
+        "max_abs_diff": 0.0
+      },
+      "reference_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 2919,
+        "empirical_coverage_eval": 0.8009592326139089,
+        "average_width_eval": 16.97402070744972,
+        "average_width_eval_finite_only": 16.97402070744972
+      },
+      "local_metrics": {
+        "n_total": 3020,
+        "n_eval": 2919,
+        "n_eval_finite_width": 2919,
+        "empirical_coverage_eval": 0.8009592326139089,
+        "average_width_eval": 16.97402070744972,
+        "average_width_eval_finite_only": 16.97402070744972
+      },
+      "metrics_delta": {
+        "empirical_coverage_eval_delta": 0.0,
+        "average_width_eval_delta": 0.0,
+        "average_width_eval_finite_only_delta": 0.0
+      },
+      "diagnosis": "No divergence detected.",
+      "verdict": "exact"
+    }
+  ]
+}
