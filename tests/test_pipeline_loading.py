@@ -14,21 +14,6 @@ PERIOD0_DATE_COLS = 157
 PERIOD1_DATE_COLS = 158
 
 
-@pytest.fixture
-def period0_sales_path(data_dir: Path) -> Path:
-    return data_dir / "Week 0 - 2024-04-08 - Sales.csv"
-
-
-@pytest.fixture
-def master_path(data_dir: Path) -> Path:
-    return data_dir / "Week 0 - Master.csv"
-
-
-@pytest.fixture
-def instock_path(data_dir: Path) -> Path:
-    return data_dir / "Week 0 - In Stock.csv"
-
-
 class TestMeltWideSales:
     def test_shape(self, period0_sales_path: Path) -> None:
         df = melt_wide_sales(period0_sales_path)

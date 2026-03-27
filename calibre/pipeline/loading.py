@@ -82,9 +82,9 @@ def melt_wide_instock(path: str | Path) -> pd.DataFrame:
 
 
 def load_period(data_dir: str | Path, period: int) -> pd.DataFrame:
-    """Find 'Week {period} - * - Sales.csv' in data_dir (glob), return melt_wide_sales result."""
+    """Find 'week_{period}_sales.csv' in data_dir, return melt_wide_sales result."""
     data_dir = Path(data_dir)
-    matches = list(data_dir.glob(f"Week {period} - * - Sales.csv"))
-    if not matches:
+    path = data_dir / f"week_{period}_sales.csv"
+    if not path.exists():
         raise FileNotFoundError(f"No Sales file found for period {period} in {data_dir}")
-    return melt_wide_sales(matches[0])
+    return melt_wide_sales(path)

@@ -6,9 +6,9 @@ import pytest
 
 
 def _find_data_dir() -> Path:
-    """Locate the data/ directory, handling git worktrees."""
+    """Locate the data/vn2/ directory, handling git worktrees."""
     # First try the standard location relative to this file
-    candidate = Path(__file__).parent.parent / "data"
+    candidate = Path(__file__).parent.parent / "data" / "vn2"
     if candidate.is_dir():
         return candidate
     # In a git worktree, data/ lives in the main project root
@@ -20,12 +20,12 @@ def _find_data_dir() -> Path:
         ).strip()
         # common_dir is e.g. C:/path/to/repo/.git — go up one level for project root
         project_root = Path(common_dir).parent
-        candidate = project_root / "data"
+        candidate = project_root / "data" / "vn2"
         if candidate.is_dir():
             return candidate
     except subprocess.CalledProcessError:
         pass
-    raise FileNotFoundError(f"Cannot find data/ directory. Tried {Path(__file__).parent.parent / 'data'}")
+    raise FileNotFoundError(f"Cannot find data/vn2/ directory. Tried {Path(__file__).parent.parent / 'data' / 'vn2'}")
 
 
 @pytest.fixture(scope="session")
@@ -33,6 +33,19 @@ def data_dir() -> Path:
     """Session-scoped fixture to locate the data/ directory."""
     return _find_data_dir()
 
+@pytest.fixture
+def period0_sales_path(data_dir: Path) -> Path:
+    return data_dir / "week_0_sales.csv"
+
+
+@pytest.fixture
+def master_path(data_dir: Path) -> Path:
+    return data_dir / "week_0_master.csv"
+
+
+@pytest.fixture
+def instock_path(data_dir: Path) -> Path:
+    return data_dir / "week_0_in_stock.csv"
 
 @pytest.fixture
 def dates():
