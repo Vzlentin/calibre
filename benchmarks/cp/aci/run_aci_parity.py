@@ -18,9 +18,9 @@ if not hasattr(np, "infty"):
     np.infty = np.inf
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SRC_ROOT = REPO_ROOT / "src"
-REFERENCE_REPO = REPO_ROOT / "experiments" / "cp" / "aci" / "conformal-time-series"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "experiments" / "cp" / "aci" / "artifacts" / "amzn_ar"
+BENCHMARK_DIR = REPO_ROOT / "benchmarks" / "cp" / "aci"
+REFERENCE_REPO = BENCHMARK_DIR / "conformal-time-series"
+DEFAULT_OUTPUT_DIR = BENCHMARK_DIR / "artifacts" / "amzn_ar"
 CONFIG_PATH = REFERENCE_REPO / "tests" / "configs" / "AMZN.yaml"
 FORECAST_PATH = REFERENCE_REPO / "tests" / "datasets" / "proc" / "AMZN" / "ar.npz"
 TAIL_ALPHA = 0.05
@@ -39,10 +39,10 @@ CONFIG = {
 }
 FLOAT_ATOL = 1e-12
 
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from forecast.conformal.aci import AdaptiveConformalInference
+from calibre.conformal.aci import AdaptiveConformalInference  # noqa: E402
 
 
 @dataclass(slots=True)

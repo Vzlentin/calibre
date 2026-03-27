@@ -16,9 +16,9 @@
   ],
   "local_quantile_rule": "higher",
   "local_alpha_bounds": null,
-  "config_path": "experiments\\cp\\aci\\conformal-time-series\\tests\\configs\\AMZN.yaml",
+  "config_path": "benchmarks\\cp\\aci\\conformal-time-series\\tests\\configs\\AMZN.yaml",
   "config_text": "real: True\nquantiles_given: False\nmultiple_series: False \nT_burnin: 100 \nalpha: 0.1\nseasonal_period: 5 \nscore_function_name: \"signed-residual\"\nsequences:\n  0:\n    dataset: \"AMZN\"\n    fit_every: 1 \n    log: True\n    model_names: \n      - \"transformer\"\n      - \"ar\"\n      - \"theta\"\n      - \"prophet\"\n    overwrite: False \nmethods:\n  Trail:\n    weight_length: 50 \n  ACI:\n    lrs:\n      - 0.1\n      - 0.05\n      - 0.01\n      - 0.005\n      - 0.0001\n    window_length: 10000000 \n  ACI (clipped):\n    lrs:\n      - 0.1\n      - 0.05\n      - 0.01\n      - 0.005\n      - 0.0001\n    window_length: 10000000 \n  Quantile:\n    lrs:\n      - 1\n      - 0.5\n      - 0.1\n      - 0.05\n      - 0\n  Quantile+Integrator (log):\n    lrs:\n      - 1\n      - 0.5\n      - 0.1\n      - 0.05\n      - 0\n    Csat: 1 \n    KI: 200 \n  Quantile+Integrator (log)+Scorecaster:\n    lrs:\n      - 1 \n      - 0.5 \n      - 0.1\n      - 0.05\n      - 0\n    Csat: 1 \n    KI: 200 \n    steps_ahead: 1\n",
-  "forecast_artifact": "experiments\\cp\\aci\\conformal-time-series\\tests\\datasets\\proc\\AMZN\\ar.npz",
+  "forecast_artifact": "benchmarks\\cp\\aci\\conformal-time-series\\tests\\datasets\\proc\\AMZN\\ar.npz",
   "reference_repo_commit": "b729c3f5ff633bfc43f0f7ca08199b549c2573ac",
-  "output_dir": "experiments\\cp\\aci\\artifacts\\amzn_ar"
+  "output_dir": "benchmarks\\cp\\aci\\artifacts\\amzn_ar"
 }
