@@ -170,10 +170,12 @@ class AdaptiveConformalInference(OnlineConformalController):
         )
 
     def update(self, error: int) -> float:
-        self._alpha = float(_clip_alpha(
-            self._alpha + self._gamma * (self._target_alpha - int(error)),
-            self._bounds,
-        ))
+        self._alpha = float(
+            _clip_alpha(
+                self._alpha + self._gamma * (self._target_alpha - int(error)),
+                self._bounds,
+            )
+        )
         self._alpha_history.append(float(self._alpha))
         return float(self._alpha)
 
