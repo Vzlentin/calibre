@@ -19,8 +19,7 @@ from calibre.contracts.forecast_frame import (
     Y_HAT,
 )
 from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
-from calibre.engine.ledger import Ledger
-from calibre.engine.order_ledger import OrderLedger
+from calibre.engine.ledger import ForecastLedger, OrderLedger
 from calibre.engine.scoring import compute_row_errors, resolve_actuals
 from calibre.models.registry import resolve_adapter
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
@@ -31,7 +30,7 @@ from calibre.tasks.forecast_task import ForecastTask
 class BackendResult:
     """Result returned by BackendEngine.execute()."""
 
-    ledger: Ledger
+    ledger: ForecastLedger
     order_ledger: OrderLedger | None = None
 
 
@@ -56,7 +55,7 @@ class BackendEngine:
         actuals: pd.DataFrame,
         origins: list[pd.Timestamp],
     ) -> BackendResult:
-        ledger = Ledger()
+        ledger = ForecastLedger()
         order_ledger = OrderLedger() if self.order_config is not None else None
         conformal_runtime = (
             ConformalRuntime(self.conformal_config)
@@ -90,7 +89,7 @@ class BackendEngine:
 
     def _resolve_ledger(
         self,
-        ledger: Ledger,
+        ledger: ForecastLedger,
         actuals: pd.DataFrame,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,

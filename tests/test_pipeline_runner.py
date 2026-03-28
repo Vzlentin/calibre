@@ -8,7 +8,7 @@ import pytest
 
 from calibre.conformal import ConformalPolicyConfig
 from calibre.engine.backend import BackendResult
-from calibre.engine.ledger import Ledger
+from calibre.engine.ledger import ForecastLedger as Ledger
 from calibre.pipeline.runner import PipelineResult, run_backtest, run_forecast
 
 _MODEL_CONFIGS = [

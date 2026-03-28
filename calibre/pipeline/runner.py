@@ -10,8 +10,7 @@ import pandas as pd
 from calibre.conformal import ConformalPolicyConfig
 from calibre.contracts.forecast_frame import DS
 from calibre.engine.backend import BackendEngine, BackendResult
-from calibre.engine.ledger import Ledger
-from calibre.engine.order_ledger import OrderLedger
+from calibre.engine.ledger import ForecastLedger, OrderLedger
 from calibre.engine.scoring import compute_metrics
 from calibre.metrics import mae, rmse, smape, wape
 from calibre.order.config import OrderPolicyConfig
@@ -23,7 +22,7 @@ _DEFAULT_METRICS: list[Callable] = [mae, rmse, smape, wape]
 
 @dataclass(frozen=True)
 class PipelineResult:
-    ledger: Ledger
+    ledger: ForecastLedger
     scores: pd.DataFrame
     sales: pd.DataFrame
     order_ledger: OrderLedger | None = None

@@ -16,7 +16,7 @@ from calibre.contracts.forecast_frame import (
     MODEL_NAME,
 )
 from calibre.engine.backend import BackendEngine, BackendResult
-from calibre.engine.order_ledger import OrderLedger
+from calibre.engine.ledger import OrderLedger
 from calibre.order.config import OrderPolicyConfig
 from calibre.order.types import NewsvendorPolicyParameters, RsPolicyParameters
 from calibre.tasks.forecast_task import ForecastTask
