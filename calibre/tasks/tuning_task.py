@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import optuna
 import pandas as pd
 
 from calibre.conformal import ConformalPolicyConfig
-from calibre.contracts.forecast_frame import Y, Y_HAT
+from calibre.contracts.forecast_frame import Y_HAT, Y
 from calibre.tasks.forecast_task import ForecastTask
 
 

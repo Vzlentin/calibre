@@ -25,13 +25,16 @@ def _find_data_dir() -> Path:
             return candidate
     except subprocess.CalledProcessError:
         pass
-    raise FileNotFoundError(f"Cannot find data/vn2/ directory. Tried {Path(__file__).parent.parent / 'data' / 'vn2'}")
+    raise FileNotFoundError(
+        f"Cannot find data/vn2/ directory. Tried {Path(__file__).parent.parent / 'data' / 'vn2'}"
+    )
 
 
 @pytest.fixture(scope="session")
 def data_dir() -> Path:
     """Session-scoped fixture to locate the data/ directory."""
     return _find_data_dir()
+
 
 @pytest.fixture
 def period0_sales_path(data_dir: Path) -> Path:
@@ -46,6 +49,7 @@ def master_path(data_dir: Path) -> Path:
 @pytest.fixture
 def instock_path(data_dir: Path) -> Path:
     return data_dir / "week_0_in_stock.csv"
+
 
 @pytest.fixture
 def dates():

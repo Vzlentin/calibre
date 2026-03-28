@@ -11,7 +11,9 @@ from calibre.contracts.forecast_frame import (
 
 
 def _decision_columns(frame: pd.DataFrame) -> list[str]:
-    return [column for column in (UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME) if column in frame.columns]
+    return [
+        column for column in (UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME) if column in frame.columns
+    ]
 
 
 def _validate_interval_columns(frame: pd.DataFrame, coverage: float) -> tuple[str, str]:

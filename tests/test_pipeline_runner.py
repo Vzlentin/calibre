@@ -1,4 +1,5 @@
 """Integration tests for calibre.pipeline.runner."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,9 +12,7 @@ from calibre.engine.backend import BackendResult
 from calibre.engine.ledger import ForecastLedger as Ledger
 from calibre.pipeline.runner import PipelineResult, run_backtest, run_forecast
 
-_MODEL_CONFIGS = [
-    {"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 52}
-]
+_MODEL_CONFIGS = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 52}]
 _SERIES_FILTER = ["0_126"]
 _HORIZON = 4
 _PERIOD = 0

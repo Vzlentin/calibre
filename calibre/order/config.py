@@ -9,7 +9,6 @@ from calibre.order.newsvendor import apply_newsvendor_policy
 from calibre.order.rs import apply_rs_policy
 from calibre.order.rss import apply_rss_policy
 
-
 OrderPolicyType = Literal["rs", "rss", "newsvendor"]
 
 
@@ -23,6 +22,7 @@ class OrderPolicyConfig:
         coverage: Conformal interval coverage level to use. Default 0.9.
         period: Horizon step for newsvendor policy. Ignored for rs/rss. Default 1.
     """
+
     policy: OrderPolicyType
     params: pd.DataFrame | list
     coverage: float = 0.9

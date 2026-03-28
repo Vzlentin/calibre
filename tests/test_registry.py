@@ -4,7 +4,9 @@ from calibre.models.registry import resolve_adapter
 
 
 def test_resolve_statsforecast_backend():
-    adapter = resolve_adapter({"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4})
+    adapter = resolve_adapter(
+        {"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4}
+    )
     assert type(adapter).__name__ == "StatsForecastAdapter"
     assert hasattr(adapter, "fit")
     assert hasattr(adapter, "predict")

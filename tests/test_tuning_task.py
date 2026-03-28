@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import optuna
 import pandas as pd
 import pytest
-
-import optuna
 
 from calibre.conformal import ConformalPolicyConfig
 from calibre.metrics import mae, smape
@@ -16,11 +15,13 @@ def _space_season_length(trial: optuna.Trial) -> dict:
 
 @pytest.fixture
 def series_df(dates, repeating_pattern):
-    return pd.DataFrame({
-        "unique_id": "test_series",
-        "ds": dates,
-        "y": repeating_pattern,
-    })
+    return pd.DataFrame(
+        {
+            "unique_id": "test_series",
+            "ds": dates,
+            "y": repeating_pattern,
+        }
+    )
 
 
 @pytest.fixture

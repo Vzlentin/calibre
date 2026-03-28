@@ -42,7 +42,12 @@ def patchtst_task(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"backend": "neuralforecast", "model": "PatchTST", "freq": "W", "max_steps": 5},
+        model_config={
+            "backend": "neuralforecast",
+            "model": "PatchTST",
+            "freq": "W",
+            "max_steps": 5,
+        },
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
 

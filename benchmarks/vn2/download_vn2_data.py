@@ -1,6 +1,7 @@
-from pathlib import Path
-import requests
 import json
+from pathlib import Path
+
+import requests
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LINKS_PATH = SCRIPT_DIR / "vn2_file_links.json"

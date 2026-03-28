@@ -108,7 +108,9 @@ def warmup_quantile(values: np.ndarray, alpha: float, t_pred: int) -> float:
     return math.inf
 
 
-def compare_numeric_arrays(reference: np.ndarray, local: np.ndarray, atol: float = FLOAT_ATOL) -> dict[str, Any]:
+def compare_numeric_arrays(
+    reference: np.ndarray, local: np.ndarray, atol: float = FLOAT_ATOL
+) -> dict[str, Any]:
     reference = np.asarray(reference)
     local = np.asarray(local)
     matches = np.isclose(reference, local, atol=atol, rtol=0.0, equal_nan=True)
@@ -156,7 +158,9 @@ def summarize_metrics(interval_frame: pd.DataFrame, burnin: int) -> dict[str, An
     finite_width_mask = eval_mask & np.isfinite(interval_frame["width"])
     coverage_eval = interval_frame.loc[eval_mask, "covered"].mean()
     width_eval = interval_frame.loc[eval_mask, "width"].mean()
-    width_eval_finite = interval_frame.loc[finite_width_mask, "width"].mean() if finite_width_mask.any() else np.nan
+    width_eval_finite = (
+        interval_frame.loc[finite_width_mask, "width"].mean() if finite_width_mask.any() else np.nan
+    )
     return {
         "n_total": int(len(interval_frame)),
         "n_eval": int(eval_mask.sum()),
@@ -167,7 +171,9 @@ def summarize_metrics(interval_frame: pd.DataFrame, burnin: int) -> dict[str, An
     }
 
 
-def choose_diagnosis(summary: dict[str, Any], reference_runs: dict[str, dict[str, np.ndarray]]) -> str:
+def choose_diagnosis(
+    summary: dict[str, Any], reference_runs: dict[str, dict[str, np.ndarray]]
+) -> str:
     q_firsts = []
     alpha_firsts = []
     for tail in ("lower", "upper"):
@@ -213,7 +219,9 @@ def verdict_from_summary(summary: dict[str, Any], metrics_match: bool) -> str:
     return "exact" if all(exact_fields) else "diverged"
 
 
-def build_signed_residual_scores(y: np.ndarray, forecast: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def build_signed_residual_scores(
+    y: np.ndarray, forecast: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     lower = forecast - y
     upper = y - forecast
     return lower.astype(float), upper.astype(float)
@@ -318,7 +326,9 @@ def build_interval_frame(
     return frame
 
 
-def metrics_delta(reference_metrics: dict[str, Any], local_metrics: dict[str, Any]) -> dict[str, Any]:
+def metrics_delta(
+    reference_metrics: dict[str, Any], local_metrics: dict[str, Any]
+) -> dict[str, Any]:
     def delta(lhs: Any, rhs: Any) -> Any:
         if isinstance(lhs, str) or isinstance(rhs, str):
             return "n/a"
@@ -401,7 +411,9 @@ def load_reference_dataset(load_dataset, dataset_name: str, reference_repo: Path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run one-step ACI parity against the conformal-time-series reference repo.")
+    parser = argparse.ArgumentParser(
+        description="Run one-step ACI parity against the conformal-time-series reference repo."
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -450,7 +462,9 @@ def main() -> None:
         "reference_repo_commit": get_reference_commit(REFERENCE_REPO),
         "output_dir": str(output_dir.relative_to(REPO_ROOT)),
     }
-    (output_dir / "params.json").write_text(json.dumps(to_python(params), indent=2), encoding="utf-8")
+    (output_dir / "params.json").write_text(
+        json.dumps(to_python(params), indent=2), encoding="utf-8"
+    )
 
     summaries: list[dict[str, Any]] = []
     for lr in CONFIG["lrs"]:
@@ -491,7 +505,9 @@ def main() -> None:
             ),
         }
 
-        reference_frame = build_interval_frame(base_frame, reference_runs["lower"], reference_runs["upper"])
+        reference_frame = build_interval_frame(
+            base_frame, reference_runs["lower"], reference_runs["upper"]
+        )
         local_frame = build_interval_frame(base_frame, local_runs["lower"], local_runs["upper"])
 
         slug = slugify_lr(lr)
@@ -502,12 +518,24 @@ def main() -> None:
         local_metrics = summarize_metrics(local_frame, CONFIG["T_burnin"])
         summary = {
             "lr": lr,
-            "q_lower": compare_numeric_arrays(reference_runs["lower"]["q"], local_runs["lower"]["q"]),
-            "q_upper": compare_numeric_arrays(reference_runs["upper"]["q"], local_runs["upper"]["q"]),
-            "alpha_lower": compare_numeric_arrays(reference_runs["lower"]["alpha"], local_runs["lower"]["alpha"]),
-            "alpha_upper": compare_numeric_arrays(reference_runs["upper"]["alpha"], local_runs["upper"]["alpha"]),
-            "miss": compare_boolean_arrays(reference_frame["miss"].to_numpy(), local_frame["miss"].to_numpy()),
-            "width": compare_numeric_arrays(reference_frame["width"].to_numpy(), local_frame["width"].to_numpy()),
+            "q_lower": compare_numeric_arrays(
+                reference_runs["lower"]["q"], local_runs["lower"]["q"]
+            ),
+            "q_upper": compare_numeric_arrays(
+                reference_runs["upper"]["q"], local_runs["upper"]["q"]
+            ),
+            "alpha_lower": compare_numeric_arrays(
+                reference_runs["lower"]["alpha"], local_runs["lower"]["alpha"]
+            ),
+            "alpha_upper": compare_numeric_arrays(
+                reference_runs["upper"]["alpha"], local_runs["upper"]["alpha"]
+            ),
+            "miss": compare_boolean_arrays(
+                reference_frame["miss"].to_numpy(), local_frame["miss"].to_numpy()
+            ),
+            "width": compare_numeric_arrays(
+                reference_frame["width"].to_numpy(), local_frame["width"].to_numpy()
+            ),
             "reference_metrics": reference_metrics,
             "local_metrics": local_metrics,
             "metrics_delta": metrics_delta(reference_metrics, local_metrics),

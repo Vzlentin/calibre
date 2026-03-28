@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -18,12 +19,12 @@ from calibre.contracts.forecast_frame import (
     CONFORMAL_METHOD,
     DS,
     FORECAST_ORIGIN,
-    H,
     MODEL_NAME,
     NONCONFORMITY_SCORE,
     UNIQUE_ID,
-    Y,
     Y_HAT,
+    H,
+    Y,
     interval_column_names,
 )
 
@@ -46,9 +47,9 @@ def serialize_calibration_state(state: dict[str, Any]) -> str:
 
 
 def deserialize_calibration_state(payload: str | None) -> dict[str, Any]:
-    if payload in (None, ""):
+    if not payload:
         return {}
-    return json.loads(payload)
+    return json.loads(payload)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +290,8 @@ class ConformalRuntime:
                 raise ValueError(f"No conformal state found for key {key}")
             ordered = group.sort_values([DS, FORECAST_ORIGIN, H])
             for idx, row in ordered.iterrows():
-                observed.at[idx, NONCONFORMITY_SCORE] = policy.observe_row(row, lower_col, upper_col)
+                observed.at[idx, NONCONFORMITY_SCORE] = policy.observe_row(
+                    row, lower_col, upper_col
+                )
 
         return observed

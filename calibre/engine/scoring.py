@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Callable
+import functools
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -8,9 +9,9 @@ import pandas as pd
 from calibre.contracts.forecast_frame import (
     DS,
     UNIQUE_ID,
-    Y,
     Y_HAT,
     H,
+    Y,
 )
 
 
@@ -73,11 +74,14 @@ def compute_metrics(
         actual = group[Y].to_numpy()
         predicted = group[Y_HAT].to_numpy()
 
-        row = dict(zip(group_by, keys))
+        row = dict(zip(group_by, keys, strict=False))
         for metric_fn in metrics:
-            name = getattr(metric_fn, "__name__", None)
+            name: str = getattr(metric_fn, "__name__", None)  # type: ignore[assignment]
             if name is None:
-                name = getattr(metric_fn.func, "__name__", str(metric_fn))
+                if isinstance(metric_fn, functools.partial):
+                    name = getattr(metric_fn.func, "__name__", str(metric_fn))
+                else:
+                    name = str(metric_fn)
             row[name] = metric_fn(actual, predicted)
 
         if interval_bounds is not None:
@@ -85,9 +89,8 @@ def compute_metrics(
             if lower_col in group.columns and upper_col in group.columns:
                 interval_group = group.dropna(subset=[lower_col, upper_col, Y])
                 if not interval_group.empty:
-                    covered = (
-                        (interval_group[lower_col] <= interval_group[Y])
-                        & (interval_group[Y] <= interval_group[upper_col])
+                    covered = (interval_group[lower_col] <= interval_group[Y]) & (
+                        interval_group[Y] <= interval_group[upper_col]
                     )
                     row["coverage"] = float(covered.mean())
                     row["mean_interval_width"] = float(

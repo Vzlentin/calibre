@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.contracts.forecast_frame import (
-    H,
     UNIQUE_ID,
+    H,
     validate_forecast_frame,
 )
 from calibre.order._helpers import (
@@ -79,21 +79,21 @@ def apply_rss_policy(
             max_horizon = int(horizons.max())
             if max_horizon >= protection_period and missing_horizons:
                 raise ValueError(
-                    f"Missing horizons within protection period {protection_period}: {missing_horizons}"
+                    f"Missing horizons within protection period "
+                    f"{protection_period}: {missing_horizons}"
                 )
             raise ValueError(
                 f"Protection period {protection_period} exceeds available horizon {max_horizon}"
             )
 
-        target_stock_level = float(
-            ordered.loc[horizons <= protection_period, upper_col].sum()
+        target_stock_level = float(ordered.loc[horizons <= protection_period, upper_col].sum())
+        order_qty = (
+            0.0
+            if inventory_position >= reorder_point
+            else max(target_stock_level - inventory_position, 0.0)
         )
-        order_qty = 0.0 if inventory_position >= reorder_point else max(target_stock_level - inventory_position, 0.0)
 
-        result = {
-            column: ordered[column].iloc[0]
-            for column in decision_columns
-        }
+        result = {column: ordered[column].iloc[0] for column in decision_columns}
         result[INVENTORY_POSITION] = inventory_position
         result[REORDER_POINT] = reorder_point
         result[LEAD_TIME] = lead_time
