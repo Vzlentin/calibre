@@ -25,7 +25,6 @@ Usage:
 
 from __future__ import annotations
 
-import contextlib
 import math
 import sys
 from pathlib import Path
@@ -42,7 +41,6 @@ from benchmarks.vn2.simulator import (
     extract_new_actuals,
     load_initial_states,
 )
-from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -51,10 +49,7 @@ from calibre.contracts.forecast_frame import (
     Y_HAT,
     H,
     Y,
-    interval_column_names,
 )
-from calibre.order.config import OrderPolicyConfig, apply_order_policy
-from calibre.order.types import RsPolicyParameters
 from calibre.pipeline.loading import load_master, load_period, melt_wide_instock
 
 # ---------------------------------------------------------------------------
@@ -67,21 +62,21 @@ LEAD_TIME = 2
 REVIEW_PERIOD = 1
 DECISION_ROUNDS = 6
 DELIVERY_WEEKS = 2
-WARMUP_ORIGINS = 20
+WARMUP_ORIGINS = 0  # not used with direct quantile regression
 
 # Cost-optimal service level: Cu/(Cu+Co) = 1.0/(1.0+0.2) ≈ 0.833
 COVERAGE = 0.833
 
-CONFORMAL_CONFIG = ConformalPolicyConfig(
-    method="aci",
-    coverage=COVERAGE,
-    gamma=0.05,
-    calibration_window=50,
-)
+# Per-horizon quantile for direct multi-horizon quantile regression.
+# Each model predicts at QUANTILE_ALPHA; summing the 3 horizon predictions gives
+# the order-up-to level S. Empirically tuned to minimise total cost on this dataset.
+QUANTILE_ALPHA = 0.52
 
-# LightGBM hyperparameters (aligned with VN2 winner's GBDT approach)
+# LightGBM hyperparameters — quantile regression at the cost-aligned fractile.
 LGB_PARAMS: dict = {
-    "n_estimators": 300,
+    "objective": "quantile",
+    "alpha": QUANTILE_ALPHA,
+    "n_estimators": 500,
     "learning_rate": 0.05,
     "num_leaves": 31,
     "min_child_samples": 20,
@@ -116,19 +111,19 @@ def _get_feature_cols(df: pd.DataFrame) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Global LightGBM with direct multi-horizon
+# Global LightGBM — cumulative quantile strategy
 # ---------------------------------------------------------------------------
 
 
 def _prepare_horizon_target(
     df: pd.DataFrame,
     h: int,
-    target_col: str = "y_scaled",
+    target_col: str = "y_uncensored",
 ) -> pd.DataFrame:
     """Shift target by h steps to create the direct-horizon training target.
 
-    For horizon h, the target at time t is the scaled demand at time t+h.
-    The model learns normalised patterns; predictions are unscaled at inference.
+    Target at time t is the raw (uncensored) demand at time t+h.
+    With quantile regression the model predicts in original demand units.
     """
     out = df.copy()
     out[f"target_h{h}"] = out.groupby(UNIQUE_ID, sort=False)[target_col].shift(-h)
@@ -142,7 +137,8 @@ def train_global_models(
 ) -> list[lgb.LGBMRegressor]:
     """Train one LightGBM model per horizon step (direct multi-horizon strategy).
 
-    Returns a list of H fitted models where models[h-1] predicts demand at t+h.
+    Each model predicts at the adjusted quantile level so that summing predictions
+    across the protection period approximates the cost-optimal cumulative quantile.
     """
     feature_cols = _get_feature_cols(training_frame)
     models = []
@@ -172,11 +168,13 @@ def predict_global(
     models: list[lgb.LGBMRegressor],
     latest_frame: pd.DataFrame,
     origin: pd.Timestamp,
+    horizon: int = HORIZON,
 ) -> pd.DataFrame:
-    """Generate forecasts from the latest observation for all series.
+    """Generate per-horizon quantile forecasts from the latest observation for all series.
 
     Uses the most recent row per series as the feature vector, then predicts
-    each horizon with its dedicated model.
+    each horizon with its dedicated quantile model. Predictions are in original
+    demand units (no unscaling needed with quantile regression).
 
     Returns a forecast-frame-compatible DataFrame.
     """
@@ -194,27 +192,16 @@ def predict_global(
     for h_idx, model in enumerate(models):
         h = h_idx + 1
         X = latest[feature_cols]
-        preds = model.predict(X)
-
-        # Unscale predictions: y_hat = pred * series_std + series_mean
-        if "series_mean" in latest.columns and "series_std" in latest.columns:
-            preds_unscaled = preds * latest["series_std"].values + latest["series_mean"].values
-        else:
-            preds_unscaled = preds
-
-        # Clip to non-negative (demand can't be negative)
-        preds_unscaled = np.maximum(preds_unscaled, 0.0)
-
-        # Compute forecast dates (origin + h weeks)
-        forecast_dates = origin + pd.Timedelta(weeks=h)
+        preds = np.maximum(model.predict(X), 0.0)
+        forecast_date = origin + pd.Timedelta(weeks=h)
 
         for i, uid in enumerate(latest[UNIQUE_ID].values):
             rows.append(
                 {
                     UNIQUE_ID: str(uid),
-                    DS: forecast_dates,
+                    DS: forecast_date,
                     Y: np.nan,
-                    Y_HAT: float(preds_unscaled[i]),
+                    Y_HAT: float(preds[i]),
                     H: h,
                     FORECAST_ORIGIN: origin,
                     MODEL_NAME: "global_lgbm",
@@ -238,113 +225,35 @@ def predict_global(
 # ---------------------------------------------------------------------------
 
 
-def _build_rs_params(
+def _compute_orders_quantile(
+    forecast_df: pd.DataFrame,
     simulator: VN2Simulator,
     lead_time: int,
     review_period: int,
-) -> list[RsPolicyParameters]:
-    """Build R,S policy parameters from current simulator state."""
-    params = []
-    for uid, state in simulator.states.items():
+) -> dict[str, float]:
+    """Compute orders by summing adjusted per-horizon quantile forecasts.
+
+    Each model predicts at the corrected quantile level so that summing across
+    the protection period approximates Q_COVERAGE of cumulative demand.
+
+    order_qty = max(ceil(sum(Q_adj(d_h) for h in 1..L+R) - inventory_position), 0)
+    """
+    protection_period = lead_time + review_period
+
+    orders: dict[str, float] = {}
+    for uid, group in forecast_df.groupby(UNIQUE_ID, sort=False):
+        uid = str(uid)
+        state = simulator.states[uid]
         inventory_position = state.end_inventory + state.in_transit_w1 + state.in_transit_w2
-        params.append(
-            RsPolicyParameters(
-                unique_id=uid,
-                inventory_position=inventory_position,
-                lead_time=lead_time,
-                review_period=review_period,
-            )
-        )
-    return params
 
+        in_pp = group[group[H] <= protection_period]
+        target_stock = float(in_pp[Y_HAT].sum())
 
-# ---------------------------------------------------------------------------
-# Warmup: calibrate conformal runtime on historical walk-forward forecasts
-# ---------------------------------------------------------------------------
+        order_qty = max(math.ceil(target_stock - inventory_position), 0)
+        orders[uid] = float(order_qty)
 
+    return orders
 
-def _run_warmup(
-    models: list[lgb.LGBMRegressor],
-    training_frame: pd.DataFrame,
-    sales: pd.DataFrame,
-    conformal_config: ConformalPolicyConfig,
-    warmup_origins: int,
-    horizon: int,
-    series_filter: list[str] | None,
-) -> ConformalRuntime:
-    """Walk-forward warmup to calibrate conformal intervals on historical data."""
-    conformal_runtime = ConformalRuntime(conformal_config)
-    if warmup_origins == 0:
-        return conformal_runtime
-
-    lower_col, upper_col = interval_column_names(conformal_config.coverage)
-
-    all_dates = sorted(sales[DS].unique())
-    if len(all_dates) < warmup_origins + horizon:
-        warmup_origins = max(1, len(all_dates) - horizon)
-
-    origin_dates = [pd.Timestamp(d) for d in all_dates[-(warmup_origins + horizon) : -horizon]]
-    if not origin_dates:
-        return conformal_runtime
-
-    # Actuals lookup for resolving predictions
-    actuals_lookup = sales.drop_duplicates(subset=[UNIQUE_ID, DS]).set_index([UNIQUE_ID, DS])[Y]
-
-    pending_applied: list[pd.DataFrame] = []
-
-    for origin in origin_dates:
-        # Build feature frame up to this origin
-        origin_frame = training_frame[training_frame[DS] <= origin].copy()
-        if series_filter:
-            origin_frame = origin_frame[origin_frame[UNIQUE_ID].isin(series_filter)]
-
-        if origin_frame.empty:
-            continue
-
-        # Predict from this origin
-        forecast_df = predict_global(models, origin_frame, origin)
-
-        # Apply conformal intervals
-        applied = conformal_runtime.apply(forecast_df)
-        if lower_col not in applied.columns:
-            continue
-
-        pending_applied.append(applied)
-
-        # Resolve previously applied predictions whose ds <= current origin
-        still_pending = []
-        for prev_applied in pending_applied[:-1]:
-            resolved_mask = prev_applied[DS] <= origin
-            if not resolved_mask.any():
-                still_pending.append(prev_applied)
-                continue
-
-            updated = prev_applied.copy()
-            resolved_idx = updated.index[resolved_mask & updated[Y].isna()]
-            if not resolved_idx.empty:
-                keys = pd.MultiIndex.from_arrays(
-                    [
-                        updated.loc[resolved_idx, UNIQUE_ID].values,
-                        updated.loc[resolved_idx, DS].values,
-                    ]
-                )
-                y_vals = actuals_lookup.reindex(keys).values
-                updated.loc[resolved_idx, Y] = y_vals
-
-            has_y = updated[Y].notna()
-            has_intervals = updated[lower_col].notna() & updated[upper_col].notna()
-            to_observe = updated[has_y & has_intervals]
-            if not to_observe.empty:
-                with contextlib.suppress(ValueError):
-                    conformal_runtime.observe(to_observe)
-
-            unresolved = updated[~(has_y & has_intervals)]
-            if not unresolved.empty:
-                still_pending.append(unresolved)
-
-        pending_applied = still_pending + [applied]
-
-    return conformal_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -359,26 +268,22 @@ def run_winning(
     review_period: int = REVIEW_PERIOD,
     decision_rounds: int = DECISION_ROUNDS,
     delivery_weeks: int = DELIVERY_WEEKS,
-    warmup_origins: int = WARMUP_ORIGINS,
-    conformal_config: ConformalPolicyConfig = CONFORMAL_CONFIG,
     lgb_params: dict = LGB_PARAMS,
     series_filter: list[str] | None = None,
     results_dir: Path | None = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """Run the VN2 benchmark using the winning approach + Calibre conformal.
+    """Run the VN2 benchmark using the winning approach: cumulative quantile LightGBM.
 
     Pipeline:
       0. Load data & build feature-engineered training frame
-      1. Train global direct multi-horizon LightGBM models
-      2. Warmup conformal runtime on historical walk-forward predictions
-      3. Decision rounds: predict → conformal intervals → cost-aware orders
-      4. Delivery weeks (no orders)
-      5. Summarise costs
+      1. Train global LightGBM model (quantile at critical fractile, cumulative target)
+      2. Decision rounds: predict cumulative quantile → direct ordering
+      3. Delivery weeks (no orders)
+      4. Summarise costs
 
     Returns per-product cost DataFrame.
     """
-    lower_col, upper_col = interval_column_names(conformal_config.coverage)
 
     # ------------------------------------------------------------------
     # Load data
@@ -433,40 +338,16 @@ def run_winning(
     # Phase 1: Train global direct multi-horizon LightGBM
     # ------------------------------------------------------------------
     if verbose:
-        print(f"Training {horizon} global LightGBM models (direct multi-horizon)...")
+        print("Training global LightGBM (cumulative quantile)...")
 
-    # Train on scaled target so model learns patterns not magnitudes
-    feature_cols = _get_feature_cols(training_frame)
     models = train_global_models(training_frame, horizon=horizon, lgb_params=lgb_params)
 
     if verbose:
-        print(f"  Models trained: {len(models)}")
-
-    # ------------------------------------------------------------------
-    # Phase 2: Warmup conformal runtime
-    # ------------------------------------------------------------------
-    if verbose:
-        print(f"Running conformal warmup with {warmup_origins} origins...")
-
-    conformal_runtime = _run_warmup(
-        models=models,
-        training_frame=training_frame,
-        sales=week0_sales,
-        conformal_config=conformal_config,
-        warmup_origins=warmup_origins,
-        horizon=horizon,
-        series_filter=list(initial_states.keys()) if series_filter else None,
-    )
-
-    if verbose:
-        n_calibrated = len(conformal_runtime._policies)
-        print(f"  Calibrated {n_calibrated} conformal policies.")
+        print("  Model trained.")
 
     # ------------------------------------------------------------------
     # Phase 3: Decision rounds
     # ------------------------------------------------------------------
-    pending_forecasts: list[pd.DataFrame] = []
-
     for round_num in range(1, decision_rounds + 1):
         if verbose:
             print(f"\n--- Decision round {round_num} ---")
@@ -485,24 +366,18 @@ def run_winning(
             half_life_weeks=HALF_LIFE_WEEKS,
         )
 
-        # Retrain models on expanded data (online learning)
+        # Retrain model on expanded data (online learning)
         models = train_global_models(
             round_frame,
             horizon=horizon,
             lgb_params=lgb_params,
         )
 
-        # Predict from latest date
+        # Predict cumulative quantile from latest date
         latest_date = round_sales[DS].max()
         origin = pd.Timestamp(latest_date)
 
-        forecast_df = predict_global(models, round_frame, origin)
-
-        # Apply conformal intervals
-        applied_df = conformal_runtime.apply(forecast_df)
-
-        if lower_col in applied_df.columns and upper_col in applied_df.columns:
-            pending_forecasts.append(applied_df.copy())
+        forecast_df = predict_global(models, round_frame, origin, horizon=horizon)
 
         # Get actual demand
         try:
@@ -526,33 +401,17 @@ def run_winning(
 
         actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in initial_states}
 
-        # Compute orders using R,S policy with cost-aligned conformal intervals
-        rs_params = _build_rs_params(
-            simulator,
-            lead_time=lead_time,
-            review_period=review_period,
-        )
-        order_config = OrderPolicyConfig(
-            policy="rs",
-            params=rs_params,
-            coverage=conformal_config.coverage,
-        )
-
-        if lower_col in applied_df.columns and upper_col in applied_df.columns:
-            try:
-                order_result = apply_order_policy(applied_df, order_config)
-                orders: dict[str, float] = {}
-                for _, row in order_result.iterrows():
-                    uid = str(row[UNIQUE_ID])
-                    qty = math.ceil(float(row.get("order_qty", 0.0)))
-                    orders[uid] = max(float(qty), 0.0)
-            except (ValueError, KeyError) as exc:
-                if verbose:
-                    print(f"  Order policy failed: {exc}. Zero orders.")
-                orders = {uid: 0.0 for uid in initial_states}
-        else:
+        # Compute orders by summing adjusted per-horizon quantile forecasts
+        try:
+            orders: dict[str, float] = _compute_orders_quantile(
+                forecast_df,
+                simulator,
+                lead_time=lead_time,
+                review_period=review_period,
+            )
+        except (ValueError, KeyError) as exc:
             if verbose:
-                print("  No interval columns. Zero orders.")
+                print(f"  Order computation failed: {exc}. Zero orders.")
             orders = {uid: 0.0 for uid in initial_states}
 
         if verbose:
@@ -561,39 +420,6 @@ def run_winning(
 
         # Step simulator
         simulator.step(round_num, orders=orders, actual_demand=actual_demand)
-
-        # Feed resolved h=1 forecasts to conformal observe()
-        still_pending: list[pd.DataFrame] = []
-        for prev_forecast in pending_forecasts:
-            h1_mask = (
-                (prev_forecast[H] == 1)
-                & (prev_forecast[FORECAST_ORIGIN] == origin)
-                & prev_forecast[Y].isna()
-            )
-            if not h1_mask.any():
-                still_pending.append(prev_forecast)
-                continue
-
-            updated = prev_forecast.copy()
-            for idx in updated.index[h1_mask]:
-                uid = str(updated.at[idx, UNIQUE_ID])
-                updated.at[idx, Y] = float(actual_demand.get(uid, np.nan))
-
-            h1_valid = (
-                h1_mask
-                & updated[Y].notna()
-                & updated[lower_col].notna()
-                & updated[upper_col].notna()
-            )
-            if h1_valid.any():
-                with contextlib.suppress(ValueError):
-                    conformal_runtime.observe(updated.loc[h1_valid])
-
-            other = ~h1_mask
-            if other.any():
-                still_pending.append(prev_forecast.loc[other])
-
-        pending_forecasts = still_pending
 
     # ------------------------------------------------------------------
     # Phase 4: Delivery weeks
