@@ -13,11 +13,23 @@ MODEL_CONFIGS: list[dict] = [
     {"backend": "statsforecast", "model": "AutoETS"},
     {"backend": "statsforecast", "model": "AutoARIMA"},
     {"backend": "statsforecast", "model": "MFLES", "season_length": 52},
+    {
+        "backend": "mlforecast",
+        "model": "lightgbm.LGBMRegressor",
+        "name": "lgbm",
+        "lags": [1, 2, 3, 4, 13, 26, 52],
+        "n_estimators": 200,
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "verbosity": -1,
+    },
 ]
 
+# Cost-optimal service level: Cu / (Cu + Co) = 1.0 / (1.0 + 0.2) ≈ 0.833
+# Aligns conformal intervals with the asymmetric cost structure (shortage 5× holding).
 CONFORMAL_CONFIG = ConformalPolicyConfig(
     method="aci",
-    coverage=0.9,
+    coverage=0.833,
     gamma=0.05,
     calibration_window=50,
 )
