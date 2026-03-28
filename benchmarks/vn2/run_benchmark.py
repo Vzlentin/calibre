@@ -36,8 +36,18 @@ from benchmarks.vn2.config import (
     LEAD_TIME,
     MODEL_CONFIGS,
     REVIEW_PERIOD,
+    TUNE_BASE_CONFIG,
+    TUNE_MAX_WORKERS,
+    TUNE_N_ORIGINS,
+    TUNE_N_TRIALS,
     WARMUP_ORIGINS,
 )
+from benchmarks.vn2.simulator import (
+    VN2Simulator,
+    extract_new_actuals,
+    load_initial_states,
+)
+from benchmarks.vn2.tuning import seasonal_naive_search_space, tune_all_series
 from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
@@ -53,11 +63,7 @@ from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.order.types import RsPolicyParameters
 from calibre.pipeline.loading import load_period
 from calibre.pipeline.tasks import build_tasks
-from calibre.simulation.vn2 import (
-    VN2Simulator,
-    extract_new_actuals,
-    load_initial_states,
-)
+from calibre.tasks.forecast_task import ForecastTask
 
 
 def _build_rs_params(
@@ -200,6 +206,11 @@ def run_benchmark(
     series_filter: list[str] | None = None,
     results_dir: Path | None = None,
     verbose: bool = True,
+    tune: bool = True,
+    tune_base_config: dict = TUNE_BASE_CONFIG,
+    tune_n_trials: int = TUNE_N_TRIALS,
+    tune_n_origins: int = TUNE_N_ORIGINS,
+    tune_max_workers: int = TUNE_MAX_WORKERS,
 ) -> pd.DataFrame:
     """Run the full VN2 benchmark and return per-product cost summary.
 
@@ -216,6 +227,11 @@ def run_benchmark(
         series_filter: Optional list of unique_ids to restrict the benchmark.
         results_dir: If provided, save per-product CSV here.
         verbose: Print progress and cost summary.
+        tune: If True, run per-series HPO and add the tuned model to the ensemble.
+        tune_base_config: Base model config to tune (default: SeasonalNaive).
+        tune_n_trials: Number of Optuna trials per series.
+        tune_n_origins: Number of walk-forward origins per tuning trial.
+        tune_max_workers: Maximum parallel threads for tuning.
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
@@ -239,14 +255,38 @@ def run_benchmark(
         print(f"Loaded {len(states)} products from initial state.")
 
     # ------------------------------------------------------------------ #
+    # Phase 0: TUNING — per-series HPO on historical data
+    # ------------------------------------------------------------------ #
+    week0_sales = load_period(data_dir, 0)
+    if series_filter is not None:
+        week0_sales = week0_sales[week0_sales[UNIQUE_ID].isin(series_filter)]
+
+    # tuned_configs maps unique_id → best model config; empty dict if tune=False
+    tuned_configs: dict[str, dict] = {}
+    if tune:
+        if verbose:
+            print(
+                f"Tuning {len(states)} series "
+                f"({tune_n_trials} trials × {tune_n_origins} origins, "
+                f"{tune_max_workers} workers)..."
+            )
+        tuned_configs = tune_all_series(
+            sales=week0_sales,
+            horizon=horizon,
+            base_config=tune_base_config,
+            search_space=seasonal_naive_search_space,
+            n_trials=tune_n_trials,
+            n_origins=tune_n_origins,
+            max_workers=tune_max_workers,
+        )
+        if verbose:
+            print(f"Tuning complete. {len(tuned_configs)} series tuned.")
+
+    # ------------------------------------------------------------------ #
     # Phase 1: WARMUP — calibrate conformal runtime
     # ------------------------------------------------------------------ #
     if verbose:
         print(f"Running warmup with {warmup_origins} origins...")
-
-    week0_sales = load_period(data_dir, 0)
-    if series_filter is not None:
-        week0_sales = week0_sales[week0_sales[UNIQUE_ID].isin(series_filter)]
 
     conformal_runtime = _run_warmup(
         sales=week0_sales,
@@ -289,6 +329,23 @@ def run_benchmark(
             horizon=horizon,
             series_filter=list(states.keys()),
         )
+        # Add per-series tuned tasks to the ensemble
+        if tuned_configs:
+            for uid in states:
+                if uid not in tuned_configs:
+                    continue
+                series_data = round_sales[round_sales[UNIQUE_ID] == uid]
+                if series_data.empty:
+                    continue
+                history = series_data[[DS, Y]].sort_values(DS).reset_index(drop=True)
+                tasks.append(
+                    ForecastTask(
+                        unique_id=uid,
+                        history=history,
+                        horizon=horizon,
+                        model_config=tuned_configs[uid],
+                    )
+                )
 
         result = engine.execute(tasks, actuals=round_sales, origins=[origin])
         raw_ledger = result.ledger.to_df()

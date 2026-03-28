@@ -10,7 +10,7 @@ from pathlib import Path
 
 from benchmarks.vn2.run_benchmark import run_benchmark
 from calibre.conformal.runtime import ConformalPolicyConfig
-from calibre.simulation.vn2 import load_initial_states
+from benchmarks.vn2.simulator import load_initial_states
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
 

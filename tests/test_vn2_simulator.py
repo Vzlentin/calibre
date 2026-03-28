@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from calibre.simulation.vn2 import (
+from benchmarks.vn2.simulator import (
     ProductState,
     VN2Simulator,
     extract_new_actuals,

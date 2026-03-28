@@ -28,3 +28,13 @@ LEAD_TIME: int = 2
 REVIEW_PERIOD: int = 1
 DECISION_ROUNDS: int = 6
 DELIVERY_WEEKS: int = 2
+
+# Tuning
+TUNE_BASE_CONFIG: dict = {
+    "backend": "statsforecast",
+    "model": "SeasonalNaive",
+    "name": "tuned_sn",
+}
+TUNE_N_TRIALS: int = 20
+TUNE_N_ORIGINS: int = 5
+TUNE_MAX_WORKERS: int = 4
