@@ -2,6 +2,8 @@
 data/
 .vscode/
 .claude/
+benchmarks/cp/aci/conformal-time-series/
+benchmarks/vn2/results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
