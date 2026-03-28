@@ -12,7 +12,7 @@ from calibre.contracts.forecast_frame import (
     MODEL_NAME,
     REQUIRED_COLUMNS,
 )
-from calibre.engine.ledger import Ledger
+from calibre.engine.ledger import ForecastLedger as Ledger
 
 
 def _make_frame(n: int = 3, origin: str = "2024-01-01") -> pd.DataFrame:
