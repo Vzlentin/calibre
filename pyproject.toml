@@ -31,8 +31,5 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/calibre"]
-
 [tool.ruff]
 line-length = 100
