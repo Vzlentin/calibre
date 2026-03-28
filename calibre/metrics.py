@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from collections.abc import Callable
 
@@ -26,7 +28,7 @@ def _naive_forecasting(actual: np.ndarray, seasonality: int = 1):
     return actual[:-seasonality]
 
 
-def _relative_error(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None):
+def _relative_error(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None):
     """Relative Error"""
     if benchmark is None or isinstance(benchmark, int):
         # If no benchmark prediction provided - use naive forecasting
@@ -39,7 +41,7 @@ def _relative_error(actual: np.ndarray, predicted: np.ndarray, benchmark: np.nda
 
 
 def _bounded_relative_error(
-    actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None
+    actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None
 ):
     """Bounded Relative Error"""
     if benchmark is None or isinstance(benchmark, int):
@@ -225,7 +227,7 @@ def rrse(actual: np.ndarray, predicted: np.ndarray):
     )
 
 
-def mre(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None):
+def mre(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None):
     """Mean Relative Error"""
     return np.mean(_relative_error(actual, predicted, benchmark))
 
@@ -235,27 +237,27 @@ def rae(actual: np.ndarray, predicted: np.ndarray):
     return np.sum(np.abs(actual - predicted)) / (np.sum(np.abs(actual - np.mean(actual))) + EPSILON)
 
 
-def mrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None):
+def mrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None):
     """Mean Relative Absolute Error"""
     return np.mean(np.abs(_relative_error(actual, predicted, benchmark)))
 
 
-def mdrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None):
+def mdrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None):
     """Median Relative Absolute Error"""
     return np.median(np.abs(_relative_error(actual, predicted, benchmark)))
 
 
-def gmrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None):
+def gmrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None):
     """Geometric Mean Relative Absolute Error"""
     return _geometric_mean(np.abs(_relative_error(actual, predicted, benchmark)))
 
 
-def mbrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None):
+def mbrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None):
     """Mean Bounded Relative Absolute Error"""
     return np.mean(_bounded_relative_error(actual, predicted, benchmark))
 
 
-def umbrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray = None):
+def umbrae(actual: np.ndarray, predicted: np.ndarray, benchmark: np.ndarray | None = None):
     """Unscaled Mean Bounded Relative Absolute Error"""
     __mbrae = mbrae(actual, predicted, benchmark)
     return __mbrae / (1 - __mbrae)

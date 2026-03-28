@@ -119,9 +119,11 @@ class AdaptiveConformalInference(OnlineConformalController):
         self._quantile_rule = _validate_quantile_rule(quantile_rule)
         self._target_alpha = float(alpha)
         self._gamma = float(gamma)
-        self._alpha = _clip_alpha(
-            self._target_alpha if initial_alpha is None else float(initial_alpha),
-            self._bounds,
+        self._alpha: float = float(
+            _clip_alpha(
+                self._target_alpha if initial_alpha is None else float(initial_alpha),
+                self._bounds,
+            )
         )
         self._score_fn = score_fn
         self._initial_radius = float(initial_radius)
@@ -168,10 +170,10 @@ class AdaptiveConformalInference(OnlineConformalController):
         )
 
     def update(self, error: int) -> float:
-        self._alpha = _clip_alpha(
+        self._alpha = float(_clip_alpha(
             self._alpha + self._gamma * (self._target_alpha - int(error)),
             self._bounds,
-        )
+        ))
         self._alpha_history.append(float(self._alpha))
         return float(self._alpha)
 
