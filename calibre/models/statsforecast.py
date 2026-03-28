@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import statsforecast.models
 import pandas as pd
+import statsforecast.models
 from statsforecast import StatsForecast
 
 from calibre.tasks.forecast_task import ForecastTask
@@ -17,7 +17,9 @@ class StatsForecastAdapter:
         model_cls = getattr(statsforecast.models, model_name, None)
         if model_cls is None:
             raise ValueError(f"Unknown statsforecast model: {model_name!r}")
-        params = {k: v for k, v in self._config.items() if k not in ("model", "name", "freq", "backend")}
+        params = {
+            k: v for k, v in self._config.items() if k not in ("model", "name", "freq", "backend")
+        }
         model = model_cls(**params)
 
         freq = self._config.get("freq", "W")

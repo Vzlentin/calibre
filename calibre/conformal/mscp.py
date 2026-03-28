@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Callable, Iterable, Literal
+from collections.abc import Callable, Iterable
+from typing import Literal
 
 import numpy as np
 
@@ -131,7 +132,9 @@ class MultiStepSplitConformalInference:
             "current_alpha": self.current_alpha,
             "calibration_window": self._calibration_window,
             "quantile_rule": self._quantile_rule,
-            "score_history": [np.asarray(list(scores), dtype=float) for scores in self._score_history],
+            "score_history": [
+                np.asarray(list(scores), dtype=float) for scores in self._score_history
+            ],
             "radius_history": (
                 np.vstack(self._radius_history)
                 if self._radius_history

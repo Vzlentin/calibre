@@ -1,4 +1,5 @@
 """Functions for creating ForecastTask objects from sales data and model configurations."""
+
 from __future__ import annotations
 
 import pandas as pd

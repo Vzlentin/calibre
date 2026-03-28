@@ -1,4 +1,9 @@
+import logging
+from collections.abc import Callable
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 EPSILON = 1e-10
 
@@ -25,10 +30,7 @@ def _relative_error(actual: np.ndarray, predicted: np.ndarray, benchmark: np.nda
     """Relative Error"""
     if benchmark is None or isinstance(benchmark, int):
         # If no benchmark prediction provided - use naive forecasting
-        if not isinstance(benchmark, int):
-            seasonality = 1
-        else:
-            seasonality = benchmark
+        seasonality = 1 if not isinstance(benchmark, int) else benchmark
         return _error(actual[seasonality:], predicted[seasonality:]) / (
             _error(actual[seasonality:], _naive_forecasting(actual, seasonality)) + EPSILON
         )
@@ -42,10 +44,7 @@ def _bounded_relative_error(
     """Bounded Relative Error"""
     if benchmark is None or isinstance(benchmark, int):
         # If no benchmark prediction provided - use naive forecasting
-        if not isinstance(benchmark, int):
-            seasonality = 1
-        else:
-            seasonality = benchmark
+        seasonality = 1 if not isinstance(benchmark, int) else benchmark
 
         abs_err = np.abs(_error(actual[seasonality:], predicted[seasonality:]))
         abs_err_bench = np.abs(
@@ -279,7 +278,7 @@ def wape(actual: np.ndarray, predicted: np.ndarray):
     return mae(actual, predicted) / np.mean(actual)
 
 
-METRICS = {
+METRICS: dict[str, Callable[..., float]] = {
     "mse": mse,
     "rmse": rmse,
     "nrmse": nrmse,
@@ -321,7 +320,7 @@ def evaluate(actual: np.ndarray, predicted: np.ndarray, metrics=("mae", "mse", "
             results[name] = METRICS[name](actual, predicted)
         except Exception as err:
             results[name] = np.nan
-            print("Unable to compute metric {0}: {1}".format(name, err))
+            logger.warning("Unable to compute metric %s: %s", name, err)
     return results
 
 

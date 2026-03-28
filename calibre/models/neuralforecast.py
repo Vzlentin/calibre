@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import pandas as pd
 import neuralforecast.models
+import pandas as pd
 from neuralforecast import NeuralForecast
 
 from calibre.tasks.forecast_task import ForecastTask
@@ -12,10 +12,9 @@ _RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", 
 class NeuralForecastAdapter:
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
-        self._nf: object | None = None
+        self._nf: NeuralForecast | None = None
 
     def fit(self, task: ForecastTask) -> None:
-
 
         model_name = self._config["model"]
         model_cls = getattr(neuralforecast.models, model_name, None)

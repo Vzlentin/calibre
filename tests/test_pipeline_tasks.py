@@ -1,4 +1,5 @@
 """Tests for calibre.pipeline.tasks."""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -173,5 +174,5 @@ class TestBuildTasks:
     def test_model_config_dict_not_mutated(self, sample_sales, model_configs):
         """Original model_config dicts should not be mutated."""
         original_configs = [cfg.copy() for cfg in model_configs]
-        tasks = build_tasks(sample_sales, model_configs, horizon=5)
+        _ = build_tasks(sample_sales, model_configs, horizon=5)
         assert model_configs == original_configs

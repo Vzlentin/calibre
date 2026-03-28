@@ -5,13 +5,13 @@ import pandas as pd
 import pytest
 
 from calibre.contracts.forecast_frame import (
-    UNIQUE_ID,
     DS,
-    Y,
-    Y_HAT,
-    H,
     FORECAST_ORIGIN,
     MODEL_NAME,
+    UNIQUE_ID,
+    Y_HAT,
+    H,
+    Y,
     interval_column_names,
 )
 from calibre.engine.scoring import (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, Literal
+from collections.abc import Callable, Iterable
+from typing import Literal
 
 import numpy as np
 
@@ -79,10 +80,10 @@ def _finite_sample_radius(
       downstream arithmetic), but note that coverage guarantees no longer
       hold for very small calibration sets with small ``alpha``.
     """
-    scores = np.asarray(list(scores), dtype=float)
-    if scores.size == 0:
+    scores_arr = np.asarray(list(scores), dtype=float)
+    if scores_arr.size == 0:
         return float(default_radius)
-    ordered = np.sort(scores)
+    ordered = np.sort(scores_arr)
     quantile_rule = _validate_quantile_rule(quantile_rule)
     alpha = float(np.asarray(alpha, dtype=float))
 
@@ -222,19 +223,23 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         self._horizon = int(horizon)
         self._bounds = _validate_bounds(alpha_bounds)
         self._quantile_rule = _validate_quantile_rule(quantile_rule)
-        self._target_alpha = _clip_alpha(_as_1d_array(alpha, "alpha", self._horizon), self._bounds)
-        self._gamma = _as_1d_array(gamma, "gamma", self._horizon)
+        self._target_alpha: np.ndarray = _clip_alpha(
+            _as_1d_array(alpha, "alpha", self._horizon), self._bounds
+        )  # type: ignore[assignment]
+        self._gamma: np.ndarray = _as_1d_array(gamma, "gamma", self._horizon)
         if np.any(self._gamma < 0):
             raise ValueError("gamma must be non-negative")
-        self._alpha = _clip_alpha(
-            self._target_alpha if initial_alpha is None else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
+        self._alpha: np.ndarray = _clip_alpha(
+            self._target_alpha
+            if initial_alpha is None
+            else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
             self._bounds,
-        )
+        )  # type: ignore[assignment]
         self._score_fn = score_fn
         self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
         self._score_history = self._normalize_score_histories(initial_scores)
         self._error_history: list[np.ndarray] = []
-        self._alpha_history = [self._alpha.copy()]
+        self._alpha_history: list[np.ndarray] = [self._alpha.copy()]  # type: ignore[union-attr]
         self._radius_history: list[np.ndarray] = []
         self._pending_predictions: dict[int, MultiStepIntervalPrediction] = {}
         self._issued_count = 0
@@ -287,7 +292,9 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
 
     def update(self, error) -> np.ndarray:
         error = _as_1d_array(error, "error", self._horizon)
-        self._alpha = _clip_alpha(self._alpha + self._gamma * (self._target_alpha - error), self._bounds)
+        self._alpha = _clip_alpha(  # type: ignore[assignment]
+            self._alpha + self._gamma * (self._target_alpha - error), self._bounds
+        )
         self._alpha_history.append(self._alpha.copy())
         return self._alpha.copy()
 
@@ -308,7 +315,11 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
 
             point_forecast = prediction.center[horizon_idx - 1]
             score = _as_scalar_score(self._score_fn(y_true, point_forecast))
-            error = int(not (prediction.lower[horizon_idx - 1] <= y_true <= prediction.upper[horizon_idx - 1]))
+            error = int(
+                not (
+                    prediction.lower[horizon_idx - 1] <= y_true <= prediction.upper[horizon_idx - 1]
+                )
+            )
 
             self._score_history[horizon_idx - 1].append(score)
             error_vector[horizon_idx - 1] = error
@@ -334,7 +345,9 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
 
     def get_diagnostics(self) -> dict:
         error_history = (
-            np.vstack(self._error_history) if self._error_history else np.empty((0, self._horizon), dtype=float)
+            np.vstack(self._error_history)
+            if self._error_history
+            else np.empty((0, self._horizon), dtype=float)
         )
         return {
             "target_alpha": self._target_alpha.copy(),
@@ -345,6 +358,8 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
             "alpha_history": np.vstack(self._alpha_history),
             "error_history": error_history,
             "score_history": [np.asarray(scores, dtype=float) for scores in self._score_history],
-            "radius_history": np.vstack(self._radius_history) if self._radius_history else np.empty((0, self._horizon)),
+            "radius_history": np.vstack(self._radius_history)
+            if self._radius_history
+            else np.empty((0, self._horizon)),
             "pending_predictions": len(self._pending_predictions),
         }

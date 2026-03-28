@@ -1,24 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
+import fugue.api as fa
 import numpy as np
 import pandas as pd
-import fugue.api as fa
 
+from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
-    H,
     MODEL_NAME,
     NONCONFORMITY_SCORE,
     REQUIRED_COLUMNS,
     UNIQUE_ID,
-    Y,
     Y_HAT,
+    H,
+    Y,
 )
-from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.engine.ledger import ForecastLedger, OrderLedger
 from calibre.engine.scoring import compute_row_errors, resolve_actuals
 from calibre.models.registry import resolve_adapter
@@ -58,9 +59,7 @@ class BackendEngine:
         ledger = ForecastLedger()
         order_ledger = OrderLedger() if self.order_config is not None else None
         conformal_runtime = (
-            ConformalRuntime(self.conformal_config)
-            if self.conformal_config is not None
-            else None
+            ConformalRuntime(self.conformal_config) if self.conformal_config is not None else None
         )
 
         tasks_by_uid: dict[str, list[ForecastTask]] = {}
@@ -106,7 +105,9 @@ class BackendEngine:
             newly_resolved = conformal_runtime.observe(newly_resolved)
             if NONCONFORMITY_SCORE not in updated.columns:
                 updated[NONCONFORMITY_SCORE] = np.nan
-            updated.loc[newly_resolved.index, NONCONFORMITY_SCORE] = newly_resolved[NONCONFORMITY_SCORE]
+            updated.loc[newly_resolved.index, NONCONFORMITY_SCORE] = newly_resolved[
+                NONCONFORMITY_SCORE
+            ]
 
         scored = compute_row_errors(newly_resolved)
         for col in ("error", "abs_error", "pct_error"):

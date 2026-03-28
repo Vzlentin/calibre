@@ -1,9 +1,11 @@
 """End-to-end pipeline runner for backtesting and forward forecasting."""
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
 
@@ -39,7 +41,7 @@ def _derive_origins(all_dates: list, n: int, horizon: int) -> list[pd.Timestamp]
             f"Not enough dates to derive {n} origins with horizon {horizon}: "
             f"need at least {n + horizon} dates, got {len(all_dates)}"
         )
-    return [pd.Timestamp(d) for d in all_dates[-(n + horizon): -horizon]]
+    return [pd.Timestamp(d) for d in all_dates[-(n + horizon) : -horizon]]
 
 
 def run_backtest(
@@ -89,7 +91,9 @@ def run_backtest(
     interval_bounds = conformal_config.interval_columns if conformal_config is not None else None
     scores = compute_metrics(ledger_df, metrics, interval_bounds=interval_bounds)
 
-    return PipelineResult(ledger=ledger, scores=scores, sales=sales, order_ledger=result.order_ledger)
+    return PipelineResult(
+        ledger=ledger, scores=scores, sales=sales, order_ledger=result.order_ledger
+    )
 
 
 def run_forecast(

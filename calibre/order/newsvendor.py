@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.contracts.forecast_frame import (
-    H,
     UNIQUE_ID,
+    H,
     validate_forecast_frame,
 )
 from calibre.order._helpers import (

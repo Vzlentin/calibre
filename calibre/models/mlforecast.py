@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import importlib
+
 import pandas as pd
 from mlforecast import MLForecast
 
 from calibre.tasks.forecast_task import ForecastTask
 
-_RESERVED_KEYS = frozenset({"model", "name", "freq", "lags", "lag_transforms", "target_transforms", "backend"})
+_RESERVED_KEYS = frozenset(
+    {"model", "name", "freq", "lags", "lag_transforms", "target_transforms", "backend"}
+)
 
 
 def _resolve_model_cls(dotted_path: str) -> type:
     """Resolve a dotted import path like 'lightgbm.LGBMRegressor' to its class."""
     try:
         module_path, class_name = dotted_path.rsplit(".", 1)
-    except ValueError:
+    except ValueError as err:
         raise ValueError(
-            f"model must be a dotted import path (e.g. 'lightgbm.LGBMRegressor'), got: {dotted_path!r}"
-        )
+            f"model must be a dotted import path "
+            f"(e.g. 'lightgbm.LGBMRegressor'), got: {dotted_path!r}"
+        ) from err
     try:
         mod = importlib.import_module(module_path)
     except ImportError as e:

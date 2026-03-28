@@ -20,7 +20,12 @@ def sn_task(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4, "freq": "W"},
+        model_config={
+            "backend": "statsforecast",
+            "model": "SeasonalNaive",
+            "season_length": 4,
+            "freq": "W",
+        },
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
 
@@ -61,7 +66,12 @@ def test_auto_ets_fit_predict(repeating_history):
         unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
-        model_config={"backend": "statsforecast", "model": "AutoETS", "season_length": 4, "freq": "W"},
+        model_config={
+            "backend": "statsforecast",
+            "model": "AutoETS",
+            "season_length": 4,
+            "freq": "W",
+        },
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
     adapter = StatsForecastAdapter(task.model_config)

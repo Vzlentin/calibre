@@ -7,11 +7,11 @@ import pytest
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
-    H,
     MODEL_NAME,
     UNIQUE_ID,
-    Y,
     Y_HAT,
+    H,
+    Y,
     interval_column_names,
 )
 from calibre.order.newsvendor import apply_newsvendor_policy

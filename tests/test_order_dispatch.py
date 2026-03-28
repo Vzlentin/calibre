@@ -7,11 +7,11 @@ import pytest
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
-    H,
     MODEL_NAME,
     UNIQUE_ID,
-    Y,
     Y_HAT,
+    H,
+    Y,
     interval_column_names,
 )
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
@@ -26,7 +26,7 @@ def _forecast_frame(
     *,
     unique_id: str,
     upper_bounds: tuple[float, ...],
-    forecast_origin: pd.Timestamp = pd.Timestamp("2024-02-04"),
+    forecast_origin: pd.Timestamp = pd.Timestamp("2024-02-04"),  # noqa: B008
     model_name: str = "SeasonalNaive",
     coverage: float = 0.9,
 ) -> pd.DataFrame:
@@ -107,7 +107,9 @@ class TestDispatchToRsPolicy:
     def test_dispatch_rs_policy_respects_custom_coverage(self) -> None:
         """RS dispatch should pass custom coverage level."""
         lower_col, upper_col = interval_column_names(0.95)
-        frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0, 40.0), coverage=0.95)
+        frame = _forecast_frame(
+            unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0, 40.0), coverage=0.95
+        )
         params = [
             RsPolicyParameters(
                 unique_id="SKU_001",

@@ -7,11 +7,11 @@ import pytest
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
-    H,
     MODEL_NAME,
     UNIQUE_ID,
-    Y,
     Y_HAT,
+    H,
+    Y,
     interval_column_names,
 )
 from calibre.order import RsPolicyParameters, apply_rs_policy
@@ -23,7 +23,7 @@ def _forecast_frame(
     *,
     unique_id: str,
     upper_bounds: tuple[float, ...],
-    forecast_origin: pd.Timestamp = pd.Timestamp("2024-02-04"),
+    forecast_origin: pd.Timestamp = pd.Timestamp("2024-02-04"),  # noqa: B008
     model_name: str = "SeasonalNaive",
     coverage: float = 0.9,
 ) -> pd.DataFrame:

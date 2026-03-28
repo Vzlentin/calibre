@@ -1,11 +1,11 @@
 """Tests for calibre.pipeline.loading."""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from calibre.pipeline.loading import load_master, load_period, melt_wide_instock, melt_wide_sales
 
@@ -54,7 +54,16 @@ class TestMeltWideSales:
 class TestLoadMaster:
     def test_columns(self, master_path: Path) -> None:
         df = load_master(master_path)
-        expected_original = ["Store", "Product", "ProductGroup", "Division", "Department", "DepartmentGroup", "StoreFormat", "Format"]
+        expected_original = [
+            "Store",
+            "Product",
+            "ProductGroup",
+            "Division",
+            "Department",
+            "DepartmentGroup",
+            "StoreFormat",
+            "Format",
+        ]
         for col in expected_original:
             assert col in df.columns
         assert "unique_id" in df.columns
@@ -100,7 +109,9 @@ class TestMeltWideInstock:
 
 
 class TestLoadPeriod:
-    def test_period0_matches_melt_wide_sales(self, data_dir: Path, period0_sales_path: Path) -> None:
+    def test_period0_matches_melt_wide_sales(
+        self, data_dir: Path, period0_sales_path: Path
+    ) -> None:
         from_load_period = load_period(data_dir, 0)
         from_melt = melt_wide_sales(period0_sales_path)
         pd.testing.assert_frame_equal(
