@@ -22,9 +22,16 @@ from calibre.contracts.forecast_frame import (
 )
 from calibre.engine.ledger import ForecastLedger, OrderLedger
 from calibre.engine.scoring import compute_row_errors, resolve_actuals
-from calibre.models.registry import resolve_adapter
+from calibre.models.registry import get_adapter_cls, resolve_adapter
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.tasks.forecast_task import ForecastTask
+
+
+def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) -> pd.DataFrame:
+    preds[FORECAST_ORIGIN] = origin
+    preds[MODEL_NAME] = model_name
+    preds[Y] = np.nan
+    return preds[REQUIRED_COLUMNS]
 
 
 @dataclass
@@ -62,19 +69,35 @@ class BackendEngine:
             ConformalRuntime(self.conformal_config) if self.conformal_config is not None else None
         )
 
-        tasks_by_uid: dict[str, list[ForecastTask]] = {}
+        # Split tasks once: parallel (per-series Fugue) vs direct (global)
+        parallel_tasks: list[ForecastTask] = []
+        direct_tasks: list[ForecastTask] = []
         for task in tasks:
+            if get_adapter_cls(task.model_config).PARALLEL_BY_UID:
+                parallel_tasks.append(task)
+            else:
+                direct_tasks.append(task)
+
+        # Group parallel tasks by uid for efficient Fugue dispatch
+        tasks_by_uid: dict[str, list[ForecastTask]] = {}
+        for task in parallel_tasks:
             tasks_by_uid.setdefault(task.unique_id, []).append(task)
 
         for origin in origins:
             if conformal_runtime is not None:
                 self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
 
-            origin_preds = self._run_origin(tasks_by_uid, origin)
+            local_preds = self._run_parallel(tasks_by_uid, origin)
+            global_preds = self._run_direct(direct_tasks, origin)
+
+            origin_preds = pd.concat(
+                [df for df in [local_preds, global_preds] if not df.empty],
+                ignore_index=True,
+            )
+
             if conformal_runtime is not None and not origin_preds.empty:
                 origin_preds = conformal_runtime.apply(origin_preds)
 
-            # Apply order policy AFTER conformal (needs interval columns)
             if self.order_config is not None and not origin_preds.empty:
                 order_result = apply_order_policy(origin_preds, self.order_config)
                 order_ledger.append(order_result)  # type: ignore[union-attr]
@@ -117,11 +140,12 @@ class BackendEngine:
 
         ledger.update_resolved(updated)
 
-    def _run_origin(
+    def _run_parallel(
         self,
         tasks_by_uid: dict[str, list[ForecastTask]],
         origin: pd.Timestamp,
     ) -> pd.DataFrame:
+        """Run per-series adapters in parallel via Fugue, one partition per uid."""
         uids = list(tasks_by_uid.keys())
         if not uids:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -134,12 +158,11 @@ class BackendEngine:
             results: list[pd.DataFrame] = []
 
             for task in tasks_by_uid[uid]:
-                history = task.history[task.history["ds"] < origin]
+                history = task.history[task.history[DS] < origin]
                 if history.empty:
                     continue
 
                 origin_task = ForecastTask(
-                    unique_id=task.unique_id,
                     history=history,
                     horizon=task.horizon,
                     model_config={**task.model_config, "freq": freq},
@@ -151,12 +174,7 @@ class BackendEngine:
                 adapter.fit(origin_task)
                 preds = adapter.predict(origin_task)
 
-                preds[UNIQUE_ID] = uid
-                preds[FORECAST_ORIGIN] = origin
-                preds[MODEL_NAME] = origin_task.model_name
-                preds[Y] = np.nan
-
-                results.append(preds[[UNIQUE_ID, DS, Y, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]])
+                results.append(_finalize_preds(preds, origin, origin_task.model_name))
 
             if not results:
                 return pd.DataFrame(columns=REQUIRED_COLUMNS)
@@ -178,3 +196,38 @@ class BackendEngine:
         )
 
         return pd.DataFrame(result)
+
+    def _run_direct(
+        self,
+        tasks: list[ForecastTask],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Run global (multi-series) adapters directly, without Fugue partitioning."""
+        if not tasks:
+            return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+        all_preds: list[pd.DataFrame] = []
+
+        for task in tasks:
+            history = task.history[task.history[DS] < origin]
+            if history.empty:
+                continue
+
+            origin_task = ForecastTask(
+                history=history,
+                horizon=task.horizon,
+                model_config={**task.model_config, "freq": self.freq},
+                forecast_origin=origin,
+                future_x=task.future_x,
+            )
+
+            adapter = resolve_adapter(origin_task.model_config)
+            adapter.fit(origin_task)
+            preds = adapter.predict(origin_task)
+
+            all_preds.append(_finalize_preds(preds, origin, origin_task.model_name))
+
+        if not all_preds:
+            return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+        return pd.concat(all_preds, ignore_index=True)

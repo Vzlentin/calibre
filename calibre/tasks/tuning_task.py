@@ -7,7 +7,7 @@ import optuna
 import pandas as pd
 
 from calibre.conformal import ConformalPolicyConfig
-from calibre.contracts.forecast_frame import Y_HAT, Y
+from calibre.contracts.forecast_frame import UNIQUE_ID, Y_HAT, Y
 from calibre.tasks.forecast_task import ForecastTask
 
 
@@ -66,9 +66,11 @@ class TuningTask:
 
         def _objective(trial: optuna.Trial) -> float:
             candidate_config = {**base_cfg, **search_space(trial)}
+            h = history.copy()
+            if UNIQUE_ID not in h.columns:
+                h.insert(0, UNIQUE_ID, unique_id)
             task = ForecastTask(
-                unique_id=unique_id,
-                history=history,
+                history=h,
                 horizon=horizon,
                 model_config=candidate_config,
             )

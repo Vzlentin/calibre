@@ -11,13 +11,12 @@ def repeating_history():
     """24 periods of repeating [10, 20, 30, 40] pattern."""
     dates = pd.date_range("2024-01-07", periods=24, freq="W")
     pattern = [10.0, 20.0, 30.0, 40.0] * 6
-    return pd.DataFrame({"ds": dates, "y": pattern})
+    return pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
 
 
 @pytest.fixture
 def sn_task(repeating_history):
     return ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={
@@ -35,7 +34,7 @@ def test_fit_predict_returns_correct_columns(sn_task):
     adapter.fit(sn_task)
     result = adapter.predict(sn_task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
 
@@ -63,7 +62,6 @@ def test_y_hat_dtype_is_float64(sn_task):
 
 def test_auto_ets_fit_predict(repeating_history):
     task = ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={
@@ -78,6 +76,6 @@ def test_auto_ets_fit_predict(repeating_history):
     adapter.fit(task)
     result = adapter.predict(task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
