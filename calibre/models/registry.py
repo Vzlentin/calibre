@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from typing import Literal, get_args
+
 from calibre.models.base import ModelAdapter
 
 _REGISTRY: dict[str, type[ModelAdapter]] = {}
+
+ScopeType = Literal["local", "global"]
+VALID_SCOPES: frozenset[ScopeType] = frozenset(get_args(ScopeType))
+DEFAULT_SCOPE: ScopeType = "local"
 
 
 def _ensure_registry() -> None:
     if _REGISTRY:
         return
     from calibre.models.mlforecast import MLForecastAdapter
-    from calibre.models.mlforecast_global import MLForecastGlobalAdapter
     from calibre.models.neuralforecast import NeuralForecastAdapter
     from calibre.models.statsforecast import StatsForecastAdapter
 
@@ -18,7 +23,6 @@ def _ensure_registry() -> None:
             "statsforecast": StatsForecastAdapter,
             "neuralforecast": NeuralForecastAdapter,
             "mlforecast": MLForecastAdapter,
-            "mlforecast_global": MLForecastGlobalAdapter,
         }
     )
 
@@ -35,6 +39,18 @@ def get_adapter_cls(model_config: dict) -> type[ModelAdapter]:
     if backend not in _REGISTRY:
         raise ValueError(f"Unknown backend: {backend!r}. Available: {list(_REGISTRY.keys())}")
     return _REGISTRY[backend]
+
+
+def get_scope(model_config: dict) -> ScopeType:
+    """Return the dispatch scope for a model config.
+
+    'local' fits one model per unique_id (Fugue-partitioned).
+    'global' fits one model per config across all unique_ids.
+    """
+    scope = model_config.get("scope", DEFAULT_SCOPE)
+    if scope not in VALID_SCOPES:
+        raise ValueError(f"Unknown scope: {scope!r}. Valid scopes: {sorted(VALID_SCOPES)}")
+    return scope
 
 
 def resolve_adapter(model_config: dict) -> ModelAdapter:

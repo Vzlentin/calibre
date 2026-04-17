@@ -33,7 +33,20 @@ def local_configs():
 def global_configs():
     """One global model config."""
     return [
-        {"backend": "mlforecast_global", "model": "lightgbm.LGBMRegressor"},
+        {"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "scope": "global"},
+    ]
+
+
+@pytest.fixture
+def statsforecast_global_config():
+    """statsforecast config with scope='global' (joint dispatch, no Fugue partitioning)."""
+    return [
+        {
+            "backend": "statsforecast",
+            "model": "SeasonalNaive",
+            "season_length": 4,
+            "scope": "global",
+        },
     ]
 
 
@@ -161,3 +174,15 @@ class TestBuildTasksGlobal:
         tasks = build_tasks(sample_sales, local_configs + global_configs, horizon=4)
         # 2 local configs × 3 series = 6 local tasks + 1 global task = 7
         assert len(tasks) == 7
+
+    def test_global_scope_works_for_non_mlforecast_backend(
+        self, sample_sales, statsforecast_global_config
+    ):
+        """scope='global' on statsforecast emits one task containing all series."""
+        tasks = build_tasks(sample_sales, statsforecast_global_config, horizon=4)
+        assert len(tasks) == 1
+        assert set(tasks[0].history["unique_id"].unique()) == {
+            "series_a",
+            "series_b",
+            "series_c",
+        }

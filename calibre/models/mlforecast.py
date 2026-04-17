@@ -10,7 +10,7 @@ from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
 _RESERVED_KEYS = frozenset(
-    {"model", "name", "freq", "lags", "lag_transforms", "target_transforms", "backend"}
+    {"model", "name", "freq", "lags", "lag_transforms", "target_transforms", "backend", "scope"}
 )
 
 
@@ -34,8 +34,6 @@ def _resolve_model_cls(dotted_path: str) -> type:
 
 
 class MLForecastAdapter(ModelAdapter):
-    PARALLEL_BY_UID = True
-
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._mlf: MLForecast | None = None

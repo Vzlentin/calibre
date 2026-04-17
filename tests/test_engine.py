@@ -274,8 +274,8 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
     assert "order_qty" in order_df.columns
 
 
-def test_global_adapter_produces_forecasts_for_all_series():
-    """mlforecast_global adapter should produce forecasts for all series in history."""
+def test_global_scope_produces_forecasts_for_all_series():
+    """scope='global' on mlforecast should produce forecasts for all series in history."""
     dates = pd.date_range("2024-01-07", periods=20, freq="W")
     pattern_a = [10.0, 20.0, 30.0, 40.0] * 5
     pattern_b = [5.0, 15.0, 25.0, 35.0] * 5
@@ -291,7 +291,8 @@ def test_global_adapter_produces_forecasts_for_all_series():
         history=all_series,
         horizon=4,
         model_config={
-            "backend": "mlforecast_global",
+            "backend": "mlforecast",
+            "scope": "global",
             "model": "lightgbm.LGBMRegressor",
             "lags": [1, 2, 3, 4],
             "verbosity": -1,
@@ -330,7 +331,8 @@ def test_mixed_local_and_global_tasks():
         history=all_series,
         horizon=4,
         model_config={
-            "backend": "mlforecast_global",
+            "backend": "mlforecast",
+            "scope": "global",
             "model": "lightgbm.LGBMRegressor",
             "name": "global_lgbm",
             "lags": [1, 2, 3, 4],

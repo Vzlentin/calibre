@@ -8,10 +8,10 @@ from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
+_RESERVED_KEYS = frozenset({"model", "name", "freq", "backend", "scope"})
+
 
 class StatsForecastAdapter(ModelAdapter):
-    PARALLEL_BY_UID = True
-
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._sf: StatsForecast | None = None
@@ -21,9 +21,7 @@ class StatsForecastAdapter(ModelAdapter):
         model_cls = getattr(statsforecast.models, model_name, None)
         if model_cls is None:
             raise ValueError(f"Unknown statsforecast model: {model_name!r}")
-        params = {
-            k: v for k, v in self._config.items() if k not in ("model", "name", "freq", "backend")
-        }
+        params = {k: v for k, v in self._config.items() if k not in _RESERVED_KEYS}
         model = model_cls(**params)
 
         freq = self._config.get("freq", "W")

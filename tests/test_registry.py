@@ -1,6 +1,6 @@
 import pytest
 
-from calibre.models.registry import get_adapter_cls, resolve_adapter
+from calibre.models.registry import get_scope, resolve_adapter
 
 
 def test_resolve_statsforecast_backend():
@@ -26,9 +26,11 @@ def test_resolve_mlforecast_backend():
     assert hasattr(adapter, "predict")
 
 
-def test_resolve_mlforecast_global_backend():
-    adapter = resolve_adapter({"backend": "mlforecast_global", "model": "lightgbm.LGBMRegressor"})
-    assert type(adapter).__name__ == "MLForecastGlobalAdapter"
+def test_resolve_mlforecast_global_scope():
+    adapter = resolve_adapter(
+        {"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "scope": "global"}
+    )
+    assert type(adapter).__name__ == "MLForecastAdapter"
     assert hasattr(adapter, "fit")
     assert hasattr(adapter, "predict")
 
@@ -43,12 +45,14 @@ def test_resolve_missing_backend_raises():
         resolve_adapter({"model": "SeasonalNaive"})
 
 
-def test_local_adapters_are_parallel_by_uid():
-    for backend in ("statsforecast", "mlforecast", "neuralforecast"):
-        cls = get_adapter_cls({"backend": backend, "model": "X"})
-        assert cls.PARALLEL_BY_UID is True, f"{backend} should have PARALLEL_BY_UID=True"
+def test_get_scope_defaults_to_local():
+    assert get_scope({"backend": "mlforecast", "model": "X"}) == "local"
 
 
-def test_global_adapter_is_not_parallel_by_uid():
-    cls = get_adapter_cls({"backend": "mlforecast_global", "model": "lightgbm.LGBMRegressor"})
-    assert cls.PARALLEL_BY_UID is False
+def test_get_scope_accepts_global():
+    assert get_scope({"backend": "mlforecast", "model": "X", "scope": "global"}) == "global"
+
+
+def test_get_scope_rejects_unknown_value():
+    with pytest.raises(ValueError, match="Unknown scope"):
+        get_scope({"backend": "mlforecast", "model": "X", "scope": "galactic"})
