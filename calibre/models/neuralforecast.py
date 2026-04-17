@@ -8,12 +8,10 @@ from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
-_RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", "backend"})
+_RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", "backend", "scope"})
 
 
 class NeuralForecastAdapter(ModelAdapter):
-    PARALLEL_BY_UID = True
-
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._nf: NeuralForecast | None = None

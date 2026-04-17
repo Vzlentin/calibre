@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
-from calibre.models.registry import get_adapter_cls
+from calibre.models.registry import get_adapter_cls, get_scope
 from calibre.tasks.forecast_task import ForecastTask
 
 
@@ -17,9 +17,9 @@ def build_tasks(
 ) -> list[ForecastTask]:
     """Create ForecastTask objects from sales data and model configs.
 
-    For per-series adapters (``PARALLEL_BY_UID=True``), emits one task per
-    (unique_id, config) pair. For global adapters (``PARALLEL_BY_UID=False``),
-    emits one task per config with all series in a single history DataFrame.
+    For ``scope="local"`` (default), emits one task per (unique_id, config)
+    pair. For ``scope="global"``, emits one task per config with all series
+    in a single history DataFrame.
 
     Args:
         sales: Long-format DataFrame with [unique_id, ds, y]
@@ -40,9 +40,9 @@ def build_tasks(
 
     tasks: list[ForecastTask] = []
     for model_config in model_configs:
-        adapter_cls = get_adapter_cls(model_config)
+        get_adapter_cls(model_config)  # validate backend early
 
-        if adapter_cls.PARALLEL_BY_UID:
+        if get_scope(model_config) == "local":
             for uid in data[UNIQUE_ID].unique():
                 series_data = data[data[UNIQUE_ID] == uid].sort_values(DS).reset_index(drop=True)
                 tasks.append(

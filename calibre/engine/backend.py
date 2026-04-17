@@ -22,7 +22,7 @@ from calibre.contracts.forecast_frame import (
 )
 from calibre.engine.ledger import ForecastLedger, OrderLedger
 from calibre.engine.scoring import compute_row_errors, resolve_actuals
-from calibre.models.registry import get_adapter_cls, resolve_adapter
+from calibre.models.registry import get_scope, resolve_adapter
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.tasks.forecast_task import ForecastTask
 
@@ -69,11 +69,11 @@ class BackendEngine:
             ConformalRuntime(self.conformal_config) if self.conformal_config is not None else None
         )
 
-        # Split tasks once: parallel (per-series Fugue) vs direct (global)
+        # Split tasks once: local (per-series Fugue) vs global (joint direct)
         parallel_tasks: list[ForecastTask] = []
         direct_tasks: list[ForecastTask] = []
         for task in tasks:
-            if get_adapter_cls(task.model_config).PARALLEL_BY_UID:
+            if get_scope(task.model_config) == "local":
                 parallel_tasks.append(task)
             else:
                 direct_tasks.append(task)

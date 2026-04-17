@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import ClassVar
 
 import pandas as pd
 
@@ -19,8 +18,6 @@ def _build_predict_frame(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 class ModelAdapter(ABC):
-    PARALLEL_BY_UID: ClassVar[bool] = True
-
     @abstractmethod
     def __init__(self, model_config: dict) -> None: ...
 
