@@ -34,8 +34,7 @@ def single_series_setup(dates, repeating_pattern):
     )
 
     task = ForecastTask(
-        unique_id="SKU_001",
-        history=pd.DataFrame({"ds": dates, "y": repeating_pattern}),
+        history=pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": repeating_pattern}),
         horizon=4,
         model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
     )
@@ -147,8 +146,7 @@ def test_conformal_updates_before_next_origin():
     pattern[7] = 41.0
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
     task = ForecastTask(
-        unique_id="SKU_001",
-        history=pd.DataFrame({"ds": dates, "y": pattern}),
+        history=pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern}),
         horizon=2,
         model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
     )
@@ -185,14 +183,12 @@ def test_multi_series():
 
     tasks = [
         ForecastTask(
-            unique_id="A",
-            history=pd.DataFrame({"ds": dates, "y": pattern_a}),
+            history=pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern_a}),
             horizon=4,
             model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
         ),
         ForecastTask(
-            unique_id="B",
-            history=pd.DataFrame({"ds": dates, "y": pattern_b}),
+            history=pd.DataFrame({"unique_id": "B", "ds": dates, "y": pattern_b}),
             horizon=4,
             model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
         ),
@@ -276,3 +272,79 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
     order_df = result.order_ledger.to_df()
     assert not order_df.empty
     assert "order_qty" in order_df.columns
+
+
+def test_global_adapter_produces_forecasts_for_all_series():
+    """mlforecast_global adapter should produce forecasts for all series in history."""
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern_a = [10.0, 20.0, 30.0, 40.0] * 5
+    pattern_b = [5.0, 15.0, 25.0, 35.0] * 5
+    all_series = pd.concat(
+        [
+            pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern_a}),
+            pd.DataFrame({"unique_id": "B", "ds": dates, "y": pattern_b}),
+        ],
+        ignore_index=True,
+    )
+
+    global_task = ForecastTask(
+        history=all_series,
+        horizon=4,
+        model_config={
+            "backend": "mlforecast_global",
+            "model": "lightgbm.LGBMRegressor",
+            "lags": [1, 2, 3, 4],
+            "verbosity": -1,
+            "n_estimators": 10,
+        },
+    )
+
+    engine = BackendEngine(freq="W")
+    result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
+
+    df = result.ledger.to_df()
+    assert not df.empty
+    assert set(df[UNIQUE_ID].unique()) == {"A", "B"}
+    assert all(col in df.columns for col in [UNIQUE_ID, DS, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME])
+
+
+def test_mixed_local_and_global_tasks():
+    """Local and global tasks should both appear in the ledger."""
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern_a = [10.0, 20.0, 30.0, 40.0] * 5
+    pattern_b = [5.0, 15.0, 25.0, 35.0] * 5
+    all_series = pd.concat(
+        [
+            pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern_a}),
+            pd.DataFrame({"unique_id": "B", "ds": dates, "y": pattern_b}),
+        ],
+        ignore_index=True,
+    )
+
+    local_task = ForecastTask(
+        history=pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern_a}),
+        horizon=4,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    global_task = ForecastTask(
+        history=all_series,
+        horizon=4,
+        model_config={
+            "backend": "mlforecast_global",
+            "model": "lightgbm.LGBMRegressor",
+            "name": "global_lgbm",
+            "lags": [1, 2, 3, 4],
+            "verbosity": -1,
+            "n_estimators": 10,
+        },
+    )
+
+    engine = BackendEngine(freq="W")
+    result = engine.execute(
+        tasks=[local_task, global_task], actuals=all_series, origins=[dates[11]]
+    )
+
+    df = result.ledger.to_df()
+    model_names = set(df[MODEL_NAME].unique())
+    assert "SeasonalNaive" in model_names
+    assert "global_lgbm" in model_names

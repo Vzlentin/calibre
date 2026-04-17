@@ -11,13 +11,12 @@ def repeating_history():
     """24 periods of repeating [10, 20, 30, 40] pattern."""
     dates = pd.date_range("2024-01-07", periods=24, freq="W")
     pattern = [10.0, 20.0, 30.0, 40.0] * 6
-    return pd.DataFrame({"ds": dates, "y": pattern})
+    return pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
 
 
 @pytest.fixture
 def lgbm_task(repeating_history):
     return ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "freq": "W"},
@@ -28,7 +27,6 @@ def lgbm_task(repeating_history):
 @pytest.fixture
 def xgb_task(repeating_history):
     return ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={"backend": "mlforecast", "model": "xgboost.XGBRegressor", "freq": "W"},
@@ -41,7 +39,7 @@ def test_lightgbm_fit_predict_columns(lgbm_task):
     adapter.fit(lgbm_task)
     result = adapter.predict(lgbm_task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
 
@@ -51,7 +49,7 @@ def test_xgboost_fit_predict_columns(xgb_task):
     adapter.fit(xgb_task)
     result = adapter.predict(xgb_task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
 
@@ -71,7 +69,6 @@ def test_y_hat_dtype_is_float64(lgbm_task):
 
 def test_custom_lags_produces_valid_output(repeating_history):
     task = ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={
@@ -86,5 +83,5 @@ def test_custom_lags_produces_valid_output(repeating_history):
     adapter.fit(task)
     result = adapter.predict(task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4

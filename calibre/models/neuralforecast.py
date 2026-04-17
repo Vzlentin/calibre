@@ -4,18 +4,21 @@ import neuralforecast.models
 import pandas as pd
 from neuralforecast import NeuralForecast
 
+from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
 _RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", "backend"})
 
 
-class NeuralForecastAdapter:
+class NeuralForecastAdapter(ModelAdapter):
+    PARALLEL_BY_UID = True
+
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._nf: NeuralForecast | None = None
 
     def fit(self, task: ForecastTask) -> None:
-
         model_name = self._config["model"]
         model_cls = getattr(neuralforecast.models, model_name, None)
         if model_cls is None:
@@ -34,31 +37,13 @@ class NeuralForecastAdapter:
             **params,
         )
 
-        sf_df = pd.DataFrame(
-            {
-                "unique_id": task.unique_id,
-                "ds": task.history["ds"].values,
-                "y": task.history["y"].values.astype("float32"),
-            }
-        )
+        nf_df = task.history[[UNIQUE_ID, DS, Y]].copy()
+        nf_df[Y] = nf_df[Y].astype("float32")
 
         self._nf = NeuralForecast(models=[model], freq=freq)
-        self._nf.fit(df=sf_df)
+        self._nf.fit(df=nf_df)
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._nf is None:
             raise RuntimeError("Call fit() before predict()")
-
-        result = self._nf.predict()
-
-        # Extract point forecast column using positional approach
-        model_cols = [c for c in result.columns if c not in ("unique_id", "ds")]
-        point_col = model_cols[0]
-
-        return pd.DataFrame(
-            {
-                "ds": result["ds"].values,
-                "y_hat": result[point_col].astype("float64").values,
-                "h": range(1, task.horizon + 1),
-            }
-        )
+        return _build_predict_frame(self._nf.predict())

@@ -11,13 +11,12 @@ def repeating_history():
     """24 periods of repeating [10, 20, 30, 40] pattern."""
     dates = pd.date_range("2024-01-07", periods=24, freq="W")
     pattern = [10.0, 20.0, 30.0, 40.0] * 6
-    return pd.DataFrame({"ds": dates, "y": pattern})
+    return pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
 
 
 @pytest.fixture
 def nhits_task(repeating_history):
     return ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={"backend": "neuralforecast", "model": "NHITS", "freq": "W", "max_steps": 5},
@@ -28,7 +27,6 @@ def nhits_task(repeating_history):
 @pytest.fixture
 def tide_task(repeating_history):
     return ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={"backend": "neuralforecast", "model": "TiDE", "freq": "W", "max_steps": 5},
@@ -39,7 +37,6 @@ def tide_task(repeating_history):
 @pytest.fixture
 def patchtst_task(repeating_history):
     return ForecastTask(
-        unique_id="SKU_001",
         history=repeating_history,
         horizon=4,
         model_config={
@@ -57,7 +54,7 @@ def test_nhits_fit_predict_columns(nhits_task):
     adapter.fit(nhits_task)
     result = adapter.predict(nhits_task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
 
@@ -67,7 +64,7 @@ def test_tide_fit_predict_columns(tide_task):
     adapter.fit(tide_task)
     result = adapter.predict(tide_task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
 
@@ -77,7 +74,7 @@ def test_patchtst_fit_predict_columns(patchtst_task):
     adapter.fit(patchtst_task)
     result = adapter.predict(patchtst_task)
 
-    assert list(result.columns) == ["ds", "y_hat", "h"]
+    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
 

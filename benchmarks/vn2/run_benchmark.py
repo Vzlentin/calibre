@@ -337,10 +337,9 @@ def run_benchmark(
                 series_data = round_sales[round_sales[UNIQUE_ID] == uid]
                 if series_data.empty:
                     continue
-                history = series_data[[DS, Y]].sort_values(DS).reset_index(drop=True)
+                history = series_data[[UNIQUE_ID, DS, Y]].sort_values(DS).reset_index(drop=True)
                 tasks.append(
                     ForecastTask(
-                        unique_id=uid,
                         history=history,
                         horizon=horizon,
                         model_config=tuned_configs[uid],

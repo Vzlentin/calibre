@@ -5,6 +5,8 @@ import importlib
 import pandas as pd
 from mlforecast import MLForecast
 
+from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
 _RESERVED_KEYS = frozenset(
@@ -31,7 +33,9 @@ def _resolve_model_cls(dotted_path: str) -> type:
     return cls
 
 
-class MLForecastAdapter:
+class MLForecastAdapter(ModelAdapter):
+    PARALLEL_BY_UID = True
+
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._mlf: MLForecast | None = None
@@ -52,13 +56,8 @@ class MLForecastAdapter:
         if target_transforms is not None:
             mlf_kwargs["target_transforms"] = target_transforms
 
-        mlf_df = pd.DataFrame(
-            {
-                "unique_id": task.unique_id,
-                "ds": task.history["ds"].values,
-                "y": task.history["y"].values.astype("float32"),
-            }
-        )
+        mlf_df = task.history[[UNIQUE_ID, DS, Y]].copy()
+        mlf_df[Y] = mlf_df[Y].astype("float32")
 
         self._mlf = MLForecast(**mlf_kwargs)
         self._mlf.fit(mlf_df)
@@ -66,14 +65,4 @@ class MLForecastAdapter:
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._mlf is None:
             raise RuntimeError("Call fit() before predict()")
-
-        result = self._mlf.predict(h=task.horizon)
-        model_cols = [c for c in result.columns if c not in ("unique_id", "ds")]
-
-        return pd.DataFrame(
-            {
-                "ds": result["ds"],
-                "y_hat": result[model_cols[0]].astype("float64"),
-                "h": range(1, task.horizon + 1),
-            }
-        )
+        return _build_predict_frame(self._mlf.predict(h=task.horizon))

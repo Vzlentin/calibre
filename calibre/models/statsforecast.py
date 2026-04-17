@@ -4,10 +4,14 @@ import pandas as pd
 import statsforecast.models
 from statsforecast import StatsForecast
 
+from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
 
-class StatsForecastAdapter:
+class StatsForecastAdapter(ModelAdapter):
+    PARALLEL_BY_UID = True
+
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._sf: StatsForecast | None = None
@@ -23,13 +27,8 @@ class StatsForecastAdapter:
         model = model_cls(**params)
 
         freq = self._config.get("freq", "W")
-        sf_df = pd.DataFrame(
-            {
-                "unique_id": task.unique_id,
-                "ds": task.history["ds"].values,
-                "y": task.history["y"].values.astype("float32"),
-            }
-        )
+        sf_df = task.history[[UNIQUE_ID, DS, Y]].copy()
+        sf_df[Y] = sf_df[Y].astype("float32")
 
         self._sf = StatsForecast(models=[model], freq=freq)
         self._sf.fit(sf_df)
@@ -37,14 +36,4 @@ class StatsForecastAdapter:
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._sf is None:
             raise RuntimeError("Call fit() before predict()")
-
-        result = self._sf.predict(h=task.horizon)
-        model_cols = [c for c in result.columns if c not in ("unique_id", "ds")]
-
-        return pd.DataFrame(
-            {
-                "ds": result["ds"],
-                "y_hat": result[model_cols[0]].astype("float64"),
-                "h": range(1, task.horizon + 1),
-            }
-        )
+        return _build_predict_frame(self._sf.predict(h=task.horizon))
