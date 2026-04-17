@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from typing import Literal, get_args
+
 from calibre.models.base import ModelAdapter
 
 _REGISTRY: dict[str, type[ModelAdapter]] = {}
 
-VALID_SCOPES = frozenset({"local", "global"})
-DEFAULT_SCOPE = "local"
+ScopeType = Literal["local", "global"]
+VALID_SCOPES: frozenset[ScopeType] = frozenset(get_args(ScopeType))
+DEFAULT_SCOPE: ScopeType = "local"
 
 
 def _ensure_registry() -> None:
@@ -38,7 +41,7 @@ def get_adapter_cls(model_config: dict) -> type[ModelAdapter]:
     return _REGISTRY[backend]
 
 
-def get_scope(model_config: dict) -> str:
+def get_scope(model_config: dict) -> ScopeType:
     """Return the dispatch scope for a model config.
 
     'local' fits one model per unique_id (Fugue-partitioned).

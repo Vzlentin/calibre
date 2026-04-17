@@ -39,7 +39,7 @@ def global_configs():
 
 @pytest.fixture
 def statsforecast_global_config():
-    """Global dispatch is available for any backend — prove it works for statsforecast."""
+    """statsforecast config with scope='global' (joint dispatch, no Fugue partitioning)."""
     return [
         {
             "backend": "statsforecast",
@@ -178,7 +178,7 @@ class TestBuildTasksGlobal:
     def test_global_scope_works_for_non_mlforecast_backend(
         self, sample_sales, statsforecast_global_config
     ):
-        """scope='global' is a dispatch flag and works for any backend."""
+        """scope='global' on statsforecast emits one task containing all series."""
         tasks = build_tasks(sample_sales, statsforecast_global_config, horizon=4)
         assert len(tasks) == 1
         assert set(tasks[0].history["unique_id"].unique()) == {
