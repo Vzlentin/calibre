@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.contracts.forecast_frame import (
+    CONFORMAL_MODE,
     UNIQUE_ID,
     H,
     quantile_column,
@@ -29,12 +30,15 @@ def apply_rs_policy(
 ) -> pd.DataFrame:
     """Apply a periodic-review order-up-to policy to a forecast frame.
 
-    By default the target stock level is the sum of per-horizon conformal
-    upper bounds at ``coverage`` over the protection period. When
-    ``quantile`` is provided, the target stock level is instead the sum of
-    the per-horizon predicted quantile (column ``q_<p>``); this requires
-    the forecast frame to carry that quantile column and bypasses the
-    conformal interval requirement.
+    Three target-stock-level paths, in priority order:
+
+    1. ``quantile`` set: target = sum of the per-horizon predicted quantile
+       column ``q_<p>`` over the protection period (bypasses conformal).
+    2. Frame carries ``conformal_mode == "cumulative"``: target = the single
+       cumulative upper bound emitted at ``h == protection_period``
+       (the bound is already calibrated on cumulative demand, no sum).
+    3. Default: target = sum of per-horizon conformal upper bounds at
+       ``coverage`` over the protection period.
     """
     if frame.empty:
         return pd.DataFrame(
@@ -50,6 +54,11 @@ def apply_rs_policy(
         )
 
     validate_forecast_frame(frame)
+    cumulative_mode = (
+        quantile is None
+        and CONFORMAL_MODE in frame.columns
+        and (frame[CONFORMAL_MODE] == "cumulative").all()
+    )
     if quantile is not None:
         target_col = quantile_column(quantile)
         if target_col not in frame.columns:
@@ -94,7 +103,15 @@ def apply_rs_policy(
                 f"Protection period {protection_period} exceeds available horizon {max_horizon}"
             )
 
-        target_stock_level = float(ordered.loc[horizons <= protection_period, target_col].sum())
+        if cumulative_mode:
+            cumulative_rows = ordered.loc[horizons == protection_period, target_col]
+            if cumulative_rows.empty:
+                raise ValueError(
+                    f"Cumulative conformal frame missing terminal h={protection_period} row"
+                )
+            target_stock_level = float(cumulative_rows.iloc[0])
+        else:
+            target_stock_level = float(ordered.loc[horizons <= protection_period, target_col].sum())
         result = {column: ordered[column].iloc[0] for column in decision_columns}
         result[INVENTORY_POSITION] = inventory_position
         result[LEAD_TIME] = lead_time

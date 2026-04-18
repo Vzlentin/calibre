@@ -13,6 +13,7 @@ NONCONFORMITY_SCORE = "nonconformity_score"
 CALIBRATION_STATE = "calibration_state"
 CONFORMAL_METHOD = "conformal_method"
 CONFORMAL_ALPHA = "conformal_alpha"
+CONFORMAL_MODE = "conformal_mode"
 
 REQUIRED_COLUMNS = [UNIQUE_ID, DS, Y, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]
 
@@ -31,6 +32,7 @@ _OPTIONAL_DTYPES = {
     CALIBRATION_STATE: "object",
     CONFORMAL_METHOD: "object",
     CONFORMAL_ALPHA: "float64",
+    CONFORMAL_MODE: "object",
 }
 
 
