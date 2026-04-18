@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import numpy as np
 import optuna
 import pandas as pd
 
 from calibre.conformal import ConformalPolicyConfig
-from calibre.contracts.forecast_frame import UNIQUE_ID, Y_HAT, Y
+from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y_HAT, Y
 from calibre.tasks.forecast_task import ForecastTask
 
 
@@ -64,27 +65,77 @@ class TuningTask:
         freq = self.freq
         conformal_config = self.conformal_config
 
-        def _objective(trial: optuna.Trial) -> float:
-            candidate_config = {**base_cfg, **search_space(trial)}
-            h = history.copy()
-            if UNIQUE_ID not in h.columns:
-                h.insert(0, UNIQUE_ID, unique_id)
-            task = ForecastTask(
-                history=h,
-                horizon=horizon,
-                model_config=candidate_config,
-            )
-            result = BackendEngine(
-                freq=freq,
-                conformal_config=conformal_config,
-            ).execute([task], actuals, origins)
-            ledger = result.ledger
-            resolved = ledger.to_df().dropna(subset=[Y, Y_HAT])
-            if resolved.empty:
-                return float("inf")
-            return float(metric(resolved[Y].to_numpy(), resolved[Y_HAT].to_numpy()))
+        if conformal_config is not None:
+            from calibre.engine.backend import BackendEngine  # deferred to avoid circular import
 
-        from calibre.engine.backend import BackendEngine  # deferred to avoid circular import
+            def _objective(trial: optuna.Trial) -> float:
+                candidate_config = {**base_cfg, **search_space(trial)}
+                h = history.copy()
+                if UNIQUE_ID not in h.columns:
+                    h.insert(0, UNIQUE_ID, unique_id)
+                task = ForecastTask(
+                    history=h,
+                    horizon=horizon,
+                    model_config=candidate_config,
+                )
+                result = BackendEngine(
+                    freq=freq,
+                    conformal_config=conformal_config,
+                ).execute([task], actuals, origins)
+                resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
+                if resolved.empty:
+                    return float("inf")
+                return float(metric(resolved[Y].to_numpy(), resolved[Y_HAT].to_numpy()))
+        else:
+            # Fast path: call adapters directly, skipping Fugue partitioning overhead.
+            # Equivalent to BackendEngine._run_parallel for a single series but without
+            # the fa.transform wrapper — each trial fires n_origins adapter fit/predict
+            # calls instead of n_origins fa.transform round-trips.
+            from calibre.models.registry import (
+                resolve_adapter,  # deferred: avoids circular import via calibre.tasks.__init__
+            )
+
+            max_resolved_ds = max(origins)
+
+            def _objective(trial: optuna.Trial) -> float:
+                candidate_config = {**base_cfg, **search_space(trial), "freq": freq}
+                h = history.copy()
+                if UNIQUE_ID not in h.columns:
+                    h.insert(0, UNIQUE_ID, unique_id)
+
+                actual_arrays: list[np.ndarray] = []
+                pred_arrays: list[np.ndarray] = []
+
+                for origin in origins:
+                    hist_slice = h[h[DS] < origin]
+                    if hist_slice.empty:
+                        continue
+                    origin_task = ForecastTask(
+                        history=hist_slice,
+                        horizon=horizon,
+                        model_config=candidate_config,
+                        forecast_origin=origin,
+                    )
+                    adapter = resolve_adapter(candidate_config)
+                    adapter.fit(origin_task)
+                    preds = adapter.predict(origin_task)
+                    # Mirror BackendEngine's resolve_actuals gate: only score
+                    # rows with ds ≤ the last origin to match current semantics.
+                    preds = preds[preds[DS] <= max_resolved_ds]
+                    if preds.empty:
+                        continue
+                    preds_clean = preds.drop(columns=[Y], errors="ignore")
+                    merged = preds_clean.merge(actuals[[DS, Y]], on=DS, how="left").dropna(
+                        subset=[Y, Y_HAT]
+                    )
+                    if merged.empty:
+                        continue
+                    actual_arrays.append(merged[Y].to_numpy())
+                    pred_arrays.append(merged[Y_HAT].to_numpy())
+
+                if not actual_arrays:
+                    return float("inf")
+                return float(metric(np.concatenate(actual_arrays), np.concatenate(pred_arrays)))
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction="minimize")
