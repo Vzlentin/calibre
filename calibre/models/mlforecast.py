@@ -1,17 +1,31 @@
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 import pandas as pd
 from mlforecast import MLForecast
 
-from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y, quantile_column
 from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
 _RESERVED_KEYS = frozenset(
-    {"model", "name", "freq", "lags", "lag_transforms", "target_transforms", "backend", "scope"}
+    {
+        "model",
+        "name",
+        "freq",
+        "lags",
+        "lag_transforms",
+        "target_transforms",
+        "backend",
+        "scope",
+        "quantiles",
+        "strategy",
+    }
 )
+
+_VALID_STRATEGIES = frozenset({"recursive", "direct"})
 
 
 def _resolve_model_cls(dotted_path: str) -> type:
@@ -33,34 +47,85 @@ def _resolve_model_cls(dotted_path: str) -> type:
     return cls
 
 
+def _validate_quantiles(quantiles: list[float]) -> list[float]:
+    if not quantiles:
+        raise ValueError("quantiles must be a non-empty list of values in (0, 1)")
+    for q in quantiles:
+        if not 0.0 < float(q) < 1.0:
+            raise ValueError(f"quantile {q!r} must lie in (0, 1)")
+    return [float(q) for q in quantiles]
+
+
+def _build_quantile_predict_frame(
+    raw: pd.DataFrame,
+    name_to_quantile: dict[str, float],
+) -> pd.DataFrame:
+    """Normalise a Nixtla multi-model predict result to a quantile forecast frame."""
+    out = raw[[UNIQUE_ID, DS]].reset_index(drop=True)
+    for name, q in name_to_quantile.items():
+        out[quantile_column(q)] = raw[name].astype("float64").values
+
+    # Median if requested, else the quantile closest to it
+    quantiles = list(name_to_quantile.values())
+    point_q = 0.5 if 0.5 in quantiles else min(quantiles, key=lambda q: abs(q - 0.5))
+    out[Y_HAT] = out[quantile_column(point_q)].astype("float64").values
+    out[H] = out.groupby(UNIQUE_ID).cumcount() + 1
+    return out
+
+
 class MLForecastAdapter(ModelAdapter):
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._mlf: MLForecast | None = None
+        self._name_to_quantile: dict[str, float] = {}
 
     def fit(self, task: ForecastTask) -> None:
         model_cls = _resolve_model_cls(self._config["model"])
         params = {k: v for k, v in self._config.items() if k not in _RESERVED_KEYS}
-        model = model_cls(**params)
+
+        quantiles = self._config.get("quantiles")
+        strategy = self._config.get("strategy", "recursive")
+        if strategy not in _VALID_STRATEGIES:
+            raise ValueError(
+                f"strategy must be one of {sorted(_VALID_STRATEGIES)}, got {strategy!r}"
+            )
+
+        # mlforecast accepts either a list of estimators (auto-named after the
+        # class) or a {name: estimator} dict (used here so each quantile gets
+        # a stable column name).
+        mlf_models: list[Any] | dict[str, Any]
+        if quantiles is not None:
+            qs = _validate_quantiles(list(quantiles))
+            self._name_to_quantile = {quantile_column(q): q for q in qs}
+            mlf_models = {
+                col: model_cls(**{**params, "alpha": q})
+                for col, q in self._name_to_quantile.items()
+            }
+        else:
+            self._name_to_quantile = {}
+            mlf_models = [model_cls(**params)]
 
         freq = self._config.get("freq", "W")
         lags = self._config.get("lags", list(range(1, task.horizon + 1)))
-        lag_transforms = self._config.get("lag_transforms")
-        target_transforms = self._config.get("target_transforms")
 
-        mlf_kwargs: dict = {"models": [model], "freq": freq, "lags": lags}
-        if lag_transforms is not None:
-            mlf_kwargs["lag_transforms"] = lag_transforms
-        if target_transforms is not None:
-            mlf_kwargs["target_transforms"] = target_transforms
+        mlf_kwargs: dict[str, Any] = {"models": mlf_models, "freq": freq, "lags": lags}
+        for opt_key in ("lag_transforms", "target_transforms"):
+            if (val := self._config.get(opt_key)) is not None:
+                mlf_kwargs[opt_key] = val
 
         mlf_df = task.history[[UNIQUE_ID, DS, Y]].copy()
         mlf_df[Y] = mlf_df[Y].astype("float32")
 
         self._mlf = MLForecast(**mlf_kwargs)
-        self._mlf.fit(mlf_df)
+        fit_kwargs: dict[str, Any] = {}
+        if strategy == "direct":
+            fit_kwargs["max_horizon"] = task.horizon
+        self._mlf.fit(mlf_df, **fit_kwargs)
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._mlf is None:
             raise RuntimeError("Call fit() before predict()")
-        return _build_predict_frame(self._mlf.predict(h=task.horizon))
+        raw = self._mlf.predict(h=task.horizon)
+        if self._name_to_quantile:
+            return _build_quantile_predict_frame(raw, self._name_to_quantile)
+        return _build_predict_frame(raw)

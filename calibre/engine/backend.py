@@ -19,6 +19,7 @@ from calibre.contracts.forecast_frame import (
     Y_HAT,
     H,
     Y,
+    is_quantile_column,
 )
 from calibre.engine.ledger import ForecastLedger, OrderLedger
 from calibre.engine.scoring import compute_row_errors, resolve_actuals
@@ -31,7 +32,8 @@ def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) 
     preds[FORECAST_ORIGIN] = origin
     preds[MODEL_NAME] = model_name
     preds[Y] = np.nan
-    return preds[REQUIRED_COLUMNS]
+    extras = [c for c in preds.columns if is_quantile_column(c) and c not in REQUIRED_COLUMNS]
+    return preds[REQUIRED_COLUMNS + extras]
 
 
 @dataclass

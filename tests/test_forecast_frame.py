@@ -17,6 +17,7 @@ from calibre.contracts.forecast_frame import (
     Y,
     interval_column_names,
     lower_interval_column,
+    quantile_column,
     upper_interval_column,
     validate_forecast_frame,
 )
@@ -83,6 +84,25 @@ def test_bad_conformal_interval_dtype_raises():
     df = _make_valid_frame()
     df[lower_col] = ["bad", "bad", "bad"]
     with pytest.raises(ValueError, match=lower_col):
+        validate_forecast_frame(df)
+
+
+def test_quantile_column_helper_uses_coverage_suffix():
+    assert quantile_column(0.5) == "q_0p5"
+    assert quantile_column(0.833) == "q_0p833"
+
+
+def test_quantile_columns_validate_when_present():
+    df = _make_valid_frame()
+    df[quantile_column(0.5)] = np.array([10.0, 20.0, 30.0], dtype=float)
+    df[quantile_column(0.833)] = np.array([12.0, 22.0, 32.0], dtype=float)
+    validate_forecast_frame(df)
+
+
+def test_bad_quantile_dtype_raises():
+    df = _make_valid_frame()
+    df[quantile_column(0.5)] = ["bad", "bad", "bad"]
+    with pytest.raises(ValueError, match="q_0p5"):
         validate_forecast_frame(df)
 
 

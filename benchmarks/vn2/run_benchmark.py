@@ -124,7 +124,7 @@ def _run_warmup(
         series_filter=series_filter,
     )
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine(freq="W-MON")
     result = engine.execute(tasks, actuals=sales, origins=origin_dates)
     ledger_df = result.ledger.to_df()
 
@@ -308,7 +308,7 @@ def run_benchmark(
     # so we can fill in actuals and call observe() when they resolve.
     pending_forecasts: list[pd.DataFrame] = []
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine(freq="W-MON")
 
     for round_num in range(1, decision_rounds + 1):
         if verbose:

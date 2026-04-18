@@ -5,6 +5,7 @@ import pandas as pd
 from calibre.contracts.forecast_frame import (
     UNIQUE_ID,
     H,
+    quantile_column,
     validate_forecast_frame,
 )
 from calibre.order._helpers import (
@@ -24,8 +25,17 @@ def apply_rs_policy(
     frame: pd.DataFrame,
     params: pd.DataFrame | list[RsPolicyParameters],
     coverage: float = 0.9,
+    quantile: float | None = None,
 ) -> pd.DataFrame:
-    """Apply a periodic-review order-up-to policy to a forecast frame."""
+    """Apply a periodic-review order-up-to policy to a forecast frame.
+
+    By default the target stock level is the sum of per-horizon conformal
+    upper bounds at ``coverage`` over the protection period. When
+    ``quantile`` is provided, the target stock level is instead the sum of
+    the per-horizon predicted quantile (column ``q_<p>``); this requires
+    the forecast frame to carry that quantile column and bypasses the
+    conformal interval requirement.
+    """
     if frame.empty:
         return pd.DataFrame(
             columns=[
@@ -40,7 +50,12 @@ def apply_rs_policy(
         )
 
     validate_forecast_frame(frame)
-    _, upper_col = _validate_interval_columns(frame, coverage)
+    if quantile is not None:
+        target_col = quantile_column(quantile)
+        if target_col not in frame.columns:
+            raise ValueError(f"Missing quantile column for quantile={quantile}: {target_col!r}")
+    else:
+        _, target_col = _validate_interval_columns(frame, coverage)
     params_frame = normalize_rs_policy_parameters(params)
 
     merged = frame.copy().merge(params_frame, on=UNIQUE_ID, how="left", validate="many_to_one")
@@ -79,7 +94,7 @@ def apply_rs_policy(
                 f"Protection period {protection_period} exceeds available horizon {max_horizon}"
             )
 
-        target_stock_level = float(ordered.loc[horizons <= protection_period, upper_col].sum())
+        target_stock_level = float(ordered.loc[horizons <= protection_period, target_col].sum())
         result = {column: ordered[column].iloc[0] for column in decision_columns}
         result[INVENTORY_POSITION] = inventory_position
         result[LEAD_TIME] = lead_time
