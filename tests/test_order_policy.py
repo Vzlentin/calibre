@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from calibre.contracts.forecast_frame import (
+    CONFORMAL_MODE,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -205,6 +206,127 @@ def test_apply_rs_policy_rejects_missing_horizons_with_clear_error() -> None:
                 )
             ],
         )
+
+
+def _cumulative_forecast_frame(
+    *,
+    unique_id: str,
+    cumulative_upper_at_terminal: float,
+    horizon: int = 3,
+    forecast_origin: pd.Timestamp = pd.Timestamp("2024-02-04"),  # noqa: B008
+    model_name: str = "SeasonalNaive",
+    coverage: float = 0.9,
+) -> pd.DataFrame:
+    """Frame with NaN per-horizon bounds and a single cumulative bound at h=K."""
+    lower_col, upper_col = interval_column_names(coverage)
+    ds = pd.date_range("2024-02-11", periods=horizon, freq="W")
+    upper = [np.nan] * horizon
+    lower = [np.nan] * horizon
+    upper[-1] = cumulative_upper_at_terminal
+    lower[-1] = -cumulative_upper_at_terminal
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: [unique_id] * horizon,
+            DS: ds,
+            Y: [np.nan] * horizon,
+            Y_HAT: [10.0] * horizon,
+            H: list(range(1, horizon + 1)),
+            FORECAST_ORIGIN: [forecast_origin] * horizon,
+            MODEL_NAME: [model_name] * horizon,
+            lower_col: lower,
+            upper_col: upper,
+            CONFORMAL_MODE: ["cumulative"] * horizon,
+        }
+    )
+    frame[H] = frame[H].astype("int64")
+    return frame
+
+
+def test_apply_rs_policy_cumulative_mode_picks_terminal_bound_without_summing() -> None:
+    """A cumulative-mode frame's target = single bound at h=K, never the sum."""
+    frame = _cumulative_forecast_frame(
+        unique_id="SKU_001",
+        cumulative_upper_at_terminal=42.0,
+        horizon=3,
+    )
+
+    result = apply_rs_policy(
+        frame,
+        [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ],
+    )
+    row = result.iloc[0]
+    assert row["protection_period"] == 3
+    assert row["target_stock_level"] == 42.0
+    assert row["order_qty"] == 37.0
+
+
+def test_apply_rs_policy_perhorizon_frame_still_sums_bounds() -> None:
+    """Without a CONFORMAL_MODE column, behaviour is unchanged (sum of bounds)."""
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    assert CONFORMAL_MODE not in frame.columns
+
+    result = apply_rs_policy(
+        frame,
+        [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ],
+    )
+    assert result.iloc[0]["target_stock_level"] == 60.0
+
+
+def test_apply_rs_policy_perhorizon_marker_still_sums_bounds() -> None:
+    """A CONFORMAL_MODE='perhorizon' marker keeps the per-horizon summing path."""
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    frame[CONFORMAL_MODE] = "perhorizon"
+
+    result = apply_rs_policy(
+        frame,
+        [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ],
+    )
+    assert result.iloc[0]["target_stock_level"] == 60.0
+
+
+def test_apply_rs_policy_quantile_path_ignores_cumulative_marker() -> None:
+    """Quantile-driven targets ignore the conformal mode marker entirely."""
+    frame = _cumulative_forecast_frame(
+        unique_id="SKU_001",
+        cumulative_upper_at_terminal=42.0,
+        horizon=3,
+    )
+    frame[quantile_column(0.833)] = [12.0, 22.0, 32.0]
+
+    result = apply_rs_policy(
+        frame,
+        [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ],
+        quantile=0.833,
+    )
+    assert result.iloc[0]["target_stock_level"] == 66.0
 
 
 def test_apply_rs_policy_rejects_duplicate_horizons_per_decision_group() -> None:

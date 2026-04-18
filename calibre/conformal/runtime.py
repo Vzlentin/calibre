@@ -10,13 +10,17 @@ import pandas as pd
 
 from calibre.conformal.aci import AdaptiveConformalInference
 from calibre.conformal.intervals import symmetric_intervals
-from calibre.conformal.mscp import MultiStepSplitConformalInference
+from calibre.conformal.mscp import (
+    CumulativeSplitConformalInference,
+    MultiStepSplitConformalInference,
+)
 from calibre.conformal.scores import absolute_error
 from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 from calibre.contracts.forecast_frame import (
     CALIBRATION_STATE,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,
+    CONFORMAL_MODE,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -29,6 +33,7 @@ from calibre.contracts.forecast_frame import (
 )
 
 ConformalMethod = Literal["mscp", "aci"]
+ConformalMode = Literal["perhorizon", "cumulative"]
 QuantileRule = Literal["conformal", "higher"]
 
 
@@ -60,6 +65,8 @@ class ConformalPolicyConfig:
     gamma: float = 0.05
     score_fn: Callable = absolute_error
     quantile_rule: QuantileRule | None = None
+    mode: ConformalMode = "perhorizon"
+    protection_period: int | None = None
 
     def __post_init__(self) -> None:
         if self.method not in {"mscp", "aci"}:
@@ -72,6 +79,13 @@ class ConformalPolicyConfig:
             raise ValueError("gamma must be non-negative")
         if self.quantile_rule is not None and self.quantile_rule not in {"conformal", "higher"}:
             raise ValueError("quantile_rule must be 'conformal', 'higher', or None")
+        if self.mode not in {"perhorizon", "cumulative"}:
+            raise ValueError("mode must be 'perhorizon' or 'cumulative'")
+        if self.mode == "cumulative":
+            if self.method != "mscp":
+                raise ValueError("cumulative mode currently supports only method='mscp'")
+            if self.protection_period is None or int(self.protection_period) < 1:
+                raise ValueError("cumulative mode requires protection_period >= 1")
 
     @property
     def alpha(self) -> float:
@@ -141,6 +155,72 @@ class _MscpPolicyState(_BasePolicyState):
     def emittable_mask(self, prediction: MultiStepIntervalPrediction) -> np.ndarray:
         base_mask = super().emittable_mask(prediction)
         return base_mask & self._controller.ready_mask()
+
+
+class _CumulativePolicyState(_BasePolicyState):
+    """Runtime adapter for cumulative-target split conformal."""
+
+    def __init__(self, config: ConformalPolicyConfig, horizon: int) -> None:
+        super().__init__(config, horizon)
+        if config.protection_period is None:
+            raise ValueError("cumulative mode requires config.protection_period")
+        if int(config.protection_period) > horizon:
+            raise ValueError(
+                f"protection_period {config.protection_period} exceeds horizon {horizon}"
+            )
+        self._protection_period = int(config.protection_period)
+        self._controller = CumulativeSplitConformalInference(
+            protection_period=self._protection_period,
+            alpha=config.alpha,
+            calibration_window=config.calibration_window,
+            score_fn=config.score_fn,
+            quantile_rule=config.resolved_quantile_rule,
+        )
+
+    def predict(self, point_forecasts: np.ndarray) -> MultiStepIntervalPrediction:
+        center = np.asarray(point_forecasts, dtype=float)
+        controller_prediction = self._controller.predict_interval(center[: self._protection_period])
+
+        center_vector = np.full(self.horizon, np.nan, dtype=float)
+        lower_vector = np.full(self.horizon, np.nan, dtype=float)
+        upper_vector = np.full(self.horizon, np.nan, dtype=float)
+        radius_vector = np.full(self.horizon, np.nan, dtype=float)
+        alpha_vector = np.full(self.horizon, self.config.alpha, dtype=float)
+        idx = self._protection_period - 1
+        center_vector[idx] = controller_prediction.center[-1]
+        lower_vector[idx] = controller_prediction.lower[-1]
+        upper_vector[idx] = controller_prediction.upper[-1]
+        radius_vector[idx] = controller_prediction.radius[-1]
+
+        return MultiStepIntervalPrediction(
+            center=center_vector,
+            lower=lower_vector,
+            upper=upper_vector,
+            radius=radius_vector,
+            alpha=alpha_vector,
+            issued_at=self._issued_count,
+            metadata={"mode": "cumulative", "protection_period": self._protection_period},
+        )
+
+    def observe_window(
+        self, y_actual_window: np.ndarray, y_hat_window: np.ndarray
+    ) -> dict[str, float | int]:
+        return self._controller.observe(y_actual_window, y_hat_window)
+
+    def snapshot(self) -> dict[str, Any]:
+        diagnostics = self._controller.get_diagnostics()
+        diagnostics["method"] = "mscp"
+        diagnostics["mode"] = "cumulative"
+        return diagnostics
+
+    def emittable_mask(self, prediction: MultiStepIntervalPrediction) -> np.ndarray:
+        mask = np.zeros(self.horizon, dtype=bool)
+        mask[: self._protection_period] = self._controller.ready_mask()
+        return mask
+
+    @property
+    def protection_period(self) -> int:
+        return self._protection_period
 
 
 class _AciPolicyState(_BasePolicyState):
@@ -226,6 +306,8 @@ class ConformalRuntime:
         self._policies: dict[tuple[str, str], _BasePolicyState] = {}
 
     def _build_policy(self, horizon: int) -> _BasePolicyState:
+        if self.config.mode == "cumulative":
+            return _CumulativePolicyState(self.config, horizon)
         if self.config.method == "mscp":
             return _MscpPolicyState(self.config, horizon)
         return _AciPolicyState(self.config, horizon)
@@ -263,6 +345,7 @@ class ConformalRuntime:
             ordered[lower_col] = lower_values
             ordered[upper_col] = upper_values
             ordered[CONFORMAL_METHOD] = self.config.method
+            ordered[CONFORMAL_MODE] = self.config.mode
             ordered[CONFORMAL_ALPHA] = prediction.alpha
             ordered[CALIBRATION_STATE] = serialize_calibration_state(policy.snapshot())
             if NONCONFORMITY_SCORE not in ordered.columns:
@@ -283,6 +366,13 @@ class ConformalRuntime:
         if NONCONFORMITY_SCORE not in observed.columns:
             observed[NONCONFORMITY_SCORE] = np.nan
 
+        if self.config.mode == "cumulative":
+            return self._observe_cumulative(observed)
+        return self._observe_perhorizon(observed, lower_col, upper_col)
+
+    def _observe_perhorizon(
+        self, observed: pd.DataFrame, lower_col: str, upper_col: str
+    ) -> pd.DataFrame:
         for _, group in observed.groupby([UNIQUE_ID, MODEL_NAME], sort=False):
             key = _policy_key(group)
             policy = self._policies.get(key)
@@ -293,5 +383,21 @@ class ConformalRuntime:
                 observed.at[idx, NONCONFORMITY_SCORE] = policy.observe_row(
                     row, lower_col, upper_col
                 )
+        return observed
 
+    def _observe_cumulative(self, observed: pd.DataFrame) -> pd.DataFrame:
+        for _, group in observed.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False):
+            key = _policy_key(group)
+            policy = self._policies.get(key)
+            if not isinstance(policy, _CumulativePolicyState):
+                raise ValueError(f"No cumulative conformal state found for key {key}")
+            window_size = policy.protection_period
+            ordered = group.sort_values(H)
+            window = ordered[ordered[H] <= window_size]
+            if len(window) < window_size or window[Y].isna().any():
+                continue
+            actuals = window[Y].to_numpy(dtype=float)
+            forecasts = window[Y_HAT].to_numpy(dtype=float)
+            result = policy.observe_window(actuals, forecasts)
+            observed.at[window.index[-1], NONCONFORMITY_SCORE] = float(result["score"])
         return observed

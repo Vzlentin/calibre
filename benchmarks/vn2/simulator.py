@@ -1,9 +1,13 @@
-"""VN2 inventory simulator implementing the competition cost rules.
+"""VN2 inventory simulator: thin adapter over ``calibre.simulation``.
+
+Holds VN2-specific concerns (the two-slot in-transit pipeline, the linear
+holding/shortage cost rates, the CSV I/O helpers) and delegates the generic
+state transitions and cost accounting to ``calibre.simulation``.
 
 Cost rules:
-    - Holding cost: €0.20 per unit of end-of-week inventory (no cost for in-transit)
-    - Shortage cost: €1.00 per unit of lost sales (no backorders)
-    - Lead time: order placed end of week X → arrives start of week X+3
+    - Holding cost: EUR 0.20 per unit of end-of-week inventory (no cost for in-transit)
+    - Shortage cost: EUR 1.00 per unit of lost sales (no backorders)
+    - Lead time: order placed end of week X arrives start of week X+3
 """
 
 from __future__ import annotations
@@ -13,53 +17,102 @@ from pathlib import Path
 
 import pandas as pd
 
+from calibre.simulation import (
+    LinearCostModel,
+    LostSalesRule,
+    PeriodResult,
+    Simulator,
+    make_pipeline,
+)
+from calibre.simulation import ProductState as GenericProductState
+
+LEAD_TIME_DEPTH: int = 2
+HOLDING_COST_RATE: float = 0.2
+SHORTAGE_COST_RATE: float = 1.0
+
 
 @dataclass
 class ProductState:
-    """Inventory state for a single product at the start of a simulation period."""
+    """VN2-shaped inventory state (two-slot in-transit pipeline)."""
 
     unique_id: str
     end_inventory: float
-    in_transit_w1: float  # arrives at start of next week (week+1)
-    in_transit_w2: float  # arrives at start of week+2
+    in_transit_w1: float
+    in_transit_w2: float
     cumulative_holding_cost: float = 0.0
     cumulative_shortage_cost: float = 0.0
 
 
 @dataclass
 class WeekResult:
-    """Snapshot of what happened for one product during one simulation week."""
+    """VN2-shaped per-week per-product simulation result."""
 
     unique_id: str
     week: int
-    start_inventory: float  # end_inventory (prev) + arrivals
-    arrivals: float  # in_transit_w1 from previous state
+    start_inventory: float
+    arrivals: float
     demand: float
-    sales: float  # min(start_inventory, demand)
-    missed_sales: float  # demand - sales
-    end_inventory: float  # start_inventory - sales
-    holding_cost: float  # end_inventory * 0.2
-    shortage_cost: float  # missed_sales * 1.0
+    sales: float
+    missed_sales: float
+    end_inventory: float
+    holding_cost: float
+    shortage_cost: float
+
+
+def _to_generic(state: ProductState) -> GenericProductState:
+    return GenericProductState(
+        unique_id=state.unique_id,
+        end_inventory=float(state.end_inventory),
+        pipeline=make_pipeline(
+            [float(state.in_transit_w1), float(state.in_transit_w2)],
+            LEAD_TIME_DEPTH,
+        ),
+        cumulative_costs={
+            "holding": float(state.cumulative_holding_cost),
+            "shortage": float(state.cumulative_shortage_cost),
+        },
+    )
+
+
+def _to_week_result(result: PeriodResult) -> WeekResult:
+    return WeekResult(
+        unique_id=result.unique_id,
+        week=result.period,
+        start_inventory=result.start_inventory,
+        arrivals=result.arrivals,
+        demand=result.demand,
+        sales=result.sales,
+        missed_sales=result.missed_sales,
+        end_inventory=result.end_inventory,
+        holding_cost=result.costs.get("holding", 0.0),
+        shortage_cost=result.costs.get("shortage", 0.0),
+    )
 
 
 class VN2Simulator:
-    """Week-by-week VN2 inventory simulator.
+    """VN2-specific facade over the generic ``Simulator``.
 
     Lead-time mechanics:
         - Orders placed at end of week X go into in_transit_w2.
-        - At next step (week X+1): in_transit_w2 → in_transit_w1.
-        - At step after (week X+2): in_transit_w1 arrives as arrivals → available inventory.
-        - So order placed end of week X is available for sales starting week X+3.
+        - Next step (week X+1): in_transit_w2 shifts to in_transit_w1.
+        - Step after (week X+2): in_transit_w1 arrives as available inventory.
+        - So an order placed end of week X is available for sales starting week X+3.
     """
 
-    HOLDING_COST_RATE: float = 0.2
-    SHORTAGE_COST_RATE: float = 1.0
+    HOLDING_COST_RATE: float = HOLDING_COST_RATE
+    SHORTAGE_COST_RATE: float = SHORTAGE_COST_RATE
 
     def __init__(self, states: dict[str, ProductState]) -> None:
-        # Deep-copy states so the caller's originals are unaffected
         self.states: dict[str, ProductState] = {
             uid: ProductState(**vars(s)) for uid, s in states.items()
         }
+        self._sim = Simulator(
+            states={uid: _to_generic(s) for uid, s in self.states.items()},
+            rule=LostSalesRule(lead_time_depth=LEAD_TIME_DEPTH),
+            cost_model=LinearCostModel(
+                rates={"holding": HOLDING_COST_RATE, "shortage": SHORTAGE_COST_RATE}
+            ),
+        )
         self.history: list[WeekResult] = []
 
     def step(
@@ -68,77 +121,33 @@ class VN2Simulator:
         orders: dict[str, float],
         actual_demand: dict[str, float],
     ) -> list[WeekResult]:
-        """Advance simulation by one week for all products.
-
-        Lead time: order placed this week → stored as in_transit_w2.
-        Next week that shifts to in_transit_w1. The week after that it
-        arrives at start of the week (available for sales).
-
-        Args:
-            week: Current week number (used for labelling WeekResult rows).
-            orders: Dict[unique_id, order_quantity] — quantities ordered this week.
-            actual_demand: Dict[unique_id, demand] — realised demand this week.
-
-        Returns:
-            List of WeekResult, one per product.
-        """
+        period_results = self._sim.step(week, orders, actual_demand)
         week_results: list[WeekResult] = []
-
-        for uid, state in self.states.items():
-            # Arrivals come from the pipeline that was loaded in_transit_w1
-            arrivals = state.in_transit_w1
-            start_inventory = state.end_inventory + arrivals
-
-            demand = actual_demand.get(uid, 0.0)
-            sales = min(start_inventory, demand)
-            missed_sales = demand - sales
-            end_inventory = start_inventory - sales
-
-            holding_cost = end_inventory * self.HOLDING_COST_RATE
-            shortage_cost = missed_sales * self.SHORTAGE_COST_RATE
-
-            result = WeekResult(
-                unique_id=uid,
-                week=week,
-                start_inventory=start_inventory,
-                arrivals=arrivals,
-                demand=demand,
-                sales=sales,
-                missed_sales=missed_sales,
-                end_inventory=end_inventory,
-                holding_cost=holding_cost,
-                shortage_cost=shortage_cost,
-            )
-            week_results.append(result)
-            self.history.append(result)
-
-            # Update state for next week
-            # Pipeline: new order → in_transit_w2
-            #           old in_transit_w2 → in_transit_w1
-            #           old in_transit_w1 became arrivals (consumed above)
-            state.in_transit_w1 = state.in_transit_w2
-            state.in_transit_w2 = float(orders.get(uid, 0.0))
-            state.end_inventory = end_inventory
-            state.cumulative_holding_cost += holding_cost
-            state.cumulative_shortage_cost += shortage_cost
-
+        for result in period_results:
+            week_result = _to_week_result(result)
+            week_results.append(week_result)
+            self.history.append(week_result)
+            generic = self._sim.states[result.unique_id]
+            user = self.states[result.unique_id]
+            user.end_inventory = generic.end_inventory
+            user.in_transit_w1, user.in_transit_w2 = generic.pipeline
+            user.cumulative_holding_cost = generic.cumulative_costs.get("holding", 0.0)
+            user.cumulative_shortage_cost = generic.cumulative_costs.get("shortage", 0.0)
         return week_results
 
     def total_cost(self) -> float:
-        """Sum of cumulative holding + shortage cost across all products."""
         return sum(
             s.cumulative_holding_cost + s.cumulative_shortage_cost for s in self.states.values()
         )
 
     def to_dataframe(self) -> pd.DataFrame:
-        """Convert simulation history to a DataFrame, one row per (product, week)."""
         return pd.DataFrame([vars(r) for r in self.history])
 
 
 def load_initial_states(initial_state_path: str | Path) -> dict[str, ProductState]:
-    """Read week_0_initial_state.csv and return a dict of ProductState keyed by unique_id.
+    """Read week_0_initial_state.csv and return ``ProductState`` per unique_id.
 
-    The unique_id is constructed as f"{Store}_{Product}" (both integers).
+    The unique_id is constructed as ``f"{Store}_{Product}"``.
 
     Expected CSV columns:
         Store, Product, End Inventory, In Transit W+1, In Transit W+2
@@ -148,33 +157,20 @@ def load_initial_states(initial_state_path: str | Path) -> dict[str, ProductStat
     states: dict[str, ProductState] = {}
     for _, row in df.iterrows():
         uid = f"{int(row['Store'])}_{int(row['Product'])}"
-        state = ProductState(
+        states[uid] = ProductState(
             unique_id=uid,
             end_inventory=float(row["End Inventory"]),
             in_transit_w1=float(row["In Transit W+1"]),
             in_transit_w2=float(row["In Transit W+2"]),
         )
-        states[uid] = state
-
     return states
 
 
 def extract_new_actuals(data_dir: str | Path, week: int) -> dict[str, float]:
-    """Extract actual demand for week N by comparing progressive sales CSVs.
+    """Extract actual demand for week N by diffing progressive sales CSVs.
 
-    Loads week_{week}_sales.csv and week_{week-1}_sales.csv. The new column
-    (present in week_N but not in week_{N-1}) contains the week's sales.
-
-    Args:
-        data_dir: Directory containing the weekly sales CSV files.
-        week: The week number to extract actuals for (must be >= 1).
-
-    Returns:
-        Dict mapping unique_id (f"{Store}_{Product}") → demand for that week.
-
-    Raises:
-        ValueError: If no new column is found or multiple new columns are found.
-        FileNotFoundError: If either sales CSV is missing.
+    Loads ``week_{week}_sales.csv`` and ``week_{week-1}_sales.csv``. The new
+    column (present in week_N but not in week_{N-1}) contains that week's sales.
     """
     data_dir = Path(data_dir)
 
@@ -184,10 +180,7 @@ def extract_new_actuals(data_dir: str | Path, week: int) -> dict[str, float]:
     current_df = pd.read_csv(current_path)
     previous_df = pd.read_csv(previous_path)
 
-    current_cols = set(current_df.columns)
-    previous_cols = set(previous_df.columns)
-    new_cols = current_cols - previous_cols
-
+    new_cols = set(current_df.columns) - set(previous_df.columns)
     if len(new_cols) != 1:
         raise ValueError(
             f"Expected exactly 1 new column in week_{week} vs week_{week - 1}, "
@@ -195,14 +188,10 @@ def extract_new_actuals(data_dir: str | Path, week: int) -> dict[str, float]:
         )
 
     new_col = next(iter(new_cols))
-
-    # Build unique_id from Store/Product columns
     unique_ids = (
         current_df["Store"].astype(int).astype(str)
         + "_"
         + current_df["Product"].astype(int).astype(str)
     )
-
     demand_series = current_df[new_col].fillna(0.0).astype(float)
-
     return dict(zip(unique_ids, demand_series, strict=False))
