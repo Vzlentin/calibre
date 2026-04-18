@@ -41,10 +41,10 @@ calibre/
 ├── order/          # Ordering policies (newsvendor, RS, RSS)
 ├── pipeline/       # Loading, task building, end-to-end runner
 ├── tasks/          # ForecastTask, TuningTask
-└── metrics.py      # MAE / RMSE / SMAPE / WAPE
-benchmarks/
-├── vn2/            # VN2 inventory challenge benchmark
-└── cp/aci/         # Adaptive conformal inference parity benchmark
+├── metrics.py      # MAE / RMSE / SMAPE / WAPE
+└── benchmarks/
+    ├──vn2/            # VN2 inventory challenge benchmark
+    └──cp/aci/         # Adaptive conformal inference parity benchmark
 tests/              # pytest suite
 .github/workflows/  # CI: ruff, mypy, pytest
 ```
