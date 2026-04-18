@@ -44,6 +44,18 @@ Wait for it to complete. If it makes changes, re-run the linting and type-checki
 
 4. Return the PR URL to the user.
 
+## Step 4 — Update project memory
+
+Invoke the `project-memory` skill to persist what was shipped. If `OBSIDIAN_VAULT_PATH` is unset, skip this step.
+
+Otherwise, for the current repo's project folder:
+
+- **`plans/<slug>.md`** — if a plan exists for this task, append the outcome (PR URL, key decisions, status: shipped). If no plan exists and the change was non-trivial, write a brief retrospective.
+- **`architecture.md`** — update only if this PR introduced a durable design decision, new module boundary, or invariant change. Keep entries terse and cite the PR.
+- **`lessons.md`** — append any rules-for-self that emerged from user corrections or pitfalls hit during this task.
+
+Do not touch `vision.md` unless product scope actually moved.
+
 ## Done
 
-Report: tests passed, simplification applied (or "no changes needed"), PR URL.
+Report: tests passed, simplification applied (or "no changes needed"), PR URL, memory updates (or "skipped — no vault" / "no durable changes").
