@@ -1,7 +1,8 @@
 # project specific
 data/
 .vscode/
-.claude/
+.claude/*
+!.claude/skills/
 benchmarks/cp/aci/conformal-time-series/
 benchmarks/vn2/results/
 
