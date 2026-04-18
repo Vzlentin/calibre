@@ -98,13 +98,12 @@ class CumulativeSplitConformalInference:
 
     def predict_interval(self, point_forecast) -> MultiStepIntervalPrediction:
         center = _as_1d_array(point_forecast, "point_forecast", self._protection_period)
-        cumulative_center = float(center.sum())
         radius = self.get_radius()
         self._radius_history.append(radius)
 
         center_vector = np.full(self._protection_period, np.nan, dtype=float)
         radius_vector = np.full(self._protection_period, np.nan, dtype=float)
-        center_vector[-1] = cumulative_center
+        center_vector[-1] = float(center.sum())
         radius_vector[-1] = radius
 
         prediction = symmetric_intervals(

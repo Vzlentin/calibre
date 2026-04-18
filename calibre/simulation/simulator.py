@@ -57,10 +57,9 @@ class Simulator:
             )
             costs = self.cost_model.cost(state, result)
             result.costs = dict(costs)
+            totals = state.cumulative_costs
             for component, value in costs.items():
-                state.cumulative_costs[component] = state.cumulative_costs.get(
-                    component, 0.0
-                ) + float(value)
+                totals[component] = totals.get(component, 0.0) + float(value)
             self.history.append(result)
             period_results.append(result)
 

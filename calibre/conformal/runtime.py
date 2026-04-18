@@ -164,11 +164,11 @@ class _CumulativePolicyState(_BasePolicyState):
         super().__init__(config, horizon)
         if config.protection_period is None:
             raise ValueError("cumulative mode requires config.protection_period")
-        if int(config.protection_period) > horizon:
-            raise ValueError(
-                f"protection_period {config.protection_period} exceeds horizon {horizon}"
-            )
         self._protection_period = int(config.protection_period)
+        if self._protection_period > horizon:
+            raise ValueError(
+                f"protection_period {self._protection_period} exceeds horizon {horizon}"
+            )
         self._controller = CumulativeSplitConformalInference(
             protection_period=self._protection_period,
             alpha=config.alpha,
@@ -181,23 +181,17 @@ class _CumulativePolicyState(_BasePolicyState):
         center = np.asarray(point_forecasts, dtype=float)
         controller_prediction = self._controller.predict_interval(center[: self._protection_period])
 
-        center_vector = np.full(self.horizon, np.nan, dtype=float)
-        lower_vector = np.full(self.horizon, np.nan, dtype=float)
-        upper_vector = np.full(self.horizon, np.nan, dtype=float)
-        radius_vector = np.full(self.horizon, np.nan, dtype=float)
-        alpha_vector = np.full(self.horizon, self.config.alpha, dtype=float)
-        idx = self._protection_period - 1
-        center_vector[idx] = controller_prediction.center[-1]
-        lower_vector[idx] = controller_prediction.lower[-1]
-        upper_vector[idx] = controller_prediction.upper[-1]
-        radius_vector[idx] = controller_prediction.radius[-1]
+        nan_pad = np.full(self.horizon - self._protection_period, np.nan, dtype=float)
+
+        def _expand(short: np.ndarray) -> np.ndarray:
+            return np.concatenate([short, nan_pad])
 
         return MultiStepIntervalPrediction(
-            center=center_vector,
-            lower=lower_vector,
-            upper=upper_vector,
-            radius=radius_vector,
-            alpha=alpha_vector,
+            center=_expand(controller_prediction.center),
+            lower=_expand(controller_prediction.lower),
+            upper=_expand(controller_prediction.upper),
+            radius=_expand(controller_prediction.radius),
+            alpha=np.full(self.horizon, self.config.alpha, dtype=float),
             issued_at=self._issued_count,
             metadata={"mode": "cumulative", "protection_period": self._protection_period},
         )
