@@ -13,6 +13,7 @@ from calibre.contracts.forecast_frame import (
     H,
     Y,
     interval_column_names,
+    quantile_column,
 )
 from calibre.order import RsPolicyParameters, apply_rs_policy
 from calibre.order.rss import apply_rss_policy
@@ -105,6 +106,51 @@ def test_apply_rs_policy_uses_per_series_parameters_and_preserves_metadata() -> 
         pd.Timestamp("2024-03-03"),
     ]
     assert list(result["order_qty"]) == [25.0, 0.0]
+
+
+def test_apply_rs_policy_uses_quantile_column_when_quantile_provided() -> None:
+    # Frame with a q_0p833 column and no conformal intervals (drop them)
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    lower_col, upper_col = interval_column_names(0.9)
+    frame = frame.drop(columns=[lower_col, upper_col])
+    frame[quantile_column(0.833)] = [12.0, 22.0, 32.0]
+
+    result = apply_rs_policy(
+        frame,
+        [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ],
+        quantile=0.833,
+    )
+
+    row = result.iloc[0]
+    # protection_period = 3 → 12 + 22 + 32 = 66, order = 66 - 5 = 61
+    assert row["protection_period"] == 3
+    assert row["target_stock_level"] == 66.0
+    assert row["order_qty"] == 61.0
+
+
+def test_apply_rs_policy_quantile_missing_column_raises() -> None:
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+
+    with pytest.raises(ValueError, match="Missing quantile column"):
+        apply_rs_policy(
+            frame,
+            [
+                RsPolicyParameters(
+                    unique_id="SKU_001",
+                    inventory_position=5.0,
+                    lead_time=1,
+                    review_period=2,
+                )
+            ],
+            quantile=0.833,
+        )
 
 
 def test_apply_rs_policy_requires_interval_columns_for_requested_coverage() -> None:

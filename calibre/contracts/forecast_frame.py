@@ -51,8 +51,18 @@ def interval_column_names(coverage: float) -> tuple[str, str]:
     return lower_interval_column(coverage), upper_interval_column(coverage)
 
 
+def quantile_column(quantile: float) -> str:
+    """Column name for a predicted quantile (e.g. 0.833 -> ``q_0p833``)."""
+    return f"q_{_format_coverage_suffix(quantile)}"
+
+
 def _is_interval_column(column: str) -> bool:
     return column.startswith("lo_") or column.startswith("hi_")
+
+
+def is_quantile_column(column: str) -> bool:
+    """Return True iff ``column`` is a per-quantile prediction column (``q_*``)."""
+    return column.startswith("q_")
 
 
 def _validate_dtype(df: pd.DataFrame, col: str, expected: str) -> None:
@@ -85,3 +95,6 @@ def validate_forecast_frame(df: pd.DataFrame) -> None:
         if _is_interval_column(col) and not pd.api.types.is_numeric_dtype(df[col]):
             actual = str(df[col].dtype)
             raise ValueError(f"Column '{col}' expected numeric interval bounds, got {actual}")
+        if is_quantile_column(col) and not pd.api.types.is_numeric_dtype(df[col]):
+            actual = str(df[col].dtype)
+            raise ValueError(f"Column '{col}' expected numeric quantile values, got {actual}")

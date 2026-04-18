@@ -309,6 +309,45 @@ def test_global_scope_produces_forecasts_for_all_series():
     assert all(col in df.columns for col in [UNIQUE_ID, DS, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME])
 
 
+def test_global_quantile_columns_survive_engine():
+    """q_<p> columns from a quantile-producing global adapter must reach the ledger."""
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern_a = [10.0, 20.0, 30.0, 40.0] * 5
+    pattern_b = [5.0, 15.0, 25.0, 35.0] * 5
+    all_series = pd.concat(
+        [
+            pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern_a}),
+            pd.DataFrame({"unique_id": "B", "ds": dates, "y": pattern_b}),
+        ],
+        ignore_index=True,
+    )
+
+    global_task = ForecastTask(
+        history=all_series,
+        horizon=3,
+        model_config={
+            "backend": "mlforecast",
+            "scope": "global",
+            "model": "lightgbm.LGBMRegressor",
+            "objective": "quantile",
+            "quantiles": [0.5, 0.833],
+            "strategy": "direct",
+            "lags": [1, 2, 3, 4],
+            "verbosity": -1,
+            "n_estimators": 10,
+        },
+    )
+
+    engine = BackendEngine(freq="W")
+    result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
+
+    df = result.ledger.to_df()
+    assert "q_0p5" in df.columns
+    assert "q_0p833" in df.columns
+    assert df["q_0p5"].notna().all()
+    assert df["q_0p833"].notna().all()
+
+
 def test_mixed_local_and_global_tasks():
     """Local and global tasks should both appear in the ledger."""
     dates = pd.date_range("2024-01-07", periods=20, freq="W")
