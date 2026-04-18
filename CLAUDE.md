@@ -1,12 +1,9 @@
 # CLAUDE.md
 
-Agent contract for this repository. Humans should read [`README.md`](README.md).
-
 ## Project
 
 Calibre is a demand planning engine: probabilistic forecasting + conformal
-intervals + ordering policies, exercised through backtesting pipelines and
-the VN2 / ACI benchmarks.
+intervals + ordering policies, exercised through backtesting pipelines.
 
 ## Commands
 
