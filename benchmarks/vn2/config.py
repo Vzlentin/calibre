@@ -10,10 +10,23 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data" / "vn2"
 
 MODEL_CONFIGS: list[dict] = [
     {"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 52},
+    {"backend": "statsforecast", "model": "AutoETS"},
+    {"backend": "statsforecast", "model": "AutoARIMA"},
+    {"backend": "statsforecast", "model": "MFLES", "season_length": 52},
+    {
+        "backend": "mlforecast",
+        "model": "lightgbm.LGBMRegressor",
+        "name": "lgbm",
+        "lags": [1, 2, 3, 4, 13, 26, 52],
+        "n_estimators": 200,
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "verbosity": -1,
+    },
 ]
 
 HORIZON: int = 3  # protection_period = lead_time(2) + review_period(1)
-WARMUP_ORIGINS: int = 6
+WARMUP_ORIGINS: int = 20
 LEAD_TIME: int = 2
 REVIEW_PERIOD: int = 1
 DECISION_ROUNDS: int = 6
@@ -36,6 +49,6 @@ TUNE_BASE_CONFIG: dict = {
     "model": "SeasonalNaive",
     "name": "tuned_sn",
 }
-TUNE_N_TRIALS: int = 6
-TUNE_N_ORIGINS: int = 3
+TUNE_N_TRIALS: int = 20
+TUNE_N_ORIGINS: int = 5
 TUNE_MAX_WORKERS: int = 4

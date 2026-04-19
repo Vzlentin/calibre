@@ -388,6 +388,10 @@ class ConformalRuntime:
             window_size = policy.protection_period
             ordered = group.sort_values(H)
             window = ordered[ordered[H] <= window_size]
+            if window[H].duplicated().any():
+                raise ValueError(
+                    f"Duplicate H values in cumulative observe window for key {key}"
+                )
             if len(window) < window_size or window[Y].isna().any():
                 continue
             actuals = window[Y].to_numpy(dtype=float)

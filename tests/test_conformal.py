@@ -676,3 +676,82 @@ def test_cumulative_config_rejects_aci_method():
 
     with pytest.raises(ValueError, match="cumulative mode"):
         ConformalPolicyConfig(method="aci", coverage=0.9, mode="cumulative", protection_period=3)
+
+
+def test_cumulative_controller_rejects_array_alpha():
+    from calibre.conformal import CumulativeSplitConformalInference
+
+    with pytest.raises(ValueError, match="scalar"):
+        CumulativeSplitConformalInference(
+            protection_period=3, alpha=np.array([0.1, 0.2]), calibration_window=5
+        )
+
+
+def test_cumulative_runtime_pads_horizon_beyond_protection_period():
+    """When horizon > protection_period, only h=K gets a finite bound; h>K is NaN."""
+    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+    from calibre.contracts.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, H, Y, Y_HAT
+
+    config = ConformalPolicyConfig(
+        method="mscp",
+        coverage=0.5,
+        calibration_window=5,
+        mode="cumulative",
+        protection_period=2,
+    )
+    runtime = ConformalRuntime(config)
+    lower_col, upper_col = config.interval_columns
+
+    # Prime buffer with two observations
+    for i in range(2):
+        origin = pd.Timestamp("2024-01-07") + pd.Timedelta(weeks=i)
+        frame = pd.DataFrame(
+            {
+                UNIQUE_ID: ["A"] * 4,
+                "ds": pd.date_range(origin + pd.Timedelta(weeks=1), periods=4, freq="W"),
+                Y: [10.0, 11.0, 12.0, 13.0],
+                Y_HAT: [10.0, 11.0, 12.0, 13.0],
+                H: [1, 2, 3, 4],
+                FORECAST_ORIGIN: [origin] * 4,
+                MODEL_NAME: ["M"] * 4,
+            }
+        )
+        enriched = runtime.apply(frame)
+        runtime.observe(enriched)
+
+    fresh_origin = pd.Timestamp("2024-01-07") + pd.Timedelta(weeks=2)
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A"] * 4,
+            "ds": pd.date_range(fresh_origin + pd.Timedelta(weeks=1), periods=4, freq="W"),
+            Y: [np.nan] * 4,
+            Y_HAT: [10.0, 11.0, 12.0, 13.0],
+            H: [1, 2, 3, 4],
+            FORECAST_ORIGIN: [fresh_origin] * 4,
+            MODEL_NAME: ["M"] * 4,
+        }
+    )
+    enriched = runtime.apply(frame)
+
+    # h=1 and h=2 (protection_period=2): only h=2 gets finite bound
+    assert pd.isna(enriched[upper_col].iloc[0]), "h=1 should be NaN"
+    assert pd.notna(enriched[upper_col].iloc[1]), "h=2 (terminal) should be finite"
+    # h=3, h=4 beyond protection_period: padded to NaN
+    assert pd.isna(enriched[upper_col].iloc[2]), "h=3 beyond protection_period should be NaN"
+    assert pd.isna(enriched[upper_col].iloc[3]), "h=4 beyond protection_period should be NaN"
+
+
+def test_cumulative_runtime_observe_raises_on_duplicate_horizons():
+    runtime, _ = _build_cumulative_runtime(protection_period=3)
+    origin = pd.Timestamp("2024-01-07")
+    frame = _cumulative_frame(
+        unique_id="SKU_001",
+        origin=origin,
+        y_hats=[10.0, 20.0, 30.0],
+        y_actuals=[12.0, 22.0, 31.0],
+    )
+    enriched = runtime.apply(frame)
+    # Inject a duplicate h=1 row
+    dup = enriched.iloc[[0]].copy()
+    with pytest.raises(ValueError, match="Duplicate H"):
+        runtime.observe(pd.concat([enriched, dup]))

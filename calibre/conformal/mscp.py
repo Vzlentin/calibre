@@ -52,7 +52,10 @@ class CumulativeSplitConformalInference:
         if calibration_window < 1:
             raise ValueError("calibration_window must be at least 1")
         self._protection_period = int(protection_period)
-        self._alpha = float(np.asarray(alpha, dtype=float))
+        alpha_arr = np.asarray(alpha, dtype=float)
+        if alpha_arr.ndim != 0:
+            raise ValueError(f"alpha must be a scalar, got shape {alpha_arr.shape}")
+        self._alpha = float(alpha_arr)
         self._calibration_window = int(calibration_window)
         self._score_fn = score_fn
         self._initial_radius = float(initial_radius)
