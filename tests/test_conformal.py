@@ -690,7 +690,7 @@ def test_cumulative_controller_rejects_array_alpha():
 def test_cumulative_runtime_pads_horizon_beyond_protection_period():
     """When horizon > protection_period, only h=K gets a finite bound; h>K is NaN."""
     from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
-    from calibre.contracts.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, H, Y, Y_HAT
+    from calibre.contracts.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 
     config = ConformalPolicyConfig(
         method="mscp",
