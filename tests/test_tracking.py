@@ -1,4 +1,5 @@
 """Smoke tests for benchmarks/common/tracking.py."""
+
 from __future__ import annotations
 
 import mlflow
