@@ -473,3 +473,285 @@ def test_multistep_score_history_populated_per_horizon():
     assert h1_scores[0] == pytest.approx(1.0)
     assert h1_scores[1] == pytest.approx(7.0)
     assert h2_scores[0] == pytest.approx(2.0)
+
+
+# ── CumulativeSplitConformalInference (controller) ────────────────────────────
+
+
+def test_cumulative_controller_predicts_only_at_terminal_horizon():
+    from calibre.conformal import CumulativeSplitConformalInference
+
+    controller = CumulativeSplitConformalInference(
+        protection_period=3,
+        alpha=0.5,
+        calibration_window=5,
+        initial_scores=[1.0, 2.0, 3.0, 4.0, 5.0],
+    )
+    prediction = controller.predict_interval(np.array([10.0, 20.0, 30.0]))
+    assert np.isnan(prediction.center[0])
+    assert np.isnan(prediction.center[1])
+    assert prediction.center[2] == pytest.approx(60.0)
+    assert np.isfinite(prediction.lower[2])
+    assert np.isfinite(prediction.upper[2])
+
+
+def test_cumulative_controller_appends_window_score():
+    from calibre.conformal import CumulativeSplitConformalInference
+
+    controller = CumulativeSplitConformalInference(
+        protection_period=3, alpha=0.1, calibration_window=5
+    )
+    controller.observe(np.array([1.0, 2.0, 3.0]), np.array([2.0, 2.0, 4.0]))
+    diag = controller.get_diagnostics()
+    np.testing.assert_array_equal(diag["score_history"], np.array([abs(6.0 - 8.0)]))
+
+
+def test_cumulative_controller_rejects_window_size_mismatch():
+    from calibre.conformal import CumulativeSplitConformalInference
+
+    controller = CumulativeSplitConformalInference(
+        protection_period=3, alpha=0.1, calibration_window=5
+    )
+    with pytest.raises(ValueError, match="length 3"):
+        controller.observe(np.array([1.0, 2.0]), np.array([1.0, 2.0]))
+
+
+def test_cumulative_controller_ready_mask_only_at_terminal():
+    from calibre.conformal import CumulativeSplitConformalInference
+
+    controller = CumulativeSplitConformalInference(
+        protection_period=3,
+        alpha=0.5,
+        calibration_window=5,
+        initial_scores=[1.0, 2.0, 3.0, 4.0, 5.0],
+    )
+    mask = controller.ready_mask()
+    assert mask.tolist() == [False, False, True]
+
+
+def test_cumulative_controller_ready_mask_blocked_when_buffer_empty():
+    from calibre.conformal import CumulativeSplitConformalInference
+
+    controller = CumulativeSplitConformalInference(
+        protection_period=3, alpha=0.5, calibration_window=5
+    )
+    assert controller.ready_mask().tolist() == [False, False, False]
+
+
+# ── ConformalRuntime cumulative mode ──────────────────────────────────────────
+
+
+def _build_cumulative_runtime(
+    protection_period: int = 3,
+    calibration_window: int = 5,
+    coverage: float = 0.5,
+):
+    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+
+    config = ConformalPolicyConfig(
+        method="mscp",
+        coverage=coverage,
+        calibration_window=calibration_window,
+        mode="cumulative",
+        protection_period=protection_period,
+    )
+    return ConformalRuntime(config), config
+
+
+def _cumulative_frame(
+    *,
+    unique_id: str,
+    origin: pd.Timestamp,
+    y_hats: list[float],
+    y_actuals: list[float] | None = None,
+):
+    from calibre.contracts.forecast_frame import (
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        UNIQUE_ID,
+        Y_HAT,
+        H,
+        Y,
+    )
+
+    horizon = len(y_hats)
+    actuals = y_actuals if y_actuals is not None else [np.nan] * horizon
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: [unique_id] * horizon,
+            "ds": pd.date_range(origin + pd.Timedelta(weeks=1), periods=horizon, freq="W"),
+            Y: actuals,
+            Y_HAT: y_hats,
+            H: list(range(1, horizon + 1)),
+            FORECAST_ORIGIN: [origin] * horizon,
+            MODEL_NAME: ["SeasonalNaive"] * horizon,
+        }
+    )
+
+
+def test_cumulative_runtime_writes_marker_column_on_every_row():
+    from calibre.contracts.forecast_frame import CONFORMAL_MODE
+
+    runtime, config = _build_cumulative_runtime()
+    frame = _cumulative_frame(
+        unique_id="SKU_001",
+        origin=pd.Timestamp("2024-01-07"),
+        y_hats=[10.0, 20.0, 30.0],
+    )
+    enriched = runtime.apply(frame)
+    assert (enriched[CONFORMAL_MODE] == "cumulative").all()
+
+
+def test_cumulative_runtime_emits_finite_bound_only_at_protection_period():
+    runtime, config = _build_cumulative_runtime(protection_period=3, calibration_window=5)
+    for week_offset in range(3):
+        origin = pd.Timestamp("2024-01-07") + pd.Timedelta(weeks=week_offset)
+        frame = _cumulative_frame(
+            unique_id="SKU_001",
+            origin=origin,
+            y_hats=[10.0, 20.0, 30.0],
+            y_actuals=[12.0, 22.0, 31.0],
+        )
+        enriched = runtime.apply(frame)
+        runtime.observe(enriched)
+
+    new_origin = pd.Timestamp("2024-02-04")
+    fresh_frame = _cumulative_frame(
+        unique_id="SKU_001",
+        origin=new_origin,
+        y_hats=[10.0, 20.0, 30.0],
+    )
+    enriched = runtime.apply(fresh_frame)
+    lower_col, upper_col = config.interval_columns
+    assert pd.isna(enriched[lower_col].iloc[0])
+    assert pd.isna(enriched[lower_col].iloc[1])
+    assert pd.notna(enriched[upper_col].iloc[2])
+    assert enriched[upper_col].iloc[2] >= 60.0
+
+
+def test_cumulative_runtime_observe_appends_one_score_per_window():
+    from calibre.contracts.forecast_frame import NONCONFORMITY_SCORE
+
+    runtime, _ = _build_cumulative_runtime(protection_period=3)
+    origin = pd.Timestamp("2024-01-07")
+    frame = _cumulative_frame(
+        unique_id="SKU_001",
+        origin=origin,
+        y_hats=[10.0, 20.0, 30.0],
+        y_actuals=[12.0, 22.0, 31.0],
+    )
+    enriched = runtime.apply(frame)
+    observed = runtime.observe(enriched)
+
+    scores = observed[NONCONFORMITY_SCORE].dropna().tolist()
+    assert len(scores) == 1
+    assert scores[0] == pytest.approx(abs(65.0 - 60.0))
+
+
+def test_cumulative_runtime_observe_skips_partially_resolved_windows():
+    from calibre.contracts.forecast_frame import NONCONFORMITY_SCORE
+
+    runtime, _ = _build_cumulative_runtime(protection_period=3)
+    origin = pd.Timestamp("2024-01-07")
+    frame = _cumulative_frame(
+        unique_id="SKU_001",
+        origin=origin,
+        y_hats=[10.0, 20.0, 30.0],
+        y_actuals=[12.0, np.nan, np.nan],
+    )
+    enriched = runtime.apply(frame)
+    observed = runtime.observe(enriched)
+    assert observed[NONCONFORMITY_SCORE].isna().all()
+
+
+def test_cumulative_config_requires_protection_period():
+    from calibre.conformal import ConformalPolicyConfig
+
+    with pytest.raises(ValueError, match="protection_period"):
+        ConformalPolicyConfig(method="mscp", coverage=0.9, mode="cumulative")
+
+
+def test_cumulative_config_rejects_aci_method():
+    from calibre.conformal import ConformalPolicyConfig
+
+    with pytest.raises(ValueError, match="cumulative mode"):
+        ConformalPolicyConfig(method="aci", coverage=0.9, mode="cumulative", protection_period=3)
+
+
+def test_cumulative_controller_rejects_array_alpha():
+    from calibre.conformal import CumulativeSplitConformalInference
+
+    with pytest.raises(ValueError, match="scalar"):
+        CumulativeSplitConformalInference(
+            protection_period=3, alpha=np.array([0.1, 0.2]), calibration_window=5
+        )
+
+
+def test_cumulative_runtime_pads_horizon_beyond_protection_period():
+    """When horizon > protection_period, only h=K gets a finite bound; h>K is NaN."""
+    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+    from calibre.contracts.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
+
+    config = ConformalPolicyConfig(
+        method="mscp",
+        coverage=0.5,
+        calibration_window=5,
+        mode="cumulative",
+        protection_period=2,
+    )
+    runtime = ConformalRuntime(config)
+    lower_col, upper_col = config.interval_columns
+
+    # Prime buffer with two observations
+    for i in range(2):
+        origin = pd.Timestamp("2024-01-07") + pd.Timedelta(weeks=i)
+        frame = pd.DataFrame(
+            {
+                UNIQUE_ID: ["A"] * 4,
+                "ds": pd.date_range(origin + pd.Timedelta(weeks=1), periods=4, freq="W"),
+                Y: [10.0, 11.0, 12.0, 13.0],
+                Y_HAT: [10.0, 11.0, 12.0, 13.0],
+                H: [1, 2, 3, 4],
+                FORECAST_ORIGIN: [origin] * 4,
+                MODEL_NAME: ["M"] * 4,
+            }
+        )
+        enriched = runtime.apply(frame)
+        runtime.observe(enriched)
+
+    fresh_origin = pd.Timestamp("2024-01-07") + pd.Timedelta(weeks=2)
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A"] * 4,
+            "ds": pd.date_range(fresh_origin + pd.Timedelta(weeks=1), periods=4, freq="W"),
+            Y: [np.nan] * 4,
+            Y_HAT: [10.0, 11.0, 12.0, 13.0],
+            H: [1, 2, 3, 4],
+            FORECAST_ORIGIN: [fresh_origin] * 4,
+            MODEL_NAME: ["M"] * 4,
+        }
+    )
+    enriched = runtime.apply(frame)
+
+    # h=1 and h=2 (protection_period=2): only h=2 gets finite bound
+    assert pd.isna(enriched[upper_col].iloc[0]), "h=1 should be NaN"
+    assert pd.notna(enriched[upper_col].iloc[1]), "h=2 (terminal) should be finite"
+    # h=3, h=4 beyond protection_period: padded to NaN
+    assert pd.isna(enriched[upper_col].iloc[2]), "h=3 beyond protection_period should be NaN"
+    assert pd.isna(enriched[upper_col].iloc[3]), "h=4 beyond protection_period should be NaN"
+
+
+def test_cumulative_runtime_observe_raises_on_duplicate_horizons():
+    runtime, _ = _build_cumulative_runtime(protection_period=3)
+    origin = pd.Timestamp("2024-01-07")
+    frame = _cumulative_frame(
+        unique_id="SKU_001",
+        origin=origin,
+        y_hats=[10.0, 20.0, 30.0],
+        y_actuals=[12.0, 22.0, 31.0],
+    )
+    enriched = runtime.apply(frame)
+    # Inject a duplicate h=1 row
+    dup = enriched.iloc[[0]].copy()
+    with pytest.raises(ValueError, match="Duplicate H"):
+        runtime.observe(pd.concat([enriched, dup]))

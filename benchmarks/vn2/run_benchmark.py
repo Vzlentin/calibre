@@ -21,7 +21,6 @@ import math
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 # Allow running as a script from repo root
@@ -52,8 +51,8 @@ from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
+    MODEL_NAME,
     UNIQUE_ID,
-    H,
     Y,
     interval_column_names,
 )
@@ -84,6 +83,42 @@ def _build_rs_params(
             )
         )
     return params
+
+
+def _split_ready(
+    frame: pd.DataFrame,
+    mode: str,
+    lower_col: str,
+    upper_col: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split a pending-forecast frame into (to_observe, still_unresolved).
+
+    Cumulative mode: a row is ready iff every row in its
+    (uid, model, origin) window has a resolved actual.
+    Per-horizon mode: a row is ready iff it has both an actual and intervals.
+    """
+    if mode == "cumulative":
+        group_keys = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
+        grouped_y = frame.groupby(group_keys, sort=False)[Y]
+        window_complete = grouped_y.transform("count").eq(grouped_y.transform("size"))
+        return frame[window_complete], frame[~window_complete]
+    resolved = frame[Y].notna() & frame[lower_col].notna() & frame[upper_col].notna()
+    return frame[resolved], frame[~resolved]
+
+
+def _fill_actuals(
+    frame: pd.DataFrame,
+    lookup: pd.Series,
+) -> pd.DataFrame:
+    """Vectorized fill of NaN y from a (uid, ds)-indexed Series."""
+    if frame.empty or not frame[Y].isna().any():
+        return frame
+    keys = pd.MultiIndex.from_arrays([frame[UNIQUE_ID].values, frame[DS].values])
+    filled = lookup.reindex(keys).to_numpy()
+    result = frame.copy()
+    missing_mask = result[Y].isna().to_numpy()
+    result.loc[missing_mask, Y] = filled[missing_mask]
+    return result
 
 
 def _run_warmup(
@@ -135,56 +170,32 @@ def _run_warmup(
     ensemble_df = ensemble_median(ledger_df)
 
     lower_col, upper_col = interval_column_names(conformal_config.coverage)
+    actuals_lookup = sales.drop_duplicates(subset=[UNIQUE_ID, DS]).set_index([UNIQUE_ID, DS])[Y]
 
-    # Walk through origins in order: apply → wait → observe when y is known
-    # We process each origin's ensemble predictions and observe once actuals are known
     pending_applied: list[pd.DataFrame] = []
 
     for origin in origin_dates:
-        origin_rows = ensemble_df[ensemble_df[FORECAST_ORIGIN] == origin].copy()
+        origin_rows = ensemble_df[ensemble_df[FORECAST_ORIGIN] == origin]
         if origin_rows.empty:
             continue
 
-        # Apply conformal to get intervals
         applied = conformal_runtime.apply(origin_rows)
         if lower_col not in applied.columns:
             continue
-        pending_applied.append(applied)
 
-        # Resolve any previously applied rows whose ds <= current origin
-        still_pending = []
-        for prev_applied in pending_applied[:-1]:  # exclude the one we just added
-            # Fill actuals from the sales DataFrame
-            actuals_lookup = sales.drop_duplicates(subset=[UNIQUE_ID, DS]).set_index(
-                [UNIQUE_ID, DS]
-            )[Y]
-            resolved_mask = prev_applied[DS] <= origin
-            if not resolved_mask.any():
+        still_pending: list[pd.DataFrame] = []
+        for prev_applied in pending_applied:
+            if not (prev_applied[DS] <= origin).any():
                 still_pending.append(prev_applied)
                 continue
 
-            updated = prev_applied.copy()
-            resolved_idx = updated.index[resolved_mask & updated[Y].isna()]
-            if not resolved_idx.empty:
-                keys = pd.MultiIndex.from_arrays(
-                    [
-                        updated.loc[resolved_idx, UNIQUE_ID].values,
-                        updated.loc[resolved_idx, DS].values,
-                    ]
-                )
-                y_vals = actuals_lookup.reindex(keys).values
-                updated.loc[resolved_idx, Y] = y_vals
-
-            # Feed rows with both y and interval columns to observe()
-            has_y = updated[Y].notna()
-            has_intervals = updated[lower_col].notna() & updated[upper_col].notna()
-            to_observe = updated[has_y & has_intervals]
+            updated = _fill_actuals(prev_applied, actuals_lookup)
+            to_observe, unresolved = _split_ready(
+                updated, conformal_config.mode, lower_col, upper_col
+            )
             if not to_observe.empty:
                 with contextlib.suppress(ValueError):
                     conformal_runtime.observe(to_observe)
-
-            # Keep unresolved rows for future origins
-            unresolved = updated[~(has_y & has_intervals)]
             if not unresolved.empty:
                 still_pending.append(unresolved)
 
@@ -305,8 +316,11 @@ def run_benchmark(
     # Phase 2: DECISION ROUNDS
     # ------------------------------------------------------------------ #
     # Track the most recent ensemble+interval predictions per (uid, origin)
-    # so we can fill in actuals and call observe() when they resolve.
+    # so we can fill in actuals and call observe() when they resolve. Rows
+    # are dropped once their actuals are filled in (per-horizon scores) or
+    # once the full protection-period window is resolved (cumulative).
     pending_forecasts: list[pd.DataFrame] = []
+    actuals_lookup: dict[tuple[str, pd.Timestamp], float] = {}
 
     engine = BackendEngine(freq="W-MON")
 
@@ -329,15 +343,12 @@ def run_benchmark(
             horizon=horizon,
             series_filter=list(states.keys()),
         )
-        # Add per-series tuned tasks to the ensemble
         if tuned_configs:
-            for uid in states:
-                if uid not in tuned_configs:
+            sorted_sales = round_sales.sort_values([UNIQUE_ID, DS])
+            for uid, series_data in sorted_sales.groupby(UNIQUE_ID, sort=False):
+                if uid not in tuned_configs or series_data.empty:
                     continue
-                series_data = round_sales[round_sales[UNIQUE_ID] == uid]
-                if series_data.empty:
-                    continue
-                history = series_data[[UNIQUE_ID, DS, Y]].sort_values(DS).reset_index(drop=True)
+                history = series_data[[UNIQUE_ID, DS, Y]].reset_index(drop=True)
                 tasks.append(
                     ForecastTask(
                         history=history,
@@ -425,41 +436,30 @@ def run_benchmark(
         simulator.step(round_num, orders=orders, actual_demand=actual_demand)
 
         # ------------------------------------------------------------------ #
-        # Feed resolved h=1 forecasts to conformal observe()
+        # Feed resolved forecasts to conformal observe()
         # ------------------------------------------------------------------ #
+        # Each round delivers actuals for one new period; record them keyed
+        # by the date they apply to (origin + 1 week == ds for h=1 of the
+        # forecast just issued at this origin).
+        actuals_ds = pd.Timestamp(origin) + pd.Timedelta(weeks=1)
+        for uid, demand in actual_demand.items():
+            actuals_lookup[(uid, actuals_ds)] = float(demand)
+
+        lookup_series = pd.Series(actuals_lookup, dtype=float)
+        if not lookup_series.empty:
+            lookup_series.index = pd.MultiIndex.from_tuples(lookup_series.index)
+
         still_pending: list[pd.DataFrame] = []
         for prev_forecast in pending_forecasts:
-            # Only process h=1 rows from this origin that have interval columns
-            h1_mask = (
-                (prev_forecast[H] == 1)
-                & (prev_forecast[FORECAST_ORIGIN] == origin)
-                & prev_forecast[Y].isna()
+            updated = _fill_actuals(prev_forecast, lookup_series)
+            to_observe, still_unresolved = _split_ready(
+                updated, conformal_config.mode, lower_col, upper_col
             )
-            if not h1_mask.any():
-                still_pending.append(prev_forecast)
-                continue
-
-            updated = prev_forecast.copy()
-            # Fill actuals into h=1 rows from this origin
-            for idx in updated.index[h1_mask]:
-                uid = str(updated.at[idx, UNIQUE_ID])
-                updated.at[idx, Y] = float(actual_demand.get(uid, np.nan))
-
-            # Rows now having y filled + valid intervals → feed to observe()
-            h1_valid_mask = (
-                h1_mask
-                & updated[Y].notna()
-                & updated[lower_col].notna()
-                & updated[upper_col].notna()
-            )
-            if h1_valid_mask.any():
+            if not to_observe.empty:
                 with contextlib.suppress(ValueError):
-                    conformal_runtime.observe(updated.loc[h1_valid_mask])
-
-            # Keep the non-h1 rows (h=2, h=3) pending for future rounds
-            other_mask = ~h1_mask
-            if other_mask.any():
-                still_pending.append(prev_forecast.loc[other_mask])
+                    conformal_runtime.observe(to_observe)
+            if not still_unresolved.empty:
+                still_pending.append(still_unresolved)
 
         pending_forecasts = still_pending
 

@@ -25,21 +25,23 @@ MODEL_CONFIGS: list[dict] = [
     },
 ]
 
-# Cost-optimal service level: Cu / (Cu + Co) = 1.0 / (1.0 + 0.2) ≈ 0.833
-# Aligns conformal intervals with the asymmetric cost structure (shortage 5× holding).
-CONFORMAL_CONFIG = ConformalPolicyConfig(
-    method="aci",
-    coverage=0.833,
-    gamma=0.05,
-    calibration_window=50,
-)
-
 HORIZON: int = 3  # protection_period = lead_time(2) + review_period(1)
 WARMUP_ORIGINS: int = 20
 LEAD_TIME: int = 2
 REVIEW_PERIOD: int = 1
 DECISION_ROUNDS: int = 6
 DELIVERY_WEEKS: int = 2
+
+# Cost-optimal service level: Cu / (Cu + Co) = 1.0 / (1.0 + 0.2) ≈ 0.833
+# Cumulative mode bounds Σdemand over the protection period directly,
+# avoiding the per-horizon-sum inflation from independent bounds.
+CONFORMAL_CONFIG = ConformalPolicyConfig(
+    method="mscp",
+    coverage=0.833,
+    calibration_window=50,
+    mode="cumulative",
+    protection_period=LEAD_TIME + REVIEW_PERIOD,
+)
 
 # Tuning
 TUNE_BASE_CONFIG: dict = {
