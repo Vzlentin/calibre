@@ -27,6 +27,10 @@ dev = [
     "ruff",
     "mypy",
 ]
+benchmarks = [
+    "mlflow>=2.17,<3",
+    "optuna-integration[mlflow]>=4.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -66,6 +70,8 @@ module = [
     "xgboost.*",
     "fugue.*",
     "optuna.*",
+    "optuna_integration.*",
+    "mlflow.*",
     "requests.*",
     "pyarrow.*",
 ]

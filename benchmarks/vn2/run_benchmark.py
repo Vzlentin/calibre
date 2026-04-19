@@ -1,215 +1,393 @@
-"""VN2 inventory planning benchmark orchestrator.
+"""Calibre's tuned VN2 benchmark — global LGBM + panel-level HPO + R,S.
 
-End-to-end pipeline:
-    1. WARMUP  — run walk-forward forecasts on week_0 history to calibrate
-                 the conformal runtime (ACI per series).
-    2. DECISION ROUNDS (1-6) — for each round:
-         a. Load updated sales data.
-         b. Forecast with multi-model ensemble.
-         c. Apply conformal intervals.
-         d. Compute R,S order quantities from current inventory position.
-         e. Step the simulator with realised actuals.
-         f. Feed resolved h=1 forecasts back to conformal runtime.
-    3. DELIVERY WEEKS (7-8) — no new orders; step simulator with zero orders.
-    4. RESULTS — print cost breakdown, save per-product CSV.
+This is the flagship Calibre entry: a single global LightGBM quantile
+regressor exercised through ``MLForecastAdapter`` with ``strategy="direct"``,
+hyper-tuned via a thin panel-level Optuna sweep, then driven through the
+standard VN2 decision loop with ``apply_rs_policy(..., quantile=alpha)``.
+
+Pipeline:
+
+1. **Pre-HPO** (once, on ``week_0_sales.csv``): N walk-forward origins,
+   panel-level Optuna sweep over LightGBM hyper-parameters and lag sets.
+   Objective is cumulative-horizon pinball loss at the chosen quantile —
+   the same statistic ``apply_rs_policy(..., quantile=p)`` sums at decision
+   time, so the HPO optimises what we deploy.
+2. **Decision loop** (rounds 1..N): refit the global LGBM with the best
+   config at every round, ``apply_rs_policy`` with ``quantile=best_alpha``,
+   step the ``VN2Simulator``.
+3. **Delivery weeks**: zero orders, just simulator.
+
+Documented gaps that this script works around (Phase-4 material):
+
+- ``MLForecastAdapter`` silently drops ``date_features`` / ``static_features``
+  (`calibre/models/mlforecast.py:111`), so calendar/static signal lives only
+  in lag-based seasonal aggregations.
+- ``TuningTask`` is per-series and point-metric only
+  (`calibre/tasks/tuning_task.py`); the panel + quantile + cumulative-cost
+  HPO is therefore inlined here.
+- ``ensemble_median`` ignores ``q_*``, so the optional multi-alpha ensemble
+  averages quantile columns inline.
+- No orchestration layer for the VN2 decision loop — it is still inlined.
+- Exogenous ``future_x`` is dead end-to-end and not used.
 """
 
 from __future__ import annotations
 
-import contextlib
 import math
 import sys
+import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+import mlflow
+import optuna
 import pandas as pd
+from mlforecast.lag_transforms import RollingMean, RollingStd
 
-# Allow running as a script from repo root
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import benchmarks.vn2.config as _vn2_config
+from benchmarks.common.tracking import (
+    log_config_module,
+    log_costs_dataframe,
+    optuna_mlflow_callback,
+    start_benchmark_run,
+)
 from benchmarks.vn2.config import (
-    CONFORMAL_CONFIG,
     DATA_DIR,
     DECISION_ROUNDS,
     DELIVERY_WEEKS,
     HORIZON,
+    HPO_COST_OPTIMAL_TAU,
+    HPO_LAG_SETS,
+    HPO_N_ORIGINS,
+    HPO_N_TRIALS,
+    HPO_SEARCH_SPACE,
+    HPO_TIMEOUT_SEC,
     LEAD_TIME,
-    MODEL_CONFIGS,
     REVIEW_PERIOD,
-    TUNE_BASE_CONFIG,
-    TUNE_MAX_WORKERS,
-    TUNE_N_ORIGINS,
-    TUNE_N_TRIALS,
-    WARMUP_ORIGINS,
 )
 from benchmarks.vn2.simulator import (
     VN2Simulator,
     extract_new_actuals,
     load_initial_states,
 )
-from benchmarks.vn2.tuning import seasonal_naive_search_space, tune_all_series
-from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
-    MODEL_NAME,
     UNIQUE_ID,
+    H,
     Y,
-    interval_column_names,
+    quantile_column,
 )
 from calibre.engine.backend import BackendEngine
-from calibre.ensemble.median import ensemble_median
+from calibre.features import add_stockout_features
+from calibre.metrics import pinball_linear
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.order.types import RsPolicyParameters
-from calibre.pipeline.loading import load_period
-from calibre.pipeline.tasks import build_tasks
+from calibre.pipeline.loading import load_period, melt_wide_instock
 from calibre.tasks.forecast_task import ForecastTask
 
+# Default rolling-mean / rolling-std windows applied at lag 1; these
+# carry the seasonal signal MLForecastAdapter would otherwise drop.
+ROLLING_WINDOWS = [4, 13, 26]
 
+
+# ------------------------------------------------------------------ #
+# Data preparation
+# ------------------------------------------------------------------ #
+def _prepare_history(sales: pd.DataFrame, instock: pd.DataFrame | None) -> pd.DataFrame:
+    """Replace observed sales with censored-demand imputed values."""
+    df = add_stockout_features(sales, instock)
+    return df[[UNIQUE_ID, DS, "y_uncensored"]].rename(columns={"y_uncensored": Y})
+
+
+def _load_instock(data_dir: Path, series_filter: list[str] | None) -> pd.DataFrame | None:
+    instock_path = data_dir / "week_0_in_stock.csv"
+    if not instock_path.exists():
+        return None
+    instock = melt_wide_instock(instock_path)
+    if series_filter is not None:
+        instock = instock[instock[UNIQUE_ID].isin(series_filter)]
+    return instock
+
+
+# ------------------------------------------------------------------ #
+# Model config builder
+# ------------------------------------------------------------------ #
+def _build_model_config(
+    quantile_alpha: float,
+    n_estimators: int,
+    learning_rate: float,
+    num_leaves: int,
+    min_child_samples: int,
+    subsample: float,
+    colsample_bytree: float,
+    reg_alpha: float,
+    reg_lambda: float,
+    lags: list[int],
+) -> dict[str, Any]:
+    """Build a single-quantile global LGBM model_config for the engine."""
+    return {
+        "backend": "mlforecast",
+        "scope": "global",
+        "name": f"global_lgbm_q{quantile_column(quantile_alpha)}",
+        "model": "lightgbm.LGBMRegressor",
+        "objective": "quantile",
+        "quantiles": [quantile_alpha],
+        "strategy": "direct",
+        "lags": lags,
+        "lag_transforms": {
+            1: [
+                *(RollingMean(window_size=w) for w in ROLLING_WINDOWS),
+                *(RollingStd(window_size=w) for w in ROLLING_WINDOWS),
+            ]
+        },
+        "n_estimators": n_estimators,
+        "learning_rate": learning_rate,
+        "num_leaves": num_leaves,
+        "min_child_samples": min_child_samples,
+        "subsample": subsample,
+        "colsample_bytree": colsample_bytree,
+        "reg_alpha": reg_alpha,
+        "reg_lambda": reg_lambda,
+        "verbosity": -1,
+        "n_jobs": -1,
+        "random_state": 42,
+    }
+
+
+# ------------------------------------------------------------------ #
+# HPO
+# ------------------------------------------------------------------ #
+def _suggest_from_spec(trial: optuna.Trial, name: str, spec: dict[str, Any]) -> Any:
+    """Sample a parameter from a declarative search-space spec."""
+    kind = spec["type"]
+    if kind == "categorical":
+        return trial.suggest_categorical(name, spec["choices"])
+    if kind == "int":
+        return trial.suggest_int(name, spec["low"], spec["high"], step=spec.get("step", 1))
+    if kind == "float":
+        return trial.suggest_float(
+            name,
+            spec["low"],
+            spec["high"],
+            step=spec.get("step"),
+            log=spec.get("log", False),
+        )
+    raise ValueError(f"Unknown HPO spec type: {kind!r}")
+
+
+def _walk_forward_origins(
+    history: pd.DataFrame, n_origins: int, horizon: int
+) -> list[pd.Timestamp]:
+    """Pick the last `n_origins` origins from the history's tail.
+
+    Each origin must leave at least `horizon` periods of future actuals
+    so we can score the cumulative pinball loss.
+    """
+    all_dates = sorted(history[DS].unique())
+    if len(all_dates) < n_origins + horizon:
+        n_origins = max(1, len(all_dates) - horizon)
+    if n_origins <= 0:
+        return []
+    return [pd.Timestamp(d) for d in all_dates[-(n_origins + horizon) : -horizon]]
+
+
+def _cumulative_pinball(
+    forecast_df: pd.DataFrame,
+    actuals: pd.DataFrame,
+    horizon: int,
+    quantile: float,
+    tau: float,
+) -> float:
+    """Cumulative-horizon pinball loss at the cost-optimal tau.
+
+    For each window ``(uid, origin)`` with all ``h=1..horizon`` resolved,
+    compute ``pinball(Σy_actual, Σq_<quantile>[h], tau=tau)`` and average
+    over windows. ``tau`` is the cost-optimal cumulative quantile
+    (``Cu / (Cu + Co)``); ``quantile`` is the per-horizon model knob.
+    Pinball at tau is, up to a constant ``Cu + Co``, the newsvendor cost
+    on cumulative demand — so this matches what
+    ``apply_rs_policy(..., quantile=p)`` deploys.
+    """
+    qcol = quantile_column(quantile)
+    if qcol not in forecast_df.columns or forecast_df.empty:
+        return float("inf")
+
+    actuals_lookup = actuals.set_index([UNIQUE_ID, DS])[Y]
+
+    df = forecast_df[[UNIQUE_ID, DS, FORECAST_ORIGIN, H, qcol]].copy()
+    df[Y] = actuals_lookup.reindex(
+        pd.MultiIndex.from_arrays([df[UNIQUE_ID].values, df[DS].values])
+    ).to_numpy()
+
+    df = df[df[H] <= horizon]
+    grouped = df.groupby([UNIQUE_ID, FORECAST_ORIGIN], sort=False)
+    full_window = grouped[Y].transform("count") == horizon
+    df = df[full_window]
+    if df.empty:
+        return float("inf")
+
+    sums = df.groupby([UNIQUE_ID, FORECAST_ORIGIN], sort=False)[[Y, qcol]].sum()
+    if sums.empty:
+        return float("inf")
+
+    actual_sum = sums[Y].to_numpy(dtype=float)
+    pred_sum = sums[qcol].to_numpy(dtype=float)
+    return float(pinball_linear(actual_sum, pred_sum, tau=tau))
+
+
+def run_hpo(
+    data_dir: Path = DATA_DIR,
+    horizon: int = HORIZON,
+    n_trials: int = HPO_N_TRIALS,
+    n_origins: int = HPO_N_ORIGINS,
+    timeout_sec: int = HPO_TIMEOUT_SEC,
+    cost_optimal_tau: float = HPO_COST_OPTIMAL_TAU,
+    series_filter: list[str] | None = None,
+    seed: int = 42,
+    verbose: bool = True,
+    mlflow_callbacks: list | None = None,
+) -> dict[str, Any]:
+    """Run the panel-level Optuna HPO and return the best model config.
+
+    The returned dict is a fully-formed ``model_config`` ready to feed into
+    a ``ForecastTask(scope="global", strategy="direct", quantiles=[alpha])``
+    via ``BackendEngine``. ``best_alpha`` is exposed under the
+    ``"_quantile_alpha"`` key (a private debug field — drop before passing
+    upstream if needed; the value is also recoverable from ``quantiles[0]``).
+
+    If ``mlflow_callbacks`` is provided, it is passed to ``study.optimize``
+    so each trial is logged as a nested MLflow run under the active parent.
+    """
+    week0 = load_period(data_dir, 0)
+    if series_filter is not None:
+        week0 = week0[week0[UNIQUE_ID].isin(series_filter)]
+
+    instock = _load_instock(data_dir, series_filter)
+    history = _prepare_history(week0, instock)
+    actuals = week0[[UNIQUE_ID, DS, Y]].copy()
+
+    origins = _walk_forward_origins(history, n_origins, horizon)
+    if not origins:
+        raise ValueError(f"Not enough history to build {n_origins} origins with horizon {horizon}")
+
+    engine = BackendEngine(freq="W-MON")
+
+    def _objective(trial: optuna.Trial) -> float:
+        params: dict[str, Any] = {
+            name: _suggest_from_spec(trial, name, spec) for name, spec in HPO_SEARCH_SPACE.items()
+        }
+        lags = HPO_LAG_SETS[int(params.pop("lag_set_idx"))]
+        quantile_alpha = float(params.pop("quantile_alpha"))
+        config = _build_model_config(quantile_alpha=quantile_alpha, lags=lags, **params)
+
+        task = ForecastTask(history=history, horizon=horizon, model_config=config)
+        result = engine.execute([task], actuals=actuals, origins=origins)
+        forecast_df = result.ledger.to_df()
+
+        return _cumulative_pinball(
+            forecast_df, actuals, horizon, quantile_alpha, tau=cost_optimal_tau
+        )
+
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=optuna.samplers.TPESampler(seed=seed),
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
+    )
+
+    if verbose:
+        print(
+            f"HPO: {n_trials} trials, {n_origins} origins, "
+            f"timeout {timeout_sec}s, panel size {history[UNIQUE_ID].nunique()} series, "
+            f"cost-optimal tau={cost_optimal_tau:.3f}"
+        )
+
+    started = time.time()
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study.optimize(
+        _objective,
+        n_trials=n_trials,
+        timeout=timeout_sec,
+        gc_after_trial=True,
+        callbacks=mlflow_callbacks or [],
+    )
+    elapsed = time.time() - started
+
+    best = dict(study.best_trial.params)
+    lags = HPO_LAG_SETS[int(best.pop("lag_set_idx"))]
+    quantile_alpha = float(best.pop("quantile_alpha"))
+    best_config = _build_model_config(quantile_alpha=quantile_alpha, lags=lags, **best)
+    best_config["_quantile_alpha"] = quantile_alpha
+
+    if verbose:
+        print(
+            f"HPO done in {elapsed:.1f}s. Best pinball={study.best_value:.4f} "
+            f"alpha={quantile_alpha:.2f} lags={lags}"
+        )
+
+    if mlflow.active_run() is not None:
+        mlflow.log_metric("hpo/best_pinball", study.best_value)
+        mlflow.log_params(
+            {f"hpo/best_{k}": str(v)[:500] for k, v in study.best_trial.params.items()}
+        )
+
+    return best_config
+
+
+# ------------------------------------------------------------------ #
+# Decision loop helpers
+# ------------------------------------------------------------------ #
 def _build_rs_params(
     simulator: VN2Simulator,
     lead_time: int,
     review_period: int,
 ) -> list[RsPolicyParameters]:
-    """Build R,S policy parameters from current simulator state."""
-    params = []
-    for uid, state in simulator.states.items():
-        inventory_position = state.end_inventory + state.in_transit_w1 + state.in_transit_w2
-        params.append(
-            RsPolicyParameters(
-                unique_id=uid,
-                inventory_position=inventory_position,
-                lead_time=lead_time,
-                review_period=review_period,
-            )
+    return [
+        RsPolicyParameters(
+            unique_id=uid,
+            inventory_position=s.end_inventory + s.in_transit_w1 + s.in_transit_w2,
+            lead_time=lead_time,
+            review_period=review_period,
         )
-    return params
+        for uid, s in simulator.states.items()
+    ]
 
 
-def _split_ready(
-    frame: pd.DataFrame,
-    mode: str,
-    lower_col: str,
-    upper_col: str,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split a pending-forecast frame into (to_observe, still_unresolved).
-
-    Cumulative mode: a row is ready iff every row in its
-    (uid, model, origin) window has a resolved actual.
-    Per-horizon mode: a row is ready iff it has both an actual and intervals.
-    """
-    if mode == "cumulative":
-        group_keys = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
-        grouped_y = frame.groupby(group_keys, sort=False)[Y]
-        window_complete = grouped_y.transform("count").eq(grouped_y.transform("size"))
-        return frame[window_complete], frame[~window_complete]
-    resolved = frame[Y].notna() & frame[lower_col].notna() & frame[upper_col].notna()
-    return frame[resolved], frame[~resolved]
-
-
-def _fill_actuals(
-    frame: pd.DataFrame,
-    lookup: pd.Series,
-) -> pd.DataFrame:
-    """Vectorized fill of NaN y from a (uid, ds)-indexed Series."""
-    if frame.empty or not frame[Y].isna().any():
-        return frame
-    keys = pd.MultiIndex.from_arrays([frame[UNIQUE_ID].values, frame[DS].values])
-    filled = lookup.reindex(keys).to_numpy()
-    result = frame.copy()
-    missing_mask = result[Y].isna().to_numpy()
-    result.loc[missing_mask, Y] = filled[missing_mask]
-    return result
+def _round_actuals(
+    data_dir: Path,
+    round_num: int,
+    state_keys: Mapping[str, object],
+) -> dict[str, float]:
+    try:
+        actuals = extract_new_actuals(data_dir, round_num + 1)
+    except (FileNotFoundError, ValueError):
+        # Fall back to the last date column of the current round's sales file.
+        round_raw = pd.read_csv(data_dir / f"week_{round_num}_sales.csv")
+        date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
+        last_col = date_cols[-1]
+        unique_ids = (
+            round_raw["Store"].astype(int).astype(str)
+            + "_"
+            + round_raw["Product"].astype(int).astype(str)
+        )
+        actuals = dict(zip(unique_ids, round_raw[last_col].fillna(0.0).astype(float), strict=False))
+    return {uid: actuals.get(uid, 0.0) for uid in state_keys}
 
 
-def _run_warmup(
-    sales: pd.DataFrame,
-    model_configs: list[dict],
-    horizon: int,
-    warmup_origins: int,
-    conformal_config: ConformalPolicyConfig,
-    series_filter: list[str] | None,
-) -> ConformalRuntime:
-    """Run walk-forward warmup to calibrate the conformal runtime.
-
-    Generates raw multi-model forecasts across the last `warmup_origins`
-    walk-forward origins, ensembles them, and feeds each resolved prediction
-    through apply/observe to build calibration state.
-
-    Returns a ConformalRuntime with calibration history accumulated.
-    """
-    conformal_runtime = ConformalRuntime(conformal_config)
-
-    if warmup_origins == 0:
-        return conformal_runtime
-
-    # Identify walk-forward origins from week_0 history
-    all_dates = sorted(sales[DS].unique())
-    if len(all_dates) < warmup_origins + horizon:
-        warmup_origins = max(1, len(all_dates) - horizon)
-
-    # Use the last warmup_origins dates as forecast origins (leave horizon for actuals)
-    origin_dates = [pd.Timestamp(d) for d in all_dates[-(warmup_origins + horizon) : -horizon]]
-    if not origin_dates:
-        return conformal_runtime
-
-    tasks = build_tasks(
-        sales,
-        model_configs,
-        horizon=horizon,
-        series_filter=series_filter,
-    )
-
-    engine = BackendEngine(freq="W-MON")
-    result = engine.execute(tasks, actuals=sales, origins=origin_dates)
-    ledger_df = result.ledger.to_df()
-
-    if ledger_df.empty:
-        return conformal_runtime
-
-    # Ensemble the multi-model predictions
-    ensemble_df = ensemble_median(ledger_df)
-
-    lower_col, upper_col = interval_column_names(conformal_config.coverage)
-    actuals_lookup = sales.drop_duplicates(subset=[UNIQUE_ID, DS]).set_index([UNIQUE_ID, DS])[Y]
-
-    pending_applied: list[pd.DataFrame] = []
-
-    for origin in origin_dates:
-        origin_rows = ensemble_df[ensemble_df[FORECAST_ORIGIN] == origin]
-        if origin_rows.empty:
-            continue
-
-        applied = conformal_runtime.apply(origin_rows)
-        if lower_col not in applied.columns:
-            continue
-
-        still_pending: list[pd.DataFrame] = []
-        for prev_applied in pending_applied:
-            if not (prev_applied[DS] <= origin).any():
-                still_pending.append(prev_applied)
-                continue
-
-            updated = _fill_actuals(prev_applied, actuals_lookup)
-            to_observe, unresolved = _split_ready(
-                updated, conformal_config.mode, lower_col, upper_col
-            )
-            if not to_observe.empty:
-                with contextlib.suppress(ValueError):
-                    conformal_runtime.observe(to_observe)
-            if not unresolved.empty:
-                still_pending.append(unresolved)
-
-        pending_applied = still_pending + [applied]
-
-    return conformal_runtime
+def _strip_private(config: dict[str, Any]) -> dict[str, Any]:
+    """Drop debug ``_*`` keys before handing the config to the engine."""
+    return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
+# ------------------------------------------------------------------ #
+# Main entry point
+# ------------------------------------------------------------------ #
 def run_benchmark(
     data_dir: Path = DATA_DIR,
-    model_configs: list[dict] = MODEL_CONFIGS,
-    conformal_config: ConformalPolicyConfig = CONFORMAL_CONFIG,
     horizon: int = HORIZON,
-    warmup_origins: int = WARMUP_ORIGINS,
     lead_time: int = LEAD_TIME,
     review_period: int = REVIEW_PERIOD,
     decision_rounds: int = DECISION_ROUNDS,
@@ -217,308 +395,201 @@ def run_benchmark(
     series_filter: list[str] | None = None,
     results_dir: Path | None = None,
     verbose: bool = True,
-    tune: bool = True,
-    tune_base_config: dict = TUNE_BASE_CONFIG,
-    tune_n_trials: int = TUNE_N_TRIALS,
-    tune_n_origins: int = TUNE_N_ORIGINS,
-    tune_max_workers: int = TUNE_MAX_WORKERS,
+    hpo_n_trials: int = HPO_N_TRIALS,
+    hpo_n_origins: int = HPO_N_ORIGINS,
+    hpo_timeout_sec: int = HPO_TIMEOUT_SEC,
+    hpo_seed: int = 42,
+    best_config: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Run the full VN2 benchmark and return per-product cost summary.
+    """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
 
     Args:
         data_dir: Directory containing week_*_sales.csv and week_0_initial_state.csv.
-        model_configs: List of model config dicts for BackendEngine tasks.
-        conformal_config: ConformalPolicyConfig for ACI/MSCP.
         horizon: Forecast horizon (= lead_time + review_period).
-        warmup_origins: Number of walk-forward origins to use for conformal warmup.
         lead_time: Order lead time in weeks.
         review_period: Review period in weeks.
         decision_rounds: Number of active ordering rounds (1 to N).
-        delivery_weeks: Number of weeks after last order (no new orders, just simulation).
+        delivery_weeks: Number of weeks after last order (no new orders).
         series_filter: Optional list of unique_ids to restrict the benchmark.
         results_dir: If provided, save per-product CSV here.
         verbose: Print progress and cost summary.
-        tune: If True, run per-series HPO and add the tuned model to the ensemble.
-        tune_base_config: Base model config to tune (default: SeasonalNaive).
-        tune_n_trials: Number of Optuna trials per series.
-        tune_n_origins: Number of walk-forward origins per tuning trial.
-        tune_max_workers: Maximum parallel threads for tuning.
+        hpo_n_trials: Optuna trial count for the pre-HPO phase.
+        hpo_n_origins: Walk-forward origins per HPO trial.
+        hpo_timeout_sec: Wall-clock cap for the HPO phase.
+        best_config: Pre-computed model config (skips HPO if provided).
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
     """
-    lower_col, upper_col = interval_column_names(conformal_config.coverage)
+    with start_benchmark_run(
+        "vn2",
+        "tuned",
+        tags={
+            "dataset": "vn2",
+            "policy": "rs",
+            "model_family": "lgbm",
+            "horizon": str(horizon),
+        },
+    ):
+        log_config_module(_vn2_config)
+        mlflow.log_param("hpo_seed", hpo_seed)
 
-    # ------------------------------------------------------------------ #
-    # Load initial inventory state
-    # ------------------------------------------------------------------ #
-    initial_state_path = data_dir / "week_0_initial_state.csv"
-    all_states = load_initial_states(initial_state_path)
-
-    if series_filter is not None:
-        states = {uid: s for uid, s in all_states.items() if uid in series_filter}
-    else:
-        states = all_states
-
-    simulator = VN2Simulator(states)
-
-    if verbose:
-        print(f"Loaded {len(states)} products from initial state.")
-
-    # ------------------------------------------------------------------ #
-    # Phase 0: TUNING — per-series HPO on historical data
-    # ------------------------------------------------------------------ #
-    week0_sales = load_period(data_dir, 0)
-    if series_filter is not None:
-        week0_sales = week0_sales[week0_sales[UNIQUE_ID].isin(series_filter)]
-
-    # tuned_configs maps unique_id → best model config; empty dict if tune=False
-    tuned_configs: dict[str, dict] = {}
-    if tune:
-        if verbose:
-            print(
-                f"Tuning {len(states)} series "
-                f"({tune_n_trials} trials × {tune_n_origins} origins, "
-                f"{tune_max_workers} workers)..."
-            )
-        tuned_configs = tune_all_series(
-            sales=week0_sales,
-            horizon=horizon,
-            base_config=tune_base_config,
-            search_space=seasonal_naive_search_space,
-            n_trials=tune_n_trials,
-            n_origins=tune_n_origins,
-            max_workers=tune_max_workers,
-        )
-        if verbose:
-            print(f"Tuning complete. {len(tuned_configs)} series tuned.")
-
-    # ------------------------------------------------------------------ #
-    # Phase 1: WARMUP — calibrate conformal runtime
-    # ------------------------------------------------------------------ #
-    if verbose:
-        print(f"Running warmup with {warmup_origins} origins...")
-
-    conformal_runtime = _run_warmup(
-        sales=week0_sales,
-        model_configs=model_configs,
-        horizon=horizon,
-        warmup_origins=warmup_origins,
-        conformal_config=conformal_config,
-        series_filter=series_filter,
-    )
-
-    if verbose:
-        n_calibrated = len(conformal_runtime._policies)
-        print(f"Warmup complete. Calibrated {n_calibrated} conformal policies.")
-
-    # ------------------------------------------------------------------ #
-    # Phase 2: DECISION ROUNDS
-    # ------------------------------------------------------------------ #
-    # Track the most recent ensemble+interval predictions per (uid, origin)
-    # so we can fill in actuals and call observe() when they resolve. Rows
-    # are dropped once their actuals are filled in (per-horizon scores) or
-    # once the full protection-period window is resolved (cumulative).
-    pending_forecasts: list[pd.DataFrame] = []
-    actuals_lookup: dict[tuple[str, pd.Timestamp], float] = {}
-
-    engine = BackendEngine(freq="W-MON")
-
-    for round_num in range(1, decision_rounds + 1):
-        if verbose:
-            print(f"\n--- Decision round {round_num} ---")
-
-        # Load updated sales data for this round
-        round_sales = load_period(data_dir, round_num)
+        initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
         if series_filter is not None:
-            round_sales = round_sales[round_sales[UNIQUE_ID].isin(series_filter)]
+            initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
 
-        # Forecast from the latest date in round sales
-        latest_date = round_sales[DS].max()
-        origin = pd.Timestamp(latest_date)
+        instock = _load_instock(data_dir, series_filter)
 
-        tasks = build_tasks(
-            round_sales,
-            model_configs,
-            horizon=horizon,
-            series_filter=list(states.keys()),
-        )
-        if tuned_configs:
-            sorted_sales = round_sales.sort_values([UNIQUE_ID, DS])
-            for uid, series_data in sorted_sales.groupby(UNIQUE_ID, sort=False):
-                if uid not in tuned_configs or series_data.empty:
-                    continue
-                history = series_data[[UNIQUE_ID, DS, Y]].reset_index(drop=True)
-                tasks.append(
-                    ForecastTask(
-                        history=history,
-                        horizon=horizon,
-                        model_config=tuned_configs[uid],
-                    )
-                )
+        if verbose:
+            print(f"Loaded {len(initial_states)} products.")
 
-        result = engine.execute(tasks, actuals=round_sales, origins=[origin])
-        raw_ledger = result.ledger.to_df()
+        # ------------------------------------------------------------------ #
+        # Phase 1: HPO on week_0 (cumulative pinball at chosen quantile)
+        # ------------------------------------------------------------------ #
+        if best_config is None:
+            best_config = run_hpo(
+                data_dir=data_dir,
+                horizon=horizon,
+                n_trials=hpo_n_trials,
+                n_origins=hpo_n_origins,
+                timeout_sec=hpo_timeout_sec,
+                series_filter=series_filter,
+                seed=hpo_seed,
+                verbose=verbose,
+                mlflow_callbacks=[optuna_mlflow_callback("vn2", metric_name="pinball_cumulative")],
+            )
+        quantile_alpha = float(best_config.get("_quantile_alpha", best_config["quantiles"][0]))
+        engine_config = _strip_private(best_config)
 
-        if raw_ledger.empty:
+        if verbose:
+            print(f"Best alpha: {quantile_alpha:.3f}")
+
+        mlflow.log_param("quantile_alpha", quantile_alpha)
+
+        # ------------------------------------------------------------------ #
+        # Phase 2: Decision loop — refit each round, R,S with quantile path
+        # ------------------------------------------------------------------ #
+        simulator = VN2Simulator(initial_states)
+        engine = BackendEngine(freq="W-MON")
+        target_quantile_col = quantile_column(quantile_alpha)
+
+        for round_num in range(1, decision_rounds + 1):
             if verbose:
-                print(f"  Round {round_num}: empty forecast ledger, skipping.")
-            continue
+                print(f"\n--- Decision round {round_num} ---")
 
-        # Ensemble the multi-model predictions
-        ensemble_df = ensemble_median(raw_ledger)
+            round_sales = load_period(data_dir, round_num)
+            if series_filter is not None:
+                round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
 
-        # Apply conformal intervals
-        applied_df = conformal_runtime.apply(ensemble_df)
+            history = _prepare_history(round_sales, instock)
+            # +1 week so the engine's strict `<` filter keeps the latest observation
+            origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
 
-        # Store for later observe()
-        if lower_col in applied_df.columns and upper_col in applied_df.columns:
-            pending_forecasts.append(applied_df.copy())
+            task = ForecastTask(history=history, horizon=horizon, model_config=engine_config)
+            result = engine.execute([task], actuals=round_sales, origins=[origin])
+            forecast_df = result.ledger.to_df()
 
-        # ------------------------------------------------------------------ #
-        # Get actual demand for this round
-        # ------------------------------------------------------------------ #
-        # The next week's sales file contains the new column for this round's actuals
-        next_week = round_num + 1
-        try:
-            actual_demand = extract_new_actuals(data_dir, next_week)
-        except (FileNotFoundError, ValueError):
-            # Fall back to the last column of the round's own sales file
-            round_raw = pd.read_csv(data_dir / f"week_{round_num}_sales.csv")
-            date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
-            last_col = date_cols[-1]
-            unique_ids = (
-                round_raw["Store"].astype(int).astype(str)
-                + "_"
-                + round_raw["Product"].astype(int).astype(str)
-            )
-            actual_demand = dict(
-                zip(unique_ids, round_raw[last_col].fillna(0.0).astype(float), strict=False)
-            )
-
-        # Filter demand to our products
-        actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in states}
-
-        # ------------------------------------------------------------------ #
-        # Compute R,S orders from current inventory position
-        # ------------------------------------------------------------------ #
-        rs_params = _build_rs_params(simulator, lead_time=lead_time, review_period=review_period)
-        order_config = OrderPolicyConfig(
-            policy="rs",
-            params=rs_params,
-            coverage=conformal_config.coverage,
-        )
-
-        if lower_col in applied_df.columns and upper_col in applied_df.columns:
-            try:
-                order_result = apply_order_policy(applied_df, order_config)
-                orders: dict[str, float] = {}
-                for _, row in order_result.iterrows():
-                    uid = str(row[UNIQUE_ID])
-                    qty = math.ceil(float(row.get("order_qty", 0.0)))
-                    orders[uid] = max(float(qty), 0.0)
-            except (ValueError, KeyError) as exc:
+            if forecast_df.empty or target_quantile_col not in forecast_df.columns:
                 if verbose:
-                    print(f"  Order policy failed: {exc}. Using zero orders.")
-                orders = {uid: 0.0 for uid in states}
-        else:
+                    print("  Empty forecast or missing quantile column, using zero orders.")
+                orders: dict[str, float] = dict.fromkeys(initial_states, 0.0)
+            else:
+                order_config = OrderPolicyConfig(
+                    policy="rs",
+                    params=_build_rs_params(simulator, lead_time, review_period),
+                    quantile=quantile_alpha,
+                )
+                try:
+                    order_result = apply_order_policy(forecast_df, order_config)
+                    orders = dict.fromkeys(initial_states, 0.0)
+                    for uid, qty in zip(
+                        order_result[UNIQUE_ID].astype(str),
+                        order_result["order_qty"].astype(float),
+                        strict=False,
+                    ):
+                        orders[uid] = float(max(math.ceil(qty), 0))
+                except (ValueError, KeyError) as exc:
+                    if verbose:
+                        print(f"  Order computation failed: {exc}. Using zero orders.")
+                    orders = dict.fromkeys(initial_states, 0.0)
+
+            actual_demand = _round_actuals(data_dir, round_num, initial_states)
+
             if verbose:
-                print("  No interval columns yet (warmup still needed). Using zero orders.")
-            orders = {uid: 0.0 for uid in states}
+                total_order = sum(orders.values())
+                print(f"  Origin: {origin.date()}  Total order qty: {total_order:.0f}")
 
-        if verbose:
-            total_order = sum(orders.values())
-            print(f"  Origin: {origin.date()}  Total order qty: {total_order:.0f}")
+            simulator.step(round_num, orders=orders, actual_demand=actual_demand)
+
+            holding_cum = shortage_cum = 0.0
+            for s in simulator.states.values():
+                holding_cum += s.cumulative_holding_cost
+                shortage_cum += s.cumulative_shortage_cost
+            mlflow.log_metric("cost/holding", holding_cum, step=round_num)
+            mlflow.log_metric("cost/shortage", shortage_cum, step=round_num)
+            mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=round_num)
 
         # ------------------------------------------------------------------ #
-        # Step simulator
+        # Phase 3: Delivery weeks (no orders)
         # ------------------------------------------------------------------ #
-        simulator.step(round_num, orders=orders, actual_demand=actual_demand)
-
-        # ------------------------------------------------------------------ #
-        # Feed resolved forecasts to conformal observe()
-        # ------------------------------------------------------------------ #
-        # Each round delivers actuals for one new period; record them keyed
-        # by the date they apply to (origin + 1 week == ds for h=1 of the
-        # forecast just issued at this origin).
-        actuals_ds = pd.Timestamp(origin) + pd.Timedelta(weeks=1)
-        for uid, demand in actual_demand.items():
-            actuals_lookup[(uid, actuals_ds)] = float(demand)
-
-        lookup_series = pd.Series(actuals_lookup, dtype=float)
-        if not lookup_series.empty:
-            lookup_series.index = pd.MultiIndex.from_tuples(lookup_series.index)
-
-        still_pending: list[pd.DataFrame] = []
-        for prev_forecast in pending_forecasts:
-            updated = _fill_actuals(prev_forecast, lookup_series)
-            to_observe, still_unresolved = _split_ready(
-                updated, conformal_config.mode, lower_col, upper_col
+        for week_offset in range(1, delivery_weeks + 1):
+            week = decision_rounds + week_offset
+            if verbose:
+                print(f"\n--- Delivery week {week} (no orders) ---")
+            try:
+                actual_demand = extract_new_actuals(data_dir, week)
+                actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in initial_states}
+            except (FileNotFoundError, ValueError):
+                actual_demand = dict.fromkeys(initial_states, 0.0)
+            simulator.step(
+                week,
+                orders=dict.fromkeys(initial_states, 0.0),
+                actual_demand=actual_demand,
             )
-            if not to_observe.empty:
-                with contextlib.suppress(ValueError):
-                    conformal_runtime.observe(to_observe)
-            if not still_unresolved.empty:
-                still_pending.append(still_unresolved)
 
-        pending_forecasts = still_pending
+        # ------------------------------------------------------------------ #
+        # Phase 4: Results
+        # ------------------------------------------------------------------ #
+        rows = []
+        for uid, state in simulator.states.items():
+            rows.append(
+                {
+                    "unique_id": uid,
+                    "holding_cost": state.cumulative_holding_cost,
+                    "shortage_cost": state.cumulative_shortage_cost,
+                    "total_cost": state.cumulative_holding_cost + state.cumulative_shortage_cost,
+                }
+            )
+        summary_df = pd.DataFrame(rows).sort_values("unique_id").reset_index(drop=True)
 
-    # ------------------------------------------------------------------ #
-    # Phase 3: DELIVERY WEEKS — no orders, just simulation
-    # ------------------------------------------------------------------ #
-    for week_offset in range(1, delivery_weeks + 1):
-        week = decision_rounds + week_offset
         if verbose:
-            print(f"\n--- Delivery week {week} (no orders) ---")
-        try:
-            actual_demand = extract_new_actuals(data_dir, week)
-            actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in states}
-        except (FileNotFoundError, ValueError):
-            actual_demand = {uid: 0.0 for uid in states}
+            total_holding = summary_df["holding_cost"].sum()
+            total_shortage = summary_df["shortage_cost"].sum()
+            total_cost = summary_df["total_cost"].sum()
+            print("\n" + "=" * 50)
+            print("VN2 TUNED BENCHMARK RESULTS")
+            print("=" * 50)
+            print(f"Products:        {len(summary_df)}")
+            print(f"Holding cost:    EUR {total_holding:,.2f}")
+            print(f"Shortage cost:   EUR {total_shortage:,.2f}")
+            print(f"TOTAL COST:      EUR {total_cost:,.2f}")
+            print("=" * 50)
 
-        simulator.step(week, orders={uid: 0.0 for uid in states}, actual_demand=actual_demand)
+        log_costs_dataframe(summary_df)
 
-    # ------------------------------------------------------------------ #
-    # Phase 4: RESULTS
-    # ------------------------------------------------------------------ #
-    rows = []
-    for uid, state in simulator.states.items():
-        rows.append(
-            {
-                "unique_id": uid,
-                "holding_cost": state.cumulative_holding_cost,
-                "shortage_cost": state.cumulative_shortage_cost,
-                "total_cost": state.cumulative_holding_cost + state.cumulative_shortage_cost,
-            }
-        )
-    summary_df = pd.DataFrame(rows).sort_values("unique_id").reset_index(drop=True)
-
-    if verbose:
-        total_holding = summary_df["holding_cost"].sum()
-        total_shortage = summary_df["shortage_cost"].sum()
-        total_cost = summary_df["total_cost"].sum()
-        print("\n" + "=" * 50)
-        print("VN2 BENCHMARK RESULTS")
-        print("=" * 50)
-        print(f"Products:        {len(summary_df)}")
-        print(f"Holding cost:    €{total_holding:,.2f}")
-        print(f"Shortage cost:   €{total_shortage:,.2f}")
-        print(f"TOTAL COST:      €{total_cost:,.2f}")
-        print("=" * 50)
-
-    if results_dir is not None:
-        results_dir = Path(results_dir)
-        results_dir.mkdir(parents=True, exist_ok=True)
-        out_path = results_dir / "per_product_costs.csv"
-        summary_df.to_csv(out_path, index=False)
-        if verbose:
-            print(f"\nPer-product costs saved to: {out_path}")
+        if results_dir is not None:
+            results_dir = Path(results_dir)
+            results_dir.mkdir(parents=True, exist_ok=True)
+            out_path = results_dir / "per_product_costs.csv"
+            summary_df.to_csv(out_path, index=False)
+            if verbose:
+                print(f"\nPer-product costs saved to: {out_path}")
 
     return summary_df
 
 
 if __name__ == "__main__":
-    results = run_benchmark(
+    run_benchmark(
         results_dir=Path(__file__).parent / "results",
         verbose=True,
     )

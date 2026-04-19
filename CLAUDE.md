@@ -10,9 +10,9 @@ intervals + ordering policies, exercised through backtesting pipelines.
 Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
 `ruff`, or `mypy` directly.
 
-| Task            | Command                                         |
-| --------------- | ----------------------------------------------- |
-| Install deps    | `uv sync --extra dev`                           |
+| Task                   | Command                                                   |
+| ---------------------- | --------------------------------------------------------- |
+| Install deps           | `uv sync --extra dev --extra benchmarks`                  |
 | Run tests       | `uv run pytest`                                 |
 | Run single test | `uv run pytest path/to/test_file.py::test_name` |
 | Lint            | `uv run ruff check .`                           |
