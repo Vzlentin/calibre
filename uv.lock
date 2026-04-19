@@ -223,12 +223,10 @@ source = { editable = "." }
 dependencies = [
     { name = "fugue" },
     { name = "lightgbm" },
-    { name = "mlflow" },
     { name = "mlforecast" },
     { name = "neuralforecast" },
     { name = "numpy" },
     { name = "optuna" },
-    { name = "optuna-integration", extra = ["mlflow"] },
     { name = "pandas" },
     { name = "pandas-stubs" },
     { name = "pyarrow" },
@@ -238,6 +236,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+benchmarks = [
+    { name = "mlflow" },
+    { name = "optuna-integration", extra = ["mlflow"] },
+]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
@@ -248,13 +250,13 @@ dev = [
 requires-dist = [
     { name = "fugue" },
     { name = "lightgbm" },
-    { name = "mlflow", specifier = ">=2.17,<3" },
+    { name = "mlflow", marker = "extra == 'benchmarks'", specifier = ">=2.17,<3" },
     { name = "mlforecast" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "neuralforecast" },
     { name = "numpy" },
     { name = "optuna" },
-    { name = "optuna-integration", extras = ["mlflow"], specifier = ">=4.0" },
+    { name = "optuna-integration", extras = ["mlflow"], marker = "extra == 'benchmarks'", specifier = ">=4.0" },
     { name = "pandas" },
     { name = "pandas-stubs", specifier = ">=3.0.0.260204" },
     { name = "pyarrow" },
@@ -263,7 +265,7 @@ requires-dist = [
     { name = "statsforecast" },
     { name = "xgboost" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "benchmarks"]
 
 [[package]]
 name = "certifi"

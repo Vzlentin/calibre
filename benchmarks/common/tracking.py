@@ -146,7 +146,7 @@ def log_costs_dataframe(costs_df: pd.DataFrame, *, artifact_subdir: str = "costs
         mlflow.log_artifact(str(csv_path), artifact_path=artifact_subdir)
 
 
-def optuna_mlflow_callback(experiment_name: str) -> Any:
+def optuna_mlflow_callback(experiment_name: str, metric_name: str = "objective") -> Any:
     """Return an optuna-integration MLflowCallback configured for nested runs.
 
     Passes nested=True when a parent MLflow run is already active (the benchmark
@@ -160,6 +160,6 @@ def optuna_mlflow_callback(experiment_name: str) -> Any:
 
     return MLflowCallback(
         tracking_uri=resolve_tracking_uri(),
-        metric_name="pinball_cumulative",
+        metric_name=metric_name,
         mlflow_kwargs=mlflow_kwargs,
     )

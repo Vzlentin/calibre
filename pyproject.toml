@@ -19,8 +19,6 @@ dependencies = [
     "neuralforecast",
     "pandas-stubs>=3.0.0.260204",
     "optuna",
-    "mlflow>=2.17,<3",
-    "optuna-integration[mlflow]>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +26,10 @@ dev = [
     "pytest",
     "ruff",
     "mypy",
+]
+benchmarks = [
+    "mlflow>=2.17,<3",
+    "optuna-integration[mlflow]>=4.0",
 ]
 
 [tool.pytest.ini_options]

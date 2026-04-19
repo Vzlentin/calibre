@@ -364,7 +364,16 @@ def _round_actuals(
     try:
         actuals = extract_new_actuals(data_dir, round_num + 1)
     except (FileNotFoundError, ValueError):
-        actuals = {}
+        # Fall back to the last date column of the current round's sales file.
+        round_raw = pd.read_csv(data_dir / f"week_{round_num}_sales.csv")
+        date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
+        last_col = date_cols[-1]
+        unique_ids = (
+            round_raw["Store"].astype(int).astype(str)
+            + "_"
+            + round_raw["Product"].astype(int).astype(str)
+        )
+        actuals = dict(zip(unique_ids, round_raw[last_col].fillna(0.0).astype(float), strict=False))
     return {uid: actuals.get(uid, 0.0) for uid in state_keys}
 
 
@@ -389,6 +398,7 @@ def run_benchmark(
     hpo_n_trials: int = HPO_N_TRIALS,
     hpo_n_origins: int = HPO_N_ORIGINS,
     hpo_timeout_sec: int = HPO_TIMEOUT_SEC,
+    hpo_seed: int = 42,
     best_config: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
@@ -422,7 +432,7 @@ def run_benchmark(
         },
     ):
         log_config_module(_vn2_config)
-        mlflow.log_param("seed", 42)
+        mlflow.log_param("hpo_seed", hpo_seed)
 
         initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
         if series_filter is not None:
@@ -444,8 +454,9 @@ def run_benchmark(
                 n_origins=hpo_n_origins,
                 timeout_sec=hpo_timeout_sec,
                 series_filter=series_filter,
+                seed=hpo_seed,
                 verbose=verbose,
-                mlflow_callbacks=[optuna_mlflow_callback("vn2")],
+                mlflow_callbacks=[optuna_mlflow_callback("vn2", metric_name="pinball_cumulative")],
             )
         quantile_alpha = float(best_config.get("_quantile_alpha", best_config["quantiles"][0]))
         engine_config = _strip_private(best_config)
