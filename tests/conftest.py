@@ -5,6 +5,12 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mlflow(tmp_path, monkeypatch):
+    """Redirect MLflow tracking to a per-test tmp directory."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", str(tmp_path / "mlruns"))
+
+
 def _find_data_dir() -> Path:
     """Locate the data/vn2/ directory, handling git worktrees."""
     # First try the standard location relative to this file

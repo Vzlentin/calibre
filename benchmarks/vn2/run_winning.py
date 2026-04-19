@@ -17,13 +17,21 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
+import mlflow
 import pandas as pd
 from mlforecast.lag_transforms import RollingMean, RollingStd
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import benchmarks.vn2.config as _vn2_config
+from benchmarks.common.tracking import (
+    log_config_module,
+    log_costs_dataframe,
+    start_benchmark_run,
+)
 from benchmarks.vn2.config import (
     DATA_DIR,
     DECISION_ROUNDS,
@@ -105,7 +113,7 @@ def _build_rs_params(
 def _round_actuals(
     data_dir: Path,
     round_num: int,
-    state_keys: dict[str, object],
+    state_keys: Mapping[str, object],
 ) -> dict[str, float]:
     try:
         actuals = extract_new_actuals(data_dir, round_num + 1)
@@ -126,117 +134,139 @@ def run_winning(
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Run the VN2 benchmark via Calibre's MLForecastAdapter quantile path."""
-    initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
+    with start_benchmark_run(
+        "vn2",
+        "winning",
+        tags={
+            "dataset": "vn2",
+            "policy": "rs",
+            "model_family": "lgbm",
+            "horizon": str(horizon),
+        },
+    ):
+        log_config_module(_vn2_config)
 
-    instock = None
-    instock_path = data_dir / "week_0_in_stock.csv"
-    if instock_path.exists():
-        instock = melt_wide_instock(instock_path)
+        initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
 
-    if series_filter is not None:
-        initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
-        if instock is not None:
-            instock = instock[instock[UNIQUE_ID].isin(series_filter)]
+        instock = None
+        instock_path = data_dir / "week_0_in_stock.csv"
+        if instock_path.exists():
+            instock = melt_wide_instock(instock_path)
 
-    simulator = VN2Simulator(initial_states)
-    engine = BackendEngine(freq="W-MON")
-
-    if verbose:
-        print(f"Loaded {len(initial_states)} products.")
-
-    for round_num in range(1, decision_rounds + 1):
-        if verbose:
-            print(f"\n--- Decision round {round_num} ---")
-
-        round_sales = load_period(data_dir, round_num)
         if series_filter is not None:
-            round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
+            initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
+            if instock is not None:
+                instock = instock[instock[UNIQUE_ID].isin(series_filter)]
 
-        history = _prepare_history(round_sales, instock)
-        # +1 week so the engine's strict `<` filter keeps the latest observation
-        origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
+        simulator = VN2Simulator(initial_states)
+        engine = BackendEngine(freq="W-MON")
 
-        task = ForecastTask(history=history, horizon=horizon, model_config=MODEL_CONFIG)
-        result = engine.execute([task], actuals=round_sales, origins=[origin])
-        forecast_df = result.ledger.to_df()
+        if verbose:
+            print(f"Loaded {len(initial_states)} products.")
 
-        actual_demand = _round_actuals(data_dir, round_num, initial_states)
-
-        order_config = OrderPolicyConfig(
-            policy="rs",
-            params=_build_rs_params(simulator, lead_time, review_period),
-            quantile=QUANTILE_ALPHA,
-        )
-
-        try:
-            order_result = apply_order_policy(forecast_df, order_config)
-            orders: dict[str, float] = dict.fromkeys(initial_states, 0.0)
-            for uid, qty in zip(
-                order_result[UNIQUE_ID].astype(str),
-                order_result["order_qty"].astype(float),
-                strict=False,
-            ):
-                orders[uid] = float(max(math.ceil(qty), 0))
-        except (ValueError, KeyError) as exc:
+        for round_num in range(1, decision_rounds + 1):
             if verbose:
-                print(f"  Order computation failed: {exc}. Using zero orders.")
-            orders = dict.fromkeys(initial_states, 0.0)
+                print(f"\n--- Decision round {round_num} ---")
+
+            round_sales = load_period(data_dir, round_num)
+            if series_filter is not None:
+                round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
+
+            history = _prepare_history(round_sales, instock)
+            # +1 week so the engine's strict `<` filter keeps the latest observation
+            origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
+
+            task = ForecastTask(history=history, horizon=horizon, model_config=MODEL_CONFIG)
+            result = engine.execute([task], actuals=round_sales, origins=[origin])
+            forecast_df = result.ledger.to_df()
+
+            actual_demand = _round_actuals(data_dir, round_num, initial_states)
+
+            order_config = OrderPolicyConfig(
+                policy="rs",
+                params=_build_rs_params(simulator, lead_time, review_period),
+                quantile=QUANTILE_ALPHA,
+            )
+
+            try:
+                order_result = apply_order_policy(forecast_df, order_config)
+                orders: dict[str, float] = dict.fromkeys(initial_states, 0.0)
+                for uid, qty in zip(
+                    order_result[UNIQUE_ID].astype(str),
+                    order_result["order_qty"].astype(float),
+                    strict=False,
+                ):
+                    orders[uid] = float(max(math.ceil(qty), 0))
+            except (ValueError, KeyError) as exc:
+                if verbose:
+                    print(f"  Order computation failed: {exc}. Using zero orders.")
+                orders = dict.fromkeys(initial_states, 0.0)
+
+            if verbose:
+                total_order = sum(orders.values())
+                print(f"  Origin: {origin.date()}  Total order qty: {total_order:.0f}")
+
+            simulator.step(round_num, orders=orders, actual_demand=actual_demand)
+
+            holding_cum = shortage_cum = 0.0
+            for s in simulator.states.values():
+                holding_cum += s.cumulative_holding_cost
+                shortage_cum += s.cumulative_shortage_cost
+            mlflow.log_metric("cost/holding", holding_cum, step=round_num)
+            mlflow.log_metric("cost/shortage", shortage_cum, step=round_num)
+            mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=round_num)
+
+        for week_offset in range(1, delivery_weeks + 1):
+            week = decision_rounds + week_offset
+            if verbose:
+                print(f"\n--- Delivery week {week} (no orders) ---")
+            try:
+                actual_demand = extract_new_actuals(data_dir, week)
+                actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in initial_states}
+            except (FileNotFoundError, ValueError):
+                actual_demand = {uid: 0.0 for uid in initial_states}
+            simulator.step(
+                week,
+                orders={uid: 0.0 for uid in initial_states},
+                actual_demand=actual_demand,
+            )
+
+        rows = []
+        for uid, state in simulator.states.items():
+            rows.append(
+                {
+                    "unique_id": uid,
+                    "holding_cost": state.cumulative_holding_cost,
+                    "shortage_cost": state.cumulative_shortage_cost,
+                    "total_cost": state.cumulative_holding_cost + state.cumulative_shortage_cost,
+                }
+            )
+        summary_df = pd.DataFrame(rows).sort_values("unique_id").reset_index(drop=True)
 
         if verbose:
-            total_order = sum(orders.values())
-            print(f"  Origin: {origin.date()}  Total order qty: {total_order:.0f}")
+            total_holding = summary_df["holding_cost"].sum()
+            total_shortage = summary_df["shortage_cost"].sum()
+            total_cost = summary_df["total_cost"].sum()
+            print("\n" + "=" * 50)
+            print("VN2 WINNING APPROACH (CALIBRE MIGRATION) RESULTS")
+            print("=" * 50)
+            print(f"Products:        {len(summary_df)}")
+            print(f"Holding cost:    EUR {total_holding:,.2f}")
+            print(f"Shortage cost:   EUR {total_shortage:,.2f}")
+            print(f"TOTAL COST:      EUR {total_cost:,.2f}")
+            print("=" * 50)
 
-        simulator.step(round_num, orders=orders, actual_demand=actual_demand)
+        log_costs_dataframe(summary_df)
 
-    for week_offset in range(1, delivery_weeks + 1):
-        week = decision_rounds + week_offset
-        if verbose:
-            print(f"\n--- Delivery week {week} (no orders) ---")
-        try:
-            actual_demand = extract_new_actuals(data_dir, week)
-            actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in initial_states}
-        except (FileNotFoundError, ValueError):
-            actual_demand = {uid: 0.0 for uid in initial_states}
-        simulator.step(
-            week,
-            orders={uid: 0.0 for uid in initial_states},
-            actual_demand=actual_demand,
-        )
+        if results_dir is not None:
+            results_dir = Path(results_dir)
+            results_dir.mkdir(parents=True, exist_ok=True)
+            out_path = results_dir / "per_product_costs_winning.csv"
+            summary_df.to_csv(out_path, index=False)
+            if verbose:
+                print(f"\nPer-product costs saved to: {out_path}")
 
-    rows = []
-    for uid, state in simulator.states.items():
-        rows.append(
-            {
-                "unique_id": uid,
-                "holding_cost": state.cumulative_holding_cost,
-                "shortage_cost": state.cumulative_shortage_cost,
-                "total_cost": state.cumulative_holding_cost + state.cumulative_shortage_cost,
-            }
-        )
-    summary_df = pd.DataFrame(rows).sort_values("unique_id").reset_index(drop=True)
-
-    if verbose:
-        total_holding = summary_df["holding_cost"].sum()
-        total_shortage = summary_df["shortage_cost"].sum()
-        total_cost = summary_df["total_cost"].sum()
-        print("\n" + "=" * 50)
-        print("VN2 WINNING APPROACH (CALIBRE MIGRATION) RESULTS")
-        print("=" * 50)
-        print(f"Products:        {len(summary_df)}")
-        print(f"Holding cost:    EUR {total_holding:,.2f}")
-        print(f"Shortage cost:   EUR {total_shortage:,.2f}")
-        print(f"TOTAL COST:      EUR {total_cost:,.2f}")
-        print("=" * 50)
-
-    if results_dir is not None:
-        results_dir = Path(results_dir)
-        results_dir.mkdir(parents=True, exist_ok=True)
-        out_path = results_dir / "per_product_costs_winning.csv"
-        summary_df.to_csv(out_path, index=False)
-        if verbose:
-            print(f"\nPer-product costs saved to: {out_path}")
-
-    return summary_df
+        return summary_df
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 # project specific
 data/
+mlruns/
 .vscode/
 .claude/*
 !.claude/skills/
