@@ -1,5 +1,4 @@
 """Shared MLflow tracking utilities for Calibre benchmarks."""
-
 from __future__ import annotations  # keeps pd.DataFrame annotation lazy at runtime
 
 import dataclasses

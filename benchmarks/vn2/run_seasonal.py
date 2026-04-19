@@ -398,9 +398,7 @@ def run_seasonal(
 
             actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in states}
 
-            rs_params = _build_rs_params(
-                simulator, lead_time=lead_time, review_period=review_period
-            )
+            rs_params = _build_rs_params(simulator, lead_time=lead_time, review_period=review_period)
             order_config = OrderPolicyConfig(
                 policy="rs",
                 params=rs_params,
