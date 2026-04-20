@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import math
 import sys
+from functools import partial
 from pathlib import Path
 
 import mlflow
@@ -74,6 +75,13 @@ from calibre.contracts.forecast_frame import (
 )
 from calibre.engine.backend import BackendEngine
 from calibre.ensemble.median import ensemble_median
+from calibre.orchestration import (
+    DecisionLoop,
+    DecisionLoopConfig,
+    RoundResult,
+    observe_cumulative,
+    observe_per_horizon,
+)
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.order.types import RsPolicyParameters
 from calibre.pipeline.loading import load_period
@@ -86,19 +94,15 @@ def _build_rs_params(
     lead_time: int,
     review_period: int,
 ) -> list[RsPolicyParameters]:
-    """Build R,S policy parameters from current simulator state."""
-    params = []
-    for uid, state in simulator.states.items():
-        inventory_position = state.end_inventory + state.in_transit_w1 + state.in_transit_w2
-        params.append(
-            RsPolicyParameters(
-                unique_id=uid,
-                inventory_position=inventory_position,
-                lead_time=lead_time,
-                review_period=review_period,
-            )
+    return [
+        RsPolicyParameters(
+            unique_id=uid,
+            inventory_position=s.end_inventory + s.in_transit_w1 + s.in_transit_w2,
+            lead_time=lead_time,
+            review_period=review_period,
         )
-    return params
+        for uid, s in simulator.states.items()
+    ]
 
 
 def _split_ready(
@@ -329,27 +333,22 @@ def run_seasonal(
             n_calibrated = len(conformal_runtime._policies)
             print(f"Warmup complete. Calibrated {n_calibrated} conformal policies.")
 
-        pending_forecasts: list[pd.DataFrame] = []
-        actuals_lookup: dict[tuple[str, pd.Timestamp], float] = {}
-
         engine = BackendEngine(freq="W-MON")
 
-        for round_num in range(1, decision_rounds + 1):
-            if verbose:
-                print(f"\n--- Decision round {round_num} ---")
+        if conformal_config.mode == "cumulative":
+            observe_fn = observe_cumulative
+        else:
+            observe_fn = partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col)
 
-            round_sales = load_period(data_dir, round_num)
+        def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
+            if verbose:
+                print(f"\n--- Decision round {rn} ---")
+            round_sales = load_period(data_dir, rn)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(series_filter)]
-
-            latest_date = round_sales[DS].max()
-            origin = pd.Timestamp(latest_date)
-
+            origin = pd.Timestamp(round_sales[DS].max())
             tasks = build_tasks(
-                round_sales,
-                model_configs,
-                horizon=horizon,
-                series_filter=list(states.keys()),
+                round_sales, model_configs, horizon=horizon, series_filter=list(states.keys())
             )
             if tuned_configs:
                 sorted_sales = round_sales.sort_values([UNIQUE_ID, DS])
@@ -360,117 +359,88 @@ def run_seasonal(
                     history = series_data[[UNIQUE_ID, DS, Y]].reset_index(drop=True)
                     tasks.append(
                         ForecastTask(
-                            history=history,
-                            horizon=horizon,
-                            model_config=tuned_configs[uid],
+                            history=history, horizon=horizon, model_config=tuned_configs[uid]
                         )
                     )
+            return tasks, origin, round_sales
 
-            result = engine.execute(tasks, actuals=round_sales, origins=[origin])
-            raw_ledger = result.ledger.to_df()
-
-            if raw_ledger.empty:
-                if verbose:
-                    print(f"  Round {round_num}: empty forecast ledger, skipping.")
-                continue
-
-            ensemble_df = ensemble_median(raw_ledger)
-            applied_df = conformal_runtime.apply(ensemble_df)
-
-            if lower_col in applied_df.columns and upper_col in applied_df.columns:
-                pending_forecasts.append(applied_df.copy())
-
-            next_week = round_num + 1
-            try:
-                actual_demand = extract_new_actuals(data_dir, next_week)
-            except (FileNotFoundError, ValueError):
-                round_raw = pd.read_csv(data_dir / f"week_{round_num}_sales.csv")
-                date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
-                last_col = date_cols[-1]
-                unique_ids = (
-                    round_raw["Store"].astype(int).astype(str)
-                    + "_"
-                    + round_raw["Product"].astype(int).astype(str)
-                )
-                actual_demand = dict(
-                    zip(unique_ids, round_raw[last_col].fillna(0.0).astype(float), strict=False)
-                )
-
-            actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in states}
-
-            rs_params = _build_rs_params(
-                simulator, lead_time=lead_time, review_period=review_period
-            )
-            order_config = OrderPolicyConfig(
-                policy="rs",
-                params=rs_params,
-                coverage=conformal_config.coverage,
-            )
-
-            if lower_col in applied_df.columns and upper_col in applied_df.columns:
-                try:
-                    order_result = apply_order_policy(applied_df, order_config)
-                    orders: dict[str, float] = {}
-                    for _, row in order_result.iterrows():
-                        uid = str(row[UNIQUE_ID])
-                        qty = math.ceil(float(row.get("order_qty", 0.0)))
-                        orders[uid] = max(float(qty), 0.0)
-                except (ValueError, KeyError) as exc:
-                    if verbose:
-                        print(f"  Order policy failed: {exc}. Using zero orders.")
-                    orders = {uid: 0.0 for uid in states}
-            else:
+        def _policy(frame: pd.DataFrame) -> dict[str, float]:
+            if lower_col not in frame.columns or upper_col not in frame.columns:
                 if verbose:
                     print("  No interval columns yet (warmup still needed). Using zero orders.")
-                orders = {uid: 0.0 for uid in states}
-
-            if verbose:
-                total_order = sum(orders.values())
-                print(f"  Origin: {origin.date()}  Total order qty: {total_order:.0f}")
-
-            simulator.step(round_num, orders=orders, actual_demand=actual_demand)
-
-            holding_cum = shortage_cum = 0.0
-            for s in simulator.states.values():
-                holding_cum += s.cumulative_holding_cost
-                shortage_cum += s.cumulative_shortage_cost
-            mlflow.log_metric("cost/holding", holding_cum, step=round_num)
-            mlflow.log_metric("cost/shortage", shortage_cum, step=round_num)
-            mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=round_num)
-
-            actuals_ds = pd.Timestamp(origin) + pd.Timedelta(weeks=1)
-            for uid, demand in actual_demand.items():
-                actuals_lookup[(uid, actuals_ds)] = float(demand)
-
-            lookup_series = pd.Series(actuals_lookup, dtype=float)
-            if not lookup_series.empty:
-                lookup_series.index = pd.MultiIndex.from_tuples(lookup_series.index)
-
-            still_pending: list[pd.DataFrame] = []
-            for prev_forecast in pending_forecasts:
-                updated = _fill_actuals(prev_forecast, lookup_series)
-                to_observe, still_unresolved = _split_ready(
-                    updated, conformal_config.mode, lower_col, upper_col
-                )
-                if not to_observe.empty:
-                    with contextlib.suppress(ValueError):
-                        conformal_runtime.observe(to_observe)
-                if not still_unresolved.empty:
-                    still_pending.append(still_unresolved)
-
-            pending_forecasts = still_pending
-
-        for week_offset in range(1, delivery_weeks + 1):
-            week = decision_rounds + week_offset
-            if verbose:
-                print(f"\n--- Delivery week {week} (no orders) ---")
+                return {uid: 0.0 for uid in states}
             try:
-                actual_demand = extract_new_actuals(data_dir, week)
-                actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in states}
-            except (FileNotFoundError, ValueError):
-                actual_demand = {uid: 0.0 for uid in states}
+                order_result = apply_order_policy(
+                    frame,
+                    OrderPolicyConfig(
+                        policy="rs",
+                        params=_build_rs_params(
+                            simulator, lead_time=lead_time, review_period=review_period
+                        ),
+                        coverage=conformal_config.coverage,
+                    ),
+                )
+                orders: dict[str, float] = {}
+                for uid, qty in zip(
+                    order_result[UNIQUE_ID].astype(str),
+                    order_result["order_qty"].astype(float),
+                    strict=False,
+                ):
+                    orders[uid] = float(max(math.ceil(qty), 0))
+                return orders
+            except (ValueError, KeyError) as exc:
+                if verbose:
+                    print(f"  Order policy failed: {exc}. Using zero orders.")
+                return {uid: 0.0 for uid in states}
 
-            simulator.step(week, orders={uid: 0.0 for uid in states}, actual_demand=actual_demand)
+        def _get_actuals(rn: int) -> dict[str, float]:
+            # Decision rounds fetch next week (+1); delivery rounds index directly.
+            week = rn + 1 if rn <= decision_rounds else rn
+            try:
+                actuals = extract_new_actuals(data_dir, week)
+                return {uid: actuals.get(uid, 0.0) for uid in states}
+            except (FileNotFoundError, ValueError):
+                if rn <= decision_rounds:
+                    round_raw = pd.read_csv(data_dir / f"week_{rn}_sales.csv")
+                    date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
+                    last_col = date_cols[-1]
+                    unique_ids = (
+                        round_raw["Store"].astype(int).astype(str)
+                        + "_"
+                        + round_raw["Product"].astype(int).astype(str)
+                    )
+                    fallback = dict(
+                        zip(unique_ids, round_raw[last_col].fillna(0.0).astype(float), strict=False)
+                    )
+                    return {uid: fallback.get(uid, 0.0) for uid in states}
+                return {uid: 0.0 for uid in states}
+
+        def _on_round(rr: RoundResult) -> None:
+            if verbose:
+                print(
+                    f"  Origin: {rr.origin.date()}  Total order qty: {sum(rr.orders.values()):.0f}"
+                )
+            holding_cum = sum(s.cumulative_holding_cost for s in simulator.states.values())
+            shortage_cum = sum(s.cumulative_shortage_cost for s in simulator.states.values())
+            mlflow.log_metric("cost/holding", holding_cum, step=rr.round_num)
+            mlflow.log_metric("cost/shortage", shortage_cum, step=rr.round_num)
+            mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=rr.round_num)
+
+        DecisionLoop(
+            engine=engine,
+            simulator=simulator,
+            build_round_tasks=_build_round,
+            policy=_policy,
+            get_actuals=_get_actuals,
+            config=DecisionLoopConfig(
+                n_rounds=decision_rounds,
+                n_delivery_rounds=delivery_weeks,
+                on_round=_on_round,
+            ),
+            runtime=conformal_runtime,
+            ensemble=ensemble_median,
+            observe_fn=observe_fn,
+        ).run()
 
         rows = []
         for uid, state in simulator.states.items():

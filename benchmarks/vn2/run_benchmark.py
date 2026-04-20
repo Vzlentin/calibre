@@ -27,7 +27,7 @@ Documented gaps that this script works around (Phase-4 material):
   HPO is therefore inlined here.
 - ``ensemble_median`` ignores ``q_*``, so the optional multi-alpha ensemble
   averages quantile columns inline.
-- No orchestration layer for the VN2 decision loop — it is still inlined.
+- Decision loop now delegated to ``calibre.orchestration.DecisionLoop``.
 - Exogenous ``future_x`` is dead end-to-end and not used.
 """
 
@@ -84,6 +84,7 @@ from calibre.contracts.forecast_frame import (
 from calibre.engine.backend import BackendEngine
 from calibre.features import add_stockout_features
 from calibre.metrics import pinball_linear
+from calibre.orchestration import DecisionLoop, DecisionLoopConfig, RoundResult
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.order.types import RsPolicyParameters
 from calibre.pipeline.loading import load_period, melt_wide_instock
@@ -473,82 +474,83 @@ def run_benchmark(
         engine = BackendEngine(freq="W-MON")
         target_quantile_col = quantile_column(quantile_alpha)
 
-        for round_num in range(1, decision_rounds + 1):
+        def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
             if verbose:
-                print(f"\n--- Decision round {round_num} ---")
-
-            round_sales = load_period(data_dir, round_num)
+                print(f"\n--- Decision round {rn} ---")
+            round_sales = load_period(data_dir, rn)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
-
             history = _prepare_history(round_sales, instock)
             # +1 week so the engine's strict `<` filter keeps the latest observation
             origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
+            return (
+                [ForecastTask(history=history, horizon=horizon, model_config=engine_config)],
+                origin,
+                round_sales,
+            )
 
-            task = ForecastTask(history=history, horizon=horizon, model_config=engine_config)
-            result = engine.execute([task], actuals=round_sales, origins=[origin])
-            forecast_df = result.ledger.to_df()
-
-            if forecast_df.empty or target_quantile_col not in forecast_df.columns:
+        def _policy(frame: pd.DataFrame) -> dict[str, float]:
+            if frame.empty or target_quantile_col not in frame.columns:
                 if verbose:
                     print("  Empty forecast or missing quantile column, using zero orders.")
-                orders: dict[str, float] = dict.fromkeys(initial_states, 0.0)
-            else:
+                return dict.fromkeys(initial_states, 0.0)
+            try:
                 order_config = OrderPolicyConfig(
                     policy="rs",
                     params=_build_rs_params(simulator, lead_time, review_period),
                     quantile=quantile_alpha,
                 )
-                try:
-                    order_result = apply_order_policy(forecast_df, order_config)
-                    orders = dict.fromkeys(initial_states, 0.0)
-                    for uid, qty in zip(
-                        order_result[UNIQUE_ID].astype(str),
-                        order_result["order_qty"].astype(float),
-                        strict=False,
-                    ):
-                        orders[uid] = float(max(math.ceil(qty), 0))
-                except (ValueError, KeyError) as exc:
-                    if verbose:
-                        print(f"  Order computation failed: {exc}. Using zero orders.")
-                    orders = dict.fromkeys(initial_states, 0.0)
+                order_result = apply_order_policy(frame, order_config)
+                orders: dict[str, float] = dict.fromkeys(initial_states, 0.0)
+                for uid, qty in zip(
+                    order_result[UNIQUE_ID].astype(str),
+                    order_result["order_qty"].astype(float),
+                    strict=False,
+                ):
+                    orders[uid] = float(max(math.ceil(qty), 0))
+                return orders
+            except (ValueError, KeyError) as exc:
+                if verbose:
+                    print(f"  Order computation failed: {exc}. Using zero orders.")
+                return dict.fromkeys(initial_states, 0.0)
 
-            actual_demand = _round_actuals(data_dir, round_num, initial_states)
-
-            if verbose:
-                total_order = sum(orders.values())
-                print(f"  Origin: {origin.date()}  Total order qty: {total_order:.0f}")
-
-            simulator.step(round_num, orders=orders, actual_demand=actual_demand)
-
-            holding_cum = shortage_cum = 0.0
-            for s in simulator.states.values():
-                holding_cum += s.cumulative_holding_cost
-                shortage_cum += s.cumulative_shortage_cost
-            mlflow.log_metric("cost/holding", holding_cum, step=round_num)
-            mlflow.log_metric("cost/shortage", shortage_cum, step=round_num)
-            mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=round_num)
-
-        # ------------------------------------------------------------------ #
-        # Phase 3: Delivery weeks (no orders)
-        # ------------------------------------------------------------------ #
-        for week_offset in range(1, delivery_weeks + 1):
-            week = decision_rounds + week_offset
-            if verbose:
-                print(f"\n--- Delivery week {week} (no orders) ---")
+        def _get_actuals(rn: int) -> dict[str, float]:
+            # Decision rounds use +1 offset (demand realized next week).
+            # Delivery rounds index directly (matches the week number).
+            if rn <= decision_rounds:
+                return _round_actuals(data_dir, rn, initial_states)
             try:
-                actual_demand = extract_new_actuals(data_dir, week)
-                actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in initial_states}
+                actuals = extract_new_actuals(data_dir, rn)
+                return {uid: actuals.get(uid, 0.0) for uid in initial_states}
             except (FileNotFoundError, ValueError):
-                actual_demand = dict.fromkeys(initial_states, 0.0)
-            simulator.step(
-                week,
-                orders=dict.fromkeys(initial_states, 0.0),
-                actual_demand=actual_demand,
-            )
+                return dict.fromkeys(initial_states, 0.0)
+
+        def _on_round(rr: RoundResult) -> None:
+            if verbose:
+                print(
+                    f"  Origin: {rr.origin.date()}  Total order qty: {sum(rr.orders.values()):.0f}"
+                )
+            holding_cum = sum(s.cumulative_holding_cost for s in simulator.states.values())
+            shortage_cum = sum(s.cumulative_shortage_cost for s in simulator.states.values())
+            mlflow.log_metric("cost/holding", holding_cum, step=rr.round_num)
+            mlflow.log_metric("cost/shortage", shortage_cum, step=rr.round_num)
+            mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=rr.round_num)
+
+        DecisionLoop(
+            engine=engine,
+            simulator=simulator,
+            build_round_tasks=_build_round,
+            policy=_policy,
+            get_actuals=_get_actuals,
+            config=DecisionLoopConfig(
+                n_rounds=decision_rounds,
+                n_delivery_rounds=delivery_weeks,
+                on_round=_on_round,
+            ),
+        ).run()
 
         # ------------------------------------------------------------------ #
-        # Phase 4: Results
+        # Results
         # ------------------------------------------------------------------ #
         rows = []
         for uid, state in simulator.states.items():
