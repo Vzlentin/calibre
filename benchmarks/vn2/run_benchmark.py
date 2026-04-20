@@ -515,8 +515,6 @@ def run_benchmark(
                 return dict.fromkeys(initial_states, 0.0)
 
         def _get_actuals(rn: int) -> dict[str, float]:
-            # Decision rounds use +1 offset (demand realized next week).
-            # Delivery rounds index directly (matches the week number).
             if rn <= decision_rounds:
                 return _round_actuals(data_dir, rn, initial_states)
             try:

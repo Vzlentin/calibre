@@ -143,7 +143,9 @@ class DecisionLoop:
             raw ledger frame (or ensemble output).
         get_actuals: ``round_num → {uid: realised_demand}``.  Called for both
             decision and delivery rounds — callers are responsible for the
-            correct offset to the underlying data files.
+            correct offset to the underlying data files.  For delivery rounds
+            the returned dict's keys are used directly as the zero-order set
+            passed to the simulator, so it must cover all tracked SKUs.
         config: Loop-level settings (n_rounds, n_delivery_rounds, on_round).
         runtime: Optional :class:`ConformalRuntime`.  When set, its ``apply``
             is called after (optional) ensembling and the output is appended to
@@ -171,6 +173,8 @@ class DecisionLoop:
         observe_fn: Callable[[ConformalRuntime, list[pd.DataFrame], pd.Series], list[pd.DataFrame]]
         | None = None,
     ) -> None:
+        if observe_fn is not None and runtime is None:
+            raise ValueError("observe_fn requires runtime")
         self._engine = engine
         self._simulator = simulator
         self._build_round_tasks = build_round_tasks
