@@ -32,7 +32,7 @@ Each project gets exactly one folder inside the vault, named after the
 repository directory:
 
 ```
-$OBSIDIAN_VAULT_PATH/<project>/
+$OBSIDIAN_VAULT_PATH/Projects/<project>/
 ├── architecture.md
 ├── vision.md
 ├── lessons.md
