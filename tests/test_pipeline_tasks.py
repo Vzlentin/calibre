@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from calibre.models.registry import get_scope
 from calibre.pipeline.tasks import build_tasks
 from calibre.tasks.forecast_task import ForecastTask
 
@@ -186,3 +187,89 @@ class TestBuildTasksGlobal:
             "series_b",
             "series_c",
         }
+
+
+class TestBuildTasksOverrides:
+    def test_override_swaps_model_list_for_one_series(self, sample_sales, local_configs):
+        """overrides[uid] replaces the default model_configs for that series only."""
+        override_cfg = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4}]
+        overrides = {"series_a": override_cfg}
+        tasks = build_tasks(sample_sales, local_configs, horizon=5, overrides=overrides)
+
+        # series_a: 1 override config × 1 series = 1 task
+        # series_b, series_c: 2 default configs × 2 series = 4 tasks
+        assert len(tasks) == 5
+
+        a_tasks = [t for t in tasks if t.unique_id == "series_a"]
+        assert len(a_tasks) == 1
+        assert a_tasks[0].model_config == override_cfg[0]
+
+        b_tasks = [t for t in tasks if t.unique_id == "series_b"]
+        assert len(b_tasks) == 2
+
+    def test_series_without_override_keep_defaults(self, sample_sales, local_configs):
+        """Series not mentioned in overrides still use model_configs."""
+        override_cfg = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4}]
+        overrides = {"series_a": override_cfg}
+        tasks = build_tasks(sample_sales, local_configs, horizon=5, overrides=overrides)
+
+        for uid in ["series_b", "series_c"]:
+            uid_tasks = [t for t in tasks if t.unique_id == uid]
+            assert len(uid_tasks) == 2
+            configs = [t.model_config for t in uid_tasks]
+            assert local_configs[0] in configs
+            assert local_configs[1] in configs
+
+    def test_unknown_uid_in_overrides_raises(self, sample_sales, local_configs):
+        """An unknown unique_id key in overrides raises ValueError."""
+        overrides = {"series_z": [{"backend": "statsforecast", "model": "SeasonalNaive"}]}
+        with pytest.raises(ValueError, match="overrides contains unknown unique_id"):
+            build_tasks(sample_sales, local_configs, horizon=5, overrides=overrides)
+
+    def test_global_override_deduplicates(self, sample_sales):
+        """Global configs in overrides for multiple uids are deduplicated."""
+        global_cfg = [
+            {"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "scope": "global"}
+        ]
+        overrides = {"series_a": global_cfg, "series_b": global_cfg}
+        tasks = build_tasks(sample_sales, [], horizon=5, overrides=overrides)
+
+        # Both uids share the same global config → exactly 1 global task
+        assert len(tasks) == 1
+        assert tasks[0].model_config == global_cfg[0]
+        assert set(tasks[0].history["unique_id"].unique()) == {"series_a", "series_b", "series_c"}
+
+    def test_override_with_local_and_global_mixed(self, sample_sales, local_configs):
+        """One series gets a global override, others keep local defaults."""
+        global_cfg = [
+            {"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "scope": "global"}
+        ]
+        overrides = {"series_a": global_cfg}
+        tasks = build_tasks(sample_sales, local_configs, horizon=5, overrides=overrides)
+
+        # series_a: 1 global task (all series in history)
+        # series_b, series_c: 2 local configs each = 4 tasks
+        assert len(tasks) == 5
+
+        global_tasks = [t for t in tasks if get_scope(t.model_config) == "global"]
+        assert len(global_tasks) == 1
+
+        local_tasks = [t for t in tasks if get_scope(t.model_config) == "local"]
+        assert len(local_tasks) == 4
+
+    def test_global_override_with_list_config_deduplicates(self, sample_sales):
+        """Global configs containing unhashable values (lists) deduplicate correctly."""
+        global_cfg = [
+            {
+                "backend": "mlforecast",
+                "model": "lightgbm.LGBMRegressor",
+                "scope": "global",
+                "features": ["rolling_mean_7", "lag_14"],
+            }
+        ]
+        overrides = {"series_a": global_cfg, "series_b": global_cfg}
+        tasks = build_tasks(sample_sales, [], horizon=5, overrides=overrides)
+
+        # Both uids share the same global config → exactly 1 global task
+        assert len(tasks) == 1
+        assert tasks[0].model_config == global_cfg[0]
