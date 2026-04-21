@@ -141,15 +141,15 @@ def ensemble_inverse_error(
         A valid forecast-frame DataFrame with model_name = name.
 
     Raises:
-        ValueError: If any error is <= 0 or if frame/error counts mismatch.
+        ValueError: If any error is not finite, <= 0, or if frame/error counts mismatch.
     """
     if len(frames) != len(errors):
         raise ValueError(
             f"frames ({len(frames)}) and errors ({len(errors)}) must have the same length"
         )
 
-    if any(e <= 0 for e in errors):
-        raise ValueError(f"all errors must be > 0, got {errors}")
+    if any(not np.isfinite(e) or e <= 0 for e in errors):
+        raise ValueError(f"all errors must be finite and > 0, got {errors}")
 
     inv = [1.0 / e for e in errors]
     total = sum(inv)

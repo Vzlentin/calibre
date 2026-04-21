@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 import pandas as pd
@@ -94,10 +95,10 @@ def build_tasks(
     # When global configs appeared in overrides for multiple uids, we
     # duplicated the global tasks. Deduplicate by identity on the task tuple
     # (history ref equality is fine since we used the same ``data`` object).
-    seen: set[tuple[int, tuple[tuple[str, object], ...], int]] = set()
+    seen: set[tuple[int, str, int]] = set()
     deduped: list[ForecastTask] = []
     for task in tasks:
-        key = id(task.history), tuple(sorted(task.model_config.items())), task.horizon
+        key = id(task.history), json.dumps(task.model_config, sort_keys=True), task.horizon
         if key not in seen:
             seen.add(key)
             deduped.append(task)

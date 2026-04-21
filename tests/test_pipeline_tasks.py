@@ -256,3 +256,20 @@ class TestBuildTasksOverrides:
 
         local_tasks = [t for t in tasks if get_scope(t.model_config) == "local"]
         assert len(local_tasks) == 4
+
+    def test_global_override_with_list_config_deduplicates(self, sample_sales):
+        """Global configs containing unhashable values (lists) deduplicate correctly."""
+        global_cfg = [
+            {
+                "backend": "mlforecast",
+                "model": "lightgbm.LGBMRegressor",
+                "scope": "global",
+                "features": ["rolling_mean_7", "lag_14"],
+            }
+        ]
+        overrides = {"series_a": global_cfg, "series_b": global_cfg}
+        tasks = build_tasks(sample_sales, [], horizon=5, overrides=overrides)
+
+        # Both uids share the same global config → exactly 1 global task
+        assert len(tasks) == 1
+        assert tasks[0].model_config == global_cfg[0]

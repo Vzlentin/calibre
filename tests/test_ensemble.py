@@ -259,5 +259,19 @@ class TestEnsembleInverseError:
         """Zero or negative errors raise ValueError."""
         rows = [_make_forecast_row("S1", "2024-01-01", "2024-01-08", 1, 1.0, "M1")]
         frame = _make_ledger(rows)
-        with pytest.raises(ValueError, match="all errors must be > 0"):
+        with pytest.raises(ValueError, match="finite and > 0"):
             ensemble_inverse_error([frame, frame], [1.0, 0.0])
+
+    def test_nan_error_raises(self) -> None:
+        """NaN errors raise ValueError."""
+        rows = [_make_forecast_row("S1", "2024-01-01", "2024-01-08", 1, 1.0, "M1")]
+        frame = _make_ledger(rows)
+        with pytest.raises(ValueError, match="finite and > 0"):
+            ensemble_inverse_error([frame, frame], [1.0, float("nan")])
+
+    def test_inf_error_raises(self) -> None:
+        """Inf errors raise ValueError."""
+        rows = [_make_forecast_row("S1", "2024-01-01", "2024-01-08", 1, 1.0, "M1")]
+        frame = _make_ledger(rows)
+        with pytest.raises(ValueError, match="finite and > 0"):
+            ensemble_inverse_error([frame, frame], [1.0, float("inf")])
