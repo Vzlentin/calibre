@@ -21,7 +21,15 @@ _RESERVED_HISTORY_COLS = frozenset({UNIQUE_ID, DS, Y})
 
 
 def exogenous_columns(df: pd.DataFrame) -> list[str]:
-    """Columns of ``df`` that are not ``{unique_id, ds, y}`` — i.e. regressors."""
+    """Columns of ``df`` that are not ``{unique_id, ds, y}`` — i.e. regressors.
+
+    Every column in ``history`` that is not one of the three reserved columns
+    (``unique_id``, ``ds``, ``y``) is treated as an exogenous regressor and
+    forwarded to the library's ``fit`` call.  Callers are responsible for
+    ensuring that any extra columns in ``history`` are genuine numeric
+    regressors; metadata columns (e.g. ``"category"``, ``"store_id"``) will be
+    passed through and may cause errors inside the underlying library.
+    """
     return [c for c in df.columns if c not in _RESERVED_HISTORY_COLS]
 
 
