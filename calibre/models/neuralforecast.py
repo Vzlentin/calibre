@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import neuralforecast.models
 import pandas as pd
 from neuralforecast import NeuralForecast
 
-from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
@@ -35,13 +37,22 @@ class NeuralForecastAdapter(ModelAdapter):
             **params,
         )
 
-        nf_df = task.history[[UNIQUE_ID, DS, Y]].copy()
+        nf_df = task.history[[UNIQUE_ID, DS, Y, *exogenous_columns(task.history)]].copy()
         nf_df[Y] = nf_df[Y].astype("float32")
 
         self._nf = NeuralForecast(models=[model], freq=freq)
         self._nf.fit(df=nf_df)
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
+        """Forwards ``task.future_x`` as ``futr_df`` when non-empty.
+
+        The model must declare matching regressor names via
+        ``futr_exog_list=[<col>]`` in ``model_config``; the library raises if
+        the lists are inconsistent.
+        """
         if self._nf is None:
             raise RuntimeError("Call fit() before predict()")
-        return _build_predict_frame(self._nf.predict())
+        predict_kwargs: dict[str, Any] = {}
+        if task.future_x is not None and not task.future_x.empty:
+            predict_kwargs["futr_df"] = task.future_x
+        return _build_predict_frame(self._nf.predict(**predict_kwargs))

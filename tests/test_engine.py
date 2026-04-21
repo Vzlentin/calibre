@@ -348,6 +348,115 @@ def test_global_quantile_columns_survive_engine():
     assert df["q_0p833"].notna().all()
 
 
+def test_run_parallel_slices_future_x_per_uid(monkeypatch):
+    """_run_parallel must filter future_x to the current uid before passing to the adapter."""
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 3
+    future_x = pd.DataFrame(
+        {
+            "unique_id": ["A", "B"],
+            "ds": [pd.Timestamp("2024-04-07")] * 2,
+            "promo": [1.0, 0.0],
+        }
+    )
+    actuals = pd.concat(
+        [
+            pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern}),
+            pd.DataFrame({"unique_id": "B", "ds": dates, "y": pattern}),
+        ],
+        ignore_index=True,
+    )
+    tasks = [
+        ForecastTask(
+            history=pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern}),
+            horizon=1,
+            model_config={"backend": "stub", "model": "stub_model"},
+            future_x=future_x,
+        ),
+        ForecastTask(
+            history=pd.DataFrame({"unique_id": "B", "ds": dates, "y": pattern}),
+            horizon=1,
+            model_config={"backend": "stub", "model": "stub_model"},
+            future_x=future_x,
+        ),
+    ]
+
+    received: dict[str, pd.DataFrame | None] = {}
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            received[task.unique_id] = task.future_x
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "unique_id": [task.unique_id],
+                    "ds": [pd.Timestamp("2024-04-07")],
+                    "y_hat": [10.0],
+                    "h": [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.engine.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    engine = BackendEngine(freq="W")
+    engine.execute(tasks, actuals, origins=[dates[11]])
+
+    assert set(received["A"][UNIQUE_ID].unique()) == {"A"}
+    assert set(received["B"][UNIQUE_ID].unique()) == {"B"}
+
+
+def test_run_direct_passes_full_future_x(monkeypatch):
+    """_run_direct must pass the complete (un-sliced) future_x to the adapter."""
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 3
+    future_x = pd.DataFrame(
+        {
+            "unique_id": ["A", "B"],
+            "ds": [pd.Timestamp("2024-04-07")] * 2,
+            "promo": [1.0, 0.0],
+        }
+    )
+    all_series = pd.concat(
+        [
+            pd.DataFrame({"unique_id": "A", "ds": dates, "y": pattern}),
+            pd.DataFrame({"unique_id": "B", "ds": dates, "y": pattern}),
+        ],
+        ignore_index=True,
+    )
+    task = ForecastTask(
+        history=all_series,
+        horizon=1,
+        model_config={"backend": "stub", "model": "stub_model", "scope": "global"},
+        future_x=future_x,
+    )
+
+    received: list[pd.DataFrame | None] = []
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            received.append(task.future_x)
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "unique_id": ["A", "B"],
+                    "ds": [pd.Timestamp("2024-04-07")] * 2,
+                    "y_hat": [10.0, 10.0],
+                    "h": [1, 1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.engine.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    engine = BackendEngine(freq="W")
+    engine.execute([task], all_series, origins=[dates[11]])
+
+    assert len(received) == 1
+    assert received[0] is not None
+    assert set(received[0][UNIQUE_ID].unique()) == {"A", "B"}
+
+
 def test_mixed_local_and_global_tasks():
     """Local and global tasks should both appear in the ledger."""
     dates = pd.date_range("2024-01-07", periods=20, freq="W")

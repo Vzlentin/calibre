@@ -6,7 +6,15 @@ from typing import Any
 import pandas as pd
 from mlforecast import MLForecast
 
-from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y, quantile_column
+from calibre.contracts.forecast_frame import (
+    DS,
+    UNIQUE_ID,
+    Y_HAT,
+    H,
+    Y,
+    exogenous_columns,
+    quantile_column,
+)
 from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
@@ -113,7 +121,7 @@ class MLForecastAdapter(ModelAdapter):
             if (val := self._config.get(opt_key)) is not None:
                 mlf_kwargs[opt_key] = val
 
-        mlf_df = task.history[[UNIQUE_ID, DS, Y]].copy()
+        mlf_df = task.history[[UNIQUE_ID, DS, Y, *exogenous_columns(task.history)]].copy()
         mlf_df[Y] = mlf_df[Y].astype("float32")
 
         self._mlf = MLForecast(**mlf_kwargs)
@@ -125,7 +133,10 @@ class MLForecastAdapter(ModelAdapter):
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._mlf is None:
             raise RuntimeError("Call fit() before predict()")
-        raw = self._mlf.predict(h=task.horizon)
+        predict_kwargs: dict[str, Any] = {"h": task.horizon}
+        if task.future_x is not None and not task.future_x.empty:
+            predict_kwargs["X_df"] = task.future_x
+        raw = self._mlf.predict(**predict_kwargs)
         if self._name_to_quantile:
             return _build_quantile_predict_frame(raw, self._name_to_quantile)
         return _build_predict_frame(raw)
