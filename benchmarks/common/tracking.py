@@ -22,6 +22,29 @@ if TYPE_CHECKING:
 _REPO_ROOT = Path(__file__).parent.parent.parent
 
 
+def _load_dotenv() -> None:
+    """Load key=value pairs from .env files into os.environ (if not already set).
+
+    Searches: repo root .env, then the CWD .env. Values already set in the
+    environment are NOT overridden. This avoids adding a python-dotenv dependency
+    while still supporting ``MLFLOW_TRACKING_URI`` and other config from .env.
+    """
+    for dotenv_path in [_REPO_ROOT / ".env", Path.cwd() / ".env"]:
+        if dotenv_path.is_file():
+            with open(dotenv_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key, value = key.strip(), value.strip()
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+
+
+_load_dotenv()
+
+
 def resolve_tracking_uri() -> str:
     """Return an MLflow-compatible tracking URI, honouring MLFLOW_TRACKING_URI if set.
 
