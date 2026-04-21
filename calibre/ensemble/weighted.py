@@ -69,9 +69,7 @@ def ensemble_weighted(
         if set(df[_GROUP_KEYS].itertuples(index=False, name=None)) != set(
             base[_GROUP_KEYS].itertuples(index=False, name=None)
         ):
-            raise ValueError(
-                f"Frame {i} does not share the same group keys as frame 0"
-            )
+            raise ValueError(f"Frame {i} does not share the same group keys as frame 0")
 
     # Merge all frames on group keys, suffixing columns to keep them distinct.
     merged = base
@@ -80,9 +78,10 @@ def ensemble_weighted(
 
     # Weighted combination of y_hat
     result = merged[_GROUP_KEYS].copy()
-    result[Y_HAT] = sum(
-        merged[f"{Y_HAT}__m{i}"] * weights[i] for i in range(1, len(frames))
-    ) + merged[Y_HAT] * weights[0]
+    result[Y_HAT] = (
+        sum(merged[f"{Y_HAT}__m{i}"] * weights[i] for i in range(1, len(frames)))
+        + merged[Y_HAT] * weights[0]
+    )
 
     # Quantile columns: each frame may have different q_* columns.
     # We need to ensemble matching quantile columns across frames.
