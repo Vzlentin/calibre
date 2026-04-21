@@ -1,9 +1,22 @@
+from unittest.mock import MagicMock
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from calibre.models.mlforecast import MLForecastAdapter
 from calibre.tasks.forecast_task import ForecastTask
+
+
+def _mlf_predict_return(uid: str, n: int) -> pd.DataFrame:
+    """Minimal Nixtla-format predict output accepted by _build_predict_frame."""
+    return pd.DataFrame(
+        {
+            "unique_id": [uid] * n,
+            "ds": pd.date_range("2024-07-07", periods=n, freq="W"),
+            "LGBMRegressor": [10.0] * n,
+        }
+    )
 
 
 @pytest.fixture
@@ -190,3 +203,72 @@ def test_invalid_quantile_value_raises(repeating_history):
     adapter = MLForecastAdapter(task.model_config)
     with pytest.raises(ValueError, match="quantile"):
         adapter.fit(task)
+
+
+def test_fit_preserves_exogenous_columns(monkeypatch, repeating_history):
+    history = repeating_history.copy()
+    history["promo"] = [0.0, 1.0] * 12
+    task = ForecastTask(
+        history=history,
+        horizon=4,
+        model_config={"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "freq": "W"},
+        forecast_origin=pd.Timestamp("2024-06-23"),
+    )
+    mock_instance = MagicMock()
+    mock_instance.predict.return_value = _mlf_predict_return("SKU_001", 4)
+    monkeypatch.setattr(
+        "calibre.models.mlforecast.MLForecast", MagicMock(return_value=mock_instance)
+    )
+
+    adapter = MLForecastAdapter(task.model_config)
+    adapter.fit(task)
+
+    fit_df = mock_instance.fit.call_args[0][0]
+    assert "promo" in fit_df.columns
+
+
+def test_predict_forwards_future_x_as_X_df(monkeypatch, repeating_history):
+    history = repeating_history.copy()
+    history["promo"] = [0.0, 1.0] * 12
+    future_x = pd.DataFrame(
+        {
+            "unique_id": ["SKU_001"] * 4,
+            "ds": pd.date_range("2024-07-07", periods=4, freq="W"),
+            "promo": [1.0, 0.0, 1.0, 0.0],
+        }
+    )
+    task = ForecastTask(
+        history=history,
+        horizon=4,
+        model_config={"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "freq": "W"},
+        forecast_origin=pd.Timestamp("2024-06-23"),
+        future_x=future_x,
+    )
+    mock_instance = MagicMock()
+    mock_instance.predict.return_value = _mlf_predict_return("SKU_001", 4)
+    monkeypatch.setattr(
+        "calibre.models.mlforecast.MLForecast", MagicMock(return_value=mock_instance)
+    )
+
+    adapter = MLForecastAdapter(task.model_config)
+    adapter.fit(task)
+    adapter.predict(task)
+
+    _, predict_kwargs = mock_instance.predict.call_args
+    assert "X_df" in predict_kwargs
+    pd.testing.assert_frame_equal(predict_kwargs["X_df"], future_x)
+
+
+def test_predict_without_future_x_omits_X_df(monkeypatch, lgbm_task):
+    mock_instance = MagicMock()
+    mock_instance.predict.return_value = _mlf_predict_return("SKU_001", 4)
+    monkeypatch.setattr(
+        "calibre.models.mlforecast.MLForecast", MagicMock(return_value=mock_instance)
+    )
+
+    adapter = MLForecastAdapter(lgbm_task.model_config)
+    adapter.fit(lgbm_task)
+    adapter.predict(lgbm_task)
+
+    _, predict_kwargs = mock_instance.predict.call_args
+    assert "X_df" not in predict_kwargs

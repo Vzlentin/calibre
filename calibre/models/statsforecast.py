@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 import statsforecast.models
 from statsforecast import StatsForecast
 
-from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.models.base import ModelAdapter, _build_predict_frame
 from calibre.tasks.forecast_task import ForecastTask
 
@@ -25,7 +27,7 @@ class StatsForecastAdapter(ModelAdapter):
         model = model_cls(**params)
 
         freq = self._config.get("freq", "W")
-        sf_df = task.history[[UNIQUE_ID, DS, Y]].copy()
+        sf_df = task.history[[UNIQUE_ID, DS, Y, *exogenous_columns(task.history)]].copy()
         sf_df[Y] = sf_df[Y].astype("float32")
 
         self._sf = StatsForecast(models=[model], freq=freq)
@@ -34,4 +36,7 @@ class StatsForecastAdapter(ModelAdapter):
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._sf is None:
             raise RuntimeError("Call fit() before predict()")
-        return _build_predict_frame(self._sf.predict(h=task.horizon))
+        predict_kwargs: dict[str, Any] = {"h": task.horizon}
+        if task.future_x is not None and not task.future_x.empty:
+            predict_kwargs["X_df"] = task.future_x
+        return _build_predict_frame(self._sf.predict(**predict_kwargs))

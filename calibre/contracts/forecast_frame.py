@@ -17,6 +17,14 @@ CONFORMAL_MODE = "conformal_mode"
 
 REQUIRED_COLUMNS = [UNIQUE_ID, DS, Y, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]
 
+_RESERVED_HISTORY_COLS = frozenset({UNIQUE_ID, DS, Y})
+
+
+def exogenous_columns(df: pd.DataFrame) -> list[str]:
+    """Columns of ``df`` that are not ``{unique_id, ds, y}`` — i.e. regressors."""
+    return [c for c in df.columns if c not in _RESERVED_HISTORY_COLS]
+
+
 _EXPECTED_DTYPES = {
     UNIQUE_ID: "object",
     DS: "datetime64[ns]",

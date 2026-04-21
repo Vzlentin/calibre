@@ -164,12 +164,16 @@ class BackendEngine:
                 if history.empty:
                     continue
 
+                task_future_x = task.future_x
+                if task_future_x is not None and not task_future_x.empty:
+                    task_future_x = task_future_x[task_future_x[UNIQUE_ID] == uid]
+
                 origin_task = ForecastTask(
                     history=history,
                     horizon=task.horizon,
                     model_config={**task.model_config, "freq": freq},
                     forecast_origin=origin,
-                    future_x=task.future_x,
+                    future_x=task_future_x,
                 )
 
                 adapter = resolve_adapter(origin_task.model_config)
