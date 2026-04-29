@@ -2,8 +2,9 @@
 
 This is the flagship Calibre entry: a single global LightGBM quantile
 regressor exercised through ``MLForecastAdapter`` with ``strategy="direct"``,
-hyper-tuned via a thin panel-level Optuna sweep, then driven through the
-standard VN2 decision loop with ``apply_rs_policy(..., quantile=alpha)``.
+hyper-tuned via a thin panel-level Optuna sweep, conformal-enriched online,
+then driven through the standard VN2 decision loop with
+``apply_rs_policy(..., quantile=alpha)``.
 
 Pipeline:
 
@@ -13,8 +14,9 @@ Pipeline:
    the same statistic ``apply_rs_policy(..., quantile=p)`` sums at decision
    time, so the HPO optimises what we deploy.
 2. **Decision loop** (rounds 1..N): refit the global LGBM with the best
-   config at every round, ``apply_rs_policy`` with ``quantile=best_alpha``,
-   step the ``VN2Simulator``.
+   config at every round, apply/observe the conformal runtime, use
+   ``apply_rs_policy`` with ``quantile=best_alpha``, then step the
+   ``VN2Simulator``.
 3. **Delivery weeks**: zero orders, just simulator.
 
 Documented gaps that this script works around (Phase-4 material):
@@ -37,6 +39,7 @@ import math
 import sys
 import time
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +58,7 @@ from benchmarks.common.tracking import (
     start_benchmark_run,
 )
 from benchmarks.vn2.config import (
+    CONFORMAL_CONFIG,
     DATA_DIR,
     DECISION_ROUNDS,
     DELIVERY_WEEKS,
@@ -73,6 +77,7 @@ from benchmarks.vn2.simulator import (
     extract_new_actuals,
     load_initial_states,
 )
+from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -84,7 +89,13 @@ from calibre.contracts.forecast_frame import (
 from calibre.engine.backend import BackendEngine
 from calibre.features import add_stockout_features
 from calibre.metrics import pinball_linear
-from calibre.orchestration import DecisionLoop, DecisionLoopConfig, RoundResult
+from calibre.orchestration import (
+    DecisionLoop,
+    DecisionLoopConfig,
+    RoundResult,
+    observe_cumulative,
+    observe_per_horizon,
+)
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.order.types import RsPolicyParameters
 from calibre.pipeline.loading import load_period, melt_wide_instock
@@ -363,7 +374,7 @@ def _round_actuals(
     state_keys: Mapping[str, object],
 ) -> dict[str, float]:
     try:
-        actuals = extract_new_actuals(data_dir, round_num + 1)
+        actuals = extract_new_actuals(data_dir, round_num)
     except (FileNotFoundError, ValueError):
         # Fall back to the last date column of the current round's sales file.
         round_raw = pd.read_csv(data_dir / f"week_{round_num}_sales.csv")
@@ -401,6 +412,7 @@ def run_benchmark(
     hpo_timeout_sec: int = HPO_TIMEOUT_SEC,
     hpo_seed: int = 42,
     best_config: dict[str, Any] | None = None,
+    conformal_config: ConformalPolicyConfig | None = CONFORMAL_CONFIG,
 ) -> pd.DataFrame:
     """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
 
@@ -418,6 +430,10 @@ def run_benchmark(
         hpo_n_origins: Walk-forward origins per HPO trial.
         hpo_timeout_sec: Wall-clock cap for the HPO phase.
         best_config: Pre-computed model config (skips HPO if provided).
+        conformal_config: Optional conformal runtime config. When provided,
+            forecasts are conformal-enriched and observed online; orders still
+            use the cost-tuned quantile target to avoid symmetric interval
+            overstock on cumulative demand.
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
@@ -427,7 +443,7 @@ def run_benchmark(
         "tuned",
         tags={
             "dataset": "vn2",
-            "policy": "rs",
+            "policy": "rs-conformal-quantile" if conformal_config is not None else "rs",
             "model_family": "lgbm",
             "horizon": str(horizon),
         },
@@ -473,11 +489,21 @@ def run_benchmark(
         simulator = VN2Simulator(initial_states)
         engine = BackendEngine(freq="W-MON")
         target_quantile_col = quantile_column(quantile_alpha)
+        conformal_runtime = (
+            ConformalRuntime(conformal_config) if conformal_config is not None else None
+        )
+        if conformal_config is None:
+            observe_fn = None
+        elif conformal_config.mode == "cumulative":
+            observe_fn = observe_cumulative
+        else:
+            lower_col, upper_col = conformal_config.interval_columns
+            observe_fn = partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col)
 
         def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
             if verbose:
                 print(f"\n--- Decision round {rn} ---")
-            round_sales = load_period(data_dir, rn)
+            round_sales = load_period(data_dir, rn - 1)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
             history = _prepare_history(round_sales, instock)
@@ -545,6 +571,8 @@ def run_benchmark(
                 n_delivery_rounds=delivery_weeks,
                 on_round=_on_round,
             ),
+            runtime=conformal_runtime,
+            observe_fn=observe_fn,
         ).run()
 
         # ------------------------------------------------------------------ #

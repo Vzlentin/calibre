@@ -343,10 +343,11 @@ def run_seasonal(
         def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
             if verbose:
                 print(f"\n--- Decision round {rn} ---")
-            round_sales = load_period(data_dir, rn)
+            round_sales = load_period(data_dir, rn - 1)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(series_filter)]
-            origin = pd.Timestamp(round_sales[DS].max())
+            # +1 week so the engine's strict `<` filter keeps the latest observation.
+            origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
             tasks = build_tasks(
                 round_sales, model_configs, horizon=horizon, series_filter=list(states.keys())
             )
@@ -394,8 +395,7 @@ def run_seasonal(
                 return {uid: 0.0 for uid in states}
 
         def _get_actuals(rn: int) -> dict[str, float]:
-            # Decision rounds fetch next week (+1); delivery rounds index directly.
-            week = rn + 1 if rn <= decision_rounds else rn
+            week = rn
             try:
                 actuals = extract_new_actuals(data_dir, week)
                 return {uid: actuals.get(uid, 0.0) for uid in states}

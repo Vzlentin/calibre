@@ -116,7 +116,7 @@ def _round_actuals(
     state_keys: Mapping[str, object],
 ) -> dict[str, float]:
     try:
-        actuals = extract_new_actuals(data_dir, round_num + 1)
+        actuals = extract_new_actuals(data_dir, round_num)
     except (FileNotFoundError, ValueError):
         actuals = {}
     return {uid: actuals.get(uid, 0.0) for uid in state_keys}
@@ -168,7 +168,7 @@ def run_winning(
             if verbose:
                 print(f"\n--- Decision round {round_num} ---")
 
-            round_sales = load_period(data_dir, round_num)
+            round_sales = load_period(data_dir, round_num - 1)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
 

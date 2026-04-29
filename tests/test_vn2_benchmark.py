@@ -12,8 +12,8 @@ from pathlib import Path
 
 from mlforecast.lag_transforms import RollingMean
 
-from benchmarks.vn2.run_benchmark import run_benchmark, run_hpo
-from benchmarks.vn2.simulator import load_initial_states
+from benchmarks.vn2.run_benchmark import _round_actuals, run_benchmark, run_hpo
+from benchmarks.vn2.simulator import extract_new_actuals, load_initial_states
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
 
@@ -113,3 +113,12 @@ def test_run_hpo_returns_valid_config() -> None:
     assert config["backend"] == "mlforecast"
     assert config["scope"] == "global"
     assert 0.0 < config["_quantile_alpha"] < 1.0
+
+
+def test_round_actuals_uses_current_round_demand() -> None:
+    series = _get_first_n_series(3)
+    expected = extract_new_actuals(DATA_DIR, 1)
+
+    actuals = _round_actuals(DATA_DIR, 1, {uid: object() for uid in series})
+
+    assert actuals == {uid: expected.get(uid, 0.0) for uid in series}
