@@ -10,6 +10,10 @@ from calibre.conformal.aci import (
     AdaptiveConformalInference,
     MultiStepAdaptiveConformalInference,
 )
+from calibre.conformal.crc import (
+    CumulativeConformalRiskConfig,
+    CumulativeConformalRiskRuntime,
+)
 from calibre.conformal.intervals import symmetric_interval, symmetric_intervals
 from calibre.conformal.mscp import (
     CumulativeSplitConformalInference,
@@ -29,6 +33,8 @@ __all__ = [
     "AdaptiveConformalInference",
     "ConformalPolicyConfig",
     "ConformalRuntime",
+    "CumulativeConformalRiskConfig",
+    "CumulativeConformalRiskRuntime",
     "CumulativeSplitConformalInference",
     "IntervalPrediction",
     "MultiStepAdaptiveConformalInference",

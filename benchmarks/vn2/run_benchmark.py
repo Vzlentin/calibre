@@ -2,21 +2,19 @@
 
 This is the flagship Calibre entry: a single global LightGBM quantile
 regressor exercised through ``MLForecastAdapter`` with ``strategy="direct"``,
-hyper-tuned via a thin panel-level Optuna sweep, conformal-enriched online,
-then driven through the standard VN2 decision loop with
-``apply_rs_policy(..., quantile=alpha)``.
+hyper-tuned via a thin panel-level Optuna sweep, then driven through a
+one-sided cumulative conformal order target.
 
 Pipeline:
 
 1. **Pre-HPO** (once, on ``week_0_sales.csv``): N walk-forward origins,
    panel-level Optuna sweep over LightGBM hyper-parameters and lag sets.
-   Objective is cumulative-horizon pinball loss at the chosen quantile —
-   the same statistic ``apply_rs_policy(..., quantile=p)`` sums at decision
-   time, so the HPO optimises what we deploy.
+   Objective is cumulative-horizon pinball loss at the chosen quantile; the
+   conformal order runtime then calibrates a signed residual around that
+   cumulative base forecast.
 2. **Decision loop** (rounds 1..N): refit the global LGBM with the best
-   config at every round, apply/observe the conformal runtime, use
-   ``apply_rs_policy`` with ``quantile=best_alpha``, then step the
-   ``VN2Simulator``.
+   config at every round, apply/observe a cumulative conformal risk runtime,
+   use its ``hi_*`` bound as the R,S target, then step the ``VN2Simulator``.
 3. **Delivery weeks**: zero orders, just simulator.
 
 Documented gaps that this script works around (Phase-4 material):
@@ -39,6 +37,7 @@ import math
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -58,7 +57,7 @@ from benchmarks.common.tracking import (
     start_benchmark_run,
 )
 from benchmarks.vn2.config import (
-    CONFORMAL_CONFIG,
+    CONFORMAL_ORDER_CONFIG,
     DATA_DIR,
     DECISION_ROUNDS,
     DELIVERY_WEEKS,
@@ -77,6 +76,7 @@ from benchmarks.vn2.simulator import (
     extract_new_actuals,
     load_initial_states,
 )
+from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
 from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
@@ -394,6 +394,44 @@ def _strip_private(config: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
+def _run_order_conformal_warmup(
+    *,
+    sales: pd.DataFrame,
+    instock: pd.DataFrame | None,
+    model_config: dict[str, Any],
+    horizon: int,
+    warmup_origins: int,
+    runtime: CumulativeConformalRiskRuntime,
+    series_filter: list[str] | None,
+) -> None:
+    """Calibrate the cumulative order conformal runtime on resolved origins."""
+    if warmup_origins <= 0:
+        return
+
+    history = _prepare_history(sales, instock)
+    all_dates = sorted(history[DS].unique())
+    if len(all_dates) < warmup_origins + horizon:
+        warmup_origins = max(1, len(all_dates) - horizon)
+    origin_dates = [pd.Timestamp(d) for d in all_dates[-(warmup_origins + horizon) : -horizon]]
+    if not origin_dates:
+        return
+
+    engine = BackendEngine(freq="W-MON")
+    task = ForecastTask(history=history, horizon=horizon, model_config=model_config)
+    ledger_df = engine.execute([task], actuals=sales, origins=origin_dates).ledger.to_df()
+    if ledger_df.empty:
+        return
+
+    if series_filter is not None:
+        ledger_df = ledger_df[ledger_df[UNIQUE_ID].isin(series_filter)]
+
+    for origin in origin_dates:
+        origin_rows = ledger_df[ledger_df[FORECAST_ORIGIN] == origin]
+        if origin_rows.empty:
+            continue
+        runtime.observe(runtime.apply(origin_rows))
+
+
 # ------------------------------------------------------------------ #
 # Main entry point
 # ------------------------------------------------------------------ #
@@ -412,7 +450,9 @@ def run_benchmark(
     hpo_timeout_sec: int = HPO_TIMEOUT_SEC,
     hpo_seed: int = 42,
     best_config: dict[str, Any] | None = None,
-    conformal_config: ConformalPolicyConfig | None = CONFORMAL_CONFIG,
+    conformal_config: ConformalPolicyConfig | None = None,
+    order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
+    order_conformal_warmup_origins: int = HPO_N_ORIGINS,
 ) -> pd.DataFrame:
     """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
 
@@ -430,10 +470,15 @@ def run_benchmark(
         hpo_n_origins: Walk-forward origins per HPO trial.
         hpo_timeout_sec: Wall-clock cap for the HPO phase.
         best_config: Pre-computed model config (skips HPO if provided).
-        conformal_config: Optional conformal runtime config. When provided,
-            forecasts are conformal-enriched and observed online; orders still
-            use the cost-tuned quantile target to avoid symmetric interval
-            overstock on cumulative demand.
+        conformal_config: Optional legacy symmetric conformal runtime config.
+            When provided without ``order_conformal_config``, forecasts are
+            enriched/observed online but orders still use the cost-tuned
+            quantile target.
+        order_conformal_config: Optional one-sided cumulative conformal risk
+            config. When provided, orders are generated from the emitted
+            conformal ``hi_*`` bound rather than the direct quantile path.
+        order_conformal_warmup_origins: Resolved week_0 walk-forward origins
+            used to seed the one-sided order conformal residual pool.
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
@@ -443,7 +488,13 @@ def run_benchmark(
         "tuned",
         tags={
             "dataset": "vn2",
-            "policy": "rs-conformal-quantile" if conformal_config is not None else "rs",
+            "policy": (
+                "rs-capped-crc"
+                if order_conformal_config is not None
+                else "rs-conformal-quantile"
+                if conformal_config is not None
+                else "rs"
+            ),
             "model_family": "lgbm",
             "horizon": str(horizon),
         },
@@ -484,21 +535,47 @@ def run_benchmark(
         mlflow.log_param("quantile_alpha", quantile_alpha)
 
         # ------------------------------------------------------------------ #
-        # Phase 2: Decision loop — refit each round, R,S with quantile path
+        # Phase 2: Decision loop — refit each round, conformal-driven R,S
         # ------------------------------------------------------------------ #
         simulator = VN2Simulator(initial_states)
         engine = BackendEngine(freq="W-MON")
         target_quantile_col = quantile_column(quantile_alpha)
-        conformal_runtime = (
-            ConformalRuntime(conformal_config) if conformal_config is not None else None
-        )
-        if conformal_config is None:
-            observe_fn = None
-        elif conformal_config.mode == "cumulative":
+        order_conformal_runtime: CumulativeConformalRiskRuntime | None = None
+        if order_conformal_config is not None:
+            resolved_order_config = replace(
+                order_conformal_config,
+                base_column=target_quantile_col,
+                protection_period=lead_time + review_period,
+            )
+            order_conformal_runtime = CumulativeConformalRiskRuntime(resolved_order_config)
+            week0_sales = load_period(data_dir, 0)
+            if series_filter is not None:
+                week0_sales = week0_sales[week0_sales[UNIQUE_ID].isin(initial_states)]
+            _run_order_conformal_warmup(
+                sales=week0_sales,
+                instock=instock,
+                model_config=engine_config,
+                horizon=horizon,
+                warmup_origins=order_conformal_warmup_origins,
+                runtime=order_conformal_runtime,
+                series_filter=list(initial_states),
+            )
+            conformal_runtime = order_conformal_runtime
             observe_fn = observe_cumulative
+            mlflow.log_param("order_conformal_method", resolved_order_config.method_name)
+            mlflow.log_param("order_conformal_coverage", resolved_order_config.coverage)
+            mlflow.log_param("order_conformal_weight_decay", resolved_order_config.weight_decay)
+            mlflow.log_param("order_conformal_warmup_origins", order_conformal_warmup_origins)
+        elif conformal_config is not None:
+            conformal_runtime = ConformalRuntime(conformal_config)
+            if conformal_config.mode == "cumulative":
+                observe_fn = observe_cumulative
+            else:
+                lower_col, upper_col = conformal_config.interval_columns
+                observe_fn = partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col)
         else:
-            lower_col, upper_col = conformal_config.interval_columns
-            observe_fn = partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col)
+            conformal_runtime = None
+            observe_fn = None
 
         def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
             if verbose:
@@ -516,16 +593,27 @@ def run_benchmark(
             )
 
         def _policy(frame: pd.DataFrame) -> dict[str, float]:
-            if frame.empty or target_quantile_col not in frame.columns:
+            if frame.empty:
                 if verbose:
-                    print("  Empty forecast or missing quantile column, using zero orders.")
+                    print("  Empty forecast, using zero orders.")
                 return dict.fromkeys(initial_states, 0.0)
             try:
-                order_config = OrderPolicyConfig(
-                    policy="rs",
-                    params=_build_rs_params(simulator, lead_time, review_period),
-                    quantile=quantile_alpha,
-                )
+                if order_conformal_runtime is not None:
+                    order_config = OrderPolicyConfig(
+                        policy="rs",
+                        params=_build_rs_params(simulator, lead_time, review_period),
+                        coverage=order_conformal_runtime.config.coverage,
+                    )
+                else:
+                    if target_quantile_col not in frame.columns:
+                        if verbose:
+                            print("  Missing quantile column, using zero orders.")
+                        return dict.fromkeys(initial_states, 0.0)
+                    order_config = OrderPolicyConfig(
+                        policy="rs",
+                        params=_build_rs_params(simulator, lead_time, review_period),
+                        quantile=quantile_alpha,
+                    )
                 order_result = apply_order_policy(frame, order_config)
                 orders: dict[str, float] = dict.fromkeys(initial_states, 0.0)
                 for uid, qty in zip(

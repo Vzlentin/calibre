@@ -10,11 +10,10 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import pandas as pd
 
-from calibre.conformal.runtime import ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -24,6 +23,19 @@ from calibre.contracts.forecast_frame import (
 )
 from calibre.engine.backend import BackendEngine
 from calibre.tasks.forecast_task import ForecastTask
+
+
+class _RuntimeConfigLike(Protocol):
+    @property
+    def interval_columns(self) -> tuple[str, str]: ...
+
+
+class ConformalRuntimeLike(Protocol):
+    config: _RuntimeConfigLike
+
+    def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
+
+    def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
 
 
 @dataclass
@@ -60,7 +72,7 @@ def _fill_actuals(frame: pd.DataFrame, lookup: pd.Series) -> pd.DataFrame:
 
 
 def observe_per_horizon(
-    runtime: ConformalRuntime,
+    runtime: ConformalRuntimeLike,
     pending: list[pd.DataFrame],
     actuals_lookup: pd.Series,
     lower_col: str,
@@ -89,7 +101,7 @@ def observe_per_horizon(
 
 
 def observe_cumulative(
-    runtime: ConformalRuntime,
+    runtime: ConformalRuntimeLike,
     pending: list[pd.DataFrame],
     actuals_lookup: pd.Series,
 ) -> list[pd.DataFrame]:
@@ -147,9 +159,9 @@ class DecisionLoop:
             the returned dict's keys are used directly as the zero-order set
             passed to the simulator, so it must cover all tracked SKUs.
         config: Loop-level settings (n_rounds, n_delivery_rounds, on_round).
-        runtime: Optional :class:`ConformalRuntime`.  When set, its ``apply``
-            is called after (optional) ensembling and the output is appended to
-            the pending-forecast queue for later ``observe_fn`` calls.
+        runtime: Optional conformal runtime.  When set, its ``apply`` is called
+            after (optional) ensembling and the output is appended to the
+            pending-forecast queue for later ``observe_fn`` calls.
         ensemble: Optional ``ledger_df → frame`` aggregation applied before
             conformal.  Typically ``ensemble_median``.
         observe_fn: ``(runtime, pending, actuals_lookup) → new_pending``.
@@ -168,9 +180,11 @@ class DecisionLoop:
         policy: Callable[[pd.DataFrame], dict[str, float]],
         get_actuals: Callable[[int], dict[str, float]],
         config: DecisionLoopConfig,
-        runtime: ConformalRuntime | None = None,
+        runtime: ConformalRuntimeLike | None = None,
         ensemble: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
-        observe_fn: Callable[[ConformalRuntime, list[pd.DataFrame], pd.Series], list[pd.DataFrame]]
+        observe_fn: Callable[
+            [ConformalRuntimeLike, list[pd.DataFrame], pd.Series], list[pd.DataFrame]
+        ]
         | None = None,
     ) -> None:
         if observe_fn is not None and runtime is None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from calibre.conformal.crc import CumulativeConformalRiskConfig
 from calibre.conformal.runtime import ConformalPolicyConfig
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "vn2"
@@ -28,6 +29,20 @@ CONFORMAL_CONFIG = ConformalPolicyConfig(
     calibration_window=50,
     mode="cumulative",
     protection_period=LEAD_TIME + REVIEW_PERIOD,
+)
+
+# Order-driven conformal calibration for the tuned global LGBM benchmark.
+# This uses a one-sided cumulative residual buffer and writes the calibrated
+# upper target into the conformal ``hi_*`` column consumed by R,S. The global
+# capped residual correction keeps the calibrated target from double-counting
+# uncertainty above the cost-tuned base quantile.
+CONFORMAL_ORDER_CONFIG = CumulativeConformalRiskConfig(
+    coverage=0.72,
+    calibration_window=5000,
+    protection_period=LEAD_TIME + REVIEW_PERIOD,
+    weight_decay=None,
+    buffer_max=0.0,
+    method_name="capped_crc",
 )
 
 # Tuning (legacy seasonal-naive smoke run; kept to exercise TuningTask wiring)
