@@ -25,7 +25,8 @@ from calibre.contracts.forecast_frame import (
     validate_forecast_frame,
 )
 
-ConformalOrderScope = Literal["global", "series"]
+ConformalOrderScope = Literal["global", "series", "hierarchical"]
+WeightedQuantileMode = Literal["empirical", "nonexchangeable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,10 +45,14 @@ class CumulativeConformalRiskConfig:
     calibration_window: int = 5000
     scope: ConformalOrderScope = "global"
     weight_decay: float | None = 0.85
+    weighted_quantile_mode: WeightedQuantileMode = "empirical"
     base_column: str | None = None
     fallback_buffer: float = 0.0
     buffer_min: float | None = None
     buffer_max: float | None = None
+    shrinkage_strength: float = 0.0
+    hierarchy_separator: str = "_"
+    hierarchy_level: int = 1
     method_name: str = "weighted_crc"
 
     def __post_init__(self) -> None:
@@ -57,10 +62,18 @@ class CumulativeConformalRiskConfig:
             raise ValueError("protection_period must be at least 1")
         if int(self.calibration_window) < 1:
             raise ValueError("calibration_window must be at least 1")
-        if self.scope not in {"global", "series"}:
-            raise ValueError("scope must be 'global' or 'series'")
+        if self.scope not in {"global", "series", "hierarchical"}:
+            raise ValueError("scope must be 'global', 'series', or 'hierarchical'")
         if self.weight_decay is not None and not 0.0 < float(self.weight_decay) <= 1.0:
             raise ValueError("weight_decay must satisfy 0 < weight_decay <= 1")
+        if self.weighted_quantile_mode not in {"empirical", "nonexchangeable"}:
+            raise ValueError("weighted_quantile_mode must be 'empirical' or 'nonexchangeable'")
+        if not 0.0 <= float(self.shrinkage_strength) <= 1.0:
+            raise ValueError("shrinkage_strength must satisfy 0 <= shrinkage_strength <= 1")
+        if int(self.hierarchy_level) < 1:
+            raise ValueError("hierarchy_level must be at least 1")
+        if not self.hierarchy_separator:
+            raise ValueError("hierarchy_separator must be non-empty")
         if (
             self.buffer_min is not None
             and self.buffer_max is not None
@@ -103,8 +116,15 @@ def _weighted_quantile(
     level: float,
     decay: float,
     fallback: float,
+    mode: WeightedQuantileMode,
 ) -> float:
-    """Recency-weighted empirical quantile for non-exchangeable calibration."""
+    """Recency-weighted quantile for non-exchangeable calibration.
+
+    ``mode="nonexchangeable"`` keeps the unit test-point mass from weighted
+    conformal prediction/CRC, so the calibration weights are normalized by
+    ``sum(weights) + 1``. If the requested level falls into that held-out mass,
+    the finite-sample upper quantile is infinite unless the caller caps it.
+    """
     if not records:
         return float(fallback)
     max_sequence = max(record.sequence for record in records)
@@ -116,11 +136,17 @@ def _weighted_quantile(
         for record in records
     )
     total_weight = sum(weight for _, weight in ordered)
+    if total_weight <= 0.0:
+        return float(fallback)
+    denominator = total_weight + (1.0 if mode == "nonexchangeable" else 0.0)
+    threshold = float(level) * denominator
     cumulative = 0.0
     for residual, weight in ordered:
         cumulative += weight
-        if cumulative / total_weight >= float(level):
+        if cumulative >= threshold:
             return float(residual)
+    if mode == "nonexchangeable":
+        return float("inf")
     return float(ordered[-1][0])
 
 
@@ -130,47 +156,116 @@ class CumulativeConformalRiskRuntime:
     def __init__(self, config: CumulativeConformalRiskConfig) -> None:
         self.config = config
         self._records: list[_ResidualRecord] = []
+        self._records_by_series: dict[str, list[_ResidualRecord]] = {}
+        self._records_by_hierarchy: dict[str, list[_ResidualRecord]] = {}
+        self._buffer_cache: dict[str, float] = {}
         self._sequence = 0
 
-    def _records_for(self, unique_id: str) -> list[_ResidualRecord]:
-        if self.config.scope == "global":
-            return self._records
-        return [record for record in self._records if record.unique_id == unique_id]
+    def _hierarchy_key(self, unique_id: str) -> str:
+        parts = unique_id.split(self.config.hierarchy_separator)
+        return self.config.hierarchy_separator.join(parts[: self.config.hierarchy_level])
 
-    def _buffer_for(self, unique_id: str) -> float:
-        records = self._records_for(unique_id)
+    def _append_record(self, record: _ResidualRecord) -> None:
+        self._records.append(record)
+        self._records_by_series.setdefault(record.unique_id, []).append(record)
+        self._records_by_hierarchy.setdefault(self._hierarchy_key(record.unique_id), []).append(
+            record
+        )
+        self._buffer_cache.clear()
+        if len(self._records) > self.config.calibration_window:
+            self._records = self._records[-self.config.calibration_window :]
+            self._rebuild_indexes()
+
+    def _rebuild_indexes(self) -> None:
+        self._records_by_series = {}
+        self._records_by_hierarchy = {}
+        for record in self._records:
+            self._records_by_series.setdefault(record.unique_id, []).append(record)
+            self._records_by_hierarchy.setdefault(self._hierarchy_key(record.unique_id), []).append(
+                record
+            )
+        self._buffer_cache.clear()
+
+    def _records_for_scope(self, unique_id: str) -> list[_ResidualRecord]:
+        return self._scope_records_and_cache_key(unique_id)[0]
+
+    def _scope_records_and_cache_key(self, unique_id: str) -> tuple[list[_ResidualRecord], str]:
+        if self.config.scope == "global":
+            return self._records, "global"
+        if self.config.scope == "hierarchical":
+            key = self._hierarchy_key(unique_id)
+            return self._records_by_hierarchy.get(key, []), f"hierarchical:{key}"
+        return self._records_by_series.get(unique_id, []), f"series:{unique_id}"
+
+    def _raw_buffer(self, records: list[_ResidualRecord]) -> float:
         if self.config.weight_decay is None:
-            buffer = _conformal_quantile(
+            return _conformal_quantile(
                 (record.residual for record in records),
                 self.config.coverage,
                 fallback=self.config.fallback_buffer,
             )
+        return _weighted_quantile(
+            records,
+            self.config.coverage,
+            decay=float(self.config.weight_decay),
+            fallback=self.config.fallback_buffer,
+            mode=self.config.weighted_quantile_mode,
+        )
+
+    def _raw_buffer_cached(self, cache_key: str, records: list[_ResidualRecord]) -> float:
+        cached = self._buffer_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        buffer = self._raw_buffer(records)
+        self._buffer_cache[cache_key] = buffer
+        return buffer
+
+    def _buffer_components_for(self, unique_id: str) -> dict[str, float]:
+        scoped_records, scoped_key = self._scope_records_and_cache_key(unique_id)
+        scoped = self._raw_buffer_cached(scoped_key, scoped_records)
+        shrinkage = float(self.config.shrinkage_strength)
+        if self.config.scope == "global" or shrinkage == 0.0:
+            buffer = scoped
+            global_buffer = scoped
         else:
-            buffer = _weighted_quantile(
-                records,
-                self.config.coverage,
-                decay=float(self.config.weight_decay),
-                fallback=self.config.fallback_buffer,
-            )
+            global_buffer = self._raw_buffer_cached("global", self._records)
+            buffer = (1.0 - shrinkage) * scoped + shrinkage * global_buffer
         if self.config.buffer_min is not None:
             buffer = max(buffer, float(self.config.buffer_min))
         if self.config.buffer_max is not None:
             buffer = min(buffer, float(self.config.buffer_max))
-        return float(buffer)
+        if not math.isfinite(buffer):
+            raise ValueError(
+                "Cumulative conformal buffer is non-finite; set buffer_max to make "
+                "non-exchangeable weighted CRC consumable by order policies."
+            )
+        return {
+            "scoped_buffer": float(scoped),
+            "global_buffer": float(global_buffer),
+            "buffer": float(buffer),
+        }
+
+    def _buffer_for(self, unique_id: str) -> float:
+        return self._buffer_components_for(unique_id)["buffer"]
 
     def _snapshot(self, unique_id: str) -> dict[str, Any]:
-        records = self._records_for(unique_id)
+        records = self._records_for_scope(unique_id)
+        buffer_components = self._buffer_components_for(unique_id)
         return {
             "method": self.config.method_name,
             "coverage": self.config.coverage,
             "protection_period": self.config.protection_period,
             "scope": self.config.scope,
             "weight_decay": self.config.weight_decay,
+            "weighted_quantile_mode": self.config.weighted_quantile_mode,
             "base_column": self.config.resolved_base_column,
             "buffer_min": self.config.buffer_min,
             "buffer_max": self.config.buffer_max,
+            "shrinkage_strength": self.config.shrinkage_strength,
+            "hierarchy_separator": self.config.hierarchy_separator,
+            "hierarchy_level": self.config.hierarchy_level,
             "n_scores": len(records),
-            "buffer": self._buffer_for(unique_id),
+            **buffer_components,
         }
 
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
@@ -254,15 +349,13 @@ class CumulativeConformalRiskRuntime:
                 actual_sum = float(window[Y].sum())
                 base_sum = float(window[base_column].sum())
                 residual = actual_sum - base_sum
-                self._records.append(
+                self._append_record(
                     _ResidualRecord(
                         sequence=self._sequence,
                         unique_id=unique_id,
                         residual=residual,
                     )
                 )
-                if len(self._records) > self.config.calibration_window:
-                    self._records = self._records[-self.config.calibration_window :]
                 observed.at[window.index[-1], NONCONFORMITY_SCORE] = residual
 
         return observed
@@ -274,9 +367,13 @@ class CumulativeConformalRiskRuntime:
             "protection_period": self.config.protection_period,
             "scope": self.config.scope,
             "weight_decay": self.config.weight_decay,
+            "weighted_quantile_mode": self.config.weighted_quantile_mode,
             "base_column": self.config.resolved_base_column,
             "buffer_min": self.config.buffer_min,
             "buffer_max": self.config.buffer_max,
+            "shrinkage_strength": self.config.shrinkage_strength,
+            "hierarchy_separator": self.config.hierarchy_separator,
+            "hierarchy_level": self.config.hierarchy_level,
             "n_scores": len(self._records),
             "residuals": np.asarray([record.residual for record in self._records], dtype=float),
         }
