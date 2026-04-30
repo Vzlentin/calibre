@@ -10,10 +10,11 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 import pandas as pd
 
+from calibre.conformal.runtime import ConformalRuntimeLike
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -23,19 +24,6 @@ from calibre.contracts.forecast_frame import (
 )
 from calibre.engine.backend import BackendEngine
 from calibre.tasks.forecast_task import ForecastTask
-
-
-class _RuntimeConfigLike(Protocol):
-    @property
-    def interval_columns(self) -> tuple[str, str]: ...
-
-
-class ConformalRuntimeLike(Protocol):
-    config: _RuntimeConfigLike
-
-    def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
-
-    def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
 
 
 @dataclass

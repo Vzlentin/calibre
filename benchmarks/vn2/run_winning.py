@@ -115,6 +115,8 @@ def _round_actuals(
     round_num: int,
     state_keys: Mapping[str, object],
 ) -> dict[str, float]:
+    # round_num indexes the resolved-actuals week directly: round 1's demand
+    # is week_1_sales' last column. Earlier revisions used round_num + 1.
     try:
         actuals = extract_new_actuals(data_dir, round_num)
     except (FileNotFoundError, ValueError):
@@ -168,6 +170,8 @@ def run_winning(
             if verbose:
                 print(f"\n--- Decision round {round_num} ---")
 
+            # Round inputs are the previous week's resolved sales (week_{rn-1});
+            # round_num itself indexes the upcoming actuals via _round_actuals.
             round_sales = load_period(data_dir, round_num - 1)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
