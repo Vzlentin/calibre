@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import pandas as pd
@@ -35,6 +35,21 @@ from calibre.contracts.forecast_frame import (
 ConformalMethod = Literal["mscp", "aci"]
 ConformalMode = Literal["perhorizon", "cumulative"]
 QuantileRule = Literal["conformal", "higher"]
+
+
+class _RuntimeConfigLike(Protocol):
+    @property
+    def interval_columns(self) -> tuple[str, str]: ...
+
+
+class ConformalRuntimeLike(Protocol):
+    """Structural type for runtimes consumable by the decision loop."""
+
+    config: _RuntimeConfigLike
+
+    def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
+
+    def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
 
 
 def _json_default(value: Any) -> Any:

@@ -174,6 +174,9 @@ class CumulativeConformalRiskRuntime:
         }
 
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
+        # Interval columns are populated only on the terminal-H row of each
+        # (uid, model, origin) group; earlier rows keep NaN. Aggregating
+        # consumers must select the terminal row, not sum across H.
         if frame.empty:
             return frame.copy()
 
@@ -233,6 +236,8 @@ class CumulativeConformalRiskRuntime:
             observed[NONCONFORMITY_SCORE] = np.nan
 
         group_cols = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
+        # sort=True is load-bearing: _sequence drives recency weights, so
+        # origins must be ingested in chronological order.
         for _, origin_group in observed.groupby(FORECAST_ORIGIN, sort=True):
             self._sequence += 1
             for _, group in origin_group.groupby(group_cols, sort=False):

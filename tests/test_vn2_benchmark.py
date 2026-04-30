@@ -12,8 +12,16 @@ from pathlib import Path
 
 from mlforecast.lag_transforms import RollingMean
 
-from benchmarks.vn2.run_benchmark import _round_actuals, run_benchmark, run_hpo
+from benchmarks.vn2.run_benchmark import (
+    _round_actuals,
+    _run_order_conformal_warmup,
+    run_benchmark,
+    run_hpo,
+)
 from benchmarks.vn2.simulator import extract_new_actuals, load_initial_states
+from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
+from calibre.contracts.forecast_frame import quantile_column
+from calibre.pipeline.loading import load_period
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
 
@@ -122,3 +130,36 @@ def test_round_actuals_uses_current_round_demand() -> None:
     actuals = _round_actuals(DATA_DIR, 1, {uid: object() for uid in series})
 
     assert actuals == {uid: expected.get(uid, 0.0) for uid in series}
+
+
+def test_run_order_conformal_warmup_seeds_residual_pool() -> None:
+    """Warmup helper produces at least one residual on real week_0 sales."""
+    series = _get_first_n_series(3)
+    sales = load_period(DATA_DIR, 0)
+    sales = sales[sales["unique_id"].isin(series)]
+
+    horizon = 3
+    runtime = CumulativeConformalRiskRuntime(
+        CumulativeConformalRiskConfig(
+            coverage=0.5,
+            protection_period=horizon,
+            calibration_window=64,
+            base_column=quantile_column(_FAST_BEST_CONFIG["_quantile_alpha"]),
+            weight_decay=None,
+        )
+    )
+    engine_config = {k: v for k, v in _FAST_BEST_CONFIG.items() if not k.startswith("_")}
+
+    assert runtime.get_diagnostics()["n_scores"] == 0
+
+    _run_order_conformal_warmup(
+        sales=sales,
+        instock=None,
+        model_config=engine_config,
+        horizon=horizon,
+        warmup_origins=2,
+        runtime=runtime,
+        series_filter=series,
+    )
+
+    assert runtime.get_diagnostics()["n_scores"] > 0

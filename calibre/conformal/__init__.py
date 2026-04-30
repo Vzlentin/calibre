@@ -23,6 +23,7 @@ from calibre.conformal.policies import OnlineConformalController
 from calibre.conformal.runtime import (
     ConformalPolicyConfig,
     ConformalRuntime,
+    ConformalRuntimeLike,
     deserialize_calibration_state,
     serialize_calibration_state,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "AdaptiveConformalInference",
     "ConformalPolicyConfig",
     "ConformalRuntime",
+    "ConformalRuntimeLike",
     "CumulativeConformalRiskConfig",
     "CumulativeConformalRiskRuntime",
     "CumulativeSplitConformalInference",
