@@ -173,16 +173,28 @@ def optuna_mlflow_callback(experiment_name: str, metric_name: str = "objective")
     """Return an optuna-integration MLflowCallback configured for nested runs.
 
     Passes nested=True when a parent MLflow run is already active (the benchmark
-    run), so each Optuna trial appears as a child run in the UI.
+    run), so each Optuna trial appears as a child run in the UI. The Optuna
+    integration creates one experiment per study by default; pin it to the
+    requested experiment instead so benchmark trial runs remain discoverable.
     """
     from optuna_integration.mlflow import MLflowCallback
 
+    tracking_uri = resolve_tracking_uri()
+    mlflow.set_tracking_uri(tracking_uri)
     mlflow_kwargs: dict[str, Any] = {}
-    if mlflow.active_run() is not None:
+    active_run = mlflow.active_run()
+    if active_run is not None:
         mlflow_kwargs["nested"] = True
+        mlflow_kwargs["experiment_id"] = active_run.info.experiment_id
+    else:
+        mlflow.set_experiment(experiment_name)
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is not None:
+            mlflow_kwargs["experiment_id"] = experiment.experiment_id
 
     return MLflowCallback(
-        tracking_uri=resolve_tracking_uri(),
+        tracking_uri=tracking_uri,
         metric_name=metric_name,
+        create_experiment=False,
         mlflow_kwargs=mlflow_kwargs,
     )
