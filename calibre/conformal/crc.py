@@ -248,14 +248,6 @@ class CumulativeConformalRiskRuntime:
     def _buffer_for(self, unique_id: str) -> float:
         return self._buffer_components_for(unique_id)["buffer"]
 
-    def _records_for(self, unique_id: str) -> list[_ResidualRecord]:
-        """Return the residual pool used by the configured scope.
-
-        Kept as a compatibility shim for callers that inspect diagnostics in
-        tests; new code should prefer ``_records_for_scope``.
-        """
-        return self._records_for_scope(unique_id)
-
     def _snapshot(self, unique_id: str) -> dict[str, Any]:
         records = self._records_for_scope(unique_id)
         buffer_components = self._buffer_components_for(unique_id)

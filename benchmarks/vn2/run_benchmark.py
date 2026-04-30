@@ -38,7 +38,7 @@ import math
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from functools import cache, partial
@@ -134,6 +134,14 @@ def _prepare_cumulative_target_history(
     protection period. A forecast made at origin ``o`` can therefore use the
     model's terminal-horizon prediction at ``o + protection_period`` as the
     direct estimate of demand over ``h=1..protection_period``.
+
+    Invariant: the rolled target is used only to fit the model. The decision
+    ledger's ``Y`` column is later refilled from the raw weekly ``sales`` frame
+    passed into ``engine.execute(actuals=sales, ...)``, so ``window[Y].sum()``
+    inside ``CumulativeConformalRiskRuntime.observe`` recovers the cumulative
+    realised demand via summation. ``_as_cumulative_decision_frame`` zeroes
+    non-terminal-horizon ``Y_HAT``/quantile rows so the matching ``base_sum``
+    reduces to the terminal cumulative prediction.
     """
     if protection_period < 1:
         raise ValueError("protection_period must be at least 1")
@@ -768,8 +776,15 @@ def replay_cached_cost(
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_base_scale: float = 1.0,
     reorder_point_scale: float | None = None,
+    on_policy_error: Callable[[int, Exception], None] | None = None,
 ) -> ReplayResult:
-    """Replay cached forecasts through the exact VN2 simulator."""
+    """Replay cached forecasts through the exact VN2 simulator.
+
+    A failure in ``apply_order_policy`` for a single round falls back to zero
+    orders so the cost trajectory remains comparable across rounds; pass
+    ``on_policy_error`` to surface the underlying exception (e.g. a print or
+    logger.warning), otherwise the failure is silent.
+    """
     simulator = VN2Simulator(cache.initial_states)
     target_quantile_col = quantile_column(cache.quantile_alpha)
 
@@ -814,7 +829,9 @@ def replay_cached_cost(
                 cache.initial_states,
                 reorder_point_scale=reorder_point_scale,
             )
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as exc:
+            if on_policy_error is not None:
+                on_policy_error(rn, exc)
             orders = dict.fromkeys(cache.initial_states, 0.0)
 
         actual_demand = cache.actuals_by_round.get(rn, dict.fromkeys(cache.initial_states, 0.0))
@@ -967,7 +984,9 @@ def _sample_cost_search_crc_config(
     buffer_min = None if buffer_min_choice == "none" else float(buffer_min_choice)
     buffer_max = None if buffer_max_choice == "none" else float(buffer_max_choice)
     if buffer_min is not None and buffer_max is not None and buffer_min > buffer_max:
-        buffer_min, buffer_max = buffer_max, buffer_min
+        # Prune rather than silently swap so trial parameters match the
+        # realised config when reproducing a best trial.
+        raise optuna.TrialPruned("buffer_min > buffer_max")
 
     return CumulativeConformalRiskConfig(
         coverage=trial.suggest_float("crc_coverage", 0.55, 0.9),
@@ -1070,15 +1089,21 @@ def run_cost_search(
                     delivery_weeks=delivery_weeks,
                     series_filter=series_filter,
                 )
+            policy_errors: list[str] = []
             result = replay_cached_cost(
                 forecast_cache[cache_key],
                 order_conformal_config=crc_config,
                 order_base_scale=order_base_scale,
                 reorder_point_scale=reorder_point_scale,
+                on_policy_error=lambda rn, exc: policy_errors.append(f"round {rn}: {exc!r}"),
             )
-        except Exception as exc:  # pragma: no cover - Optuna should record trial failures.
+            if policy_errors:
+                trial.set_user_attr("policy_errors", policy_errors)
+        except optuna.TrialPruned:
+            raise
+        except Exception as exc:  # pragma: no cover - exercised by Optuna on bad trials.
             trial.set_user_attr("error", repr(exc))
-            return float("inf")
+            raise
 
         trial.set_user_attr("total_holding_cost", float(result.summary["holding_cost"].sum()))
         trial.set_user_attr("total_shortage_cost", float(result.summary["shortage_cost"].sum()))
@@ -1122,6 +1147,7 @@ def run_cost_search(
                 n_trials=n_trials,
                 timeout=timeout_sec,
                 gc_after_trial=True,
+                catch=(Exception,),
                 callbacks=[optuna_mlflow_callback(experiment_name, metric_name="cost/total")],
             )
             completed_trials = [
@@ -1140,7 +1166,13 @@ def run_cost_search(
                     study.trials_dataframe().to_csv(trials_path, index=False)
                     mlflow.log_artifact(str(trials_path), artifact_path="optuna")
     else:
-        study.optimize(_objective, n_trials=n_trials, timeout=timeout_sec, gc_after_trial=True)
+        study.optimize(
+            _objective,
+            n_trials=n_trials,
+            timeout=timeout_sec,
+            gc_after_trial=True,
+            catch=(Exception,),
+        )
     return study
 
 
@@ -1172,7 +1204,9 @@ def _optimal_order_path_for_sku(
     demands = tuple(float(demand_by_week.get(week, 0.0)) for week in range(1, total_weeks + 1))
     choices: dict[tuple[int, float, float, float], float] = {}
 
-    def _key(week: int, end_inventory: float, p1: float, p2: float) -> tuple[int, float, float, float]:
+    def _key(
+        week: int, end_inventory: float, p1: float, p2: float
+    ) -> tuple[int, float, float, float]:
         return (week, round(end_inventory, 6), round(p1, 6), round(p2, 6))
 
     @cache
@@ -1234,7 +1268,8 @@ def _optimal_order_path_for_sku(
         start_inventory = end_inventory + arrivals
         sales = min(start_inventory, demand)
         end_inventory = round(start_inventory - sales, 6)
-        p1, p2 = round(p2, 6), round(order, 6) if week <= decision_rounds else 0.0
+        next_p2 = round(order, 6) if week <= decision_rounds else 0.0
+        p1, p2 = round(p2, 6), next_p2
         week += 1
 
     return orders
@@ -1388,10 +1423,10 @@ def _cost_diagnostic_tables(
         )
         .assign(
             avoidable_total_cost=lambda df: df["total_cost_actual"] - df["total_cost_oracle"],
-            avoidable_holding_cost=lambda df: df["holding_cost_actual"]
-            - df["holding_cost_oracle"],
-            avoidable_shortage_cost=lambda df: df["shortage_cost_actual"]
-            - df["shortage_cost_oracle"],
+            avoidable_holding_cost=lambda df: df["holding_cost_actual"] - df["holding_cost_oracle"],
+            avoidable_shortage_cost=lambda df: (
+                df["shortage_cost_actual"] - df["shortage_cost_oracle"]
+            ),
         )
         .sort_values("avoidable_total_cost", ascending=False)
         .reset_index(drop=True)
