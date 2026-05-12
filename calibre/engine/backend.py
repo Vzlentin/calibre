@@ -22,7 +22,7 @@ from calibre.contracts.forecast_frame import (
     is_quantile_column,
 )
 from calibre.engine.ledger import ForecastLedger, OrderLedger
-from calibre.engine.scoring import compute_row_errors, resolve_actuals
+from calibre.eval.metrics import compute_row_errors, resolve_actuals
 from calibre.models.registry import get_scope, resolve_adapter
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.tasks.forecast_task import ForecastTask

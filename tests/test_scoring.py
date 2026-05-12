@@ -14,7 +14,7 @@ from calibre.contracts.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.engine.scoring import (
+from calibre.eval.metrics import (
     compute_metrics,
     compute_row_errors,
     resolve_actuals,

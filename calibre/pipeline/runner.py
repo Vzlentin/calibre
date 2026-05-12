@@ -13,7 +13,7 @@ from calibre.conformal import ConformalPolicyConfig
 from calibre.contracts.forecast_frame import DS
 from calibre.engine.backend import BackendEngine, BackendResult
 from calibre.engine.ledger import ForecastLedger, OrderLedger
-from calibre.engine.scoring import compute_metrics
+from calibre.eval.metrics import compute_metrics
 from calibre.metrics import mae, rmse, smape, wape
 from calibre.order.config import OrderPolicyConfig
 from calibre.pipeline.dataset import DatasetBundle
