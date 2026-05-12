@@ -16,6 +16,7 @@ from calibre.engine.ledger import ForecastLedger, OrderLedger
 from calibre.engine.scoring import compute_metrics
 from calibre.metrics import mae, rmse, smape, wape
 from calibre.order.config import OrderPolicyConfig
+from calibre.pipeline.dataset import DatasetBundle
 from calibre.pipeline.loading import load_period
 from calibre.pipeline.tasks import build_tasks
 
@@ -44,9 +45,24 @@ def _derive_origins(all_dates: list, n: int, horizon: int) -> list[pd.Timestamp]
     return [pd.Timestamp(d) for d in all_dates[-(n + horizon) : -horizon]]
 
 
+def _resolve_bundle(data_dir: DatasetBundle | str | Path, period: int | None) -> DatasetBundle:
+    if isinstance(data_dir, DatasetBundle):
+        return data_dir
+    if period is None:
+        raise ValueError("period is required when data_dir is not a DatasetBundle")
+    return DatasetBundle(
+        history=load_period(data_dir, period),
+        future_x=None,
+        costs={},
+        hierarchy=None,
+        censoring=None,
+    )
+
+
 def run_backtest(
-    data_dir: str | Path,
-    period: int,
+    data_dir: DatasetBundle | str | Path,
+    period: int | None = None,
+    *,
     model_configs: list[dict],
     horizon: int,
     origins: list[pd.Timestamp] | int,
@@ -68,7 +84,8 @@ def run_backtest(
     5. Compute aggregate metrics over resolved rows.
     6. Return a PipelineResult.
     """
-    sales = load_period(data_dir, period)
+    bundle = _resolve_bundle(data_dir, period)
+    sales = bundle.history
     tasks = build_tasks(sales, model_configs, horizon, series_filter)
 
     if isinstance(origins, int):
@@ -97,8 +114,9 @@ def run_backtest(
 
 
 def run_forecast(
-    data_dir: str | Path,
-    period: int,
+    data_dir: DatasetBundle | str | Path,
+    period: int | None = None,
+    *,
     model_configs: list[dict],
     horizon: int,
     series_filter: list[str] | None = None,
@@ -108,7 +126,8 @@ def run_forecast(
     order_config: OrderPolicyConfig | None = None,
 ) -> BackendResult:
     """Forward-looking forecast. Single origin = latest date in sales. No scoring."""
-    sales = load_period(data_dir, period)
+    bundle = _resolve_bundle(data_dir, period)
+    sales = bundle.history
     tasks = build_tasks(sales, model_configs, horizon, series_filter)
 
     latest_origin = sales[DS].max()

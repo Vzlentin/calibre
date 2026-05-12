@@ -18,6 +18,33 @@ NEWSVENDOR_PARAMETER_COLUMNS = [UNDERAGE_COST, OVERAGE_COST, INVENTORY_POSITION]
 
 
 @dataclass(frozen=True, slots=True)
+class CostStruct:
+    """Minimal linear cost structure shared by order plug-ins and datasets."""
+
+    underage_cost: float = 1.0
+    overage_cost: float = 1.0
+    holding_cost: float = 0.0
+    shortage_cost: float = 0.0
+
+    def __post_init__(self) -> None:
+        if float(self.underage_cost) < 0:
+            raise ValueError("underage_cost must be non-negative")
+        if float(self.overage_cost) < 0:
+            raise ValueError("overage_cost must be non-negative")
+        if float(self.holding_cost) < 0:
+            raise ValueError("holding_cost must be non-negative")
+        if float(self.shortage_cost) < 0:
+            raise ValueError("shortage_cost must be non-negative")
+
+    @property
+    def critical_ratio(self) -> float:
+        denominator = float(self.underage_cost) + float(self.overage_cost)
+        if denominator <= 0.0:
+            raise ValueError("underage_cost + overage_cost must be positive")
+        return float(self.underage_cost) / denominator
+
+
+@dataclass(frozen=True, slots=True)
 class RsPolicyParameters:
     unique_id: str
     inventory_position: float
