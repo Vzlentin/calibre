@@ -3,20 +3,17 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 
-from calibre.conformal.aci import AdaptiveConformalInference
-from calibre.conformal.intervals import symmetric_intervals
-from calibre.conformal.mscp import (
-    CumulativeSplitConformalInference,
-    MultiStepSplitConformalInference,
-)
+from calibre.conformal.calibrators import RollingQuantileCalibrator
+from calibre.conformal.controllers import AdaptiveAlphaController, FixedAlphaController
 from calibre.conformal.partitions import global_partition
-from calibre.conformal.scores import absolute_error
-from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
+from calibre.conformal.protocols import Calibrator, Controller, Score
+from calibre.conformal.scores import absolute_error_score
+from calibre.conformal.types import IntervalPrediction
 from calibre.contracts.forecast_frame import (
     CALIBRATION_STATE,
     CONFORMAL_ALPHA,
@@ -36,21 +33,6 @@ from calibre.contracts.forecast_frame import (
 ConformalMethod = Literal["mscp", "aci"]
 ConformalMode = Literal["perhorizon", "cumulative"]
 QuantileRule = Literal["conformal", "higher"]
-
-
-class _RuntimeConfigLike(Protocol):
-    @property
-    def interval_columns(self) -> tuple[str, str]: ...
-
-
-class ConformalRuntimeLike(Protocol):
-    """Structural type for runtimes consumable by the decision loop."""
-
-    config: _RuntimeConfigLike
-
-    def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
-
-    def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
 
 
 def _json_default(value: Any) -> Any:
@@ -79,7 +61,6 @@ class ConformalPolicyConfig:
     coverage: float = 0.9
     calibration_window: int = 100
     gamma: float = 0.05
-    score_fn: Callable = absolute_error
     partition_key: Callable[[pd.Series], Hashable] = global_partition
     quantile_rule: QuantileRule | None = None
     mode: ConformalMode = "perhorizon"
@@ -121,187 +102,11 @@ class ConformalPolicyConfig:
         return "higher" if self.method == "mscp" else "conformal"
 
 
-class _BasePolicyState:
-    def __init__(self, config: ConformalPolicyConfig, horizon: int) -> None:
-        if horizon < 1:
-            raise ValueError("horizon must be at least 1")
-        self.config = config
-        self.horizon = int(horizon)
-        self._issued_count = 0
-
-    def predict(self, point_forecasts: np.ndarray) -> MultiStepIntervalPrediction:
-        raise NotImplementedError
-
-    def observe_row(self, row: pd.Series, lower_col: str, upper_col: str) -> float:
-        raise NotImplementedError
-
-    def snapshot(self) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def emittable_mask(self, prediction: MultiStepIntervalPrediction) -> np.ndarray:
-        lower = np.asarray(prediction.lower, dtype=float)
-        upper = np.asarray(prediction.upper, dtype=float)
-        return np.isfinite(lower) & np.isfinite(upper)
-
-
-class _MscpPolicyState(_BasePolicyState):
-    def __init__(self, config: ConformalPolicyConfig, horizon: int) -> None:
-        super().__init__(config, horizon)
-        self._controller = MultiStepSplitConformalInference(
-            horizon=horizon,
-            alpha=config.alpha,
-            calibration_window=config.calibration_window,
-            score_fn=config.score_fn,
-            quantile_rule=config.resolved_quantile_rule,
-        )
-
-    def predict(self, point_forecasts: np.ndarray) -> MultiStepIntervalPrediction:
-        return self._controller.predict_interval(point_forecasts)
-
-    def observe_row(self, row: pd.Series, lower_col: str, upper_col: str) -> float:
-        result = self._controller.observe(
-            horizon=int(row[H]),
-            y_true=float(row[Y]),
-            point_forecast=float(row[Y_HAT]),
-        )
-        return float(result["score"])
-
-    def snapshot(self) -> dict[str, Any]:
-        diagnostics = self._controller.get_diagnostics()
-        diagnostics["method"] = "mscp"
-        return diagnostics
-
-    def emittable_mask(self, prediction: MultiStepIntervalPrediction) -> np.ndarray:
-        base_mask = super().emittable_mask(prediction)
-        return base_mask & self._controller.ready_mask()
-
-
-class _CumulativePolicyState(_BasePolicyState):
-    """Runtime adapter for cumulative-target split conformal."""
-
-    def __init__(self, config: ConformalPolicyConfig, horizon: int) -> None:
-        super().__init__(config, horizon)
-        if config.protection_period is None:
-            raise ValueError("cumulative mode requires config.protection_period")
-        self._protection_period = int(config.protection_period)
-        if self._protection_period > horizon:
-            raise ValueError(
-                f"protection_period {self._protection_period} exceeds horizon {horizon}"
-            )
-        self._controller = CumulativeSplitConformalInference(
-            protection_period=self._protection_period,
-            alpha=config.alpha,
-            calibration_window=config.calibration_window,
-            score_fn=config.score_fn,
-            quantile_rule=config.resolved_quantile_rule,
-        )
-
-    def predict(self, point_forecasts: np.ndarray) -> MultiStepIntervalPrediction:
-        center = np.asarray(point_forecasts, dtype=float)
-        controller_prediction = self._controller.predict_interval(center[: self._protection_period])
-
-        nan_pad = np.full(self.horizon - self._protection_period, np.nan, dtype=float)
-
-        def _expand(short: np.ndarray) -> np.ndarray:
-            return np.concatenate([short, nan_pad])
-
-        return MultiStepIntervalPrediction(
-            center=_expand(controller_prediction.center),
-            lower=_expand(controller_prediction.lower),
-            upper=_expand(controller_prediction.upper),
-            radius=_expand(controller_prediction.radius),
-            alpha=np.full(self.horizon, self.config.alpha, dtype=float),
-            issued_at=self._issued_count,
-            metadata={"mode": "cumulative", "protection_period": self._protection_period},
-        )
-
-    def observe_window(
-        self, y_actual_window: np.ndarray, y_hat_window: np.ndarray
-    ) -> dict[str, float | int]:
-        return self._controller.observe(y_actual_window, y_hat_window)
-
-    def snapshot(self) -> dict[str, Any]:
-        diagnostics = self._controller.get_diagnostics()
-        diagnostics["method"] = "mscp"
-        diagnostics["mode"] = "cumulative"
-        return diagnostics
-
-    def emittable_mask(self, prediction: MultiStepIntervalPrediction) -> np.ndarray:
-        mask = np.zeros(self.horizon, dtype=bool)
-        mask[: self._protection_period] = self._controller.ready_mask()
-        return mask
-
-    @property
-    def protection_period(self) -> int:
-        return self._protection_period
-
-
-class _AciPolicyState(_BasePolicyState):
-    """Runtime adapter for horizon-wise ACI.
-
-    The engine can issue forecasts on sparse origin grids, so the runtime uses
-    one single-step controller per horizon instead of relying on a contiguous
-    issued/observed sequence shared across all horizons.
-    """
-
-    def __init__(self, config: ConformalPolicyConfig, horizon: int) -> None:
-        super().__init__(config, horizon)
-        self._controllers = [
-            AdaptiveConformalInference(
-                alpha=config.alpha,
-                gamma=config.gamma,
-                score_fn=config.score_fn,
-                quantile_rule=config.resolved_quantile_rule,
-            )
-            for _ in range(horizon)
-        ]
-
-    def predict(self, point_forecasts: np.ndarray) -> MultiStepIntervalPrediction:
-        center = np.asarray(point_forecasts, dtype=float)
-        radii = []
-        alphas = []
-        for idx, controller in enumerate(self._controllers):
-            prediction = controller.predict_interval(center[idx])
-            radii.append(prediction.radius)
-            alphas.append(prediction.alpha)
-        interval = symmetric_intervals(
-            center=center,
-            radius=np.asarray(radii, dtype=float),
-            alpha=np.asarray(alphas, dtype=float),
-            issued_at=self._issued_count,
-        )
-        self._issued_count += 1
-        return interval
-
-    def observe_row(self, row: pd.Series, lower_col: str, upper_col: str) -> float:
-        horizon_idx = int(row[H]) - 1
-        controller = self._controllers[horizon_idx]
-        center = float(row[Y_HAT])
-        lower = float(row[lower_col])
-        upper = float(row[upper_col])
-        alpha = float(row.get(CONFORMAL_ALPHA, controller.current_alpha))
-        prediction = IntervalPrediction(
-            center=center,
-            lower=lower,
-            upper=upper,
-            radius=max(center - lower, upper - center),
-            alpha=alpha,
-        )
-        result = controller.observe(y_true=float(row[Y]), prediction=prediction)
-        controller.trim_scores(self.config.calibration_window)
-        return float(result["score"])
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "method": "aci",
-            "horizon": self.horizon,
-            "issued_count": self._issued_count,
-            "controllers": [controller.get_diagnostics() for controller in self._controllers],
-        }
-
-
-def _policy_key(frame: pd.DataFrame) -> tuple[str, str]:
-    return str(frame[UNIQUE_ID].iloc[0]), str(frame[MODEL_NAME].iloc[0])
+def _as_scalar_score(score) -> float:
+    arr = np.asarray(score, dtype=float).reshape(-1)
+    if arr.size != 1:
+        raise ValueError("Expected Score to return a scalar score")
+    return float(arr[0])
 
 
 def _validate_horizon_layout(frame: pd.DataFrame) -> pd.DataFrame:
@@ -313,59 +118,147 @@ def _validate_horizon_layout(frame: pd.DataFrame) -> pd.DataFrame:
     return ordered
 
 
+def _hashable(value: Hashable) -> Hashable:
+    try:
+        hash(value)
+    except TypeError:
+        return str(value)
+    return value
+
+
 class ConformalRuntime:
-    def __init__(self, config: ConformalPolicyConfig) -> None:
+    def __init__(
+        self,
+        config: ConformalPolicyConfig,
+        score: Score | None = None,
+        calibrator: Calibrator | None = None,
+        controller: Controller | None = None,
+        *,
+        method_name: str | None = None,
+    ) -> None:
+        if score is None or calibrator is None or controller is None:
+            score, calibrator, controller = _components_from_config(config)
         self.config = config
-        self._policies: dict[tuple[str, str], _BasePolicyState] = {}
+        self.score = score
+        self.calibrator = calibrator
+        self.controller = controller
+        self.method_name = method_name or config.method
+        self._issued_count = 0
 
-    def _build_policy(self, horizon: int) -> _BasePolicyState:
-        if self.config.mode == "cumulative":
-            return _CumulativePolicyState(self.config, horizon)
-        if self.config.method == "mscp":
-            return _MscpPolicyState(self.config, horizon)
-        return _AciPolicyState(self.config, horizon)
+    def _base_partition(self, row: pd.Series) -> str:
+        value = _hashable(self.config.partition_key(row))
+        return str(value)
 
-    def _get_policy(self, key: tuple[str, str], horizon: int) -> _BasePolicyState:
-        policy = self._policies.get(key)
-        if policy is None:
-            policy = self._build_policy(horizon)
-            self._policies[key] = policy
-            return policy
-        if policy.horizon != horizon:
-            raise ValueError(
-                f"Conformal horizon changed for {key}: existing {policy.horizon}, new {horizon}"
-            )
-        return policy
+    def _partition_for_row(self, row: pd.Series, *, cumulative: bool = False) -> str:
+        model_name = str(row[MODEL_NAME])
+        base = self._base_partition(row)
+        if cumulative:
+            return f"{model_name}:cumulative:{base}"
+        return f"{model_name}:h{int(row[H])}:{base}"
+
+    def _calibrator_ready(self, partition: str, alpha: float) -> bool:
+        ready = getattr(self.calibrator, "ready", None)
+        if ready is None:
+            return bool(np.isfinite(self.calibrator.predict(alpha, partition)))
+        return bool(ready(partition, alpha))
+
+    def _snapshot(self, partition: str) -> dict[str, Any]:
+        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        return {
+            "method": self.method_name,
+            "mode": self.config.mode,
+            "coverage": self.config.coverage,
+            "partition": partition,
+            "issued_count": self._issued_count,
+            "controller": self.controller.get_state(),
+            "calibrator": calibrator_state,
+        }
 
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:
             return frame.copy()
 
-        lower_col, upper_col = self.config.interval_columns
-        enriched_parts: list[pd.DataFrame] = []
+        if self.config.mode == "cumulative":
+            return self._apply_cumulative(frame)
+        return self._apply_perhorizon(frame)
 
-        for _, group in frame.groupby([UNIQUE_ID, MODEL_NAME], sort=False):
+    def _apply_perhorizon(self, frame: pd.DataFrame) -> pd.DataFrame:
+        lower_col, upper_col = self.config.interval_columns
+        parts: list[pd.DataFrame] = []
+
+        for _, group in frame.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False):
             ordered = _validate_horizon_layout(group)
-            key = _policy_key(ordered)
-            policy = self._get_policy(key, len(ordered))
-            prediction = policy.predict(ordered[Y_HAT].to_numpy())
-            lower_values = np.asarray(prediction.lower, dtype=float).copy()
-            upper_values = np.asarray(prediction.upper, dtype=float).copy()
-            mask = policy.emittable_mask(prediction)
-            lower_values[~mask] = np.nan
-            upper_values[~mask] = np.nan
+            lower_values = np.full(len(ordered), np.nan, dtype=float)
+            upper_values = np.full(len(ordered), np.nan, dtype=float)
+            alpha_values = np.full(len(ordered), np.nan, dtype=float)
+            state_values: list[str] = []
+
+            for pos, (_, row) in enumerate(ordered.iterrows()):
+                alpha = self.controller.get_alpha()
+                partition = self._partition_for_row(row)
+                radius = self.calibrator.predict(alpha, partition)
+                alpha_values[pos] = alpha
+                if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
+                    center = float(row[Y_HAT])
+                    lower_values[pos] = center - float(radius)
+                    upper_values[pos] = center + float(radius)
+                state_values.append(serialize_calibration_state(self._snapshot(partition)))
 
             ordered[lower_col] = lower_values
             ordered[upper_col] = upper_values
-            ordered[CONFORMAL_METHOD] = self.config.method
+            ordered[CONFORMAL_METHOD] = self.method_name
             ordered[CONFORMAL_MODE] = self.config.mode
-            ordered[CONFORMAL_ALPHA] = prediction.alpha
-            ordered[CALIBRATION_STATE] = serialize_calibration_state(policy.snapshot())
+            ordered[CONFORMAL_ALPHA] = alpha_values
+            ordered[CALIBRATION_STATE] = state_values
             if NONCONFORMITY_SCORE not in ordered.columns:
                 ordered[NONCONFORMITY_SCORE] = np.nan
-            enriched_parts.append(ordered)
+            parts.append(ordered)
+            self._issued_count += 1
 
-        return pd.concat(enriched_parts).sort_index()
+        return pd.concat(parts).sort_index()
+
+    def _apply_cumulative(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if self.config.protection_period is None:
+            raise ValueError("cumulative mode requires config.protection_period")
+        protection_period = int(self.config.protection_period)
+        lower_col, upper_col = self.config.interval_columns
+        result = frame.copy()
+        result[lower_col] = np.nan
+        result[upper_col] = np.nan
+        result[CONFORMAL_METHOD] = self.method_name
+        result[CONFORMAL_MODE] = self.config.mode
+        result[CONFORMAL_ALPHA] = self.controller.get_alpha()
+        if NONCONFORMITY_SCORE not in result.columns:
+            result[NONCONFORMITY_SCORE] = np.nan
+
+        for _, group in result.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False):
+            ordered = group.sort_values(H)
+            if int(ordered[H].max()) < protection_period:
+                continue
+            window = ordered[ordered[H] <= protection_period]
+            if len(window) < protection_period:
+                continue
+            terminal = window[window[H] == protection_period]
+            if terminal.empty:
+                continue
+            row = terminal.iloc[-1]
+            terminal_idx = terminal.index[-1]
+            alpha = self.controller.get_alpha()
+            partition = self._partition_for_row(row, cumulative=True)
+            radius = self.calibrator.predict(alpha, partition)
+            if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
+                center = float(window[Y_HAT].sum())
+                result.loc[terminal_idx, lower_col] = center - float(radius)
+                result.loc[terminal_idx, upper_col] = center + float(radius)
+            result.loc[terminal_idx, CALIBRATION_STATE] = serialize_calibration_state(
+                self._snapshot(partition)
+            )
+            self._issued_count += 1
+
+        if CALIBRATION_STATE not in result.columns:
+            result[CALIBRATION_STATE] = ""
+        result[CALIBRATION_STATE] = result[CALIBRATION_STATE].fillna("")
+        return result
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
         if resolved.empty:
@@ -387,32 +280,77 @@ class ConformalRuntime:
         self, observed: pd.DataFrame, lower_col: str, upper_col: str
     ) -> pd.DataFrame:
         for _, group in observed.groupby([UNIQUE_ID, MODEL_NAME], sort=False):
-            key = _policy_key(group)
-            policy = self._policies.get(key)
-            if policy is None:
-                raise ValueError(f"No conformal state found for key {key}")
             ordered = group.sort_values([DS, FORECAST_ORIGIN, H])
             for idx, row in ordered.iterrows():
-                observed.at[idx, NONCONFORMITY_SCORE] = policy.observe_row(
-                    row, lower_col, upper_col
+                if pd.isna(row[Y]) or pd.isna(row[Y_HAT]):
+                    continue
+                partition = self._partition_for_row(row)
+                score = _as_scalar_score(self.score(float(row[Y]), float(row[Y_HAT])))
+                self.calibrator.update(score, partition)
+                prediction = IntervalPrediction(
+                    center=float(row[Y_HAT]),
+                    lower=float(row[lower_col]) if pd.notna(row[lower_col]) else np.nan,
+                    upper=float(row[upper_col]) if pd.notna(row[upper_col]) else np.nan,
+                    radius=max(
+                        abs(float(row[Y_HAT]) - float(row[lower_col]))
+                        if pd.notna(row[lower_col])
+                        else 0.0,
+                        abs(float(row[upper_col]) - float(row[Y_HAT]))
+                        if pd.notna(row[upper_col])
+                        else 0.0,
+                    ),
+                    alpha=float(row.get(CONFORMAL_ALPHA, self.controller.get_alpha())),
                 )
+                self.controller.observe(float(row[Y]), prediction, int(row[H]))
+                observed.at[idx, NONCONFORMITY_SCORE] = score
         return observed
 
     def _observe_cumulative(self, observed: pd.DataFrame) -> pd.DataFrame:
-        for _, group in observed.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False):
-            key = _policy_key(group)
-            policy = self._policies.get(key)
-            if not isinstance(policy, _CumulativePolicyState):
-                raise ValueError(f"No cumulative conformal state found for key {key}")
-            window_size = policy.protection_period
+        if self.config.protection_period is None:
+            raise ValueError("cumulative mode requires config.protection_period")
+        protection_period = int(self.config.protection_period)
+        group_cols = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
+
+        for _, group in observed.groupby(group_cols, sort=False):
             ordered = group.sort_values(H)
-            window = ordered[ordered[H] <= window_size]
+            window = ordered[ordered[H] <= protection_period]
             if window[H].duplicated().any():
-                raise ValueError(f"Duplicate H values in cumulative observe window for key {key}")
-            if len(window) < window_size or window[Y].isna().any():
+                raise ValueError("Duplicate H values in cumulative observe window")
+            if len(window) < protection_period or window[Y].isna().any():
                 continue
-            actuals = window[Y].to_numpy(dtype=float)
-            forecasts = window[Y_HAT].to_numpy(dtype=float)
-            result = policy.observe_window(actuals, forecasts)
-            observed.at[window.index[-1], NONCONFORMITY_SCORE] = float(result["score"])
+            terminal = window[window[H] == protection_period]
+            if terminal.empty:
+                continue
+            row = terminal.iloc[-1]
+            partition = self._partition_for_row(row, cumulative=True)
+            actual_sum = float(window[Y].sum())
+            forecast_sum = float(window[Y_HAT].sum())
+            score = _as_scalar_score(self.score(actual_sum, forecast_sum))
+            self.calibrator.update(score, partition)
+            self.controller.observe(actual_sum, forecast_sum, protection_period)
+            observed.at[terminal.index[-1], NONCONFORMITY_SCORE] = score
         return observed
+
+
+def _components_from_config(config: ConformalPolicyConfig) -> tuple[Score, Calibrator, Controller]:
+    calibrator = RollingQuantileCalibrator(
+        calibration_window=config.calibration_window,
+        quantile_rule=config.resolved_quantile_rule,
+        ready_on_empty=config.method == "aci",
+    )
+    if config.method == "aci":
+        controller: Controller = AdaptiveAlphaController(alpha=config.alpha, gamma=config.gamma)
+    else:
+        controller = FixedAlphaController(config.alpha)
+    return absolute_error_score, calibrator, controller
+
+
+def build_conformal_runtime(config: ConformalPolicyConfig) -> ConformalRuntime:
+    score, calibrator, controller = _components_from_config(config)
+    return ConformalRuntime(
+        config=config,
+        score=score,
+        calibrator=calibrator,
+        controller=controller,
+        method_name=config.method,
+    )

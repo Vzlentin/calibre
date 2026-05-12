@@ -282,7 +282,7 @@ def run_local_tail_aci(
                 alpha=alpha,
                 gamma=gamma,
                 initial_alpha=alpha,
-                score_fn=raw_scalar_score,
+                score=raw_scalar_score,
                 initial_scores=scores[:t_pred],
                 alpha_bounds=alpha_bounds,
                 quantile_rule=quantile_rule,

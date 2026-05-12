@@ -83,7 +83,7 @@ from benchmarks.vn2.simulator import (
 )
 from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
 from calibre.conformal.partitions import global_partition, series_partition
-from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
+from calibre.conformal.runtime import ConformalPolicyConfig, build_conformal_runtime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -1691,7 +1691,7 @@ def run_benchmark(
             )
             mlflow.log_param("order_conformal_warmup_origins", order_conformal_warmup_origins)
         elif conformal_config is not None:
-            conformal_runtime = ConformalRuntime(conformal_config)
+            conformal_runtime = build_conformal_runtime(conformal_config)
             if conformal_config.mode == "cumulative":
                 observe_fn = observe_cumulative
             else:

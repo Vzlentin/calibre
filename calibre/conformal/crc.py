@@ -145,8 +145,8 @@ def _weighted_quantile(
     return float(ordered[-1][0])
 
 
-class CumulativeConformalRiskRuntime:
-    """One-sided cumulative residual conformal runtime for order decisions."""
+class WeightedResidualCalibrator:
+    """Recency-weighted CRC residual calibrator keyed by runtime partitions."""
 
     def __init__(self, config: CumulativeConformalRiskConfig) -> None:
         self.config = config
@@ -155,17 +155,45 @@ class CumulativeConformalRiskRuntime:
         self._buffer_cache: dict[str, float] = {}
         self._sequence = 0
 
-    def _partition_for_row(self, row: pd.Series) -> Hashable:
-        partition = self.config.partition_key(row)
-        try:
-            hash(partition)
-        except TypeError:
-            return str(partition)
-        return partition
+    def fit(self, scores: dict[str, list[float]]) -> None:
+        self._records = []
+        self._records_by_partition = {}
+        self._buffer_cache = {}
+        self._sequence = 0
+        for partition, values in scores.items():
+            for value in values:
+                self.update(float(value), partition)
 
-    def _append_record(self, record: _ResidualRecord) -> None:
-        self._records.append(record)
-        self._records_by_partition.setdefault(record.partition, []).append(record)
+    def predict(self, alpha: float, partition: Hashable = GLOBAL_PARTITION) -> float:
+        del alpha
+        return self._buffer_components_for(partition)["buffer"]
+
+    def update(self, new_score: float, partition: Hashable = GLOBAL_PARTITION) -> None:
+        self._sequence += 1
+        self.update_record(
+            sequence=self._sequence,
+            unique_id=str(partition),
+            partition=partition,
+            residual=float(new_score),
+        )
+
+    def update_record(
+        self,
+        *,
+        sequence: int,
+        unique_id: str,
+        partition: Hashable,
+        residual: float,
+    ) -> None:
+        self._records.append(
+            _ResidualRecord(
+                sequence=int(sequence),
+                unique_id=str(unique_id),
+                partition=partition,
+                residual=float(residual),
+            )
+        )
+        self._records_by_partition.setdefault(partition, []).append(self._records[-1])
         self._buffer_cache.clear()
         if len(self._records) > self.config.calibration_window:
             self._records = self._records[-self.config.calibration_window :]
@@ -177,8 +205,10 @@ class CumulativeConformalRiskRuntime:
             self._records_by_partition.setdefault(record.partition, []).append(record)
         self._buffer_cache.clear()
 
-    def _records_for_partition(self, partition: Hashable) -> list[_ResidualRecord]:
-        return self._partition_records_and_cache_key(partition)[0]
+    def records_for_partition(self, partition: Hashable) -> list[_ResidualRecord]:
+        if partition == GLOBAL_PARTITION:
+            return self._records
+        return self._records_by_partition.get(partition, [])
 
     def _partition_records_and_cache_key(
         self, partition: Hashable
@@ -235,15 +265,87 @@ class CumulativeConformalRiskRuntime:
             "buffer": float(buffer),
         }
 
+    def snapshot(self, partition: Hashable) -> dict[str, Any]:
+        records = self.records_for_partition(partition)
+        return {
+            "partition": str(partition),
+            "n_scores": len(records),
+            **self._buffer_components_for(partition),
+        }
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "n_scores": len(self._records),
+            "n_partitions": len(self._records_by_partition),
+            "residuals": np.asarray([record.residual for record in self._records], dtype=float),
+        }
+
+
+class CumulativeConformalRiskRuntime:
+    """One-sided cumulative residual conformal runtime for order decisions."""
+
+    def __init__(self, config: CumulativeConformalRiskConfig) -> None:
+        self.config = config
+        self._calibrator = WeightedResidualCalibrator(config)
+        self._sequence = 0
+
+    def _partition_for_row(self, row: pd.Series) -> Hashable:
+        partition = self.config.partition_key(row)
+        try:
+            hash(partition)
+        except TypeError:
+            return str(partition)
+        return partition
+
+    def _append_record(self, record: _ResidualRecord) -> None:
+        self._calibrator.update_record(
+            sequence=record.sequence,
+            unique_id=record.unique_id,
+            partition=record.partition,
+            residual=record.residual,
+        )
+
+    def _rebuild_indexes(self) -> None:
+        self._calibrator._rebuild_indexes()
+
+    def _records_for_partition(self, partition: Hashable) -> list[_ResidualRecord]:
+        return self._calibrator.records_for_partition(partition)
+
+    def _partition_records_and_cache_key(
+        self, partition: Hashable
+    ) -> tuple[list[_ResidualRecord], str]:
+        return self._calibrator._partition_records_and_cache_key(partition)
+
+    def _raw_buffer(self, records: list[_ResidualRecord]) -> float:
+        if self.config.weight_decay is None:
+            return _conformal_quantile(
+                (record.residual for record in records),
+                self.config.coverage,
+                fallback=self.config.fallback_buffer,
+            )
+        return _weighted_quantile(
+            records,
+            self.config.coverage,
+            decay=float(self.config.weight_decay),
+            fallback=self.config.fallback_buffer,
+            mode=self.config.weighted_quantile_mode,
+        )
+
+    def _raw_buffer_cached(self, cache_key: str, records: list[_ResidualRecord]) -> float:
+        return self._calibrator._raw_buffer_cached(cache_key, records)
+
+    def _buffer_components_for(self, partition: Hashable) -> dict[str, float]:
+        return self._calibrator._buffer_components_for(partition)
+
     def _buffer_for(self, partition: Hashable) -> float:
-        return self._buffer_components_for(partition)["buffer"]
+        return self._calibrator.predict(self.config.alpha, partition)
 
     def _records_for(self, unique_id: str) -> list[_ResidualRecord]:
         """Return the residual pool used by a series partition.
 
         Kept as a compatibility shim for callers that inspect diagnostics in tests.
         """
-        return self._records_by_partition.get(unique_id, [])
+        return self._calibrator.records_for_partition(unique_id)
 
     def _snapshot(self, partition: Hashable) -> dict[str, Any]:
         records = self._records_for_partition(partition)
@@ -378,7 +480,5 @@ class CumulativeConformalRiskRuntime:
             "buffer_min": self.config.buffer_min,
             "buffer_max": self.config.buffer_max,
             "shrinkage_strength": self.config.shrinkage_strength,
-            "n_scores": len(self._records),
-            "n_partitions": len(self._records_by_partition),
-            "residuals": np.asarray([record.residual for record in self._records], dtype=float),
+            **self._calibrator.get_state(),
         }

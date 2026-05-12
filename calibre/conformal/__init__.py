@@ -29,18 +29,23 @@ from calibre.conformal.policies import OnlineConformalController
 from calibre.conformal.runtime import (
     ConformalPolicyConfig,
     ConformalRuntime,
-    ConformalRuntimeLike,
+    build_conformal_runtime,
     deserialize_calibration_state,
     serialize_calibration_state,
 )
-from calibre.conformal.scores import absolute_error, scaled_absolute_error
+from calibre.conformal.scores import (
+    AbsoluteErrorScore,
+    ScaledAbsoluteErrorScore,
+    absolute_error,
+    absolute_error_score,
+    scaled_absolute_error,
+)
 from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 
 __all__ = [
     "AdaptiveConformalInference",
     "ConformalPolicyConfig",
     "ConformalRuntime",
-    "ConformalRuntimeLike",
     "CumulativeConformalRiskConfig",
     "CumulativeConformalRiskRuntime",
     "CumulativeSplitConformalInference",
@@ -49,7 +54,11 @@ __all__ = [
     "MultiStepSplitConformalInference",
     "MultiStepIntervalPrediction",
     "OnlineConformalController",
+    "AbsoluteErrorScore",
+    "ScaledAbsoluteErrorScore",
     "absolute_error",
+    "absolute_error_score",
+    "build_conformal_runtime",
     "category_partition",
     "deserialize_calibration_state",
     "global_partition",

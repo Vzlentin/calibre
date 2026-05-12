@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from typing import Literal
 
 import numpy as np
@@ -13,7 +13,8 @@ from calibre.conformal.aci import (
     _validate_quantile_rule,
 )
 from calibre.conformal.intervals import symmetric_intervals
-from calibre.conformal.scores import absolute_error
+from calibre.conformal.protocols import Score
+from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.types import MultiStepIntervalPrediction
 
 
@@ -42,7 +43,7 @@ class CumulativeSplitConformalInference:
         protection_period: int,
         alpha: float,
         calibration_window: int,
-        score_fn: Callable = absolute_error,
+        score: Score = absolute_error_score,
         initial_scores: Iterable[float] | None = None,
         initial_radius: float = 0.0,
         quantile_rule: Literal["conformal", "higher"] = "higher",
@@ -57,7 +58,7 @@ class CumulativeSplitConformalInference:
             raise ValueError(f"alpha must be a scalar, got shape {alpha_arr.shape}")
         self._alpha = float(alpha_arr)
         self._calibration_window = int(calibration_window)
-        self._score_fn = score_fn
+        self._score = score
         self._initial_radius = float(initial_radius)
         self._quantile_rule = _validate_quantile_rule(quantile_rule)
         self._score_history: deque[float] = deque(
@@ -130,7 +131,7 @@ class CumulativeSplitConformalInference:
                 f"Cumulative observe expects windows of length {self._protection_period}; "
                 f"got y_actual={actual_arr.size}, y_hat={hat_arr.size}"
             )
-        score = _as_scalar_score(self._score_fn(actual_arr.sum(), hat_arr.sum()))
+        score = _as_scalar_score(self._score(actual_arr.sum(), hat_arr.sum()))
         self._score_history.append(score)
         return {
             "score": score,
@@ -163,7 +164,7 @@ class MultiStepSplitConformalInference:
         horizon: int,
         alpha: float,
         calibration_window: int,
-        score_fn: Callable = absolute_error,
+        score: Score = absolute_error_score,
         initial_scores: Iterable[Iterable[float]] | None = None,
         initial_radius=0.0,
         quantile_rule: Literal["conformal", "higher"] = "higher",
@@ -175,7 +176,7 @@ class MultiStepSplitConformalInference:
         self._horizon = int(horizon)
         self._alpha = float(np.asarray(alpha, dtype=float))
         self._calibration_window = int(calibration_window)
-        self._score_fn = score_fn
+        self._score = score
         self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
         self._quantile_rule = _validate_quantile_rule(quantile_rule)
         self._score_history = self._normalize_score_histories(initial_scores)
@@ -251,7 +252,7 @@ class MultiStepSplitConformalInference:
         if not 0 <= horizon_idx < self._horizon:
             raise ValueError(f"horizon must be in [1, {self._horizon}]")
 
-        score = _as_scalar_score(self._score_fn(y_true, point_forecast))
+        score = _as_scalar_score(self._score(y_true, point_forecast))
         self._score_history[horizon_idx].append(score)
         return {
             "horizon": int(horizon),
