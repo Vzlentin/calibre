@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 
+from calibre.conformal.partitions import GLOBAL_PARTITION, global_partition
 from calibre.conformal.runtime import serialize_calibration_state
 from calibre.contracts.forecast_frame import (
     CALIBRATION_STATE,
@@ -25,7 +26,6 @@ from calibre.contracts.forecast_frame import (
     validate_forecast_frame,
 )
 
-ConformalOrderScope = Literal["global", "series", "hierarchical"]
 WeightedQuantileMode = Literal["empirical", "nonexchangeable"]
 
 
@@ -43,7 +43,7 @@ class CumulativeConformalRiskConfig:
     coverage: float = 0.5
     protection_period: int = 3
     calibration_window: int = 5000
-    scope: ConformalOrderScope = "global"
+    partition_key: Callable[[pd.Series], Hashable] = global_partition
     weight_decay: float | None = 0.85
     weighted_quantile_mode: WeightedQuantileMode = "empirical"
     base_column: str | None = None
@@ -51,8 +51,6 @@ class CumulativeConformalRiskConfig:
     buffer_min: float | None = None
     buffer_max: float | None = None
     shrinkage_strength: float = 0.0
-    hierarchy_separator: str = "_"
-    hierarchy_level: int = 1
     method_name: str = "weighted_crc"
 
     def __post_init__(self) -> None:
@@ -62,18 +60,14 @@ class CumulativeConformalRiskConfig:
             raise ValueError("protection_period must be at least 1")
         if int(self.calibration_window) < 1:
             raise ValueError("calibration_window must be at least 1")
-        if self.scope not in {"global", "series", "hierarchical"}:
-            raise ValueError("scope must be 'global', 'series', or 'hierarchical'")
+        if not callable(self.partition_key):
+            raise ValueError("partition_key must be callable")
         if self.weight_decay is not None and not 0.0 < float(self.weight_decay) <= 1.0:
             raise ValueError("weight_decay must satisfy 0 < weight_decay <= 1")
         if self.weighted_quantile_mode not in {"empirical", "nonexchangeable"}:
             raise ValueError("weighted_quantile_mode must be 'empirical' or 'nonexchangeable'")
         if not 0.0 <= float(self.shrinkage_strength) <= 1.0:
             raise ValueError("shrinkage_strength must satisfy 0 <= shrinkage_strength <= 1")
-        if int(self.hierarchy_level) < 1:
-            raise ValueError("hierarchy_level must be at least 1")
-        if not self.hierarchy_separator:
-            raise ValueError("hierarchy_separator must be non-empty")
         if (
             self.buffer_min is not None
             and self.buffer_max is not None
@@ -98,6 +92,7 @@ class CumulativeConformalRiskConfig:
 class _ResidualRecord:
     sequence: int
     unique_id: str
+    partition: Hashable
     residual: float
 
 
@@ -156,46 +151,41 @@ class CumulativeConformalRiskRuntime:
     def __init__(self, config: CumulativeConformalRiskConfig) -> None:
         self.config = config
         self._records: list[_ResidualRecord] = []
-        self._records_by_series: dict[str, list[_ResidualRecord]] = {}
-        self._records_by_hierarchy: dict[str, list[_ResidualRecord]] = {}
+        self._records_by_partition: dict[Hashable, list[_ResidualRecord]] = {}
         self._buffer_cache: dict[str, float] = {}
         self._sequence = 0
 
-    def _hierarchy_key(self, unique_id: str) -> str:
-        parts = unique_id.split(self.config.hierarchy_separator)
-        return self.config.hierarchy_separator.join(parts[: self.config.hierarchy_level])
+    def _partition_for_row(self, row: pd.Series) -> Hashable:
+        partition = self.config.partition_key(row)
+        try:
+            hash(partition)
+        except TypeError:
+            return str(partition)
+        return partition
 
     def _append_record(self, record: _ResidualRecord) -> None:
         self._records.append(record)
-        self._records_by_series.setdefault(record.unique_id, []).append(record)
-        self._records_by_hierarchy.setdefault(self._hierarchy_key(record.unique_id), []).append(
-            record
-        )
+        self._records_by_partition.setdefault(record.partition, []).append(record)
         self._buffer_cache.clear()
         if len(self._records) > self.config.calibration_window:
             self._records = self._records[-self.config.calibration_window :]
             self._rebuild_indexes()
 
     def _rebuild_indexes(self) -> None:
-        self._records_by_series = {}
-        self._records_by_hierarchy = {}
+        self._records_by_partition = {}
         for record in self._records:
-            self._records_by_series.setdefault(record.unique_id, []).append(record)
-            self._records_by_hierarchy.setdefault(self._hierarchy_key(record.unique_id), []).append(
-                record
-            )
+            self._records_by_partition.setdefault(record.partition, []).append(record)
         self._buffer_cache.clear()
 
-    def _records_for_scope(self, unique_id: str) -> list[_ResidualRecord]:
-        return self._scope_records_and_cache_key(unique_id)[0]
+    def _records_for_partition(self, partition: Hashable) -> list[_ResidualRecord]:
+        return self._partition_records_and_cache_key(partition)[0]
 
-    def _scope_records_and_cache_key(self, unique_id: str) -> tuple[list[_ResidualRecord], str]:
-        if self.config.scope == "global":
+    def _partition_records_and_cache_key(
+        self, partition: Hashable
+    ) -> tuple[list[_ResidualRecord], str]:
+        if partition == GLOBAL_PARTITION:
             return self._records, "global"
-        if self.config.scope == "hierarchical":
-            key = self._hierarchy_key(unique_id)
-            return self._records_by_hierarchy.get(key, []), f"hierarchical:{key}"
-        return self._records_by_series.get(unique_id, []), f"series:{unique_id}"
+        return self._records_by_partition.get(partition, []), f"partition:{partition}"
 
     def _raw_buffer(self, records: list[_ResidualRecord]) -> float:
         if self.config.weight_decay is None:
@@ -220,11 +210,11 @@ class CumulativeConformalRiskRuntime:
         self._buffer_cache[cache_key] = buffer
         return buffer
 
-    def _buffer_components_for(self, unique_id: str) -> dict[str, float]:
-        scoped_records, scoped_key = self._scope_records_and_cache_key(unique_id)
+    def _buffer_components_for(self, partition: Hashable) -> dict[str, float]:
+        scoped_records, scoped_key = self._partition_records_and_cache_key(partition)
         scoped = self._raw_buffer_cached(scoped_key, scoped_records)
         shrinkage = float(self.config.shrinkage_strength)
-        if self.config.scope == "global" or shrinkage == 0.0:
+        if partition == GLOBAL_PARTITION or shrinkage == 0.0:
             buffer = scoped
             global_buffer = scoped
         else:
@@ -245,33 +235,35 @@ class CumulativeConformalRiskRuntime:
             "buffer": float(buffer),
         }
 
-    def _buffer_for(self, unique_id: str) -> float:
-        return self._buffer_components_for(unique_id)["buffer"]
+    def _buffer_for(self, partition: Hashable) -> float:
+        return self._buffer_components_for(partition)["buffer"]
 
     def _records_for(self, unique_id: str) -> list[_ResidualRecord]:
-        """Return the residual pool used by the configured scope.
+        """Return the residual pool used by a series partition.
 
-        Kept as a compatibility shim for callers that inspect diagnostics in
-        tests; new code should prefer ``_records_for_scope``.
+        Kept as a compatibility shim for callers that inspect diagnostics in tests.
         """
-        return self._records_for_scope(unique_id)
+        return self._records_by_partition.get(unique_id, [])
 
-    def _snapshot(self, unique_id: str) -> dict[str, Any]:
-        records = self._records_for_scope(unique_id)
-        buffer_components = self._buffer_components_for(unique_id)
+    def _snapshot(self, partition: Hashable) -> dict[str, Any]:
+        records = self._records_for_partition(partition)
+        buffer_components = self._buffer_components_for(partition)
         return {
             "method": self.config.method_name,
             "coverage": self.config.coverage,
             "protection_period": self.config.protection_period,
-            "scope": self.config.scope,
+            "partition": str(partition),
+            "partition_key": getattr(
+                self.config.partition_key,
+                "__name__",
+                repr(self.config.partition_key),
+            ),
             "weight_decay": self.config.weight_decay,
             "weighted_quantile_mode": self.config.weighted_quantile_mode,
             "base_column": self.config.resolved_base_column,
             "buffer_min": self.config.buffer_min,
             "buffer_max": self.config.buffer_max,
             "shrinkage_strength": self.config.shrinkage_strength,
-            "hierarchy_separator": self.config.hierarchy_separator,
-            "hierarchy_level": self.config.hierarchy_level,
             "n_scores": len(records),
             **buffer_components,
         }
@@ -308,16 +300,16 @@ class CumulativeConformalRiskRuntime:
             if terminal.empty:
                 continue
 
-            unique_id = str(ordered[UNIQUE_ID].iloc[0])
+            partition = self._partition_for_row(ordered.iloc[0])
             base_sum = float(window[base_column].sum())
-            buffer = self._buffer_for(unique_id)
+            buffer = self._buffer_for(partition)
             upper = base_sum + buffer
             terminal_idx = terminal.index[-1]
 
             result.loc[terminal_idx, lower_col] = min(base_sum, upper)
             result.loc[terminal_idx, upper_col] = upper
             result.loc[terminal_idx, CALIBRATION_STATE] = serialize_calibration_state(
-                self._snapshot(unique_id)
+                self._snapshot(partition)
             )
 
         if CALIBRATION_STATE not in result.columns:
@@ -354,6 +346,7 @@ class CumulativeConformalRiskRuntime:
                     continue
 
                 unique_id = str(ordered[UNIQUE_ID].iloc[0])
+                partition = self._partition_for_row(ordered.iloc[0])
                 actual_sum = float(window[Y].sum())
                 base_sum = float(window[base_column].sum())
                 residual = actual_sum - base_sum
@@ -361,6 +354,7 @@ class CumulativeConformalRiskRuntime:
                     _ResidualRecord(
                         sequence=self._sequence,
                         unique_id=unique_id,
+                        partition=partition,
                         residual=residual,
                     )
                 )
@@ -373,15 +367,18 @@ class CumulativeConformalRiskRuntime:
             "method": self.config.method_name,
             "coverage": self.config.coverage,
             "protection_period": self.config.protection_period,
-            "scope": self.config.scope,
+            "partition_key": getattr(
+                self.config.partition_key,
+                "__name__",
+                repr(self.config.partition_key),
+            ),
             "weight_decay": self.config.weight_decay,
             "weighted_quantile_mode": self.config.weighted_quantile_mode,
             "base_column": self.config.resolved_base_column,
             "buffer_min": self.config.buffer_min,
             "buffer_max": self.config.buffer_max,
             "shrinkage_strength": self.config.shrinkage_strength,
-            "hierarchy_separator": self.config.hierarchy_separator,
-            "hierarchy_level": self.config.hierarchy_level,
             "n_scores": len(self._records),
+            "n_partitions": len(self._records_by_partition),
             "residuals": np.asarray([record.residual for record in self._records], dtype=float),
         }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -14,6 +14,7 @@ from calibre.conformal.mscp import (
     CumulativeSplitConformalInference,
     MultiStepSplitConformalInference,
 )
+from calibre.conformal.partitions import global_partition
 from calibre.conformal.scores import absolute_error
 from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 from calibre.contracts.forecast_frame import (
@@ -79,6 +80,7 @@ class ConformalPolicyConfig:
     calibration_window: int = 100
     gamma: float = 0.05
     score_fn: Callable = absolute_error
+    partition_key: Callable[[pd.Series], Hashable] = global_partition
     quantile_rule: QuantileRule | None = None
     mode: ConformalMode = "perhorizon"
     protection_period: int | None = None
@@ -92,6 +94,8 @@ class ConformalPolicyConfig:
             raise ValueError("calibration_window must be at least 1")
         if float(self.gamma) < 0.0:
             raise ValueError("gamma must be non-negative")
+        if not callable(self.partition_key):
+            raise ValueError("partition_key must be callable")
         if self.quantile_rule is not None and self.quantile_rule not in {"conformal", "higher"}:
             raise ValueError("quantile_rule must be 'conformal', 'higher', or None")
         if self.mode not in {"perhorizon", "cumulative"}:

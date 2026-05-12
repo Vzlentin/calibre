@@ -7,7 +7,9 @@ from pathlib import Path
 from mlforecast.lag_transforms import RollingMean, RollingStd
 
 from calibre.conformal.crc import CumulativeConformalRiskConfig
+from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import ConformalPolicyConfig
+from calibre.contracts.forecast_frame import UNIQUE_ID
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "vn2"
 
@@ -159,7 +161,7 @@ CRC_ABLATION_CONFIGS: dict[str, CumulativeConformalRiskConfig | None] = {
         coverage=0.72,
         calibration_window=5000,
         protection_period=LEAD_TIME + REVIEW_PERIOD,
-        scope="global",
+        partition_key=global_partition,
         weight_decay=0.85,
         method_name="weighted_crc",
     ),
@@ -167,7 +169,7 @@ CRC_ABLATION_CONFIGS: dict[str, CumulativeConformalRiskConfig | None] = {
         coverage=0.72,
         calibration_window=5000,
         protection_period=LEAD_TIME + REVIEW_PERIOD,
-        scope="global",
+        partition_key=global_partition,
         weight_decay=0.85,
         weighted_quantile_mode="nonexchangeable",
         buffer_max=0.0,
@@ -177,7 +179,7 @@ CRC_ABLATION_CONFIGS: dict[str, CumulativeConformalRiskConfig | None] = {
         coverage=0.72,
         calibration_window=5000,
         protection_period=LEAD_TIME + REVIEW_PERIOD,
-        scope="series",
+        partition_key=series_partition,
         weight_decay=None,
         fallback_buffer=0.0,
         method_name="series_crc",
@@ -186,7 +188,7 @@ CRC_ABLATION_CONFIGS: dict[str, CumulativeConformalRiskConfig | None] = {
         coverage=0.72,
         calibration_window=5000,
         protection_period=LEAD_TIME + REVIEW_PERIOD,
-        scope="hierarchical",
+        partition_key=lambda row: str(row[UNIQUE_ID]).split("_")[0],
         weight_decay=None,
         shrinkage_strength=0.35,
         method_name="hierarchical_shrinkage_crc",

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
+from calibre.conformal.partitions import series_partition
 from calibre.contracts.forecast_frame import (
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
@@ -206,23 +207,17 @@ def test_cumulative_crc_can_cap_positive_buffers() -> None:
     assert fresh[upper_col].iloc[2] == pytest.approx(60.0)
 
 
-def test_cumulative_crc_hierarchical_scope_uses_parent_residual_pool() -> None:
+def test_cumulative_crc_partition_key_uses_parent_residual_pool() -> None:
     runtime = CumulativeConformalRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.9,
             protection_period=3,
             base_column=quantile_column(0.5),
-            scope="hierarchical",
+            partition_key=lambda row: str(row[UNIQUE_ID]).split("_")[0],
             weight_decay=None,
-            hierarchy_separator="_",
-            hierarchy_level=1,
         )
     )
-    runtime.observe(
-        runtime.apply(
-            _frame(unique_id="1_A", actual_values=[10.0, 20.0, 40.0])
-        )
-    )
+    runtime.observe(runtime.apply(_frame(unique_id="1_A", actual_values=[10.0, 20.0, 40.0])))
     runtime.observe(
         runtime.apply(
             _frame(
@@ -250,13 +245,13 @@ def test_cumulative_crc_hierarchical_scope_uses_parent_residual_pool() -> None:
     assert fresh[upper_col].iloc[2] == pytest.approx(80.0)
 
 
-def test_cumulative_crc_series_scope_can_shrink_toward_global_pool() -> None:
+def test_cumulative_crc_series_partition_can_shrink_toward_global_pool() -> None:
     runtime = CumulativeConformalRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.9,
             protection_period=3,
             base_column=quantile_column(0.5),
-            scope="series",
+            partition_key=series_partition,
             weight_decay=None,
             shrinkage_strength=0.5,
         )

@@ -82,6 +82,7 @@ from benchmarks.vn2.simulator import (
     load_initial_states,
 )
 from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
+from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
 from calibre.contracts.forecast_frame import (
     DS,
@@ -949,7 +950,7 @@ def _sample_cost_search_model_config(
 def _sample_cost_search_crc_config(
     trial: optuna.Trial,
     protection_period: int,
-    crc_scopes: list[str] | None = None,
+    crc_partitions: list[str] | None = None,
 ) -> CumulativeConformalRiskConfig | None:
     if not trial.suggest_categorical("crc_enabled", [True, False]):
         return None
@@ -969,14 +970,17 @@ def _sample_cost_search_crc_config(
     if buffer_min is not None and buffer_max is not None and buffer_min > buffer_max:
         buffer_min, buffer_max = buffer_max, buffer_min
 
+    partition_name = trial.suggest_categorical(
+        "crc_partition",
+        crc_partitions or ["global", "series", "hierarchical"],
+    )
+    partition_key = _crc_partition_key(partition_name)
+
     return CumulativeConformalRiskConfig(
         coverage=trial.suggest_float("crc_coverage", 0.55, 0.9),
         calibration_window=5000,
         protection_period=protection_period,
-        scope=trial.suggest_categorical(
-            "crc_scope",
-            crc_scopes or ["global", "series", "hierarchical"],
-        ),
+        partition_key=partition_key,
         weight_decay=None if weight_decay_choice == "none" else float(weight_decay_choice),
         weighted_quantile_mode=weighted_quantile_mode,
         buffer_min=buffer_min,
@@ -984,6 +988,16 @@ def _sample_cost_search_crc_config(
         shrinkage_strength=trial.suggest_float("crc_shrinkage_strength", 0.0, 0.75),
         method_name="cost_search_crc",
     )
+
+
+def _crc_partition_key(name: str):
+    if name == "global":
+        return global_partition
+    if name == "series":
+        return series_partition
+    if name == "hierarchical":
+        return lambda row: str(row[UNIQUE_ID]).split("_")[0]
+    raise ValueError(f"Unknown crc partition: {name!r}")
 
 
 def run_cost_search(
@@ -1001,7 +1015,7 @@ def run_cost_search(
     seed: int = 42,
     search_forecast: bool = False,
     include_order_calibration: bool = False,
-    crc_scopes: list[str] | None = None,
+    crc_partitions: list[str] | None = None,
     log_mlflow: bool = False,
     experiment_name: str = "vn2",
     run_name: str = "cost_search",
@@ -1042,7 +1056,7 @@ def run_cost_search(
         crc_config = _sample_cost_search_crc_config(
             trial,
             lead_time + review_period,
-            crc_scopes=crc_scopes,
+            crc_partitions=crc_partitions,
         )
         cache_key = _stable_config_key(
             {
@@ -1108,7 +1122,7 @@ def run_cost_search(
                     "seed": seed,
                     "search_forecast": search_forecast,
                     "include_order_calibration": include_order_calibration,
-                    "crc_scopes": crc_scopes,
+                    "crc_partitions": crc_partitions,
                     "horizon": horizon,
                     "lead_time": lead_time,
                     "review_period": review_period,
@@ -1172,7 +1186,9 @@ def _optimal_order_path_for_sku(
     demands = tuple(float(demand_by_week.get(week, 0.0)) for week in range(1, total_weeks + 1))
     choices: dict[tuple[int, float, float, float], float] = {}
 
-    def _key(week: int, end_inventory: float, p1: float, p2: float) -> tuple[int, float, float, float]:
+    def _key(
+        week: int, end_inventory: float, p1: float, p2: float
+    ) -> tuple[int, float, float, float]:
         return (week, round(end_inventory, 6), round(p1, 6), round(p2, 6))
 
     @cache
@@ -1388,10 +1404,10 @@ def _cost_diagnostic_tables(
         )
         .assign(
             avoidable_total_cost=lambda df: df["total_cost_actual"] - df["total_cost_oracle"],
-            avoidable_holding_cost=lambda df: df["holding_cost_actual"]
-            - df["holding_cost_oracle"],
-            avoidable_shortage_cost=lambda df: df["shortage_cost_actual"]
-            - df["shortage_cost_oracle"],
+            avoidable_holding_cost=lambda df: df["holding_cost_actual"] - df["holding_cost_oracle"],
+            avoidable_shortage_cost=lambda df: (
+                df["shortage_cost_actual"] - df["shortage_cost_oracle"]
+            ),
         )
         .sort_values("avoidable_total_cost", ascending=False)
         .reset_index(drop=True)

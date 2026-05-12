@@ -19,6 +19,12 @@ from calibre.conformal.mscp import (
     CumulativeSplitConformalInference,
     MultiStepSplitConformalInference,
 )
+from calibre.conformal.partitions import (
+    category_partition,
+    global_partition,
+    regime_partition,
+    series_partition,
+)
 from calibre.conformal.policies import OnlineConformalController
 from calibre.conformal.runtime import (
     ConformalPolicyConfig,
@@ -44,9 +50,13 @@ __all__ = [
     "MultiStepIntervalPrediction",
     "OnlineConformalController",
     "absolute_error",
+    "category_partition",
     "deserialize_calibration_state",
+    "global_partition",
+    "regime_partition",
     "scaled_absolute_error",
     "serialize_calibration_state",
+    "series_partition",
     "symmetric_interval",
     "symmetric_intervals",
 ]
