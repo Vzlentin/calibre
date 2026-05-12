@@ -9,6 +9,7 @@ import pandas as pd
 
 from calibre.contracts.forecast_frame import Y_HAT
 from calibre.metrics import METRICS
+from calibre.order.protocols import DecisionRule, OrderingArithmetic
 from calibre.order.types import INVENTORY_POSITION, REORDER_POINT, CostStruct
 
 
@@ -43,8 +44,8 @@ class Accuracy:
 
 @dataclass(frozen=True, slots=True)
 class Cost:
-    decision_rule: Callable[[pd.DataFrame, CostStruct], float]
-    arithmetic: Callable[..., float]
+    decision_rule: DecisionRule
+    arithmetic: OrderingArithmetic
     costs: CostStruct
 
     def evaluate(self, frame: pd.DataFrame, actuals: pd.Series) -> float:
@@ -66,8 +67,8 @@ class Cost:
 
 @dataclass(frozen=True, slots=True)
 class Pareto:
-    decision_rule_fn: Callable[[float], Callable[[pd.DataFrame, CostStruct], float]]
-    arithmetic: Callable[..., float]
+    decision_rule_fn: Callable[[float], DecisionRule]
+    arithmetic: OrderingArithmetic
     costs: CostStruct
     lambda_grid: Iterable[float]
     reduction: Literal["min", "mean"] | Callable[[list[float]], float] = "min"
