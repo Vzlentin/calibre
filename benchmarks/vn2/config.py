@@ -41,7 +41,7 @@ CONFORMAL_CONFIG = ConformalPolicyConfig(
 # capped residual correction keeps the calibrated target from double-counting
 # uncertainty above the cost-tuned base quantile.
 CONFORMAL_ORDER_CONFIG = CumulativeConformalRiskConfig(
-    coverage=0.72,
+    coverage=0.74,
     calibration_window=5000,
     protection_period=LEAD_TIME + REVIEW_PERIOD,
     weight_decay=None,
@@ -112,7 +112,7 @@ HPO_SEARCH_SPACE: dict = {
 }
 
 # Reproducible HPO-best model used by run_benchmark(tune=False). On current
-# main, resolved week_0 CRC warmup replays at EUR 5,006.40 total cost.
+# main, resolved week_0 CRC warmup replays at EUR 4,992.20 total cost.
 BEST_CONFIG: dict = {
     "backend": "mlforecast",
     "scope": "global",
