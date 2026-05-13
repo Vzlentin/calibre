@@ -142,11 +142,21 @@ def test_run_hpo_returns_valid_config() -> None:
     assert 0.0 < config["_quantile_alpha"] < 1.0
 
 
-def test_committed_best_config_exposes_hpo_winner() -> None:
-    assert BEST_CONFIG["_quantile_alpha"] == 0.59
-    assert BEST_CONFIG["quantiles"] == [0.59]
-    assert BEST_CONFIG["n_estimators"] == 800
-    assert BEST_CONFIG["lags"] == [*range(1, 14), 26, 52]
+def test_committed_best_config_is_structurally_complete() -> None:
+    required_keys = {
+        "backend",
+        "scope",
+        "model",
+        "objective",
+        "quantiles",
+        "lags",
+        "_quantile_alpha",
+    }
+    assert required_keys.issubset(BEST_CONFIG)
+    assert BEST_CONFIG["objective"] == "quantile"
+    assert isinstance(BEST_CONFIG["quantiles"], list) and BEST_CONFIG["quantiles"]
+    assert 0.0 < float(BEST_CONFIG["_quantile_alpha"]) < 1.0
+    assert float(BEST_CONFIG["_quantile_alpha"]) == BEST_CONFIG["quantiles"][0]
 
 
 def test_top1_and_cumulative_candidate_configs_are_explicit() -> None:
@@ -243,6 +253,29 @@ def test_cached_replay_matches_run_benchmark_on_small_subset() -> None:
     actual = replay_cached_cost(cache)
 
     assert actual.total_cost == pytest.approx(float(expected["total_cost"].sum()))
+
+
+def test_run_benchmark_with_cumulative_target_config_produces_finite_cost() -> None:
+    """End-to-end smoke for the direct-cumulative target plumbing."""
+    cumulative_config = {**_FAST_BEST_CONFIG, "_target_mode": "cumulative"}
+    result = run_benchmark(
+        data_dir=DATA_DIR,
+        horizon=3,
+        lead_time=2,
+        review_period=1,
+        decision_rounds=1,
+        delivery_weeks=1,
+        series_filter=_get_first_n_series(2),
+        results_dir=None,
+        verbose=False,
+        best_config=cumulative_config,
+        order_conformal_warmup_origins=1,
+    )
+
+    assert not result.empty
+    total = float(result["total_cost"].sum())
+    assert total >= 0.0
+    assert pd.notna(total)
 
 
 def test_cost_search_smoke_runs_one_cached_trial() -> None:

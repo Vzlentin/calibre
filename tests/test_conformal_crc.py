@@ -273,3 +273,46 @@ def test_cumulative_crc_series_partition_can_shrink_toward_global_pool() -> None
     # Local residual is 10, global residual quantile is 100, shrinkage 0.5
     # produces a 55-unit buffer on a 60-unit base forecast.
     assert fresh[upper_col].iloc[2] == pytest.approx(115.0)
+
+
+def test_cumulative_crc_partition_key_combined_with_weight_decay() -> None:
+    runtime = CumulativeConformalRiskRuntime(
+        CumulativeConformalRiskConfig(
+            coverage=0.5,
+            protection_period=3,
+            base_column=quantile_column(0.5),
+            partition_key=lambda row: str(row[UNIQUE_ID]).split("_")[0],
+            weight_decay=0.5,
+        )
+    )
+    # Older residual under parent "1": actual_sum=70, base_sum=60 -> residual 10.
+    runtime.observe(runtime.apply(_frame(unique_id="1_A", actual_values=[10.0, 20.0, 40.0])))
+    # Newer residual under parent "1": actual_sum=110, base_sum=60 -> residual 50.
+    runtime.observe(
+        runtime.apply(
+            _frame(
+                unique_id="1_B",
+                origin=pd.Timestamp("2024-02-01"),
+                actual_values=[10.0, 20.0, 80.0],
+            )
+        )
+    )
+    # Different parent "2"; residual 250 must not influence the "1_*" buffer.
+    runtime.observe(
+        runtime.apply(
+            _frame(
+                unique_id="2_A",
+                origin=pd.Timestamp("2024-03-01"),
+                actual_values=[10.0, 20.0, 280.0],
+            )
+        )
+    )
+
+    fresh = runtime.apply(_frame(unique_id="1_C", origin=pd.Timestamp("2024-04-01")))
+    _, upper_col = interval_column_names(0.5)
+
+    # Within parent "1", residuals are [10 (weight 0.5), 50 (weight 1.0)].
+    # Threshold = 0.5 * 1.5 = 0.75; cumulative crosses at residual 50.
+    # Upper = base 60 + buffer 50 = 110. The 250 residual under parent "2"
+    # is correctly excluded.
+    assert fresh[upper_col].iloc[2] == pytest.approx(110.0)

@@ -340,13 +340,6 @@ class CumulativeConformalRiskRuntime:
     def _buffer_for(self, partition: Hashable) -> float:
         return self._calibrator.predict(self.config.alpha, partition)
 
-    def _records_for(self, unique_id: str) -> list[_ResidualRecord]:
-        """Return the residual pool used by a series partition.
-
-        Kept as a compatibility shim for callers that inspect diagnostics in tests.
-        """
-        return self._calibrator.records_for_partition(unique_id)
-
     def _snapshot(self, partition: Hashable) -> dict[str, Any]:
         records = self._records_for_partition(partition)
         buffer_components = self._buffer_components_for(partition)
