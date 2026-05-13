@@ -281,13 +281,17 @@ class WeightedResidualCalibrator:
         }
 
 
-class CumulativeConformalRiskRuntime:
+class CumulativeRiskRuntime:
     """One-sided cumulative residual conformal runtime for order decisions."""
 
     def __init__(self, config: CumulativeConformalRiskConfig) -> None:
         self.config = config
         self._calibrator = WeightedResidualCalibrator(config)
         self._sequence = 0
+
+    @property
+    def interval_columns(self) -> tuple[str, str]:
+        return self.config.interval_columns
 
     def _partition_for_row(self, row: pd.Series) -> Hashable:
         partition = self.config.partition_key(row)

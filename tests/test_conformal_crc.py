@@ -6,7 +6,7 @@ import pytest
 
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
-    CumulativeConformalRiskRuntime,
+    CumulativeRiskRuntime,
 )
 from calibre.conformal.partitions import series_partition
 from calibre.core.forecast_frame import (
@@ -50,8 +50,8 @@ def _frame(
     )
 
 
-def _runtime(*, weight_decay: float | None = None) -> CumulativeConformalRiskRuntime:
-    return CumulativeConformalRiskRuntime(
+def _runtime(*, weight_decay: float | None = None) -> CumulativeRiskRuntime:
+    return CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.5,
             protection_period=3,
@@ -130,7 +130,7 @@ def test_cumulative_crc_weight_decay_prefers_recent_residuals() -> None:
 
 
 def test_cumulative_crc_nonexchangeable_mode_keeps_test_point_mass() -> None:
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.5,
             protection_period=3,
@@ -158,7 +158,7 @@ def test_cumulative_crc_nonexchangeable_mode_keeps_test_point_mass() -> None:
 
 
 def test_cumulative_crc_nonexchangeable_infinite_buffer_requires_cap() -> None:
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.9,
             protection_period=3,
@@ -174,7 +174,7 @@ def test_cumulative_crc_nonexchangeable_infinite_buffer_requires_cap() -> None:
 
 
 def test_cumulative_crc_nonexchangeable_infinite_buffer_can_be_capped() -> None:
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.9,
             protection_period=3,
@@ -193,7 +193,7 @@ def test_cumulative_crc_nonexchangeable_infinite_buffer_can_be_capped() -> None:
 
 
 def test_cumulative_crc_can_cap_positive_buffers() -> None:
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.9,
             protection_period=3,
@@ -211,7 +211,7 @@ def test_cumulative_crc_can_cap_positive_buffers() -> None:
 
 
 def test_cumulative_crc_partition_key_uses_parent_residual_pool() -> None:
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.9,
             protection_period=3,
@@ -249,7 +249,7 @@ def test_cumulative_crc_partition_key_uses_parent_residual_pool() -> None:
 
 
 def test_cumulative_crc_series_partition_can_shrink_toward_global_pool() -> None:
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.9,
             protection_period=3,
@@ -279,7 +279,7 @@ def test_cumulative_crc_series_partition_can_shrink_toward_global_pool() -> None
 
 
 def test_cumulative_crc_partition_key_combined_with_weight_decay() -> None:
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.5,
             protection_period=3,

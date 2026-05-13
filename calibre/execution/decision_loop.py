@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 
+from calibre.conformal.runtime import ConformalRuntime
 from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -59,7 +60,7 @@ def _fill_actuals(frame: pd.DataFrame, lookup: pd.Series) -> pd.DataFrame:
 
 
 def observe_per_horizon(
-    runtime: Any,
+    runtime: ConformalRuntime,
     pending: list[pd.DataFrame],
     actuals_lookup: pd.Series,
     lower_col: str,
@@ -88,7 +89,7 @@ def observe_per_horizon(
 
 
 def observe_cumulative(
-    runtime: Any,
+    runtime: ConformalRuntime,
     pending: list[pd.DataFrame],
     actuals_lookup: pd.Series,
 ) -> list[pd.DataFrame]:
@@ -167,9 +168,9 @@ class DecisionLoop:
         policy: Callable[[pd.DataFrame], dict[str, float]],
         get_actuals: Callable[[int], dict[str, float]],
         config: DecisionLoopConfig,
-        runtime: Any | None = None,
+        runtime: ConformalRuntime | None = None,
         ensemble: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
-        observe_fn: Callable[[Any, list[pd.DataFrame], pd.Series], list[pd.DataFrame]]
+        observe_fn: Callable[[ConformalRuntime, list[pd.DataFrame], pd.Series], list[pd.DataFrame]]
         | None = None,
     ) -> None:
         if observe_fn is not None and runtime is None:
@@ -193,7 +194,7 @@ class DecisionLoop:
 
         lower_col = upper_col = ""
         if self._runtime is not None:
-            lower_col, upper_col = self._runtime.config.interval_columns
+            lower_col, upper_col = self._runtime.interval_columns
 
         for round_num in range(1, self._config.n_rounds + 1):
             tasks, origin, round_actuals = self._build_round_tasks(round_num)

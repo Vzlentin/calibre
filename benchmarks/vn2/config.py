@@ -8,7 +8,7 @@ from mlforecast.lag_transforms import RollingMean, RollingStd
 
 from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
 from calibre.conformal.partitions import global_partition, series_partition
-from calibre.conformal.runtime import ConformalPolicyConfig
+from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "vn2"
@@ -27,7 +27,7 @@ DELIVERY_WEEKS: int = 2
 # Cost-optimal service level: Cu / (Cu + Co) = 1.0 / (1.0 + 0.2) ≈ 0.833
 # Cumulative mode bounds Σdemand over the protection period directly,
 # avoiding the per-horizon-sum inflation from independent bounds.
-CONFORMAL_CONFIG = ConformalPolicyConfig(
+CONFORMAL_CONFIG = SymmetricIntervalConfig(
     method="mscp",
     coverage=0.833,
     calibration_window=50,

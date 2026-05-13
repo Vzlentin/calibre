@@ -12,13 +12,14 @@ import pytest
 def test_conformal_module_importable():
     from calibre.conformal import (  # noqa: F401
         AdaptiveConformalInference,
-        ConformalPolicyConfig,
         ConformalRuntime,
         IntervalPrediction,
         MultiStepAdaptiveConformalInference,
         MultiStepIntervalPrediction,
         MultiStepSplitConformalInference,
         OnlineConformalController,
+        SymmetricIntervalConfig,
+        SymmetricIntervalRuntime,
         absolute_error,
         scaled_absolute_error,
         symmetric_interval,
@@ -27,15 +28,15 @@ def test_conformal_module_importable():
 
 
 def test_conformal_policy_config_exposes_alpha_and_interval_columns():
-    from calibre.conformal import ConformalPolicyConfig
+    from calibre.conformal import SymmetricIntervalConfig
 
-    config = ConformalPolicyConfig(method="mscp", coverage=0.9, calibration_window=12)
+    config = SymmetricIntervalConfig(method="mscp", coverage=0.9, calibration_window=12)
     assert config.alpha == pytest.approx(0.1)
     assert config.interval_columns == ("lo_0p9", "hi_0p9")
 
 
 def test_conformal_runtime_stamps_aci_interval_columns_and_state():
-    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
     from calibre.core.forecast_frame import (
         CALIBRATION_STATE,
         CONFORMAL_ALPHA,
@@ -49,8 +50,8 @@ def test_conformal_runtime_stamps_aci_interval_columns_and_state():
         Y,
     )
 
-    config = ConformalPolicyConfig(method="aci", coverage=0.9, calibration_window=5, gamma=0.05)
-    runtime = ConformalRuntime(config)
+    config = SymmetricIntervalConfig(method="aci", coverage=0.9, calibration_window=5, gamma=0.05)
+    runtime = SymmetricIntervalRuntime(config)
     origin = pd.Timestamp("2024-01-07")
     future_dates = pd.date_range("2024-01-14", periods=2, freq="W")
     frame = pd.DataFrame(
@@ -76,11 +77,11 @@ def test_conformal_runtime_stamps_aci_interval_columns_and_state():
 
 
 def test_conformal_runtime_updates_only_observed_aci_horizon():
-    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
     from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 
-    config = ConformalPolicyConfig(method="aci", coverage=0.9, calibration_window=5, gamma=0.05)
-    runtime = ConformalRuntime(config)
+    config = SymmetricIntervalConfig(method="aci", coverage=0.9, calibration_window=5, gamma=0.05)
+    runtime = SymmetricIntervalRuntime(config)
     first_origin = pd.Timestamp("2024-01-07")
     first_frame = pd.DataFrame(
         {
@@ -120,11 +121,11 @@ def test_conformal_runtime_updates_only_observed_aci_horizon():
 
 
 def test_conformal_runtime_masks_mscp_warmup_bounds():
-    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
     from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 
-    config = ConformalPolicyConfig(method="mscp", coverage=0.9, calibration_window=5)
-    runtime = ConformalRuntime(config)
+    config = SymmetricIntervalConfig(method="mscp", coverage=0.9, calibration_window=5)
+    runtime = SymmetricIntervalRuntime(config)
     origin = pd.Timestamp("2024-01-07")
     frame = pd.DataFrame(
         {
@@ -538,7 +539,7 @@ def test_cumulative_controller_ready_mask_blocked_when_buffer_empty():
     assert controller.ready_mask().tolist() == [False, False, False]
 
 
-# ── ConformalRuntime cumulative mode ──────────────────────────────────────────
+# ── SymmetricIntervalRuntime cumulative mode ──────────────────────────────────
 
 
 def _build_cumulative_runtime(
@@ -546,16 +547,16 @@ def _build_cumulative_runtime(
     calibration_window: int = 5,
     coverage: float = 0.5,
 ):
-    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 
-    config = ConformalPolicyConfig(
+    config = SymmetricIntervalConfig(
         method="mscp",
         coverage=coverage,
         calibration_window=calibration_window,
         mode="cumulative",
         protection_period=protection_period,
     )
-    return ConformalRuntime(config), config
+    return SymmetricIntervalRuntime(config), config
 
 
 def _cumulative_frame(
@@ -665,17 +666,17 @@ def test_cumulative_runtime_observe_skips_partially_resolved_windows():
 
 
 def test_cumulative_config_requires_protection_period():
-    from calibre.conformal import ConformalPolicyConfig
+    from calibre.conformal import SymmetricIntervalConfig
 
     with pytest.raises(ValueError, match="protection_period"):
-        ConformalPolicyConfig(method="mscp", coverage=0.9, mode="cumulative")
+        SymmetricIntervalConfig(method="mscp", coverage=0.9, mode="cumulative")
 
 
 def test_cumulative_config_rejects_aci_method():
-    from calibre.conformal import ConformalPolicyConfig
+    from calibre.conformal import SymmetricIntervalConfig
 
     with pytest.raises(ValueError, match="cumulative mode"):
-        ConformalPolicyConfig(method="aci", coverage=0.9, mode="cumulative", protection_period=3)
+        SymmetricIntervalConfig(method="aci", coverage=0.9, mode="cumulative", protection_period=3)
 
 
 def test_cumulative_controller_rejects_array_alpha():
@@ -689,17 +690,17 @@ def test_cumulative_controller_rejects_array_alpha():
 
 def test_cumulative_runtime_pads_horizon_beyond_protection_period():
     """When horizon > protection_period, only h=K gets a finite bound; h>K is NaN."""
-    from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
     from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 
-    config = ConformalPolicyConfig(
+    config = SymmetricIntervalConfig(
         method="mscp",
         coverage=0.5,
         calibration_window=5,
         mode="cumulative",
         protection_period=2,
     )
-    runtime = ConformalRuntime(config)
+    runtime = SymmetricIntervalRuntime(config)
     lower_col, upper_col = config.interval_columns
 
     # Prime buffer with two observations

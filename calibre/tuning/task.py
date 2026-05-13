@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import optuna
 import pandas as pd
 
-from calibre.conformal import ConformalPolicyConfig
+from calibre.conformal import ConformalRuntime
 from calibre.tuning.objectives import TuningObjective
 
 
@@ -24,4 +24,4 @@ class TuningTask:
     objective: TuningObjective
     n_trials: int = 50
     freq: str = "W"
-    conformal_config: ConformalPolicyConfig | None = None
+    conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None

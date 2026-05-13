@@ -3,7 +3,7 @@
 This is the legacy `run_benchmark.py` body, kept around as a reference
 exercise for the parts of Calibre that the tuned pipeline bypasses:
 
-- `ConformalRuntime` (ACI / MSCP per-horizon),
+- `SymmetricIntervalRuntime` (ACI / MSCP per-horizon),
 - MSCP cumulative mode,
 - `apply_rs_policy` default summed-conformal / cumulative path,
 - `VN2Simulator` end-to-end,
@@ -65,9 +65,9 @@ from benchmarks.vn2.simulator import (
 )
 from benchmarks.vn2.tuning import seasonal_naive_search_space, tune_all_series
 from calibre.conformal.runtime import (
-    ConformalPolicyConfig,
-    ConformalRuntime,
-    build_conformal_runtime,
+    SymmetricIntervalConfig,
+    SymmetricIntervalRuntime,
+    build_symmetric_interval_runtime,
 )
 from calibre.core.forecast_frame import (
     DS,
@@ -150,18 +150,18 @@ def _run_warmup(
     model_configs: list[dict],
     horizon: int,
     warmup_origins: int,
-    conformal_config: ConformalPolicyConfig,
+    conformal_config: SymmetricIntervalConfig,
     series_filter: list[str] | None,
-) -> ConformalRuntime:
+) -> SymmetricIntervalRuntime:
     """Run walk-forward warmup to calibrate the conformal runtime.
 
     Generates raw multi-model forecasts across the last `warmup_origins`
     walk-forward origins, ensembles them, and feeds each resolved prediction
     through apply/observe to build calibration state.
 
-    Returns a ConformalRuntime with calibration history accumulated.
+    Returns a SymmetricIntervalRuntime with calibration history accumulated.
     """
-    conformal_runtime = build_conformal_runtime(conformal_config)
+    conformal_runtime = build_symmetric_interval_runtime(conformal_config)
 
     if warmup_origins == 0:
         return conformal_runtime
@@ -228,7 +228,7 @@ def _run_warmup(
 def run_seasonal(
     data_dir: Path = DATA_DIR,
     model_configs: list[dict] = MODEL_CONFIGS,
-    conformal_config: ConformalPolicyConfig = CONFORMAL_CONFIG,
+    conformal_config: SymmetricIntervalConfig = CONFORMAL_CONFIG,
     horizon: int = HORIZON,
     warmup_origins: int = WARMUP_ORIGINS,
     lead_time: int = LEAD_TIME,
@@ -250,7 +250,7 @@ def run_seasonal(
         data_dir: Directory containing week_*_sales.csv and week_0_initial_state.csv.
         model_configs: List of model config dicts for BackendEngine tasks.
             Defaults to a single SeasonalNaive (no ensemble).
-        conformal_config: ConformalPolicyConfig for ACI/MSCP.
+        conformal_config: SymmetricIntervalConfig for ACI/MSCP.
         horizon: Forecast horizon (= lead_time + review_period).
         warmup_origins: Number of walk-forward origins to use for conformal warmup.
         lead_time: Order lead time in weeks.
@@ -334,7 +334,9 @@ def run_seasonal(
         )
 
         if verbose:
-            n_calibrated = len(conformal_runtime._policies)
+            diagnostics = conformal_runtime.get_diagnostics()
+            score_history = diagnostics.get("calibrator", {}).get("score_history", {})
+            n_calibrated = len(score_history)
             print(f"Warmup complete. Calibrated {n_calibrated} conformal policies.")
 
         engine = BackendEngine(freq="W-MON")

@@ -4,7 +4,7 @@ import optuna
 import pandas as pd
 import pytest
 
-from calibre.conformal import ConformalPolicyConfig
+from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.evaluation.point_metrics import mae, smape
 from calibre.tuning.objectives import Accuracy
 from calibre.tuning.optimizer import optimize_task
@@ -107,6 +107,20 @@ def test_optimize_with_mae_metric(series_df, dates):
 
 
 def test_optimize_accepts_conformal_config(series_df, dates):
+    factory_calls = 0
+
+    def _runtime_factory() -> SymmetricIntervalRuntime:
+        nonlocal factory_calls
+        factory_calls += 1
+        return SymmetricIntervalRuntime(
+            SymmetricIntervalConfig(
+                method="aci",
+                coverage=0.9,
+                calibration_window=4,
+                gamma=0.05,
+            )
+        )
+
     task = TuningTask(
         unique_id="test_series",
         history=series_df,
@@ -122,13 +136,9 @@ def test_optimize_accepts_conformal_config(series_df, dates):
         objective=Accuracy(metric=smape),
         n_trials=1,
         freq="W",
-        conformal_config=ConformalPolicyConfig(
-            method="aci",
-            coverage=0.9,
-            calibration_window=4,
-            gamma=0.05,
-        ),
+        conformal_runtime_factory=_runtime_factory,
     )
     result = optimize_task(task)
     assert isinstance(result, dict)
     assert "season_length" in result
+    assert factory_calls == 1

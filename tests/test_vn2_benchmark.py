@@ -31,7 +31,7 @@ from benchmarks.vn2.run_benchmark import (
 from benchmarks.vn2.simulator import ProductState, extract_new_actuals, load_initial_states
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
-    CumulativeConformalRiskRuntime,
+    CumulativeRiskRuntime,
 )
 from calibre.core.forecast_frame import (
     DS,
@@ -326,7 +326,7 @@ def test_run_order_conformal_warmup_seeds_residual_pool() -> None:
     sales = sales[sales["unique_id"].isin(series)]
 
     horizon = 3
-    runtime = CumulativeConformalRiskRuntime(
+    runtime = CumulativeRiskRuntime(
         CumulativeConformalRiskConfig(
             coverage=0.5,
             protection_period=horizon,
