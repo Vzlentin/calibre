@@ -1,7 +1,7 @@
 """VN2 winning approach expressed entirely through Calibre's public API.
 
 The pipeline is now:
-  - ``calibre.features.add_stockout_features`` for censored-demand imputation
+  - ``calibre.forecasting.features.add_stockout_features`` for censored-demand imputation
   - A single ``ForecastTask`` with ``scope="global"``, ``quantiles=[0.52]``,
     ``strategy="direct"``, run through ``BackendEngine`` with the
     ``mlforecast`` backend wrapping LightGBM quantile regression.
@@ -45,13 +45,13 @@ from benchmarks.vn2.simulator import (
     extract_new_actuals,
     load_initial_states,
 )
-from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
-from calibre.engine.backend import BackendEngine
-from calibre.features import add_stockout_features
-from calibre.order.config import OrderPolicyConfig, apply_order_policy
-from calibre.order.types import RsPolicyParameters
-from calibre.pipeline.loading import load_period, melt_wide_instock
-from calibre.tasks.forecast_task import ForecastTask
+from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.core.forecast_task import ForecastTask
+from calibre.core.order_types import RsPolicyParameters
+from calibre.execution.backend import BackendEngine
+from calibre.execution.data_loading import load_period, melt_wide_instock
+from calibre.forecasting.features import add_stockout_features
+from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 
 # Cost-aligned quantile: Cu / (Cu + Co) = 1.0 / (1.0 + 0.2) ≈ 0.833.
 # 0.52 is the empirically-tuned per-horizon level used in the VN2 winner;

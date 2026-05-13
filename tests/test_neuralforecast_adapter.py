@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.models.neuralforecast import NeuralForecastAdapter
-from calibre.tasks.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask
+from calibre.forecasting.neuralforecast_adapter import NeuralForecastAdapter
 
 
 def _nf_predict_return(uid: str, n: int) -> pd.DataFrame:
@@ -123,7 +123,8 @@ def test_fit_preserves_exogenous_columns(monkeypatch, repeating_history):
     mock_instance = MagicMock()
     mock_instance.predict.return_value = _nf_predict_return("SKU_001", 4)
     monkeypatch.setattr(
-        "calibre.models.neuralforecast.NeuralForecast", MagicMock(return_value=mock_instance)
+        "calibre.forecasting.neuralforecast_adapter.NeuralForecast",
+        MagicMock(return_value=mock_instance),
     )
 
     adapter = NeuralForecastAdapter(task.model_config)
@@ -160,7 +161,8 @@ def test_predict_forwards_future_x_as_futr_df(monkeypatch, repeating_history):
     mock_instance = MagicMock()
     mock_instance.predict.return_value = _nf_predict_return("SKU_001", 4)
     monkeypatch.setattr(
-        "calibre.models.neuralforecast.NeuralForecast", MagicMock(return_value=mock_instance)
+        "calibre.forecasting.neuralforecast_adapter.NeuralForecast",
+        MagicMock(return_value=mock_instance),
     )
 
     adapter = NeuralForecastAdapter(task.model_config)
@@ -176,7 +178,8 @@ def test_predict_without_future_x_omits_futr_df(monkeypatch, nhits_task):
     mock_instance = MagicMock()
     mock_instance.predict.return_value = _nf_predict_return("SKU_001", 4)
     monkeypatch.setattr(
-        "calibre.models.neuralforecast.NeuralForecast", MagicMock(return_value=mock_instance)
+        "calibre.forecasting.neuralforecast_adapter.NeuralForecast",
+        MagicMock(return_value=mock_instance),
     )
 
     adapter = NeuralForecastAdapter(nhits_task.model_config)

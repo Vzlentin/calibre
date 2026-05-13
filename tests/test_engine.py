@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from calibre.conformal import ConformalPolicyConfig
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
     CONFORMAL_METHOD,
     DS,
@@ -15,11 +15,11 @@ from calibre.contracts.forecast_frame import (
     H,
     Y,
 )
-from calibre.engine.backend import BackendEngine, BackendResult
-from calibre.engine.ledger import OrderLedger
-from calibre.order.config import OrderPolicyConfig
-from calibre.order.types import NewsvendorPolicyParameters, RsPolicyParameters
-from calibre.tasks.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask
+from calibre.core.order_types import NewsvendorPolicyParameters, RsPolicyParameters
+from calibre.execution.backend import BackendEngine, BackendResult
+from calibre.execution.ledger import OrderLedger
+from calibre.ordering.policy_config import OrderPolicyConfig
 
 
 @pytest.fixture
@@ -397,7 +397,7 @@ def test_run_parallel_slices_future_x_per_uid(monkeypatch):
                 }
             )
 
-    monkeypatch.setattr("calibre.engine.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
     engine = BackendEngine(freq="W")
     engine.execute(tasks, actuals, origins=[dates[11]])
@@ -447,7 +447,7 @@ def test_run_direct_passes_full_future_x(monkeypatch):
                 }
             )
 
-    monkeypatch.setattr("calibre.engine.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
     engine = BackendEngine(freq="W")
     engine.execute([task], all_series, origins=[dates[11]])

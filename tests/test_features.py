@@ -1,4 +1,4 @@
-"""Tests for calibre.features package."""
+"""Tests for calibre.forecasting.features package."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.features import (
+from calibre.forecasting.features import (
     add_calendar_features,
     add_lag_features,
     add_rolling_features,

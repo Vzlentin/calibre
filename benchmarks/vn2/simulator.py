@@ -1,8 +1,8 @@
-"""VN2 inventory simulator: thin adapter over ``calibre.simulation``.
+"""VN2 inventory simulator: thin adapter over ``calibre.ordering.simulation``.
 
 Holds VN2-specific concerns (the two-slot in-transit pipeline, the linear
 holding/shortage cost rates, the CSV I/O helpers) and delegates the generic
-state transitions and cost accounting to ``calibre.simulation``.
+state transitions and cost accounting to ``calibre.ordering.simulation``.
 
 Cost rules:
     - Holding cost: EUR 0.20 per unit of end-of-week inventory (no cost for in-transit)
@@ -17,14 +17,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from calibre.simulation import (
+from calibre.ordering.simulation import (
     LinearCostModel,
     LostSalesRule,
     PeriodResult,
     Simulator,
     make_pipeline,
 )
-from calibre.simulation import ProductState as GenericProductState
+from calibre.ordering.simulation import ProductState as GenericProductState
 
 LEAD_TIME_DEPTH: int = 2
 HOLDING_COST_RATE: float = 0.2

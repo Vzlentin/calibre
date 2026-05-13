@@ -8,10 +8,11 @@ from collections.abc import Callable
 import optuna
 import pandas as pd
 
-from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
-from calibre.metrics import smape
-from calibre.tasks.tuning_task import TuningTask
+from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.evaluation.point_metrics import smape
 from calibre.tuning.objectives import Accuracy
+from calibre.tuning.optimizer import optimize_task
+from calibre.tuning.task import TuningTask
 
 
 def seasonal_naive_search_space(trial: optuna.Trial) -> dict:
@@ -57,7 +58,7 @@ def tune_one_series(
         n_trials=n_trials,
         freq=freq,
     )
-    return task.optimize()
+    return optimize_task(task)
 
 
 def tune_all_series(

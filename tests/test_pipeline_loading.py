@@ -1,4 +1,4 @@
-"""Tests for calibre.pipeline.loading."""
+"""Tests for calibre.execution.data_loading."""
 
 from __future__ import annotations
 
@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from calibre.pipeline.loading import load_master, load_period, melt_wide_instock, melt_wide_sales
+from calibre.execution.data_loading import (
+    load_master,
+    load_period,
+    melt_wide_instock,
+    melt_wide_sales,
+)
 
 STORE_PRODUCT_PAIRS = 599
 PERIOD0_DATE_COLS = 157

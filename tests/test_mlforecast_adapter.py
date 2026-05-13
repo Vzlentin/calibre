@@ -4,8 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.models.mlforecast import MLForecastAdapter
-from calibre.tasks.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask
+from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
 
 
 def _mlf_predict_return(uid: str, n: int) -> pd.DataFrame:
@@ -217,7 +217,7 @@ def test_fit_preserves_exogenous_columns(monkeypatch, repeating_history):
     mock_instance = MagicMock()
     mock_instance.predict.return_value = _mlf_predict_return("SKU_001", 4)
     monkeypatch.setattr(
-        "calibre.models.mlforecast.MLForecast", MagicMock(return_value=mock_instance)
+        "calibre.forecasting.mlforecast_adapter.MLForecast", MagicMock(return_value=mock_instance)
     )
 
     adapter = MLForecastAdapter(task.model_config)
@@ -247,7 +247,7 @@ def test_predict_forwards_future_x_as_X_df(monkeypatch, repeating_history):
     mock_instance = MagicMock()
     mock_instance.predict.return_value = _mlf_predict_return("SKU_001", 4)
     monkeypatch.setattr(
-        "calibre.models.mlforecast.MLForecast", MagicMock(return_value=mock_instance)
+        "calibre.forecasting.mlforecast_adapter.MLForecast", MagicMock(return_value=mock_instance)
     )
 
     adapter = MLForecastAdapter(task.model_config)
@@ -263,7 +263,7 @@ def test_predict_without_future_x_omits_X_df(monkeypatch, lgbm_task):
     mock_instance = MagicMock()
     mock_instance.predict.return_value = _mlf_predict_return("SKU_001", 4)
     monkeypatch.setattr(
-        "calibre.models.mlforecast.MLForecast", MagicMock(return_value=mock_instance)
+        "calibre.forecasting.mlforecast_adapter.MLForecast", MagicMock(return_value=mock_instance)
     )
 
     adapter = MLForecastAdapter(lgbm_task.model_config)

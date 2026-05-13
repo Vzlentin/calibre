@@ -1,6 +1,6 @@
 import pytest
 
-from calibre.models.registry import get_scope, resolve_adapter
+from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
 
 
 def test_resolve_statsforecast_backend():

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -12,7 +12,7 @@ from calibre.contracts.forecast_frame import (
     H,
     Y,
 )
-from calibre.engine.ledger import ForecastLedger as Ledger
+from calibre.execution.ledger import ForecastLedger as Ledger
 
 
 def _make_frame(n: int = 3, origin: str = "2024-01-01") -> pd.DataFrame:

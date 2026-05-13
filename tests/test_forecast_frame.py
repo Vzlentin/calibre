@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,

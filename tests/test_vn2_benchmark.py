@@ -29,8 +29,11 @@ from benchmarks.vn2.run_benchmark import (
     run_hpo,
 )
 from benchmarks.vn2.simulator import ProductState, extract_new_actuals, load_initial_states
-from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
-from calibre.contracts.forecast_frame import (
+from calibre.conformal.cumulative_risk import (
+    CumulativeConformalRiskConfig,
+    CumulativeConformalRiskRuntime,
+)
+from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -40,7 +43,7 @@ from calibre.contracts.forecast_frame import (
     Y,
     quantile_column,
 )
-from calibre.pipeline.loading import load_period
+from calibre.execution.data_loading import load_period
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
 

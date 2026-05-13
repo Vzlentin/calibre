@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from calibre.simulation import (
+from calibre.ordering.simulation import (
     LinearCostModel,
     LostSalesRule,
     PeriodResult,

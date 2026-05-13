@@ -6,7 +6,7 @@ from typing import Literal
 
 import numpy as np
 
-from calibre.conformal.aci import _finite_sample_radius, _validate_quantile_rule
+from calibre.conformal.numerics import _finite_sample_radius, _validate_quantile_rule
 
 
 class RollingQuantileCalibrator:

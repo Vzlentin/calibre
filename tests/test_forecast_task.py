@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from calibre.tasks.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask
 
 
 @pytest.fixture

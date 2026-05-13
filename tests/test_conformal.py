@@ -36,7 +36,7 @@ def test_conformal_policy_config_exposes_alpha_and_interval_columns():
 
 def test_conformal_runtime_stamps_aci_interval_columns_and_state():
     from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
-    from calibre.contracts.forecast_frame import (
+    from calibre.core.forecast_frame import (
         CALIBRATION_STATE,
         CONFORMAL_ALPHA,
         CONFORMAL_METHOD,
@@ -77,7 +77,7 @@ def test_conformal_runtime_stamps_aci_interval_columns_and_state():
 
 def test_conformal_runtime_updates_only_observed_aci_horizon():
     from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
-    from calibre.contracts.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
+    from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 
     config = ConformalPolicyConfig(method="aci", coverage=0.9, calibration_window=5, gamma=0.05)
     runtime = ConformalRuntime(config)
@@ -121,7 +121,7 @@ def test_conformal_runtime_updates_only_observed_aci_horizon():
 
 def test_conformal_runtime_masks_mscp_warmup_bounds():
     from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
-    from calibre.contracts.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
+    from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 
     config = ConformalPolicyConfig(method="mscp", coverage=0.9, calibration_window=5)
     runtime = ConformalRuntime(config)
@@ -349,7 +349,7 @@ def test_aci_initial_scores_seed_radius():
 
 def test_finite_sample_radius_higher_returns_inf_for_small_alpha():
     """'higher' rule returns inf when alpha <= 1/(n+1)."""
-    from calibre.conformal.aci import _finite_sample_radius
+    from calibre.conformal.adaptive import _finite_sample_radius
 
     scores = [1.0, 2.0, 3.0]  # n=3
     # alpha <= 1/4 should trigger inf
@@ -359,7 +359,7 @@ def test_finite_sample_radius_higher_returns_inf_for_small_alpha():
 
 def test_finite_sample_radius_conformal_never_returns_inf():
     """'conformal' rule never returns inf (uses max score instead)."""
-    from calibre.conformal.aci import _finite_sample_radius
+    from calibre.conformal.adaptive import _finite_sample_radius
 
     scores = [1.0, 2.0, 3.0]  # n=3
     # same small alpha as above
@@ -565,7 +565,7 @@ def _cumulative_frame(
     y_hats: list[float],
     y_actuals: list[float] | None = None,
 ):
-    from calibre.contracts.forecast_frame import (
+    from calibre.core.forecast_frame import (
         FORECAST_ORIGIN,
         MODEL_NAME,
         UNIQUE_ID,
@@ -590,7 +590,7 @@ def _cumulative_frame(
 
 
 def test_cumulative_runtime_writes_marker_column_on_every_row():
-    from calibre.contracts.forecast_frame import CONFORMAL_MODE
+    from calibre.core.forecast_frame import CONFORMAL_MODE
 
     runtime, config = _build_cumulative_runtime()
     frame = _cumulative_frame(
@@ -630,7 +630,7 @@ def test_cumulative_runtime_emits_finite_bound_only_at_protection_period():
 
 
 def test_cumulative_runtime_observe_appends_one_score_per_window():
-    from calibre.contracts.forecast_frame import NONCONFORMITY_SCORE
+    from calibre.core.forecast_frame import NONCONFORMITY_SCORE
 
     runtime, _ = _build_cumulative_runtime(protection_period=3)
     origin = pd.Timestamp("2024-01-07")
@@ -649,7 +649,7 @@ def test_cumulative_runtime_observe_appends_one_score_per_window():
 
 
 def test_cumulative_runtime_observe_skips_partially_resolved_windows():
-    from calibre.contracts.forecast_frame import NONCONFORMITY_SCORE
+    from calibre.core.forecast_frame import NONCONFORMITY_SCORE
 
     runtime, _ = _build_cumulative_runtime(protection_period=3)
     origin = pd.Timestamp("2024-01-07")
@@ -690,7 +690,7 @@ def test_cumulative_controller_rejects_array_alpha():
 def test_cumulative_runtime_pads_horizon_beyond_protection_period():
     """When horizon > protection_period, only h=K gets a finite bound; h>K is NaN."""
     from calibre.conformal import ConformalPolicyConfig, ConformalRuntime
-    from calibre.contracts.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
+    from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 
     config = ConformalPolicyConfig(
         method="mscp",

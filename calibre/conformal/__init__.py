@@ -6,19 +6,15 @@ configuration helpers now live alongside the low-level controllers so the
 engine can adopt them incrementally.
 """
 
-from calibre.conformal.aci import (
+from calibre.conformal.adaptive import (
     AdaptiveConformalInference,
     MultiStepAdaptiveConformalInference,
 )
-from calibre.conformal.crc import (
+from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
     CumulativeConformalRiskRuntime,
 )
 from calibre.conformal.intervals import symmetric_interval, symmetric_intervals
-from calibre.conformal.mscp import (
-    CumulativeSplitConformalInference,
-    MultiStepSplitConformalInference,
-)
 from calibre.conformal.partitions import (
     category_partition,
     global_partition,
@@ -39,6 +35,10 @@ from calibre.conformal.scores import (
     absolute_error,
     absolute_error_score,
     scaled_absolute_error,
+)
+from calibre.conformal.split import (
+    CumulativeSplitConformalInference,
+    MultiStepSplitConformalInference,
 )
 from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 

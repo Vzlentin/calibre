@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -14,8 +14,8 @@ from calibre.contracts.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.order.newsvendor import apply_newsvendor_policy
-from calibre.order.types import NewsvendorPolicyParameters
+from calibre.core.order_types import NewsvendorPolicyParameters
+from calibre.ordering.newsvendor import apply_newsvendor_policy
 
 
 def _forecast_frame(

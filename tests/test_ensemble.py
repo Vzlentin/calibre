@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -18,8 +18,7 @@ from calibre.contracts.forecast_frame import (
     quantile_column,
     validate_forecast_frame,
 )
-from calibre.ensemble.median import ensemble_median
-from calibre.ensemble.weighted import ensemble_inverse_error, ensemble_weighted
+from calibre.forecasting.ensemble import ensemble_inverse_error, ensemble_median, ensemble_weighted
 
 
 def _make_forecast_row(

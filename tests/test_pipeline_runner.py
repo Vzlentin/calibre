@@ -1,4 +1,4 @@
-"""Integration tests for calibre.pipeline.runner."""
+"""Integration tests for calibre.execution.runner."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import pandas as pd
 import pytest
 
 from calibre.conformal import ConformalPolicyConfig
-from calibre.engine.backend import BackendResult
-from calibre.engine.ledger import ForecastLedger as Ledger
-from calibre.pipeline.dataset import DatasetBundle
-from calibre.pipeline.runner import PipelineResult, run_backtest, run_forecast
+from calibre.execution.backend import BackendResult
+from calibre.execution.dataset import DatasetBundle
+from calibre.execution.ledger import ForecastLedger as Ledger
+from calibre.execution.runner import PipelineResult, run_backtest, run_forecast
 
 _MODEL_CONFIGS = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 52}]
 _SERIES_FILTER = ["0_126"]
