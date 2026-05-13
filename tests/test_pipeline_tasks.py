@@ -1,13 +1,13 @@
-"""Tests for calibre.pipeline.tasks."""
+"""Tests for calibre.execution.task_builder."""
 
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-from calibre.models.registry import get_scope
-from calibre.pipeline.tasks import build_tasks
-from calibre.tasks.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask
+from calibre.execution.task_builder import build_tasks
+from calibre.forecasting.adapter_registry import get_scope
 
 
 @pytest.fixture

@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from calibre.conformal.aci import _clip_alpha, _validate_bounds
+from calibre.conformal.numerics import _clip_alpha, _validate_bounds
 from calibre.conformal.types import IntervalPrediction
 
 

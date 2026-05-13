@@ -27,7 +27,7 @@ Documented gaps that this script works around (Phase-4 material):
   HPO is therefore inlined here.
 - ``ensemble_median`` ignores ``q_*``, so the optional multi-alpha ensemble
   averages quantile columns inline.
-- Decision loop now delegated to ``calibre.orchestration.DecisionLoop``.
+- Decision loop now delegated to ``calibre.execution.DecisionLoop``.
 - Exogenous ``future_x`` is dead end-to-end and not used.
 """
 
@@ -81,10 +81,13 @@ from benchmarks.vn2.simulator import (
     extract_new_actuals,
     load_initial_states,
 )
-from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
+from calibre.conformal.cumulative_risk import (
+    CumulativeConformalRiskConfig,
+    CumulativeConformalRiskRuntime,
+)
 from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import ConformalPolicyConfig, build_conformal_runtime
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -95,20 +98,20 @@ from calibre.contracts.forecast_frame import (
     is_quantile_column,
     quantile_column,
 )
-from calibre.engine.backend import BackendEngine
-from calibre.features import add_stockout_features
-from calibre.metrics import pinball_linear
-from calibre.orchestration import (
+from calibre.core.forecast_task import ForecastTask
+from calibre.core.order_types import RsPolicyParameters
+from calibre.evaluation.point_metrics import pinball_linear
+from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
     RoundResult,
     observe_cumulative,
     observe_per_horizon,
 )
-from calibre.order.config import OrderPolicyConfig, apply_order_policy
-from calibre.order.types import RsPolicyParameters
-from calibre.pipeline.loading import load_period, melt_wide_instock
-from calibre.tasks.forecast_task import ForecastTask
+from calibre.execution.backend import BackendEngine
+from calibre.execution.data_loading import load_period, melt_wide_instock
+from calibre.forecasting.features import add_stockout_features
+from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 
 # Default rolling-mean / rolling-std windows applied at lag 1; these
 # carry the seasonal signal MLForecastAdapter would otherwise drop.

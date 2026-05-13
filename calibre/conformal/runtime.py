@@ -14,7 +14,7 @@ from calibre.conformal.partitions import global_partition
 from calibre.conformal.protocols import Calibrator, Controller, Score
 from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.types import IntervalPrediction
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,

@@ -6,10 +6,10 @@ from pathlib import Path
 
 from mlforecast.lag_transforms import RollingMean, RollingStd
 
-from calibre.conformal.crc import CumulativeConformalRiskConfig
+from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
 from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import ConformalPolicyConfig
-from calibre.contracts.forecast_frame import UNIQUE_ID
+from calibre.core.forecast_frame import UNIQUE_ID
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "vn2"
 

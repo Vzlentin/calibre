@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -14,12 +14,12 @@ from calibre.contracts.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.eval.metrics import (
+from calibre.evaluation.forecast_metrics import (
     compute_metrics,
     compute_row_errors,
     resolve_actuals,
 )
-from calibre.metrics import mae, mase
+from calibre.evaluation.point_metrics import mae, mase
 
 
 def _make_ledger_df() -> pd.DataFrame:

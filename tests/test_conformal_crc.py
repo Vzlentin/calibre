@@ -4,9 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
+from calibre.conformal.cumulative_risk import (
+    CumulativeConformalRiskConfig,
+    CumulativeConformalRiskRuntime,
+)
 from calibre.conformal.partitions import series_partition
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
     FORECAST_ORIGIN,
@@ -19,7 +22,7 @@ from calibre.contracts.forecast_frame import (
     interval_column_names,
     quantile_column,
 )
-from calibre.order import RsPolicyParameters, apply_rs_policy
+from calibre.ordering import RsPolicyParameters, apply_rs_policy
 
 
 def _frame(

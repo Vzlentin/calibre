@@ -42,7 +42,7 @@ FLOAT_ATOL = 1e-12
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from calibre.conformal.aci import AdaptiveConformalInference  # noqa: E402
+from calibre.conformal.adaptive import AdaptiveConformalInference  # noqa: E402
 
 
 @dataclass(slots=True)

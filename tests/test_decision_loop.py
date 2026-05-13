@@ -1,4 +1,4 @@
-"""Tests for calibre.orchestration.decision_loop."""
+"""Tests for calibre.execution.decision_loop."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -14,7 +14,7 @@ from calibre.contracts.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.orchestration.decision_loop import (
+from calibre.execution.decision_loop import (
     DecisionLoop,
     DecisionLoopConfig,
     RoundResult,

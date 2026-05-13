@@ -4,7 +4,7 @@ from collections.abc import Hashable
 
 import pandas as pd
 
-from calibre.contracts.forecast_frame import UNIQUE_ID
+from calibre.core.forecast_frame import UNIQUE_ID
 
 GLOBAL_PARTITION = "__global__"
 

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.contracts.forecast_frame import (
+from calibre.core.forecast_frame import (
     CONFORMAL_MODE,
     DS,
     FORECAST_ORIGIN,
@@ -16,9 +16,9 @@ from calibre.contracts.forecast_frame import (
     interval_column_names,
     quantile_column,
 )
-from calibre.order import RsPolicyParameters, apply_rs_policy
-from calibre.order.rss import apply_rss_policy
-from calibre.order.types import RssPolicyParameters
+from calibre.core.order_types import RssPolicyParameters
+from calibre.ordering import RsPolicyParameters, apply_rs_policy
+from calibre.ordering.reorder_point import apply_rss_policy
 
 
 def _forecast_frame(

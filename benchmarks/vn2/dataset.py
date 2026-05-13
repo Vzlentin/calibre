@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.vn2.simulator import HOLDING_COST_RATE, SHORTAGE_COST_RATE
-from calibre.order.types import CostStruct
-from calibre.pipeline.dataset import DatasetAdapter, DatasetBundle
-from calibre.pipeline.loading import load_master, load_period, melt_wide_instock
+from calibre.core.order_types import CostStruct
+from calibre.execution.data_loading import load_master, load_period, melt_wide_instock
+from calibre.execution.dataset import DatasetAdapter, DatasetBundle
 
 
 class VN2DatasetAdapter(DatasetAdapter):
