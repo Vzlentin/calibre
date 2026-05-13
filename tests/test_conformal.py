@@ -215,8 +215,8 @@ def test_scaled_absolute_error():
 
     from calibre.conformal import scaled_absolute_error
 
-    score_fn = functools.partial(scaled_absolute_error, scale=2.0)
-    assert score_fn(3.0, 1.0) == pytest.approx(1.0)  # |3-1|/2 = 1.0
+    score = functools.partial(scaled_absolute_error, scale=2.0)
+    assert score(3.0, 1.0) == pytest.approx(1.0)  # |3-1|/2 = 1.0
 
 
 # ── IntervalPrediction ────────────────────────────────────────────────────────

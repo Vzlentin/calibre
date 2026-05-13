@@ -2,21 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from calibre.contracts.forecast_frame import (
-    CONFORMAL_MODE,
-    UNIQUE_ID,
-    H,
-    quantile_column,
-    validate_forecast_frame,
-)
-from calibre.order._helpers import (
-    _decision_columns,
-    _validate_interval_columns,
-)
+from calibre.contracts.forecast_frame import UNIQUE_ID, H, validate_forecast_frame
+from calibre.order._helpers import _decision_columns
+from calibre.order.rules import RSArithmetic, UpperBoundRule
 from calibre.order.types import (
     INVENTORY_POSITION,
     LEAD_TIME,
     REVIEW_PERIOD,
+    CostStruct,
     RsPolicyParameters,
     normalize_rs_policy_parameters,
 )
@@ -28,18 +21,7 @@ def apply_rs_policy(
     coverage: float = 0.9,
     quantile: float | None = None,
 ) -> pd.DataFrame:
-    """Apply a periodic-review order-up-to policy to a forecast frame.
-
-    Three target-stock-level paths, in priority order:
-
-    1. ``quantile`` set: target = sum of the per-horizon predicted quantile
-       column ``q_<p>`` over the protection period (bypasses conformal).
-    2. Frame carries ``conformal_mode == "cumulative"``: target = the single
-       cumulative upper bound emitted at ``h == protection_period``
-       (the bound is already calibrated on cumulative demand, no sum).
-    3. Default: target = sum of per-horizon conformal upper bounds at
-       ``coverage`` over the protection period.
-    """
+    """Apply a periodic-review order-up-to policy to a forecast frame."""
     if frame.empty:
         return pd.DataFrame(
             columns=[
@@ -54,19 +36,7 @@ def apply_rs_policy(
         )
 
     validate_forecast_frame(frame)
-    cumulative_mode = (
-        quantile is None
-        and CONFORMAL_MODE in frame.columns
-        and (frame[CONFORMAL_MODE] == "cumulative").all()
-    )
-    if quantile is not None:
-        target_col = quantile_column(quantile)
-        if target_col not in frame.columns:
-            raise ValueError(f"Missing quantile column for quantile={quantile}: {target_col!r}")
-    else:
-        _, target_col = _validate_interval_columns(frame, coverage)
     params_frame = normalize_rs_policy_parameters(params)
-
     merged = frame.copy().merge(params_frame, on=UNIQUE_ID, how="left", validate="many_to_one")
     missing_uids = merged.loc[
         merged[INVENTORY_POSITION].isna(),
@@ -75,8 +45,10 @@ def apply_rs_policy(
     if not missing_uids.empty:
         raise ValueError(f"Missing policy parameters for unique_id values: {missing_uids.tolist()}")
 
-    outputs: list[dict[str, object]] = []
     decision_columns = _decision_columns(merged)
+    decision_rule = UpperBoundRule(coverage=coverage, quantile=quantile)
+    arithmetic = RSArithmetic()
+    outputs: list[dict[str, object]] = []
 
     for _, group in merged.groupby(decision_columns, sort=False):
         ordered = group.sort_values(H)
@@ -84,41 +56,16 @@ def apply_rs_policy(
         lead_time = int(ordered[LEAD_TIME].iloc[0])
         review_period = int(ordered[REVIEW_PERIOD].iloc[0])
         protection_period = lead_time + review_period
-        horizons = ordered[H].astype(int)
-        duplicate_horizons = sorted(horizons[horizons.duplicated()].unique().tolist())
-        if duplicate_horizons:
-            raise ValueError(f"Duplicate horizons for decision group: {duplicate_horizons}")
-        required_horizons = set(range(1, protection_period + 1))
-        available_horizons = set(horizons.tolist())
+        target_stock_level = decision_rule(ordered, CostStruct())
+        order_qty = arithmetic(target_stock_level, inventory_position)
 
-        if not required_horizons.issubset(available_horizons):
-            missing_horizons = sorted(required_horizons - available_horizons)
-            max_horizon = int(horizons.max())
-            if max_horizon >= protection_period and missing_horizons:
-                raise ValueError(
-                    f"Missing horizons within protection period "
-                    f"{protection_period}: {missing_horizons}"
-                )
-            raise ValueError(
-                f"Protection period {protection_period} exceeds available horizon {max_horizon}"
-            )
-
-        if cumulative_mode:
-            cumulative_rows = ordered.loc[horizons == protection_period, target_col]
-            if cumulative_rows.empty:
-                raise ValueError(
-                    f"Cumulative conformal frame missing terminal h={protection_period} row"
-                )
-            target_stock_level = float(cumulative_rows.iloc[0])
-        else:
-            target_stock_level = float(ordered.loc[horizons <= protection_period, target_col].sum())
         result = {column: ordered[column].iloc[0] for column in decision_columns}
         result[INVENTORY_POSITION] = inventory_position
         result[LEAD_TIME] = lead_time
         result[REVIEW_PERIOD] = review_period
         result["protection_period"] = protection_period
         result["target_stock_level"] = target_stock_level
-        result["order_qty"] = max(target_stock_level - inventory_position, 0.0)
+        result["order_qty"] = order_qty
         outputs.append(result)
 
     return pd.DataFrame(outputs)

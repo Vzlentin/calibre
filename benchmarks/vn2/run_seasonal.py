@@ -64,7 +64,11 @@ from benchmarks.vn2.simulator import (
     load_initial_states,
 )
 from benchmarks.vn2.tuning import seasonal_naive_search_space, tune_all_series
-from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
+from calibre.conformal.runtime import (
+    ConformalPolicyConfig,
+    ConformalRuntime,
+    build_conformal_runtime,
+)
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -157,7 +161,7 @@ def _run_warmup(
 
     Returns a ConformalRuntime with calibration history accumulated.
     """
-    conformal_runtime = ConformalRuntime(conformal_config)
+    conformal_runtime = build_conformal_runtime(conformal_config)
 
     if warmup_origins == 0:
         return conformal_runtime

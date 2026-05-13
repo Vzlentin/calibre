@@ -11,6 +11,7 @@ import pandas as pd
 from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.metrics import smape
 from calibre.tasks.tuning_task import TuningTask
+from calibre.tuning.objectives import Accuracy
 
 
 def seasonal_naive_search_space(trial: optuna.Trial) -> dict:
@@ -52,7 +53,7 @@ def tune_one_series(
         search_space=search_space,
         actuals=actuals,
         origins=origins,
-        metric=smape,
+        objective=Accuracy(metric=smape),
         n_trials=n_trials,
         freq=freq,
     )

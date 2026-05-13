@@ -8,7 +8,11 @@ import fugue.api as fa
 import numpy as np
 import pandas as pd
 
-from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
+from calibre.conformal.runtime import (
+    ConformalPolicyConfig,
+    ConformalRuntime,
+    build_conformal_runtime,
+)
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -22,7 +26,7 @@ from calibre.contracts.forecast_frame import (
     is_quantile_column,
 )
 from calibre.engine.ledger import ForecastLedger, OrderLedger
-from calibre.engine.scoring import compute_row_errors, resolve_actuals
+from calibre.eval.metrics import compute_row_errors, resolve_actuals
 from calibre.models.registry import get_scope, resolve_adapter
 from calibre.order.config import OrderPolicyConfig, apply_order_policy
 from calibre.tasks.forecast_task import ForecastTask
@@ -68,7 +72,9 @@ class BackendEngine:
         ledger = ForecastLedger()
         order_ledger = OrderLedger() if self.order_config is not None else None
         conformal_runtime = (
-            ConformalRuntime(self.conformal_config) if self.conformal_config is not None else None
+            build_conformal_runtime(self.conformal_config)
+            if self.conformal_config is not None
+            else None
         )
 
         # Split tasks once: local (per-series Fugue) vs global (joint direct)

@@ -82,7 +82,8 @@ from benchmarks.vn2.simulator import (
     load_initial_states,
 )
 from calibre.conformal.crc import CumulativeConformalRiskConfig, CumulativeConformalRiskRuntime
-from calibre.conformal.runtime import ConformalPolicyConfig, ConformalRuntime
+from calibre.conformal.partitions import global_partition, series_partition
+from calibre.conformal.runtime import ConformalPolicyConfig, build_conformal_runtime
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -966,7 +967,7 @@ def _sample_cost_search_model_config(
 def _sample_cost_search_crc_config(
     trial: optuna.Trial,
     protection_period: int,
-    crc_scopes: list[str] | None = None,
+    crc_partitions: list[str] | None = None,
 ) -> CumulativeConformalRiskConfig | None:
     if not trial.suggest_categorical("crc_enabled", [True, False]):
         return None
@@ -988,14 +989,17 @@ def _sample_cost_search_crc_config(
         # realised config when reproducing a best trial.
         raise optuna.TrialPruned("buffer_min > buffer_max")
 
+    partition_name = trial.suggest_categorical(
+        "crc_partition",
+        crc_partitions or ["global", "series", "hierarchical"],
+    )
+    partition_key = _crc_partition_key(partition_name)
+
     return CumulativeConformalRiskConfig(
         coverage=trial.suggest_float("crc_coverage", 0.55, 0.9),
         calibration_window=5000,
         protection_period=protection_period,
-        scope=trial.suggest_categorical(
-            "crc_scope",
-            crc_scopes or ["global", "series", "hierarchical"],
-        ),
+        partition_key=partition_key,
         weight_decay=None if weight_decay_choice == "none" else float(weight_decay_choice),
         weighted_quantile_mode=weighted_quantile_mode,
         buffer_min=buffer_min,
@@ -1003,6 +1007,16 @@ def _sample_cost_search_crc_config(
         shrinkage_strength=trial.suggest_float("crc_shrinkage_strength", 0.0, 0.75),
         method_name="cost_search_crc",
     )
+
+
+def _crc_partition_key(name: str):
+    if name == "global":
+        return global_partition
+    if name == "series":
+        return series_partition
+    if name == "hierarchical":
+        return lambda row: str(row[UNIQUE_ID]).split("_")[0]
+    raise ValueError(f"Unknown crc partition: {name!r}")
 
 
 def run_cost_search(
@@ -1020,7 +1034,7 @@ def run_cost_search(
     seed: int = 42,
     search_forecast: bool = False,
     include_order_calibration: bool = False,
-    crc_scopes: list[str] | None = None,
+    crc_partitions: list[str] | None = None,
     log_mlflow: bool = False,
     experiment_name: str = "vn2",
     run_name: str = "cost_search",
@@ -1061,7 +1075,7 @@ def run_cost_search(
         crc_config = _sample_cost_search_crc_config(
             trial,
             lead_time + review_period,
-            crc_scopes=crc_scopes,
+            crc_partitions=crc_partitions,
         )
         cache_key = _stable_config_key(
             {
@@ -1133,7 +1147,7 @@ def run_cost_search(
                     "seed": seed,
                     "search_forecast": search_forecast,
                     "include_order_calibration": include_order_calibration,
-                    "crc_scopes": crc_scopes,
+                    "crc_partitions": crc_partitions,
                     "horizon": horizon,
                     "lead_time": lead_time,
                     "review_period": review_period,
@@ -1710,7 +1724,7 @@ def run_benchmark(
             )
             mlflow.log_param("order_conformal_warmup_origins", order_conformal_warmup_origins)
         elif conformal_config is not None:
-            conformal_runtime = ConformalRuntime(conformal_config)
+            conformal_runtime = build_conformal_runtime(conformal_config)
             if conformal_config.mode == "cumulative":
                 observe_fn = observe_cumulative
             else:

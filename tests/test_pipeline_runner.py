@@ -10,12 +10,20 @@ import pytest
 from calibre.conformal import ConformalPolicyConfig
 from calibre.engine.backend import BackendResult
 from calibre.engine.ledger import ForecastLedger as Ledger
+from calibre.pipeline.dataset import DatasetBundle
 from calibre.pipeline.runner import PipelineResult, run_backtest, run_forecast
 
 _MODEL_CONFIGS = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 52}]
 _SERIES_FILTER = ["0_126"]
 _HORIZON = 4
 _PERIOD = 0
+
+
+@pytest.fixture(scope="module")
+def dataset_bundle(data_dir: Path) -> DatasetBundle:
+    from benchmarks.vn2.dataset import VN2DatasetAdapter
+
+    return VN2DatasetAdapter().load(data_dir, period=_PERIOD)
 
 
 @pytest.fixture(scope="module")
@@ -112,3 +120,16 @@ def test_run_backtest_with_mscp_config_enriches_ledger(data_dir: Path) -> None:
     assert lower_col in ledger_df.columns
     assert upper_col in ledger_df.columns
     assert ledger_df["conformal_method"].eq("mscp").all()
+
+
+def test_run_backtest_accepts_dataset_bundle(dataset_bundle: DatasetBundle) -> None:
+    result = run_backtest(
+        data_dir=dataset_bundle,
+        model_configs=_MODEL_CONFIGS,
+        horizon=_HORIZON,
+        origins=1,
+        series_filter=_SERIES_FILTER,
+        freq="W-MON",
+    )
+    assert isinstance(result, PipelineResult)
+    assert not result.ledger.to_df().empty

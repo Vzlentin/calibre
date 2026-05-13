@@ -3,13 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
 import optuna
 import pandas as pd
 
 from calibre.conformal import ConformalPolicyConfig
 from calibre.contracts.forecast_frame import DS, UNIQUE_ID, Y_HAT, Y
 from calibre.tasks.forecast_task import ForecastTask
+from calibre.tuning.objectives import TuningObjective
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class TuningTask:
             search_space=space,
             actuals=df,
             origins=[cutoff_date],
-            metric=smape,
+            objective=Accuracy(metric=smape),
             n_trials=30,
         )
         best_config = task.optimize()
@@ -47,7 +47,7 @@ class TuningTask:
     search_space: Callable[[optuna.Trial], dict]
     actuals: pd.DataFrame
     origins: list[pd.Timestamp]
-    metric: Callable  # (np.ndarray, np.ndarray) -> float
+    objective: TuningObjective
     n_trials: int = 50
     freq: str = "W"
     conformal_config: ConformalPolicyConfig | None = None
@@ -61,7 +61,7 @@ class TuningTask:
         search_space = self.search_space
         actuals = self.actuals
         origins = self.origins
-        metric = self.metric
+        objective = self.objective
         freq = self.freq
         conformal_config = self.conformal_config
 
@@ -85,7 +85,7 @@ class TuningTask:
                 resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
                 if resolved.empty:
                     return float("inf")
-                return float(metric(resolved[Y].to_numpy(), resolved[Y_HAT].to_numpy()))
+                return float(objective.evaluate(resolved, resolved[Y]))
         else:
             # Fast path: call adapters directly, skipping Fugue partitioning overhead.
             # Equivalent to BackendEngine._run_parallel for a single series but without
@@ -103,8 +103,7 @@ class TuningTask:
                 if UNIQUE_ID not in h.columns:
                     h.insert(0, UNIQUE_ID, unique_id)
 
-                actual_arrays: list[np.ndarray] = []
-                pred_arrays: list[np.ndarray] = []
+                resolved_frames: list[pd.DataFrame] = []
 
                 for origin in origins:
                     hist_slice = h[h[DS] < origin]
@@ -130,12 +129,12 @@ class TuningTask:
                     )
                     if merged.empty:
                         continue
-                    actual_arrays.append(merged[Y].to_numpy())
-                    pred_arrays.append(merged[Y_HAT].to_numpy())
+                    resolved_frames.append(merged)
 
-                if not actual_arrays:
+                if not resolved_frames:
                     return float("inf")
-                return float(metric(np.concatenate(actual_arrays), np.concatenate(pred_arrays)))
+                resolved = pd.concat(resolved_frames, ignore_index=True)
+                return float(objective.evaluate(resolved, resolved[Y]))
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction="minimize")

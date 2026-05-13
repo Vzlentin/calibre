@@ -7,6 +7,7 @@ import pytest
 from calibre.conformal import ConformalPolicyConfig
 from calibre.metrics import mae, smape
 from calibre.tasks.tuning_task import TuningTask
+from calibre.tuning.objectives import Accuracy
 
 
 def _space_season_length(trial: optuna.Trial) -> dict:
@@ -38,7 +39,7 @@ def tuning_task(series_df, dates):
         search_space=_space_season_length,
         actuals=series_df,
         origins=[dates[15]],
-        metric=smape,
+        objective=Accuracy(metric=smape),
         n_trials=10,
         freq="W",
     )
@@ -73,7 +74,7 @@ def test_optimize_single_trial(series_df, dates):
         search_space=_space_season_length,
         actuals=series_df,
         origins=[dates[15]],
-        metric=smape,
+        objective=Accuracy(metric=smape),
         n_trials=1,
         freq="W",
     )
@@ -96,7 +97,7 @@ def test_optimize_with_mae_metric(series_df, dates):
         search_space=_space_season_length,
         actuals=series_df,
         origins=[dates[15]],
-        metric=mae,
+        objective=Accuracy(metric=mae),
         n_trials=10,
         freq="W",
     )
@@ -117,7 +118,7 @@ def test_optimize_accepts_conformal_config(series_df, dates):
         search_space=_space_season_length,
         actuals=series_df,
         origins=[dates[15]],
-        metric=smape,
+        objective=Accuracy(metric=smape),
         n_trials=1,
         freq="W",
         conformal_config=ConformalPolicyConfig(

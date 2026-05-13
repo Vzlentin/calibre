@@ -14,7 +14,6 @@ from typing import Any
 
 import pandas as pd
 
-from calibre.conformal.runtime import ConformalRuntimeLike
 from calibre.contracts.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -60,7 +59,7 @@ def _fill_actuals(frame: pd.DataFrame, lookup: pd.Series) -> pd.DataFrame:
 
 
 def observe_per_horizon(
-    runtime: ConformalRuntimeLike,
+    runtime: Any,
     pending: list[pd.DataFrame],
     actuals_lookup: pd.Series,
     lower_col: str,
@@ -89,7 +88,7 @@ def observe_per_horizon(
 
 
 def observe_cumulative(
-    runtime: ConformalRuntimeLike,
+    runtime: Any,
     pending: list[pd.DataFrame],
     actuals_lookup: pd.Series,
 ) -> list[pd.DataFrame]:
@@ -168,10 +167,10 @@ class DecisionLoop:
         policy: Callable[[pd.DataFrame], dict[str, float]],
         get_actuals: Callable[[int], dict[str, float]],
         config: DecisionLoopConfig,
-        runtime: ConformalRuntimeLike | None = None,
+        runtime: Any | None = None,
         ensemble: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
         observe_fn: Callable[
-            [ConformalRuntimeLike, list[pd.DataFrame], pd.Series], list[pd.DataFrame]
+            [Any, list[pd.DataFrame], pd.Series], list[pd.DataFrame]
         ]
         | None = None,
     ) -> None:

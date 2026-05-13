@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from typing import Literal
 
 import numpy as np
 
 from calibre.conformal.intervals import symmetric_interval, symmetric_intervals
 from calibre.conformal.policies import OnlineConformalController
-from calibre.conformal.scores import absolute_error
+from calibre.conformal.protocols import Score
+from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 
 
 def _as_scalar_score(score) -> float:
     arr = np.asarray(score, dtype=float).reshape(-1)
     if arr.size != 1:
-        raise ValueError("Expected score_fn to return a scalar score")
+        raise ValueError("Expected Score to return a scalar score")
     return float(arr[0])
 
 
@@ -107,7 +108,7 @@ class AdaptiveConformalInference(OnlineConformalController):
         alpha: float,
         gamma: float,
         initial_alpha: float | None = None,
-        score_fn: Callable = absolute_error,
+        score: Score = absolute_error_score,
         initial_scores: Iterable[float] | None = None,
         initial_radius: float = 0.0,
         alpha_bounds: tuple[float, float] | None = (1e-6, 1.0 - 1e-6),
@@ -125,7 +126,7 @@ class AdaptiveConformalInference(OnlineConformalController):
                 self._bounds,
             )
         )
-        self._score_fn = score_fn
+        self._score = score
         self._initial_radius = float(initial_radius)
         self._score_history = [float(s) for s in ([] if initial_scores is None else initial_scores)]
         self._error_history: list[int] = []
@@ -181,7 +182,7 @@ class AdaptiveConformalInference(OnlineConformalController):
 
     def observe(self, y_true: float, prediction: IntervalPrediction) -> dict:
         error = int(not prediction.contains(float(y_true)))
-        score = _as_scalar_score(self._score_fn(y_true, prediction.center))
+        score = _as_scalar_score(self._score(y_true, prediction.center))
         self._score_history.append(score)
         self._error_history.append(error)
         alpha_before = float(self._alpha)
@@ -216,7 +217,7 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         alpha,
         gamma,
         initial_alpha=None,
-        score_fn: Callable = absolute_error,
+        score: Score = absolute_error_score,
         initial_scores: Iterable[Iterable[float]] | None = None,
         initial_radius=0.0,
         alpha_bounds: tuple[float, float] | None = (1e-6, 1.0 - 1e-6),
@@ -239,7 +240,7 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
             else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
             self._bounds,
         )  # type: ignore[assignment]
-        self._score_fn = score_fn
+        self._score = score
         self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
         self._score_history = self._normalize_score_histories(initial_scores)
         self._error_history: list[np.ndarray] = []
@@ -318,7 +319,7 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
                 continue
 
             point_forecast = prediction.center[horizon_idx - 1]
-            score = _as_scalar_score(self._score_fn(y_true, point_forecast))
+            score = _as_scalar_score(self._score(y_true, point_forecast))
             error = int(
                 not (
                     prediction.lower[horizon_idx - 1] <= y_true <= prediction.upper[horizon_idx - 1]
