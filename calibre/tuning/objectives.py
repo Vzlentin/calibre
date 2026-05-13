@@ -56,9 +56,7 @@ class Cost:
         reorder_point = (
             float(frame[REORDER_POINT].iloc[0]) if REORDER_POINT in frame.columns else None
         )
-        order_qty = float(
-            self.arithmetic(target, inventory_position, reorder_point=reorder_point)
-        )
+        order_qty = float(self.arithmetic(target, inventory_position, reorder_point=reorder_point))
         demand = float(actuals.dropna().sum())
         overage = max(order_qty - demand, 0.0) * float(self.costs.overage_cost)
         underage = max(demand - order_qty, 0.0) * float(self.costs.underage_cost)

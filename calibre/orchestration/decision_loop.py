@@ -169,9 +169,7 @@ class DecisionLoop:
         config: DecisionLoopConfig,
         runtime: Any | None = None,
         ensemble: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
-        observe_fn: Callable[
-            [Any, list[pd.DataFrame], pd.Series], list[pd.DataFrame]
-        ]
+        observe_fn: Callable[[Any, list[pd.DataFrame], pd.Series], list[pd.DataFrame]]
         | None = None,
     ) -> None:
         if observe_fn is not None and runtime is None:

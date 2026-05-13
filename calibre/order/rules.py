@@ -36,8 +36,7 @@ def _validate_protection_horizons(ordered: pd.DataFrame, protection_period: int)
         max_horizon = int(horizons.max())
         if max_horizon >= protection_period and missing_horizons:
             raise ValueError(
-                f"Missing horizons within protection period {protection_period}: "
-                f"{missing_horizons}"
+                f"Missing horizons within protection period {protection_period}: {missing_horizons}"
             )
         raise ValueError(
             f"Protection period {protection_period} exceeds available horizon {max_horizon}"
