@@ -10,7 +10,7 @@ from pathlib import Path
 
 from benchmarks.vn2.run_seasonal import run_seasonal
 from benchmarks.vn2.simulator import load_initial_states
-from calibre.conformal.runtime import ConformalPolicyConfig
+from calibre.conformal.runtime import SymmetricIntervalConfig
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
 
@@ -18,7 +18,7 @@ _FAST_MODEL_CONFIGS = [
     {"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 52},
 ]
 
-_FAST_CONFORMAL_CONFIG = ConformalPolicyConfig(
+_FAST_CONFORMAL_CONFIG = SymmetricIntervalConfig(
     method="aci",
     coverage=0.9,
     gamma=0.05,

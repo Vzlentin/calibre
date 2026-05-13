@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import pandas as pd
@@ -55,8 +55,19 @@ def deserialize_calibration_state(payload: str | None) -> dict[str, Any]:
     return json.loads(payload)  # type: ignore[arg-type]
 
 
+class ConformalRuntime(Protocol):
+    @property
+    def interval_columns(self) -> tuple[str, str]: ...
+
+    def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
+
+    def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
+
+    def get_diagnostics(self) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True, slots=True)
-class ConformalPolicyConfig:
+class SymmetricIntervalConfig:
     method: ConformalMethod
     coverage: float = 0.9
     calibration_window: int = 100
@@ -126,10 +137,10 @@ def _hashable(value: Hashable) -> Hashable:
     return value
 
 
-class ConformalRuntime:
+class SymmetricIntervalRuntime:
     def __init__(
         self,
-        config: ConformalPolicyConfig,
+        config: SymmetricIntervalConfig,
         score: Score | None = None,
         calibrator: Calibrator | None = None,
         controller: Controller | None = None,
@@ -144,6 +155,10 @@ class ConformalRuntime:
         self.controller = controller
         self.method_name = method_name or config.method
         self._issued_count = 0
+
+    @property
+    def interval_columns(self) -> tuple[str, str]:
+        return self.config.interval_columns
 
     def _base_partition(self, row: pd.Series) -> str:
         value = _hashable(self.config.partition_key(row))
@@ -331,8 +346,30 @@ class ConformalRuntime:
             observed.at[terminal.index[-1], NONCONFORMITY_SCORE] = score
         return observed
 
+    def get_diagnostics(self) -> dict[str, Any]:
+        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        return {
+            "method": self.method_name,
+            "mode": self.config.mode,
+            "coverage": self.config.coverage,
+            "calibration_window": self.config.calibration_window,
+            "gamma": self.config.gamma,
+            "partition_key": getattr(
+                self.config.partition_key,
+                "__name__",
+                repr(self.config.partition_key),
+            ),
+            "quantile_rule": self.config.resolved_quantile_rule,
+            "protection_period": self.config.protection_period,
+            "issued_count": self._issued_count,
+            "controller": self.controller.get_state(),
+            "calibrator": calibrator_state,
+        }
 
-def _components_from_config(config: ConformalPolicyConfig) -> tuple[Score, Calibrator, Controller]:
+
+def _components_from_config(
+    config: SymmetricIntervalConfig,
+) -> tuple[Score, Calibrator, Controller]:
     calibrator = RollingQuantileCalibrator(
         calibration_window=config.calibration_window,
         quantile_rule=config.resolved_quantile_rule,
@@ -345,9 +382,9 @@ def _components_from_config(config: ConformalPolicyConfig) -> tuple[Score, Calib
     return absolute_error_score, calibrator, controller
 
 
-def build_conformal_runtime(config: ConformalPolicyConfig) -> ConformalRuntime:
+def build_symmetric_interval_runtime(config: SymmetricIntervalConfig) -> SymmetricIntervalRuntime:
     score, calibrator, controller = _components_from_config(config)
-    return ConformalRuntime(
+    return SymmetricIntervalRuntime(
         config=config,
         score=score,
         calibrator=calibrator,

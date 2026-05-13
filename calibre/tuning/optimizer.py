@@ -23,9 +23,9 @@ def optimize_task(task: TuningTask) -> dict:
     origins = task.origins
     objective = task.objective
     freq = task.freq
-    conformal_config = task.conformal_config
+    conformal_runtime_factory = task.conformal_runtime_factory
 
-    if conformal_config is not None:
+    if conformal_runtime_factory is not None:
 
         def _objective(trial: optuna.Trial) -> float:
             candidate_config = {**base_cfg, **search_space(trial)}
@@ -39,7 +39,7 @@ def optimize_task(task: TuningTask) -> dict:
             )
             result = BackendEngine(
                 freq=freq,
-                conformal_config=conformal_config,
+                conformal_runtime=conformal_runtime_factory(),
             ).execute([forecast_task], actuals, origins)
             resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
             if resolved.empty:

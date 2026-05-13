@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from calibre.conformal import ConformalPolicyConfig
+from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.execution.backend import BackendResult
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.ledger import ForecastLedger as Ledger
@@ -75,7 +75,7 @@ def test_run_forecast_returns_backend_result(data_dir: Path) -> None:
 
 
 def test_run_backtest_with_conformal_config_enriches_ledger(data_dir: Path) -> None:
-    conformal_config = ConformalPolicyConfig(
+    conformal_config = SymmetricIntervalConfig(
         method="aci",
         coverage=0.9,
         calibration_window=4,
@@ -89,7 +89,7 @@ def test_run_backtest_with_conformal_config_enriches_ledger(data_dir: Path) -> N
         origins=2,
         series_filter=_SERIES_FILTER,
         freq="W-MON",
-        conformal_config=conformal_config,
+        conformal_runtime_factory=lambda: SymmetricIntervalRuntime(conformal_config),
     )
     lower_col, upper_col = conformal_config.interval_columns
     ledger_df = result.ledger.to_df()
@@ -100,7 +100,7 @@ def test_run_backtest_with_conformal_config_enriches_ledger(data_dir: Path) -> N
 
 
 def test_run_backtest_with_mscp_config_enriches_ledger(data_dir: Path) -> None:
-    conformal_config = ConformalPolicyConfig(
+    conformal_config = SymmetricIntervalConfig(
         method="mscp",
         coverage=0.9,
         calibration_window=4,
@@ -113,7 +113,7 @@ def test_run_backtest_with_mscp_config_enriches_ledger(data_dir: Path) -> None:
         origins=2,
         series_filter=_SERIES_FILTER,
         freq="W-MON",
-        conformal_config=conformal_config,
+        conformal_runtime_factory=lambda: SymmetricIntervalRuntime(conformal_config),
     )
     lower_col, upper_col = conformal_config.interval_columns
     ledger_df = result.ledger.to_df()

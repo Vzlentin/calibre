@@ -83,10 +83,10 @@ from benchmarks.vn2.simulator import (
 )
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
-    CumulativeConformalRiskRuntime,
+    CumulativeRiskRuntime,
 )
 from calibre.conformal.partitions import global_partition, series_partition
-from calibre.conformal.runtime import ConformalPolicyConfig, build_conformal_runtime
+from calibre.conformal.runtime import SymmetricIntervalConfig, build_symmetric_interval_runtime
 from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -142,7 +142,7 @@ def _prepare_cumulative_target_history(
     Invariant: the rolled target is used only to fit the model. The decision
     ledger's ``Y`` column is later refilled from the raw weekly ``sales`` frame
     passed into ``engine.execute(actuals=sales, ...)``, so ``window[Y].sum()``
-    inside ``CumulativeConformalRiskRuntime.observe`` recovers the cumulative
+    inside ``CumulativeRiskRuntime.observe`` recovers the cumulative
     realised demand via summation. ``_as_cumulative_decision_frame`` zeroes
     non-terminal-horizon ``Y_HAT``/quantile rows so the matching ``base_sum``
     reduces to the terminal cumulative prediction.
@@ -526,7 +526,7 @@ def _run_order_conformal_warmup(
     model_config: dict[str, Any],
     horizon: int,
     warmup_origins: int,
-    runtime: CumulativeConformalRiskRuntime,
+    runtime: CumulativeRiskRuntime,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
 ) -> None:
@@ -792,14 +792,14 @@ def replay_cached_cost(
     simulator = VN2Simulator(cache.initial_states)
     target_quantile_col = quantile_column(cache.quantile_alpha)
 
-    runtime: CumulativeConformalRiskRuntime | None = None
+    runtime: CumulativeRiskRuntime | None = None
     if order_conformal_config is not None:
         resolved_config = replace(
             order_conformal_config,
             base_column=target_quantile_col,
             protection_period=cache.lead_time + cache.review_period,
         )
-        runtime = CumulativeConformalRiskRuntime(resolved_config)
+        runtime = CumulativeRiskRuntime(resolved_config)
         for frame in cache.warmup_frames:
             runtime.observe(runtime.apply(_scale_base_forecasts(frame, order_base_scale)))
 
@@ -1594,7 +1594,7 @@ def run_benchmark(
     hpo_seed: int = 42,
     tune: bool = False,
     best_config: dict[str, Any] | None = None,
-    conformal_config: ConformalPolicyConfig | None = None,
+    conformal_config: SymmetricIntervalConfig | None = None,
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_conformal_warmup_origins: int = HPO_N_ORIGINS,
 ) -> pd.DataFrame:
@@ -1695,14 +1695,14 @@ def run_benchmark(
         simulator = VN2Simulator(initial_states)
         engine = BackendEngine(freq="W-MON")
         target_quantile_col = quantile_column(quantile_alpha)
-        order_conformal_runtime: CumulativeConformalRiskRuntime | None = None
+        order_conformal_runtime: CumulativeRiskRuntime | None = None
         if order_conformal_config is not None:
             resolved_order_config = replace(
                 order_conformal_config,
                 base_column=target_quantile_col,
                 protection_period=lead_time + review_period,
             )
-            order_conformal_runtime = CumulativeConformalRiskRuntime(resolved_order_config)
+            order_conformal_runtime = CumulativeRiskRuntime(resolved_order_config)
             week0_sales = load_period(data_dir, 0)
             if series_filter is not None:
                 week0_sales = week0_sales[week0_sales[UNIQUE_ID].isin(initial_states)]
@@ -1727,7 +1727,7 @@ def run_benchmark(
             )
             mlflow.log_param("order_conformal_warmup_origins", order_conformal_warmup_origins)
         elif conformal_config is not None:
-            conformal_runtime = build_conformal_runtime(conformal_config)
+            conformal_runtime = build_symmetric_interval_runtime(conformal_config)
             if conformal_config.mode == "cumulative":
                 observe_fn = observe_cumulative
             else:

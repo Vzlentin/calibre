@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from calibre.conformal import ConformalPolicyConfig
+from calibre.conformal import ConformalRuntime
 from calibre.core.forecast_frame import DS
 from calibre.evaluation.forecast_metrics import compute_metrics
 from calibre.evaluation.point_metrics import mae, rmse, smape, wape
@@ -70,7 +70,7 @@ def run_backtest(
     series_filter: list[str] | None = None,
     freq: str = "W",
     engine: Any = None,
-    conformal_config: ConformalPolicyConfig | None = None,
+    conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None,
     order_config: OrderPolicyConfig | None = None,
 ) -> PipelineResult:
     """End-to-end backtest pipeline.
@@ -92,10 +92,13 @@ def run_backtest(
         all_dates = sorted(sales[DS].unique())
         origins = _derive_origins(all_dates, origins, horizon)
 
+    conformal_runtime = (
+        conformal_runtime_factory() if conformal_runtime_factory is not None else None
+    )
     result = BackendEngine(
         freq=freq,
         engine=engine,
-        conformal_config=conformal_config,
+        conformal_runtime=conformal_runtime,
         order_config=order_config,
     ).execute(tasks, sales, origins)
 
@@ -105,7 +108,7 @@ def run_backtest(
         metrics = _DEFAULT_METRICS
 
     ledger_df = ledger.to_df()
-    interval_bounds = conformal_config.interval_columns if conformal_config is not None else None
+    interval_bounds = conformal_runtime.interval_columns if conformal_runtime is not None else None
     scores = compute_metrics(ledger_df, metrics, interval_bounds=interval_bounds)
 
     return PipelineResult(
@@ -122,7 +125,7 @@ def run_forecast(
     series_filter: list[str] | None = None,
     freq: str = "W",
     engine: Any = None,
-    conformal_config: ConformalPolicyConfig | None = None,
+    conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None,
     order_config: OrderPolicyConfig | None = None,
 ) -> BackendResult:
     """Forward-looking forecast. Single origin = latest date in sales. No scoring."""
@@ -133,9 +136,12 @@ def run_forecast(
     latest_origin = sales[DS].max()
     origins = [latest_origin]
 
+    conformal_runtime = (
+        conformal_runtime_factory() if conformal_runtime_factory is not None else None
+    )
     return BackendEngine(
         freq=freq,
         engine=engine,
-        conformal_config=conformal_config,
+        conformal_runtime=conformal_runtime,
         order_config=order_config,
     ).execute(tasks, sales, origins)

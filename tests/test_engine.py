@@ -2,7 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.conformal import ConformalPolicyConfig
+from calibre.conformal import (
+    CumulativeConformalRiskConfig,
+    CumulativeRiskRuntime,
+    SymmetricIntervalConfig,
+    SymmetricIntervalRuntime,
+)
 from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
     CONFORMAL_METHOD,
@@ -101,13 +106,13 @@ def test_model_name_stamped(single_series_setup):
 
 def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
     task, actuals, origins = single_series_setup
-    conformal_config = ConformalPolicyConfig(
+    conformal_config = SymmetricIntervalConfig(
         method="aci",
         coverage=0.9,
         calibration_window=4,
         gamma=0.05,
     )
-    engine = BackendEngine(freq="W", conformal_config=conformal_config)
+    engine = BackendEngine(freq="W", conformal_runtime=SymmetricIntervalRuntime(conformal_config))
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -123,12 +128,12 @@ def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
 
 def test_execute_with_mscp_config_enriches_ledger(single_series_setup):
     task, actuals, origins = single_series_setup
-    conformal_config = ConformalPolicyConfig(
+    conformal_config = SymmetricIntervalConfig(
         method="mscp",
         coverage=0.9,
         calibration_window=4,
     )
-    engine = BackendEngine(freq="W", conformal_config=conformal_config)
+    engine = BackendEngine(freq="W", conformal_runtime=SymmetricIntervalRuntime(conformal_config))
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -138,6 +143,28 @@ def test_execute_with_mscp_config_enriches_ledger(single_series_setup):
     assert df[CONFORMAL_METHOD].eq("mscp").all()
     assert df[lower_col].isna().all()
     assert df[upper_col].isna().all()
+
+
+def test_execute_accepts_injected_cumulative_risk_runtime(single_series_setup):
+    task, actuals, origins = single_series_setup
+    runtime = CumulativeRiskRuntime(
+        CumulativeConformalRiskConfig(
+            coverage=0.5,
+            protection_period=2,
+            calibration_window=4,
+            weight_decay=None,
+        )
+    )
+    engine = BackendEngine(freq="W", conformal_runtime=runtime)
+    result = engine.execute([task], actuals, origins)
+
+    df = result.ledger.to_df()
+    lower_col, upper_col = runtime.interval_columns
+    terminal = df[df[H] == 2]
+    assert lower_col in df.columns
+    assert upper_col in df.columns
+    assert terminal[upper_col].notna().all()
+    assert df[CONFORMAL_METHOD].eq("weighted_crc").all()
 
 
 def test_conformal_updates_before_next_origin():
@@ -150,13 +177,13 @@ def test_conformal_updates_before_next_origin():
         horizon=2,
         model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
     )
-    conformal_config = ConformalPolicyConfig(
+    conformal_config = SymmetricIntervalConfig(
         method="aci",
         coverage=0.9,
         calibration_window=4,
         gamma=0.05,
     )
-    engine = BackendEngine(freq="W", conformal_config=conformal_config)
+    engine = BackendEngine(freq="W", conformal_runtime=SymmetricIntervalRuntime(conformal_config))
     result = engine.execute([task], actuals, origins=[dates[7], dates[8]])
 
     df = result.ledger.to_df()
@@ -224,7 +251,7 @@ def test_engine_without_order_config_returns_none_order_ledger(single_series_set
 
 def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup):
     task, actuals, origins = single_series_setup
-    conformal_config = ConformalPolicyConfig(
+    conformal_config = SymmetricIntervalConfig(
         method="aci",
         coverage=0.9,
         calibration_window=4,
@@ -239,7 +266,11 @@ def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup)
         )
     ]
     order_config = OrderPolicyConfig(policy="rs", params=params, coverage=0.9)
-    engine = BackendEngine(freq="W", conformal_config=conformal_config, order_config=order_config)
+    engine = BackendEngine(
+        freq="W",
+        conformal_runtime=SymmetricIntervalRuntime(conformal_config),
+        order_config=order_config,
+    )
     result = engine.execute([task], actuals, origins)
 
     assert isinstance(result.order_ledger, OrderLedger)
@@ -250,7 +281,7 @@ def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup)
 
 def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setup):
     task, actuals, origins = single_series_setup
-    conformal_config = ConformalPolicyConfig(
+    conformal_config = SymmetricIntervalConfig(
         method="aci",
         coverage=0.9,
         calibration_window=4,
@@ -265,7 +296,11 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
         )
     ]
     order_config = OrderPolicyConfig(policy="newsvendor", params=params, coverage=0.9)
-    engine = BackendEngine(freq="W", conformal_config=conformal_config, order_config=order_config)
+    engine = BackendEngine(
+        freq="W",
+        conformal_runtime=SymmetricIntervalRuntime(conformal_config),
+        order_config=order_config,
+    )
     result = engine.execute([task], actuals, origins)
 
     assert isinstance(result.order_ledger, OrderLedger)

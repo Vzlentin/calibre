@@ -12,7 +12,7 @@ from calibre.conformal.adaptive import (
 )
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
-    CumulativeConformalRiskRuntime,
+    CumulativeRiskRuntime,
 )
 from calibre.conformal.intervals import symmetric_interval, symmetric_intervals
 from calibre.conformal.partitions import (
@@ -23,9 +23,10 @@ from calibre.conformal.partitions import (
 )
 from calibre.conformal.policies import OnlineConformalController
 from calibre.conformal.runtime import (
-    ConformalPolicyConfig,
     ConformalRuntime,
-    build_conformal_runtime,
+    SymmetricIntervalConfig,
+    SymmetricIntervalRuntime,
+    build_symmetric_interval_runtime,
     deserialize_calibration_state,
     serialize_calibration_state,
 )
@@ -44,10 +45,9 @@ from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPredict
 
 __all__ = [
     "AdaptiveConformalInference",
-    "ConformalPolicyConfig",
     "ConformalRuntime",
     "CumulativeConformalRiskConfig",
-    "CumulativeConformalRiskRuntime",
+    "CumulativeRiskRuntime",
     "CumulativeSplitConformalInference",
     "IntervalPrediction",
     "MultiStepAdaptiveConformalInference",
@@ -58,7 +58,7 @@ __all__ = [
     "ScaledAbsoluteErrorScore",
     "absolute_error",
     "absolute_error_score",
-    "build_conformal_runtime",
+    "build_symmetric_interval_runtime",
     "category_partition",
     "deserialize_calibration_state",
     "global_partition",
@@ -66,6 +66,8 @@ __all__ = [
     "scaled_absolute_error",
     "serialize_calibration_state",
     "series_partition",
+    "SymmetricIntervalConfig",
+    "SymmetricIntervalRuntime",
     "symmetric_interval",
     "symmetric_intervals",
 ]

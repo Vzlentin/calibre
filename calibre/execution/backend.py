@@ -8,11 +8,7 @@ import fugue.api as fa
 import numpy as np
 import pandas as pd
 
-from calibre.conformal.runtime import (
-    ConformalPolicyConfig,
-    ConformalRuntime,
-    build_conformal_runtime,
-)
+from calibre.conformal.runtime import ConformalRuntime
 from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -54,13 +50,13 @@ class BackendEngine:
         freq: str = "W",
         metrics: list[Callable] | None = None,
         engine: Any = None,
-        conformal_config: ConformalPolicyConfig | None = None,
+        conformal_runtime: ConformalRuntime | None = None,
         order_config: OrderPolicyConfig | None = None,
     ) -> None:
         self.freq = freq
         self.metrics = metrics
         self.engine = engine
-        self.conformal_config = conformal_config
+        self.conformal_runtime = conformal_runtime
         self.order_config = order_config
 
     def execute(
@@ -71,11 +67,7 @@ class BackendEngine:
     ) -> BackendResult:
         ledger = ForecastLedger()
         order_ledger = OrderLedger() if self.order_config is not None else None
-        conformal_runtime = (
-            build_conformal_runtime(self.conformal_config)
-            if self.conformal_config is not None
-            else None
-        )
+        conformal_runtime = self.conformal_runtime
 
         # Split tasks once: local (per-series Fugue) vs global (joint direct)
         parallel_tasks: list[ForecastTask] = []
