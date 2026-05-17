@@ -9,6 +9,7 @@ import pytest
 
 from calibre.cli.commands import run
 from calibre.execution.data_loading import load_period
+from calibre.storage.objstore import write_ledger_shard
 
 
 def _write_fixture(root) -> None:
@@ -103,9 +104,16 @@ def test_cli_run_with_s3_config_matches_local_fixture(monkeypatch, tmp_path) -> 
         actual_result = run("s3://calibre-test-bucket/configs/s3.yaml")
         actual = actual_result.ledger.to_df().reset_index(drop=True)
         written = pd.read_parquet("s3://calibre-test-bucket/output/ledger.parquet")
+        pointer = write_ledger_shard(
+            expected_ledger,
+            "s3://calibre-test-bucket/artifacts/shard.parquet",
+        )
+        shard = pd.read_parquet(str(pointer["uri"]))
     finally:
         server.stop()
 
     pd.testing.assert_frame_equal(actual_period, expected_period)
     pd.testing.assert_frame_equal(actual, expected_ledger)
     pd.testing.assert_frame_equal(written.reset_index(drop=True), expected_ledger)
+    pd.testing.assert_frame_equal(shard.reset_index(drop=True), expected_ledger)
+    assert pointer["byte_size"] > 0

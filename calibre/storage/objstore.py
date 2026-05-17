@@ -26,7 +26,8 @@ def artifact_pointer(uri: str) -> dict[str, int | str]:
 
 def write_ledger_shard(df: pd.DataFrame, uri: str) -> dict[str, int | str]:
     ensure_parent_dir(uri)
-    df.to_parquet(uri, index=False)
+    with fsspec.open(uri, "wb") as handle:
+        df.to_parquet(handle, index=False)
     return artifact_pointer(uri)
 
 
