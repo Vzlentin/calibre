@@ -20,6 +20,10 @@ docker run --rm calibre:full health
 docker run --rm calibre:slim run --config /app/benchmarks/vn2/config/smoke.yaml
 ```
 
+CI publishes same-repository PR and main-branch images to GHCR as
+`ghcr.io/<owner>/<repo>:pr-<number>-full`, `:pr-<number>-slim`, and short-SHA
+`:<sha>-full` / `:<sha>-slim` tags after both image smoke tests pass.
+
 ## Kubernetes Job
 
 ```yaml
