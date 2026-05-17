@@ -5,7 +5,7 @@ from pathlib import Path
 import fsspec
 import pandas as pd
 
-from calibre.cli.commands import _record_order_cost_metric, health, run, validate
+from calibre.cli.commands import _record_order_cost_metric, health, run, run_sweep, validate
 from calibre.cli.config import load_config
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
@@ -52,11 +52,8 @@ class _StubAdapter:
 register_dataset_adapter("unit_cli")(_CliDatasetAdapter)
 
 
-def _write_config(tmp_path, *, ledger_path: str | None = None) -> str:
-    path = tmp_path / "config.yaml"
-    output = ledger_path or (tmp_path / "ledger.parquet").as_posix()
-    path.write_text(
-        f"""
+def _config_text(output: str) -> str:
+    return f"""
 config_schema: "1.0"
 dataset:
   adapter: unit_cli
@@ -76,9 +73,13 @@ output:
 execution:
   engine: null
   seed: 123
-""",
-        encoding="utf-8",
-    )
+"""
+
+
+def _write_config(tmp_path, *, ledger_path: str | None = None) -> str:
+    path = tmp_path / "config.yaml"
+    output = ledger_path or (tmp_path / "ledger.parquet").as_posix()
+    path.write_text(_config_text(output), encoding="utf-8")
     return str(path)
 
 
@@ -122,6 +123,21 @@ def test_load_config_accepts_dask_execution_options(tmp_path) -> None:
     assert config.execution.dask_address == "tcp://scheduler:8786"
 
 
+def test_load_config_reads_fsspec_uri() -> None:
+    uri = "memory://calibre-cli-config-load/config.yaml"
+    ledger_uri = "memory://calibre-cli-config-load/output/ledger.parquet"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("/calibre-cli-config-load"):
+        fs.rm("/calibre-cli-config-load", recursive=True)
+    with fsspec.open(uri, "wt", encoding="utf-8") as fh:
+        fh.write(_config_text(ledger_uri))
+
+    config = load_config(uri)
+
+    assert config.source_path == uri
+    assert config.output.ledger_path == ledger_uri
+
+
 def test_winning_dask_config_uses_dask_engine() -> None:
     config = load_config("benchmarks/vn2/config/winning_dask.yaml")
 
@@ -154,4 +170,24 @@ def test_run_command_writes_non_streaming_output_to_fsspec_uri(monkeypatch, tmp_
     run(path)
 
     frame = pd.read_parquet(uri)
+    assert len(frame) == 1
+
+
+def test_run_sweep_reads_fsspec_config_dir(monkeypatch) -> None:
+    root_uri = "memory://calibre-cli-sweep/configs"
+    config_uri = f"{root_uri}/config.yaml"
+    ledger_uri = "memory://calibre-cli-sweep/output/ledger.parquet"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("/calibre-cli-sweep"):
+        fs.rm("/calibre-cli-sweep", recursive=True)
+    fs.mkdirs("/calibre-cli-sweep/configs", exist_ok=True)
+    with fsspec.open(config_uri, "wt", encoding="utf-8") as fh:
+        fh.write(_config_text(ledger_uri))
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    results = run_sweep(root_uri)
+
+    assert len(results) == 1
+    frame = pd.read_parquet(ledger_uri)
     assert len(frame) == 1

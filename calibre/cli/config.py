@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import fsspec  # type: ignore[import-untyped]
 import pandas as pd
 import yaml
 
@@ -99,7 +100,7 @@ class BackendConfig:
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     benchmark: str | None = None
-    source_path: Path | None = None
+    source_path: str | None = None
 
 
 def _require_mapping(data: Any, section: str) -> dict[str, Any]:
@@ -215,7 +216,7 @@ def _parse_execution(data: Any) -> ExecutionConfig:
 
 
 def load_config_from_mapping(
-    data: dict[str, Any], *, source_path: Path | None = None
+    data: dict[str, Any], *, source_path: str | Path | None = None
 ) -> BackendConfig:
     raw = _require_mapping(data, "config")
     schema = str(_require_key(raw, "config_schema", "config"))
@@ -237,7 +238,7 @@ def load_config_from_mapping(
         output=_parse_output(raw.get("output")),
         execution=_parse_execution(raw.get("execution")),
         benchmark=str(raw["benchmark"]) if raw.get("benchmark") is not None else None,
-        source_path=source_path,
+        source_path=str(source_path) if source_path is not None else None,
     )
     if config.output.streaming and config.output.ledger_path is None:
         raise ValueError("output.ledger_path is required when output.streaming is true")
@@ -245,8 +246,8 @@ def load_config_from_mapping(
 
 
 def load_config(path: str | Path) -> BackendConfig:
-    source_path = Path(path)
-    with source_path.open("r", encoding="utf-8") as fh:
+    source_path = str(path)
+    with fsspec.open(source_path, "rt", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if data is None:
         raise ValueError(f"Config file is empty: {source_path}")

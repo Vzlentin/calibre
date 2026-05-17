@@ -15,7 +15,7 @@ from calibre.core.metrics import set_order_cost
 from calibre.execution.backend import BackendEngine, BackendResult
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
-from calibre.execution.io import ensure_parent_dir
+from calibre.execution.io import ensure_parent_dir, open_fs
 from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import OrderPolicyConfig
@@ -24,6 +24,14 @@ from calibre.storage.state import ConformalStateStore
 
 def _emit(message: str) -> None:
     sys.stdout.write(f"{message}\n")
+
+
+def _fs_result_uri(fs, path: str) -> str:
+    protocol = fs.protocol
+    protocols = {protocol} if isinstance(protocol, str) else set(protocol)
+    if not protocols.isdisjoint({"file", "local"}):
+        return path
+    return str(fs.unstrip_protocol(path))
 
 
 _HEALTH_CONFIG: dict[str, Any] = {
@@ -275,10 +283,16 @@ def health() -> dict[str, Any]:
 
 
 def run_sweep(configs_dir: str | Path) -> list[BackendResult | pd.DataFrame]:
-    root = Path(configs_dir)
-    if not root.exists():
-        raise FileNotFoundError(f"Config directory not found: {root}")
-    configs = sorted([*root.glob("*.yaml"), *root.glob("*.yml")])
+    fs, root = open_fs(configs_dir)
+    if not fs.exists(root):
+        raise FileNotFoundError(f"Config directory not found: {configs_dir}")
+    normalized = root.rstrip("/\\")
+    configs = sorted(
+        {
+            *fs.glob(f"{normalized}/*.yaml"),
+            *fs.glob(f"{normalized}/*.yml"),
+        }
+    )
     if not configs:
-        raise ValueError(f"No YAML configs found under {root}")
-    return [run(path) for path in configs]
+        raise ValueError(f"No YAML configs found under {configs_dir}")
+    return [run(_fs_result_uri(fs, path)) for path in configs]
