@@ -130,15 +130,27 @@ def run_config(config: BackendConfig) -> BackendResult | pd.DataFrame:
     streaming_output = config.output.ledger_path if config.output.streaming else None
     streaming_order_output = config.output.order_ledger_path if config.output.streaming else None
 
+    execution_engine = _resolve_execution_engine(config)
     result = BackendEngine(
         freq=config.origins.freq,
-        engine=_resolve_execution_engine(config),
+        engine=execution_engine,
         conformal_config=conformal_config,
         order_config=_build_order_config(config),
         streaming_output=streaming_output,
         streaming_order_output=streaming_order_output,
         seed=config.execution.seed,
     ).execute(tasks, bundle.history, origins)
+
+    # Clean up distributed execution engines to avoid thread/connection leaks
+    # in long-running processes (e.g. FastAPI server).
+    if execution_engine is not None:
+        if hasattr(execution_engine, "_calibre_dask_client"):
+            execution_engine._calibre_dask_client.close()
+        if (
+            hasattr(execution_engine, "_calibre_dask_cluster")
+            and execution_engine._calibre_dask_cluster is not None
+        ):
+            execution_engine._calibre_dask_cluster.close()
 
     if not config.output.streaming and config.output.ledger_path is not None:
         Path(config.output.ledger_path).parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,28 @@
+{
+  "name": "calibre-vn2-smoke",
+  "email_notifications": {
+    "no_alert_for_skipped_runs": false
+  },
+  "tasks": [
+    {
+      "task_key": "smoke_test",
+      "spark_python_task": {
+        "python_file": "dbfs:/mnt/calibre/scripts/databricks_smoke.py",
+        "parameters": []
+      },
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 1,
+        "spark_conf": {
+          "spark.sql.adaptive.enabled": "true"
+        }
+      },
+      "libraries": [
+        {
+          "whl": "dbfs:/mnt/calibre/calibre-0.1.0-py3-none-any.whl"
+        }
+      ]
+    }
+  ]
+}

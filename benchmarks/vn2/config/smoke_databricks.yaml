@@ -1,0 +1,21 @@
+config_schema: "1.0"
+dataset:
+  adapter: vn2
+  path: /dbfs/mnt/calibre/vn2-fixture
+  period: 0
+tasks:
+  - model: SeasonalNaive
+    horizon: 2
+    config:
+      backend: statsforecast
+      season_length: 2
+origins:
+  start: "2024-01-29"
+  end: "2024-01-29"
+  freq: W-MON
+output:
+  ledger_path: /dbfs/mnt/calibre/results/smoke-ledger.parquet
+  streaming: true
+execution:
+  engine: spark
+  seed: 42

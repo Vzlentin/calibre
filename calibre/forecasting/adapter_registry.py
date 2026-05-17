@@ -15,16 +15,20 @@ def _ensure_registry() -> None:
     if _REGISTRY:
         return
     from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
-    from calibre.forecasting.neuralforecast_adapter import NeuralForecastAdapter
     from calibre.forecasting.statsforecast_adapter import StatsForecastAdapter
 
     _REGISTRY.update(
         {
             "statsforecast": StatsForecastAdapter,
-            "neuralforecast": NeuralForecastAdapter,
             "mlforecast": MLForecastAdapter,
         }
     )
+    try:
+        from calibre.forecasting.neuralforecast_adapter import NeuralForecastAdapter
+
+        _REGISTRY["neuralforecast"] = NeuralForecastAdapter
+    except Exception:
+        pass
 
 
 def get_adapter_cls(model_config: dict) -> type[ModelAdapter]:

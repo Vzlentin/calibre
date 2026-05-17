@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
-import neuralforecast.models
 import pandas as pd
-from neuralforecast import NeuralForecast
+
+try:
+    import neuralforecast.models
+    from neuralforecast import NeuralForecast
+
+    _NEURALFORECAST_AVAILABLE = True
+except Exception:  # pragma: no cover
+    neuralforecast = None  # type: ignore[assignment]
+    NeuralForecast = None  # type: ignore[misc, assignment]
+    _NEURALFORECAST_AVAILABLE = False
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.core.forecast_task import ForecastTask
@@ -15,8 +23,13 @@ _RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", 
 
 class NeuralForecastAdapter(ModelAdapter):
     def __init__(self, model_config: dict) -> None:
+        if not _NEURALFORECAST_AVAILABLE:
+            raise RuntimeError(
+                "neuralforecast is not installed. Install calibre with the 'neural' extra: "
+                "pip install calibre[neural]"
+            )
         self._config = model_config
-        self._nf: NeuralForecast | None = None
+        self._nf: "NeuralForecast" | None = None
 
     def fit(self, task: ForecastTask) -> None:
         model_name = self._config["model"]
