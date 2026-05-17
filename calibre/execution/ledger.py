@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from calibre.core.forecast_frame import REQUIRED_COLUMNS, validate_forecast_frame
+from calibre.execution.io import ensure_parent_dir
 
 
 class LedgerSink(Protocol):
@@ -21,9 +22,7 @@ class _ParquetLedgerSink:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         fs, fs_path = fsspec.core.url_to_fs(self.path)
-        parent = str(Path(fs_path).parent).replace("\\", "/")
-        if parent and parent != ".":
-            fs.mkdirs(parent, exist_ok=True)
+        ensure_parent_dir(self.path)
         if fs.exists(fs_path):
             fs.rm(fs_path)
         self._handle = None
@@ -107,6 +106,7 @@ class _BaseLedger:
         return pd.concat(self._frames, ignore_index=True)
 
     def to_parquet(self, path: str | Path) -> None:
+        ensure_parent_dir(path)
         self.to_df().to_parquet(str(path), index=False)
 
 

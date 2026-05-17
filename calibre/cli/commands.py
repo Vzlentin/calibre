@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pandas as pd
 
@@ -11,9 +12,11 @@ from calibre.cli.config import BackendConfig, load_config
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.execution.backend import BackendEngine, BackendResult
 from calibre.execution.dataset_registry import resolve_dataset_adapter
+from calibre.execution.io import ensure_parent_dir
 from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import OrderPolicyConfig
+from calibre.storage.state import ConformalStateStore
 
 
 def _emit(message: str) -> None:
@@ -93,7 +96,7 @@ def _run_builtin_benchmark(config: BackendConfig) -> pd.DataFrame:
         verbose=True,
     )
     if config.output.ledger_path is not None:
-        Path(config.output.ledger_path).parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(config.output.ledger_path)
         summary.to_parquet(config.output.ledger_path, index=False)
     return summary
 
@@ -109,7 +112,13 @@ def run(
     return run_config(config)
 
 
-def run_config(config: BackendConfig) -> BackendResult | pd.DataFrame:
+def run_config(
+    config: BackendConfig,
+    *,
+    run_id: UUID | None = None,
+    conformal_state_store: ConformalStateStore | None = None,
+    initial_ledger: pd.DataFrame | None = None,
+) -> BackendResult | pd.DataFrame:
     if config.benchmark is not None:
         summary = _run_builtin_benchmark(config)
         total_cost = float(summary["total_cost"].sum()) if "total_cost" in summary else float("nan")
@@ -140,6 +149,9 @@ def run_config(config: BackendConfig) -> BackendResult | pd.DataFrame:
             streaming_output=streaming_output,
             streaming_order_output=streaming_order_output,
             seed=config.execution.seed,
+            run_id=run_id,
+            conformal_state_store=conformal_state_store,
+            initial_ledger=initial_ledger,
         ).execute(tasks, bundle.history, origins)
     finally:
         # Clean up distributed execution engines to avoid thread/connection leaks
@@ -154,14 +166,12 @@ def run_config(config: BackendConfig) -> BackendResult | pd.DataFrame:
                 execution_engine._calibre_dask_cluster.close()
 
     if not config.output.streaming and config.output.ledger_path is not None:
-        Path(config.output.ledger_path).parent.mkdir(parents=True, exist_ok=True)
         result.ledger.to_parquet(config.output.ledger_path)
     if (
         not config.output.streaming
         and result.order_ledger is not None
         and config.output.order_ledger_path is not None
     ):
-        Path(config.output.order_ledger_path).parent.mkdir(parents=True, exist_ok=True)
         result.order_ledger.to_parquet(config.output.order_ledger_path)
 
     ledger_rows = len(result.ledger.to_df())

@@ -83,6 +83,14 @@ class ForecastPointerRepo:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def get(self, run_id: UUID, kind: str) -> ForecastPointer | None:
+        return self.session.get(ForecastPointer, (run_id, kind))
+
+    def list_for_run(self, run_id: UUID) -> list[ForecastPointer]:
+        return list(
+            self.session.scalars(select(ForecastPointer).where(ForecastPointer.run_id == run_id))
+        )
+
     def upsert(self, run_id: UUID, kind: str, uri: str, byte_size: int) -> None:
         row = self.session.get(ForecastPointer, (run_id, kind))
         if row is None:

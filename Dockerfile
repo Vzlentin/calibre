@@ -1,7 +1,6 @@
 FROM python:3.11-slim AS builder
 
-ENV UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
 
 WORKDIR /app
 
@@ -11,11 +10,14 @@ COPY pyproject.toml uv.lock README.md ./
 COPY calibre ./calibre
 COPY benchmarks ./benchmarks
 
-RUN uv sync --extra cloud --no-dev --frozen
+RUN uv sync --extra cloud --extra xgboost --extra neural --no-dev --frozen \
+    && find /app/.venv -type f -name "*.pyc" -delete \
+    && find /app/.venv -type d -name "__pycache__" -empty -delete
 
 FROM python:3.11-slim AS runtime
 
 ENV PATH="/app/.venv/bin:${PATH}" \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app

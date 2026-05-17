@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import fsspec
 import pandas as pd
 
 from calibre.cli.commands import run, validate
@@ -50,9 +51,9 @@ class _StubAdapter:
 register_dataset_adapter("unit_cli")(_CliDatasetAdapter)
 
 
-def _write_config(tmp_path) -> str:
+def _write_config(tmp_path, *, ledger_path: str | None = None) -> str:
     path = tmp_path / "config.yaml"
-    output = tmp_path / "ledger.parquet"
+    output = ledger_path or (tmp_path / "ledger.parquet").as_posix()
     path.write_text(
         f"""
 config_schema: "1.0"
@@ -69,7 +70,7 @@ origins:
   end: 2024-02-04
   freq: W-SUN
 output:
-  ledger_path: {output.as_posix()}
+  ledger_path: {output}
   streaming: false
 execution:
   engine: null
@@ -112,3 +113,18 @@ def test_run_command_executes_config(monkeypatch, tmp_path) -> None:
     frame = result.ledger.to_df()
     assert len(frame) == 1
     assert (tmp_path / "ledger.parquet").exists()
+
+
+def test_run_command_writes_non_streaming_output_to_fsspec_uri(monkeypatch, tmp_path) -> None:
+    uri = "memory://calibre-cli-test/output/ledger.parquet"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("calibre-cli-test"):
+        fs.rm("calibre-cli-test", recursive=True)
+    path = _write_config(tmp_path, ledger_path=uri)
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    run(path)
+
+    frame = pd.read_parquet(uri)
+    assert len(frame) == 1

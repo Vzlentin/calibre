@@ -24,6 +24,10 @@ from calibre.conformal.runtime import (
     serialize_calibration_state,
 )
 from calibre.core.forecast_frame import (
+    CALIBRATION_STATE,
+    CONFORMAL_ALPHA,
+    CONFORMAL_METHOD,
+    CONFORMAL_MODE,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -68,13 +72,13 @@ def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     result = frame.copy()
-    for col in (UNIQUE_ID, MODEL_NAME):
+    for col in (UNIQUE_ID, MODEL_NAME, CALIBRATION_STATE, CONFORMAL_METHOD, CONFORMAL_MODE):
         if col in result.columns:
             result[col] = result[col].astype("object")
     for col in (DS, FORECAST_ORIGIN):
         if col in result.columns:
             result[col] = pd.to_datetime(result[col]).astype("datetime64[ns]")
-    for col in (Y, Y_HAT):
+    for col in (Y, Y_HAT, NONCONFORMITY_SCORE, CONFORMAL_ALPHA):
         if col in result.columns:
             result[col] = result[col].astype("float64")
     if H in result.columns:
@@ -217,6 +221,7 @@ class BackendEngine:
         seed: int | None = None,
         run_id: UUID | None = None,
         conformal_state_store: ConformalStateStore | None = None,
+        initial_ledger: pd.DataFrame | None = None,
     ) -> None:
         self.freq = freq
         self.metrics = metrics
@@ -237,6 +242,7 @@ class BackendEngine:
         self.seed: Seed | None = set_seed(seed) if seed is not None else None
         self.run_id = run_id
         self.conformal_state_store = conformal_state_store
+        self.initial_ledger = initial_ledger.copy() if initial_ledger is not None else None
 
     def execute(
         self,
@@ -248,10 +254,13 @@ class BackendEngine:
         ledger = ForecastLedger()
         if self.streaming_output is not None:
             ledger.stream_to(self.streaming_output)
+        if self.initial_ledger is not None and not self.initial_ledger.empty:
+            ledger.append(_coerce_forecast_frame_dtypes(self.initial_ledger))
         order_ledger = OrderLedger() if self.order_config is not None else None
         if order_ledger is not None and self.streaming_order_output is not None:
             order_ledger.stream_to(self.streaming_order_output)
         self._restore_conformal_state()
+        self._advance_issued_count_from_initial_ledger()
         conformal_runtime = self.conformal_runtime
 
         try:
@@ -376,6 +385,33 @@ class BackendEngine:
             serialize_calibration_state(conformal_runtime.get_diagnostics())
         )
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
+
+    def _advance_issued_count_from_initial_ledger(self) -> None:
+        """Recover issued-origin accounting from a resumed ledger snapshot."""
+        runtime = self.conformal_runtime
+        if (
+            runtime is None
+            or self.initial_ledger is None
+            or self.initial_ledger.empty
+            or CALIBRATION_STATE not in self.initial_ledger.columns
+        ):
+            return
+
+        max_issued_count = 0
+        for payload in self.initial_ledger[CALIBRATION_STATE].dropna().astype(str):
+            if not payload:
+                continue
+            try:
+                state = deserialize_calibration_state(payload)
+            except (TypeError, ValueError):
+                continue
+            max_issued_count = max(max_issued_count, int(state.get("issued_count", 0)) + 1)
+
+        if (
+            isinstance(runtime, SymmetricIntervalRuntime)
+            and max_issued_count > runtime._issued_count
+        ):
+            runtime._issued_count = max_issued_count
 
     def _materialize_dispatch_records(
         self,

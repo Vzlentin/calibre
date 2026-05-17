@@ -19,7 +19,17 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine
-from calibre.storage.state import RUNTIME_PARTITION
+from calibre.storage.models import Base
+from calibre.storage.objstore import read_initial_ledger, write_ledger_shard
+from calibre.storage.postgres import (
+    ConformalStateRepo,
+    ForecastPointerRepo,
+    RunRepo,
+    make_engine,
+    make_session_factory,
+    session_scope,
+)
+from calibre.storage.state import RUNTIME_PARTITION, SqlConformalStateStore
 
 
 class _MemoryStateStore:
@@ -115,3 +125,111 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
     frame = resumed.ledger.to_df()
     lower_col, upper_col = config.interval_columns
     assert (frame[upper_col] - frame[lower_col]).iloc[0] > 0.0
+
+
+def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": [10.0, 20.0, 30.0, 40.0] * 3})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    config = SymmetricIntervalConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    origins = [dates[7], dates[8], dates[9]]
+
+    uninterrupted = BackendEngine(freq="W", conformal_config=config).execute(
+        [task],
+        actuals,
+        origins=origins,
+    )
+
+    run_id = uuid4()
+    store = _MemoryStateStore()
+    interrupted = BackendEngine(
+        freq="W",
+        conformal_config=config,
+        run_id=run_id,
+        conformal_state_store=store,
+    ).execute([task], actuals, origins=origins[:2])
+
+    resumed = BackendEngine(
+        freq="W",
+        conformal_config=config,
+        run_id=run_id,
+        conformal_state_store=store,
+        initial_ledger=interrupted.ledger.to_df(),
+    ).execute([task], actuals, origins=origins[2:])
+
+    sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
+    expected = uninterrupted.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
+    actual = resumed.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": [10.0, 20.0, 30.0, 40.0] * 3})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    config = SymmetricIntervalConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    origins = [dates[7], dates[8], dates[9]]
+
+    uninterrupted = BackendEngine(freq="W", conformal_config=config).execute(
+        [task],
+        actuals,
+        origins=origins,
+    )
+
+    db = make_engine(f"sqlite+pysqlite:///{(tmp_path / 'resume.db').as_posix()}")
+    Base.metadata.create_all(db)
+    factory = make_session_factory(db)
+    ledger_path = tmp_path / "ledger.parquet"
+
+    with session_scope(factory) as session:
+        run = RunRepo(session).create(config={"name": "resume-test"})
+        run_id = run.id
+        interrupted = BackendEngine(
+            freq="W",
+            conformal_config=config,
+            run_id=run_id,
+            conformal_state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+        ).execute([task], actuals, origins=origins[:2])
+        pointer = write_ledger_shard(interrupted.ledger.to_df(), str(ledger_path))
+        ForecastPointerRepo(session).upsert(
+            run_id,
+            "ledger",
+            str(pointer["uri"]),
+            int(pointer["byte_size"]),
+        )
+
+    with session_scope(factory) as session:
+        initial_ledger = read_initial_ledger(ForecastPointerRepo(session), run_id)
+        assert initial_ledger is not None
+        resumed = BackendEngine(
+            freq="W",
+            conformal_config=config,
+            run_id=run_id,
+            conformal_state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+            initial_ledger=initial_ledger,
+        ).execute([task], actuals, origins=origins[2:])
+
+    sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
+    expected = uninterrupted.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
+    actual = resumed.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(actual, expected)

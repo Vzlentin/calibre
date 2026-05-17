@@ -1,5 +1,8 @@
 .git
 .venv
+.worktrees
+.vscode
+.claude
 .mypy_cache
 .pytest_cache
 .ruff_cache
@@ -11,4 +14,5 @@ mlruns/
 lightning_logs/
 results/
 tests/
+benchmarks/cp/
 benchmarks/*/data

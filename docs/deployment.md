@@ -10,12 +10,14 @@ Build:
 
 ```bash
 docker build -t calibre:full .
+docker build -f Dockerfile.slim -t calibre:slim .
 ```
 
 Smoke:
 
 ```bash
 docker run --rm calibre:full health
+docker run --rm calibre:slim run --config /app/benchmarks/vn2/config/smoke.yaml
 ```
 
 ## Kubernetes Job
@@ -58,6 +60,11 @@ artifact bucket, ECR repository, and small RDS Postgres instance:
 terraform -chdir=infra/aws init
 terraform -chdir=infra/aws apply
 ```
+
+Set `CALIBRE_DATABASE_URL` to the Postgres SQLAlchemy URL when running the API.
+When set, `POST /backtests` persists rows in `runs`, conformal snapshots in
+`conformal_state`, and output artifact pointers in `forecast_pointers`. Run the
+Alembic migration under `calibre/storage/migrations/` before starting the API.
 
 ## Azure Container Instances
 

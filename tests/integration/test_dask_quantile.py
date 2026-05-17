@@ -9,49 +9,45 @@ from calibre.execution.backend import BackendEngine
 
 
 def _panel() -> pd.DataFrame:
-    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
     return pd.concat(
         [
-            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [10.0, 20.0] * 6}),
-            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [5.0, 15.0] * 6}),
+            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [10.0, 20.0] * 10}),
+            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [5.0, 15.0] * 10}),
         ],
         ignore_index=True,
     )
 
 
 def test_dask_quantile_columns_survive() -> None:
-    """Quantile columns from a global model must survive Fugue+Dask transform."""
+    """Quantile columns from local models must survive Fugue+Dask transform."""
     distributed = pytest.importorskip("distributed")
     fugue_dask = pytest.importorskip("fugue_dask")
 
-    dates = pd.date_range("2024-01-07", periods=12, freq="W")
-    all_series = pd.concat(
-        [
-            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [10.0, 20.0] * 6}),
-            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [5.0, 15.0] * 6}),
-        ],
-        ignore_index=True,
-    )
+    all_series = _panel()
+    model_config = {
+        "backend": "mlforecast",
+        "scope": "local",
+        "model": "lightgbm.LGBMRegressor",
+        "objective": "quantile",
+        "quantiles": [0.5, 0.833],
+        "strategy": "direct",
+        "lags": [1, 2],
+        "verbosity": -1,
+        "n_estimators": 10,
+    }
+    tasks = [
+        ForecastTask(
+            history=group.reset_index(drop=True),
+            horizon=2,
+            model_config=model_config,
+        )
+        for _, group in all_series.groupby(UNIQUE_ID, sort=False)
+    ]
 
-    global_task = ForecastTask(
-        history=all_series,
-        horizon=2,
-        model_config={
-            "backend": "mlforecast",
-            "scope": "global",
-            "model": "lightgbm.LGBMRegressor",
-            "objective": "quantile",
-            "quantiles": [0.5, 0.833],
-            "strategy": "direct",
-            "lags": [1, 2],
-            "verbosity": -1,
-            "n_estimators": 10,
-        },
-    )
+    origins = [pd.Timestamp("2024-04-14")]
 
-    origins = [pd.Timestamp("2024-02-11")]
-
-    expected = BackendEngine(freq="W").execute([global_task], all_series, origins).ledger.to_df()
+    expected = BackendEngine(freq="W").execute(tasks, all_series, origins).ledger.to_df()
     assert "q_0p5" in expected.columns
     assert "q_0p833" in expected.columns
 
@@ -61,7 +57,7 @@ def test_dask_quantile_columns_survive() -> None:
         engine = fugue_dask.DaskExecutionEngine(client)
         actual = (
             BackendEngine(freq="W", engine=engine)
-            .execute([global_task], all_series, origins)
+            .execute(tasks, all_series, origins)
             .ledger.to_df()
         )
     finally:
