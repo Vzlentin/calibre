@@ -13,6 +13,7 @@ def test_resolve_statsforecast_backend():
 
 
 def test_resolve_neuralforecast_backend():
+    pytest.importorskip("neuralforecast")
     adapter = resolve_adapter({"backend": "neuralforecast", "model": "NHITS"})
     assert type(adapter).__name__ == "NeuralForecastAdapter"
     assert hasattr(adapter, "fit")

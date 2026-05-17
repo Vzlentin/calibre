@@ -21,7 +21,6 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-import mlflow
 import pandas as pd
 from mlforecast.lag_transforms import RollingMean, RollingStd
 

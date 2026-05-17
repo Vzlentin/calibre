@@ -29,7 +29,7 @@ class NeuralForecastAdapter(ModelAdapter):
                 "pip install calibre[neural]"
             )
         self._config = model_config
-        self._nf: "NeuralForecast" | None = None
+        self._nf: NeuralForecast | None = None
 
     def fit(self, task: ForecastTask) -> None:
         model_name = self._config["model"]

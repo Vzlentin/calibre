@@ -3,6 +3,7 @@
 from __future__ import annotations  # keeps pd.DataFrame annotation lazy at runtime
 
 import dataclasses
+import logging
 import os
 import platform
 import subprocess
@@ -13,8 +14,6 @@ import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import logging
 
 import mlflow
 

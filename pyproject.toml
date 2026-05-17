@@ -61,6 +61,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = ["scripts/databricks_notebook.py"]
 
 [tool.ruff.lint]
 select = [
