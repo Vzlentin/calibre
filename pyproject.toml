@@ -38,7 +38,7 @@ dev = [
     "moto[server,s3]",
     "types-PyYAML",
     "pandas-stubs>=3.0.0.260204",
-    "xgboost",
+    "xgboost<2",
 ]
 benchmarks = [
     "mlflow>=2.17,<3",
@@ -50,8 +50,16 @@ gcs = ["gcsfs"]
 cloud = ["s3fs", "adlfs", "gcsfs"]
 dask = ["dask[distributed]"]
 spark = ["pyspark"]
-neural = ["neuralforecast"]
-xgboost = ["xgboost"]
+neural = ["neuralforecast", "torch"]
+xgboost = ["xgboost<2"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu", marker = "platform_system == 'Linux' and platform_machine == 'x86_64'" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

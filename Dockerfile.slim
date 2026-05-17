@@ -10,7 +10,7 @@ COPY pyproject.toml uv.lock README.md ./
 COPY calibre ./calibre
 COPY benchmarks ./benchmarks
 
-# Slim variant: no torch-based neuralforecast, xgboost GPU wheel, or benchmark extras.
+# Slim variant: no torch-based neuralforecast, xgboost, or benchmark extras.
 RUN uv sync --extra cloud --no-dev --frozen
 RUN find /app/.venv -type f -name "*.pyc" -delete \
     && find /app/.venv -type d -name "__pycache__" -empty -delete
