@@ -7,7 +7,6 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from calibre.api.runs import create_run, get_run, run_backtest_job
 from calibre.api.schemas import ForecastRequest, ForecastResponse, RunResponse
 from calibre.cli.commands import run_config
-from calibre.cli.config import load_config_from_mapping
 
 app = FastAPI(title="Calibre", version="0.1.0")
 
@@ -34,7 +33,7 @@ def metrics() -> Response:
 
 @app.post("/forecasts", response_model=ForecastResponse)
 def forecasts(req: ForecastRequest) -> ForecastResponse:
-    config = load_config_from_mapping(req.config)
+    config = req.as_backend_config()
     result = run_config(config)
     frame = result if isinstance(result, pd.DataFrame) else result.ledger.to_df()
     return ForecastResponse(rows=len(frame), forecasts=_json_records(frame))
