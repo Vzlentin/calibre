@@ -8,8 +8,9 @@ from uuid import UUID
 
 import pandas as pd
 
-from calibre.cli.config import BackendConfig, load_config
+from calibre.cli.config import BackendConfig, load_config, load_config_from_mapping
 from calibre.conformal.runtime import SymmetricIntervalConfig
+from calibre.core.metrics import set_order_cost
 from calibre.execution.backend import BackendEngine, BackendResult
 from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.io import ensure_parent_dir
@@ -21,6 +22,22 @@ from calibre.storage.state import ConformalStateStore
 
 def _emit(message: str) -> None:
     sys.stdout.write(f"{message}\n")
+
+
+_HEALTH_CONFIG: dict[str, Any] = {
+    "config_schema": "1.0",
+    "dataset": {"adapter": "vn2", "path": "benchmarks/vn2/fixture", "period": 0},
+    "tasks": [
+        {
+            "model": "SeasonalNaive",
+            "horizon": 2,
+            "config": {"backend": "statsforecast", "season_length": 2},
+        }
+    ],
+    "origins": {"start": "2024-01-29", "end": "2024-01-29", "freq": "W-MON"},
+    "output": {"ledger_path": "results/vn2/smoke-ledger.parquet", "streaming": False},
+    "execution": {"engine": None, "seed": 42},
+}
 
 
 def _load_dataset(config: BackendConfig):
@@ -47,6 +64,28 @@ def _build_order_config(config: BackendConfig) -> OrderPolicyConfig | None:
         coverage=config.ordering.coverage,
         quantile=config.ordering.quantile,
     )
+
+
+def _metric_currency(config: BackendConfig) -> str:
+    currency = config.dataset.options.get("currency")
+    return str(currency) if currency is not None else "EUR"
+
+
+def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: str) -> None:
+    if frame.empty:
+        return
+    if "total_cost" in frame.columns:
+        total_cost = float(frame["total_cost"].sum())
+    else:
+        cost_columns = [
+            column
+            for column in frame.columns
+            if column.endswith("_cost") and pd.api.types.is_numeric_dtype(frame[column])
+        ]
+        if not cost_columns:
+            return
+        total_cost = float(frame[cost_columns].sum(numeric_only=True).sum())
+    set_order_cost(currency, dataset, total_cost)
 
 
 def _resolve_execution_engine(config: BackendConfig) -> Any:
@@ -122,6 +161,11 @@ def run_config(
     if config.benchmark is not None:
         summary = _run_builtin_benchmark(config)
         total_cost = float(summary["total_cost"].sum()) if "total_cost" in summary else float("nan")
+        _record_order_cost_metric(
+            summary,
+            dataset=config.benchmark,
+            currency=_metric_currency(config),
+        )
         _emit(f"benchmark={config.benchmark} rows={len(summary)} total_cost={total_cost:.2f}")
         return summary
 
@@ -173,6 +217,12 @@ def run_config(
         and config.output.order_ledger_path is not None
     ):
         result.order_ledger.to_parquet(config.output.order_ledger_path)
+    if result.order_ledger is not None:
+        _record_order_cost_metric(
+            result.order_ledger.to_df(),
+            dataset=config.dataset.adapter,
+            currency=_metric_currency(config),
+        )
 
     ledger_rows = len(result.ledger.to_df())
     _emit(f"run complete rows={ledger_rows}")
@@ -194,7 +244,14 @@ def health() -> dict[str, Any]:
         version = importlib.metadata.version("calibre")
     except importlib.metadata.PackageNotFoundError:
         version = "0.1.0"
-    payload = {"status": "ok", "version": version}
+    config = load_config_from_mapping(_HEALTH_CONFIG)
+    resolve_dataset_adapter(config.dataset.adapter)
+    payload = {
+        "status": "ok",
+        "version": version,
+        "config_schema": config.config_schema,
+        "fixture_adapter": config.dataset.adapter,
+    }
     _emit(json.dumps(payload, sort_keys=True))
     return payload
 

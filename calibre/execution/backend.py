@@ -44,7 +44,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.forecast_task_io import ForecastTaskRef
-from calibre.core.metrics import observe_forecast_duration
+from calibre.core.metrics import observe_forecast_duration, set_conformal_coverage
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
 from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
@@ -348,6 +348,7 @@ class BackendEngine:
 
         if conformal_runtime is not None:
             newly_resolved = conformal_runtime.observe(newly_resolved)
+            self._record_conformal_coverage(newly_resolved, conformal_runtime)
             if NONCONFORMITY_SCORE not in updated.columns:
                 updated[NONCONFORMITY_SCORE] = np.nan
             updated.loc[newly_resolved.index, NONCONFORMITY_SCORE] = newly_resolved[
@@ -385,6 +386,23 @@ class BackendEngine:
             serialize_calibration_state(conformal_runtime.get_diagnostics())
         )
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
+
+    def _record_conformal_coverage(
+        self,
+        resolved: pd.DataFrame,
+        conformal_runtime: ConformalRuntime,
+    ) -> None:
+        lower_col, upper_col = conformal_runtime.interval_columns
+        if lower_col not in resolved.columns or upper_col not in resolved.columns:
+            return
+        comparable = resolved.dropna(subset=[Y, lower_col, upper_col, MODEL_NAME])
+        if comparable.empty:
+            return
+        diagnostics = conformal_runtime.get_diagnostics()
+        mode = str(diagnostics.get("mode", "unknown"))
+        for model_name, group in comparable.groupby(MODEL_NAME, sort=False):
+            covered = (group[Y] >= group[lower_col]) & (group[Y] <= group[upper_col])
+            set_conformal_coverage(str(model_name), mode, float(covered.mean()))
 
     def _advance_issued_count_from_initial_ledger(self) -> None:
         """Recover issued-origin accounting from a resumed ledger snapshot."""

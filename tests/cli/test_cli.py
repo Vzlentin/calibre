@@ -5,10 +5,11 @@ from pathlib import Path
 import fsspec
 import pandas as pd
 
-from calibre.cli.commands import run, validate
+from calibre.cli.commands import _record_order_cost_metric, health, run, validate
 from calibre.cli.config import load_config
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
+from calibre.core.metrics import order_cost
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
@@ -87,6 +88,22 @@ def test_load_config_and_validate_command(tmp_path) -> None:
     assert config.config_schema == "1.0"
     assert config.tasks[0].horizon == 1
     assert validate(path).dataset.adapter == "unit_cli"
+
+
+def test_health_validates_embedded_smoke_config() -> None:
+    payload = health()
+
+    assert payload["status"] == "ok"
+    assert payload["config_schema"] == "1.0"
+    assert payload["fixture_adapter"] == "vn2"
+
+
+def test_order_cost_metric_uses_total_cost_column() -> None:
+    frame = pd.DataFrame({"unique_id": ["A", "B"], "total_cost": [1.25, 2.75]})
+
+    _record_order_cost_metric(frame, dataset="unit", currency="EUR")
+
+    assert order_cost.labels(currency="EUR", dataset="unit")._value.get() == 4.0
 
 
 def test_load_config_accepts_dask_execution_options(tmp_path) -> None:
