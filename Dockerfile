@@ -27,6 +27,8 @@ RUN apt-get update \
 
 COPY --from=builder --chown=calibre:calibre /app /app
 
+RUN chown calibre:calibre /app
+
 USER calibre
 
 ENTRYPOINT ["calibre"]
