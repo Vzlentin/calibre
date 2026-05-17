@@ -355,7 +355,6 @@ dependencies = [
     { name = "fugue" },
     { name = "lightgbm" },
     { name = "mlforecast" },
-    { name = "neuralforecast" },
     { name = "numpy" },
     { name = "optuna" },
     { name = "pandas" },
@@ -398,6 +397,9 @@ dev = [
 gcs = [
     { name = "gcsfs" },
 ]
+neural = [
+    { name = "neuralforecast" },
+]
 s3 = [
     { name = "s3fs" },
 ]
@@ -422,7 +424,7 @@ requires-dist = [
     { name = "mlforecast" },
     { name = "moto", extras = ["s3"], marker = "extra == 'dev'" },
     { name = "mypy", marker = "extra == 'dev'" },
-    { name = "neuralforecast" },
+    { name = "neuralforecast", marker = "extra == 'neural'" },
     { name = "numpy" },
     { name = "optuna" },
     { name = "optuna-integration", extras = ["mlflow"], marker = "extra == 'benchmarks'", specifier = ">=4.0" },
@@ -443,7 +445,7 @@ requires-dist = [
     { name = "uvicorn" },
     { name = "xgboost" },
 ]
-provides-extras = ["dev", "benchmarks", "s3", "azure", "gcs", "cloud", "dask", "spark"]
+provides-extras = ["dev", "benchmarks", "s3", "azure", "gcs", "cloud", "dask", "spark", "neural"]
 
 [[package]]
 name = "certifi"

@@ -23,7 +23,6 @@ dependencies = [
     "mlforecast",
     "lightgbm",
     "xgboost",
-    "neuralforecast",
     "pandas-stubs>=3.0.0.260204",
     "optuna",
     "uvicorn",
@@ -51,6 +50,7 @@ gcs = ["gcsfs"]
 cloud = ["s3fs", "adlfs", "gcsfs"]
 dask = ["dask[distributed]"]
 spark = ["pyspark"]
+neural = ["neuralforecast"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -61,6 +61,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = ["scripts/databricks_notebook.py"]
 
 [tool.ruff.lint]
 select = [

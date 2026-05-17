@@ -34,6 +34,7 @@ from calibre.core.forecast_frame import (
     H,
     Y,
     is_quantile_column,
+    quantile_column,
     validate_actuals_frame,
     validate_forecast_frame,
 )
@@ -87,6 +88,16 @@ def _encode_model_config(model_config: dict) -> str:
 
 def _decode_model_config(payload: str) -> dict:
     return pickle.loads(base64.b64decode(payload.encode("ascii")))  # noqa: S301
+
+
+def _collect_quantile_columns(records: list[_TaskDispatchRecord]) -> set[str]:
+    """Inspect encoded model configs for declared quantile outputs."""
+    cols: set[str] = set()
+    for record in records:
+        model_config = _decode_model_config(record.model_config_payload)
+        for q in model_config.get("quantiles", []):
+            cols.add(quantile_column(float(q)))
+    return cols
 
 
 @dataclass(frozen=True)
@@ -392,11 +403,15 @@ class BackendEngine:
 
         task_df = _dispatch_records_to_frame(records, origin)
 
+        # Build schema dynamically so quantile columns survive distributed transforms
+        quantile_cols = _collect_quantile_columns(records)
         schema = (
             f"{UNIQUE_ID}:str,{DS}:datetime,{Y}:double,"
             f"{Y_HAT}:double,{H}:long,"
             f"{FORECAST_ORIGIN}:datetime,{MODEL_NAME}:str"
         )
+        if quantile_cols:
+            schema += "," + ",".join(f"{c}:double" for c in sorted(quantile_cols))
 
         result = fa.transform(
             task_df,

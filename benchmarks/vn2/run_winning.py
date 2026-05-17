@@ -21,7 +21,6 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-import mlflow
 import pandas as pd
 from mlforecast.lag_transforms import RollingMean, RollingStd
 
@@ -31,6 +30,7 @@ import benchmarks.vn2.config as _vn2_config
 from benchmarks.common.tracking import (
     log_config_module,
     log_costs_dataframe,
+    safe_log_metric,
     start_benchmark_run,
 )
 from benchmarks.vn2.config import (
@@ -223,9 +223,9 @@ def run_winning(
             for s in simulator.states.values():
                 holding_cum += s.cumulative_holding_cost
                 shortage_cum += s.cumulative_shortage_cost
-            mlflow.log_metric("cost/holding", holding_cum, step=round_num)
-            mlflow.log_metric("cost/shortage", shortage_cum, step=round_num)
-            mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=round_num)
+            safe_log_metric("cost/holding", holding_cum, step=round_num)
+            safe_log_metric("cost/shortage", shortage_cum, step=round_num)
+            safe_log_metric("cost/total", holding_cum + shortage_cum, step=round_num)
 
         for week_offset in range(1, delivery_weeks + 1):
             week = decision_rounds + week_offset

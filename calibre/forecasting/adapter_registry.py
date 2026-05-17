@@ -18,11 +18,13 @@ def _ensure_registry() -> None:
     from calibre.forecasting.neuralforecast_adapter import NeuralForecastAdapter
     from calibre.forecasting.statsforecast_adapter import StatsForecastAdapter
 
+    # NeuralForecastAdapter imports neuralforecast lazily; instantiation raises
+    # a clear RuntimeError when the optional extra isn't installed.
     _REGISTRY.update(
         {
             "statsforecast": StatsForecastAdapter,
-            "neuralforecast": NeuralForecastAdapter,
             "mlforecast": MLForecastAdapter,
+            "neuralforecast": NeuralForecastAdapter,
         }
     )
 

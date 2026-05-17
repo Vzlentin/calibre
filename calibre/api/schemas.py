@@ -4,9 +4,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from calibre.cli.config import BackendConfig, load_config_from_mapping
+
 
 class ForecastRequest(BaseModel):
     config: dict[str, Any] = Field(..., description="BackendConfig YAML-equivalent mapping")
+
+    def as_backend_config(self) -> BackendConfig:
+        """Parse and validate this request's config into a BackendConfig."""
+        return load_config_from_mapping(self.config)
 
 
 class ForecastResponse(BaseModel):

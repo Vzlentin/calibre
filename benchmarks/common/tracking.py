@@ -3,6 +3,7 @@
 from __future__ import annotations  # keeps pd.DataFrame annotation lazy at runtime
 
 import dataclasses
+import logging
 import os
 import platform
 import subprocess
@@ -16,10 +17,17 @@ from typing import TYPE_CHECKING, Any
 
 import mlflow
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     import pandas as pd
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
+
+
+def _mlflow_disabled() -> bool:
+    """Return True when CALIBRE_NO_MLFLOW is set to a truthy value."""
+    return os.environ.get("CALIBRE_NO_MLFLOW", "").lower() in {"1", "true", "yes"}
 
 
 def _load_dotenv() -> None:
@@ -103,6 +111,10 @@ def start_benchmark_run(
     if needed, and attaches standard tags (git_sha, python, platform). Caller
     logs params/metrics inside the yielded context.
     """
+    if _mlflow_disabled():
+        yield None
+        return
+
     mlflow.set_tracking_uri(resolve_tracking_uri())
     mlflow.set_experiment(experiment)
 
@@ -153,12 +165,21 @@ def log_config_module(mod: types.ModuleType) -> None:
             warnings.warn(f"Could not log non-scalar config: {exc}", stacklevel=2)
 
 
+def safe_log_metric(key: str, value: float, step: int | None = None) -> None:
+    """Log a metric via MLflow, silently skipping if CALIBRE_NO_MLFLOW is set."""
+    if _mlflow_disabled():
+        return
+    mlflow.log_metric(key, value, step=step)
+
+
 def log_costs_dataframe(costs_df: pd.DataFrame, *, artifact_subdir: str = "costs") -> None:
     """Log aggregate costs as MLflow metrics and the full frame as a CSV artifact.
 
     Metrics are namespaced (cost/holding_total, cost/shortage_total, cost/total)
     so cross-dataset comparisons work in the MLflow UI.
     """
+    if _mlflow_disabled():
+        return
     mlflow.log_metric("cost/holding_total", float(costs_df["holding_cost"].sum()))
     mlflow.log_metric("cost/shortage_total", float(costs_df["shortage_cost"].sum()))
     mlflow.log_metric("cost/total", float(costs_df["total_cost"].sum()))

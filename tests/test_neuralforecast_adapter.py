@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+pytest.importorskip("neuralforecast")
+
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.neuralforecast_adapter import NeuralForecastAdapter
 
