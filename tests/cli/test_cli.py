@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+import urllib.request
 from pathlib import Path
 
 import fsspec
@@ -76,11 +78,54 @@ execution:
 """
 
 
+def _metrics_config_text(output: str) -> str:
+    return f"""
+config_schema: "1.0"
+dataset:
+  adapter: unit_cli
+  path: ignored
+tasks:
+  - model: stub_model
+    horizon: 1
+    config:
+      backend: stub
+conformal:
+  method: aci
+  coverage: 0.9
+  calibration_window: 4
+  gamma: 0.05
+ordering:
+  policy: newsvendor
+  coverage: 0.9
+  params:
+    - unique_id: A
+      underage_cost: 3.0
+      overage_cost: 1.0
+      inventory_position: 0.0
+origins:
+  start: 2024-02-04
+  end: 2024-02-11
+  freq: W-SUN
+output:
+  ledger_path: {output}
+  streaming: false
+execution:
+  engine: null
+  seed: 123
+"""
+
+
 def _write_config(tmp_path, *, ledger_path: str | None = None) -> str:
     path = tmp_path / "config.yaml"
     output = ledger_path or (tmp_path / "ledger.parquet").as_posix()
     path.write_text(_config_text(output), encoding="utf-8")
     return str(path)
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def test_load_config_and_validate_command(tmp_path) -> None:
@@ -157,6 +202,25 @@ def test_run_command_executes_config(monkeypatch, tmp_path) -> None:
     frame = result.ledger.to_df()
     assert len(frame) == 1
     assert (tmp_path / "ledger.parquet").exists()
+
+
+def test_run_command_metrics_port_exposes_required_series(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "metrics-config.yaml"
+    path.write_text(
+        _metrics_config_text((tmp_path / "metrics-ledger.parquet").as_posix()),
+        encoding="utf-8",
+    )
+    port = _free_port()
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    run(path, metrics_port=port)
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=3) as response:
+        payload = response.read().decode("utf-8")
+    assert "calibre_forecast_duration_seconds" in payload
+    assert "calibre_conformal_coverage_ratio" in payload
+    assert "calibre_order_cost" in payload
 
 
 def test_run_command_writes_non_streaming_output_to_fsspec_uri(monkeypatch, tmp_path) -> None:
