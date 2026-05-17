@@ -14,7 +14,7 @@ COPY pyproject.toml uv.lock README.md ./
 COPY calibre ./calibre
 COPY benchmarks ./benchmarks
 
-RUN uv sync --extra cloud --extra neural --no-dev --frozen \
+RUN uv sync --extra cloud --extra ml --extra neural --no-dev --frozen \
     && find /app/.venv -type f -name "*.pyc" -delete \
     && find /app/.venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
     && find /app/.venv/lib/python3.11/site-packages -type d \( -name tests -o -name test \) -prune -exec rm -rf {} + \

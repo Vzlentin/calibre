@@ -394,8 +394,6 @@ dependencies = [
     { name = "fastapi" },
     { name = "fsspec" },
     { name = "fugue" },
-    { name = "lightgbm" },
-    { name = "mlforecast" },
     { name = "numpy" },
     { name = "optuna" },
     { name = "pandas" },
@@ -414,7 +412,9 @@ azure = [
     { name = "adlfs" },
 ]
 benchmarks = [
+    { name = "lightgbm" },
     { name = "mlflow" },
+    { name = "mlforecast" },
     { name = "optuna-integration", extra = ["mlflow"] },
 ]
 cloud = [
@@ -427,6 +427,8 @@ dask = [
 ]
 dev = [
     { name = "httpx" },
+    { name = "lightgbm" },
+    { name = "mlforecast" },
     { name = "moto", extra = ["s3", "server"] },
     { name = "mypy" },
     { name = "pandas-stubs" },
@@ -437,6 +439,10 @@ dev = [
 ]
 gcs = [
     { name = "gcsfs" },
+]
+ml = [
+    { name = "lightgbm" },
+    { name = "mlforecast" },
 ]
 neural = [
     { name = "neuralforecast" },
@@ -465,9 +471,13 @@ requires-dist = [
     { name = "gcsfs", marker = "extra == 'cloud'" },
     { name = "gcsfs", marker = "extra == 'gcs'" },
     { name = "httpx", marker = "extra == 'dev'" },
-    { name = "lightgbm" },
+    { name = "lightgbm", marker = "extra == 'benchmarks'" },
+    { name = "lightgbm", marker = "extra == 'dev'" },
+    { name = "lightgbm", marker = "extra == 'ml'" },
     { name = "mlflow", marker = "extra == 'benchmarks'", specifier = ">=2.17,<3" },
-    { name = "mlforecast" },
+    { name = "mlforecast", marker = "extra == 'benchmarks'" },
+    { name = "mlforecast", marker = "extra == 'dev'" },
+    { name = "mlforecast", marker = "extra == 'ml'" },
     { name = "moto", extras = ["server", "s3"], marker = "extra == 'dev'" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "neuralforecast", marker = "extra == 'neural'" },
@@ -494,7 +504,7 @@ requires-dist = [
     { name = "xgboost", marker = "extra == 'dev'", specifier = "<2" },
     { name = "xgboost", marker = "extra == 'xgboost'", specifier = "<2" },
 ]
-provides-extras = ["dev", "benchmarks", "s3", "azure", "gcs", "cloud", "dask", "spark", "neural", "xgboost"]
+provides-extras = ["dev", "benchmarks", "s3", "azure", "gcs", "cloud", "dask", "spark", "ml", "neural", "xgboost"]
 
 [[package]]
 name = "certifi"

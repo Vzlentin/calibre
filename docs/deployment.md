@@ -32,6 +32,10 @@ CI publishes same-repository PR and main-branch images to GHCR as
 `ghcr.io/<owner>/<repo>:pr-<number>-full`, `:pr-<number>-slim`, and short-SHA
 `:<sha>-full` / `:<sha>-slim` tags after both image smoke tests pass.
 
+The slim image is intended for statsforecast/local model configs and omits the
+MLForecast/LightGBM and NeuralForecast stacks. Use the full image for the VN2
+winning benchmark and other global LightGBM or neural configs.
+
 ## Kubernetes Job
 
 ```yaml
