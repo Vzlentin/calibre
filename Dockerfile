@@ -22,7 +22,7 @@ WORKDIR /app
 
 RUN useradd --create-home --shell /usr/sbin/nologin calibre
 
-COPY --from=builder /app /app
+COPY --from=builder --chown=calibre:calibre /app /app
 
 USER calibre
 
