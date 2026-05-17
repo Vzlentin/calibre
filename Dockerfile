@@ -20,7 +20,10 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 
 WORKDIR /app
 
-RUN useradd --create-home --shell /usr/sbin/nologin calibre
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /usr/sbin/nologin calibre
 
 COPY --from=builder --chown=calibre:calibre /app /app
 
