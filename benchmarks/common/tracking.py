@@ -25,6 +25,11 @@ if TYPE_CHECKING:
 _REPO_ROOT = Path(__file__).parent.parent.parent
 
 
+def _mlflow_disabled() -> bool:
+    """Return True when CALIBRE_NO_MLFLOW is set to a truthy value."""
+    return os.environ.get("CALIBRE_NO_MLFLOW", "").lower() in {"1", "true", "yes"}
+
+
 def _load_dotenv() -> None:
     """Load key=value pairs from .env files into os.environ (if not already set).
 
@@ -106,7 +111,7 @@ def start_benchmark_run(
     if needed, and attaches standard tags (git_sha, python, platform). Caller
     logs params/metrics inside the yielded context.
     """
-    if os.environ.get("CALIBRE_NO_MLFLOW", "").lower() in {"1", "true", "yes"}:
+    if _mlflow_disabled():
         yield None
         return
 
@@ -162,7 +167,7 @@ def log_config_module(mod: types.ModuleType) -> None:
 
 def safe_log_metric(key: str, value: float, step: int | None = None) -> None:
     """Log a metric via MLflow, silently skipping if CALIBRE_NO_MLFLOW is set."""
-    if os.environ.get("CALIBRE_NO_MLFLOW", "").lower() in {"1", "true", "yes"}:
+    if _mlflow_disabled():
         return
     mlflow.log_metric(key, value, step=step)
 
@@ -173,7 +178,7 @@ def log_costs_dataframe(costs_df: pd.DataFrame, *, artifact_subdir: str = "costs
     Metrics are namespaced (cost/holding_total, cost/shortage_total, cost/total)
     so cross-dataset comparisons work in the MLflow UI.
     """
-    if os.environ.get("CALIBRE_NO_MLFLOW", "").lower() in {"1", "true", "yes"}:
+    if _mlflow_disabled():
         return
     mlflow.log_metric("cost/holding_total", float(costs_df["holding_cost"].sum()))
     mlflow.log_metric("cost/shortage_total", float(costs_df["shortage_cost"].sum()))

@@ -66,12 +66,9 @@ print(f"Fixture files in DBFS: {sorted(p.name for p in dbfs_fixture.iterdir())}"
 
 # COMMAND ----------
 
-# Run the Databricks smoke test.
+# Run the Databricks smoke test. The fixture was already copied above,
+# so main() will detect it and skip its own copy step.
 from scripts.databricks_smoke import main
-
-# Override paths for the notebook environment
-import scripts.databricks_smoke as smoke_mod
-smoke_mod.local_fixture = str(dbfs_fixture)
 
 result = main()
 print(f"Smoke test exit code: {result}")

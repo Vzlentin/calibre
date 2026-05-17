@@ -9,7 +9,7 @@ try:
     from neuralforecast import NeuralForecast
 
     _NEURALFORECAST_AVAILABLE = True
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     neuralforecast = None  # type: ignore[assignment]
     NeuralForecast = None  # type: ignore[misc, assignment]
     _NEURALFORECAST_AVAILABLE = False
