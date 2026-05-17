@@ -86,9 +86,7 @@ def main() -> int:
 
     # Assertions
     assert diagnostics["rows"] == 4, f"Expected 4 rows, got {diagnostics['rows']}"
-    assert diagnostics["engine"] == "spark", (
-        f"Expected spark engine, got {diagnostics['engine']}"
-    )
+    assert diagnostics["engine"] == "spark", f"Expected spark engine, got {diagnostics['engine']}"
     assert diagnostics["ledger_path"] is not None, "Ledger path not set"
     ledger_path = diagnostics["ledger_path"]
     assert Path(ledger_path).exists(), f"Ledger not written: {ledger_path}"
