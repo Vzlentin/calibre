@@ -53,6 +53,12 @@ def _resolved_uri(path: str | Path) -> str:
     return f"{text}.resolved.parquet"
 
 
+def _write_parquet(df: pd.DataFrame, path: str | Path) -> None:
+    ensure_parent_dir(path)
+    with fsspec.open(str(path), "wb") as handle:
+        df.to_parquet(handle, index=False)
+
+
 class _BaseLedger:
     _empty_columns: list[str] = []
 
@@ -106,8 +112,7 @@ class _BaseLedger:
         return pd.concat(self._frames, ignore_index=True)
 
     def to_parquet(self, path: str | Path) -> None:
-        ensure_parent_dir(path)
-        self.to_df().to_parquet(str(path), index=False)
+        _write_parquet(self.to_df(), path)
 
 
 class ForecastLedger(_BaseLedger):
@@ -124,7 +129,7 @@ class ForecastLedger(_BaseLedger):
         if self.streaming:
             self._stream_current = df.copy()
             if self._resolved_path is not None:
-                df.to_parquet(self._resolved_path, index=False)
+                _write_parquet(df, self._resolved_path)
             return
         self._frames = [df]
 
