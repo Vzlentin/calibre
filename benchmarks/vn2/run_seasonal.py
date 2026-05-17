@@ -26,6 +26,7 @@ End-to-end pipeline:
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import sys
 from functools import partial
@@ -91,6 +92,8 @@ from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import build_tasks
 from calibre.forecasting.ensemble import ensemble_median
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+
+logger = logging.getLogger(__name__)
 
 
 def _build_rs_params(
@@ -295,7 +298,7 @@ def run_seasonal(
         simulator = VN2Simulator(states)
 
         if verbose:
-            print(f"Loaded {len(states)} products from initial state.")
+            logger.info("Loaded %s products from initial state.", len(states))
 
         week0_sales = load_period(data_dir, 0)
         if series_filter is not None:
@@ -304,10 +307,12 @@ def run_seasonal(
         tuned_configs: dict[str, dict] = {}
         if tune:
             if verbose:
-                print(
-                    f"Tuning {len(states)} series "
-                    f"({tune_n_trials} trials x {tune_n_origins} origins, "
-                    f"{tune_max_workers} workers)..."
+                logger.info(
+                    "Tuning %s series (%s trials x %s origins, %s workers)...",
+                    len(states),
+                    tune_n_trials,
+                    tune_n_origins,
+                    tune_max_workers,
                 )
             tuned_configs = tune_all_series(
                 sales=week0_sales,
@@ -319,10 +324,10 @@ def run_seasonal(
                 max_workers=tune_max_workers,
             )
             if verbose:
-                print(f"Tuning complete. {len(tuned_configs)} series tuned.")
+                logger.info("Tuning complete. %s series tuned.", len(tuned_configs))
 
         if verbose:
-            print(f"Running warmup with {warmup_origins} origins...")
+            logger.info("Running warmup with %s origins...", warmup_origins)
 
         conformal_runtime = _run_warmup(
             sales=week0_sales,
@@ -337,7 +342,7 @@ def run_seasonal(
             diagnostics = conformal_runtime.get_diagnostics()
             score_history = diagnostics.get("calibrator", {}).get("score_history", {})
             n_calibrated = len(score_history)
-            print(f"Warmup complete. Calibrated {n_calibrated} conformal policies.")
+            logger.info("Warmup complete. Calibrated %s conformal policies.", n_calibrated)
 
         engine = BackendEngine(freq="W-MON")
 
@@ -348,7 +353,7 @@ def run_seasonal(
 
         def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
             if verbose:
-                print(f"\n--- Decision round {rn} ---")
+                logger.info("\n--- Decision round %s ---", rn)
             round_sales = load_period(data_dir, rn - 1)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(series_filter)]
@@ -374,7 +379,9 @@ def run_seasonal(
         def _policy(frame: pd.DataFrame) -> dict[str, float]:
             if lower_col not in frame.columns or upper_col not in frame.columns:
                 if verbose:
-                    print("  No interval columns yet (warmup still needed). Using zero orders.")
+                    logger.info(
+                        "  No interval columns yet (warmup still needed). Using zero orders."
+                    )
                 return {uid: 0.0 for uid in states}
             try:
                 order_result = apply_order_policy(
@@ -397,7 +404,7 @@ def run_seasonal(
                 return orders
             except (ValueError, KeyError) as exc:
                 if verbose:
-                    print(f"  Order policy failed: {exc}. Using zero orders.")
+                    logger.info("  Order policy failed: %s. Using zero orders.", exc)
                 return {uid: 0.0 for uid in states}
 
         def _get_actuals(rn: int) -> dict[str, float]:
@@ -423,8 +430,10 @@ def run_seasonal(
 
         def _on_round(rr: RoundResult) -> None:
             if verbose:
-                print(
-                    f"  Origin: {rr.origin.date()}  Total order qty: {sum(rr.orders.values()):.0f}"
+                logger.info(
+                    "  Origin: %s  Total order qty: %.0f",
+                    rr.origin.date(),
+                    sum(rr.orders.values()),
                 )
             holding_cum = sum(s.cumulative_holding_cost for s in simulator.states.values())
             shortage_cum = sum(s.cumulative_shortage_cost for s in simulator.states.values())
@@ -464,14 +473,14 @@ def run_seasonal(
             total_holding = summary_df["holding_cost"].sum()
             total_shortage = summary_df["shortage_cost"].sum()
             total_cost = summary_df["total_cost"].sum()
-            print("\n" + "=" * 50)
-            print("VN2 SEASONAL-NAIVE SMOKE RESULTS")
-            print("=" * 50)
-            print(f"Products:        {len(summary_df)}")
-            print(f"Holding cost:    EUR {total_holding:,.2f}")
-            print(f"Shortage cost:   EUR {total_shortage:,.2f}")
-            print(f"TOTAL COST:      EUR {total_cost:,.2f}")
-            print("=" * 50)
+            logger.info("\n%s", "=" * 50)
+            logger.info("VN2 SEASONAL-NAIVE SMOKE RESULTS")
+            logger.info("%s", "=" * 50)
+            logger.info("Products:        %s", len(summary_df))
+            logger.info("Holding cost:    EUR %,.2f", total_holding)
+            logger.info("Shortage cost:   EUR %,.2f", total_shortage)
+            logger.info("TOTAL COST:      EUR %,.2f", total_cost)
+            logger.info("%s", "=" * 50)
 
         log_costs_dataframe(summary_df)
 
@@ -481,12 +490,13 @@ def run_seasonal(
             out_path = results_dir / "per_product_costs_seasonal.csv"
             summary_df.to_csv(out_path, index=False)
             if verbose:
-                print(f"\nPer-product costs saved to: {out_path}")
+                logger.info("\nPer-product costs saved to: %s", out_path)
 
         return summary_df
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     run_seasonal(
         results_dir=Path(__file__).parent / "results",
         verbose=True,

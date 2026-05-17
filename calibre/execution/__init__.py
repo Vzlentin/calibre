@@ -8,6 +8,12 @@ from calibre.execution.data_loading import (
     melt_wide_sales,
 )
 from calibre.execution.dataset import DatasetAdapter, DatasetBundle
+from calibre.execution.dataset_registry import (
+    available_dataset_adapters,
+    get_dataset_adapter_cls,
+    register_dataset_adapter,
+    resolve_dataset_adapter,
+)
 from calibre.execution.decision_loop import (
     DecisionLoop,
     DecisionLoopConfig,
@@ -15,9 +21,11 @@ from calibre.execution.decision_loop import (
     observe_cumulative,
     observe_per_horizon,
 )
+from calibre.execution.io import exists, join_uri, open_fs, resolve_path
 from calibre.execution.ledger import ForecastLedger, OrderLedger
 from calibre.execution.runner import PipelineResult, run_backtest, run_forecast
 from calibre.execution.task_builder import build_tasks
+from calibre.execution.validation import load_costs, validate_dataset_bundle
 
 __all__ = [
     "BackendEngine",
@@ -28,6 +36,10 @@ __all__ = [
     "melt_wide_sales",
     "DatasetAdapter",
     "DatasetBundle",
+    "available_dataset_adapters",
+    "get_dataset_adapter_cls",
+    "register_dataset_adapter",
+    "resolve_dataset_adapter",
     "DecisionLoop",
     "DecisionLoopConfig",
     "RoundResult",
@@ -35,8 +47,14 @@ __all__ = [
     "observe_per_horizon",
     "ForecastLedger",
     "OrderLedger",
+    "exists",
+    "join_uri",
+    "open_fs",
+    "resolve_path",
     "PipelineResult",
     "run_backtest",
     "run_forecast",
     "build_tasks",
+    "load_costs",
+    "validate_dataset_bundle",
 ]

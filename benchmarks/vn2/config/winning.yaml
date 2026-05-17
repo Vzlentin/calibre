@@ -1,0 +1,24 @@
+config_schema: "1.0"
+benchmark: vn2_winning
+dataset:
+  adapter: vn2
+  path: data/vn2
+  period: 8
+tasks:
+  - model: global_lgbm_qq_0p59
+    horizon: 3
+    config:
+      backend: mlforecast
+      scope: global
+      model: lightgbm.LGBMRegressor
+origins:
+  start: 2024-01-01
+  end: 2024-01-01
+  freq: W-MON
+output:
+  ledger_path: results/vn2/ledger.parquet
+  order_ledger_path: results/vn2/orders.parquet
+  streaming: false
+execution:
+  engine: null
+  seed: 42

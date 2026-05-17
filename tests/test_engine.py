@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -22,7 +24,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import NewsvendorPolicyParameters, RsPolicyParameters
-from calibre.execution.backend import BackendEngine, BackendResult
+from calibre.execution.backend import BackendEngine, BackendResult, _process_task_ref_partition
 from calibre.execution.ledger import OrderLedger
 from calibre.ordering.policy_config import OrderPolicyConfig
 
@@ -57,6 +59,10 @@ def test_execute_returns_backend_result(single_series_setup):
     assert isinstance(result, BackendResult)
     df = result.ledger.to_df()
     assert len(df) == 8
+
+
+def test_fugue_partition_worker_is_module_level_picklable():
+    pickle.dumps(_process_task_ref_partition)
 
 
 def test_forecast_frame_columns_present(single_series_setup):

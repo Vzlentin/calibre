@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import fsspec
 import pandas as pd
 
 from calibre.execution.data_loading import (
@@ -131,3 +132,13 @@ class TestLoadPeriod:
     def test_accepts_string_path(self, data_dir: Path) -> None:
         df = load_period(str(data_dir), 0)
         assert df.shape == (STORE_PRODUCT_PAIRS * PERIOD0_DATE_COLS, 3)
+
+    def test_accepts_fsspec_uri(self) -> None:
+        uri = "memory://calibre-tests/vn2/week_0_sales.csv"
+        with fsspec.open(uri, "w") as fh:
+            fh.write("Store,Product,2024-01-01,2024-01-08\n1,10,2,3\n2,20,4,5\n")
+
+        df = load_period("memory://calibre-tests/vn2", 0)
+
+        assert df.shape == (4, 3)
+        assert set(df["unique_id"]) == {"1_10", "2_20"}

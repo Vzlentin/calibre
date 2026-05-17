@@ -14,9 +14,12 @@ from calibre.core.forecast_frame import (
     interval_column_names,
     is_quantile_column,
     quantile_column,
+    validate_actuals_frame,
     validate_forecast_frame,
 )
 from calibre.core.forecast_task import ForecastTask
+from calibre.core.forecast_task_io import ForecastTaskRef
+from calibre.core.logging import JsonFormatter, setup_logging
 from calibre.core.order_types import (
     INVENTORY_POSITION,
     LEAD_TIME,
@@ -29,6 +32,7 @@ from calibre.core.order_types import (
     RsPolicyParameters,
     RssPolicyParameters,
 )
+from calibre.core.seeding import Seed, seed_model_config, set_seed
 
 __all__ = [
     "DS",
@@ -44,8 +48,12 @@ __all__ = [
     "interval_column_names",
     "is_quantile_column",
     "quantile_column",
+    "validate_actuals_frame",
     "validate_forecast_frame",
     "ForecastTask",
+    "ForecastTaskRef",
+    "JsonFormatter",
+    "setup_logging",
     "CostStruct",
     "INVENTORY_POSITION",
     "LEAD_TIME",
@@ -56,4 +64,7 @@ __all__ = [
     "NewsvendorPolicyParameters",
     "RsPolicyParameters",
     "RssPolicyParameters",
+    "Seed",
+    "seed_model_config",
+    "set_seed",
 ]

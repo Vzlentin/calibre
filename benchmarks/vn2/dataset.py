@@ -7,27 +7,30 @@ from benchmarks.vn2.simulator import HOLDING_COST_RATE, SHORTAGE_COST_RATE
 from calibre.core.order_types import CostStruct
 from calibre.execution.data_loading import load_master, load_period, melt_wide_instock
 from calibre.execution.dataset import DatasetAdapter, DatasetBundle
+from calibre.execution.dataset_registry import register_dataset_adapter
+from calibre.execution.io import exists, join_uri
 
 
+@register_dataset_adapter("vn2")
 class VN2DatasetAdapter(DatasetAdapter):
     def name(self) -> str:
         return "vn2"
 
     def load(self, path: str | Path, **kwargs: Any) -> DatasetBundle:
-        data_dir = Path(path)
+        data_dir = str(path)
         period = int(kwargs.get("period", 0))
 
         history = load_period(data_dir, period)
 
-        master_path = data_dir / f"week_{period}_master.csv"
-        if not master_path.exists() and period != 0:
-            master_path = data_dir / "week_0_master.csv"
-        hierarchy = load_master(master_path) if master_path.exists() else None
+        master_path = join_uri(data_dir, f"week_{period}_master.csv")
+        if not exists(master_path) and period != 0:
+            master_path = join_uri(data_dir, "week_0_master.csv")
+        hierarchy = load_master(master_path) if exists(master_path) else None
 
-        instock_path = data_dir / f"week_{period}_in_stock.csv"
-        if not instock_path.exists() and period != 0:
-            instock_path = data_dir / "week_0_in_stock.csv"
-        censoring = melt_wide_instock(instock_path) if instock_path.exists() else None
+        instock_path = join_uri(data_dir, f"week_{period}_in_stock.csv")
+        if not exists(instock_path) and period != 0:
+            instock_path = join_uri(data_dir, "week_0_in_stock.csv")
+        censoring = melt_wide_instock(instock_path) if exists(instock_path) else None
 
         costs = CostStruct(
             underage_cost=SHORTAGE_COST_RATE,
