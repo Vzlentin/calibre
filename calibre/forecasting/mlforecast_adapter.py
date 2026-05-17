@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
@@ -34,15 +35,18 @@ _RESERVED_KEYS = frozenset(
 )
 
 _VALID_STRATEGIES = frozenset({"recursive", "direct"})
+_TRANSFORM_ALIASES = {
+    "RollingMean": "mlforecast.lag_transforms.RollingMean",
+    "RollingStd": "mlforecast.lag_transforms.RollingStd",
+}
 
 
-def _resolve_model_cls(dotted_path: str) -> type:
-    """Resolve a dotted import path like 'lightgbm.LGBMRegressor' to its class."""
+def _resolve_dotted_cls(dotted_path: str, *, field: str) -> type:
     try:
         module_path, class_name = dotted_path.rsplit(".", 1)
     except ValueError as err:
         raise ValueError(
-            f"model must be a dotted import path "
+            f"{field} must be a dotted import path "
             f"(e.g. 'lightgbm.LGBMRegressor'), got: {dotted_path!r}"
         ) from err
     try:
@@ -53,6 +57,38 @@ def _resolve_model_cls(dotted_path: str) -> type:
     if cls is None:
         raise ValueError(f"Module {module_path!r} has no attribute {class_name!r}")
     return cls
+
+
+def _resolve_model_cls(dotted_path: str) -> type:
+    """Resolve a dotted import path like 'lightgbm.LGBMRegressor' to its class."""
+    return _resolve_dotted_cls(dotted_path, field="model")
+
+
+def _resolve_transform_spec(spec: Any) -> Any:
+    if not isinstance(spec, Mapping):
+        return spec
+    transform_name = spec.get("transform") or spec.get("class") or spec.get("name")
+    if transform_name is None:
+        return dict(spec)
+    dotted_path = _TRANSFORM_ALIASES.get(str(transform_name), str(transform_name))
+    cls = _resolve_dotted_cls(dotted_path, field="transform")
+    params = {
+        key: value for key, value in spec.items() if key not in {"transform", "class", "name"}
+    }
+    return cls(**params)
+
+
+def _resolve_mlforecast_option(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            int(key) if isinstance(key, str) and key.isdigit() else key: _resolve_mlforecast_option(
+                item
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_resolve_transform_spec(item) for item in value]
+    return _resolve_transform_spec(value)
 
 
 def _validate_quantiles(quantiles: list[float]) -> list[float]:
@@ -119,7 +155,7 @@ class MLForecastAdapter(ModelAdapter):
         mlf_kwargs: dict[str, Any] = {"models": mlf_models, "freq": freq, "lags": lags}
         for opt_key in ("lag_transforms", "target_transforms"):
             if (val := self._config.get(opt_key)) is not None:
-                mlf_kwargs[opt_key] = val
+                mlf_kwargs[opt_key] = _resolve_mlforecast_option(val)
 
         mlf_df = task.history[[UNIQUE_ID, DS, Y, *exogenous_columns(task.history)]].copy()
         mlf_df[Y] = mlf_df[Y].astype("float32")

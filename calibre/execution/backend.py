@@ -199,6 +199,45 @@ def _process_task_ref_partition(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(results, ignore_index=True)
 
 
+def _process_global_task_ref_partition(df: pd.DataFrame) -> pd.DataFrame:
+    results: list[pd.DataFrame] = []
+
+    for _, row in df.iterrows():
+        origin = pd.Timestamp(row[FORECAST_ORIGIN])
+        model_config = _decode_model_config(str(row[_MODEL_CONFIG_PAYLOAD]))
+        task = ForecastTaskRef(
+            unique_id=str(row[UNIQUE_ID]),
+            model_config=model_config,
+            horizon=int(row[H]),
+            forecast_origin=origin,
+            history_uri=str(row[_HISTORY_URI]),
+            future_x_uri=str(row[_FUTURE_X_URI]) if bool(row[_HAS_FUTURE_X]) else None,
+        ).materialize()
+
+        history = task.history[task.history[DS] < origin]
+        if history.empty:
+            continue
+
+        origin_task = ForecastTask(
+            history=history,
+            horizon=task.horizon,
+            model_config=model_config,
+            forecast_origin=origin,
+            future_x=task.future_x,
+        )
+
+        adapter = resolve_adapter(origin_task.model_config)
+        adapter.fit(origin_task)
+        preds = adapter.predict(origin_task)
+
+        results.append(_finalize_preds(preds, origin, origin_task.model_name))
+
+    if not results:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+    return pd.concat(results, ignore_index=True)
+
+
 @dataclass
 class BackendResult:
     """Result returned by BackendEngine.execute()."""
@@ -482,9 +521,11 @@ class BackendEngine:
         records: list[_TaskDispatchRecord],
         origin: pd.Timestamp,
     ) -> pd.DataFrame:
-        """Run global (multi-series) adapters directly, without Fugue partitioning."""
+        """Run global (multi-series) adapters directly or through the configured engine."""
         if not records:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
+        if self.engine is not None:
+            return self._run_global_distributed(records, origin)
 
         all_preds: list[pd.DataFrame] = []
 
@@ -518,4 +559,27 @@ class BackendEngine:
         if not all_preds:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
-        return pd.concat(all_preds, ignore_index=True)
+        return _coerce_forecast_frame_dtypes(pd.concat(all_preds, ignore_index=True))
+
+    def _run_global_distributed(
+        self,
+        records: list[_TaskDispatchRecord],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        task_df = _dispatch_records_to_frame(records, origin)
+        quantile_cols = _collect_quantile_columns(records)
+        schema = (
+            f"{UNIQUE_ID}:str,{DS}:datetime,{Y}:double,"
+            f"{Y_HAT}:double,{H}:long,"
+            f"{FORECAST_ORIGIN}:datetime,{MODEL_NAME}:str"
+        )
+        if quantile_cols:
+            schema += "," + ",".join(f"{c}:double" for c in sorted(quantile_cols))
+
+        result = fa.transform(
+            task_df,
+            _process_global_task_ref_partition,
+            schema=schema,
+            engine=self.engine,
+        )
+        return _coerce_forecast_frame_dtypes(fa.as_pandas(result))

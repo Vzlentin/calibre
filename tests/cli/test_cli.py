@@ -120,6 +120,14 @@ def test_load_config_accepts_dask_execution_options(tmp_path) -> None:
     assert config.execution.dask_address == "tcp://scheduler:8786"
 
 
+def test_winning_dask_config_uses_dask_engine() -> None:
+    config = load_config("benchmarks/vn2/config/winning_dask.yaml")
+
+    assert config.execution.engine == "dask"
+    assert config.tasks[0].config["scope"] == "global"
+    assert "lag_transforms" in config.tasks[0].config
+
+
 def test_run_command_executes_config(monkeypatch, tmp_path) -> None:
     path = _write_config(tmp_path)
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 import pytest
+from mlforecast.lag_transforms import RollingMean, RollingStd
 
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
@@ -98,6 +99,39 @@ def test_custom_lags_produces_valid_output(repeating_history):
 
     assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
     assert len(result) == 4
+
+
+def test_lag_transform_specs_are_resolved_for_yaml_configs(monkeypatch, repeating_history):
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=4,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "freq": "W",
+            "lags": [1, 2],
+            "lag_transforms": {
+                1: [
+                    {"name": "RollingMean", "window_size": 4},
+                    {"transform": "mlforecast.lag_transforms.RollingStd", "window_size": 4},
+                ]
+            },
+        },
+        forecast_origin=pd.Timestamp("2024-06-23"),
+    )
+    mock_instance = MagicMock()
+    mock_mlf = MagicMock(return_value=mock_instance)
+    monkeypatch.setattr(
+        "calibre.forecasting.mlforecast_adapter.MLForecast",
+        mock_mlf,
+    )
+
+    MLForecastAdapter(task.model_config).fit(task)
+
+    constructor_kwargs = mock_mlf.call_args.kwargs
+    transforms = constructor_kwargs["lag_transforms"][1]
+    assert isinstance(transforms[0], RollingMean)
+    assert isinstance(transforms[1], RollingStd)
 
 
 def test_quantile_models_produce_quantile_columns(repeating_history):

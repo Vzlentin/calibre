@@ -1,0 +1,53 @@
+config_schema: "1.0"
+dataset:
+  adapter: vn2
+  path: data/vn2
+  period: 8
+tasks:
+  - model: global_lgbm_qq_0p59
+    horizon: 3
+    config:
+      backend: mlforecast
+      scope: global
+      name: global_lgbm_qq_0p59
+      model: lightgbm.LGBMRegressor
+      objective: quantile
+      quantiles: [0.59]
+      strategy: direct
+      lags: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 52]
+      lag_transforms:
+        1:
+          - name: RollingMean
+            window_size: 4
+          - name: RollingMean
+            window_size: 13
+          - name: RollingMean
+            window_size: 26
+          - name: RollingStd
+            window_size: 4
+          - name: RollingStd
+            window_size: 13
+          - name: RollingStd
+            window_size: 26
+      n_estimators: 800
+      learning_rate: 0.029992886777618452
+      num_leaves: 15
+      min_child_samples: 41
+      subsample: 0.8010716092915446
+      colsample_bytree: 0.6205915004999957
+      reg_alpha: 0.006853925708853058
+      reg_lambda: 0.5306371575220844
+      verbosity: -1
+      n_jobs: -1
+      random_state: 42
+origins:
+  start: 2024-01-01
+  end: 2024-01-01
+  freq: W-MON
+output:
+  ledger_path: results/vn2/ledger-dask.parquet
+  streaming: false
+execution:
+  engine: dask
+  dask_address: null
+  seed: 42
