@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import UUID
 
 import pandas as pd
 from fastapi.testclient import TestClient
 
 from calibre.api.main import app
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
+from calibre.cli.commands import run_config
+from calibre.cli.config import load_config_from_mapping
+from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y, interval_column_names
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
@@ -38,6 +41,8 @@ class _ApiDatasetAdapter:
 
 
 class _ManyApiDatasetAdapter:
+    count = 31
+
     def name(self) -> str:
         return "unit_api_many"
 
@@ -46,7 +51,7 @@ class _ManyApiDatasetAdapter:
         dates = pd.date_range("2024-01-07", periods=8, freq="W")
         rows = [
             {UNIQUE_ID: f"SKU_{idx:02d}", DS: ds, Y: float(step)}
-            for idx in range(31)
+            for idx in range(self.count)
             for step, ds in enumerate(dates)
         ]
         return DatasetBundle(
@@ -56,6 +61,13 @@ class _ManyApiDatasetAdapter:
             hierarchy=None,
             censoring=None,
         )
+
+
+class _ThirtyApiDatasetAdapter(_ManyApiDatasetAdapter):
+    count = 30
+
+    def name(self) -> str:
+        return "unit_api_thirty"
 
 
 class _StubAdapter:
@@ -78,6 +90,7 @@ class _StubAdapter:
 
 register_dataset_adapter("unit_api")(_ApiDatasetAdapter)
 register_dataset_adapter("unit_api_many")(_ManyApiDatasetAdapter)
+register_dataset_adapter("unit_api_thirty")(_ThirtyApiDatasetAdapter)
 
 
 def _payload(adapter: str = "unit_api") -> dict:
@@ -131,6 +144,28 @@ def test_forecasts_endpoint_rejects_more_than_30_skus() -> None:
     assert "maximum allowed is 30" in response.json()["detail"]
 
 
+def test_forecasts_endpoint_accepts_30_skus_and_returns_intervals(monkeypatch) -> None:
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    payload = _payload(adapter="unit_api_thirty")
+    payload["config"]["conformal"] = {
+        "method": "aci",
+        "coverage": 0.9,
+        "calibration_window": 4,
+        "gamma": 0.05,
+    }
+    client = TestClient(app)
+
+    response = client.post("/forecasts", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    lower_col, upper_col = interval_column_names(0.9)
+    assert body["rows"] == 30
+    assert {row[UNIQUE_ID] for row in body["forecasts"]} == {f"SKU_{idx:02d}" for idx in range(30)}
+    assert all(lower_col in row and upper_col in row for row in body["forecasts"])
+
+
 def test_backtests_endpoint_records_status(monkeypatch) -> None:
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
@@ -162,6 +197,9 @@ def test_backtests_endpoint_persists_runs_and_pointers(monkeypatch, tmp_path) ->
         "streaming": False,
     }
     client = TestClient(app)
+    expected_payload = _payload()
+    expected_result = run_config(load_config_from_mapping(expected_payload["config"]))
+    expected_ledger = expected_result.ledger.to_df().reset_index(drop=True)
 
     response = client.post("/backtests", json=payload, headers={"Idempotency-Key": "db-key"})
 
@@ -171,7 +209,10 @@ def test_backtests_endpoint_persists_runs_and_pointers(monkeypatch, tmp_path) ->
     assert status["status"] == "succeeded"
     assert status["artifact_urls"]["rows"] == "1"
     assert "ledger" in status["artifact_urls"]
+    assert Path(status["artifact_urls"]["ledger"]) == ledger_path
     assert ledger_path.exists()
+    actual_ledger = pd.read_parquet(ledger_path).reset_index(drop=True)
+    pd.testing.assert_frame_equal(actual_ledger, expected_ledger)
 
     with session_scope(factory) as session:
         run = RunRepo(session).get(UUID(run_id))
