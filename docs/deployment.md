@@ -54,15 +54,35 @@ Grant the task role read access to input/config prefixes and write access to
 artifact prefixes.
 
 The starter AWS Terraform root module is under `infra/aws/`. It provisions an
-artifact bucket, ECR repository, and small RDS Postgres instance:
+artifact bucket, ECR repository, small RDS Postgres instance, ECS Fargate API
+service, CloudWatch logs, a database URL secret, and task IAM for artifact IO:
 
 ```bash
 terraform -chdir=infra/aws init
 terraform -chdir=infra/aws apply
 ```
 
-Set `CALIBRE_DATABASE_URL` to the Postgres SQLAlchemy URL when running the API.
-When set, `POST /backtests` persists rows in `runs`, conformal snapshots in
+Provide `container_subnet_ids`, `vpc_id`, `db_subnet_group_name`, and
+`db_password` in a `.tfvars` file. Set `api_ingress_cidr_blocks` to the operator
+or load-balancer CIDRs that may call the API; leave it empty to deploy the
+service without public API ingress.
+
+For initial bootstrap, apply once with `desired_count=0` to create ECR without
+starting tasks, push the image, then apply again with the desired task count:
+
+```bash
+terraform -chdir=infra/aws apply -var desired_count=0
+ECR_REPO="$(terraform -chdir=infra/aws output -raw ecr_repository_url)"
+ECR_REGISTRY="${ECR_REPO%/*}"
+aws ecr get-login-password --region eu-west-1 \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+docker tag calibre:full "$ECR_REPO:latest"
+docker push "$ECR_REPO:latest"
+terraform -chdir=infra/aws apply -var desired_count=1
+```
+
+The ECS task gets `CALIBRE_DATABASE_URL` from Secrets Manager. When set,
+`POST /backtests` persists rows in `runs`, conformal snapshots in
 `conformal_state`, and output artifact pointers in `forecast_pointers`. Run the
 Alembic migration under `calibre/storage/migrations/` before starting the API.
 
