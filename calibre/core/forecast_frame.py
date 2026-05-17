@@ -117,3 +117,15 @@ def validate_forecast_frame(df: pd.DataFrame) -> None:
         if is_quantile_column(col) and not pd.api.types.is_numeric_dtype(df[col]):
             actual = str(df[col].dtype)
             raise ValueError(f"Column '{col}' expected numeric quantile values, got {actual}")
+
+
+def validate_actuals_frame(df: pd.DataFrame) -> None:
+    missing = {UNIQUE_ID, DS, Y} - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required actuals columns: {missing}")
+    if not pd.api.types.is_datetime64_any_dtype(df[DS]):
+        raise ValueError(f"Column '{DS}' expected datetime64, got {df[DS].dtype}")
+    if not pd.api.types.is_numeric_dtype(df[Y]):
+        raise ValueError(f"Column '{Y}' expected numeric, got {df[Y].dtype}")
+    if df[[UNIQUE_ID, DS]].isna().any().any():
+        raise ValueError("Actuals frame has null values in key columns")

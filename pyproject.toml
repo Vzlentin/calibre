@@ -11,7 +11,14 @@ dependencies = [
     "numpy",
     "pandas",
     "pyarrow",
+    "pyyaml",
+    "fsspec",
     "fugue",
+    "fastapi",
+    "sqlalchemy",
+    "alembic",
+    "psycopg[binary]",
+    "prometheus-client",
     "statsforecast",
     "mlforecast",
     "lightgbm",
@@ -19,21 +26,37 @@ dependencies = [
     "neuralforecast",
     "pandas-stubs>=3.0.0.260204",
     "optuna",
+    "uvicorn",
 ]
+
+[project.scripts]
+calibre = "calibre.cli.main:app"
 
 [project.optional-dependencies]
 dev = [
+    "httpx",
     "pytest",
     "ruff",
     "mypy",
+    "moto[s3]",
+    "types-PyYAML",
 ]
 benchmarks = [
     "mlflow>=2.17,<3",
     "optuna-integration[mlflow]>=4.0",
 ]
+s3 = ["s3fs"]
+azure = ["adlfs"]
+gcs = ["gcsfs"]
+cloud = ["s3fs", "adlfs", "gcsfs"]
+dask = ["dask[distributed]"]
+spark = ["pyspark"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "spark: tests that require a local Spark runtime",
+]
 
 [tool.ruff]
 line-length = 100
@@ -52,7 +75,7 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"benchmarks/**" = ["T20", "E501"]
+"benchmarks/**" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -69,10 +92,20 @@ module = [
     "lightgbm.*",
     "xgboost.*",
     "fugue.*",
+    "fugue_dask.*",
+    "fugue_spark.*",
+    "fsspec",
+    "fsspec.*",
+    "fsspec.core.*",
+    "distributed.*",
+    "sqlalchemy.*",
+    "alembic.*",
+    "psycopg.*",
     "optuna.*",
     "optuna_integration.*",
     "mlflow.*",
     "requests.*",
     "pyarrow.*",
+    "pyspark.*",
 ]
 ignore_missing_imports = true

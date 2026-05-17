@@ -34,6 +34,7 @@ Documented gaps that this script works around (Phase-4 material):
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sys
 import tempfile
@@ -112,10 +113,12 @@ from calibre.execution.backend import BackendEngine
 from calibre.execution.data_loading import load_period, melt_wide_instock
 from calibre.forecasting.features import add_stockout_features
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.tuning.optimizer import create_tpe_sampler
 
 # Default rolling-mean / rolling-std windows applied at lag 1; these
 # carry the seasonal signal MLForecastAdapter would otherwise drop.
 ROLLING_WINDOWS = [4, 13, 26]
+logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------ #
@@ -427,15 +430,18 @@ def run_hpo(
 
     study = optuna.create_study(
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
+        sampler=create_tpe_sampler(seed),
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
     )
 
     if verbose:
-        print(
-            f"HPO: {n_trials} trials, {n_origins} origins, "
-            f"timeout {timeout_sec}s, panel size {history[UNIQUE_ID].nunique()} series, "
-            f"cost-optimal tau={cost_optimal_tau:.3f}"
+        logger.info(
+            "HPO: %s trials, %s origins, timeout %ss, panel size %s series, cost-optimal tau=%.3f",
+            n_trials,
+            n_origins,
+            timeout_sec,
+            history[UNIQUE_ID].nunique(),
+            cost_optimal_tau,
         )
 
     started = time.time()
@@ -458,9 +464,12 @@ def run_hpo(
         best_config["_target_mode"] = "cumulative"
 
     if verbose:
-        print(
-            f"HPO done in {elapsed:.1f}s. Best pinball={study.best_value:.4f} "
-            f"alpha={quantile_alpha:.2f} lags={lags}"
+        logger.info(
+            "HPO done in %.1fs. Best pinball=%.4f alpha=%.2f lags=%s",
+            elapsed,
+            study.best_value,
+            quantile_alpha,
+            lags,
         )
 
     if mlflow.active_run() is not None:
@@ -1130,7 +1139,7 @@ def run_cost_search(
 
     study = optuna.create_study(
         direction="minimize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
+        sampler=create_tpe_sampler(seed),
     )
 
     if log_mlflow:
@@ -1657,7 +1666,7 @@ def run_benchmark(
         instock = _load_instock(data_dir, series_filter)
 
         if verbose:
-            print(f"Loaded {len(initial_states)} products.")
+            logger.info("Loaded %s products.", len(initial_states))
 
         # ------------------------------------------------------------------ #
         # Phase 1: choose model config
@@ -1684,7 +1693,7 @@ def run_benchmark(
         engine_config = _strip_private(best_config)
 
         if verbose:
-            print(f"Best alpha: {quantile_alpha:.3f}")
+            logger.info("Best alpha: %.3f", quantile_alpha)
 
         mlflow.log_param("quantile_alpha", quantile_alpha)
         mlflow.log_param("target_mode", "cumulative" if cumulative_target else "per_horizon")
@@ -1739,7 +1748,7 @@ def run_benchmark(
 
         def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
             if verbose:
-                print(f"\n--- Decision round {rn} ---")
+                logger.info("\n--- Decision round %s ---", rn)
             # Round inputs are the previous week's resolved sales (week_{rn-1});
             # round_num itself indexes the upcoming actuals via _round_actuals.
             round_sales = load_period(data_dir, rn - 1)
@@ -1762,7 +1771,7 @@ def run_benchmark(
         def _policy(frame: pd.DataFrame) -> dict[str, float]:
             if frame.empty:
                 if verbose:
-                    print("  Empty forecast, using zero orders.")
+                    logger.info("  Empty forecast, using zero orders.")
                 return dict.fromkeys(initial_states, 0.0)
             try:
                 if order_conformal_runtime is not None:
@@ -1773,7 +1782,7 @@ def run_benchmark(
                     )
                 elif target_quantile_col not in frame.columns:
                     if verbose:
-                        print("  Missing quantile column, using zero orders.")
+                        logger.info("  Missing quantile column, using zero orders.")
                     return dict.fromkeys(initial_states, 0.0)
                 else:
                     order_config = OrderPolicyConfig(
@@ -1785,7 +1794,7 @@ def run_benchmark(
                 return _orders_from_policy_result(order_result, initial_states)
             except (ValueError, KeyError) as exc:
                 if verbose:
-                    print(f"  Order computation failed: {exc}. Using zero orders.")
+                    logger.info("  Order computation failed: %s. Using zero orders.", exc)
                 return dict.fromkeys(initial_states, 0.0)
 
         def _get_actuals(rn: int) -> dict[str, float]:
@@ -1799,8 +1808,10 @@ def run_benchmark(
 
         def _on_round(rr: RoundResult) -> None:
             if verbose:
-                print(
-                    f"  Origin: {rr.origin.date()}  Total order qty: {sum(rr.orders.values()):.0f}"
+                logger.info(
+                    "  Origin: %s  Total order qty: %.0f",
+                    rr.origin.date(),
+                    sum(rr.orders.values()),
                 )
             holding_cum = sum(s.cumulative_holding_cost for s in simulator.states.values())
             shortage_cum = sum(s.cumulative_shortage_cost for s in simulator.states.values())
@@ -1839,14 +1850,14 @@ def run_benchmark(
             total_holding = summary_df["holding_cost"].sum()
             total_shortage = summary_df["shortage_cost"].sum()
             total_cost = summary_df["total_cost"].sum()
-            print("\n" + "=" * 50)
-            print("VN2 TUNED BENCHMARK RESULTS")
-            print("=" * 50)
-            print(f"Products:        {len(summary_df)}")
-            print(f"Holding cost:    EUR {total_holding:,.2f}")
-            print(f"Shortage cost:   EUR {total_shortage:,.2f}")
-            print(f"TOTAL COST:      EUR {total_cost:,.2f}")
-            print("=" * 50)
+            logger.info("\n%s", "=" * 50)
+            logger.info("VN2 TUNED BENCHMARK RESULTS")
+            logger.info("%s", "=" * 50)
+            logger.info("Products:        %s", len(summary_df))
+            logger.info("Holding cost:    EUR %,.2f", total_holding)
+            logger.info("Shortage cost:   EUR %,.2f", total_shortage)
+            logger.info("TOTAL COST:      EUR %,.2f", total_cost)
+            logger.info("%s", "=" * 50)
 
         log_costs_dataframe(summary_df)
 
@@ -1856,12 +1867,13 @@ def run_benchmark(
             out_path = results_dir / "per_product_costs.csv"
             summary_df.to_csv(out_path, index=False)
             if verbose:
-                print(f"\nPer-product costs saved to: {out_path}")
+                logger.info("\nPer-product costs saved to: %s", out_path)
 
     return summary_df
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     run_benchmark(
         results_dir=Path(__file__).parent / "results",
         verbose=True,

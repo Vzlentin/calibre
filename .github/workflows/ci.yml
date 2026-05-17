@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 2 * * *"
 
 jobs:
   lint-and-type-check:
@@ -24,3 +26,47 @@ jobs:
       - run: uv sync --extra dev --extra benchmarks
       - run: uv run python benchmarks/vn2/download_vn2_data.py
       - run: uv run pytest
+
+  dask-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --extra dev --extra benchmarks --extra dask
+      - run: uv run pytest tests/integration/test_dask.py
+
+  s3-ingestion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --extra dev --extra benchmarks --extra s3
+      - run: uv run --extra s3 --with 'moto[server]' pytest tests/integration/test_s3_ingestion.py
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" \
+            /usr/local/share/powershell /usr/share/swift /usr/lib/jvm
+          sudo docker image prune --all --force || true
+          df -h
+      - uses: docker/setup-buildx-action@v3
+      - run: docker build -t calibre:full .
+      - run: docker run --rm calibre:full run --config /app/benchmarks/vn2/config/smoke.yaml
+
+  spark-nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --extra dev --extra benchmarks --extra spark
+      - run: uv run pytest tests/integration/test_spark.py

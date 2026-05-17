@@ -15,6 +15,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import math
 import sys
 from collections.abc import Mapping
@@ -52,6 +53,8 @@ from calibre.execution.backend import BackendEngine
 from calibre.execution.data_loading import load_period, melt_wide_instock
 from calibre.forecasting.features import add_stockout_features
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+
+logger = logging.getLogger(__name__)
 
 # Cost-aligned quantile: Cu / (Cu + Co) = 1.0 / (1.0 + 0.2) ≈ 0.833.
 # 0.52 is the empirically-tuned per-horizon level used in the VN2 winner;
@@ -164,11 +167,11 @@ def run_winning(
         engine = BackendEngine(freq="W-MON")
 
         if verbose:
-            print(f"Loaded {len(initial_states)} products.")
+            logger.info("Loaded %s products.", len(initial_states))
 
         for round_num in range(1, decision_rounds + 1):
             if verbose:
-                print(f"\n--- Decision round {round_num} ---")
+                logger.info("\n--- Decision round %s ---", round_num)
 
             # Round inputs are the previous week's resolved sales (week_{rn-1});
             # round_num itself indexes the upcoming actuals via _round_actuals.
@@ -203,12 +206,16 @@ def run_winning(
                     orders[uid] = float(max(math.ceil(qty), 0))
             except (ValueError, KeyError) as exc:
                 if verbose:
-                    print(f"  Order computation failed: {exc}. Using zero orders.")
+                    logger.info("  Order computation failed: %s. Using zero orders.", exc)
                 orders = dict.fromkeys(initial_states, 0.0)
 
             if verbose:
                 total_order = sum(orders.values())
-                print(f"  Origin: {origin.date()}  Total order qty: {total_order:.0f}")
+                logger.info(
+                    "  Origin: %s  Total order qty: %.0f",
+                    origin.date(),
+                    total_order,
+                )
 
             simulator.step(round_num, orders=orders, actual_demand=actual_demand)
 
@@ -223,7 +230,7 @@ def run_winning(
         for week_offset in range(1, delivery_weeks + 1):
             week = decision_rounds + week_offset
             if verbose:
-                print(f"\n--- Delivery week {week} (no orders) ---")
+                logger.info("\n--- Delivery week %s (no orders) ---", week)
             try:
                 actual_demand = extract_new_actuals(data_dir, week)
                 actual_demand = {uid: actual_demand.get(uid, 0.0) for uid in initial_states}
@@ -251,14 +258,14 @@ def run_winning(
             total_holding = summary_df["holding_cost"].sum()
             total_shortage = summary_df["shortage_cost"].sum()
             total_cost = summary_df["total_cost"].sum()
-            print("\n" + "=" * 50)
-            print("VN2 WINNING APPROACH (CALIBRE MIGRATION) RESULTS")
-            print("=" * 50)
-            print(f"Products:        {len(summary_df)}")
-            print(f"Holding cost:    EUR {total_holding:,.2f}")
-            print(f"Shortage cost:   EUR {total_shortage:,.2f}")
-            print(f"TOTAL COST:      EUR {total_cost:,.2f}")
-            print("=" * 50)
+            logger.info("\n%s", "=" * 50)
+            logger.info("VN2 WINNING APPROACH (CALIBRE MIGRATION) RESULTS")
+            logger.info("%s", "=" * 50)
+            logger.info("Products:        %s", len(summary_df))
+            logger.info("Holding cost:    EUR %,.2f", total_holding)
+            logger.info("Shortage cost:   EUR %,.2f", total_shortage)
+            logger.info("TOTAL COST:      EUR %,.2f", total_cost)
+            logger.info("%s", "=" * 50)
 
         log_costs_dataframe(summary_df)
 
@@ -268,12 +275,13 @@ def run_winning(
             out_path = results_dir / "per_product_costs_winning.csv"
             summary_df.to_csv(out_path, index=False)
             if verbose:
-                print(f"\nPer-product costs saved to: {out_path}")
+                logger.info("\nPer-product costs saved to: %s", out_path)
 
         return summary_df
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     run_winning(
         results_dir=Path(__file__).parent / "results",
         verbose=True,

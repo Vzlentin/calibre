@@ -156,6 +156,22 @@ class SymmetricIntervalRuntime:
         self.method_name = method_name or config.method
         self._issued_count = 0
 
+    @classmethod
+    def from_state(
+        cls,
+        config: SymmetricIntervalConfig,
+        state_payload: str | None,
+    ) -> SymmetricIntervalRuntime:
+        """Rehydrate a runtime from a serialized calibration-state snapshot."""
+        state = deserialize_calibration_state(state_payload)
+        runtime = cls(config, method_name=state.get("method", config.method))
+        runtime._issued_count = int(state.get("issued_count", 0))
+        if "calibrator" in state:
+            runtime.calibrator.set_state(state["calibrator"])
+        if "controller" in state:
+            runtime.controller.set_state(state["controller"])
+        return runtime
+
     @property
     def interval_columns(self) -> tuple[str, str]:
         return self.config.interval_columns

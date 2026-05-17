@@ -23,6 +23,12 @@ class FixedAlphaController:
     def get_state(self) -> dict:
         return {"type": "fixed", "alpha": float(self._alpha), "observations": self._observations}
 
+    def set_state(self, state: dict) -> None:
+        if state.get("type", "fixed") != "fixed":
+            raise ValueError("FixedAlphaController state must have type='fixed'")
+        self._alpha = float(state.get("alpha", self._alpha))
+        self._observations = int(state.get("observations", self._observations))
+
 
 class AdaptiveAlphaController:
     def __init__(
@@ -83,3 +89,18 @@ class AdaptiveAlphaController:
             "alpha_history": np.asarray(self._alpha_history, dtype=float),
             "error_history": np.asarray(self._error_history, dtype=int),
         }
+
+    def set_state(self, state: dict) -> None:
+        if state.get("type", "adaptive") != "adaptive":
+            raise ValueError("AdaptiveAlphaController state must have type='adaptive'")
+        self._target_alpha = float(state.get("target_alpha", self._target_alpha))
+        self._gamma = float(state.get("gamma", self._gamma))
+        raw_bounds = state.get("alpha_bounds", self._bounds)
+        self._bounds = _validate_bounds(tuple(raw_bounds) if raw_bounds is not None else None)
+        self._alpha = float(
+            _clip_alpha(float(state.get("current_alpha", self._alpha)), self._bounds)
+        )
+        self._alpha_history = [
+            float(value) for value in state.get("alpha_history", [float(self._alpha)])
+        ]
+        self._error_history = [int(value) for value in state.get("error_history", [])]

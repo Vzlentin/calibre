@@ -25,3 +25,4 @@ class TuningTask:
     n_trials: int = 50
     freq: str = "W"
     conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None
+    seed: int | None = None

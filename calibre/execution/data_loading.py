@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, IN_STOCK, UNIQUE_ID, Y
+from calibre.execution.io import exists, join_uri
 
 
 def _detect_date_columns(columns: list[str]) -> list[str]:
@@ -35,7 +36,7 @@ def melt_wide_sales(path: str | Path) -> pd.DataFrame:
     - Detect date columns by trying pd.to_datetime on each column name
     - Return sorted by unique_id, then ds
     """
-    raw = pd.read_csv(path)
+    raw = pd.read_csv(str(path))
     date_cols = _detect_date_columns(list(raw.columns))
 
     id_df = raw[["Store", "Product"]].copy()
@@ -54,7 +55,7 @@ def melt_wide_sales(path: str | Path) -> pd.DataFrame:
 
 def load_master(path: str | Path) -> pd.DataFrame:
     """Read Master CSV, add unique_id column = f"{Store}_{Product}". Return all columns."""
-    df = pd.read_csv(path)
+    df = pd.read_csv(str(path))
     df[UNIQUE_ID] = _make_unique_id(df)
     return df
 
@@ -65,7 +66,7 @@ def melt_wide_instock(path: str | Path) -> pd.DataFrame:
     - in_stock is boolean
     - Same date column detection as melt_wide_sales
     """
-    raw = pd.read_csv(path)
+    raw = pd.read_csv(str(path))
     date_cols = _detect_date_columns(list(raw.columns))
 
     id_col = _make_unique_id(raw)
@@ -82,8 +83,7 @@ def melt_wide_instock(path: str | Path) -> pd.DataFrame:
 
 def load_period(data_dir: str | Path, period: int) -> pd.DataFrame:
     """Find 'week_{period}_sales.csv' in data_dir, return melt_wide_sales result."""
-    data_dir = Path(data_dir)
-    path = data_dir / f"week_{period}_sales.csv"
-    if not path.exists():
+    path = join_uri(data_dir, f"week_{period}_sales.csv")
+    if not exists(path):
         raise FileNotFoundError(f"No Sales file found for period {period} in {data_dir}")
     return melt_wide_sales(path)

@@ -75,3 +75,21 @@ class RollingQuantileCalibrator:
                 for partition, scores in self._scores.items()
             },
         }
+
+    def set_state(self, state: dict) -> None:
+        """Restore the fields emitted by get_state()."""
+        self._calibration_window = int(state.get("calibration_window", self._calibration_window))
+        self._quantile_rule = _validate_quantile_rule(
+            state.get("quantile_rule", self._quantile_rule)
+        )
+        self._ready_on_empty = bool(state.get("ready_on_empty", self._ready_on_empty))
+        score_history = state.get("score_history", {})
+        if not isinstance(score_history, dict):
+            raise ValueError("calibrator score_history must be a mapping")
+        self._scores = {
+            str(partition): deque(
+                (float(score) for score in values),
+                maxlen=self._calibration_window,
+            )
+            for partition, values in score_history.items()
+        }

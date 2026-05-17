@@ -12,6 +12,10 @@ from calibre.forecasting.adapter_registry import resolve_adapter
 from calibre.tuning.task import TuningTask
 
 
+def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
+    return optuna.samplers.TPESampler(seed=seed)
+
+
 def optimize_task(task: TuningTask) -> dict:
     """Run HPO via Optuna. Returns best model_config dict."""
     unique_id = task.unique_id
@@ -87,6 +91,6 @@ def optimize_task(task: TuningTask) -> dict:
             return float(objective.evaluate(resolved, resolved[Y]))
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="minimize")
+    study = optuna.create_study(direction="minimize", sampler=create_tpe_sampler(task.seed))
     study.optimize(_objective, n_trials=task.n_trials)
     return {**task.base_model_config, **study.best_params}
