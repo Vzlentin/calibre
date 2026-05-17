@@ -262,9 +262,9 @@ def run_winning(
             logger.info("VN2 WINNING APPROACH (CALIBRE MIGRATION) RESULTS")
             logger.info("%s", "=" * 50)
             logger.info("Products:        %s", len(summary_df))
-            logger.info("Holding cost:    EUR %,.2f", total_holding)
-            logger.info("Shortage cost:   EUR %,.2f", total_shortage)
-            logger.info("TOTAL COST:      EUR %,.2f", total_cost)
+            logger.info("Holding cost:    EUR %s", f"{total_holding:,.2f}")
+            logger.info("Shortage cost:   EUR %s", f"{total_shortage:,.2f}")
+            logger.info("TOTAL COST:      EUR %s", f"{total_cost:,.2f}")
             logger.info("%s", "=" * 50)
 
         log_costs_dataframe(summary_df)

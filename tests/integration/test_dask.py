@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from benchmarks.vn2.run_benchmark import run_benchmark
 from calibre.cli.commands import run
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
@@ -56,6 +57,54 @@ def _global_task(panel: pd.DataFrame) -> ForecastTask:
 
 def _sorted(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.sort_values([UNIQUE_ID, FORECAST_ORIGIN, H]).reset_index(drop=True)
+
+
+def _write_vn2_benchmark_fixture(root: Path) -> None:
+    dates = pd.date_range("2023-01-02", periods=18, freq="W-MON")
+    rows = []
+    for store, product, base in [(1, 100, 10.0), (2, 200, 18.0)]:
+        row: dict[str, object] = {"Store": store, "Product": product}
+        for idx, ds in enumerate(dates):
+            row[ds.strftime("%Y-%m-%d")] = base + float(idx % 4)
+        rows.append(row)
+    full = pd.DataFrame(rows)
+    date_cols = [col for col in full.columns if col not in {"Store", "Product"}]
+    full[["Store", "Product", *date_cols[:-1]]].to_csv(root / "week_0_sales.csv", index=False)
+    full.to_csv(root / "week_1_sales.csv", index=False)
+    pd.DataFrame(
+        {
+            "Store": [1, 2],
+            "Product": [100, 200],
+            "End Inventory": [50.0, 50.0],
+            "In Transit W+1": [0.0, 0.0],
+            "In Transit W+2": [0.0, 0.0],
+        }
+    ).to_csv(root / "week_0_initial_state.csv", index=False)
+
+
+def _fast_benchmark_model_config() -> dict:
+    return {
+        "backend": "mlforecast",
+        "scope": "global",
+        "name": "test_global_lgbm_q0p52",
+        "model": "lightgbm.LGBMRegressor",
+        "objective": "quantile",
+        "quantiles": [0.52],
+        "strategy": "direct",
+        "lags": [1, 2, 4],
+        "n_estimators": 5,
+        "learning_rate": 0.1,
+        "num_leaves": 7,
+        "min_child_samples": 2,
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+        "reg_alpha": 0.0,
+        "reg_lambda": 0.0,
+        "verbosity": -1,
+        "n_jobs": 1,
+        "random_state": 42,
+        "_quantile_alpha": 0.52,
+    }
 
 
 def test_dask_localcluster_matches_single_node_backend() -> None:
@@ -147,3 +196,38 @@ def test_cli_dask_config_matches_cli_single_node(tmp_path: Path) -> None:
     assert isinstance(local, BackendResult)
     assert isinstance(dask, BackendResult)
     pd.testing.assert_frame_equal(_sorted(dask.ledger.to_df()), _sorted(local.ledger.to_df()))
+
+
+def test_vn2_dask_benchmark_cost_matches_single_node(tmp_path: Path) -> None:
+    distributed = pytest.importorskip("distributed")
+    fugue_dask = pytest.importorskip("fugue_dask")
+
+    _write_vn2_benchmark_fixture(tmp_path)
+    common_kwargs = {
+        "data_dir": tmp_path,
+        "horizon": 2,
+        "lead_time": 1,
+        "review_period": 1,
+        "decision_rounds": 1,
+        "delivery_weeks": 0,
+        "results_dir": None,
+        "verbose": False,
+        "best_config": _fast_benchmark_model_config(),
+        "order_conformal_config": None,
+    }
+    expected = run_benchmark(**common_kwargs).sort_values("unique_id").reset_index(drop=True)
+
+    cluster = distributed.LocalCluster(processes=False, dashboard_address=None)
+    client = distributed.Client(cluster)
+    try:
+        engine = fugue_dask.DaskExecutionEngine(client)
+        actual = (
+            run_benchmark(**common_kwargs, execution_engine=engine)
+            .sort_values("unique_id")
+            .reset_index(drop=True)
+        )
+    finally:
+        client.close()
+        cluster.close()
+
+    pd.testing.assert_frame_equal(actual, expected, check_exact=False, atol=1e-9)

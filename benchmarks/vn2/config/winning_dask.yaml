@@ -1,4 +1,5 @@
 config_schema: "1.0"
+benchmark: vn2_winning
 dataset:
   adapter: vn2
   path: data/vn2

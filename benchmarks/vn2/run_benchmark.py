@@ -538,6 +538,7 @@ def _run_order_conformal_warmup(
     runtime: CumulativeRiskRuntime,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
+    execution_engine: Any = None,
 ) -> None:
     """Calibrate the cumulative order conformal runtime on resolved origins."""
     for frame in _order_conformal_warmup_frames(
@@ -548,6 +549,7 @@ def _run_order_conformal_warmup(
         warmup_origins=warmup_origins,
         series_filter=series_filter,
         cumulative_target=cumulative_target,
+        execution_engine=execution_engine,
     ):
         runtime.observe(runtime.apply(frame))
 
@@ -561,6 +563,7 @@ def _order_conformal_warmup_frames(
     warmup_origins: int,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
+    execution_engine: Any = None,
 ) -> list[pd.DataFrame]:
     """Return resolved warmup forecast frames for CRC calibration."""
     if warmup_origins <= 0:
@@ -579,7 +582,7 @@ def _order_conformal_warmup_frames(
     if not origin_dates:
         return []
 
-    engine = BackendEngine(freq="W-MON")
+    engine = BackendEngine(freq="W-MON", engine=execution_engine)
     task = ForecastTask(history=history, horizon=horizon, model_config=model_config)
     ledger_df = _prepare_policy_forecast_frame(
         engine.execute([task], actuals=sales, origins=origin_dates).ledger.to_df(),
@@ -1606,6 +1609,7 @@ def run_benchmark(
     conformal_config: SymmetricIntervalConfig | None = None,
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_conformal_warmup_origins: int = HPO_N_ORIGINS,
+    execution_engine: Any = None,
 ) -> pd.DataFrame:
     """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
 
@@ -1635,6 +1639,8 @@ def run_benchmark(
             conformal ``hi_*`` bound rather than the direct quantile path.
         order_conformal_warmup_origins: Resolved week_0 walk-forward origins
             used to seed the one-sided order conformal residual pool.
+        execution_engine: Optional Fugue execution engine passed to the
+            forecast engine during warmup and decision rounds.
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
@@ -1702,7 +1708,7 @@ def run_benchmark(
         # Phase 2: Decision loop — refit each round, conformal-driven R,S
         # ------------------------------------------------------------------ #
         simulator = VN2Simulator(initial_states)
-        engine = BackendEngine(freq="W-MON")
+        engine = BackendEngine(freq="W-MON", engine=execution_engine)
         target_quantile_col = quantile_column(quantile_alpha)
         order_conformal_runtime: CumulativeRiskRuntime | None = None
         if order_conformal_config is not None:
@@ -1724,6 +1730,7 @@ def run_benchmark(
                 runtime=order_conformal_runtime,
                 series_filter=list(initial_states),
                 cumulative_target=cumulative_target,
+                execution_engine=execution_engine,
             )
             conformal_runtime = order_conformal_runtime
             observe_fn = observe_cumulative
@@ -1854,9 +1861,9 @@ def run_benchmark(
             logger.info("VN2 TUNED BENCHMARK RESULTS")
             logger.info("%s", "=" * 50)
             logger.info("Products:        %s", len(summary_df))
-            logger.info("Holding cost:    EUR %,.2f", total_holding)
-            logger.info("Shortage cost:   EUR %,.2f", total_shortage)
-            logger.info("TOTAL COST:      EUR %,.2f", total_cost)
+            logger.info("Holding cost:    EUR %s", f"{total_holding:,.2f}")
+            logger.info("Shortage cost:   EUR %s", f"{total_shortage:,.2f}")
+            logger.info("TOTAL COST:      EUR %s", f"{total_cost:,.2f}")
             logger.info("%s", "=" * 50)
 
         log_costs_dataframe(summary_df)

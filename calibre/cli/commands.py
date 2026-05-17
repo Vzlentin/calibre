@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import fsspec  # type: ignore[import-untyped]
 import pandas as pd
 
 from calibre.cli.config import BackendConfig, load_config, load_config_from_mapping
@@ -110,6 +111,12 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
     set_order_cost(currency, dataset, total_cost)
 
 
+def _write_parquet(frame: pd.DataFrame, path: str | Path) -> None:
+    ensure_parent_dir(path)
+    with fsspec.open(str(path), "wb") as handle:
+        frame.to_parquet(handle, index=False)
+
+
 def _resolve_execution_engine(config: BackendConfig) -> Any:
     if config.execution.engine is None:
         return None
@@ -143,22 +150,38 @@ def _resolve_execution_engine(config: BackendConfig) -> Any:
     raise ValueError(f"Unsupported execution engine: {config.execution.engine!r}")
 
 
+def _close_execution_engine(execution_engine: Any) -> None:
+    if execution_engine is None:
+        return
+    if hasattr(execution_engine, "_calibre_dask_client"):
+        execution_engine._calibre_dask_client.close()
+    if (
+        hasattr(execution_engine, "_calibre_dask_cluster")
+        and execution_engine._calibre_dask_cluster is not None
+    ):
+        execution_engine._calibre_dask_cluster.close()
+
+
 def _run_builtin_benchmark(config: BackendConfig) -> pd.DataFrame:
     if config.benchmark not in {"vn2_winning", "vn2_tuned"}:
         raise ValueError(f"Unknown benchmark runner: {config.benchmark!r}")
 
     from benchmarks.vn2.run_benchmark import run_benchmark
 
-    summary = run_benchmark(
-        data_dir=Path(config.dataset.path),
-        horizon=config.tasks[0].horizon,
-        tune=False,
-        results_dir=None,
-        verbose=True,
-    )
+    execution_engine = _resolve_execution_engine(config)
+    try:
+        summary = run_benchmark(
+            data_dir=Path(config.dataset.path),
+            horizon=config.tasks[0].horizon,
+            tune=False,
+            results_dir=None,
+            verbose=True,
+            execution_engine=execution_engine,
+        )
+    finally:
+        _close_execution_engine(execution_engine)
     if config.output.ledger_path is not None:
-        ensure_parent_dir(config.output.ledger_path)
-        summary.to_parquet(config.output.ledger_path, index=False)
+        _write_parquet(summary, config.output.ledger_path)
     return summary
 
 
@@ -224,14 +247,7 @@ def run_config(
     finally:
         # Clean up distributed execution engines to avoid thread/connection leaks
         # in long-running processes (e.g. FastAPI server). Runs even on failure.
-        if execution_engine is not None:
-            if hasattr(execution_engine, "_calibre_dask_client"):
-                execution_engine._calibre_dask_client.close()
-            if (
-                hasattr(execution_engine, "_calibre_dask_cluster")
-                and execution_engine._calibre_dask_cluster is not None
-            ):
-                execution_engine._calibre_dask_cluster.close()
+        _close_execution_engine(execution_engine)
 
     if not config.output.streaming and config.output.ledger_path is not None:
         result.ledger.to_parquet(config.output.ledger_path)

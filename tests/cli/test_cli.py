@@ -141,6 +141,7 @@ def test_load_config_reads_fsspec_uri() -> None:
 def test_winning_dask_config_uses_dask_engine() -> None:
     config = load_config("benchmarks/vn2/config/winning_dask.yaml")
 
+    assert config.benchmark == "vn2_winning"
     assert config.execution.engine == "dask"
     assert config.tasks[0].config["scope"] == "global"
     assert "lag_transforms" in config.tasks[0].config
