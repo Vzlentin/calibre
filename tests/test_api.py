@@ -112,6 +112,16 @@ def test_forecasts_endpoint(monkeypatch) -> None:
     assert body["forecasts"][0][UNIQUE_ID] == "A"
 
 
+def test_metrics_endpoint_exposes_prometheus_payload() -> None:
+    client = TestClient(app)
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    assert "calibre_forecast_duration_seconds" in response.text
+
+
 def test_forecasts_endpoint_rejects_more_than_30_skus() -> None:
     client = TestClient(app)
 
