@@ -9,6 +9,7 @@ from calibre.api.schemas import ForecastRequest, ForecastResponse, RunResponse
 from calibre.cli.commands import run_config
 
 app = FastAPI(title="Calibre", version="0.1.0")
+MAX_FORECAST_UNIQUE_IDS = 30
 
 
 def _json_records(frame: pd.DataFrame) -> list[dict]:
@@ -33,8 +34,11 @@ def metrics() -> Response:
 
 @app.post("/forecasts", response_model=ForecastResponse)
 def forecasts(req: ForecastRequest) -> ForecastResponse:
-    config = req.as_backend_config()
-    result = run_config(config)
+    try:
+        config = req.as_backend_config()
+        result = run_config(config, max_unique_ids=MAX_FORECAST_UNIQUE_IDS)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     frame = result if isinstance(result, pd.DataFrame) else result.ledger.to_df()
     return ForecastResponse(rows=len(frame), forecasts=_json_records(frame))
 

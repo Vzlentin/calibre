@@ -10,8 +10,10 @@ import pandas as pd
 
 from calibre.cli.config import BackendConfig, load_config, load_config_from_mapping
 from calibre.conformal.runtime import SymmetricIntervalConfig
+from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.metrics import set_order_cost
 from calibre.execution.backend import BackendEngine, BackendResult
+from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.io import ensure_parent_dir
 from calibre.execution.task_builder import build_tasks
@@ -48,6 +50,18 @@ def _load_dataset(config: BackendConfig):
     bundle = adapter.load(config.dataset.path, **kwargs)
     validate_dataset_bundle(bundle)
     return bundle
+
+
+def _enforce_unique_id_limit(bundle: DatasetBundle, max_unique_ids: int | None) -> None:
+    if max_unique_ids is None:
+        return
+    if max_unique_ids < 1:
+        raise ValueError("max_unique_ids must be at least 1")
+    unique_ids = int(bundle.history[UNIQUE_ID].astype(str).nunique())
+    if unique_ids > max_unique_ids:
+        raise ValueError(
+            f"dataset contains {unique_ids} unique_id values; maximum allowed is {max_unique_ids}"
+        )
 
 
 def _build_order_config(config: BackendConfig) -> OrderPolicyConfig | None:
@@ -157,6 +171,7 @@ def run_config(
     run_id: UUID | None = None,
     conformal_state_store: ConformalStateStore | None = None,
     initial_ledger: pd.DataFrame | None = None,
+    max_unique_ids: int | None = None,
 ) -> BackendResult | pd.DataFrame:
     if config.benchmark is not None:
         summary = _run_builtin_benchmark(config)
@@ -170,6 +185,7 @@ def run_config(
         return summary
 
     bundle = _load_dataset(config)
+    _enforce_unique_id_limit(bundle, max_unique_ids)
     model_configs = [task.model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
     tasks = build_tasks(bundle.history, model_configs, horizon)
@@ -245,12 +261,14 @@ def health() -> dict[str, Any]:
     except importlib.metadata.PackageNotFoundError:
         version = "0.1.0"
     config = load_config_from_mapping(_HEALTH_CONFIG)
-    resolve_dataset_adapter(config.dataset.adapter)
+    bundle = _load_dataset(config)
     payload = {
         "status": "ok",
         "version": version,
         "config_schema": config.config_schema,
         "fixture_adapter": config.dataset.adapter,
+        "fixture_rows": len(bundle.history),
+        "fixture_series": int(bundle.history[UNIQUE_ID].astype(str).nunique()),
     }
     _emit(json.dumps(payload, sort_keys=True))
     return payload

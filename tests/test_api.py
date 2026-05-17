@@ -37,6 +37,27 @@ class _ApiDatasetAdapter:
         )
 
 
+class _ManyApiDatasetAdapter:
+    def name(self) -> str:
+        return "unit_api_many"
+
+    def load(self, path: str, **kwargs) -> DatasetBundle:
+        del path, kwargs
+        dates = pd.date_range("2024-01-07", periods=8, freq="W")
+        rows = [
+            {UNIQUE_ID: f"SKU_{idx:02d}", DS: ds, Y: float(step)}
+            for idx in range(31)
+            for step, ds in enumerate(dates)
+        ]
+        return DatasetBundle(
+            history=pd.DataFrame(rows),
+            future_x=None,
+            costs=CostStruct(),
+            hierarchy=None,
+            censoring=None,
+        )
+
+
 class _StubAdapter:
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
@@ -56,13 +77,14 @@ class _StubAdapter:
 
 
 register_dataset_adapter("unit_api")(_ApiDatasetAdapter)
+register_dataset_adapter("unit_api_many")(_ManyApiDatasetAdapter)
 
 
-def _payload() -> dict:
+def _payload(adapter: str = "unit_api") -> dict:
     return {
         "config": {
             "config_schema": "1.0",
-            "dataset": {"adapter": "unit_api", "path": "ignored"},
+            "dataset": {"adapter": adapter, "path": "ignored"},
             "tasks": [
                 {
                     "model": "stub_model",
@@ -88,6 +110,15 @@ def test_forecasts_endpoint(monkeypatch) -> None:
     body = response.json()
     assert body["rows"] == 1
     assert body["forecasts"][0][UNIQUE_ID] == "A"
+
+
+def test_forecasts_endpoint_rejects_more_than_30_skus() -> None:
+    client = TestClient(app)
+
+    response = client.post("/forecasts", json=_payload(adapter="unit_api_many"))
+
+    assert response.status_code == 400
+    assert "maximum allowed is 30" in response.json()["detail"]
 
 
 def test_backtests_endpoint_records_status(monkeypatch) -> None:

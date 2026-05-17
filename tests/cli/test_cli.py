@@ -96,6 +96,8 @@ def test_health_validates_embedded_smoke_config() -> None:
     assert payload["status"] == "ok"
     assert payload["config_schema"] == "1.0"
     assert payload["fixture_adapter"] == "vn2"
+    assert payload["fixture_rows"] > 0
+    assert payload["fixture_series"] > 0
 
 
 def test_order_cost_metric_uses_total_cost_column() -> None:
