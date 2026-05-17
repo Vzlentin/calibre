@@ -46,7 +46,6 @@ from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
-import mlflow
 import optuna
 import pandas as pd
 from mlforecast.lag_transforms import RollingMean, RollingStd
@@ -57,6 +56,7 @@ import benchmarks.vn2.config as _vn2_config
 from benchmarks.common.tracking import (
     log_config_module,
     log_costs_dataframe,
+    mlflow,
     optuna_mlflow_callback,
     start_benchmark_run,
 )
