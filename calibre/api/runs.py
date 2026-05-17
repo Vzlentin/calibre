@@ -11,7 +11,12 @@ from sqlalchemy.orm import sessionmaker
 from calibre.api.schemas import RunResponse
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
-from calibre.storage.objstore import artifact_pointer, read_initial_ledger, signed_url
+from calibre.storage.objstore import (
+    artifact_pointer,
+    canonical_ledger_uri,
+    read_initial_ledger,
+    signed_url,
+)
 from calibre.storage.postgres import (
     ConformalStateRepo,
     ForecastPointerRepo,
@@ -109,6 +114,24 @@ def get_run(run_id: str) -> RunResponse | None:
     return record.response() if record is not None else None
 
 
+def queue_run(run_id: str) -> RunResponse:
+    factory = _session_factory()
+    if factory is not None:
+        with session_scope(factory) as session:
+            parsed_run_id = UUID(run_id)
+            repo = RunRepo(session)
+            repo.set_status(parsed_run_id, "queued")
+            run = repo.get(parsed_run_id)
+            if run is None:
+                raise KeyError(f"Unknown run_id: {run_id}")
+            return _db_response(run, ForecastPointerRepo(session))
+
+    record = _RUNS[run_id]
+    record.status = "queued"
+    record.error = None
+    return record.response()
+
+
 def run_backtest_job(run_id: str) -> None:
     factory = _session_factory()
     if factory is not None:
@@ -141,8 +164,9 @@ def _record_artifact_pointers(
     config,
 ) -> None:
     if config.output.ledger_path is not None:
+        ledger_uri = canonical_ledger_uri(config.output.ledger_path)
         try:
-            pointer = artifact_pointer(config.output.ledger_path)
+            pointer = artifact_pointer(ledger_uri)
         except FileNotFoundError:
             pass
         else:
@@ -161,6 +185,20 @@ def _record_artifact_pointers(
             )
 
 
+def _register_configured_artifact_pointers(
+    pointer_repo: ForecastPointerRepo,
+    run_id: UUID,
+    config,
+) -> None:
+    if config.output.ledger_path is not None and pointer_repo.get(run_id, "ledger") is None:
+        pointer_repo.upsert(run_id, "ledger", config.output.ledger_path, 0)
+    if (
+        config.output.order_ledger_path is not None
+        and pointer_repo.get(run_id, "order_ledger") is None
+    ):
+        pointer_repo.upsert(run_id, "order_ledger", config.output.order_ledger_path, 0)
+
+
 def _run_backtest_job_db(factory: sessionmaker, run_id: UUID) -> None:
     try:
         with session_scope(factory) as session:
@@ -172,6 +210,8 @@ def _run_backtest_job_db(factory: sessionmaker, run_id: UUID) -> None:
             session.commit()
             config = load_config_from_mapping(run.config)
             pointer_repo = ForecastPointerRepo(session)
+            _register_configured_artifact_pointers(pointer_repo, run_id, config)
+            session.commit()
             initial_ledger = read_initial_ledger(pointer_repo, run_id)
             result = run_config(
                 config,

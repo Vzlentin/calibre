@@ -322,7 +322,14 @@ class BackendEngine:
                     str(Path(temp_dir) / "global"),
                 )
 
+                completed_origins = self._completed_initial_origins()
                 for origin in origins:
+                    if pd.Timestamp(origin) in completed_origins:
+                        logger.info(
+                            "skipping resumed origin",
+                            extra={"origin": origin, "phase": "resume"},
+                        )
+                        continue
                     origin_started = time.perf_counter()
                     with span("backtest", origin=str(origin)):
                         if conformal_runtime is not None:
@@ -469,6 +476,16 @@ class BackendEngine:
             and max_issued_count > runtime._issued_count
         ):
             runtime._issued_count = max_issued_count
+
+    def _completed_initial_origins(self) -> set[pd.Timestamp]:
+        if (
+            self.initial_ledger is None
+            or self.initial_ledger.empty
+            or FORECAST_ORIGIN not in self.initial_ledger.columns
+        ):
+            return set()
+        origins = pd.to_datetime(self.initial_ledger[FORECAST_ORIGIN], errors="coerce")
+        return {pd.Timestamp(origin) for origin in origins.dropna().unique()}
 
     def _materialize_dispatch_records(
         self,

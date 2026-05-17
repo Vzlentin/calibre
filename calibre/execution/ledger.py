@@ -44,7 +44,7 @@ class _ParquetLedgerSink:
             self._handle = None
 
 
-def _resolved_uri(path: str | Path) -> str:
+def resolved_ledger_uri(path: str | Path) -> str:
     text = str(path)
     if "://" not in text:
         return str(Path(text).with_suffix(".resolved.parquet"))
@@ -78,7 +78,7 @@ class _BaseLedger:
         if partition_cols:
             raise NotImplementedError("partitioned streaming ledgers are not implemented yet")
         self._stream_path = str(path)
-        self._resolved_path = _resolved_uri(path)
+        self._resolved_path = resolved_ledger_uri(path)
         fs, fs_path = fsspec.core.url_to_fs(self._resolved_path)
         if fs.exists(fs_path):
             fs.rm(fs_path)

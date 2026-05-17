@@ -4,7 +4,7 @@ import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from calibre.api.runs import create_run, get_run, run_backtest_job
+from calibre.api.runs import create_run, get_run, queue_run, run_backtest_job
 from calibre.api.schemas import ForecastRequest, ForecastResponse, RunResponse
 from calibre.cli.commands import run_config
 
@@ -50,7 +50,9 @@ def backtests(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> RunResponse:
     run = create_run(req.config, idempotency_key=idempotency_key)
-    if run.status == "queued":
+    if run.status == "failed":
+        run = queue_run(run.id)
+    if run.status in {"queued", "failed"}:
         bg.add_task(run_backtest_job, run.id)
     return run
 

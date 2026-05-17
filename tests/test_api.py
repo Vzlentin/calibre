@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from uuid import UUID
 
@@ -9,11 +10,20 @@ from fastapi.testclient import TestClient
 from calibre.api.main import app
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y, interval_column_names
+from calibre.core.forecast_frame import (
+    DS,
+    FORECAST_ORIGIN,
+    UNIQUE_ID,
+    Y_HAT,
+    H,
+    Y,
+    interval_column_names,
+)
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
+from calibre.execution.ledger import resolved_ledger_uri
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
     ForecastPointerRepo,
@@ -221,3 +231,73 @@ def test_backtests_endpoint_persists_runs_and_pointers(monkeypatch, tmp_path) ->
         pointer = ForecastPointerRepo(session).get(UUID(run_id), "ledger")
         assert pointer is not None
         assert pointer.byte_size > 0
+
+
+def test_backtests_endpoint_retries_failed_db_run_from_streaming_pointer(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = {"count": 0, "fail": False}
+
+    class _FlakyStubAdapter(_StubAdapter):
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            calls["count"] += 1
+            if calls["fail"] and calls["count"] == 2:
+                raise RuntimeError("interrupted between origins")
+            return super().predict(task)
+
+    monkeypatch.setattr(
+        "calibre.execution.task_builder.get_adapter_cls",
+        lambda _: _FlakyStubAdapter,
+    )
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _FlakyStubAdapter())
+
+    db_url = f"sqlite+pysqlite:///{(tmp_path / 'retry.db').as_posix()}"
+    db = make_engine(db_url)
+    Base.metadata.create_all(db)
+    monkeypatch.setenv("CALIBRE_DATABASE_URL", db_url)
+
+    payload = _payload()
+    payload["config"]["origins"] = {
+        "start": "2024-02-04",
+        "end": "2024-02-18",
+        "freq": "W-SUN",
+    }
+    ledger_path = tmp_path / "streaming-ledger.parquet"
+    payload["config"]["output"] = {
+        "ledger_path": ledger_path.as_posix(),
+        "streaming": True,
+    }
+
+    expected_payload = copy.deepcopy(payload)
+    expected_payload["config"]["output"] = {}
+    expected = run_config(load_config_from_mapping(expected_payload["config"])).ledger.to_df()
+
+    client = TestClient(app)
+    calls["count"] = 0
+    calls["fail"] = True
+    first = client.post("/backtests", json=payload, headers={"Idempotency-Key": "retry-key"})
+
+    assert first.status_code == 202
+    run_id = first.json()["id"]
+    failed = client.get(f"/runs/{run_id}").json()
+    assert failed["status"] == "failed"
+    assert ledger_path.exists()
+
+    calls["count"] = 0
+    calls["fail"] = False
+    retry = client.post("/backtests", json=payload, headers={"Idempotency-Key": "retry-key"})
+
+    assert retry.status_code == 202
+    assert retry.json()["id"] == run_id
+    assert retry.json()["status"] == "queued"
+    status = client.get(f"/runs/{run_id}").json()
+    assert status["status"] == "succeeded"
+    assert Path(status["artifact_urls"]["ledger"]) == Path(resolved_ledger_uri(ledger_path))
+
+    actual = pd.read_parquet(status["artifact_urls"]["ledger"])
+    sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
+    pd.testing.assert_frame_equal(
+        actual.sort_values(sort_cols).reset_index(drop=True),
+        expected.sort_values(sort_cols).reset_index(drop=True),
+    )

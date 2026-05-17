@@ -61,6 +61,8 @@ class RunRepo:
         run.error = error
         if status in {"succeeded", "failed"}:
             run.finished_at = datetime.now(UTC)
+        else:
+            run.finished_at = None
 
 
 class ConformalStateRepo:
