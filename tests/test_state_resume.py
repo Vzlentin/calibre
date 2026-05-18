@@ -8,7 +8,6 @@ import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.core.forecast_frame import (
-    CALIBRATION_STATE,
     FORECAST_ORIGIN,
     MODEL_NAME,
     NONCONFORMITY_SCORE,
@@ -18,7 +17,7 @@ from calibre.core.forecast_frame import (
     Y,
 )
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ConformalOptions
 from calibre.storage.models import Base
 from calibre.storage.objstore import read_initial_ledger, write_ledger_shard
 from calibre.storage.postgres import (
@@ -71,16 +70,17 @@ def test_symmetric_runtime_from_state_restores_calibrator_and_controller() -> No
     observed = runtime.observe(first)
     assert observed[NONCONFORMITY_SCORE].iloc[0] == pytest.approx(2.0)
 
-    second = runtime.apply(_frame(pd.Timestamp("2024-01-08"), 11.0))
-    state_payload = str(second[CALIBRATION_STATE].iloc[0])
+    state_payload = runtime.get_resume_state()
     resumed = SymmetricIntervalRuntime.from_state(config, state_payload)
 
     original_diag = runtime.get_diagnostics()
     resumed_diag = resumed.get_diagnostics()
-    assert resumed_diag["issued_count"] == original_diag["issued_count"] - 1
+    assert resumed_diag["issued_count"] == original_diag["issued_count"]
     assert resumed_diag["controller"]["current_alpha"] == pytest.approx(
         original_diag["controller"]["current_alpha"]
     )
+    assert "alpha_history" not in state_payload["controller"]
+    assert "error_history" not in state_payload["controller"]
     np.testing.assert_allclose(
         resumed_diag["calibrator"]["score_history"]["stub:h1:__global__"],
         np.asarray([2.0]),
@@ -107,19 +107,16 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
     store = _MemoryStateStore()
 
     BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
+        conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
     ).execute([task], actuals, origins=[dates[7], dates[8]])
 
-    assert store.get(run_id, RUNTIME_PARTITION) is not None
+    persisted = store.get(run_id, RUNTIME_PARTITION)
+    assert persisted is not None
+    assert "alpha_history" not in persisted["controller"]
+    assert "error_history" not in persisted["controller"]
 
     resumed = BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
+        conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
     ).execute([task], actuals, origins=[dates[9]])
 
     frame = resumed.ledger.to_df()
@@ -143,7 +140,7 @@ def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
     )
     origins = [dates[7], dates[8], dates[9]]
 
-    uninterrupted = BackendEngine(freq="W", conformal_config=config).execute(
+    uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
         [task],
         actuals,
         origins=origins,
@@ -152,18 +149,16 @@ def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
     run_id = uuid4()
     store = _MemoryStateStore()
     interrupted = BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
+        conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
     ).execute([task], actuals, origins=origins[:2])
 
     resumed = BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
-        initial_ledger=interrupted.ledger.to_df(),
+        conformal=ConformalOptions(
+            config=config,
+            run_id=run_id,
+            state_store=store,
+            initial_ledger=interrupted.ledger.to_df(),
+        ),
     ).execute([task], actuals, origins=origins[2:])
 
     sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
@@ -189,7 +184,7 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
     )
     origins = [dates[7], dates[8], dates[9]]
 
-    uninterrupted = BackendEngine(freq="W", conformal_config=config).execute(
+    uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
         [task],
         actuals,
         origins=origins,
@@ -204,10 +199,11 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
         run = RunRepo(session).create(config={"name": "resume-test"})
         run_id = run.id
         interrupted = BackendEngine(
-            freq="W",
-            conformal_config=config,
-            run_id=run_id,
-            conformal_state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+            conformal=ConformalOptions(
+                config=config,
+                run_id=run_id,
+                state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+            ),
         ).execute([task], actuals, origins=origins[:2])
         pointer = write_ledger_shard(interrupted.ledger.to_df(), str(ledger_path))
         ForecastPointerRepo(session).upsert(
@@ -221,11 +217,12 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
         initial_ledger = read_initial_ledger(ForecastPointerRepo(session), run_id)
         assert initial_ledger is not None
         resumed = BackendEngine(
-            freq="W",
-            conformal_config=config,
-            run_id=run_id,
-            conformal_state_store=SqlConformalStateStore(ConformalStateRepo(session)),
-            initial_ledger=initial_ledger,
+            conformal=ConformalOptions(
+                config=config,
+                run_id=run_id,
+                state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+                initial_ledger=initial_ledger,
+            ),
         ).execute([task], actuals, origins=origins[2:])
 
     sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]

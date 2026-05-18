@@ -8,7 +8,7 @@ import pytest
 
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ExecutionOptions
 
 pytestmark = pytest.mark.spark
 
@@ -52,7 +52,7 @@ def test_spark_local_matches_single_node_backend() -> None:
     panel = _panel()
     tasks = _tasks(panel)
     origins = [pd.Timestamp("2024-02-11"), pd.Timestamp("2024-02-18")]
-    expected = BackendEngine(freq="W").execute(tasks, panel, origins).ledger.to_df()
+    expected = BackendEngine().execute(tasks, panel, origins).ledger.to_df()
 
     spark = (
         pyspark_sql.SparkSession.builder.master("local[1]")
@@ -63,7 +63,9 @@ def test_spark_local_matches_single_node_backend() -> None:
     try:
         engine = fugue_spark.SparkExecutionEngine(spark)
         actual = (
-            BackendEngine(freq="W", engine=engine).execute(tasks, panel, origins).ledger.to_df()
+            BackendEngine(execution=ExecutionOptions(engine=engine))
+            .execute(tasks, panel, origins)
+            .ledger.to_df()
         )
     finally:
         spark.stop()

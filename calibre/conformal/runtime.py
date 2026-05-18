@@ -17,10 +17,11 @@ from calibre.conformal.protocols import Calibrator, Controller, Score
 from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.types import IntervalPrediction
 from calibre.core.forecast_frame import (
-    CALIBRATION_STATE,
+    CALIBRATION_STATE_REF,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
+    CONFORMAL_PARTITION,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -49,19 +50,32 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def serialize_calibration_state(state: dict[str, Any]) -> str:
-    return json.dumps(state, sort_keys=True, separators=(",", ":"), default=_json_default)
-
-
-def deserialize_calibration_state(payload: str | None) -> dict[str, Any]:
-    if not payload:
-        return {}
-    return json.loads(payload)  # type: ignore[arg-type]
-
-
 def to_json_safe_state(state: dict[str, Any]) -> dict[str, Any]:
     """Coerce numpy/ndarray/Timestamp values into JSON-safe Python objects."""
-    return json.loads(serialize_calibration_state(state))
+    return json.loads(json.dumps(state, default=_json_default))
+
+
+@dataclass(frozen=True, slots=True)
+class StateRef:
+    method: str
+    mode: str
+    issued_count: int
+    partition: str
+
+
+def state_ref_value(method: str, mode: str, issued_count: int, partition: str) -> str:
+    return f"{method}:{mode}:{issued_count}:{partition}"
+
+
+def parse_state_ref(text: str) -> StateRef | None:
+    parts = text.split(":", 3)
+    if len(parts) != 4:
+        return None
+    try:
+        issued_count = int(parts[2])
+    except ValueError:
+        return None
+    return StateRef(method=parts[0], mode=parts[1], issued_count=issued_count, partition=parts[3])
 
 
 class ConformalRuntime(Protocol):
@@ -71,6 +85,8 @@ class ConformalRuntime(Protocol):
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
+
+    def get_resume_state(self) -> dict[str, Any]: ...
 
     def get_diagnostics(self) -> dict[str, Any]: ...
 
@@ -169,13 +185,10 @@ class SymmetricIntervalRuntime:
     def from_state(
         cls,
         config: SymmetricIntervalConfig,
-        state_payload: str | dict[str, Any] | None,
+        state: dict[str, Any] | None,
     ) -> SymmetricIntervalRuntime:
-        """Rehydrate a runtime from a serialized calibration-state snapshot."""
-        if isinstance(state_payload, dict):
-            state = state_payload
-        else:
-            state = deserialize_calibration_state(state_payload)
+        """Rehydrate a runtime from a calibration-state snapshot."""
+        state = state or {}
         runtime = cls(config, method_name=state.get("method", config.method))
         runtime._issued_count = int(state.get("issued_count", 0))
         if "calibrator" in state:
@@ -221,6 +234,28 @@ class SymmetricIntervalRuntime:
             "calibrator": calibrator_state,
         }
 
+    def _state_ref(self, partition: str) -> str:
+        return state_ref_value(self.method_name, self.config.mode, self._issued_count, partition)
+
+    def _controller_resume_state(self) -> dict[str, Any]:
+        state = self.controller.get_state()
+        controller_type = state.get("type")
+        if controller_type == "adaptive":
+            return {
+                key: state[key]
+                for key in (
+                    "type",
+                    "target_alpha",
+                    "gamma",
+                    "current_alpha",
+                    "alpha_bounds",
+                )
+                if key in state
+            }
+        if controller_type == "fixed":
+            return {key: state[key] for key in ("type", "alpha") if key in state}
+        return state
+
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
         started = time.perf_counter()
         if frame.empty:
@@ -251,25 +286,28 @@ class SymmetricIntervalRuntime:
             lower_values = np.full(len(ordered), np.nan, dtype=float)
             upper_values = np.full(len(ordered), np.nan, dtype=float)
             alpha_values = np.full(len(ordered), np.nan, dtype=float)
-            state_values: list[str] = []
+            state_refs: list[str] = []
+            partitions: list[str] = []
 
             for pos, (_, row) in enumerate(ordered.iterrows()):
                 alpha = self.controller.get_alpha()
                 partition = self._partition_for_row(row)
+                partitions.append(partition)
                 radius = self.calibrator.predict(alpha, partition)
                 alpha_values[pos] = alpha
                 if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
                     center = float(row[Y_HAT])
                     lower_values[pos] = center - float(radius)
                     upper_values[pos] = center + float(radius)
-                state_values.append(serialize_calibration_state(self._snapshot(partition)))
+                state_refs.append(self._state_ref(partition))
 
             ordered[lower_col] = lower_values
             ordered[upper_col] = upper_values
             ordered[CONFORMAL_METHOD] = self.method_name
             ordered[CONFORMAL_MODE] = self.config.mode
             ordered[CONFORMAL_ALPHA] = alpha_values
-            ordered[CALIBRATION_STATE] = state_values
+            ordered[CALIBRATION_STATE_REF] = state_refs
+            ordered[CONFORMAL_PARTITION] = partitions
             if NONCONFORMITY_SCORE not in ordered.columns:
                 ordered[NONCONFORMITY_SCORE] = np.nan
             parts.append(ordered)
@@ -288,6 +326,8 @@ class SymmetricIntervalRuntime:
         result[CONFORMAL_METHOD] = self.method_name
         result[CONFORMAL_MODE] = self.config.mode
         result[CONFORMAL_ALPHA] = self.controller.get_alpha()
+        result[CALIBRATION_STATE_REF] = ""
+        result[CONFORMAL_PARTITION] = ""
         if NONCONFORMITY_SCORE not in result.columns:
             result[NONCONFORMITY_SCORE] = np.nan
 
@@ -310,14 +350,10 @@ class SymmetricIntervalRuntime:
                 center = float(window[Y_HAT].sum())
                 result.loc[terminal_idx, lower_col] = center - float(radius)
                 result.loc[terminal_idx, upper_col] = center + float(radius)
-            result.loc[terminal_idx, CALIBRATION_STATE] = serialize_calibration_state(
-                self._snapshot(partition)
-            )
+            result.loc[terminal_idx, CALIBRATION_STATE_REF] = self._state_ref(partition)
+            result.loc[terminal_idx, CONFORMAL_PARTITION] = partition
             self._issued_count += 1
 
-        if CALIBRATION_STATE not in result.columns:
-            result[CALIBRATION_STATE] = ""
-        result[CALIBRATION_STATE] = result[CALIBRATION_STATE].fillna("")
         return result
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
@@ -422,6 +458,21 @@ class SymmetricIntervalRuntime:
             "protection_period": self.config.protection_period,
             "issued_count": self._issued_count,
             "controller": self.controller.get_state(),
+            "calibrator": calibrator_state,
+        }
+
+    def get_resume_state(self) -> dict[str, Any]:
+        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        return {
+            "method": self.method_name,
+            "mode": self.config.mode,
+            "coverage": self.config.coverage,
+            "calibration_window": self.config.calibration_window,
+            "gamma": self.config.gamma,
+            "quantile_rule": self.config.resolved_quantile_rule,
+            "protection_period": self.config.protection_period,
+            "issued_count": self._issued_count,
+            "controller": self._controller_resume_state(),
             "calibrator": calibrator_state,
         }
 

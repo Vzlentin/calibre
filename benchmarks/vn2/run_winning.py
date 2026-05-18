@@ -49,7 +49,7 @@ from benchmarks.vn2.simulator import (
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import RsPolicyParameters
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period, melt_wide_instock
 from calibre.execution.io import exists, join_uri
 from calibre.forecasting.features import add_stockout_features
@@ -165,7 +165,7 @@ def run_winning(
                 instock = instock[instock[UNIQUE_ID].isin(series_filter)]
 
         simulator = VN2Simulator(initial_states)
-        engine = BackendEngine(freq="W-MON")
+        engine = BackendEngine(execution=ExecutionOptions(freq="W-MON"))
 
         if verbose:
             logger.info("Loaded %s products.", len(initial_states))

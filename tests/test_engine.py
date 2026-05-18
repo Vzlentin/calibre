@@ -12,7 +12,9 @@ from calibre.conformal import (
 )
 from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
+    CALIBRATION_STATE_REF,
     CONFORMAL_METHOD,
+    CONFORMAL_PARTITION,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -25,7 +27,14 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.metrics import conformal_coverage_ratio
 from calibre.core.order_types import NewsvendorPolicyParameters, RsPolicyParameters
-from calibre.execution.backend import BackendEngine, BackendResult, _process_task_ref_partition
+from calibre.execution.backend import (
+    BackendEngine,
+    BackendResult,
+    ConformalOptions,
+    ExecutionOptions,
+    LedgerOutputOptions,
+    _process_task_ref_partition,
+)
 from calibre.execution.ledger import OrderLedger
 from calibre.ordering.policy_config import OrderPolicyConfig
 
@@ -54,12 +63,25 @@ def single_series_setup(dates, repeating_pattern):
 
 def test_execute_returns_backend_result(single_series_setup):
     task, actuals, origins = single_series_setup
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
     assert isinstance(result, BackendResult)
     df = result.ledger.to_df()
     assert len(df) == 8
+
+
+def test_execute_accepts_grouped_constructor_options(single_series_setup, tmp_path):
+    task, actuals, origins = single_series_setup
+    path = tmp_path / "grouped-ledger.parquet"
+    engine = BackendEngine(
+        execution=ExecutionOptions(freq="W", seed=42),
+        output=LedgerOutputOptions(forecast_path=path.as_posix(), streaming=True),
+    )
+    result = engine.execute([task], actuals, origins)
+
+    assert path.exists()
+    assert len(result.ledger.to_df()) == 8
 
 
 def test_fugue_partition_worker_is_module_level_picklable():
@@ -68,7 +90,7 @@ def test_fugue_partition_worker_is_module_level_picklable():
 
 def test_forecast_frame_columns_present(single_series_setup):
     task, actuals, origins = single_series_setup
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -78,7 +100,7 @@ def test_forecast_frame_columns_present(single_series_setup):
 
 def test_partial_resolution(single_series_setup):
     task, actuals, origins = single_series_setup
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -91,7 +113,7 @@ def test_partial_resolution(single_series_setup):
 
 def test_error_columns_on_resolved(single_series_setup):
     task, actuals, origins = single_series_setup
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -104,7 +126,7 @@ def test_error_columns_on_resolved(single_series_setup):
 
 def test_model_name_stamped(single_series_setup):
     task, actuals, origins = single_series_setup
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -119,7 +141,9 @@ def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
         calibration_window=4,
         gamma=0.05,
     )
-    engine = BackendEngine(freq="W", conformal_runtime=SymmetricIntervalRuntime(conformal_config))
+    engine = BackendEngine(
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
+    )
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -127,9 +151,11 @@ def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
     assert lower_col in df.columns
     assert upper_col in df.columns
     assert CONFORMAL_METHOD in df.columns
-    assert CALIBRATION_STATE in df.columns
+    assert CALIBRATION_STATE not in df.columns
+    assert CALIBRATION_STATE_REF in df.columns
+    assert CONFORMAL_PARTITION in df.columns
     assert df[CONFORMAL_METHOD].eq("aci").all()
-    assert df[CALIBRATION_STATE].str.startswith("{").all()
+    assert df[CALIBRATION_STATE_REF].str.startswith("aci:perhorizon:").all()
     assert df.loc[df[Y].notna(), NONCONFORMITY_SCORE].notna().all()
 
 
@@ -140,7 +166,9 @@ def test_execute_with_mscp_config_enriches_ledger(single_series_setup):
         coverage=0.9,
         calibration_window=4,
     )
-    engine = BackendEngine(freq="W", conformal_runtime=SymmetricIntervalRuntime(conformal_config))
+    engine = BackendEngine(
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
+    )
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -162,7 +190,7 @@ def test_execute_accepts_injected_cumulative_risk_runtime(single_series_setup):
             weight_decay=None,
         )
     )
-    engine = BackendEngine(freq="W", conformal_runtime=runtime)
+    engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
     result = engine.execute([task], actuals, origins)
 
     df = result.ledger.to_df()
@@ -190,7 +218,9 @@ def test_conformal_updates_before_next_origin():
         calibration_window=4,
         gamma=0.05,
     )
-    engine = BackendEngine(freq="W", conformal_runtime=SymmetricIntervalRuntime(conformal_config))
+    engine = BackendEngine(
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
+    )
     result = engine.execute([task], actuals, origins=[dates[7], dates[8]])
 
     df = result.ledger.to_df()
@@ -228,7 +258,7 @@ def test_multi_series():
         ),
     ]
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute(tasks, actuals, origins=[dates[11]])
 
     df = result.ledger.to_df()
@@ -238,7 +268,7 @@ def test_multi_series():
 
 def test_to_parquet_roundtrip(single_series_setup, tmp_path):
     task, actuals, origins = single_series_setup
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
     path = str(tmp_path / "backtest.parquet")
@@ -249,7 +279,7 @@ def test_to_parquet_roundtrip(single_series_setup, tmp_path):
 
 def test_engine_without_order_config_returns_none_order_ledger(single_series_setup):
     task, actuals, origins = single_series_setup
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
     assert isinstance(result, BackendResult)
@@ -274,9 +304,8 @@ def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup)
     ]
     order_config = OrderPolicyConfig(policy="rs", params=params, coverage=0.9)
     engine = BackendEngine(
-        freq="W",
-        conformal_runtime=SymmetricIntervalRuntime(conformal_config),
-        order_config=order_config,
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config)),
+        order=order_config,
     )
     result = engine.execute([task], actuals, origins)
 
@@ -304,9 +333,8 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
     ]
     order_config = OrderPolicyConfig(policy="newsvendor", params=params, coverage=0.9)
     engine = BackendEngine(
-        freq="W",
-        conformal_runtime=SymmetricIntervalRuntime(conformal_config),
-        order_config=order_config,
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config)),
+        order=order_config,
     )
     result = engine.execute([task], actuals, origins)
 
@@ -325,8 +353,7 @@ def test_engine_records_conformal_coverage_metric(single_series_setup):
         gamma=0.05,
     )
     engine = BackendEngine(
-        freq="W",
-        conformal_runtime=SymmetricIntervalRuntime(conformal_config),
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
     )
 
     engine.execute([task], actuals, origins)
@@ -368,7 +395,7 @@ def test_global_scope_produces_forecasts_for_all_series():
         },
     )
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
 
     df = result.ledger.to_df()
@@ -406,7 +433,7 @@ def test_global_quantile_columns_survive_engine():
         },
     )
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
 
     df = result.ledger.to_df()
@@ -467,7 +494,7 @@ def test_run_parallel_slices_future_x_per_uid(monkeypatch):
 
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     engine.execute(tasks, actuals, origins=[dates[11]])
 
     assert set(received["A"][UNIQUE_ID].unique()) == {"A"}
@@ -517,7 +544,7 @@ def test_run_direct_passes_full_future_x(monkeypatch):
 
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     engine.execute([task], all_series, origins=[dates[11]])
 
     assert len(received) == 1
@@ -557,7 +584,7 @@ def test_mixed_local_and_global_tasks():
         },
     )
 
-    engine = BackendEngine(freq="W")
+    engine = BackendEngine()
     result = engine.execute(
         tasks=[local_task, global_task], actuals=all_series, origins=[dates[11]]
     )

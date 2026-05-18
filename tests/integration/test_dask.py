@@ -9,7 +9,7 @@ from benchmarks.vn2.run_benchmark import run_benchmark
 from calibre.cli.commands import run
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine, BackendResult
+from calibre.execution.backend import BackendEngine, BackendResult, ExecutionOptions
 
 
 def _panel() -> pd.DataFrame:
@@ -114,14 +114,16 @@ def test_dask_localcluster_matches_single_node_backend() -> None:
     panel = _panel()
     tasks = _tasks(panel)
     origins = [pd.Timestamp("2024-02-11"), pd.Timestamp("2024-02-18")]
-    expected = BackendEngine(freq="W").execute(tasks, panel, origins).ledger.to_df()
+    expected = BackendEngine().execute(tasks, panel, origins).ledger.to_df()
 
     cluster = distributed.LocalCluster(processes=False, dashboard_address=None)
     client = distributed.Client(cluster)
     try:
         engine = fugue_dask.DaskExecutionEngine(client)
         actual = (
-            BackendEngine(freq="W", engine=engine).execute(tasks, panel, origins).ledger.to_df()
+            BackendEngine(execution=ExecutionOptions(engine=engine))
+            .execute(tasks, panel, origins)
+            .ledger.to_df()
         )
     finally:
         client.close()
@@ -137,14 +139,16 @@ def test_dask_global_scope_matches_single_node_backend() -> None:
     panel = _panel()
     task = _global_task(panel)
     origins = [pd.Timestamp("2024-02-11")]
-    expected = BackendEngine(freq="W").execute([task], panel, origins).ledger.to_df()
+    expected = BackendEngine().execute([task], panel, origins).ledger.to_df()
 
     cluster = distributed.LocalCluster(processes=False, dashboard_address=None)
     client = distributed.Client(cluster)
     try:
         engine = fugue_dask.DaskExecutionEngine(client)
         actual = (
-            BackendEngine(freq="W", engine=engine).execute([task], panel, origins).ledger.to_df()
+            BackendEngine(execution=ExecutionOptions(engine=engine))
+            .execute([task], panel, origins)
+            .ledger.to_df()
         )
     finally:
         client.close()

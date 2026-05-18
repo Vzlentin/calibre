@@ -23,6 +23,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("error", sa.String(), nullable=True),
+        sa.Column("row_count", sa.Integer(), nullable=True),
     )
     op.create_table(
         "conformal_state",

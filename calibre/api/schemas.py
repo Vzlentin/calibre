@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from calibre.cli.config import BackendConfig, load_config_from_mapping
+from calibre.core.run_status import RunStatus
 
 
 class ForecastRequest(BaseModel):
@@ -22,6 +23,7 @@ class ForecastResponse(BaseModel):
 
 class RunResponse(BaseModel):
     id: str
-    status: Literal["queued", "running", "succeeded", "failed"]
+    status: RunStatus
     artifact_urls: dict[str, str] = Field(default_factory=dict)
+    row_count: int | None = None
     error: str | None = None

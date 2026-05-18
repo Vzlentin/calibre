@@ -20,14 +20,15 @@ from calibre.conformal.runtime import (
     SymmetricIntervalConfig,
     SymmetricIntervalRuntime,
     build_symmetric_interval_runtime,
-    deserialize_calibration_state,
+    parse_state_ref,
     to_json_safe_state,
 )
 from calibre.core.forecast_frame import (
-    CALIBRATION_STATE,
+    CALIBRATION_STATE_REF,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
+    CONFORMAL_PARTITION,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -106,7 +107,14 @@ def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     result = frame.copy()
-    for col in (UNIQUE_ID, MODEL_NAME, CALIBRATION_STATE, CONFORMAL_METHOD, CONFORMAL_MODE):
+    for col in (
+        UNIQUE_ID,
+        MODEL_NAME,
+        CALIBRATION_STATE_REF,
+        CONFORMAL_PARTITION,
+        CONFORMAL_METHOD,
+        CONFORMAL_MODE,
+    ):
         if col in result.columns:
             result[col] = result[col].astype("object")
     for col in (DS, FORECAST_ORIGIN):
@@ -276,42 +284,70 @@ class BackendResult:
     order_ledger: OrderLedger | None = None
 
 
+@dataclass(frozen=True)
+class ExecutionOptions:
+    freq: str = "W"
+    engine: Any = None
+    seed: int | None = None
+    metrics: list[Callable] | None = None
+
+
+@dataclass(frozen=True)
+class LedgerOutputOptions:
+    forecast_path: str | None = None
+    order_path: str | None = None
+    streaming: bool = False
+
+
+@dataclass(frozen=True)
+class ConformalOptions:
+    runtime: ConformalRuntime | None = None
+    config: SymmetricIntervalConfig | None = None
+    run_id: UUID | None = None
+    state_store: ConformalStateStore | None = None
+    initial_ledger: pd.DataFrame | None = None
+
+    def __post_init__(self) -> None:
+        if self.runtime is not None and self.config is not None:
+            raise ValueError("Pass either conformal runtime or config, not both")
+
+
+_DEFAULT_EXECUTION = ExecutionOptions()
+_DEFAULT_OUTPUT = LedgerOutputOptions()
+_DEFAULT_CONFORMAL = ConformalOptions()
+
+
 class BackendEngine:
     def __init__(
         self,
-        freq: str = "W",
-        metrics: list[Callable] | None = None,
-        engine: Any = None,
-        conformal_runtime: ConformalRuntime | None = None,
-        conformal_config: SymmetricIntervalConfig | None = None,
-        order_config: OrderPolicyConfig | None = None,
-        streaming_output: str | None = None,
-        streaming_order_output: str | None = None,
-        seed: int | None = None,
-        run_id: UUID | None = None,
-        conformal_state_store: ConformalStateStore | None = None,
-        initial_ledger: pd.DataFrame | None = None,
+        *,
+        execution: ExecutionOptions = _DEFAULT_EXECUTION,
+        output: LedgerOutputOptions = _DEFAULT_OUTPUT,
+        conformal: ConformalOptions = _DEFAULT_CONFORMAL,
+        order: OrderPolicyConfig | None = None,
     ) -> None:
-        self.freq = freq
-        self.metrics = metrics
-        self.engine = engine
-        if conformal_runtime is not None and conformal_config is not None:
-            raise ValueError("Pass either conformal_runtime or conformal_config, not both")
-        self.conformal_config = conformal_config
+        self.execution = execution
+        self.output = output
+        self.conformal = conformal
+        self.order_config = order
+        self.freq = execution.freq
+        self.engine = execution.engine
+        self.seed: Seed | None = set_seed(execution.seed) if execution.seed is not None else None
+        self.conformal_config = conformal.config
         self.conformal_runtime = (
-            conformal_runtime
-            if conformal_runtime is not None
-            else build_symmetric_interval_runtime(conformal_config)
-            if conformal_config is not None
+            conformal.runtime
+            if conformal.runtime is not None
+            else build_symmetric_interval_runtime(conformal.config)
+            if conformal.config is not None
             else None
         )
-        self.order_config = order_config
-        self.streaming_output = streaming_output
-        self.streaming_order_output = streaming_order_output
-        self.seed: Seed | None = set_seed(seed) if seed is not None else None
-        self.run_id = run_id
-        self.conformal_state_store = conformal_state_store
-        self.initial_ledger = initial_ledger.copy() if initial_ledger is not None else None
+        self.streaming_output = output.forecast_path if output.streaming else None
+        self.streaming_order_output = output.order_path if output.streaming else None
+        self.run_id = conformal.run_id
+        self.conformal_state_store = conformal.state_store
+        self.initial_ledger = (
+            conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
+        )
 
     def execute(
         self,
@@ -413,7 +449,7 @@ class BackendEngine:
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
-        current = ledger.to_df()
+        current = ledger.resolution_frame()
         if current.empty:
             return
 
@@ -454,7 +490,7 @@ class BackendEngine:
     def _persist_conformal_state(self, conformal_runtime: ConformalRuntime | None) -> None:
         if self.run_id is None or self.conformal_state_store is None or conformal_runtime is None:
             return
-        state = to_json_safe_state(conformal_runtime.get_diagnostics())
+        state = to_json_safe_state(conformal_runtime.get_resume_state())
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
 
     def _record_conformal_coverage(
@@ -480,16 +516,16 @@ class BackendEngine:
             runtime is None
             or self.initial_ledger is None
             or self.initial_ledger.empty
-            or CALIBRATION_STATE not in self.initial_ledger.columns
+            or CALIBRATION_STATE_REF not in self.initial_ledger.columns
         ):
             return
 
         max_issued_count = 0
-        for payload in self.initial_ledger[CALIBRATION_STATE].dropna().astype(str):
-            if not payload:
+        for state_ref in self.initial_ledger[CALIBRATION_STATE_REF].dropna().astype(str):
+            parsed = parse_state_ref(state_ref) if state_ref else None
+            if parsed is None:
                 continue
-            state = deserialize_calibration_state(payload)
-            max_issued_count = max(max_issued_count, int(state.get("issued_count", 0)) + 1)
+            max_issued_count = max(max_issued_count, parsed.issued_count + 1)
 
         if (
             isinstance(runtime, SymmetricIntervalRuntime)

@@ -217,8 +217,9 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
 
     def update(self, error) -> np.ndarray:
         error = _as_1d_array(error, "error", self._horizon)
-        self._alpha = _clip_alpha(  # type: ignore[assignment]
-            self._alpha + self._gamma * (self._target_alpha - error), self._bounds
+        self._alpha = np.asarray(
+            _clip_alpha(self._alpha + self._gamma * (self._target_alpha - error), self._bounds),
+            dtype=float,
         )
         self._alpha_history.append(self._alpha.copy())
         return self._alpha.copy()

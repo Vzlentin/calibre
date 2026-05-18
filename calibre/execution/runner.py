@@ -13,7 +13,12 @@ from calibre.conformal import ConformalRuntime
 from calibre.core.forecast_frame import DS
 from calibre.evaluation.forecast_metrics import compute_metrics
 from calibre.evaluation.point_metrics import mae, rmse, smape, wape
-from calibre.execution.backend import BackendEngine, BackendResult
+from calibre.execution.backend import (
+    BackendEngine,
+    BackendResult,
+    ConformalOptions,
+    ExecutionOptions,
+)
 from calibre.execution.data_loading import load_period
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.ledger import ForecastLedger, OrderLedger
@@ -96,10 +101,9 @@ def run_backtest(
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
     result = BackendEngine(
-        freq=freq,
-        engine=engine,
-        conformal_runtime=conformal_runtime,
-        order_config=order_config,
+        execution=ExecutionOptions(freq=freq, engine=engine),
+        conformal=ConformalOptions(runtime=conformal_runtime),
+        order=order_config,
     ).execute(tasks, sales, origins)
 
     ledger = result.ledger
@@ -140,8 +144,7 @@ def run_forecast(
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
     return BackendEngine(
-        freq=freq,
-        engine=engine,
-        conformal_runtime=conformal_runtime,
-        order_config=order_config,
+        execution=ExecutionOptions(freq=freq, engine=engine),
+        conformal=ConformalOptions(runtime=conformal_runtime),
+        order=order_config,
     ).execute(tasks, sales, origins)

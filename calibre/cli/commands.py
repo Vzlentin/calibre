@@ -11,7 +11,13 @@ from calibre.cli.config import BackendConfig, load_config, load_config_from_mapp
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.metrics import set_order_cost
-from calibre.execution.backend import BackendEngine, BackendResult
+from calibre.execution.backend import (
+    BackendEngine,
+    BackendResult,
+    ConformalOptions,
+    ExecutionOptions,
+    LedgerOutputOptions,
+)
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.io import is_local_fs, open_fs, write_parquet
@@ -219,16 +225,23 @@ def run_config(
     execution_engine = _resolve_execution_engine(config)
     try:
         result = BackendEngine(
-            freq=config.origins.freq,
-            engine=execution_engine,
-            conformal_config=conformal_config,
-            order_config=_build_order_config(config),
-            streaming_output=streaming_output,
-            streaming_order_output=streaming_order_output,
-            seed=config.execution.seed,
-            run_id=run_id,
-            conformal_state_store=conformal_state_store,
-            initial_ledger=initial_ledger,
+            execution=ExecutionOptions(
+                freq=config.origins.freq,
+                engine=execution_engine,
+                seed=config.execution.seed,
+            ),
+            output=LedgerOutputOptions(
+                forecast_path=streaming_output,
+                order_path=streaming_order_output,
+                streaming=config.output.streaming,
+            ),
+            conformal=ConformalOptions(
+                config=conformal_config,
+                run_id=run_id,
+                state_store=conformal_state_store,
+                initial_ledger=initial_ledger,
+            ),
+            order=_build_order_config(config),
         ).execute(tasks, bundle.history, origins)
     finally:
         _close_execution_engine(execution_engine)

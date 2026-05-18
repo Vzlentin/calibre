@@ -27,8 +27,6 @@ from calibre.conformal.runtime import (
     SymmetricIntervalConfig,
     SymmetricIntervalRuntime,
     build_symmetric_interval_runtime,
-    deserialize_calibration_state,
-    serialize_calibration_state,
 )
 from calibre.conformal.scores import (
     AbsoluteErrorScore,
@@ -60,11 +58,9 @@ __all__ = [
     "absolute_error_score",
     "build_symmetric_interval_runtime",
     "category_partition",
-    "deserialize_calibration_state",
     "global_partition",
     "regime_partition",
     "scaled_absolute_error",
-    "serialize_calibration_state",
     "series_partition",
     "SymmetricIntervalConfig",
     "SymmetricIntervalRuntime",

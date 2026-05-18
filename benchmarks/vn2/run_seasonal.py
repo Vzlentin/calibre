@@ -87,7 +87,7 @@ from calibre.execution import (
     observe_cumulative,
     observe_per_horizon,
 )
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri
 from calibre.execution.task_builder import build_tasks
@@ -185,7 +185,7 @@ def _run_warmup(
         series_filter=series_filter,
     )
 
-    engine = BackendEngine(freq="W-MON")
+    engine = BackendEngine(execution=ExecutionOptions(freq="W-MON"))
     result = engine.execute(tasks, actuals=sales, origins=origin_dates)
     ledger_df = result.ledger.to_df()
 
@@ -345,7 +345,7 @@ def run_seasonal(
             n_calibrated = len(score_history)
             logger.info("Warmup complete. Calibrated %s conformal policies.", n_calibrated)
 
-        engine = BackendEngine(freq="W-MON")
+        engine = BackendEngine(execution=ExecutionOptions(freq="W-MON"))
 
         if conformal_config.mode == "cumulative":
             observe_fn = observe_cumulative
