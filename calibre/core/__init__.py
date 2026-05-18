@@ -17,8 +17,7 @@ from calibre.core.forecast_frame import (
     validate_actuals_frame,
     validate_forecast_frame,
 )
-from calibre.core.forecast_task import ForecastTask
-from calibre.core.forecast_task_io import ForecastTaskRef
+from calibre.core.forecast_task import ForecastTask, ForecastTaskRef
 from calibre.core.logging import JsonFormatter, setup_logging
 from calibre.core.order_types import (
     INVENTORY_POSITION,

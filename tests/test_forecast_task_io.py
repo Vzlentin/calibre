@@ -3,8 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
-from calibre.core.forecast_task import ForecastTask
-from calibre.core.forecast_task_io import ForecastTaskRef
+from calibre.core.forecast_task import ForecastTask, ForecastTaskRef
 
 
 def test_forecast_task_to_uri_round_trips_from_fsspec_uri() -> None:
