@@ -81,25 +81,36 @@ Terraform, AWS Batch, Azure Container Instances, and Databricks setup.
 ## Repository structure
 
 ```
-calibre/
-├── api/           # FastAPI routes and schemas
-├── cli/           # CLI entrypoint, config loader, commands
-├── conformal/     # Calibration protocols, intervals, adaptive controllers
-├── core/          # ForecastFrame, ForecastTask, metrics, tracing
-├── evaluation/    # Scoring and metric computation
-├── execution/     # BackendEngine, ledger, dataset registry, I/O
-├── forecasting/   # Adapter registry + model adapters
-├── features/      # Feature engineering for global models
-├── ensemble/      # Model combination strategies
-├── ordering/      # Order policy protocols and implementations
-├── order/         # Legacy order dispatch (preserved for compatibility)
-├── simulation/    # Demand and lead-time simulators
-├── storage/       # Postgres state store, Alembic migrations
-├── tasks/         # Task definitions and builders
-├── tuning/        # Optuna-based hyper-parameter tuning
-├── benchmarks/    # VN2 and ACI benchmark suites
-│   ├── vn2/
-│   └── cp/aci/
-├── tests/         # pytest suite
-└── docs/          # Deployment guides
+calibre/                 # Python package
+├── api/                 # FastAPI routes and schemas
+├── cli/                 # CLI entrypoint, config loader, commands
+├── conformal/           # ACI / MSCP / split conformal policies
+├── contracts/           # Forecast frame schema and shared dtypes
+├── core/                # ForecastFrame, ForecastTask, metrics, tracing
+├── engine/              # Backend engine internals
+├── ensemble/            # Ensemble combinators (e.g. median)
+├── evaluation/          # Scoring and metric computation
+├── eval/                # Legacy evaluation helpers
+├── execution/           # BackendEngine, ledger, dataset registry, I/O
+├── features/            # Feature engineering for global models
+├── forecasting/         # Adapter registry + model adapters
+├── models/              # Model-specific logic and wrappers
+├── orchestration/       # Pipeline orchestration helpers
+├── order/               # Ordering policies (newsvendor, RS, RSS)
+├── ordering/            # Order policy protocols and implementations
+├── pipeline/            # Loading, task building, end-to-end runner
+├── simulation/          # Demand and lead-time simulators
+├── storage/             # Postgres state store, Alembic migrations
+├── tasks/               # ForecastTask, TuningTask
+└── tuning/              # Optuna-based hyper-parameter tuning
+
+benchmarks/              # Benchmark suites
+├── vn2/                 # VN2 inventory challenge
+└── cp/aci/              # Adaptive conformal inference parity
+
+tests/                   # pytest suite
+docs/                    # Deployment guides
+infra/                   # Terraform modules
+scripts/                 # Databricks notebooks, jobs
+.github/workflows/       # CI: ruff, mypy, pytest
 ```
