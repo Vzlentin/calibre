@@ -12,7 +12,9 @@ from calibre.conformal import (
 )
 from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
+    CALIBRATION_STATE_REF,
     CONFORMAL_METHOD,
+    CONFORMAL_PARTITION,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -25,7 +27,14 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.metrics import conformal_coverage_ratio
 from calibre.core.order_types import NewsvendorPolicyParameters, RsPolicyParameters
-from calibre.execution.backend import BackendEngine, BackendResult, _process_task_ref_partition
+from calibre.execution.backend import (
+    BackendEngine,
+    BackendResult,
+    ConformalOptions,
+    ExecutionOptions,
+    LedgerOutputOptions,
+    _process_task_ref_partition,
+)
 from calibre.execution.ledger import OrderLedger
 from calibre.ordering.policy_config import OrderPolicyConfig
 
@@ -60,6 +69,23 @@ def test_execute_returns_backend_result(single_series_setup):
     assert isinstance(result, BackendResult)
     df = result.ledger.to_df()
     assert len(df) == 8
+
+
+def test_execute_accepts_grouped_constructor_options(single_series_setup, tmp_path):
+    task, actuals, origins = single_series_setup
+    path = tmp_path / "grouped-ledger.parquet"
+    engine = BackendEngine(
+        execution_options=ExecutionOptions(freq="W", seed=42),
+        ledger_output_options=LedgerOutputOptions(
+            forecast_path=path.as_posix(),
+            streaming=True,
+        ),
+        conformal_options=ConformalOptions(),
+    )
+    result = engine.execute([task], actuals, origins)
+
+    assert path.exists()
+    assert len(result.ledger.to_df()) == 8
 
 
 def test_fugue_partition_worker_is_module_level_picklable():
@@ -127,9 +153,11 @@ def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
     assert lower_col in df.columns
     assert upper_col in df.columns
     assert CONFORMAL_METHOD in df.columns
-    assert CALIBRATION_STATE in df.columns
+    assert CALIBRATION_STATE not in df.columns
+    assert CALIBRATION_STATE_REF in df.columns
+    assert CONFORMAL_PARTITION in df.columns
     assert df[CONFORMAL_METHOD].eq("aci").all()
-    assert df[CALIBRATION_STATE].str.startswith("{").all()
+    assert df[CALIBRATION_STATE_REF].str.startswith("aci:perhorizon:").all()
     assert df.loc[df[Y].notna(), NONCONFORMITY_SCORE].notna().all()
 
 

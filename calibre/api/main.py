@@ -7,6 +7,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from calibre.api.runs import create_run, get_run, queue_run, run_backtest_job
 from calibre.api.schemas import ForecastRequest, ForecastResponse, RunResponse
 from calibre.cli.commands import run_config
+from calibre.core.run_status import RunStatus
 
 app = FastAPI(title="Calibre", version="0.1.0")
 MAX_FORECAST_UNIQUE_IDS = 30
@@ -50,9 +51,9 @@ def backtests(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> RunResponse:
     run = create_run(req.config, idempotency_key=idempotency_key)
-    if run.status == "failed":
+    if run.status == RunStatus.FAILED:
         run = queue_run(run.id)
-    if run.status in {"queued", "failed"}:
+    if run.status in {RunStatus.QUEUED, RunStatus.FAILED}:
         bg.add_task(run_backtest_job, run.id)
     return run
 

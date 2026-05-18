@@ -17,10 +17,11 @@ from calibre.conformal.protocols import Calibrator, Controller, Score
 from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.types import IntervalPrediction
 from calibre.core.forecast_frame import (
-    CALIBRATION_STATE,
+    CALIBRATION_STATE_REF,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
+    CONFORMAL_PARTITION,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -71,6 +72,8 @@ class ConformalRuntime(Protocol):
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
+
+    def get_resume_state(self) -> dict[str, Any]: ...
 
     def get_diagnostics(self) -> dict[str, Any]: ...
 
@@ -221,6 +224,28 @@ class SymmetricIntervalRuntime:
             "calibrator": calibrator_state,
         }
 
+    def _state_ref(self, partition: str) -> str:
+        return f"{self.method_name}:{self.config.mode}:{self._issued_count}:{partition}"
+
+    def _controller_resume_state(self) -> dict[str, Any]:
+        state = self.controller.get_state()
+        controller_type = state.get("type")
+        if controller_type == "adaptive":
+            return {
+                key: state[key]
+                for key in (
+                    "type",
+                    "target_alpha",
+                    "gamma",
+                    "current_alpha",
+                    "alpha_bounds",
+                )
+                if key in state
+            }
+        if controller_type == "fixed":
+            return {key: state[key] for key in ("type", "alpha") if key in state}
+        return state
+
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
         started = time.perf_counter()
         if frame.empty:
@@ -251,25 +276,28 @@ class SymmetricIntervalRuntime:
             lower_values = np.full(len(ordered), np.nan, dtype=float)
             upper_values = np.full(len(ordered), np.nan, dtype=float)
             alpha_values = np.full(len(ordered), np.nan, dtype=float)
-            state_values: list[str] = []
+            state_refs: list[str] = []
+            partitions: list[str] = []
 
             for pos, (_, row) in enumerate(ordered.iterrows()):
                 alpha = self.controller.get_alpha()
                 partition = self._partition_for_row(row)
+                partitions.append(partition)
                 radius = self.calibrator.predict(alpha, partition)
                 alpha_values[pos] = alpha
                 if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
                     center = float(row[Y_HAT])
                     lower_values[pos] = center - float(radius)
                     upper_values[pos] = center + float(radius)
-                state_values.append(serialize_calibration_state(self._snapshot(partition)))
+                state_refs.append(self._state_ref(partition))
 
             ordered[lower_col] = lower_values
             ordered[upper_col] = upper_values
             ordered[CONFORMAL_METHOD] = self.method_name
             ordered[CONFORMAL_MODE] = self.config.mode
             ordered[CONFORMAL_ALPHA] = alpha_values
-            ordered[CALIBRATION_STATE] = state_values
+            ordered[CALIBRATION_STATE_REF] = state_refs
+            ordered[CONFORMAL_PARTITION] = partitions
             if NONCONFORMITY_SCORE not in ordered.columns:
                 ordered[NONCONFORMITY_SCORE] = np.nan
             parts.append(ordered)
@@ -288,6 +316,8 @@ class SymmetricIntervalRuntime:
         result[CONFORMAL_METHOD] = self.method_name
         result[CONFORMAL_MODE] = self.config.mode
         result[CONFORMAL_ALPHA] = self.controller.get_alpha()
+        result[CALIBRATION_STATE_REF] = ""
+        result[CONFORMAL_PARTITION] = ""
         if NONCONFORMITY_SCORE not in result.columns:
             result[NONCONFORMITY_SCORE] = np.nan
 
@@ -310,14 +340,10 @@ class SymmetricIntervalRuntime:
                 center = float(window[Y_HAT].sum())
                 result.loc[terminal_idx, lower_col] = center - float(radius)
                 result.loc[terminal_idx, upper_col] = center + float(radius)
-            result.loc[terminal_idx, CALIBRATION_STATE] = serialize_calibration_state(
-                self._snapshot(partition)
-            )
+            result.loc[terminal_idx, CALIBRATION_STATE_REF] = self._state_ref(partition)
+            result.loc[terminal_idx, CONFORMAL_PARTITION] = partition
             self._issued_count += 1
 
-        if CALIBRATION_STATE not in result.columns:
-            result[CALIBRATION_STATE] = ""
-        result[CALIBRATION_STATE] = result[CALIBRATION_STATE].fillna("")
         return result
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
@@ -422,6 +448,21 @@ class SymmetricIntervalRuntime:
             "protection_period": self.config.protection_period,
             "issued_count": self._issued_count,
             "controller": self.controller.get_state(),
+            "calibrator": calibrator_state,
+        }
+
+    def get_resume_state(self) -> dict[str, Any]:
+        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        return {
+            "method": self.method_name,
+            "mode": self.config.mode,
+            "coverage": self.config.coverage,
+            "calibration_window": self.config.calibration_window,
+            "gamma": self.config.gamma,
+            "quantile_rule": self.config.resolved_quantile_rule,
+            "protection_period": self.config.protection_period,
+            "issued_count": self._issued_count,
+            "controller": self._controller_resume_state(),
             "calibrator": calibrator_state,
         }
 

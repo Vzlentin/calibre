@@ -39,8 +39,10 @@ def test_conformal_runtime_stamps_aci_interval_columns_and_state():
     from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
     from calibre.core.forecast_frame import (
         CALIBRATION_STATE,
+        CALIBRATION_STATE_REF,
         CONFORMAL_ALPHA,
         CONFORMAL_METHOD,
+        CONFORMAL_PARTITION,
         FORECAST_ORIGIN,
         MODEL_NAME,
         NONCONFORMITY_SCORE,
@@ -73,7 +75,9 @@ def test_conformal_runtime_stamps_aci_interval_columns_and_state():
     assert enriched[CONFORMAL_METHOD].eq("aci").all()
     assert enriched[CONFORMAL_ALPHA].notna().all()
     assert enriched[NONCONFORMITY_SCORE].isna().all()
-    assert enriched[CALIBRATION_STATE].str.startswith("{").all()
+    assert CALIBRATION_STATE not in enriched.columns
+    assert enriched[CALIBRATION_STATE_REF].str.startswith("aci:perhorizon:").all()
+    assert enriched[CONFORMAL_PARTITION].str.contains("SeasonalNaive:h").all()
 
 
 def test_conformal_runtime_updates_only_observed_aci_horizon():

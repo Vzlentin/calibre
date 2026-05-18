@@ -8,7 +8,6 @@ import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.core.forecast_frame import (
-    CALIBRATION_STATE,
     FORECAST_ORIGIN,
     MODEL_NAME,
     NONCONFORMITY_SCORE,
@@ -71,16 +70,17 @@ def test_symmetric_runtime_from_state_restores_calibrator_and_controller() -> No
     observed = runtime.observe(first)
     assert observed[NONCONFORMITY_SCORE].iloc[0] == pytest.approx(2.0)
 
-    second = runtime.apply(_frame(pd.Timestamp("2024-01-08"), 11.0))
-    state_payload = str(second[CALIBRATION_STATE].iloc[0])
+    state_payload = runtime.get_resume_state()
     resumed = SymmetricIntervalRuntime.from_state(config, state_payload)
 
     original_diag = runtime.get_diagnostics()
     resumed_diag = resumed.get_diagnostics()
-    assert resumed_diag["issued_count"] == original_diag["issued_count"] - 1
+    assert resumed_diag["issued_count"] == original_diag["issued_count"]
     assert resumed_diag["controller"]["current_alpha"] == pytest.approx(
         original_diag["controller"]["current_alpha"]
     )
+    assert "alpha_history" not in state_payload["controller"]
+    assert "error_history" not in state_payload["controller"]
     np.testing.assert_allclose(
         resumed_diag["calibrator"]["score_history"]["stub:h1:__global__"],
         np.asarray([2.0]),
@@ -113,7 +113,10 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
         conformal_state_store=store,
     ).execute([task], actuals, origins=[dates[7], dates[8]])
 
-    assert store.get(run_id, RUNTIME_PARTITION) is not None
+    persisted = store.get(run_id, RUNTIME_PARTITION)
+    assert persisted is not None
+    assert "alpha_history" not in persisted["controller"]
+    assert "error_history" not in persisted["controller"]
 
     resumed = BackendEngine(
         freq="W",

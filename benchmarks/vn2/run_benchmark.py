@@ -39,7 +39,7 @@ import math
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from functools import cache, partial
@@ -87,7 +87,11 @@ from calibre.conformal.cumulative_risk import (
     CumulativeRiskRuntime,
 )
 from calibre.conformal.partitions import global_partition, series_partition
-from calibre.conformal.runtime import SymmetricIntervalConfig, build_symmetric_interval_runtime
+from calibre.conformal.runtime import (
+    ConformalRuntime,
+    SymmetricIntervalConfig,
+    build_symmetric_interval_runtime,
+)
 from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -1251,7 +1255,7 @@ def _optimal_order_path_for_sku(
                 sum(demands[arrival_week - 1 :]) if arrival_week <= total_weeks else 0.0
             )
             max_units = int(math.ceil(max(0.0, remaining_after_arrival) / order_step))
-            order_values = (unit * order_step for unit in range(max_units + 1))
+            order_values: Iterable[float] = (unit * order_step for unit in range(max_units + 1))
         else:
             order_values = (0.0,)
 
@@ -1681,7 +1685,7 @@ def run_benchmark(
         if best_config is None:
             if tune:
                 best_config = run_hpo(
-                    data_dir=data_dir,
+                    data_dir=Path(data_dir),
                     horizon=horizon,
                     n_trials=hpo_n_trials,
                     n_origins=hpo_n_origins,
@@ -1712,6 +1716,7 @@ def run_benchmark(
         engine = BackendEngine(freq="W-MON", engine=execution_engine)
         target_quantile_col = quantile_column(quantile_alpha)
         order_conformal_runtime: CumulativeRiskRuntime | None = None
+        conformal_runtime: ConformalRuntime | None = None
         if order_conformal_config is not None:
             resolved_order_config = replace(
                 order_conformal_config,

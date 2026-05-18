@@ -49,6 +49,7 @@ def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> Non
     actual = streaming_result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)
     assert streaming_result.ledger._frames == []
+    assert not hasattr(streaming_result.ledger, "_stream_current")
     assert path.exists()
     assert (tmp_path / "ledger.resolved.parquet").exists()
 
@@ -70,6 +71,32 @@ def test_streaming_output_accepts_fsspec_uri(monkeypatch) -> None:
 
     assert len(result.ledger.to_df()) == 1
     assert pd.read_parquet("memory://calibre-tests/streaming/ledger.parquet").shape[0] == 1
+
+
+def test_streaming_resolution_keeps_only_pending_rows(monkeypatch, tmp_path) -> None:
+    dates = pd.date_range("2024-01-07", periods=24, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(24)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=4,
+        model_config={"backend": "stub", "model": "stub_model"},
+    )
+    origins = list(dates[5:17])
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    expected = BackendEngine(freq="W").execute([task], actuals, origins).ledger.to_df()
+    path = tmp_path / "bounded-ledger.parquet"
+    result = BackendEngine(freq="W", streaming_output=str(path)).execute(
+        [task],
+        actuals,
+        origins,
+    )
+
+    actual = result.ledger.to_df()
+    pd.testing.assert_frame_equal(actual, expected)
+    assert len(result.ledger._pending) <= 10
+    assert len(pd.read_parquet(path)) == len(origins) * task.horizon
 
 
 def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:

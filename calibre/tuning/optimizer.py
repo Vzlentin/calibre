@@ -7,7 +7,7 @@ import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
 from calibre.forecasting.adapter_registry import resolve_adapter
 from calibre.tuning.task import TuningTask
 
@@ -42,8 +42,8 @@ def optimize_task(task: TuningTask) -> dict:
                 model_config=candidate_config,
             )
             result = BackendEngine(
-                freq=freq,
-                conformal_runtime=conformal_runtime_factory(),
+                execution_options=ExecutionOptions(freq=freq),
+                conformal_options=ConformalOptions(runtime=conformal_runtime_factory()),
             ).execute([forecast_task], actuals, origins)
             resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
             if resolved.empty:

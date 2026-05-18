@@ -11,6 +11,8 @@ FORECAST_ORIGIN = "forecast_origin"
 MODEL_NAME = "model_name"
 NONCONFORMITY_SCORE = "nonconformity_score"
 CALIBRATION_STATE = "calibration_state"
+CALIBRATION_STATE_REF = "calibration_state_ref"
+CONFORMAL_PARTITION = "conformal_partition"
 CONFORMAL_METHOD = "conformal_method"
 CONFORMAL_ALPHA = "conformal_alpha"
 CONFORMAL_MODE = "conformal_mode"
@@ -47,6 +49,8 @@ _EXPECTED_DTYPES = {
 _OPTIONAL_DTYPES = {
     NONCONFORMITY_SCORE: "float64",
     CALIBRATION_STATE: "object",
+    CALIBRATION_STATE_REF: "object",
+    CONFORMAL_PARTITION: "object",
     CONFORMAL_METHOD: "object",
     CONFORMAL_ALPHA: "float64",
     CONFORMAL_MODE: "object",

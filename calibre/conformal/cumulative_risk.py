@@ -9,12 +9,12 @@ import numpy as np
 import pandas as pd
 
 from calibre.conformal.partitions import GLOBAL_PARTITION, global_partition
-from calibre.conformal.runtime import serialize_calibration_state
 from calibre.core.forecast_frame import (
-    CALIBRATION_STATE,
+    CALIBRATION_STATE_REF,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
+    CONFORMAL_PARTITION,
     FORECAST_ORIGIN,
     MODEL_NAME,
     NONCONFORMITY_SCORE,
@@ -367,6 +367,9 @@ class CumulativeRiskRuntime:
             **buffer_components,
         }
 
+    def _state_ref(self, partition: Hashable) -> str:
+        return f"{self.config.method_name}:cumulative:{self._sequence}:{partition}"
+
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
         # Interval columns are populated only on the terminal-H row of each
         # (uid, model, origin) group; earlier rows keep NaN. Aggregating
@@ -386,6 +389,8 @@ class CumulativeRiskRuntime:
         result[CONFORMAL_METHOD] = self.config.method_name
         result[CONFORMAL_MODE] = "cumulative"
         result[CONFORMAL_ALPHA] = self.config.alpha
+        result[CALIBRATION_STATE_REF] = ""
+        result[CONFORMAL_PARTITION] = ""
         if NONCONFORMITY_SCORE not in result.columns:
             result[NONCONFORMITY_SCORE] = np.nan
 
@@ -407,13 +412,8 @@ class CumulativeRiskRuntime:
 
             result.loc[terminal_idx, lower_col] = min(base_sum, upper)
             result.loc[terminal_idx, upper_col] = upper
-            result.loc[terminal_idx, CALIBRATION_STATE] = serialize_calibration_state(
-                self._snapshot(partition)
-            )
-
-        if CALIBRATION_STATE not in result.columns:
-            result[CALIBRATION_STATE] = ""
-        result[CALIBRATION_STATE] = result[CALIBRATION_STATE].fillna("")
+            result.loc[terminal_idx, CALIBRATION_STATE_REF] = self._state_ref(partition)
+            result.loc[terminal_idx, CONFORMAL_PARTITION] = str(partition)
         return result
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
@@ -479,3 +479,6 @@ class CumulativeRiskRuntime:
             "shrinkage_strength": self.config.shrinkage_strength,
             **self._calibrator.get_state(),
         }
+
+    def get_resume_state(self) -> dict[str, Any]:
+        return self.get_diagnostics()

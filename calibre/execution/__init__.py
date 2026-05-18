@@ -1,6 +1,12 @@
 """Execution layer: backend engine, ledgers, pipeline runners, decision loops."""
 
-from calibre.execution.backend import BackendEngine, BackendResult
+from calibre.execution.backend import (
+    BackendEngine,
+    BackendResult,
+    ConformalOptions,
+    ExecutionOptions,
+    LedgerOutputOptions,
+)
 from calibre.execution.data_loading import (
     load_master,
     load_period,
@@ -30,6 +36,9 @@ from calibre.execution.validation import load_costs, validate_dataset_bundle
 __all__ = [
     "BackendEngine",
     "BackendResult",
+    "ConformalOptions",
+    "ExecutionOptions",
+    "LedgerOutputOptions",
     "load_master",
     "load_period",
     "melt_wide_instock",

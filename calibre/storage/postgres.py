@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from calibre.core.run_status import RunStatus
 from calibre.storage.models import ConformalState, ForecastPointer, Run
 
 
@@ -47,7 +48,7 @@ class RunRepo:
             existing = self.get_by_idempotency_key(idempotency_key)
             if existing is not None:
                 return existing
-        run = Run(config=config, idempotency_key=idempotency_key, status="queued")
+        run = Run(config=config, idempotency_key=idempotency_key, status=RunStatus.QUEUED.value)
         self.session.add(run)
         self.session.flush()
         return run
@@ -58,13 +59,20 @@ class RunRepo:
     def get_by_idempotency_key(self, key: str) -> Run | None:
         return self.session.scalar(select(Run).where(Run.idempotency_key == key))
 
-    def set_status(self, run_id: UUID, status: str, *, error: str | None = None) -> None:
+    def set_status(
+        self,
+        run_id: UUID,
+        status: RunStatus | str,
+        *,
+        error: str | None = None,
+    ) -> None:
+        parsed_status = RunStatus(status)
         run = self.get(run_id)
         if run is None:
             raise KeyError(f"Unknown run_id: {run_id}")
-        run.status = status
+        run.status = parsed_status.value
         run.error = error
-        if status in {"succeeded", "failed"}:
+        if parsed_status in {RunStatus.SUCCEEDED, RunStatus.FAILED}:
             run.finished_at = datetime.now(UTC)
         else:
             run.finished_at = None

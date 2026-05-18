@@ -20,14 +20,14 @@ from calibre.conformal.runtime import (
     SymmetricIntervalConfig,
     SymmetricIntervalRuntime,
     build_symmetric_interval_runtime,
-    deserialize_calibration_state,
     to_json_safe_state,
 )
 from calibre.core.forecast_frame import (
-    CALIBRATION_STATE,
+    CALIBRATION_STATE_REF,
     CONFORMAL_ALPHA,
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
+    CONFORMAL_PARTITION,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -106,7 +106,14 @@ def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     result = frame.copy()
-    for col in (UNIQUE_ID, MODEL_NAME, CALIBRATION_STATE, CONFORMAL_METHOD, CONFORMAL_MODE):
+    for col in (
+        UNIQUE_ID,
+        MODEL_NAME,
+        CALIBRATION_STATE_REF,
+        CONFORMAL_PARTITION,
+        CONFORMAL_METHOD,
+        CONFORMAL_MODE,
+    ):
         if col in result.columns:
             result[col] = result[col].astype("object")
     for col in (DS, FORECAST_ORIGIN):
@@ -276,10 +283,38 @@ class BackendResult:
     order_ledger: OrderLedger | None = None
 
 
+@dataclass(frozen=True)
+class ExecutionOptions:
+    freq: str = "W"
+    engine: Any = None
+    seed: int | None = None
+    metrics: list[Callable] | None = None
+
+
+@dataclass(frozen=True)
+class LedgerOutputOptions:
+    forecast_path: str | None = None
+    order_path: str | None = None
+    streaming: bool = False
+
+
+@dataclass(frozen=True)
+class ConformalOptions:
+    runtime: ConformalRuntime | None = None
+    config: SymmetricIntervalConfig | None = None
+    run_id: UUID | None = None
+    state_store: ConformalStateStore | None = None
+    initial_ledger: pd.DataFrame | None = None
+
+    def __post_init__(self) -> None:
+        if self.runtime is not None and self.config is not None:
+            raise ValueError("Pass either conformal runtime or config, not both")
+
+
 class BackendEngine:
     def __init__(
         self,
-        freq: str = "W",
+        freq: str | ExecutionOptions = "W",
         metrics: list[Callable] | None = None,
         engine: Any = None,
         conformal_runtime: ConformalRuntime | None = None,
@@ -291,27 +326,87 @@ class BackendEngine:
         run_id: UUID | None = None,
         conformal_state_store: ConformalStateStore | None = None,
         initial_ledger: pd.DataFrame | None = None,
+        execution_options: ExecutionOptions | None = None,
+        ledger_output_options: LedgerOutputOptions | None = None,
+        conformal_options: ConformalOptions | None = None,
     ) -> None:
-        self.freq = freq
-        self.metrics = metrics
-        self.engine = engine
-        if conformal_runtime is not None and conformal_config is not None:
-            raise ValueError("Pass either conformal_runtime or conformal_config, not both")
-        self.conformal_config = conformal_config
+        if isinstance(freq, ExecutionOptions):
+            if execution_options is not None:
+                raise ValueError("Pass execution options once")
+            execution_options = freq
+            freq = "W"
+
+        legacy_execution = (
+            freq != "W" or metrics is not None or engine is not None or seed is not None
+        )
+        if execution_options is not None and legacy_execution:
+            raise ValueError("Pass either execution_options or legacy execution arguments")
+        if execution_options is None:
+            execution_options = ExecutionOptions(
+                freq=str(freq),
+                engine=engine,
+                seed=seed,
+                metrics=metrics,
+            )
+
+        legacy_ledger_output = streaming_output is not None or streaming_order_output is not None
+        if ledger_output_options is not None and legacy_ledger_output:
+            raise ValueError("Pass either ledger_output_options or legacy streaming arguments")
+        if ledger_output_options is None:
+            ledger_output_options = LedgerOutputOptions(
+                forecast_path=streaming_output,
+                order_path=streaming_order_output,
+                streaming=legacy_ledger_output,
+            )
+
+        legacy_conformal = (
+            conformal_runtime is not None
+            or conformal_config is not None
+            or run_id is not None
+            or conformal_state_store is not None
+            or initial_ledger is not None
+        )
+        if conformal_options is not None and legacy_conformal:
+            raise ValueError("Pass either conformal_options or legacy conformal arguments")
+        if conformal_options is None:
+            conformal_options = ConformalOptions(
+                runtime=conformal_runtime,
+                config=conformal_config,
+                run_id=run_id,
+                state_store=conformal_state_store,
+                initial_ledger=initial_ledger,
+            )
+
+        self.execution_options = execution_options
+        self.ledger_output_options = ledger_output_options
+        self.conformal_options = conformal_options
+        self.freq = execution_options.freq
+        self.engine = execution_options.engine
         self.conformal_runtime = (
-            conformal_runtime
-            if conformal_runtime is not None
-            else build_symmetric_interval_runtime(conformal_config)
-            if conformal_config is not None
+            conformal_options.runtime
+            if conformal_options.runtime is not None
+            else build_symmetric_interval_runtime(conformal_options.config)
+            if conformal_options.config is not None
             else None
         )
+        self.conformal_config = conformal_options.config
         self.order_config = order_config
-        self.streaming_output = streaming_output
-        self.streaming_order_output = streaming_order_output
-        self.seed: Seed | None = set_seed(seed) if seed is not None else None
-        self.run_id = run_id
-        self.conformal_state_store = conformal_state_store
-        self.initial_ledger = initial_ledger.copy() if initial_ledger is not None else None
+        self.streaming_output = (
+            ledger_output_options.forecast_path if ledger_output_options.streaming else None
+        )
+        self.streaming_order_output = (
+            ledger_output_options.order_path if ledger_output_options.streaming else None
+        )
+        self.seed: Seed | None = (
+            set_seed(execution_options.seed) if execution_options.seed is not None else None
+        )
+        self.run_id = conformal_options.run_id
+        self.conformal_state_store = conformal_options.state_store
+        self.initial_ledger = (
+            conformal_options.initial_ledger.copy()
+            if conformal_options.initial_ledger is not None
+            else None
+        )
 
     def execute(
         self,
@@ -413,7 +508,7 @@ class BackendEngine:
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
-        current = ledger.to_df()
+        current = ledger.resolution_frame()
         if current.empty:
             return
 
@@ -454,7 +549,7 @@ class BackendEngine:
     def _persist_conformal_state(self, conformal_runtime: ConformalRuntime | None) -> None:
         if self.run_id is None or self.conformal_state_store is None or conformal_runtime is None:
             return
-        state = to_json_safe_state(conformal_runtime.get_diagnostics())
+        state = to_json_safe_state(conformal_runtime.get_resume_state())
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
 
     def _record_conformal_coverage(
@@ -480,16 +575,22 @@ class BackendEngine:
             runtime is None
             or self.initial_ledger is None
             or self.initial_ledger.empty
-            or CALIBRATION_STATE not in self.initial_ledger.columns
+            or CALIBRATION_STATE_REF not in self.initial_ledger.columns
         ):
             return
 
         max_issued_count = 0
-        for payload in self.initial_ledger[CALIBRATION_STATE].dropna().astype(str):
-            if not payload:
+        for state_ref in self.initial_ledger[CALIBRATION_STATE_REF].dropna().astype(str):
+            if not state_ref:
                 continue
-            state = deserialize_calibration_state(payload)
-            max_issued_count = max(max_issued_count, int(state.get("issued_count", 0)) + 1)
+            parts = state_ref.split(":", 3)
+            if len(parts) < 4:
+                continue
+            try:
+                issued_count = int(parts[2])
+            except ValueError:
+                continue
+            max_issued_count = max(max_issued_count, issued_count + 1)
 
         if (
             isinstance(runtime, SymmetricIntervalRuntime)
