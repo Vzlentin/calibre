@@ -188,6 +188,10 @@ class SymmetricIntervalRuntime:
     def interval_columns(self) -> tuple[str, str]:
         return self.config.interval_columns
 
+    @property
+    def mode(self) -> str:
+        return self.config.mode
+
     def _base_partition(self, row: pd.Series) -> str:
         value = _hashable(self.config.partition_key(row))
         return str(value)

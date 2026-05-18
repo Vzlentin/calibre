@@ -468,7 +468,7 @@ class BackendEngine:
         comparable = resolved.dropna(subset=[Y, lower_col, upper_col, MODEL_NAME])
         if comparable.empty:
             return
-        mode = self.conformal_config.mode if self.conformal_config is not None else "unknown"
+        mode = getattr(conformal_runtime, "mode", "unknown")
         for model_name, group in comparable.groupby(MODEL_NAME, sort=False):
             covered = (group[Y] >= group[lower_col]) & (group[Y] <= group[upper_col])
             set_conformal_coverage(str(model_name), mode, float(covered.mean()))

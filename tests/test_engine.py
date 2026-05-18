@@ -331,6 +331,11 @@ def test_engine_records_conformal_coverage_metric(single_series_setup):
 
     engine.execute([task], actuals, origins)
 
+    labels = {
+        (sample.labels["model"], sample.labels["mode"])
+        for sample in conformal_coverage_ratio.collect()[0].samples
+    }
+    assert ("SeasonalNaive", "perhorizon") in labels
     coverage = conformal_coverage_ratio.labels(
         model="SeasonalNaive", mode="perhorizon"
     )._value.get()
