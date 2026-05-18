@@ -21,7 +21,7 @@ from calibre.conformal.runtime import (
     SymmetricIntervalRuntime,
     build_symmetric_interval_runtime,
     deserialize_calibration_state,
-    serialize_calibration_state,
+    to_json_safe_state,
 )
 from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
@@ -333,7 +333,6 @@ class BackendEngine:
         conformal_runtime = self.conformal_runtime
 
         try:
-            # Split tasks once: local (per-series Fugue) vs global (joint direct)
             parallel_tasks: list[ForecastTask] = []
             direct_tasks: list[ForecastTask] = []
             for task in tasks:
@@ -450,17 +449,12 @@ class BackendEngine:
         state = self.conformal_state_store.get(self.run_id, RUNTIME_PARTITION)
         if state is None:
             return
-        self.conformal_runtime = SymmetricIntervalRuntime.from_state(
-            self.conformal_config,
-            serialize_calibration_state(state),
-        )
+        self.conformal_runtime = SymmetricIntervalRuntime.from_state(self.conformal_config, state)
 
     def _persist_conformal_state(self, conformal_runtime: ConformalRuntime | None) -> None:
         if self.run_id is None or self.conformal_state_store is None or conformal_runtime is None:
             return
-        state = deserialize_calibration_state(
-            serialize_calibration_state(conformal_runtime.get_diagnostics())
-        )
+        state = to_json_safe_state(conformal_runtime.get_diagnostics())
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
 
     def _record_conformal_coverage(
@@ -474,8 +468,7 @@ class BackendEngine:
         comparable = resolved.dropna(subset=[Y, lower_col, upper_col, MODEL_NAME])
         if comparable.empty:
             return
-        diagnostics = conformal_runtime.get_diagnostics()
-        mode = str(diagnostics.get("mode", "unknown"))
+        mode = self.conformal_config.mode if self.conformal_config is not None else "unknown"
         for model_name, group in comparable.groupby(MODEL_NAME, sort=False):
             covered = (group[Y] >= group[lower_col]) & (group[Y] <= group[upper_col])
             set_conformal_coverage(str(model_name), mode, float(covered.mean()))
@@ -495,10 +488,7 @@ class BackendEngine:
         for payload in self.initial_ledger[CALIBRATION_STATE].dropna().astype(str):
             if not payload:
                 continue
-            try:
-                state = deserialize_calibration_state(payload)
-            except (TypeError, ValueError):
-                continue
+            state = deserialize_calibration_state(payload)
             max_issued_count = max(max_issued_count, int(state.get("issued_count", 0)) + 1)
 
         if (

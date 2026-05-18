@@ -59,6 +59,11 @@ def deserialize_calibration_state(payload: str | None) -> dict[str, Any]:
     return json.loads(payload)  # type: ignore[arg-type]
 
 
+def to_json_safe_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Coerce numpy/ndarray/Timestamp values into JSON-safe Python objects."""
+    return json.loads(serialize_calibration_state(state))
+
+
 class ConformalRuntime(Protocol):
     @property
     def interval_columns(self) -> tuple[str, str]: ...
@@ -164,10 +169,13 @@ class SymmetricIntervalRuntime:
     def from_state(
         cls,
         config: SymmetricIntervalConfig,
-        state_payload: str | None,
+        state_payload: str | dict[str, Any] | None,
     ) -> SymmetricIntervalRuntime:
         """Rehydrate a runtime from a serialized calibration-state snapshot."""
-        state = deserialize_calibration_state(state_payload)
+        if isinstance(state_payload, dict):
+            state = state_payload
+        else:
+            state = deserialize_calibration_state(state_payload)
         runtime = cls(config, method_name=state.get("method", config.method))
         runtime._issued_count = int(state.get("issued_count", 0))
         if "calibrator" in state:

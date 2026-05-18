@@ -89,6 +89,7 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "benchmarks/**" = ["E501"]
+"calibre/cli/**" = ["T20"]
 
 [tool.mypy]
 python_version = "3.11"

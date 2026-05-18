@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -10,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from calibre.core.forecast_frame import REQUIRED_COLUMNS, validate_forecast_frame
-from calibre.execution.io import ensure_parent_dir
+from calibre.execution.io import join_uri, open_fs, write_parquet
 
 
 class LedgerSink(Protocol):
@@ -22,9 +23,8 @@ class LedgerSink(Protocol):
 class _ParquetLedgerSink:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
-        fs, fs_path = fsspec.core.url_to_fs(self.path)
-        ensure_parent_dir(self.path)
-        if fs.exists(fs_path):
+        fs, fs_path = open_fs(self.path)
+        with contextlib.suppress(FileNotFoundError):
             fs.rm(fs_path)
         self._handle = None
         self._writer: pq.ParquetWriter | None = None
@@ -45,12 +45,6 @@ class _ParquetLedgerSink:
             self._handle = None
 
 
-def _join_uri(base: str, *parts: str) -> str:
-    if "://" not in base:
-        return str(Path(base, *parts))
-    return "/".join([base.rstrip("/"), *(part.strip("/") for part in parts)])
-
-
 def _partition_value(value: Any) -> str:
     if pd.isna(value):
         return "__HIVE_DEFAULT_PARTITION__"
@@ -63,9 +57,8 @@ class _PartitionedParquetLedgerSink:
         self.partition_cols = list(partition_cols)
         self._writers: dict[tuple[str, ...], pq.ParquetWriter] = {}
         self._handles: dict[tuple[str, ...], Any] = {}
-        fs, fs_path = fsspec.core.url_to_fs(self.path)
-        ensure_parent_dir(self.path)
-        if fs.exists(fs_path):
+        fs, fs_path = open_fs(self.path)
+        with contextlib.suppress(FileNotFoundError):
             fs.rm(fs_path, recursive=True)
         fs.mkdirs(fs_path, exist_ok=True)
 
@@ -81,15 +74,15 @@ class _PartitionedParquetLedgerSink:
             partition_parts = [
                 f"{col}={value}" for col, value in zip(self.partition_cols, key, strict=True)
             ]
-            partition_dir = _join_uri(self.path, *partition_parts)
+            partition_dir = join_uri(self.path, *partition_parts)
             table = pa.Table.from_pandas(
                 group.drop(columns=self.partition_cols),
                 preserve_index=False,
             )
             if key not in self._writers:
-                fs, fs_path = fsspec.core.url_to_fs(partition_dir)
+                fs, fs_path = open_fs(partition_dir)
                 fs.mkdirs(fs_path, exist_ok=True)
-                output_path = _join_uri(partition_dir, "part-0.parquet")
+                output_path = join_uri(partition_dir, "part-0.parquet")
                 handle = fsspec.open(output_path, "wb").open()
                 self._handles[key] = handle
                 self._writers[key] = pq.ParquetWriter(handle, table.schema)
@@ -113,12 +106,6 @@ def resolved_ledger_uri(path: str | Path) -> str:
     return f"{text}.resolved.parquet"
 
 
-def _write_parquet(df: pd.DataFrame, path: str | Path) -> None:
-    ensure_parent_dir(path)
-    with fsspec.open(str(path), "wb") as handle:
-        df.to_parquet(handle, index=False)
-
-
 class _BaseLedger:
     _empty_columns: list[str] = []
 
@@ -137,8 +124,8 @@ class _BaseLedger:
     ) -> None:
         self._stream_path = str(path)
         self._resolved_path = resolved_ledger_uri(path)
-        fs, fs_path = fsspec.core.url_to_fs(self._resolved_path)
-        if fs.exists(fs_path):
+        fs, fs_path = open_fs(self._resolved_path)
+        with contextlib.suppress(FileNotFoundError):
             fs.rm(fs_path)
         self._stream_sink = (
             _PartitionedParquetLedgerSink(self._stream_path, partition_cols)
@@ -174,7 +161,7 @@ class _BaseLedger:
         return pd.concat(self._frames, ignore_index=True)
 
     def to_parquet(self, path: str | Path) -> None:
-        _write_parquet(self.to_df(), path)
+        write_parquet(self.to_df(), path)
 
 
 class ForecastLedger(_BaseLedger):
@@ -191,18 +178,12 @@ class ForecastLedger(_BaseLedger):
         if self.streaming:
             self._stream_current = df.copy()
             if self._resolved_path is not None:
-                _write_parquet(df, self._resolved_path)
+                write_parquet(df, self._resolved_path)
             return
         self._frames = [df]
 
 
 class OrderLedger(_BaseLedger):
-    """Append-only store for order policy outputs.
-
-    Accumulates per-origin order recommendations produced by an OrderPolicyConfig
-    during a BackendEngine walk-forward run.
-    """
-
     def append(self, df: pd.DataFrame) -> None:
         if not df.empty:
             if self.streaming:

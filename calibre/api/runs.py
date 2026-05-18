@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import traceback
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
@@ -21,6 +20,7 @@ from calibre.storage.postgres import (
     ConformalStateRepo,
     ForecastPointerRepo,
     RunRepo,
+    database_url,
     make_engine,
     make_session_factory,
     session_scope,
@@ -51,19 +51,24 @@ _DB_URL: str | None = None
 _DB_FACTORY: sessionmaker | None = None
 
 
-def _database_url() -> str | None:
-    return os.environ.get("CALIBRE_DATABASE_URL")
-
-
 def _session_factory() -> sessionmaker | None:
     global _DB_FACTORY, _DB_URL
-    url = _database_url()
+    url = database_url()
     if not url:
         return None
     if _DB_FACTORY is None or url != _DB_URL:
         _DB_URL = url
         _DB_FACTORY = make_session_factory(make_engine(url))
     return _DB_FACTORY
+
+
+def _pointer_kinds(config) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    if config.output.ledger_path is not None:
+        pairs.append(("ledger", config.output.ledger_path))
+    if config.output.order_ledger_path is not None:
+        pairs.append(("order_ledger", config.output.order_ledger_path))
+    return pairs
 
 
 def _db_response(run, pointer_repo: ForecastPointerRepo) -> RunResponse:
@@ -163,26 +168,13 @@ def _record_artifact_pointers(
     run_id: UUID,
     config,
 ) -> None:
-    if config.output.ledger_path is not None:
-        ledger_uri = canonical_ledger_uri(config.output.ledger_path)
+    for kind, path in _pointer_kinds(config):
+        uri = canonical_ledger_uri(path) if kind == "ledger" else path
         try:
-            pointer = artifact_pointer(ledger_uri)
+            pointer = artifact_pointer(uri)
         except FileNotFoundError:
-            pass
-        else:
-            pointer_repo.upsert(run_id, "ledger", str(pointer["uri"]), int(pointer["byte_size"]))
-    if config.output.order_ledger_path is not None:
-        try:
-            pointer = artifact_pointer(config.output.order_ledger_path)
-        except FileNotFoundError:
-            pass
-        else:
-            pointer_repo.upsert(
-                run_id,
-                "order_ledger",
-                str(pointer["uri"]),
-                int(pointer["byte_size"]),
-            )
+            continue
+        pointer_repo.upsert(run_id, kind, str(pointer["uri"]), int(pointer["byte_size"]))
 
 
 def _register_configured_artifact_pointers(
@@ -190,13 +182,9 @@ def _register_configured_artifact_pointers(
     run_id: UUID,
     config,
 ) -> None:
-    if config.output.ledger_path is not None and pointer_repo.get(run_id, "ledger") is None:
-        pointer_repo.upsert(run_id, "ledger", config.output.ledger_path, 0)
-    if (
-        config.output.order_ledger_path is not None
-        and pointer_repo.get(run_id, "order_ledger") is None
-    ):
-        pointer_repo.upsert(run_id, "order_ledger", config.output.order_ledger_path, 0)
+    for kind, path in _pointer_kinds(config):
+        if pointer_repo.get(run_id, kind) is None:
+            pointer_repo.upsert(run_id, kind, path, 0)
 
 
 def _run_backtest_job_db(factory: sessionmaker, run_id: UUID) -> None:

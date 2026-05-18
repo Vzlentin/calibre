@@ -10,15 +10,8 @@ from calibre.core.forecast_task import ForecastTask
 
 
 @lru_cache(maxsize=1024)
-def _read_history_cached(unique_id: str, history_uri: str) -> pd.DataFrame:
-    del unique_id
-    return pd.read_parquet(history_uri)
-
-
-@lru_cache(maxsize=1024)
-def _read_future_x_cached(unique_id: str, future_x_uri: str) -> pd.DataFrame:
-    del unique_id
-    return pd.read_parquet(future_x_uri)
+def _read_parquet_cached(uri: str) -> pd.DataFrame:
+    return pd.read_parquet(uri)
 
 
 @dataclass(frozen=True)
@@ -31,9 +24,9 @@ class ForecastTaskRef:
     future_x_uri: str | None = None
 
     def materialize(self) -> ForecastTask:
-        history = _read_history_cached(self.unique_id, self.history_uri).copy()
+        history = _read_parquet_cached(self.history_uri).copy()
         future_x = (
-            _read_future_x_cached(self.unique_id, self.future_x_uri).copy()
+            _read_parquet_cached(self.future_x_uri).copy()
             if self.future_x_uri is not None
             else None
         )
