@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-import fsspec  # type: ignore[import-untyped]
 import pandas as pd
 
 from calibre.cli.config import BackendConfig, load_config, load_config_from_mapping
@@ -16,21 +14,15 @@ from calibre.core.metrics import set_order_cost
 from calibre.execution.backend import BackendEngine, BackendResult
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
-from calibre.execution.io import ensure_parent_dir, open_fs
+from calibre.execution.io import is_local_fs, open_fs, write_parquet
 from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import OrderPolicyConfig
 from calibre.storage.state import ConformalStateStore
 
 
-def _emit(message: str) -> None:
-    sys.stdout.write(f"{message}\n")
-
-
 def _fs_result_uri(fs, path: str) -> str:
-    protocol = fs.protocol
-    protocols = {protocol} if isinstance(protocol, str) else set(protocol)
-    if not protocols.isdisjoint({"file", "local"}):
+    if is_local_fs(fs):
         return path
     return str(fs.unstrip_protocol(path))
 
@@ -111,12 +103,6 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
     set_order_cost(currency, dataset, total_cost)
 
 
-def _write_parquet(frame: pd.DataFrame, path: str | Path) -> None:
-    ensure_parent_dir(path)
-    with fsspec.open(str(path), "wb") as handle:
-        frame.to_parquet(handle, index=False)
-
-
 def _resolve_execution_engine(config: BackendConfig) -> Any:
     if config.execution.engine is None:
         return None
@@ -181,7 +167,7 @@ def _run_builtin_benchmark(config: BackendConfig) -> pd.DataFrame:
     finally:
         _close_execution_engine(execution_engine)
     if config.output.ledger_path is not None:
-        _write_parquet(summary, config.output.ledger_path)
+        write_parquet(summary, config.output.ledger_path)
     return summary
 
 
@@ -212,7 +198,7 @@ def run_config(
             dataset=config.benchmark,
             currency=_metric_currency(config),
         )
-        _emit(f"benchmark={config.benchmark} rows={len(summary)} total_cost={total_cost:.2f}")
+        print(f"benchmark={config.benchmark} rows={len(summary)} total_cost={total_cost:.2f}")
         return summary
 
     bundle = _load_dataset(config)
@@ -245,8 +231,6 @@ def run_config(
             initial_ledger=initial_ledger,
         ).execute(tasks, bundle.history, origins)
     finally:
-        # Clean up distributed execution engines to avoid thread/connection leaks
-        # in long-running processes (e.g. FastAPI server). Runs even on failure.
         _close_execution_engine(execution_engine)
 
     if not config.output.streaming and config.output.ledger_path is not None:
@@ -265,15 +249,15 @@ def run_config(
         )
 
     ledger_rows = len(result.ledger.to_df())
-    _emit(f"run complete rows={ledger_rows}")
+    print(f"run complete rows={ledger_rows}")
     if config.output.ledger_path is not None:
-        _emit(f"ledger={config.output.ledger_path}")
+        print(f"ledger={config.output.ledger_path}")
     return result
 
 
 def validate(config_path: str | Path) -> BackendConfig:
     config = load_config(config_path)
-    _emit(f"valid config_schema={config.config_schema} tasks={len(config.tasks)}")
+    print(f"valid config_schema={config.config_schema} tasks={len(config.tasks)}")
     return config
 
 
@@ -294,7 +278,7 @@ def health() -> dict[str, Any]:
         "fixture_rows": len(bundle.history),
         "fixture_series": int(bundle.history[UNIQUE_ID].astype(str).nunique()),
     }
-    _emit(json.dumps(payload, sort_keys=True))
+    print(json.dumps(payload, sort_keys=True))
     return payload
 
 

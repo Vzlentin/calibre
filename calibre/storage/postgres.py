@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -10,6 +11,10 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from calibre.storage.models import ConformalState, ForecastPointer, Run
+
+
+def database_url() -> str | None:
+    return os.environ.get("CALIBRE_DATABASE_URL")
 
 
 def make_engine(url: str, **kwargs) -> Engine:

@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import os
-
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from calibre.storage.models import Base
+from calibre.storage.postgres import database_url
 
 config = context.config
 target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    url = os.environ.get("CALIBRE_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    url = database_url() or config.get_main_option("sqlalchemy.url")
     if not url or url.startswith("driver://"):
         raise RuntimeError(
             "Set CALIBRE_DATABASE_URL or sqlalchemy.url before running storage migrations"

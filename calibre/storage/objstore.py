@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-import fsspec  # type: ignore[import-untyped]
 import pandas as pd
 
-from calibre.execution.io import ensure_parent_dir
+from calibre.execution.io import exists, open_fs, write_parquet
 from calibre.execution.ledger import resolved_ledger_uri
 
 
@@ -20,25 +18,18 @@ class _PointerRepo(Protocol):
 
 
 def artifact_pointer(uri: str) -> dict[str, int | str]:
-    fs, path = fsspec.core.url_to_fs(uri)
+    fs, path = open_fs(uri)
     info = fs.info(path)
     return {"uri": uri, "byte_size": int(info.get("size", 0))}
 
 
-def _exists(uri: str) -> bool:
-    fs, path = fsspec.core.url_to_fs(uri)
-    return bool(fs.exists(path))
-
-
 def canonical_ledger_uri(uri: str) -> str:
     resolved_uri = resolved_ledger_uri(uri)
-    return resolved_uri if _exists(resolved_uri) else uri
+    return resolved_uri if exists(resolved_uri) else uri
 
 
 def write_ledger_shard(df: pd.DataFrame, uri: str) -> dict[str, int | str]:
-    ensure_parent_dir(uri)
-    with fsspec.open(uri, "wb") as handle:
-        df.to_parquet(handle, index=False)
+    write_parquet(df, uri)
     return artifact_pointer(uri)
 
 
@@ -51,17 +42,17 @@ def read_initial_ledger(pointer_repo: _PointerRepo, run_id: UUID) -> pd.DataFram
     if pointer is None:
         return None
     uri = canonical_ledger_uri(str(pointer.uri))
-    if not _exists(uri):
+    if not exists(uri):
         return None
     return pd.read_parquet(uri)
 
 
 def signed_url(uri: str, *, expires: int = 3600) -> str:
-    fs, path = fsspec.core.url_to_fs(uri)
+    fs, path = open_fs(uri)
     sign = getattr(fs, "sign", None)
     if callable(sign):
         try:
             return str(sign(path, expiration=expires))
         except NotImplementedError:
             pass
-    return str(Path(uri)) if "://" not in uri else uri
+    return uri
