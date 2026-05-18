@@ -94,13 +94,16 @@ calibre/                 # Python package
 ├── execution/           # BackendEngine, ledger, dataset registry, I/O
 ├── features/            # Feature engineering for global models
 ├── forecasting/         # Adapter registry + model adapters
+│   └── features/        # Forecasting-specific feature transforms
 ├── models/              # Model-specific logic and wrappers
 ├── orchestration/       # Pipeline orchestration helpers
 ├── order/               # Ordering policies (newsvendor, RS, RSS)
 ├── ordering/            # Order policy protocols and implementations
+│   └── simulation/      # Ordering simulation helpers
 ├── pipeline/            # Loading, task building, end-to-end runner
 ├── simulation/          # Demand and lead-time simulators
 ├── storage/             # Postgres state store, Alembic migrations
+│   └── migrations/      # Alembic revision scripts
 ├── tasks/               # ForecastTask, TuningTask
 └── tuning/              # Optuna-based hyper-parameter tuning
 
