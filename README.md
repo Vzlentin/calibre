@@ -89,8 +89,11 @@ calibre/                 # Python package
 ├── evaluation/          # Scoring and metric computation
 ├── execution/           # BackendEngine, ledger, dataset registry, I/O
 ├── forecasting/         # Adapter registry + model adapters
+│   └── features/        # Forecasting-specific feature transforms
 ├── ordering/            # Order policy protocols and implementations
+│   └── simulation/      # Inventory simulation (costs, rules, state)
 ├── storage/             # Postgres state store, Alembic migrations
+│   └── migrations/      # Alembic revision scripts
 └── tuning/              # Optuna-based hyper-parameter tuning
 
 benchmarks/              # Benchmark suites
