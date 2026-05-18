@@ -84,27 +84,13 @@ Terraform, AWS Batch, Azure Container Instances, and Databricks setup.
 calibre/                 # Python package
 ├── api/                 # FastAPI routes and schemas
 ├── cli/                 # CLI entrypoint, config loader, commands
-├── conformal/           # ACI / MSCP / split conformal policies
-├── contracts/           # Forecast frame schema and shared dtypes
+├── conformal/           # Conformal calibration policies
 ├── core/                # ForecastFrame, ForecastTask, metrics, tracing
-├── engine/              # Backend engine internals
-├── ensemble/            # Ensemble combinators (e.g. median)
 ├── evaluation/          # Scoring and metric computation
-├── eval/                # Legacy evaluation helpers
 ├── execution/           # BackendEngine, ledger, dataset registry, I/O
-├── features/            # Feature engineering for global models
 ├── forecasting/         # Adapter registry + model adapters
-│   └── features/        # Forecasting-specific feature transforms
-├── models/              # Model-specific logic and wrappers
-├── orchestration/       # Pipeline orchestration helpers
-├── order/               # Ordering policies (newsvendor, RS, RSS)
 ├── ordering/            # Order policy protocols and implementations
-│   └── simulation/      # Ordering simulation helpers
-├── pipeline/            # Loading, task building, end-to-end runner
-├── simulation/          # Demand and lead-time simulators
 ├── storage/             # Postgres state store, Alembic migrations
-│   └── migrations/      # Alembic revision scripts
-├── tasks/               # ForecastTask, TuningTask
 └── tuning/              # Optuna-based hyper-parameter tuning
 
 benchmarks/              # Benchmark suites
