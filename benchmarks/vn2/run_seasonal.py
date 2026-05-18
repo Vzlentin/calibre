@@ -89,6 +89,7 @@ from calibre.execution import (
 )
 from calibre.execution.backend import BackendEngine
 from calibre.execution.data_loading import load_period
+from calibre.execution.io import join_uri
 from calibre.execution.task_builder import build_tasks
 from calibre.forecasting.ensemble import ensemble_median
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
@@ -229,7 +230,7 @@ def _run_warmup(
 
 
 def run_seasonal(
-    data_dir: Path = DATA_DIR,
+    data_dir: str | Path = DATA_DIR,
     model_configs: list[dict] = MODEL_CONFIGS,
     conformal_config: SymmetricIntervalConfig = CONFORMAL_CONFIG,
     horizon: int = HORIZON,
@@ -287,7 +288,7 @@ def run_seasonal(
         log_config_module(_vn2_config)
         lower_col, upper_col = interval_column_names(conformal_config.coverage)
 
-        initial_state_path = data_dir / "week_0_initial_state.csv"
+        initial_state_path = join_uri(data_dir, "week_0_initial_state.csv")
         all_states = load_initial_states(initial_state_path)
 
         if series_filter is not None:
@@ -414,7 +415,7 @@ def run_seasonal(
                 return {uid: actuals.get(uid, 0.0) for uid in states}
             except (FileNotFoundError, ValueError):
                 if rn <= decision_rounds:
-                    round_raw = pd.read_csv(data_dir / f"week_{rn}_sales.csv")
+                    round_raw = pd.read_csv(join_uri(data_dir, f"week_{rn}_sales.csv"))
                     date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
                     last_col = date_cols[-1]
                     unique_ids = (

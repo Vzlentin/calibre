@@ -111,6 +111,7 @@ from calibre.execution import (
 )
 from calibre.execution.backend import BackendEngine
 from calibre.execution.data_loading import load_period, melt_wide_instock
+from calibre.execution.io import exists, join_uri
 from calibre.forecasting.features import add_stockout_features
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.tuning.optimizer import create_tpe_sampler
@@ -167,9 +168,9 @@ def _prepare_cumulative_target_history(
     return history.dropna(subset=[Y]).reset_index(drop=True)
 
 
-def _load_instock(data_dir: Path, series_filter: list[str] | None) -> pd.DataFrame | None:
-    instock_path = data_dir / "week_0_in_stock.csv"
-    if not instock_path.exists():
+def _load_instock(data_dir: str | Path, series_filter: list[str] | None) -> pd.DataFrame | None:
+    instock_path = join_uri(data_dir, "week_0_in_stock.csv")
+    if not exists(instock_path):
         return None
     instock = melt_wide_instock(instock_path)
     if series_filter is not None:
@@ -501,7 +502,7 @@ def _build_rs_params(
 
 
 def _round_actuals(
-    data_dir: Path,
+    data_dir: str | Path,
     round_num: int,
     state_keys: Mapping[str, object],
 ) -> dict[str, float]:
@@ -511,7 +512,7 @@ def _round_actuals(
         actuals = extract_new_actuals(data_dir, round_num)
     except (FileNotFoundError, ValueError):
         # Fall back to the last date column of the current round's sales file.
-        round_raw = pd.read_csv(data_dir / f"week_{round_num}_sales.csv")
+        round_raw = pd.read_csv(join_uri(data_dir, f"week_{round_num}_sales.csv"))
         date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
         last_col = date_cols[-1]
         unique_ids = (
@@ -693,7 +694,7 @@ def _orders_from_policy_result(
 
 
 def _actuals_for_replay_round(
-    data_dir: Path,
+    data_dir: str | Path,
     round_num: int,
     decision_rounds: int,
     state_keys: Mapping[str, object],
@@ -709,7 +710,7 @@ def _actuals_for_replay_round(
 
 def build_replay_cache(
     *,
-    data_dir: Path = DATA_DIR,
+    data_dir: str | Path = DATA_DIR,
     model_config: dict[str, Any] | None = None,
     horizon: int = HORIZON,
     lead_time: int = LEAD_TIME,
@@ -725,7 +726,7 @@ def build_replay_cache(
     cumulative_target = _model_uses_cumulative_target(model_config)
     engine_config = _strip_private(model_config)
 
-    initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
+    initial_states = load_initial_states(join_uri(data_dir, "week_0_initial_state.csv"))
     if series_filter is not None:
         initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
 
@@ -1591,7 +1592,7 @@ def oracle_diagnostic(
 # Main entry point
 # ------------------------------------------------------------------ #
 def run_benchmark(
-    data_dir: Path = DATA_DIR,
+    data_dir: str | Path = DATA_DIR,
     horizon: int = HORIZON,
     lead_time: int = LEAD_TIME,
     review_period: int = REVIEW_PERIOD,
@@ -1665,7 +1666,7 @@ def run_benchmark(
         mlflow.log_param("hpo_seed", hpo_seed)
         mlflow.log_param("tune", tune)
 
-        initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
+        initial_states = load_initial_states(join_uri(data_dir, "week_0_initial_state.csv"))
         if series_filter is not None:
             initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from calibre.execution.io import join_uri
 from calibre.ordering.simulation import (
     LinearCostModel,
     LostSalesRule,
@@ -152,7 +153,7 @@ def load_initial_states(initial_state_path: str | Path) -> dict[str, ProductStat
     Expected CSV columns:
         Store, Product, End Inventory, In Transit W+1, In Transit W+2
     """
-    df = pd.read_csv(initial_state_path)
+    df = pd.read_csv(str(initial_state_path))
 
     states: dict[str, ProductState] = {}
     for _, row in df.iterrows():
@@ -172,10 +173,8 @@ def extract_new_actuals(data_dir: str | Path, week: int) -> dict[str, float]:
     Loads ``week_{week}_sales.csv`` and ``week_{week-1}_sales.csv``. The new
     column (present in week_N but not in week_{N-1}) contains that week's sales.
     """
-    data_dir = Path(data_dir)
-
-    current_path = data_dir / f"week_{week}_sales.csv"
-    previous_path = data_dir / f"week_{week - 1}_sales.csv"
+    current_path = join_uri(data_dir, f"week_{week}_sales.csv")
+    previous_path = join_uri(data_dir, f"week_{week - 1}_sales.csv")
 
     current_df = pd.read_csv(current_path)
     previous_df = pd.read_csv(previous_path)

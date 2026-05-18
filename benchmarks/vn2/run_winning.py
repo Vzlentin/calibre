@@ -51,6 +51,7 @@ from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import RsPolicyParameters
 from calibre.execution.backend import BackendEngine
 from calibre.execution.data_loading import load_period, melt_wide_instock
+from calibre.execution.io import exists, join_uri
 from calibre.forecasting.features import add_stockout_features
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 
@@ -114,7 +115,7 @@ def _build_rs_params(
 
 
 def _round_actuals(
-    data_dir: Path,
+    data_dir: str | Path,
     round_num: int,
     state_keys: Mapping[str, object],
 ) -> dict[str, float]:
@@ -128,7 +129,7 @@ def _round_actuals(
 
 
 def run_winning(
-    data_dir: Path = DATA_DIR,
+    data_dir: str | Path = DATA_DIR,
     horizon: int = HORIZON,
     lead_time: int = LEAD_TIME,
     review_period: int = REVIEW_PERIOD,
@@ -151,11 +152,11 @@ def run_winning(
     ):
         log_config_module(_vn2_config)
 
-        initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
+        initial_states = load_initial_states(join_uri(data_dir, "week_0_initial_state.csv"))
 
         instock = None
-        instock_path = data_dir / "week_0_in_stock.csv"
-        if instock_path.exists():
+        instock_path = join_uri(data_dir, "week_0_in_stock.csv")
+        if exists(instock_path):
             instock = melt_wide_instock(instock_path)
 
         if series_filter is not None:
