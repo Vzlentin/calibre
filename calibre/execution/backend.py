@@ -24,6 +24,10 @@ from calibre.conformal.runtime import (
     serialize_calibration_state,
 )
 from calibre.core.forecast_frame import (
+    CALIBRATION_STATE,
+    CONFORMAL_ALPHA,
+    CONFORMAL_METHOD,
+    CONFORMAL_MODE,
     DS,
     FORECAST_ORIGIN,
     MODEL_NAME,
@@ -40,7 +44,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.forecast_task_io import ForecastTaskRef
-from calibre.core.metrics import observe_forecast_duration
+from calibre.core.metrics import observe_forecast_duration, set_conformal_coverage
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
 from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
@@ -64,17 +68,51 @@ def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) 
     return preds[REQUIRED_COLUMNS + extras]
 
 
+def _fit_predict_task(task: ForecastTask) -> pd.DataFrame:
+    adapter = resolve_adapter(task.model_config)
+    model_name = task.model_name
+    uid = task.unique_id
+    origin = task.forecast_origin
+
+    fit_started = time.perf_counter()
+    adapter.fit(task)
+    logger.info(
+        "completed adapter fit",
+        extra={
+            "origin": origin,
+            "model_name": model_name,
+            "unique_id": uid,
+            "phase": "fit",
+            "duration_ms": round((time.perf_counter() - fit_started) * 1000.0, 3),
+        },
+    )
+
+    predict_started = time.perf_counter()
+    preds = adapter.predict(task)
+    logger.info(
+        "completed adapter predict",
+        extra={
+            "origin": origin,
+            "model_name": model_name,
+            "unique_id": uid,
+            "phase": "predict",
+            "duration_ms": round((time.perf_counter() - predict_started) * 1000.0, 3),
+        },
+    )
+    return preds
+
+
 def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     result = frame.copy()
-    for col in (UNIQUE_ID, MODEL_NAME):
+    for col in (UNIQUE_ID, MODEL_NAME, CALIBRATION_STATE, CONFORMAL_METHOD, CONFORMAL_MODE):
         if col in result.columns:
             result[col] = result[col].astype("object")
     for col in (DS, FORECAST_ORIGIN):
         if col in result.columns:
             result[col] = pd.to_datetime(result[col]).astype("datetime64[ns]")
-    for col in (Y, Y_HAT):
+    for col in (Y, Y_HAT, NONCONFORMITY_SCORE, CONFORMAL_ALPHA):
         if col in result.columns:
             result[col] = result[col].astype("float64")
     if H in result.columns:
@@ -183,9 +221,44 @@ def _process_task_ref_partition(df: pd.DataFrame) -> pd.DataFrame:
             future_x=task_future_x,
         )
 
-        adapter = resolve_adapter(origin_task.model_config)
-        adapter.fit(origin_task)
-        preds = adapter.predict(origin_task)
+        preds = _fit_predict_task(origin_task)
+
+        results.append(_finalize_preds(preds, origin, origin_task.model_name))
+
+    if not results:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+    return pd.concat(results, ignore_index=True)
+
+
+def _process_global_task_ref_partition(df: pd.DataFrame) -> pd.DataFrame:
+    results: list[pd.DataFrame] = []
+
+    for _, row in df.iterrows():
+        origin = pd.Timestamp(row[FORECAST_ORIGIN])
+        model_config = _decode_model_config(str(row[_MODEL_CONFIG_PAYLOAD]))
+        task = ForecastTaskRef(
+            unique_id=str(row[UNIQUE_ID]),
+            model_config=model_config,
+            horizon=int(row[H]),
+            forecast_origin=origin,
+            history_uri=str(row[_HISTORY_URI]),
+            future_x_uri=str(row[_FUTURE_X_URI]) if bool(row[_HAS_FUTURE_X]) else None,
+        ).materialize()
+
+        history = task.history[task.history[DS] < origin]
+        if history.empty:
+            continue
+
+        origin_task = ForecastTask(
+            history=history,
+            horizon=task.horizon,
+            model_config=model_config,
+            forecast_origin=origin,
+            future_x=task.future_x,
+        )
+
+        preds = _fit_predict_task(origin_task)
 
         results.append(_finalize_preds(preds, origin, origin_task.model_name))
 
@@ -217,6 +290,7 @@ class BackendEngine:
         seed: int | None = None,
         run_id: UUID | None = None,
         conformal_state_store: ConformalStateStore | None = None,
+        initial_ledger: pd.DataFrame | None = None,
     ) -> None:
         self.freq = freq
         self.metrics = metrics
@@ -237,6 +311,7 @@ class BackendEngine:
         self.seed: Seed | None = set_seed(seed) if seed is not None else None
         self.run_id = run_id
         self.conformal_state_store = conformal_state_store
+        self.initial_ledger = initial_ledger.copy() if initial_ledger is not None else None
 
     def execute(
         self,
@@ -248,10 +323,13 @@ class BackendEngine:
         ledger = ForecastLedger()
         if self.streaming_output is not None:
             ledger.stream_to(self.streaming_output)
+        if self.initial_ledger is not None and not self.initial_ledger.empty:
+            ledger.append(_coerce_forecast_frame_dtypes(self.initial_ledger))
         order_ledger = OrderLedger() if self.order_config is not None else None
         if order_ledger is not None and self.streaming_order_output is not None:
             order_ledger.stream_to(self.streaming_order_output)
         self._restore_conformal_state()
+        self._advance_issued_count_from_initial_ledger()
         conformal_runtime = self.conformal_runtime
 
         try:
@@ -274,7 +352,14 @@ class BackendEngine:
                     str(Path(temp_dir) / "global"),
                 )
 
+                completed_origins = self._completed_initial_origins()
                 for origin in origins:
+                    if pd.Timestamp(origin) in completed_origins:
+                        logger.info(
+                            "skipping resumed origin",
+                            extra={"origin": origin, "phase": "resume"},
+                        )
+                        continue
                     origin_started = time.perf_counter()
                     with span("backtest", origin=str(origin)):
                         if conformal_runtime is not None:
@@ -339,6 +424,7 @@ class BackendEngine:
 
         if conformal_runtime is not None:
             newly_resolved = conformal_runtime.observe(newly_resolved)
+            self._record_conformal_coverage(newly_resolved, conformal_runtime)
             if NONCONFORMITY_SCORE not in updated.columns:
                 updated[NONCONFORMITY_SCORE] = np.nan
             updated.loc[newly_resolved.index, NONCONFORMITY_SCORE] = newly_resolved[
@@ -376,6 +462,60 @@ class BackendEngine:
             serialize_calibration_state(conformal_runtime.get_diagnostics())
         )
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
+
+    def _record_conformal_coverage(
+        self,
+        resolved: pd.DataFrame,
+        conformal_runtime: ConformalRuntime,
+    ) -> None:
+        lower_col, upper_col = conformal_runtime.interval_columns
+        if lower_col not in resolved.columns or upper_col not in resolved.columns:
+            return
+        comparable = resolved.dropna(subset=[Y, lower_col, upper_col, MODEL_NAME])
+        if comparable.empty:
+            return
+        diagnostics = conformal_runtime.get_diagnostics()
+        mode = str(diagnostics.get("mode", "unknown"))
+        for model_name, group in comparable.groupby(MODEL_NAME, sort=False):
+            covered = (group[Y] >= group[lower_col]) & (group[Y] <= group[upper_col])
+            set_conformal_coverage(str(model_name), mode, float(covered.mean()))
+
+    def _advance_issued_count_from_initial_ledger(self) -> None:
+        """Recover issued-origin accounting from a resumed ledger snapshot."""
+        runtime = self.conformal_runtime
+        if (
+            runtime is None
+            or self.initial_ledger is None
+            or self.initial_ledger.empty
+            or CALIBRATION_STATE not in self.initial_ledger.columns
+        ):
+            return
+
+        max_issued_count = 0
+        for payload in self.initial_ledger[CALIBRATION_STATE].dropna().astype(str):
+            if not payload:
+                continue
+            try:
+                state = deserialize_calibration_state(payload)
+            except (TypeError, ValueError):
+                continue
+            max_issued_count = max(max_issued_count, int(state.get("issued_count", 0)) + 1)
+
+        if (
+            isinstance(runtime, SymmetricIntervalRuntime)
+            and max_issued_count > runtime._issued_count
+        ):
+            runtime._issued_count = max_issued_count
+
+    def _completed_initial_origins(self) -> set[pd.Timestamp]:
+        if (
+            self.initial_ledger is None
+            or self.initial_ledger.empty
+            or FORECAST_ORIGIN not in self.initial_ledger.columns
+        ):
+            return set()
+        origins = pd.to_datetime(self.initial_ledger[FORECAST_ORIGIN], errors="coerce")
+        return {pd.Timestamp(origin) for origin in origins.dropna().unique()}
 
     def _materialize_dispatch_records(
         self,
@@ -428,9 +568,11 @@ class BackendEngine:
         records: list[_TaskDispatchRecord],
         origin: pd.Timestamp,
     ) -> pd.DataFrame:
-        """Run global (multi-series) adapters directly, without Fugue partitioning."""
+        """Run global (multi-series) adapters directly or through the configured engine."""
         if not records:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
+        if self.engine is not None:
+            return self._run_global_distributed(records, origin)
 
         all_preds: list[pd.DataFrame] = []
 
@@ -455,13 +597,34 @@ class BackendEngine:
                 future_x=task.future_x,
             )
 
-            adapter = resolve_adapter(origin_task.model_config)
-            adapter.fit(origin_task)
-            preds = adapter.predict(origin_task)
+            preds = _fit_predict_task(origin_task)
 
             all_preds.append(_finalize_preds(preds, origin, origin_task.model_name))
 
         if not all_preds:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
-        return pd.concat(all_preds, ignore_index=True)
+        return _coerce_forecast_frame_dtypes(pd.concat(all_preds, ignore_index=True))
+
+    def _run_global_distributed(
+        self,
+        records: list[_TaskDispatchRecord],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        task_df = _dispatch_records_to_frame(records, origin)
+        quantile_cols = _collect_quantile_columns(records)
+        schema = (
+            f"{UNIQUE_ID}:str,{DS}:datetime,{Y}:double,"
+            f"{Y_HAT}:double,{H}:long,"
+            f"{FORECAST_ORIGIN}:datetime,{MODEL_NAME}:str"
+        )
+        if quantile_cols:
+            schema += "," + ",".join(f"{c}:double" for c in sorted(quantile_cols))
+
+        result = fa.transform(
+            task_df,
+            _process_global_task_ref_partition,
+            schema=schema,
+            engine=self.engine,
+        )
+        return _coerce_forecast_frame_dtypes(fa.as_pandas(result))

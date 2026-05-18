@@ -10,13 +10,31 @@ Build:
 
 ```bash
 docker build -t calibre:full .
+docker build -f Dockerfile.slim -t calibre:slim .
 ```
 
 Smoke:
 
 ```bash
 docker run --rm calibre:full health
+docker run --rm calibre:slim run --config /app/benchmarks/vn2/config/smoke.yaml
 ```
+
+Full VN2 benchmark smoke with external data mounted:
+
+```bash
+docker run --rm \
+  -v "$PWD/data/vn2:/app/data/vn2:ro" \
+  calibre:full run --config /app/benchmarks/vn2/config/winning.yaml
+```
+
+CI publishes same-repository PR and main-branch images to GHCR as
+`ghcr.io/<owner>/<repo>:pr-<number>-full`, `:pr-<number>-slim`, and short-SHA
+`:<sha>-full` / `:<sha>-slim` tags after both image smoke tests pass.
+
+The slim image is intended for statsforecast/local model configs and omits the
+MLForecast/LightGBM and NeuralForecast stacks. Use the full image for the VN2
+winning benchmark and other global LightGBM or neural configs.
 
 ## Kubernetes Job
 
@@ -52,11 +70,41 @@ Grant the task role read access to input/config prefixes and write access to
 artifact prefixes.
 
 The starter AWS Terraform root module is under `infra/aws/`. It provisions an
-artifact bucket, ECR repository, and small RDS Postgres instance:
+artifact bucket, ECR repository, small RDS Postgres instance, ECS Fargate API
+service, CloudWatch logs, a database URL secret, and task IAM for artifact IO:
 
 ```bash
 terraform -chdir=infra/aws init
 terraform -chdir=infra/aws apply
+```
+
+Provide `container_subnet_ids`, `vpc_id`, `db_subnet_group_name`, and
+`db_password` in a `.tfvars` file. Set `api_ingress_cidr_blocks` to the operator
+or load-balancer CIDRs that may call the API; leave it empty to deploy the
+service without public API ingress.
+
+For initial bootstrap, apply once with `desired_count=0` to create ECR without
+starting tasks, push the image, then apply again with the desired task count:
+
+```bash
+terraform -chdir=infra/aws apply -var desired_count=0
+ECR_REPO="$(terraform -chdir=infra/aws output -raw ecr_repository_url)"
+ECR_REGISTRY="${ECR_REPO%/*}"
+aws ecr get-login-password --region eu-west-1 \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+docker tag calibre:full "$ECR_REPO:latest"
+docker push "$ECR_REPO:latest"
+terraform -chdir=infra/aws apply -var desired_count=1
+```
+
+The ECS task gets `CALIBRE_DATABASE_URL` from Secrets Manager. When set,
+`POST /backtests` persists rows in `runs`, conformal snapshots in
+`conformal_state`, and output artifact pointers in `forecast_pointers`. Run the
+Alembic migration before starting the API:
+
+```bash
+CALIBRE_DATABASE_URL="postgresql+psycopg://..." \
+  uv run alembic -c alembic.ini upgrade head
 ```
 
 ## Azure Container Instances

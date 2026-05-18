@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import fsspec
 import pytest
 
 from benchmarks.vn2.simulator import (
@@ -223,3 +224,25 @@ class TestExtractNewActuals:
             assert len(parts) == 2
             assert parts[0].isdigit()
             assert parts[1].isdigit()
+
+
+def test_vn2_simulator_loads_initial_state_and_actuals_from_fsspec_uri() -> None:
+    fs = fsspec.filesystem("memory")
+    root = "calibre-vn2-simulator"
+    if fs.exists(root):
+        fs.rm(root, recursive=True)
+    fs.mkdirs(root)
+    with fs.open(f"{root}/week_0_initial_state.csv", "wt", encoding="utf-8") as handle:
+        handle.write("Store,Product,End Inventory,In Transit W+1,In Transit W+2\n1,10,5,1,2\n")
+    with fs.open(f"{root}/week_0_sales.csv", "wt", encoding="utf-8") as handle:
+        handle.write("Store,Product,2024-01-01\n1,10,3\n")
+    with fs.open(f"{root}/week_1_sales.csv", "wt", encoding="utf-8") as handle:
+        handle.write("Store,Product,2024-01-01,2024-01-08\n1,10,3,7\n")
+
+    states = load_initial_states(f"memory://{root}/week_0_initial_state.csv")
+    actuals = extract_new_actuals(f"memory://{root}", 1)
+
+    assert states["1_10"].end_inventory == pytest.approx(5.0)
+    assert states["1_10"].in_transit_w1 == pytest.approx(1.0)
+    assert states["1_10"].in_transit_w2 == pytest.approx(2.0)
+    assert actuals == {"1_10": 7.0}

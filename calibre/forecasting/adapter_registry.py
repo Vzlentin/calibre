@@ -1,45 +1,49 @@
 from __future__ import annotations
 
+import importlib
 from typing import Literal, get_args
 
 from calibre.forecasting.adapter_base import ModelAdapter
 
 _REGISTRY: dict[str, type[ModelAdapter]] = {}
+_ADAPTERS: dict[str, tuple[str, str]] = {
+    "statsforecast": (
+        "calibre.forecasting.statsforecast_adapter",
+        "StatsForecastAdapter",
+    ),
+    "mlforecast": (
+        "calibre.forecasting.mlforecast_adapter",
+        "MLForecastAdapter",
+    ),
+    "neuralforecast": (
+        "calibre.forecasting.neuralforecast_adapter",
+        "NeuralForecastAdapter",
+    ),
+}
 
 ScopeType = Literal["local", "global"]
 VALID_SCOPES: frozenset[ScopeType] = frozenset(get_args(ScopeType))
 DEFAULT_SCOPE: ScopeType = "local"
 
 
-def _ensure_registry() -> None:
-    if _REGISTRY:
-        return
-    from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
-    from calibre.forecasting.neuralforecast_adapter import NeuralForecastAdapter
-    from calibre.forecasting.statsforecast_adapter import StatsForecastAdapter
-
-    # NeuralForecastAdapter imports neuralforecast lazily; instantiation raises
-    # a clear RuntimeError when the optional extra isn't installed.
-    _REGISTRY.update(
-        {
-            "statsforecast": StatsForecastAdapter,
-            "mlforecast": MLForecastAdapter,
-            "neuralforecast": NeuralForecastAdapter,
-        }
-    )
+def _available_backends() -> list[str]:
+    return sorted(_ADAPTERS)
 
 
 def get_adapter_cls(model_config: dict) -> type[ModelAdapter]:
     """Return the adapter class for the given config without instantiating it."""
-    _ensure_registry()
     backend = model_config.get("backend")
     if not backend:
         raise ValueError(
             f"model_config must include a 'backend' key. "
-            f"Available backends: {list(_REGISTRY.keys())}"
+            f"Available backends: {_available_backends()}"
         )
+    if backend not in _ADAPTERS:
+        raise ValueError(f"Unknown backend: {backend!r}. Available: {_available_backends()}")
     if backend not in _REGISTRY:
-        raise ValueError(f"Unknown backend: {backend!r}. Available: {list(_REGISTRY.keys())}")
+        module_name, class_name = _ADAPTERS[backend]
+        module = importlib.import_module(module_name)
+        _REGISTRY[backend] = getattr(module, class_name)
     return _REGISTRY[backend]
 
 

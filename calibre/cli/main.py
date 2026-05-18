@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 from calibre.cli import commands
 from calibre.core.logging import setup_logging
@@ -15,16 +14,16 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--config", required=True, type=Path)
+    run_parser.add_argument("--config", required=True)
     run_parser.add_argument("--metrics-port", type=int)
 
     validate_parser = subparsers.add_parser("validate")
-    validate_parser.add_argument("--config", required=True, type=Path)
+    validate_parser.add_argument("--config", required=True)
 
     subparsers.add_parser("health")
 
     sweep_parser = subparsers.add_parser("run-sweep")
-    sweep_parser.add_argument("--configs", required=True, type=Path)
+    sweep_parser.add_argument("--configs", required=True)
 
     return parser
 

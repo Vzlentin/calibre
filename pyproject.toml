@@ -20,10 +20,6 @@ dependencies = [
     "psycopg[binary]",
     "prometheus-client",
     "statsforecast",
-    "mlforecast",
-    "lightgbm",
-    "xgboost",
-    "pandas-stubs>=3.0.0.260204",
     "optuna",
     "uvicorn",
 ]
@@ -37,10 +33,16 @@ dev = [
     "pytest",
     "ruff",
     "mypy",
-    "moto[s3]",
+    "moto[server,s3]",
     "types-PyYAML",
+    "pandas-stubs>=3.0.0.260204",
+    "mlforecast",
+    "lightgbm",
+    "xgboost<2",
 ]
 benchmarks = [
+    "mlforecast",
+    "lightgbm",
     "mlflow>=2.17,<3",
     "optuna-integration[mlflow]>=4.0",
 ]
@@ -50,7 +52,17 @@ gcs = ["gcsfs"]
 cloud = ["s3fs", "adlfs", "gcsfs"]
 dask = ["dask[distributed]"]
 spark = ["pyspark"]
-neural = ["neuralforecast"]
+ml = ["mlforecast", "lightgbm"]
+neural = ["neuralforecast", "torch"]
+xgboost = ["xgboost<2"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu", marker = "platform_system == 'Linux' and platform_machine == 'x86_64'" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

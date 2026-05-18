@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
+from urllib.parse import quote
 
 import fsspec  # type: ignore[import-untyped]
 import pandas as pd
@@ -9,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from calibre.core.forecast_frame import REQUIRED_COLUMNS, validate_forecast_frame
+from calibre.execution.io import ensure_parent_dir
 
 
 class LedgerSink(Protocol):
@@ -21,9 +23,7 @@ class _ParquetLedgerSink:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         fs, fs_path = fsspec.core.url_to_fs(self.path)
-        parent = str(Path(fs_path).parent).replace("\\", "/")
-        if parent and parent != ".":
-            fs.mkdirs(parent, exist_ok=True)
+        ensure_parent_dir(self.path)
         if fs.exists(fs_path):
             fs.rm(fs_path)
         self._handle = None
@@ -45,13 +45,78 @@ class _ParquetLedgerSink:
             self._handle = None
 
 
-def _resolved_uri(path: str | Path) -> str:
+def _join_uri(base: str, *parts: str) -> str:
+    if "://" not in base:
+        return str(Path(base, *parts))
+    return "/".join([base.rstrip("/"), *(part.strip("/") for part in parts)])
+
+
+def _partition_value(value: Any) -> str:
+    if pd.isna(value):
+        return "__HIVE_DEFAULT_PARTITION__"
+    return quote(str(value), safe="")
+
+
+class _PartitionedParquetLedgerSink:
+    def __init__(self, path: str | Path, partition_cols: list[str]) -> None:
+        self.path = str(path)
+        self.partition_cols = list(partition_cols)
+        self._writers: dict[tuple[str, ...], pq.ParquetWriter] = {}
+        self._handles: dict[tuple[str, ...], Any] = {}
+        fs, fs_path = fsspec.core.url_to_fs(self.path)
+        ensure_parent_dir(self.path)
+        if fs.exists(fs_path):
+            fs.rm(fs_path, recursive=True)
+        fs.mkdirs(fs_path, exist_ok=True)
+
+    def append(self, df: pd.DataFrame) -> None:
+        missing = [col for col in self.partition_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing partition columns: {missing}")
+
+        grouped = df.groupby(self.partition_cols, sort=False, dropna=False)
+        for raw_key, group in grouped:
+            key_values = raw_key if isinstance(raw_key, tuple) else (raw_key,)
+            key = tuple(_partition_value(value) for value in key_values)
+            partition_parts = [
+                f"{col}={value}" for col, value in zip(self.partition_cols, key, strict=True)
+            ]
+            partition_dir = _join_uri(self.path, *partition_parts)
+            table = pa.Table.from_pandas(
+                group.drop(columns=self.partition_cols),
+                preserve_index=False,
+            )
+            if key not in self._writers:
+                fs, fs_path = fsspec.core.url_to_fs(partition_dir)
+                fs.mkdirs(fs_path, exist_ok=True)
+                output_path = _join_uri(partition_dir, "part-0.parquet")
+                handle = fsspec.open(output_path, "wb").open()
+                self._handles[key] = handle
+                self._writers[key] = pq.ParquetWriter(handle, table.schema)
+            self._writers[key].write_table(table)
+
+    def close(self) -> None:
+        for writer in self._writers.values():
+            writer.close()
+        self._writers.clear()
+        for handle in self._handles.values():
+            handle.close()
+        self._handles.clear()
+
+
+def resolved_ledger_uri(path: str | Path) -> str:
     text = str(path)
     if "://" not in text:
         return str(Path(text).with_suffix(".resolved.parquet"))
     if text.endswith(".parquet"):
         return f"{text[: -len('.parquet')]}.resolved.parquet"
     return f"{text}.resolved.parquet"
+
+
+def _write_parquet(df: pd.DataFrame, path: str | Path) -> None:
+    ensure_parent_dir(path)
+    with fsspec.open(str(path), "wb") as handle:
+        df.to_parquet(handle, index=False)
 
 
 class _BaseLedger:
@@ -70,14 +135,16 @@ class _BaseLedger:
         *,
         partition_cols: list[str] | None = None,
     ) -> None:
-        if partition_cols:
-            raise NotImplementedError("partitioned streaming ledgers are not implemented yet")
         self._stream_path = str(path)
-        self._resolved_path = _resolved_uri(path)
+        self._resolved_path = resolved_ledger_uri(path)
         fs, fs_path = fsspec.core.url_to_fs(self._resolved_path)
         if fs.exists(fs_path):
             fs.rm(fs_path)
-        self._stream_sink = _ParquetLedgerSink(self._stream_path)
+        self._stream_sink = (
+            _PartitionedParquetLedgerSink(self._stream_path, partition_cols)
+            if partition_cols
+            else _ParquetLedgerSink(self._stream_path)
+        )
 
     @property
     def streaming(self) -> bool:
@@ -107,7 +174,7 @@ class _BaseLedger:
         return pd.concat(self._frames, ignore_index=True)
 
     def to_parquet(self, path: str | Path) -> None:
-        self.to_df().to_parquet(str(path), index=False)
+        _write_parquet(self.to_df(), path)
 
 
 class ForecastLedger(_BaseLedger):
@@ -124,7 +191,7 @@ class ForecastLedger(_BaseLedger):
         if self.streaming:
             self._stream_current = df.copy()
             if self._resolved_path is not None:
-                df.to_parquet(self._resolved_path, index=False)
+                _write_parquet(df, self._resolved_path)
             return
         self._frames = [df]
 

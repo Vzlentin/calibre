@@ -23,6 +23,7 @@ from calibre.core.forecast_frame import (
     Y,
 )
 from calibre.core.forecast_task import ForecastTask
+from calibre.core.metrics import conformal_coverage_ratio
 from calibre.core.order_types import NewsvendorPolicyParameters, RsPolicyParameters
 from calibre.execution.backend import BackendEngine, BackendResult, _process_task_ref_partition
 from calibre.execution.ledger import OrderLedger
@@ -313,6 +314,27 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
     order_df = result.order_ledger.to_df()
     assert not order_df.empty
     assert "order_qty" in order_df.columns
+
+
+def test_engine_records_conformal_coverage_metric(single_series_setup):
+    task, actuals, origins = single_series_setup
+    conformal_config = SymmetricIntervalConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    engine = BackendEngine(
+        freq="W",
+        conformal_runtime=SymmetricIntervalRuntime(conformal_config),
+    )
+
+    engine.execute([task], actuals, origins)
+
+    coverage = conformal_coverage_ratio.labels(
+        model="SeasonalNaive", mode="perhorizon"
+    )._value.get()
+    assert 0.0 <= coverage <= 1.0
 
 
 def test_global_scope_produces_forecasts_for_all_series():

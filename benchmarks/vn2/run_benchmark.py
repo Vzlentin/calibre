@@ -46,7 +46,6 @@ from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
-import mlflow
 import optuna
 import pandas as pd
 from mlforecast.lag_transforms import RollingMean, RollingStd
@@ -57,6 +56,7 @@ import benchmarks.vn2.config as _vn2_config
 from benchmarks.common.tracking import (
     log_config_module,
     log_costs_dataframe,
+    mlflow,
     optuna_mlflow_callback,
     start_benchmark_run,
 )
@@ -111,6 +111,7 @@ from calibre.execution import (
 )
 from calibre.execution.backend import BackendEngine
 from calibre.execution.data_loading import load_period, melt_wide_instock
+from calibre.execution.io import exists, join_uri
 from calibre.forecasting.features import add_stockout_features
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.tuning.optimizer import create_tpe_sampler
@@ -167,9 +168,9 @@ def _prepare_cumulative_target_history(
     return history.dropna(subset=[Y]).reset_index(drop=True)
 
 
-def _load_instock(data_dir: Path, series_filter: list[str] | None) -> pd.DataFrame | None:
-    instock_path = data_dir / "week_0_in_stock.csv"
-    if not instock_path.exists():
+def _load_instock(data_dir: str | Path, series_filter: list[str] | None) -> pd.DataFrame | None:
+    instock_path = join_uri(data_dir, "week_0_in_stock.csv")
+    if not exists(instock_path):
         return None
     instock = melt_wide_instock(instock_path)
     if series_filter is not None:
@@ -501,7 +502,7 @@ def _build_rs_params(
 
 
 def _round_actuals(
-    data_dir: Path,
+    data_dir: str | Path,
     round_num: int,
     state_keys: Mapping[str, object],
 ) -> dict[str, float]:
@@ -511,7 +512,7 @@ def _round_actuals(
         actuals = extract_new_actuals(data_dir, round_num)
     except (FileNotFoundError, ValueError):
         # Fall back to the last date column of the current round's sales file.
-        round_raw = pd.read_csv(data_dir / f"week_{round_num}_sales.csv")
+        round_raw = pd.read_csv(join_uri(data_dir, f"week_{round_num}_sales.csv"))
         date_cols = [c for c in round_raw.columns if c not in ("Store", "Product")]
         last_col = date_cols[-1]
         unique_ids = (
@@ -538,6 +539,7 @@ def _run_order_conformal_warmup(
     runtime: CumulativeRiskRuntime,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
+    execution_engine: Any = None,
 ) -> None:
     """Calibrate the cumulative order conformal runtime on resolved origins."""
     for frame in _order_conformal_warmup_frames(
@@ -548,6 +550,7 @@ def _run_order_conformal_warmup(
         warmup_origins=warmup_origins,
         series_filter=series_filter,
         cumulative_target=cumulative_target,
+        execution_engine=execution_engine,
     ):
         runtime.observe(runtime.apply(frame))
 
@@ -561,6 +564,7 @@ def _order_conformal_warmup_frames(
     warmup_origins: int,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
+    execution_engine: Any = None,
 ) -> list[pd.DataFrame]:
     """Return resolved warmup forecast frames for CRC calibration."""
     if warmup_origins <= 0:
@@ -579,7 +583,7 @@ def _order_conformal_warmup_frames(
     if not origin_dates:
         return []
 
-    engine = BackendEngine(freq="W-MON")
+    engine = BackendEngine(freq="W-MON", engine=execution_engine)
     task = ForecastTask(history=history, horizon=horizon, model_config=model_config)
     ledger_df = _prepare_policy_forecast_frame(
         engine.execute([task], actuals=sales, origins=origin_dates).ledger.to_df(),
@@ -690,7 +694,7 @@ def _orders_from_policy_result(
 
 
 def _actuals_for_replay_round(
-    data_dir: Path,
+    data_dir: str | Path,
     round_num: int,
     decision_rounds: int,
     state_keys: Mapping[str, object],
@@ -706,7 +710,7 @@ def _actuals_for_replay_round(
 
 def build_replay_cache(
     *,
-    data_dir: Path = DATA_DIR,
+    data_dir: str | Path = DATA_DIR,
     model_config: dict[str, Any] | None = None,
     horizon: int = HORIZON,
     lead_time: int = LEAD_TIME,
@@ -722,7 +726,7 @@ def build_replay_cache(
     cumulative_target = _model_uses_cumulative_target(model_config)
     engine_config = _strip_private(model_config)
 
-    initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
+    initial_states = load_initial_states(join_uri(data_dir, "week_0_initial_state.csv"))
     if series_filter is not None:
         initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
 
@@ -1588,7 +1592,7 @@ def oracle_diagnostic(
 # Main entry point
 # ------------------------------------------------------------------ #
 def run_benchmark(
-    data_dir: Path = DATA_DIR,
+    data_dir: str | Path = DATA_DIR,
     horizon: int = HORIZON,
     lead_time: int = LEAD_TIME,
     review_period: int = REVIEW_PERIOD,
@@ -1606,6 +1610,7 @@ def run_benchmark(
     conformal_config: SymmetricIntervalConfig | None = None,
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_conformal_warmup_origins: int = HPO_N_ORIGINS,
+    execution_engine: Any = None,
 ) -> pd.DataFrame:
     """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
 
@@ -1635,6 +1640,8 @@ def run_benchmark(
             conformal ``hi_*`` bound rather than the direct quantile path.
         order_conformal_warmup_origins: Resolved week_0 walk-forward origins
             used to seed the one-sided order conformal residual pool.
+        execution_engine: Optional Fugue execution engine passed to the
+            forecast engine during warmup and decision rounds.
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
@@ -1659,7 +1666,7 @@ def run_benchmark(
         mlflow.log_param("hpo_seed", hpo_seed)
         mlflow.log_param("tune", tune)
 
-        initial_states = load_initial_states(data_dir / "week_0_initial_state.csv")
+        initial_states = load_initial_states(join_uri(data_dir, "week_0_initial_state.csv"))
         if series_filter is not None:
             initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
 
@@ -1702,7 +1709,7 @@ def run_benchmark(
         # Phase 2: Decision loop — refit each round, conformal-driven R,S
         # ------------------------------------------------------------------ #
         simulator = VN2Simulator(initial_states)
-        engine = BackendEngine(freq="W-MON")
+        engine = BackendEngine(freq="W-MON", engine=execution_engine)
         target_quantile_col = quantile_column(quantile_alpha)
         order_conformal_runtime: CumulativeRiskRuntime | None = None
         if order_conformal_config is not None:
@@ -1724,6 +1731,7 @@ def run_benchmark(
                 runtime=order_conformal_runtime,
                 series_filter=list(initial_states),
                 cumulative_target=cumulative_target,
+                execution_engine=execution_engine,
             )
             conformal_runtime = order_conformal_runtime
             observe_fn = observe_cumulative
@@ -1854,9 +1862,9 @@ def run_benchmark(
             logger.info("VN2 TUNED BENCHMARK RESULTS")
             logger.info("%s", "=" * 50)
             logger.info("Products:        %s", len(summary_df))
-            logger.info("Holding cost:    EUR %,.2f", total_holding)
-            logger.info("Shortage cost:   EUR %,.2f", total_shortage)
-            logger.info("TOTAL COST:      EUR %,.2f", total_cost)
+            logger.info("Holding cost:    EUR %s", f"{total_holding:,.2f}")
+            logger.info("Shortage cost:   EUR %s", f"{total_shortage:,.2f}")
+            logger.info("TOTAL COST:      EUR %s", f"{total_cost:,.2f}")
             logger.info("%s", "=" * 50)
 
         log_costs_dataframe(summary_df)

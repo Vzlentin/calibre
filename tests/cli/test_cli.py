@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import socket
+import urllib.request
 from pathlib import Path
 
+import fsspec
 import pandas as pd
 
-from calibre.cli.commands import run, validate
-from calibre.cli.config import load_config
+from calibre.cli.commands import (
+    _record_order_cost_metric,
+    health,
+    run,
+    run_config,
+    run_sweep,
+    validate,
+)
+from calibre.cli.config import load_config, load_config_from_mapping
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
+from calibre.core.metrics import order_cost
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
@@ -50,11 +61,8 @@ class _StubAdapter:
 register_dataset_adapter("unit_cli")(_CliDatasetAdapter)
 
 
-def _write_config(tmp_path) -> str:
-    path = tmp_path / "config.yaml"
-    output = tmp_path / "ledger.parquet"
-    path.write_text(
-        f"""
+def _config_text(output: str) -> str:
+    return f"""
 config_schema: "1.0"
 dataset:
   adapter: unit_cli
@@ -69,15 +77,62 @@ origins:
   end: 2024-02-04
   freq: W-SUN
 output:
-  ledger_path: {output.as_posix()}
+  ledger_path: {output}
   streaming: false
 execution:
   engine: null
   seed: 123
-""",
-        encoding="utf-8",
-    )
+"""
+
+
+def _metrics_config_text(output: str) -> str:
+    return f"""
+config_schema: "1.0"
+dataset:
+  adapter: unit_cli
+  path: ignored
+tasks:
+  - model: stub_model
+    horizon: 1
+    config:
+      backend: stub
+conformal:
+  method: aci
+  coverage: 0.9
+  calibration_window: 4
+  gamma: 0.05
+ordering:
+  policy: newsvendor
+  coverage: 0.9
+  params:
+    - unique_id: A
+      underage_cost: 3.0
+      overage_cost: 1.0
+      inventory_position: 0.0
+origins:
+  start: 2024-02-04
+  end: 2024-02-11
+  freq: W-SUN
+output:
+  ledger_path: {output}
+  streaming: false
+execution:
+  engine: null
+  seed: 123
+"""
+
+
+def _write_config(tmp_path, *, ledger_path: str | None = None) -> str:
+    path = tmp_path / "config.yaml"
+    output = ledger_path or (tmp_path / "ledger.parquet").as_posix()
+    path.write_text(_config_text(output), encoding="utf-8")
     return str(path)
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def test_load_config_and_validate_command(tmp_path) -> None:
@@ -86,6 +141,24 @@ def test_load_config_and_validate_command(tmp_path) -> None:
     assert config.config_schema == "1.0"
     assert config.tasks[0].horizon == 1
     assert validate(path).dataset.adapter == "unit_cli"
+
+
+def test_health_validates_embedded_smoke_config() -> None:
+    payload = health()
+
+    assert payload["status"] == "ok"
+    assert payload["config_schema"] == "1.0"
+    assert payload["fixture_adapter"] == "vn2"
+    assert payload["fixture_rows"] > 0
+    assert payload["fixture_series"] > 0
+
+
+def test_order_cost_metric_uses_total_cost_column() -> None:
+    frame = pd.DataFrame({"unique_id": ["A", "B"], "total_cost": [1.25, 2.75]})
+
+    _record_order_cost_metric(frame, dataset="unit", currency="EUR")
+
+    assert order_cost.labels(currency="EUR", dataset="unit")._value.get() == 4.0
 
 
 def test_load_config_accepts_dask_execution_options(tmp_path) -> None:
@@ -102,6 +175,69 @@ def test_load_config_accepts_dask_execution_options(tmp_path) -> None:
     assert config.execution.dask_address == "tcp://scheduler:8786"
 
 
+def test_load_config_reads_fsspec_uri() -> None:
+    uri = "memory://calibre-cli-config-load/config.yaml"
+    ledger_uri = "memory://calibre-cli-config-load/output/ledger.parquet"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("/calibre-cli-config-load"):
+        fs.rm("/calibre-cli-config-load", recursive=True)
+    with fsspec.open(uri, "wt", encoding="utf-8") as fh:
+        fh.write(_config_text(ledger_uri))
+
+    config = load_config(uri)
+
+    assert config.source_path == uri
+    assert config.output.ledger_path == ledger_uri
+
+
+def test_winning_dask_config_uses_dask_engine() -> None:
+    config = load_config("benchmarks/vn2/config/winning_dask.yaml")
+
+    assert config.benchmark == "vn2_winning"
+    assert config.execution.engine == "dask"
+    assert config.tasks[0].config["scope"] == "global"
+    assert "lag_transforms" in config.tasks[0].config
+
+
+def test_builtin_benchmark_preserves_fsspec_dataset_uri(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_run_benchmark(**kwargs):
+        seen.update(kwargs)
+        return pd.DataFrame(
+            {
+                UNIQUE_ID: ["A"],
+                "holding_cost": [0.0],
+                "shortage_cost": [1.0],
+                "total_cost": [1.0],
+            }
+        )
+
+    monkeypatch.setattr("benchmarks.vn2.run_benchmark.run_benchmark", _fake_run_benchmark)
+    config = load_config_from_mapping(
+        {
+            "config_schema": "1.0",
+            "benchmark": "vn2_winning",
+            "dataset": {"adapter": "vn2", "path": "memory://calibre-vn2-benchmark/data"},
+            "tasks": [
+                {
+                    "model": "global_lgbm",
+                    "horizon": 3,
+                    "config": {"backend": "mlforecast"},
+                }
+            ],
+            "origins": {"start": "2024-01-01", "end": "2024-01-01", "freq": "W-MON"},
+            "output": {"streaming": False},
+            "execution": {"engine": None, "seed": 42},
+        }
+    )
+
+    summary = run_config(config)
+
+    assert seen["data_dir"] == "memory://calibre-vn2-benchmark/data"
+    assert summary["total_cost"].sum() == 1.0
+
+
 def test_run_command_executes_config(monkeypatch, tmp_path) -> None:
     path = _write_config(tmp_path)
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
@@ -112,3 +248,57 @@ def test_run_command_executes_config(monkeypatch, tmp_path) -> None:
     frame = result.ledger.to_df()
     assert len(frame) == 1
     assert (tmp_path / "ledger.parquet").exists()
+
+
+def test_run_command_metrics_port_exposes_required_series(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "metrics-config.yaml"
+    path.write_text(
+        _metrics_config_text((tmp_path / "metrics-ledger.parquet").as_posix()),
+        encoding="utf-8",
+    )
+    port = _free_port()
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    run(path, metrics_port=port)
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=3) as response:
+        payload = response.read().decode("utf-8")
+    assert "calibre_forecast_duration_seconds" in payload
+    assert "calibre_conformal_coverage_ratio" in payload
+    assert "calibre_order_cost" in payload
+
+
+def test_run_command_writes_non_streaming_output_to_fsspec_uri(monkeypatch, tmp_path) -> None:
+    uri = "memory://calibre-cli-test/output/ledger.parquet"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("calibre-cli-test"):
+        fs.rm("calibre-cli-test", recursive=True)
+    path = _write_config(tmp_path, ledger_path=uri)
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    run(path)
+
+    frame = pd.read_parquet(uri)
+    assert len(frame) == 1
+
+
+def test_run_sweep_reads_fsspec_config_dir(monkeypatch) -> None:
+    root_uri = "memory://calibre-cli-sweep/configs"
+    config_uri = f"{root_uri}/config.yaml"
+    ledger_uri = "memory://calibre-cli-sweep/output/ledger.parquet"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("/calibre-cli-sweep"):
+        fs.rm("/calibre-cli-sweep", recursive=True)
+    fs.mkdirs("/calibre-cli-sweep/configs", exist_ok=True)
+    with fsspec.open(config_uri, "wt", encoding="utf-8") as fh:
+        fh.write(_config_text(ledger_uri))
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    results = run_sweep(root_uri)
+
+    assert len(results) == 1
+    frame = pd.read_parquet(ledger_uri)
+    assert len(frame) == 1

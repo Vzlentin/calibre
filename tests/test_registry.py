@@ -1,5 +1,8 @@
+import importlib
+
 import pytest
 
+from calibre.forecasting import adapter_registry
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
 
 
@@ -10,6 +13,27 @@ def test_resolve_statsforecast_backend():
     assert type(adapter).__name__ == "StatsForecastAdapter"
     assert hasattr(adapter, "fit")
     assert hasattr(adapter, "predict")
+
+
+def test_resolve_statsforecast_backend_does_not_import_other_adapters(monkeypatch):
+    monkeypatch.setattr(adapter_registry, "_REGISTRY", {})
+    real_import_module = importlib.import_module
+    imported: list[str] = []
+
+    def tracking_import_module(name: str, package: str | None = None):
+        imported.append(name)
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(adapter_registry.importlib, "import_module", tracking_import_module)
+
+    adapter = resolve_adapter(
+        {"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4}
+    )
+
+    assert type(adapter).__name__ == "StatsForecastAdapter"
+    assert "calibre.forecasting.statsforecast_adapter" in imported
+    assert "calibre.forecasting.mlforecast_adapter" not in imported
+    assert "calibre.forecasting.neuralforecast_adapter" not in imported
 
 
 def test_resolve_neuralforecast_backend():
