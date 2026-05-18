@@ -5,6 +5,7 @@ import pandas as pd
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine
+from calibre.execution.ledger import ForecastLedger
 
 
 class _StubAdapter:
@@ -69,3 +70,59 @@ def test_streaming_output_accepts_fsspec_uri(monkeypatch) -> None:
 
     assert len(result.ledger.to_df()) == 1
     assert pd.read_parquet("memory://calibre-tests/streaming/ledger.parquet").shape[0] == 1
+
+
+def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:
+    ledger = ForecastLedger()
+    path = tmp_path / "partitioned-ledger"
+    first = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            DS: pd.date_range("2024-01-07", periods=2, freq="W"),
+            Y: [float("nan"), float("nan")],
+            Y_HAT: [1.0, 2.0],
+            H: [1, 1],
+            "forecast_origin": [pd.Timestamp("2024-01-01")] * 2,
+            "model_name": ["stub", "stub"],
+        }
+    )
+    second = first.assign(**{Y_HAT: [3.0, 4.0]})
+
+    ledger.stream_to(path, partition_cols=[UNIQUE_ID])
+    ledger.append(first)
+    ledger.append(second)
+    ledger.close()
+
+    written = pd.read_parquet(path).sort_values([UNIQUE_ID, Y_HAT]).reset_index(drop=True)
+    expected = pd.concat([first, second], ignore_index=True).sort_values([UNIQUE_ID, Y_HAT])
+    expected = expected.reset_index(drop=True)
+    written[UNIQUE_ID] = written[UNIQUE_ID].astype(str)
+    pd.testing.assert_frame_equal(written[expected.columns], expected, check_dtype=False)
+    assert (path / "unique_id=A" / "part-0.parquet").exists()
+    assert (path / "unique_id=B" / "part-0.parquet").exists()
+    assert ledger._frames == []
+
+
+def test_partitioned_streaming_requires_partition_columns(tmp_path) -> None:
+    ledger = ForecastLedger()
+    ledger.stream_to(tmp_path / "partitioned-ledger", partition_cols=["missing"])
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A"],
+            DS: [pd.Timestamp("2024-01-07")],
+            Y: [float("nan")],
+            Y_HAT: [1.0],
+            H: [1],
+            "forecast_origin": [pd.Timestamp("2024-01-01")],
+            "model_name": ["stub"],
+        }
+    )
+
+    try:
+        ledger.append(frame)
+    except ValueError as exc:
+        assert "Missing partition columns" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected missing partition columns to fail")
+    finally:
+        ledger.close()
