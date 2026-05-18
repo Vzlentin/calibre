@@ -28,7 +28,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv sync --extra dev --extra benchmarks
-      - run: uv run python benchmarks/vn2/download_vn2_data.py
+      - name: Cache VN2 data
+        uses: actions/cache@v4
+        id: vn2-cache
+        with:
+          path: data/vn2
+          key: vn2-data-${{ hashFiles('benchmarks/vn2/vn2_file_links.json') }}
+          restore-keys: vn2-data-
+      - name: Download VN2 data (cache miss only)
+        if: steps.vn2-cache.outputs.cache-hit != 'true'
+        run: uv run python benchmarks/vn2/download_vn2_data.py
       - run: uv run pytest
 
   dask-integration:
