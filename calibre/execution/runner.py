@@ -101,9 +101,9 @@ def run_backtest(
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
     result = BackendEngine(
-        execution_options=ExecutionOptions(freq=freq, engine=engine),
-        conformal_options=ConformalOptions(runtime=conformal_runtime),
-        order_config=order_config,
+        execution=ExecutionOptions(freq=freq, engine=engine),
+        conformal=ConformalOptions(runtime=conformal_runtime),
+        order=order_config,
     ).execute(tasks, sales, origins)
 
     ledger = result.ledger
@@ -144,7 +144,7 @@ def run_forecast(
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
     return BackendEngine(
-        execution_options=ExecutionOptions(freq=freq, engine=engine),
-        conformal_options=ConformalOptions(runtime=conformal_runtime),
-        order_config=order_config,
+        execution=ExecutionOptions(freq=freq, engine=engine),
+        conformal=ConformalOptions(runtime=conformal_runtime),
+        order=order_config,
     ).execute(tasks, sales, origins)

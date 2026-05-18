@@ -50,19 +50,32 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def serialize_calibration_state(state: dict[str, Any]) -> str:
-    return json.dumps(state, sort_keys=True, separators=(",", ":"), default=_json_default)
-
-
-def deserialize_calibration_state(payload: str | None) -> dict[str, Any]:
-    if not payload:
-        return {}
-    return json.loads(payload)  # type: ignore[arg-type]
-
-
 def to_json_safe_state(state: dict[str, Any]) -> dict[str, Any]:
     """Coerce numpy/ndarray/Timestamp values into JSON-safe Python objects."""
-    return json.loads(serialize_calibration_state(state))
+    return json.loads(json.dumps(state, default=_json_default))
+
+
+@dataclass(frozen=True, slots=True)
+class StateRef:
+    method: str
+    mode: str
+    issued_count: int
+    partition: str
+
+
+def state_ref_value(method: str, mode: str, issued_count: int, partition: str) -> str:
+    return f"{method}:{mode}:{issued_count}:{partition}"
+
+
+def parse_state_ref(text: str) -> StateRef | None:
+    parts = text.split(":", 3)
+    if len(parts) != 4:
+        return None
+    try:
+        issued_count = int(parts[2])
+    except ValueError:
+        return None
+    return StateRef(method=parts[0], mode=parts[1], issued_count=issued_count, partition=parts[3])
 
 
 class ConformalRuntime(Protocol):
@@ -172,13 +185,10 @@ class SymmetricIntervalRuntime:
     def from_state(
         cls,
         config: SymmetricIntervalConfig,
-        state_payload: str | dict[str, Any] | None,
+        state: dict[str, Any] | None,
     ) -> SymmetricIntervalRuntime:
-        """Rehydrate a runtime from a serialized calibration-state snapshot."""
-        if isinstance(state_payload, dict):
-            state = state_payload
-        else:
-            state = deserialize_calibration_state(state_payload)
+        """Rehydrate a runtime from a calibration-state snapshot."""
+        state = state or {}
         runtime = cls(config, method_name=state.get("method", config.method))
         runtime._issued_count = int(state.get("issued_count", 0))
         if "calibrator" in state:
@@ -225,7 +235,7 @@ class SymmetricIntervalRuntime:
         }
 
     def _state_ref(self, partition: str) -> str:
-        return f"{self.method_name}:{self.config.mode}:{self._issued_count}:{partition}"
+        return state_ref_value(self.method_name, self.config.mode, self._issued_count, partition)
 
     def _controller_resume_state(self) -> dict[str, Any]:
         state = self.controller.get_state()

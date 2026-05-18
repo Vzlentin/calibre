@@ -20,6 +20,7 @@ from calibre.conformal.runtime import (
     SymmetricIntervalConfig,
     SymmetricIntervalRuntime,
     build_symmetric_interval_runtime,
+    parse_state_ref,
     to_json_safe_state,
 )
 from calibre.core.forecast_frame import (
@@ -311,101 +312,41 @@ class ConformalOptions:
             raise ValueError("Pass either conformal runtime or config, not both")
 
 
+_DEFAULT_EXECUTION = ExecutionOptions()
+_DEFAULT_OUTPUT = LedgerOutputOptions()
+_DEFAULT_CONFORMAL = ConformalOptions()
+
+
 class BackendEngine:
     def __init__(
         self,
-        freq: str | ExecutionOptions = "W",
-        metrics: list[Callable] | None = None,
-        engine: Any = None,
-        conformal_runtime: ConformalRuntime | None = None,
-        conformal_config: SymmetricIntervalConfig | None = None,
-        order_config: OrderPolicyConfig | None = None,
-        streaming_output: str | None = None,
-        streaming_order_output: str | None = None,
-        seed: int | None = None,
-        run_id: UUID | None = None,
-        conformal_state_store: ConformalStateStore | None = None,
-        initial_ledger: pd.DataFrame | None = None,
-        execution_options: ExecutionOptions | None = None,
-        ledger_output_options: LedgerOutputOptions | None = None,
-        conformal_options: ConformalOptions | None = None,
+        *,
+        execution: ExecutionOptions = _DEFAULT_EXECUTION,
+        output: LedgerOutputOptions = _DEFAULT_OUTPUT,
+        conformal: ConformalOptions = _DEFAULT_CONFORMAL,
+        order: OrderPolicyConfig | None = None,
     ) -> None:
-        if isinstance(freq, ExecutionOptions):
-            if execution_options is not None:
-                raise ValueError("Pass execution options once")
-            execution_options = freq
-            freq = "W"
-
-        legacy_execution = (
-            freq != "W" or metrics is not None or engine is not None or seed is not None
-        )
-        if execution_options is not None and legacy_execution:
-            raise ValueError("Pass either execution_options or legacy execution arguments")
-        if execution_options is None:
-            execution_options = ExecutionOptions(
-                freq=str(freq),
-                engine=engine,
-                seed=seed,
-                metrics=metrics,
-            )
-
-        legacy_ledger_output = streaming_output is not None or streaming_order_output is not None
-        if ledger_output_options is not None and legacy_ledger_output:
-            raise ValueError("Pass either ledger_output_options or legacy streaming arguments")
-        if ledger_output_options is None:
-            ledger_output_options = LedgerOutputOptions(
-                forecast_path=streaming_output,
-                order_path=streaming_order_output,
-                streaming=legacy_ledger_output,
-            )
-
-        legacy_conformal = (
-            conformal_runtime is not None
-            or conformal_config is not None
-            or run_id is not None
-            or conformal_state_store is not None
-            or initial_ledger is not None
-        )
-        if conformal_options is not None and legacy_conformal:
-            raise ValueError("Pass either conformal_options or legacy conformal arguments")
-        if conformal_options is None:
-            conformal_options = ConformalOptions(
-                runtime=conformal_runtime,
-                config=conformal_config,
-                run_id=run_id,
-                state_store=conformal_state_store,
-                initial_ledger=initial_ledger,
-            )
-
-        self.execution_options = execution_options
-        self.ledger_output_options = ledger_output_options
-        self.conformal_options = conformal_options
-        self.freq = execution_options.freq
-        self.engine = execution_options.engine
+        self.execution = execution
+        self.output = output
+        self.conformal = conformal
+        self.order_config = order
+        self.freq = execution.freq
+        self.engine = execution.engine
+        self.seed: Seed | None = set_seed(execution.seed) if execution.seed is not None else None
+        self.conformal_config = conformal.config
         self.conformal_runtime = (
-            conformal_options.runtime
-            if conformal_options.runtime is not None
-            else build_symmetric_interval_runtime(conformal_options.config)
-            if conformal_options.config is not None
+            conformal.runtime
+            if conformal.runtime is not None
+            else build_symmetric_interval_runtime(conformal.config)
+            if conformal.config is not None
             else None
         )
-        self.conformal_config = conformal_options.config
-        self.order_config = order_config
-        self.streaming_output = (
-            ledger_output_options.forecast_path if ledger_output_options.streaming else None
-        )
-        self.streaming_order_output = (
-            ledger_output_options.order_path if ledger_output_options.streaming else None
-        )
-        self.seed: Seed | None = (
-            set_seed(execution_options.seed) if execution_options.seed is not None else None
-        )
-        self.run_id = conformal_options.run_id
-        self.conformal_state_store = conformal_options.state_store
+        self.streaming_output = output.forecast_path if output.streaming else None
+        self.streaming_order_output = output.order_path if output.streaming else None
+        self.run_id = conformal.run_id
+        self.conformal_state_store = conformal.state_store
         self.initial_ledger = (
-            conformal_options.initial_ledger.copy()
-            if conformal_options.initial_ledger is not None
-            else None
+            conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
         )
 
     def execute(
@@ -581,16 +522,10 @@ class BackendEngine:
 
         max_issued_count = 0
         for state_ref in self.initial_ledger[CALIBRATION_STATE_REF].dropna().astype(str):
-            if not state_ref:
+            parsed = parse_state_ref(state_ref) if state_ref else None
+            if parsed is None:
                 continue
-            parts = state_ref.split(":", 3)
-            if len(parts) < 4:
-                continue
-            try:
-                issued_count = int(parts[2])
-            except ValueError:
-                continue
-            max_issued_count = max(max_issued_count, issued_count + 1)
+            max_issued_count = max(max_issued_count, parsed.issued_count + 1)
 
         if (
             isinstance(runtime, SymmetricIntervalRuntime)

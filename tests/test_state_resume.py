@@ -17,7 +17,7 @@ from calibre.core.forecast_frame import (
     Y,
 )
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ConformalOptions
 from calibre.storage.models import Base
 from calibre.storage.objstore import read_initial_ledger, write_ledger_shard
 from calibre.storage.postgres import (
@@ -107,10 +107,7 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
     store = _MemoryStateStore()
 
     BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
+        conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
     ).execute([task], actuals, origins=[dates[7], dates[8]])
 
     persisted = store.get(run_id, RUNTIME_PARTITION)
@@ -119,10 +116,7 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
     assert "error_history" not in persisted["controller"]
 
     resumed = BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
+        conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
     ).execute([task], actuals, origins=[dates[9]])
 
     frame = resumed.ledger.to_df()
@@ -146,7 +140,7 @@ def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
     )
     origins = [dates[7], dates[8], dates[9]]
 
-    uninterrupted = BackendEngine(freq="W", conformal_config=config).execute(
+    uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
         [task],
         actuals,
         origins=origins,
@@ -155,18 +149,16 @@ def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
     run_id = uuid4()
     store = _MemoryStateStore()
     interrupted = BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
+        conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
     ).execute([task], actuals, origins=origins[:2])
 
     resumed = BackendEngine(
-        freq="W",
-        conformal_config=config,
-        run_id=run_id,
-        conformal_state_store=store,
-        initial_ledger=interrupted.ledger.to_df(),
+        conformal=ConformalOptions(
+            config=config,
+            run_id=run_id,
+            state_store=store,
+            initial_ledger=interrupted.ledger.to_df(),
+        ),
     ).execute([task], actuals, origins=origins[2:])
 
     sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
@@ -192,7 +184,7 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
     )
     origins = [dates[7], dates[8], dates[9]]
 
-    uninterrupted = BackendEngine(freq="W", conformal_config=config).execute(
+    uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
         [task],
         actuals,
         origins=origins,
@@ -207,10 +199,11 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
         run = RunRepo(session).create(config={"name": "resume-test"})
         run_id = run.id
         interrupted = BackendEngine(
-            freq="W",
-            conformal_config=config,
-            run_id=run_id,
-            conformal_state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+            conformal=ConformalOptions(
+                config=config,
+                run_id=run_id,
+                state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+            ),
         ).execute([task], actuals, origins=origins[:2])
         pointer = write_ledger_shard(interrupted.ledger.to_df(), str(ledger_path))
         ForecastPointerRepo(session).upsert(
@@ -224,11 +217,12 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
         initial_ledger = read_initial_ledger(ForecastPointerRepo(session), run_id)
         assert initial_ledger is not None
         resumed = BackendEngine(
-            freq="W",
-            conformal_config=config,
-            run_id=run_id,
-            conformal_state_store=SqlConformalStateStore(ConformalStateRepo(session)),
-            initial_ledger=initial_ledger,
+            conformal=ConformalOptions(
+                config=config,
+                run_id=run_id,
+                state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+                initial_ledger=initial_ledger,
+            ),
         ).execute([task], actuals, origins=origins[2:])
 
     sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]

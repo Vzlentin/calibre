@@ -5,7 +5,7 @@ import pytest
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ExecutionOptions
 
 
 def _panel() -> pd.DataFrame:
@@ -47,7 +47,7 @@ def test_dask_quantile_columns_survive() -> None:
 
     origins = [pd.Timestamp("2024-04-14")]
 
-    expected = BackendEngine(freq="W").execute(tasks, all_series, origins).ledger.to_df()
+    expected = BackendEngine().execute(tasks, all_series, origins).ledger.to_df()
     assert "q_0p5" in expected.columns
     assert "q_0p833" in expected.columns
 
@@ -56,7 +56,7 @@ def test_dask_quantile_columns_survive() -> None:
     try:
         engine = fugue_dask.DaskExecutionEngine(client)
         actual = (
-            BackendEngine(freq="W", engine=engine)
+            BackendEngine(execution=ExecutionOptions(engine=engine))
             .execute(tasks, all_series, origins)
             .ledger.to_df()
         )

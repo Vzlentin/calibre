@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import traceback
-from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID, uuid4
 
 import pandas as pd
 from sqlalchemy.orm import sessionmaker
 
+from calibre.api.schemas import RunResponse
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
 from calibre.core.run_status import RunStatus
@@ -21,33 +21,12 @@ from calibre.storage.postgres import ConformalStateRepo, ForecastPointerRepo, Ru
 from calibre.storage.state import SqlConformalStateStore
 
 
-@dataclass
-class RunSnapshot:
-    id: str
-    config: dict
-    status: RunStatus = RunStatus.QUEUED
-    artifact_urls: dict[str, str] = field(default_factory=dict)
-    error: str | None = None
-
-
 class RunStore(Protocol):
-    def create(self, config: dict, *, idempotency_key: str | None = None) -> RunSnapshot: ...
+    def create(self, config: dict, *, idempotency_key: str | None = None) -> RunResponse: ...
 
-    def get(self, run_id: str) -> RunSnapshot | None: ...
+    def get(self, run_id: str) -> RunResponse | None: ...
 
-    def queue(self, run_id: str) -> RunSnapshot: ...
-
-    def mark_running(self, run_id: str) -> None: ...
-
-    def mark_succeeded(self, run_id: str, *, rows: int) -> None: ...
-
-    def mark_failed(self, run_id: str, *, error: str) -> None: ...
-
-    def register_configured_artifact_pointers(self, run_id: str, config) -> None: ...
-
-    def record_artifact_pointers(self, run_id: str, config) -> None: ...
-
-    def initial_ledger(self, run_id: str) -> pd.DataFrame | None: ...
+    def queue(self, run_id: str) -> RunResponse: ...
 
     def run_backtest_job(self, run_id: str) -> None: ...
 
@@ -65,90 +44,87 @@ def _format_error(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 
-class MemoryRunStore(RunStore):
+def _result_rows(result) -> int:
+    return len(result) if isinstance(result, pd.DataFrame) else len(result.ledger.to_df())
+
+
+class MemoryRunStore:
     def __init__(self) -> None:
-        self._runs: dict[str, RunSnapshot] = {}
+        self._runs: dict[str, RunResponse] = {}
+        self._configs: dict[str, dict] = {}
         self._idempotency: dict[str, str] = {}
 
-    def create(self, config: dict, *, idempotency_key: str | None = None) -> RunSnapshot:
+    def create(self, config: dict, *, idempotency_key: str | None = None) -> RunResponse:
         if idempotency_key is not None and idempotency_key in self._idempotency:
             return self._runs[self._idempotency[idempotency_key]]
         run_id = str(uuid4())
-        record = RunSnapshot(id=run_id, config=config)
-        self._runs[run_id] = record
+        response = RunResponse(id=run_id, status=RunStatus.QUEUED)
+        self._runs[run_id] = response
+        self._configs[run_id] = config
         if idempotency_key is not None:
             self._idempotency[idempotency_key] = run_id
-        return record
+        return response
 
-    def get(self, run_id: str) -> RunSnapshot | None:
+    def get(self, run_id: str) -> RunResponse | None:
         return self._runs.get(run_id)
 
-    def queue(self, run_id: str) -> RunSnapshot:
-        record = self._runs[run_id]
-        record.status = RunStatus.QUEUED
-        record.error = None
-        return record
+    def queue(self, run_id: str) -> RunResponse:
+        response = self._runs[run_id].model_copy(update={"status": RunStatus.QUEUED, "error": None})
+        self._runs[run_id] = response
+        return response
 
     def mark_running(self, run_id: str) -> None:
-        self._runs[run_id].status = RunStatus.RUNNING
+        self._runs[run_id] = self._runs[run_id].model_copy(update={"status": RunStatus.RUNNING})
 
     def mark_succeeded(self, run_id: str, *, rows: int) -> None:
-        record = self._runs[run_id]
-        record.artifact_urls["rows"] = str(rows)
-        record.status = RunStatus.SUCCEEDED
-        record.error = None
+        self._runs[run_id] = self._runs[run_id].model_copy(
+            update={"status": RunStatus.SUCCEEDED, "row_count": int(rows), "error": None}
+        )
 
     def mark_failed(self, run_id: str, *, error: str) -> None:
-        record = self._runs[run_id]
-        record.status = RunStatus.FAILED
-        record.error = error
+        self._runs[run_id] = self._runs[run_id].model_copy(
+            update={"status": RunStatus.FAILED, "error": error}
+        )
 
-    def register_configured_artifact_pointers(self, run_id: str, config) -> None:
-        del run_id, config
-
-    def record_artifact_pointers(self, run_id: str, config) -> None:
-        record = self._runs[run_id]
+    def _record_artifact_urls(self, run_id: str, config) -> None:
+        urls = dict(self._runs[run_id].artifact_urls)
         for kind, path in _pointer_kinds(config):
             uri = canonical_ledger_uri(path) if kind == "ledger" else path
-            record.artifact_urls[kind] = signed_url(uri)
-
-    def initial_ledger(self, run_id: str) -> pd.DataFrame | None:
-        del run_id
-        return None
+            urls[kind] = signed_url(uri)
+        self._runs[run_id] = self._runs[run_id].model_copy(update={"artifact_urls": urls})
 
     def run_backtest_job(self, run_id: str) -> None:
         self.mark_running(run_id)
         try:
-            record = self._runs[run_id]
-            config = load_config_from_mapping(record.config)
+            config = load_config_from_mapping(self._configs[run_id])
             result = run_config(config)
-            rows = len(result) if isinstance(result, pd.DataFrame) else len(result.ledger.to_df())
-            self.record_artifact_pointers(run_id, config)
-            self.mark_succeeded(run_id, rows=rows)
-        except Exception as exc:  # pragma: no cover - exercised through API status tests
+            self._record_artifact_urls(run_id, config)
+            self.mark_succeeded(run_id, rows=_result_rows(result))
+        except Exception as exc:
             self.mark_failed(run_id, error=_format_error(exc))
 
 
-class SqlRunStore(RunStore):
+class SqlRunStore:
     def __init__(self, factory: sessionmaker) -> None:
         self.factory = factory
 
-    def create(self, config: dict, *, idempotency_key: str | None = None) -> RunSnapshot:
+    def create(self, config: dict, *, idempotency_key: str | None = None) -> RunResponse:
         with session_scope(self.factory) as session:
             run = RunRepo(session).create(config=config, idempotency_key=idempotency_key)
-            return self._snapshot(run, ForecastPointerRepo(session))
+            return self._response(run, ForecastPointerRepo(session))
 
-    def get(self, run_id: str) -> RunSnapshot | None:
-        parsed = self._parse_run_id(run_id)
-        if parsed is None:
+    def get(self, run_id: str) -> RunResponse | None:
+        try:
+            parsed = UUID(run_id)
+        except ValueError:
             return None
         with session_scope(self.factory) as session:
             run = RunRepo(session).get(parsed)
             if run is None:
                 return None
-            return self._snapshot(run, ForecastPointerRepo(session))
+            return self._response(run, ForecastPointerRepo(session))
 
-    def queue(self, run_id: str) -> RunSnapshot:
+    def queue(self, run_id: str) -> RunResponse:
         parsed = UUID(run_id)
         with session_scope(self.factory) as session:
             repo = RunRepo(session)
@@ -156,48 +132,25 @@ class SqlRunStore(RunStore):
             run = repo.get(parsed)
             if run is None:
                 raise KeyError(f"Unknown run_id: {run_id}")
-            return self._snapshot(run, ForecastPointerRepo(session))
+            return self._response(run, ForecastPointerRepo(session))
 
     def mark_running(self, run_id: str) -> None:
         with session_scope(self.factory) as session:
             RunRepo(session).set_status(UUID(run_id), RunStatus.RUNNING)
 
     def mark_succeeded(self, run_id: str, *, rows: int) -> None:
+        parsed = UUID(run_id)
         with session_scope(self.factory) as session:
             repo = RunRepo(session)
-            run = repo.get(UUID(run_id))
+            run = repo.get(parsed)
             if run is None:
                 raise KeyError(f"Unknown run_id: {run_id}")
-            run.config = {**run.config, "_rows": int(rows)}
-            repo.set_status(UUID(run_id), RunStatus.SUCCEEDED)
+            run.row_count = int(rows)
+            repo.set_status(parsed, RunStatus.SUCCEEDED)
 
     def mark_failed(self, run_id: str, *, error: str) -> None:
         with session_scope(self.factory) as session:
             RunRepo(session).set_status(UUID(run_id), RunStatus.FAILED, error=error)
-
-    def register_configured_artifact_pointers(self, run_id: str, config) -> None:
-        parsed = UUID(run_id)
-        with session_scope(self.factory) as session:
-            pointer_repo = ForecastPointerRepo(session)
-            for kind, path in _pointer_kinds(config):
-                if pointer_repo.get(parsed, kind) is None:
-                    pointer_repo.upsert(parsed, kind, path, 0)
-
-    def record_artifact_pointers(self, run_id: str, config) -> None:
-        parsed = UUID(run_id)
-        with session_scope(self.factory) as session:
-            pointer_repo = ForecastPointerRepo(session)
-            for kind, path in _pointer_kinds(config):
-                uri = canonical_ledger_uri(path) if kind == "ledger" else path
-                try:
-                    pointer = artifact_pointer(uri)
-                except FileNotFoundError:
-                    continue
-                pointer_repo.upsert(parsed, kind, str(pointer["uri"]), int(pointer["byte_size"]))
-
-    def initial_ledger(self, run_id: str) -> pd.DataFrame | None:
-        with session_scope(self.factory) as session:
-            return read_initial_ledger(ForecastPointerRepo(session), UUID(run_id))
 
     def run_backtest_job(self, run_id: str) -> None:
         parsed = UUID(run_id)
@@ -222,10 +175,7 @@ class SqlRunStore(RunStore):
                     conformal_state_store=SqlConformalStateStore(ConformalStateRepo(session)),
                     initial_ledger=initial_ledger,
                 )
-                rows = (
-                    len(result) if isinstance(result, pd.DataFrame) else len(result.ledger.to_df())
-                )
-                run.config = {**run.config, "_rows": int(rows)}
+                run.row_count = _result_rows(result)
                 for kind, path in _pointer_kinds(config):
                     uri = canonical_ledger_uri(path) if kind == "ledger" else path
                     try:
@@ -239,27 +189,18 @@ class SqlRunStore(RunStore):
                         int(pointer["byte_size"]),
                     )
                 run_repo.set_status(parsed, RunStatus.SUCCEEDED)
-        except Exception as exc:  # pragma: no cover - status path exercised by tests
+        except Exception as exc:
             self.mark_failed(run_id, error=_format_error(exc))
 
     @staticmethod
-    def _parse_run_id(run_id: str) -> UUID | None:
-        try:
-            return UUID(run_id)
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _snapshot(run, pointer_repo: ForecastPointerRepo) -> RunSnapshot:
+    def _response(run, pointer_repo: ForecastPointerRepo) -> RunResponse:
         artifact_urls = {
             pointer.kind: signed_url(pointer.uri) for pointer in pointer_repo.list_for_run(run.id)
         }
-        if "_rows" in run.config:
-            artifact_urls["rows"] = str(run.config["_rows"])
-        return RunSnapshot(
+        return RunResponse(
             id=str(run.id),
-            config=run.config,
             status=RunStatus(run.status),
             artifact_urls=artifact_urls,
+            row_count=run.row_count,
             error=run.error,
         )

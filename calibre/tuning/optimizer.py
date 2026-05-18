@@ -42,8 +42,8 @@ def optimize_task(task: TuningTask) -> dict:
                 model_config=candidate_config,
             )
             result = BackendEngine(
-                execution_options=ExecutionOptions(freq=freq),
-                conformal_options=ConformalOptions(runtime=conformal_runtime_factory()),
+                execution=ExecutionOptions(freq=freq),
+                conformal=ConformalOptions(runtime=conformal_runtime_factory()),
             ).execute([forecast_task], actuals, origins)
             resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
             if resolved.empty:

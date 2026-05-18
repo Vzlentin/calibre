@@ -4,7 +4,7 @@ import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, LedgerOutputOptions
 from calibre.execution.ledger import ForecastLedger
 
 
@@ -38,13 +38,11 @@ def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> Non
 
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
-    expected = BackendEngine(freq="W").execute([task], actuals, origins).ledger.to_df()
+    expected = BackendEngine().execute([task], actuals, origins).ledger.to_df()
     path = tmp_path / "ledger.parquet"
-    streaming_result = BackendEngine(freq="W", streaming_output=str(path)).execute(
-        [task],
-        actuals,
-        origins,
-    )
+    streaming_result = BackendEngine(
+        output=LedgerOutputOptions(forecast_path=str(path), streaming=True),
+    ).execute([task], actuals, origins)
 
     actual = streaming_result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)
@@ -65,8 +63,10 @@ def test_streaming_output_accepts_fsspec_uri(monkeypatch) -> None:
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
     result = BackendEngine(
-        freq="W",
-        streaming_output="memory://calibre-tests/streaming/ledger.parquet",
+        output=LedgerOutputOptions(
+            forecast_path="memory://calibre-tests/streaming/ledger.parquet",
+            streaming=True,
+        ),
     ).execute([task], actuals, [dates[3]])
 
     assert len(result.ledger.to_df()) == 1
@@ -85,13 +85,11 @@ def test_streaming_resolution_keeps_only_pending_rows(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
-    expected = BackendEngine(freq="W").execute([task], actuals, origins).ledger.to_df()
+    expected = BackendEngine().execute([task], actuals, origins).ledger.to_df()
     path = tmp_path / "bounded-ledger.parquet"
-    result = BackendEngine(freq="W", streaming_output=str(path)).execute(
-        [task],
-        actuals,
-        origins,
-    )
+    result = BackendEngine(
+        output=LedgerOutputOptions(forecast_path=str(path), streaming=True),
+    ).execute([task], actuals, origins)
 
     actual = result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)

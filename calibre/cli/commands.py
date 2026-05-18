@@ -225,23 +225,23 @@ def run_config(
     execution_engine = _resolve_execution_engine(config)
     try:
         result = BackendEngine(
-            execution_options=ExecutionOptions(
+            execution=ExecutionOptions(
                 freq=config.origins.freq,
                 engine=execution_engine,
                 seed=config.execution.seed,
             ),
-            conformal_options=ConformalOptions(
+            output=LedgerOutputOptions(
+                forecast_path=streaming_output,
+                order_path=streaming_order_output,
+                streaming=config.output.streaming,
+            ),
+            conformal=ConformalOptions(
                 config=conformal_config,
                 run_id=run_id,
                 state_store=conformal_state_store,
                 initial_ledger=initial_ledger,
             ),
-            order_config=_build_order_config(config),
-            ledger_output_options=LedgerOutputOptions(
-                forecast_path=streaming_output,
-                order_path=streaming_order_output,
-                streaming=config.output.streaming,
-            ),
+            order=_build_order_config(config),
         ).execute(tasks, bundle.history, origins)
     finally:
         _close_execution_engine(execution_engine)

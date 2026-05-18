@@ -20,7 +20,7 @@ from calibre.core.metrics import (
     set_order_cost,
 )
 from calibre.core.tracing import span
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ExecutionOptions
 
 
 class _ObservabilityAdapter:
@@ -79,7 +79,9 @@ def test_backend_logs_adapter_fit_predict_phases(monkeypatch) -> None:
         model_config={"backend": "stub", "model": "stub_model", "name": "stub_model"},
     )
 
-    BackendEngine(freq="W-SUN").execute([task], history, [pd.Timestamp("2024-01-28")])
+    BackendEngine(execution=ExecutionOptions(freq="W-SUN")).execute(
+        [task], history, [pd.Timestamp("2024-01-28")]
+    )
 
     records = _json_lines(stream)
     by_phase = {record.get("phase"): record for record in records}

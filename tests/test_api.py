@@ -187,7 +187,7 @@ def test_backtests_endpoint_records_status(monkeypatch) -> None:
     run_id = response.json()["id"]
     status = client.get(f"/runs/{run_id}").json()
     assert status["status"] == "succeeded"
-    assert status["artifact_urls"]["rows"] == "1"
+    assert status["row_count"] == 1
 
 
 def test_backtests_endpoint_persists_runs_and_pointers(monkeypatch, tmp_path) -> None:
@@ -217,7 +217,7 @@ def test_backtests_endpoint_persists_runs_and_pointers(monkeypatch, tmp_path) ->
     run_id = response.json()["id"]
     status = client.get(f"/runs/{run_id}").json()
     assert status["status"] == "succeeded"
-    assert status["artifact_urls"]["rows"] == "1"
+    assert status["row_count"] == 1
     assert "ledger" in status["artifact_urls"]
     assert Path(status["artifact_urls"]["ledger"]) == ledger_path
     assert ledger_path.exists()
