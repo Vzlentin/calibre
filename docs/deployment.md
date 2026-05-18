@@ -100,7 +100,12 @@ terraform -chdir=infra/aws apply -var desired_count=1
 The ECS task gets `CALIBRE_DATABASE_URL` from Secrets Manager. When set,
 `POST /backtests` persists rows in `runs`, conformal snapshots in
 `conformal_state`, and output artifact pointers in `forecast_pointers`. Run the
-Alembic migration under `calibre/storage/migrations/` before starting the API.
+Alembic migration before starting the API:
+
+```bash
+CALIBRE_DATABASE_URL="postgresql+psycopg://..." \
+  uv run alembic -c alembic.ini upgrade head
+```
 
 ## Azure Container Instances
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
@@ -9,16 +11,27 @@ config = context.config
 target_metadata = Base.metadata
 
 
+def _database_url() -> str:
+    url = os.environ.get("CALIBRE_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    if not url or url.startswith("driver://"):
+        raise RuntimeError(
+            "Set CALIBRE_DATABASE_URL or sqlalchemy.url before running storage migrations"
+        )
+    return url
+
+
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
+    url = _database_url()
     context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
     with context.begin_transaction():
         context.run_migrations()
 
 
 def run_migrations_online() -> None:
+    section = config.get_section(config.config_ini_section, {})
+    section["sqlalchemy.url"] = _database_url()
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        section,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
