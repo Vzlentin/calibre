@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -29,6 +31,8 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
+
+logger = logging.getLogger(__name__)
 
 ConformalMethod = Literal["mscp", "aci"]
 ConformalMode = Literal["perhorizon", "cumulative"]
@@ -206,12 +210,25 @@ class SymmetricIntervalRuntime:
         }
 
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame:
+        started = time.perf_counter()
         if frame.empty:
-            return frame.copy()
-
-        if self.config.mode == "cumulative":
-            return self._apply_cumulative(frame)
-        return self._apply_perhorizon(frame)
+            result = frame.copy()
+        elif self.config.mode == "cumulative":
+            result = self._apply_cumulative(frame)
+        else:
+            result = self._apply_perhorizon(frame)
+        logger.info(
+            "applied conformal runtime",
+            extra={
+                "phase": "conformal",
+                "operation": "apply",
+                "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                "rows": len(frame),
+                "method": self.method_name,
+                "mode": self.config.mode,
+            },
+        )
+        return result
 
     def _apply_perhorizon(self, frame: pd.DataFrame) -> pd.DataFrame:
         lower_col, upper_col = self.config.interval_columns
@@ -292,20 +309,34 @@ class SymmetricIntervalRuntime:
         return result
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
+        started = time.perf_counter()
         if resolved.empty:
-            return resolved.copy()
+            observed = resolved.copy()
+        else:
+            lower_col, upper_col = self.config.interval_columns
+            if lower_col not in resolved.columns or upper_col not in resolved.columns:
+                raise ValueError("Resolved rows must include conformal interval columns")
 
-        lower_col, upper_col = self.config.interval_columns
-        if lower_col not in resolved.columns or upper_col not in resolved.columns:
-            raise ValueError("Resolved rows must include conformal interval columns")
+            observed = resolved.copy()
+            if NONCONFORMITY_SCORE not in observed.columns:
+                observed[NONCONFORMITY_SCORE] = np.nan
 
-        observed = resolved.copy()
-        if NONCONFORMITY_SCORE not in observed.columns:
-            observed[NONCONFORMITY_SCORE] = np.nan
-
-        if self.config.mode == "cumulative":
-            return self._observe_cumulative(observed)
-        return self._observe_perhorizon(observed, lower_col, upper_col)
+            if self.config.mode == "cumulative":
+                observed = self._observe_cumulative(observed)
+            else:
+                observed = self._observe_perhorizon(observed, lower_col, upper_col)
+        logger.info(
+            "observed conformal runtime",
+            extra={
+                "phase": "conformal",
+                "operation": "observe",
+                "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                "rows": len(resolved),
+                "method": self.method_name,
+                "mode": self.config.mode,
+            },
+        )
+        return observed
 
     def _observe_perhorizon(
         self, observed: pd.DataFrame, lower_col: str, upper_col: str
