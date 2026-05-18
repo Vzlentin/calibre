@@ -7,8 +7,15 @@ from pathlib import Path
 import fsspec
 import pandas as pd
 
-from calibre.cli.commands import _record_order_cost_metric, health, run, run_sweep, validate
-from calibre.cli.config import load_config
+from calibre.cli.commands import (
+    _record_order_cost_metric,
+    health,
+    run,
+    run_config,
+    run_sweep,
+    validate,
+)
+from calibre.cli.config import load_config, load_config_from_mapping
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.metrics import order_cost
@@ -190,6 +197,45 @@ def test_winning_dask_config_uses_dask_engine() -> None:
     assert config.execution.engine == "dask"
     assert config.tasks[0].config["scope"] == "global"
     assert "lag_transforms" in config.tasks[0].config
+
+
+def test_builtin_benchmark_preserves_fsspec_dataset_uri(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_run_benchmark(**kwargs):
+        seen.update(kwargs)
+        return pd.DataFrame(
+            {
+                UNIQUE_ID: ["A"],
+                "holding_cost": [0.0],
+                "shortage_cost": [1.0],
+                "total_cost": [1.0],
+            }
+        )
+
+    monkeypatch.setattr("benchmarks.vn2.run_benchmark.run_benchmark", _fake_run_benchmark)
+    config = load_config_from_mapping(
+        {
+            "config_schema": "1.0",
+            "benchmark": "vn2_winning",
+            "dataset": {"adapter": "vn2", "path": "memory://calibre-vn2-benchmark/data"},
+            "tasks": [
+                {
+                    "model": "global_lgbm",
+                    "horizon": 3,
+                    "config": {"backend": "mlforecast"},
+                }
+            ],
+            "origins": {"start": "2024-01-01", "end": "2024-01-01", "freq": "W-MON"},
+            "output": {"streaming": False},
+            "execution": {"engine": None, "seed": 42},
+        }
+    )
+
+    summary = run_config(config)
+
+    assert seen["data_dir"] == "memory://calibre-vn2-benchmark/data"
+    assert summary["total_cost"].sum() == 1.0
 
 
 def test_run_command_executes_config(monkeypatch, tmp_path) -> None:

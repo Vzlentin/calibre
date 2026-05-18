@@ -171,7 +171,7 @@ def _run_builtin_benchmark(config: BackendConfig) -> pd.DataFrame:
     execution_engine = _resolve_execution_engine(config)
     try:
         summary = run_benchmark(
-            data_dir=Path(config.dataset.path),
+            data_dir=config.dataset.path,
             horizon=config.tasks[0].horizon,
             tune=False,
             results_dir=None,
