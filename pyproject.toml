@@ -30,6 +30,7 @@ calibre = "calibre.cli.main:app"
 [project.optional-dependencies]
 dev = [
     "httpx",
+    "pre-commit",
     "pytest",
     "ruff",
     "mypy",
