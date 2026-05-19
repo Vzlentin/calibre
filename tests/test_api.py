@@ -117,7 +117,7 @@ def _payload(adapter: str = "unit_api") -> dict:
             ],
             "origins": {"start": "2024-02-04", "end": "2024-02-04", "freq": "W-SUN"},
             "output": {},
-            "execution": {"engine": None, "seed": 123},
+            "execution": {"backend": "local", "seed": 123},
         }
     }
 

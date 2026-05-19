@@ -13,7 +13,7 @@ dependencies = [
     "pyarrow",
     "pyyaml",
     "fsspec",
-    "fugue",
+    "ray[default,tune]>=2.38,<3",
     "fastapi",
     "sqlalchemy",
     "alembic",
@@ -45,14 +45,11 @@ benchmarks = [
     "mlforecast",
     "lightgbm",
     "mlflow>=2.17,<3",
-    "optuna-integration[mlflow]>=4.0",
 ]
 s3 = ["s3fs"]
 azure = ["adlfs"]
 gcs = ["gcsfs"]
 cloud = ["s3fs", "adlfs", "gcsfs"]
-dask = ["dask[distributed]"]
-spark = ["pyspark"]
 ml = ["mlforecast", "lightgbm"]
 neural = ["neuralforecast", "torch"]
 xgboost = ["xgboost<2"]
@@ -67,9 +64,7 @@ explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    "spark: tests that require a local Spark runtime",
-]
+markers = []
 
 [tool.ruff]
 line-length = 100
@@ -106,9 +101,7 @@ module = [
     "mlforecast.*",
     "lightgbm.*",
     "xgboost.*",
-    "fugue.*",
-    "fugue_dask.*",
-    "fugue_spark.*",
+    "ray.*",
     "fsspec",
     "fsspec.*",
     "fsspec.core.*",
@@ -117,10 +110,8 @@ module = [
     "alembic.*",
     "psycopg.*",
     "optuna.*",
-    "optuna_integration.*",
     "mlflow.*",
     "requests.*",
     "pyarrow.*",
-    "pyspark.*",
 ]
 ignore_missing_imports = true

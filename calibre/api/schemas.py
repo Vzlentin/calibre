@@ -25,5 +25,6 @@ class RunResponse(BaseModel):
     id: str
     status: RunStatus
     artifact_urls: dict[str, str] = Field(default_factory=dict)
+    hpo_metadata: dict[str, Any] = Field(default_factory=dict)
     row_count: int | None = None
     error: str | None = None

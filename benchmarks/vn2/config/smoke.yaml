@@ -17,5 +17,5 @@ output:
   ledger_path: results/vn2/smoke-ledger.parquet
   streaming: false
 execution:
-  engine: null
+  backend: local
   seed: 42

@@ -82,11 +82,20 @@ class OutputConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HPOConfig:
+    tune_experiment_dir: str | None = None
+    optuna_study_name: str | None = None
+    optuna_storage_uri: str | None = None
+    best_config_path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionConfig:
-    engine: str | None = None
+    backend: Literal["local", "ray", "auto"] = "auto"
     seed: int | None = None
-    dask_address: str | None = None
-    spark_session: dict[str, Any] = field(default_factory=dict)
+    ray_address: str | None = None
+    ray_threshold: int = 10
+    max_concurrency: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +105,7 @@ class BackendConfig:
     tasks: list[TaskConfig]
     origins: OriginsConfig
     output: OutputConfig
+    hpo: HPOConfig | None = None
     conformal: ConformalConfig | None = None
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
@@ -202,15 +212,46 @@ def _parse_output(data: Any) -> OutputConfig:
     )
 
 
+def _parse_hpo(data: Any) -> HPOConfig | None:
+    raw = _optional_mapping(data, "hpo")
+    if raw is None:
+        return None
+    return HPOConfig(
+        tune_experiment_dir=str(raw["tune_experiment_dir"])
+        if raw.get("tune_experiment_dir") is not None
+        else None,
+        optuna_study_name=str(raw["optuna_study_name"])
+        if raw.get("optuna_study_name") is not None
+        else None,
+        optuna_storage_uri=str(raw["optuna_storage_uri"])
+        if raw.get("optuna_storage_uri") is not None
+        else None,
+        best_config_path=str(raw["best_config_path"])
+        if raw.get("best_config_path") is not None
+        else None,
+    )
+
+
 def _parse_execution(data: Any) -> ExecutionConfig:
     raw = _require_mapping(data or {}, "execution")
-    engine = raw.get("engine")
-    if engine not in (None, "dask", "spark"):
-        raise ValueError("execution.engine must be null, 'dask', or 'spark'")
+    if "engine" in raw:
+        raise ValueError("legacy execution engine field has been replaced by execution.backend")
+    backend = str(raw.get("backend", "auto"))
+    if backend not in {"local", "ray", "auto"}:
+        raise ValueError("execution.backend must be 'local', 'ray', or 'auto'")
+    ray_threshold = int(raw.get("ray_threshold", 10))
+    if ray_threshold < 1:
+        raise ValueError("execution.ray_threshold must be at least 1")
+    max_concurrency = (
+        int(raw["max_concurrency"]) if raw.get("max_concurrency") is not None else None
+    )
+    if max_concurrency is not None and max_concurrency < 1:
+        raise ValueError("execution.max_concurrency must be at least 1")
     return ExecutionConfig(
-        engine=engine,
-        dask_address=str(raw["dask_address"]) if raw.get("dask_address") is not None else None,
-        spark_session=dict(raw.get("spark_session", {})),
+        backend=backend,  # type: ignore[arg-type]
+        ray_address=str(raw["ray_address"]) if raw.get("ray_address") is not None else None,
+        ray_threshold=ray_threshold,
+        max_concurrency=max_concurrency,
         seed=int(raw["seed"]) if raw.get("seed") is not None else None,
     )
 
@@ -236,6 +277,7 @@ def load_config_from_mapping(
         ordering=_parse_ordering(raw.get("ordering")),
         origins=_parse_origins(_require_key(raw, "origins", "config")),
         output=_parse_output(raw.get("output")),
+        hpo=_parse_hpo(raw.get("hpo")),
         execution=_parse_execution(raw.get("execution")),
         benchmark=str(raw["benchmark"]) if raw.get("benchmark") is not None else None,
         source_path=str(source_path) if source_path is not None else None,

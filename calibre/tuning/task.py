@@ -26,3 +26,14 @@ class TuningTask:
     freq: str = "W"
     conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None
     seed: int | None = None
+    asha_grace_period: int = 8
+    cpu_per_trial: float = 1.0
+    max_concurrent_trials: int | None = None
+    max_uid_concurrency: int | None = None
+    ray_address: str | None = None
+    ray_local_mode: bool = False
+    tune_storage_path: str | None = None
+    tune_experiment_name: str | None = None
+    mlflow_tracking_uri: str | None = None
+    mlflow_experiment_name: str | None = None
+    mlflow_parent_run_id: str | None = None

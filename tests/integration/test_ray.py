@@ -13,31 +13,29 @@ from calibre.execution.backend import BackendEngine, BackendResult, ExecutionOpt
 
 
 def _panel() -> pd.DataFrame:
-    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
     return pd.concat(
         [
-            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [10.0, 20.0] * 6}),
-            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [5.0, 15.0] * 6}),
+            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [10.0, 20.0] * 10}),
+            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [5.0, 15.0] * 10}),
         ],
         ignore_index=True,
     )
 
 
 def _tasks(panel: pd.DataFrame) -> list[ForecastTask]:
-    tasks: list[ForecastTask] = []
-    for _, group in panel.groupby(UNIQUE_ID, sort=False):
-        tasks.append(
-            ForecastTask(
-                history=group.reset_index(drop=True),
-                horizon=2,
-                model_config={
-                    "backend": "statsforecast",
-                    "model": "SeasonalNaive",
-                    "season_length": 2,
-                },
-            )
+    return [
+        ForecastTask(
+            history=group.reset_index(drop=True),
+            horizon=2,
+            model_config={
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "season_length": 2,
+            },
         )
-    return tasks
+        for _, group in panel.groupby(UNIQUE_ID, sort=False)
+    ]
 
 
 def _global_task(panel: pd.DataFrame) -> ForecastTask:
@@ -51,6 +49,7 @@ def _global_task(panel: pd.DataFrame) -> ForecastTask:
             "lags": [1, 2, 3, 4],
             "verbosity": -1,
             "n_estimators": 10,
+            "n_jobs": 1,
         },
     )
 
@@ -107,60 +106,66 @@ def _fast_benchmark_model_config() -> dict:
     }
 
 
-def test_dask_localcluster_matches_single_node_backend() -> None:
-    distributed = pytest.importorskip("distributed")
-    fugue_dask = pytest.importorskip("fugue_dask")
+def test_ray_backend_matches_local_backend() -> None:
+    pytest.importorskip("ray")
 
     panel = _panel()
     tasks = _tasks(panel)
-    origins = [pd.Timestamp("2024-02-11"), pd.Timestamp("2024-02-18")]
+    origins = [pd.Timestamp("2024-03-17"), pd.Timestamp("2024-03-24")]
     expected = BackendEngine().execute(tasks, panel, origins).ledger.to_df()
-
-    cluster = distributed.LocalCluster(processes=False, dashboard_address=None)
-    client = distributed.Client(cluster)
+    engine = BackendEngine(
+        execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
+    )
     try:
-        engine = fugue_dask.DaskExecutionEngine(client)
-        actual = (
-            BackendEngine(execution=ExecutionOptions(engine=engine))
-            .execute(tasks, panel, origins)
-            .ledger.to_df()
-        )
+        actual = engine.execute(tasks, panel, origins).ledger.to_df()
     finally:
-        client.close()
-        cluster.close()
+        engine.close()
 
     pd.testing.assert_frame_equal(_sorted(actual), _sorted(expected))
 
 
-def test_dask_global_scope_matches_single_node_backend() -> None:
-    distributed = pytest.importorskip("distributed")
-    fugue_dask = pytest.importorskip("fugue_dask")
+def test_ray_quantile_columns_survive() -> None:
+    pytest.importorskip("ray")
 
-    panel = _panel()
-    task = _global_task(panel)
-    origins = [pd.Timestamp("2024-02-11")]
-    expected = BackendEngine().execute([task], panel, origins).ledger.to_df()
-
-    cluster = distributed.LocalCluster(processes=False, dashboard_address=None)
-    client = distributed.Client(cluster)
-    try:
-        engine = fugue_dask.DaskExecutionEngine(client)
-        actual = (
-            BackendEngine(execution=ExecutionOptions(engine=engine))
-            .execute([task], panel, origins)
-            .ledger.to_df()
+    all_series = _panel()
+    model_config = {
+        "backend": "mlforecast",
+        "scope": "local",
+        "model": "lightgbm.LGBMRegressor",
+        "objective": "quantile",
+        "quantiles": [0.5, 0.833],
+        "strategy": "direct",
+        "lags": [1, 2],
+        "verbosity": -1,
+        "n_estimators": 10,
+        "n_jobs": 1,
+    }
+    tasks = [
+        ForecastTask(
+            history=group.reset_index(drop=True),
+            horizon=2,
+            model_config=model_config,
         )
+        for _, group in all_series.groupby(UNIQUE_ID, sort=False)
+    ]
+    origins = [pd.Timestamp("2024-04-14")]
+    engine = BackendEngine(
+        execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
+    )
+    try:
+        actual = engine.execute(tasks, all_series, origins).ledger.to_df()
     finally:
-        client.close()
-        cluster.close()
+        engine.close()
 
-    pd.testing.assert_frame_equal(_sorted(actual), _sorted(expected))
+    assert "q_0p5" in actual.columns
+    assert "q_0p833" in actual.columns
+    assert actual["q_0p5"].notna().all()
+    assert actual["q_0p833"].notna().all()
 
 
-def _write_cli_config(tmp_path: Path, *, engine: str | None) -> Path:
-    config_path = tmp_path / f"{engine or 'local'}.yaml"
-    ledger_path = tmp_path / f"{engine or 'local'}.parquet"
-    engine_value = "null" if engine is None else engine
+def _write_cli_config(tmp_path: Path, *, backend: str) -> Path:
+    config_path = tmp_path / f"{backend}.yaml"
+    ledger_path = tmp_path / f"{backend}.parquet"
     config_path.write_text(
         f"""
 config_schema: "1.0"
@@ -182,7 +187,9 @@ output:
   ledger_path: {ledger_path.as_posix()}
   streaming: false
 execution:
-  engine: {engine_value}
+  backend: {backend}
+  ray_threshold: 1
+  max_concurrency: 1
   seed: 42
 """,
         encoding="utf-8",
@@ -190,21 +197,22 @@ execution:
     return config_path
 
 
-def test_cli_dask_config_matches_cli_single_node(tmp_path: Path) -> None:
-    pytest.importorskip("distributed")
-    pytest.importorskip("fugue_dask")
+def test_cli_ray_config_matches_cli_local(tmp_path: Path) -> None:
+    pytest.importorskip("ray")
 
-    local = run(_write_cli_config(tmp_path, engine=None))
-    dask = run(_write_cli_config(tmp_path, engine="dask"))
+    local = run(_write_cli_config(tmp_path, backend="local"))
+    ray_result = run(_write_cli_config(tmp_path, backend="ray"))
 
     assert isinstance(local, BackendResult)
-    assert isinstance(dask, BackendResult)
-    pd.testing.assert_frame_equal(_sorted(dask.ledger.to_df()), _sorted(local.ledger.to_df()))
+    assert isinstance(ray_result, BackendResult)
+    pd.testing.assert_frame_equal(
+        _sorted(ray_result.ledger.to_df()),
+        _sorted(local.ledger.to_df()),
+    )
 
 
-def test_vn2_dask_benchmark_cost_matches_single_node(tmp_path: Path) -> None:
-    distributed = pytest.importorskip("distributed")
-    fugue_dask = pytest.importorskip("fugue_dask")
+def test_vn2_ray_benchmark_cost_matches_local(tmp_path: Path) -> None:
+    pytest.importorskip("ray")
 
     _write_vn2_benchmark_fixture(tmp_path)
     common_kwargs = {
@@ -220,18 +228,15 @@ def test_vn2_dask_benchmark_cost_matches_single_node(tmp_path: Path) -> None:
         "order_conformal_config": None,
     }
     expected = run_benchmark(**common_kwargs).sort_values("unique_id").reset_index(drop=True)
-
-    cluster = distributed.LocalCluster(processes=False, dashboard_address=None)
-    client = distributed.Client(cluster)
-    try:
-        engine = fugue_dask.DaskExecutionEngine(client)
-        actual = (
-            run_benchmark(**common_kwargs, execution_engine=engine)
-            .sort_values("unique_id")
-            .reset_index(drop=True)
+    actual = (
+        run_benchmark(
+            **common_kwargs,
+            execution_backend="ray",
+            ray_threshold=1,
+            max_concurrency=1,
         )
-    finally:
-        client.close()
-        cluster.close()
+        .sort_values("unique_id")
+        .reset_index(drop=True)
+    )
 
     pd.testing.assert_frame_equal(actual, expected, check_exact=False, atol=1e-9)

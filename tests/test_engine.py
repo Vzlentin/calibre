@@ -33,7 +33,7 @@ from calibre.execution.backend import (
     ConformalOptions,
     ExecutionOptions,
     LedgerOutputOptions,
-    _process_task_ref_partition,
+    _process_task_ref,
 )
 from calibre.execution.ledger import OrderLedger
 from calibre.ordering.policy_config import OrderPolicyConfig
@@ -84,8 +84,8 @@ def test_execute_accepts_grouped_constructor_options(single_series_setup, tmp_pa
     assert len(result.ledger.to_df()) == 8
 
 
-def test_fugue_partition_worker_is_module_level_picklable():
-    pickle.dumps(_process_task_ref_partition)
+def test_ray_worker_function_is_module_level_picklable():
+    pickle.dumps(_process_task_ref)
 
 
 def test_forecast_frame_columns_present(single_series_setup):

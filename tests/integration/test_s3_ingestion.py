@@ -41,7 +41,7 @@ output:
   ledger_path: {ledger_path}
   streaming: false
 execution:
-  engine: null
+  backend: local
   seed: 123
 """,
         encoding="utf-8",

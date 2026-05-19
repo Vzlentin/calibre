@@ -120,7 +120,9 @@ supported by `adlfs`.
 
 ## Databricks
 
-Calibre runs on Databricks via the Spark execution backend. The workflow is:
+Calibre can run on Databricks as a normal Python job on the driver. Use
+`backend: local` for small smoke tests and submit larger distributed runs to a
+Ray cluster or KubeRay rather than routing forecasts through Spark.
 
 1. **Build and upload the wheel** from your local checkout:
 
@@ -169,3 +171,12 @@ Calibre runs on Databricks via the Spark execution backend. The workflow is:
    )
    display(summary)
    ```
+
+## Ray Notes
+
+`execution.backend: auto` starts Ray only when the per-origin local task count
+meets `execution.ray_threshold` (default `10`). Set `backend: local` for health
+checks, tiny fixtures, and Windows development when startup cost matters. For
+multi-node execution, run Ray on Linux containers or KubeRay and pass
+`execution.ray_address`; Calibre connects to remote clusters without shutting
+them down.

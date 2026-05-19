@@ -1,473 +1,468 @@
-# Calibre Execution + Tuning Stack Decision
+# Calibre Execution and Tuning Stack Decision
 
-> **Status:** accepted · **Date:** 2026-05-18
-> **Author:** analysis session · **Canonical plan reference:** `~/.claude/plans/i-want-to-switch-polished-ocean.md`
+Status: implemented
+Decision date: 2026-05-19
 
----
+## Decision
 
-## Executive Summary
+Replace the current Fugue-based execution path and sequential Optuna tuning loop with
+Ray Core for execution fan-out and Ray Tune with OptunaSearch plus ASHA for HPO. Keep
+pandas, Parquet, fsspec, ForecastTaskRef URI materialization, FastAPI, SQLAlchemy,
+Alembic, MLflow, and Prometheus.
 
-Replace Fugue (execution fan-out) and sequential Optuna (HPO) with **Ray Core + Ray Tune
-(OptunaSearch + ASHAScheduler)**. Keep everything else: pandas, parquet, fsspec, SQLAlchemy,
-FastAPI, MLflow, Prometheus, ForecastTaskRef URI hand-off.
+This is a targeted scheduler migration, not a platform rewrite. The model adapters in
+`calibre/forecasting/{stats,ml,neural}forecast_adapter.py` remain backend-blind.
+Conformal calibration remains driver-owned because it is sequential mutable state.
+The VN2 cost gate remains exact: `benchmarks/vn2/config/winning.yaml` must reproduce
+`total_cost = 4992.20` rounded to cents at every milestone.
 
-The canonical plan (`i-want-to-switch-polished-ocean.md`) is correct in its overall direction.
-This document agrees with it on the fundamental choice and sharpens several implementation
-specifics where the plan left gaps: the `execute()` API contract, the single-node fast path,
-resource budgeting for nested parallelism, and the `run_streaming()` / `execute()` split.
+## Implementation Evidence
 
----
+The execution layer now schedules Calibre's natural unit of work directly instead of
+adapting it into a relational transform:
+
+- `calibre/execution/backend.py` uses explicit `backend`, `ray_address`,
+  `ray_threshold`, and `max_concurrency` execution options.
+- Local-scope fan-out materializes `ForecastTaskRef` instances from URI-backed task
+  payloads and submits Ray Core tasks only when the selected backend and task count
+  require it.
+- The local fast path runs in-process below the configured Ray threshold, which keeps
+  smoke tests, health checks, and small fixtures free of Ray startup cost.
+- Global-scope models always run in-process on the driver.
+- The driver still owns conformal interval application, ordering policy, ledger
+  appends, and result aggregation.
+
+The tuning layer now delegates trial scheduling to Ray Tune while preserving the Optuna
+search-space contract:
+
+- `calibre/tuning/task.py` keeps `search_space: Callable[[optuna.Trial], dict]`.
+- `calibre/tuning/optimizer.py` uses Ray Tune `Tuner`, `OptunaSearch`, and
+  `ASHAScheduler`.
+- Trial trainables stream completed origins through the execution backend and report
+  pruning metrics only between origins.
+- Trial CPU budgets cap UID fan-out and common library thread counts.
+
+The CLI and packaging expose the Ray/local scheduler fields directly:
+
+- `calibre/cli/config.py` parses `execution.backend`, `execution.ray_address`,
+  `execution.ray_threshold`, and `execution.max_concurrency`.
+- `calibre/cli/commands.py` constructs a `BackendEngine` from those explicit options.
+- `pyproject.toml` includes Ray as the scheduler runtime and no longer exposes legacy
+  scheduler extras.
+
+The data hand-off layer is worth keeping:
+
+- `calibre/core/forecast_task.py:40-58` writes task history and future covariates to
+  Parquet URIs.
+- `forecast_task.py:70-82` materializes those URIs back into a `ForecastTask`.
+- `forecast_task.py:12-14` caches Parquet reads per process with `lru_cache`, which
+  maps cleanly to worker processes.
 
 ## 1. Execution Layer
 
-### 1.1 Problem with the current stack
+### Recommendation
 
-`backend.py:_run_parallel` calls `fugue.api.transform(task_df, _process_task_ref_partition, schema=..., partition={"by": UNIQUE_ID}, engine=self.engine)`. This forces four artefacts that are wrong by design:
+Use Ray Core for per-series fit and predict fan-out. Keep global models and small local
+runs in-process.
 
-1. **Schema strings.** `_collect_quantile_columns` (line 138) decodes every model config just to enumerate quantile column names so Fugue can declare a schema string. The schema is a Fugue protocol requirement; it has no value for Calibre.
-2. **Base64-pickled model configs as DataFrame columns.** `_encode_model_config` / `_decode_model_config` exist solely to embed model configs in a Fugue-partitioned DataFrame. This is a workaround for Fugue's inability to pass arbitrary Python objects alongside partition data.
-3. **Parquet round-trips.** `ForecastTask.to_uri` was introduced to make tasks serializable across Fugue workers. URI hand-off is the right pattern; the problem is that Fugue *also* forces the dispatch frame to be materialized to parquet before it can be transformed.
-4. **`_run_direct` bypass.** Line 598: `if self.engine is not None: return self._run_global_distributed(...)`. The global bypass exists because Fugue's partition-by-uid semantics don't compose with global (multi-series) adapters. This is a smell: the execution layer needs a special case to handle a common workflow.
+Ray fits Calibre's execution shape better than Fugue, Dask, Spark, or a bare process
+pool because Calibre's unit of work is already a Python object plus URI references, not
+a relational DataFrame transform. Ray can schedule those Python tasks directly across
+cores or nodes, and the same scheduler can also run HPO trials. That removes the current
+Fugue-only artifacts: base64 config columns, schema strings, dispatch DataFrames, and
+global-model detours.
 
-None of these problems exist with Ray.
+### Local-scope fan-out
 
-### 1.2 Proposed design: Ray Core
+For local-scope models, `BackendEngine` should build one `ForecastTaskRef` per uid and
+origin-independent model configuration. At each origin:
 
-**Local-scope (per-uid) fan-out.**
+- If the local task count is below the fast-path threshold, run the existing fit and
+  predict loop in-process.
+- Otherwise, submit one Ray task per uid for that origin.
+- Each Ray worker materializes the `ForecastTaskRef`, filters `history[ds] < origin`,
+  resolves the backend-blind adapter, fits, predicts, finalizes the forecast frame, and
+  returns a pandas DataFrame.
+- The driver concatenates returned frames, normalizes dtypes, applies conformal intervals,
+  applies ordering policy if configured, and appends to the ledger.
 
-```python
-@ray.remote(num_cpus=1)
-def _ray_fit_predict_uid(ref: ForecastTaskRef, origin: pd.Timestamp) -> pd.DataFrame:
-    task = ref.materialize()
-    history = task.history[task.history[DS] < origin]
-    if history.empty:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS)
-    origin_task = ForecastTask(history=history, horizon=task.horizon,
-                               model_config=task.model_config, forecast_origin=origin)
-    preds = _fit_predict_task(origin_task)
-    return _finalize_preds(preds, origin, origin_task.model_name)
-```
+This keeps all distributed-framework imports out of model adapters. Workers call the
+same adapter registry as the local path.
 
-`_run_parallel` becomes:
+### Global-scope execution
 
-```python
-def _run_parallel(self, refs: list[ForecastTaskRef], origin: pd.Timestamp) -> pd.DataFrame:
-    if not refs:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS)
-    if len(refs) < self._ray_threshold:
-        # in-process fast path, zero Ray overhead
-        return self._run_sequential(refs, origin)
-    futures = [_ray_fit_predict_uid.remote(ref, origin) for ref in refs]
-    frames = ray.get(futures)
-    return _coerce_forecast_frame_dtypes(
-        pd.concat([f for f in frames if not f.empty], ignore_index=True)
-    )
-```
+Global-scope models run in-process on the driver. A global LightGBM model fits once on
+the full panel; it is not a per-uid map operation. Sending one global task to a worker
+adds scheduling, serialization, logging, and lifecycle cost without creating useful
+parallelism. Distributed LightGBM is a separate model-training concern and is skipped
+until a real global panel crosses the scale where single-process training is the
+bottleneck.
 
-Key differences from current Fugue path:
-- `ForecastTaskRef` is pickled directly into the Ray task argument (it is already picklable: two URI strings + a config dict + a timestamp). No schema string, no base64 encoding, no intermediate DataFrame.
-- Schema discovery is gone. `_collect_quantile_columns` is deleted. Ray returns real Python `pd.DataFrame` objects; `_coerce_forecast_frame_dtypes` handles dtype normalization on the concat result.
-- The `_TaskDispatchRecord` dataclass and `_dispatch_records_to_frame` are deleted. They existed only to satisfy Fugue's partition-by-column contract.
+The current `_run_global_distributed` branch should disappear during migration.
 
-**Global-scope (single model on full panel).**
+### Task hand-off
 
-Global tasks always run in-process on the driver. No Ray hop. This was already the intent of `_run_direct` (line 592–655), but the current code adds a Fugue distributed path when `self.engine is not None`. That branch is deleted; global scope is unconditionally in-process:
+Use `ForecastTaskRef` as the worker argument. It contains small Python metadata and
+URIs to Parquet data. Ray serializes that reference directly; large histories stay in
+Parquet and are read by workers through the existing materialization path.
 
-```python
-def _run_direct(self, refs: list[ForecastTaskRef], origin: pd.Timestamp) -> pd.DataFrame:
-    # Global adapters fit on the full panel: no fan-out, always in-process.
-    ...
-```
+Do not move per-uid history frames into Ray object storage by default. Object storage is
+useful when the same large immutable object is reused many times by many tasks. Calibre's
+history hand-off is already URI-based, cloud-compatible, and resumable. For current VN2
+scale, task refs are small enough to pass by value, while returned forecast frames are
+small enough to collect on the driver. Use `ray.put` only after profiling shows that a
+shared object is repeatedly serialized and is larger than the task-ref metadata.
 
-This is correct because global models (e.g. LightGBM with `scope="global"`) fit once on the concatenated panel. Distributing one training job across Ray workers would add coordination overhead with no parallelism gain. The panel for VN2 is ~600 series × ~260 weeks × 1 feature = ~156k rows — milliseconds to pass in-process.
+### ExecutionOptions and engine resolution
 
-**Task hand-off mechanism.**
+Replace the current `ExecutionOptions.engine: Any` Fugue object with explicit scheduler
+options:
 
-`ForecastTaskRef` → pickled into `@ray.remote` args. Each ref is ~500 bytes (two file paths + horizon int + timestamp + config dict). At 600 series this is <300 KB total. Plasma store is not needed; plasma is optimized for large NumPy arrays (>100 MB).
+- `backend`: `local`, `ray`, or `auto`; default `auto`.
+- `ray_address`: optional Ray cluster address; absent means local Ray when needed.
+- `ray_threshold`: default `10`; below this count, do not initialize Ray.
+- `max_concurrency`: optional cap on concurrent uid tasks for a run or trial.
+- `seed`, `freq`, and metrics fields remain conceptually unchanged.
 
-Workers read parquet via `_read_parquet_cached` (the existing `lru_cache` wrapper). In Ray workers, the cache is per-process, which is correct — each worker process independently caches the parquet it has read, and the cache is released when the process exits.
+The CLI config now uses `execution.backend: local | ray | auto` plus
+`execution.ray_address`. `commands.py` passes explicit scheduler options into the
+execution layer. Scheduler lifecycle belongs in the execution layer, not in model
+adapters and not in the CLI command body.
 
-**`ExecutionOptions` changes.**
+### Cluster and worker lifecycle
 
-Replace `engine: Any` (Fugue engine object) with:
+Local CLI runs:
 
-```python
-@dataclass(frozen=True)
-class ExecutionOptions:
-    freq: str = "W"
-    ray_address: str | None = None   # None = local; "ray://host:10001" = cluster
-    ray_threshold: int = 10          # tasks below this run in-process (no Ray)
-    max_concurrency: int | None = None  # None = num_cpus; used as placement group budget
-    seed: int | None = None
-    metrics: list[Callable] | None = None
-```
+- If `backend=local`, never initialize Ray.
+- If `backend=auto` and local task count is below `ray_threshold`, never initialize Ray.
+- If Ray is needed and no address is provided, Calibre starts a local Ray runtime for
+  the process and owns its shutdown at the run boundary.
 
-`engine: Any = None` is removed. The `ray_threshold` field gives the single-node fast path without a special config flag.
+Remote cluster runs:
 
-**Cluster and worker lifecycle.**
+- If `ray_address` is provided, Calibre connects to that cluster and does not own its
+  lifecycle.
+- KubeRay, ECS bootstrap scripts, or a platform job runner owns cluster startup and
+  shutdown.
+- The Ray runtime lifetime should be one Calibre run for CLI jobs and process-scoped for
+  long-lived API workers.
 
-`ray.init(address=options.ray_address, ignore_reinit_error=True)` is called once at the **process level**, not per `BackendEngine` instance. `BackendEngine.__init__` calls `ray.init(...)` if `options.ray_address is not None` (cluster) or if `len(tasks) >= ray_threshold` (local multicore). For the fast path (below threshold, no address) Ray is never initialized, preserving the zero-startup smoke test path.
+This preserves small-run latency while giving cloud jobs a clear ownership boundary.
 
-`ray.shutdown()` is **not** called by `BackendEngine`. Lifetime is the process. Tests use a session-scoped `ray.init(num_cpus=2, ignore_reinit_error=True)` fixture.
+### Single-node fast path
 
-**Single-node fast path (< `ray_threshold` tasks).**
+Keep a pure in-process fast path for fewer than 10 local tasks. This path is not a
+fallback for correctness; it is the expected path for smoke tests, health checks,
+single-SKU debugging, and small customer fixtures. It avoids Ray import, runtime startup,
+task serialization, and dashboard overhead when the work is too small to amortize them.
 
-When `len(parallel_tasks) < ray_threshold`, `_run_parallel` calls `_run_sequential` — the same pure-Python loop used in `_run_direct`. This preserves the existing behavior for smoke tests, health checks, and small configs without any Ray overhead (no `ray.init`, no task pickling, no futures).
+### BackendEngine API
 
-Default threshold: 10 tasks. Configurable in `ExecutionOptions` for benchmarks that want a lower crossover.
+`BackendEngine.execute(tasks, actuals, origins) -> BackendResult` should survive. It is
+the public batch API used by CLI, API, tests, and benchmarks.
 
-**`BackendEngine.execute()` signature.**
+Add a separate streaming origin iterator for tuning and pruning. The tuning layer needs
+per-origin intermediate metrics; existing callers need a completed `BackendResult`.
+Changing `execute()` into a generator would create avoidable migration churn.
 
-The existing signature `execute(tasks, actuals, origins) -> BackendResult` is **preserved unchanged**. This is the primary public API surface. It is called from `commands.py`, integration tests, and benchmark scripts.
+### Why not the alternatives?
 
-A new `run_streaming(tasks, actuals, origins)` method is added as a **generator** that yields `OriginResult` (one per origin). This is the surface consumed by the Ray Tune objective function for per-origin ASHA reporting. The canonical plan proposes converting `execute()` itself to a generator — this is wrong. It would break every existing call site that does `result = engine.execute(...)`. The generator belongs in `run_streaming()`.
+ProcessPoolExecutor is the right mental model for the fast path but not the cloud
+scheduler. It has no cluster story, no dashboard, no HPO scheduler, and no resource
+budgeting across trials.
 
----
+Dask Distributed can submit Python futures and would remove some Fugue schema overhead,
+but it does not solve HPO as directly. Calibre would still need a custom ask/tell Optuna
+or pruning orchestrator to coordinate trial parallelism, early stopping, and nested
+per-uid execution. That is more bespoke scheduler code than Ray Tune.
+
+Spark is the wrong default for this workload. It is strong for SQL, large shuffles, and
+JVM-heavy ETL. Calibre needs Python model fits per uid, conditional HPO, and low-overhead
+single-node operation. Spark would keep the schema and pandas-UDF tax that Fugue already
+exposes.
+
+Keeping Fugue is not justified. Its portability across Dask and Spark is no longer a
+constraint, and its abstraction forces non-domain code into `backend.py`.
 
 ## 2. Tuning Layer
 
-### 2.1 Problem with the current stack
+### Recommendation
 
-`optimizer.py:optimize_task` calls `study.optimize(_objective, n_trials=task.n_trials)`. The `_objective` for the conformal path calls `BackendEngine(...).execute(...)` — a full backtest per trial. Every trial is sequential. The `ThreadPoolExecutor` in `benchmarks/vn2/tuning.py:98–102` parallelizes across *series* but not across *trials within a series*. For VN2 (600 series × 50 trials × ~40 origins = 1.2M fit-predicts), this is the dominant runtime bottleneck.
+Use Ray Tune with OptunaSearch and ASHAScheduler.
 
-There is no early stopping. A 50-trial study evaluates all 50 trials to completion even if 40 of them are clearly worse than the incumbent after 8 origins.
+The hard requirements are conditional Optuna search spaces, parallel trials, early
+stopping between origins, resource budgeting, and MLflow tracking. Ray Tune covers the
+scheduler side; OptunaSearch preserves the current search-space API.
 
-### 2.2 Proposed design: Ray Tune + OptunaSearch + ASHAScheduler
+### Preserving `TuningTask.search_space`
 
-**Preserving `TuningTask.search_space: Callable[[optuna.Trial], dict]`.**
+Keep `TuningTask.search_space: Callable[[optuna.Trial], dict]` unchanged. This API is
+load-bearing because Calibre search spaces can be conditional: one sampled value can
+determine whether later parameters are sampled at all.
 
-`OptunaSearch(space=task.search_space, sampler=TPESampler(seed=task.seed))` is the correct interface. It forwards a real `optuna.Trial` object to the user callback — same `suggest_int`, `suggest_float`, `suggest_categorical`, same `TrialPruned`, same conditional logic. The define-by-run pattern used in `benchmarks/vn2/run_benchmark.py:987–1029` (`_sample_cost_search_crc_config`, `crc_enabled=False` skipping ~10 suggests) is preserved without code changes.
+Use Ray Tune's OptunaSearch with the callable form of the search space. Current Ray
+documentation supports Optuna define-by-run callables that receive an Optuna trial and
+return suggested values. Do not convert these search spaces to Ray Tune's declarative
+parameter dictionaries; that would break conditional sampling.
 
-This is the decisive advantage of `OptunaSearch` over Ray Tune's native search: it does not require the search space to be declared upfront.
+### Trial-level parallelism
 
-**Trial-level parallelism.**
+Ray Tune should schedule trials as the top-level parallel unit. Each trial receives an
+explicit CPU budget. For per-series tuning, the trial usually runs one series and should
+not fan out further. For panel-level sweeps, the trial may use Ray Core inside its budget
+to fan out uid work, but concurrency must be capped so one trial cannot consume the
+whole cluster.
 
-```python
-tuner = tune.Tuner(
-    tune.with_resources(objective_fn, resources={"cpu": K}),
-    tune_config=tune.TuneConfig(
-        search_alg=OptunaSearch(space=task.search_space, sampler=TPESampler(seed=task.seed)),
-        scheduler=ASHAScheduler(
-            time_attr="origin_idx",
-            grace_period=task.grace_period,
-            max_t=len(task.origins),
-            reduction_factor=3,
-        ),
-        num_samples=task.n_trials,
-        max_concurrent_trials=max(1, num_cpus // K),
-    ),
-    run_config=RunConfig(name=task.unique_id),
-)
-result_grid = tuner.fit()
-```
+Set `max_concurrent_trials` from available CPUs and the configured CPU budget per trial.
+Inside each trial, set model-level thread counts and Calibre uid concurrency to the same
+budget. Ray resource requests are scheduling admission control, not hard CPU isolation,
+so LightGBM, NumPy, Torch, and other libraries still need explicit thread controls.
 
-Where `K = max(1, num_cpus // max_concurrent_trials)` is the CPU budget per trial. For a 16-core machine running 4 concurrent trials, each trial gets 4 cores for its per-uid Ray fan-out.
+### Early stopping and pruning
 
-**Preventing nested oversubscription.**
+Prune only between origins. The evaluation loop should report a cumulative objective
+after each completed origin. ASHA should use origin index as the monotonic progress
+attribute, with `max_t = len(origins)` and a conservative grace period.
 
-Each trial's `BackendEngine` uses `ExecutionOptions(ray_address=None, max_concurrency=K)`. The per-uid Ray tasks inside a trial are limited to `K` concurrent workers via the placement group budget. This prevents 4 concurrent trials × 600 series each from spawning 2400 simultaneous workers on a 16-core machine.
+Default grace period: 8 origins for VN2 conformal/order-cost searches. This avoids
+pruning during the conformal warmup period where early origins are not representative of
+later inventory cost. Make the grace period configurable per `TuningTask`.
 
-The canonical plan says `resources_per_trial={"cpu": K}` and `ExecutionOptions.max_uid_concurrency` — the intent is identical. The name `max_concurrency` is clearer.
+Do not prune mid-fit, mid-predict, mid-conformal update, or mid-ordering decision.
+Conformal state must remain internally consistent for every reported origin.
 
-**Early stopping / pruning via per-origin ASHA.**
+### MLflow tracking
 
-The objective function consumes `BackendEngine.run_streaming()`:
+Keep MLflow as the experiment system.
 
-```python
-def objective_fn(config: dict) -> None:
-    engine = BackendEngine(
-        execution=ExecutionOptions(freq=task.freq, max_concurrency=K),
-        conformal=ConformalOptions(runtime=task.conformal_runtime_factory()),
-    )
-    running_score = 0.0
-    for idx, origin_result in enumerate(engine.run_streaming([forecast_task], actuals, origins)):
-        running_score = task.objective.evaluate(origin_result.resolved, origin_result.resolved[Y])
-        tune.report({"score": running_score, "origin_idx": idx})
-```
+- Keep `safe_log_metric` and `log_costs_dataframe` for non-HPO benchmark paths.
+- Use Ray's MLflow logger or `setup_mlflow` for Ray Tune HPO paths.
+- Use a remote MLflow tracking URI for multi-node Tune runs.
+- Preserve parent/child run discoverability by tagging Tune trial runs with the parent
+  Calibre run id and the Ray trial id.
+- Log the best config, trial table, pruning summary, and cost artifacts as MLflow
+  artifacts.
 
-ASHA prunes a trial by stopping `tune.report` calls — the objective exits, Ray reclaims the worker CPUs. No trial is killed mid-fit; pruning happens between origins.
+Ray's MLflow callback logs from the driver, not from the trainable. If a trainable must
+log custom artifacts directly, use Ray's MLflow setup helper inside that trainable rather
+than calling plain MLflow APIs without an active session.
 
-**Grace period.**
+### RunStore integration
 
-`task.grace_period` defaults to `WARMUP_ORIGINS` for conformal tasks, where `WARMUP_ORIGINS = max(K, ceil(1/alpha) - 1)` — the minimum number of origins before conformal intervals stabilize. For VN2 (α=0.167, K=3): `WARMUP_ORIGINS = max(3, 5) = 5`. The canonical plan uses 8 — conservative and safe. Calibre should encode the formula and let the user override via `TuningTask.grace_period: int = 8`.
+Keep `RunStore` as run-level state, not as a trial database. The current `RunStore`
+contract in `calibre/api/run_store.py:24-31` is about creating, queueing, retrieving,
+and running backtest jobs. The SQL implementation records status, row counts, errors,
+and artifact pointers. That is the right boundary.
 
-**MLflow experiment tracking.**
+For HPO:
 
-Replace `optuna_integration.mlflow.MLflowCallback` with `ray.air.integrations.mlflow.MLflowLoggerCallback`. Parent run semantics:
+- `RunStore` records the parent run, status, artifact pointers, best config pointer,
+  Tune experiment pointer, and Optuna study name or storage URI.
+- Ray Tune and Optuna own trial-level persistence and resumption.
+- MLflow owns experiment metrics, params, and artifacts.
+- `SqlConformalStateStore` remains for resumable backtests, not for sharing mutable
+  conformal state across parallel trials.
 
-```python
-with mlflow.start_run(run_name=task.unique_id) as parent_run:
-    tuner = tune.Tuner(
-        ...,
-        run_config=RunConfig(
-            callbacks=[MLflowLoggerCallback(
-                tracking_uri=MLFLOW_TRACKING_URI,
-                experiment_name="vn2-tuning",
-                tags={"parent_run_id": parent_run.info.run_id},
-            )]
-        ),
-    )
-```
+On resume, a queued HPO run should recover the same Tune experiment directory and Optuna
+study identity, then continue unfinished trials. A completed best config is written back
+as a run artifact and can be used by normal `BackendEngine.execute()` runs.
 
-Each trial logs as a child run keyed by `parent_run_id`. The existing `safe_log_metric` and `log_costs_dataframe` remain for non-HPO paths.
+### Nested parallelism prevention
 
-**`RunStore` integration.**
+Use one scheduler: Ray. Do not run Fugue, Dask, Spark, joblib, or ThreadPoolExecutor
+inside Ray Tune trials.
 
-`RunStore` (PR #31, `calibre/storage/state.py`) stores conformal runtime state. It is not extended for trial persistence — that is MLflow's job. After `tuner.fit()` completes, the calling script writes `result_grid.get_best_result().config` to the run store if a `run_id` is provided. No direct coupling between Ray Tune and SQLAlchemy.
+Per trial:
 
-**`TuningTask` field additions.**
+- Request an explicit CPU budget.
+- Cap uid fan-out to that budget.
+- Set model library thread counts to fit that budget.
+- Keep global models single-trial and in-process unless a measured global-training
+  bottleneck appears.
+- Disable Ray initialization inside code paths that are already running in a Ray worker
+  except for submitting nested Ray tasks under the same cluster and resource budget.
 
-```python
-@dataclass(frozen=True)
-class TuningTask:
-    ...
-    grace_period: int = 8           # ASHA grace period (minimum origins before pruning)
-    resources_per_trial: dict = field(default_factory=lambda: {"cpu": 1})  # Ray resource budget
-```
-
-`search_space: Callable[[optuna.Trial], dict]` is unchanged — the load-bearing constraint.
-
----
-
-## 3. Scheduler Depth: Do / Defer / Skip
+## 3. Scheduler Depth
 
 | Layer | What it means | Verdict | Why |
-|-------|--------------|---------|-----|
-| **0. Execution framework (fan-out)** | Ray Core `@ray.remote` replaces `fugue.api.transform` | **DO** | Unified scheduler with tuning layer, no schema strings, picklable task refs work natively, KubeRay address is one config field. Fugue added complexity with no remaining advantage. |
-| **1. Tuning framework (HPO)** | Ray Tune + OptunaSearch + ASHAScheduler | **DO** | Fixes the trial-serialization bottleneck. ASHA cuts wasteful trials at the origin level — the natural unit of evaluation. OptunaSearch is the only Ray Tune search algorithm that supports define-by-run conditional search spaces. |
-| **2. Data loading (parallel IO, column pruning)** | Ray Data parallel parquet reads | **DEFER** | VN2 has 600 series. Each per-uid parquet is <5 MB. `fsspec` + `_read_parquet_cached` (lru_cache) is fast enough. Ray Data parallelizes parquet reads but adds 100–200 ms scheduling overhead per batch — net negative at VN2 scale. Revisit at 50k+ series where IO is measurably the bottleneck. |
-| **3. Stateful actors (caching, shared mutable state)** | Ray named actor for ConformalRuntime | **DEFER** | The driver-hosted `ConformalRuntime` is correct for both local and KubeRay deployments (mutable sequential state, never on the hot path of worker tasks). A named `ConformalRuntimeActor` is useful for multi-tenant server deployments where multiple concurrent requests share a single calibrated runtime. That use case is revenue-gated. |
-| **4. Model training (distributed LightGBM/XGBoost)** | Ray Train / distributed tree training | **SKIP** | Global LGBM trains on 600 series × ~260 weeks = 156k rows. Training takes 1–3 seconds. Distributed tree training adds coordination overhead that exceeds the training time. The right scale trigger is >10M rows and >5 minutes of training. Calibre is not there. |
-| **5. Serving (colocate with execution or replace FastAPI)** | Ray Serve | **SKIP** | Calibre's serving model is batch inference via ECS Jobs triggered by CLI or API. FastAPI wraps the CLI commands cleanly (PR #31). Ray Serve adds actor lifecycle complexity for a request pattern that is not latency-sensitive. No client SLA requires sub-second response times for a demand planning backtest. |
-| **6. State store (replace SQLAlchemy/Alembic)** | Ray's native checkpointing or a document store | **SKIP** | SQLAlchemy + Alembic + Postgres is the correct persistence layer for transactional state (run records, conformal snapshots). Ray's checkpointing is designed for ML training recovery, not durable business state. Migration would cost more than it saves. |
-| **7. Orchestration (replace CLI / ECS / K8s Jobs)** | Ray Workflows, Prefect, or Airflow | **SKIP** | Calibre's execution DAG is flat: one `BackendEngine.execute()` call per run. There are no cross-run DAG dependencies, no fan-in aggregations, no conditional branches between jobs. ECS Jobs + CLI covers the orchestration need. KubeRay handles cluster-mode execution when needed. Ray Workflows is designed for DAGs with 10+ steps and inter-task data dependencies — not Calibre's use case. |
-
----
+|-------|---------------|---------|-----|
+| 0 | Execution framework for per-uid fan-out | Do: Ray Core | Calibre's dominant execution unit is a picklable Python task plus Parquet URI references. Ray schedules that directly across cores or nodes and removes Fugue's schema/config dispatch layer. |
+| 1 | Tuning framework for HPO | Do: Ray Tune + OptunaSearch + ASHA | Trial parallelism and origin-level pruning are the biggest runtime gap. OptunaSearch preserves Calibre's conditional `Callable[[optuna.Trial], dict]` search spaces. |
+| 2 | Data loading with parallel IO and column pruning | Defer | `fsspec` plus pandas/pyarrow already handles object-store Parquet. Ray Data is useful if IO becomes the bottleneck, but VN2 and near-term panels are model-fit bound, not scan bound. |
+| 3 | Stateful actors for caching or shared mutable state | Defer | Conformal runtime state is sequential and should stay on the driver. Named actors may help future multi-tenant cache sharing, but they add lifecycle complexity before there is a measured need. |
+| 4 | Distributed model training | Skip | Global LightGBM is one model over the panel and is not the current bottleneck. Distributed LightGBM/XGBoost adds network coordination and failure modes that are unjustified below multi-million-row, multi-minute training jobs. |
+| 5 | Serving replacement or execution colocation | Skip | FastAPI already exposes the job surface. Calibre runs batch backtests and planning jobs, not low-latency online inference that needs Ray Serve. |
+| 6 | State store replacement | Skip | SQLAlchemy, Alembic, and Postgres are correct for durable business state. Ray checkpoints and Tune trial state are not replacements for run records, idempotency, artifact pointers, or conformal state snapshots. |
+| 7 | Orchestration replacement | Skip | CLI, ECS jobs, and K8s jobs match the current flat workflow. KubeRay can own Ray cluster resources, but Prefect/Airflow/Ray Workflows would add DAG machinery Calibre does not need. |
 
 ## 4. Data Layer
 
-**fsspec for object-store IO: keep.**
+### fsspec
 
-`fsspec` is the right abstraction. It handles `file://`, `s3://`, `az://`, `gs://` uniformly. PR #31 consolidated all IO through `calibre/execution/io.py`. The `cloud`, `s3`, `azure`, `gcs` extras in `pyproject.toml` map cleanly to `s3fs`, `adlfs`, `gcsfs`. No reason to change.
+Keep and extend fsspec. It is already the right boundary for local, S3, Azure, and GCS
+URIs. The cloud extras in `pyproject.toml` map cleanly to the backend filesystems.
+Replacing it would break the current object-store story without solving the scheduler
+problem.
 
-**pandas as in-memory frame format: keep.**
+### In-memory frames
 
-Per-uid frames at VN2 scale are <1 MB each. The driver accumulates origins into the `ForecastLedger` — at 600 series × 40 origins × ~10 columns × 3 horizon steps, the ledger is ~72k rows, trivially small for pandas. Polars would reduce peak memory by 2–3× and accelerate the `_coerce_forecast_frame_dtypes` coercions, but these are not bottlenecks. The integration cost (adapter compatibility, parquet read types) is not worth it for this scale. Revisit at 100k+ series.
+Keep pandas as the in-memory frame format. The forecasting adapters, metrics, ordering
+logic, and ledger code already speak pandas. Per-uid task frames and returned forecast
+frames are small. Moving to Polars, Arrow tables, Ray Data, or Spark DataFrames would
+push conversion work into every adapter and validator before a measured bottleneck
+exists.
 
-**Parquet as serialization format: keep.**
+Revisit Polars or Arrow-native internals only if profiling shows pandas ledger
+operations or dtype coercion dominating large-panel runs.
 
-Parquet is the right format for ForecastTaskRef persistence. It is columnar, compressed, and read by `pd.read_parquet` via pyarrow (already a dependency). Arrow IPC (feather) is faster for in-process round-trips but ForecastTaskRef is written once and read by workers — the IO is not on the critical path relative to model training. Plasma store targets sub-millisecond inter-process transfers of large NumPy arrays; it adds a daemon dependency for no gain at this task size.
+### Serialization
 
-**ForecastTaskRef (URI-based materialization): keep.**
+Keep Parquet for durable task and ledger serialization. It is columnar, compressed,
+cloud-friendly, and already backed by `pyarrow`. Arrow IPC/Feather is faster for local
+same-machine interchange, but Calibre needs stateless containers and object-store URIs,
+not only local shared memory. Plasma/ObjectRef transfer is optional for measured large
+shared objects, not the default task protocol.
 
-`ForecastTaskRef` is already Ray-clean. It is picklable (two string URIs + config dict + timestamp), reads via `fsspec` + pyarrow, and the `lru_cache` on `_read_parquet_cached` is per-process — correct in Ray worker processes. The workaround for multi-origin reads (a single `ForecastTaskRef` per uid, filtering by `history[DS] < origin` in the worker) is correct and already implemented.
+### ForecastTaskRef
 
-The `_TaskDispatchRecord` intermediate layer (lines 148–195 of `backend.py`) is deleted. It existed only to embed task data into a Fugue partition DataFrame.
+Keep `ForecastTaskRef` and remove the Fugue-specific dispatch wrapper around it.
 
----
+`ForecastTaskRef` is the correct abstraction because it is small, picklable, durable,
+and cloud-native. It also makes worker retries practical: a retried worker can
+materialize the same URI-backed task without relying on driver memory.
+
+Potential extension: add a manifest form for large panels so one object-store prefix can
+describe many uid refs and checksums. Do not replace the current URI materialization
+contract.
 
 ## 5. Observability
 
-**Dashboard: Ray Dashboard.**
+### Dashboard
 
-Ray Dashboard (included in `ray[default]`) shows task queue depth, CPU/memory per worker, task duration histograms, and HPO trial status (via Ray Tune's built-in Tune tab). This replaces the current opacity between Fugue worker logs and Optuna's local study. The Ray Dashboard runs on port 8265 by default; for ECS/K8s, expose it via an internal load balancer.
+Use separate surfaces with shared run identifiers:
 
-Keep the existing structured JSON logs (`logger.info(..., extra={...})`) — they are the per-task audit trail, not a replacement for the dashboard.
+- Ray Dashboard for scheduler state, task durations, worker CPU/memory, failed tasks,
+  and Tune trial progress.
+- MLflow for experiment parameters, trial metrics, artifacts, and best configs.
+- Existing FastAPI and CLI logs for Calibre job status and user-facing errors.
 
-**Experiment tracking: MLflow (keep).**
+A forced "single pane" would hide the different failure modes. Scheduling failures,
+model quality, and business cost are different questions.
 
-MLflow is already deployed on the Tailscale mesh (`http://404records.tail810e2e.ts.net:5000`). Every benchmark run logs params, metrics, and artifacts. The switch is:
+### Experiment tracking
 
-- Non-HPO paths: `safe_log_metric`, `log_costs_dataframe` unchanged.
-- HPO paths: `MLflowLoggerCallback` (from `ray.air.integrations.mlflow`) replaces `optuna_integration.mlflow.MLflowCallback`. Nested run semantics (parent = benchmark, child = trial) are preserved by tagging child runs with `parent_run_id`.
+Keep MLflow. It is already integrated in benchmark utilities and tests. W&B would add a
+second experiment system without replacing a broken one. Ray's native result directory
+is useful for Tune resumption but is not enough as the experiment UI and artifact system.
 
-W&B and Ray's native tracking are not needed. MLflow covers the use case and is already operational.
+### Metrics
 
-**Metrics: Prometheus (keep).**
+Keep Prometheus for Calibre business and operational metrics. Add Ray's exported
+Prometheus metrics when Ray is enabled. Calibre metrics such as forecast duration,
+conformal coverage, and order cost remain application-level metrics; Ray metrics explain
+cluster utilization and scheduling behavior.
 
-`prometheus-client` stays for operational metrics (`observe_forecast_duration`, `set_conformal_coverage`, `set_order_cost`). Ray's built-in metrics (task duration, memory, queue depth) complement but do not replace these business-level metrics. Configure Ray to scrape its metrics endpoint from the same Prometheus instance.
+### Logging and tracing
 
-**Logging: structured JSON (keep).**
+Use structured JSON logs everywhere, including workers. Required fields should include
+`run_id`, `trial_id`, `origin`, `unique_id`, `model_name`, `phase`, and duration.
 
-The existing `logger.info(..., extra={...})` pattern produces structured logs. Ray workers inherit the driver's logging config. No distributed tracing is needed at this scale — OpenTelemetry spans would add 50–100 ms overhead per origin for no operational benefit in a batch pipeline. Revisit if Calibre moves to real-time decision APIs.
-
----
+Defer distributed tracing. The current workload is a batch pipeline with clear origin
+and uid boundaries. Tracing becomes useful when Calibre adds long-lived, multi-service,
+latency-sensitive workflows.
 
 ## 6. Packaging
 
-**`pyproject.toml` extras post-migration:**
+### Extras
 
-Remove:
-```toml
-# DELETE
-dask = ["dask[distributed]"]
-spark = ["pyspark"]
-```
+Recommended dependency shape after migration:
 
-Add:
-```toml
-ray = ["ray[default,tune]>=2.10,<3"]
-```
+- Core: keep NumPy, pandas, pyarrow, pyyaml, fsspec, FastAPI, SQLAlchemy, Alembic,
+  psycopg, prometheus-client, statsforecast, optuna, and uvicorn.
+- Remove from core: `fugue`.
+- Legacy optional scheduler extras were removed once migration tests were green.
+- Add `ray = ["ray[default,tune]>=2.38,<3"]`.
+- Keep `cloud`, `s3`, `azure`, `gcs`, `ml`, `neural`, `xgboost`, `benchmarks`, and
+  `dev` extras.
+- Keep `optuna-integration[mlflow]` only until old Optuna MLflow callback users are
+  removed.
 
-Keep: `cloud`, `s3`, `azure`, `gcs`, `ml`, `neural`, `xgboost`, `benchmarks`, `dev`.
+### Slim and full images
 
-`benchmarks` extra retains `mlflow>=2.17,<3` and `optuna-integration[mlflow]>=4.0` — the latter is kept until all callers of `optuna_mlflow_callback` are migrated, then removed.
-
-**Slim vs full image:**
+Keep the slim/full Docker split.
 
 | Image | Contents | Use |
 |-------|----------|-----|
-| `slim` | core deps + `ray` extra | ECS Fargate tasks, health checks, CLI runs without LightGBM |
-| `full` | slim + `ml` + `neural` + `benchmarks` | VN2 benchmarks, HPO, neuralforecast experiments |
+| Slim | Core Calibre, FastAPI, SQL state store, fsspec, pandas/pyarrow, statsforecast, Prometheus client, Ray runtime | API workers, health checks, small CLI runs, Ray worker base image |
+| Full | Slim plus `ml`, `neural`, `benchmarks`, cloud filesystem extras, MLflow tooling | VN2 benchmarks, HPO jobs, LightGBM/XGBoost/neural experiments |
 
-Image size is not a concern (stated in PLAN.md constraints). The slim/full split from PR #31 is preserved.
+Image size is not a decision constraint, so prefer operational consistency over shaving
+Ray or ML libraries out of images that need them.
 
-**Databricks compatibility.**
+### Databricks compatibility
 
-Not required for Phase A or B. If a client operates on Databricks, the options are:
-1. Run Calibre CLI as a Databricks Job task on a single-driver cluster (no Ray needed for small datasets).
-2. Use RayDP (`raydp` package) to mount Ray on top of Databricks' existing Spark cluster for large-scale fan-out.
+Do not keep Spark/Fugue solely for Databricks. The Databricks path should be:
 
-No Calibre-side code changes are required for either path. The `ray_address` config field points to whatever address Ray is listening on.
+- Small and medium panels: run Calibre on the Databricks driver as a normal Python job
+  with object-store URIs.
+- Large panels: run Ray on a managed Ray/KubeRay cluster adjacent to the lakehouse and
+  point Calibre at that Ray address.
+- Notebook workflow: use Databricks notebooks to prepare configs, launch Calibre jobs,
+  and inspect artifacts, not to force the execution backend through Spark.
 
-**Version pinning.**
+This keeps the core engine consistent across ECS, K8s, local CLI, and notebooks.
 
-`ray>=2.10,<3` — Ray 2.10 is when `OptunaSearch` with define-by-run callables stabilized and `ASHAScheduler` with `time_attr` other than "training_iteration" was formally supported. Pin the major version upper bound to avoid breaking API changes (Ray 3.x is not yet released; add a CI check to catch it when it arrives).
+### Version pinning
 
----
+Use a broad package constraint and an exact lock:
+
+- `pyproject.toml`: `ray[default,tune]>=2.38,<3`.
+- `uv.lock`: exact tested Ray patch version.
+- KubeRay Helm/operator: pin to a version compatible with the locked Ray version.
+- Upgrade Ray and KubeRay together on a scheduled cadence after running the VN2 cost gate.
+
+Do not use Ray versions between 2.11.0 and 2.37.0 for KubeRay deployments because the
+current KubeRay upgrade guide calls out a RayJob readiness/liveness bug in that range.
 
 ## 7. Staged Migration Sequence
 
-### Phase A — Execution backend (Ray Core)
+| Phase | Entry criteria | Work | Exit criteria | Rollback plan | Estimate |
+|-------|----------------|------|---------------|---------------|----------|
+| 0. Baseline and acceptance | This document reviewed; current worktree clean except planned docs | Record baseline commands and expected VN2 winning cost; agree config fields and API compatibility | Baseline run record shows `benchmarks/vn2/config/winning.yaml` returns `total_cost = 4992.20` rounded to cents; no source changes yet | No rollback needed | 0.5 day |
+| 1. Ray Core execution | Phase 0 complete; baseline cost recorded | Replace Fugue dispatch with Ray Core local fan-out; keep global in-process; preserve `BackendEngine.execute`; add fast path and Ray execution config | Unit and integration tests green; ruff and mypy green; no active runtime references to the legacy scheduler path remain in `calibre` or `tests`; VN2 winning cost remains `4992.20` | Revert execution migration commit; old scheduler path was isolated to backend, CLI engine resolution, config, and tests | 2 days |
+| 2. Ray Tune HPO | Phase 1 complete; Ray execution stable locally | Add streaming origin evaluation for tuning; move `optimize_task` to Ray Tune with OptunaSearch and ASHA; add trial budgets and grace period | HPO tests show conditional search spaces work, at least one bad trial prunes after grace period, no nested oversubscription in resource tests; VN2 winning cost remains `4992.20` | Revert tuning migration; keep Ray Core execution | 2 to 3 days |
+| 3. Observability and persistence | Phase 2 complete; MLflow remote URI available | Wire Tune outputs to MLflow; record Tune/Optuna pointers and best config artifacts through RunStore; document resume path | RunStore tests cover HPO artifact pointers and resume metadata; MLflow trial runs are discoverable under parent run id; VN2 winning cost remains `4992.20` | Disable HPO resume metadata and fall back to MLflow artifacts while keeping execution | 1 day |
+| 4. Packaging and deployment | Phase 3 complete; deployment image build available | Remove Fugue/Dask/Spark deps; add Ray extra; update slim/full image install sets; pin Ray/KubeRay versions | Fresh env installs; Docker slim/full build; API health check; local Ray smoke; VN2 winning cost remains `4992.20` | Restore dependency set from previous lockfile and image definitions | 1 day |
+| 5. Cleanup and docs | Phase 4 complete | Remove dead Fugue tests/docs; update deployment docs and examples; add troubleshooting notes for Ray startup and Windows dev | Docs match code; no stale Dask/Spark config examples; final full test suite green; VN2 winning cost remains `4992.20` | Revert docs cleanup only | 0.5 day |
 
-**Entry criteria:** This decision document merged. `benchmarks/vn2/config/winning.yaml` cost verified at ≤ EUR 4,992.20 on the pre-migration stack.
-
-**Work:**
-- Delete `_TaskDispatchRecord`, `_dispatch_records_to_frame`, `_collect_quantile_columns`, `_encode_model_config`, `_decode_model_config`, `_process_task_ref_partition` (Fugue version), `_process_global_task_ref_partition` (Fugue version).
-- Add `_ray_fit_predict_uid` as `@ray.remote` module-level function.
-- Rewrite `_run_parallel` to `ray.get([...])` + concat, with sequential fast path below `ray_threshold`.
-- Delete `_run_global_distributed`. `_run_direct` becomes unconditionally in-process.
-- Update `ExecutionOptions`: remove `engine: Any`, add `ray_address`, `ray_threshold`, `max_concurrency`.
-- Update `commands.py`: replace `_resolve_execution_engine` / `_close_execution_engine` with `_init_ray(config)`.
-- Delete Dask/Spark integration tests (`test_dask.py`, `test_dask_quantile.py`, `test_spark.py`).
-- Add `tests/integration/test_ray.py`: local Ray cluster, VN2 winning config, cost ≤ EUR 4,992.20.
-- Add `tests/integration/test_ray_quantile.py`: quantile columns survive Ray task round-trip.
-- Remove `fugue`, add `ray[default,tune]>=2.10,<3` in `pyproject.toml`.
-
-**Exit criteria:**
-- `uv run pytest` green.
-- `uv run mypy calibre/` clean.
-- `uv run ruff check .` clean.
-- `tests/integration/test_ray.py` green.
-- `rg -i 'fugue|fa\.transform|DaskExecutionEngine|SparkExecutionEngine' calibre/ tests/` → no matches.
-- `benchmarks/vn2/config/winning.yaml` cost ≤ EUR 4,992.20 under Ray.
-
-**Rollback:** `git revert` the Phase A commit(s). The Fugue path is in a single file (`backend.py`) and the CLI engine resolver is in `commands.py`. Revert is surgical.
-
-**Effort:** ~2 working days.
-
----
-
-### Phase B — Tuning (Ray Tune + OptunaSearch + ASHA)
-
-**Entry criteria:** Phase A complete. `test_ray.py` green on CI.
-
-**Work:**
-- Add `BackendEngine.run_streaming(tasks, actuals, origins)` generator yielding `OriginResult`.
-- Rewrite `optimize_task` in `optimizer.py` to use `tune.Tuner(OptunaSearch, ASHAScheduler)`.
-- Add `grace_period: int = 8` and `resources_per_trial: dict` to `TuningTask`.
-- Update `benchmarks/vn2/tuning.py`: delete `ThreadPoolExecutor`, `tune_all_series` submits one Tune study per uid (or one multi-uid study — benchmark after Phase A).
-- Update `benchmarks/vn2/run_benchmark.py`: `run_hpo` and `run_cost_search` switch to `tune.Tuner(...).fit()`, replace `optuna_mlflow_callback` with `MLflowLoggerCallback`.
-- Add `tests/integration/test_ray_tune.py`: small study (10 trials), ASHA pruning observed, conditional search space exercised.
-
-**Exit criteria:**
-- `tests/integration/test_ray_tune.py` green.
-- At least one trial pruned before completing all origins (ASHA is active).
-- `run_hpo` cost within ±5% of pre-migration baseline (variance from ASHA exploration is acceptable).
-- Conditional search spaces (`_sample_cost_search_crc_config` with `crc_enabled=False`) covered by integration test.
-
-**Rollback:** Restore `optimizer.py` to sequential `study.optimize(...)`. `TuningTask` field additions are backward-compatible (default values).
-
-**Effort:** ~2 working days.
-
----
-
-### Phase C — Vault sync
-
-**Entry criteria:** Phase B complete.
-
-**Work:**
-- Update `~/obsidian-vault/vault/Val/Projects/calibre/architecture.md`: technology stack row → `Ray Core (local + KubeRay)` for distributed execution, `Ray Tune + OptunaSearch + ASHA` for HPO.
-- Append to `lessons.md`: Fugue removed in favour of Ray — schema strings, base64-encoded configs, and dispatch DataFrames deleted. Unified scheduler for series + trials enables ASHA early stopping.
-- Flip plan status `i-want-to-switch-polished-ocean.md` → `accepted`.
-
-**Exit criteria:** Vault committed and pushed.
-
-**Effort:** < 1 working day.
-
----
+Total expected effort: 6 to 7 working days.
 
 ## 8. Risk Register
 
-### Risk 1: Framework setup cost per CLI invocation
-**Likelihood:** Medium. **Impact:** Medium.
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Framework setup cost per CLI invocation | Medium | Medium | Keep `ray_threshold=10` fast path. Do not initialize Ray for health checks, one-off single-series runs, or tiny fixtures. Own local Ray shutdown at CLI run boundary. |
+| Early stopping prunes good trials because origin ordering is non-stationary | Medium | High | Report metrics only after completed origins; use conservative grace period of 8 origins for VN2; compare ASHA results against a no-pruning sample before accepting HPO migration; allow disabling pruning per task. |
+| Conditional search spaces break under the chosen scheduler | Low | High | Keep OptunaSearch callable search spaces; add tests where early sampled values suppress later parameters; pin Ray and Optuna versions; do not convert to Ray declarative search spaces. |
+| Memory pressure on large panels | Medium | High | Keep URI-backed `ForecastTaskRef`; cap uid concurrency; use streaming ledger output for panels above a documented threshold; avoid putting full panels into Ray object storage by default; profile driver ledger growth. |
+| Dev experience on actual platforms, especially Windows | Medium | Medium | Keep local fast path independent of Ray; run Ray tests primarily on Linux CI; document that Windows Ray support is for local development only and multi-node Ray should run on Linux containers/KubeRay; keep path handling URI-based. |
 
-`ray.init()` on a cold process takes 1–2 seconds (imports, daemon startup, object store init). For a health check or a 3-series smoke test, this is the majority of runtime.
+## References Checked
 
-**Mitigation:** The `ray_threshold` fast path. When `len(parallel_tasks) < ray_threshold` (default: 10), Ray is never initialized — the in-process sequential path runs. Health checks use 2 tasks (single origin, single series). Smoke tests use ≤ 5 series. Both stay below the threshold. For ECS Jobs (600 series × 40 origins), the 2-second overhead is <0.5% of total runtime.
-
----
-
-### Risk 2: ASHA pruning good trials because origin ordering is non-stationary
-**Likelihood:** Medium. **Impact:** High.
-
-VN2 conformal costs are systematically higher in early origins (fewer warmup windows → wider intervals → more holding cost). A trial that looks bad at origin 3 may be excellent at origin 15 after calibration stabilizes. ASHA would prune it if `grace_period` is too small.
-
-**Mitigation:** `grace_period = WARMUP_ORIGINS = 8` for VN2 (α=0.167, K=3: `ceil(1/0.167) - 1 + 3 = 5 + 3 = 8`). This is the minimum number of origins before conformal intervals are statistically stable. Encoded as `TuningTask.grace_period` with a default derived from `ConformalOptions` when present. The `reduction_factor=3` means a trial must be in the bottom 1/3 of all trials *after* the grace period to be pruned — conservative enough to avoid pruning warmup artefacts.
-
----
-
-### Risk 3: Conditional search spaces breaking under OptunaSearch
-**Likelihood:** Low. **Impact:** High.
-
-`OptunaSearch` with define-by-run callables is the primary advertised use case for Ray Tune's Optuna integration. The risk is subtle: if Ray Tune recreates a pruned trial's config for re-evaluation (e.g., after a worker failure), it must replay the same `Trial.suggest_*` sequence. This works because `OptunaSearch` preserves the trial's parameter history in the Optuna study, which is owned by the search algorithm object (not the worker).
-
-**Mitigation:** Integration test in `test_ray_tune.py` that exercises `_sample_cost_search_crc_config` end-to-end: verify that `crc_enabled=False` trials produce configs without the `crc_*` keys, and that `crc_enabled=True` trials include them. Pin `ray>=2.10` where this is stable. Monitor Ray release notes for `OptunaSearch` changes.
-
----
-
-### Risk 4: Memory pressure on large panels
-**Likelihood:** Low (at VN2 scale). **Impact:** Medium (at 10k+ series).
-
-Each Ray worker deserializes its `ForecastTaskRef`, reads a parquet file (~1–2 MB/series), holds it in memory during fit+predict, then returns a DataFrame. At 600 series with `max_concurrency=8`: 8 workers × 2 MB = 16 MB peak working memory. Negligible.
-
-At 10,000 series with `max_concurrency=16`: 16 workers × 2 MB = 32 MB — still fine. The `lru_cache` in `_read_parquet_cached` is per-process; workers do not accumulate across tasks (each task gets a fresh worker if the pool is saturated). The driver's `ForecastLedger` grows to ~10k × 40 origins × 10 columns = 4M rows — ~500 MB for pandas. That is the real pressure point.
-
-**Mitigation:** `LedgerOutputOptions(streaming=True)` (already implemented in PR #31) writes ledger rows to parquet as they complete, keeping driver memory bounded. Ensure streaming mode is documented as the recommended mode for panels > 5k series.
-
----
-
-### Risk 5: Dev experience on the platforms actually developed on
-**Likelihood:** Low. **Impact:** Medium.
-
-Ray on Linux (the primary dev environment) is mature. The risk is the `ray.init()` / `ray.shutdown()` lifecycle in tests: if a test crashes without calling `shutdown()`, subsequent tests may hit a re-init error. `ignore_reinit_error=True` handles this in the session fixture.
-
-A subtler risk: `ray.remote` functions must be defined at module level (not inside functions or closures) to be picklable. `_process_task_ref_partition` is already module-level in `backend.py`. Moving to `@ray.remote` at module level is the same constraint. The existing test `test_fugue_partition_worker_is_module_level_picklable` (retargeted to `test_ray_remote_is_picklable`) enforces this.
-
-**Mitigation:** Session-scoped `ray.init(num_cpus=2, ignore_reinit_error=True)` fixture in `conftest.py`. Static picklability test that asserts `_ray_fit_predict_uid.__wrapped__` pickles without `ConformalRuntime` references.
-
----
-
-## Appendix A: Where this document disagrees with the canonical plan
-
-The canonical plan (`i-want-to-switch-polished-ocean.md`) is the correct direction. The following are refinements, not contradictions:
-
-1. **`execute()` as generator.** The plan (section 2.3) says "`BackendEngine.execute()` becomes a generator." This document proposes `execute()` stays non-generator; `run_streaming()` is the new generator method. Reason: `execute()` is called from 8+ sites in `commands.py`, tests, and benchmarks — changing its return type breaks all of them. Adding `run_streaming()` as a parallel method is additive and avoids migration churn at every call site.
-
-2. **`_run_global_distributed` deletion.** The plan (section 3, `backend.py:591-655`) says this method is deleted and "global scope always runs in-process on the driver." This document agrees — and removes it from the design without the waffling in the original Fugue path (which had the `if self.engine is not None` branch). The global scope is unconditionally in-process.
-
-3. **`ray_threshold` fast path.** The plan does not specify a threshold mechanism for the single-node fast path. This document adds `ExecutionOptions.ray_threshold: int = 10` to make the crossover explicit and configurable.
-
-4. **Resource budget calculation.** The plan says `resources_per_trial={"cpu": K}` and `ExecutionOptions.max_uid_concurrency`. This document specifies the formula: `K = max(1, num_cpus // max_concurrent_trials)`. The naming `max_concurrency` is preferred over `max_uid_concurrency` because it applies at the engine level, not the uid level.
-
-5. **`MLflowLoggerCallback` nesting.** The plan notes MLflow nested-run semantics may differ. This document specifies the mechanism: start a parent `mlflow.start_run()` before `tune.Tuner.fit()`, pass `parent_run_id` as a tag to `MLflowLoggerCallback`. This is a known pattern in the Ray docs and does not require custom MLflow run management in the objective function.
+- Ray Core tasks and object refs: https://docs.ray.io/en/latest/ray-core/tasks.html
+- Ray resource scheduling: https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
+- Ray Tune OptunaSearch: https://docs.ray.io/en/latest/tune/api/doc/ray.tune.search.optuna.OptunaSearch.html
+- Ray Tune ASHA scheduler: https://docs.ray.io/en/latest/tune/api/doc/ray.tune.schedulers.AsyncHyperBandScheduler.html
+- Ray Tune MLflow callback: https://docs.ray.io/en/latest/tune/api/doc/ray.air.integrations.mlflow.MLflowLoggerCallback.html
+- Ray metrics and Prometheus: https://docs.ray.io/en/latest/cluster/metrics.html
+- Ray on Kubernetes and KubeRay: https://docs.ray.io/en/latest/cluster/kubernetes/
+- KubeRay upgrade guide: https://docs.ray.io/en/latest/cluster/kubernetes/user-guides/upgrade-guide.html
+- Ray Windows support notes: https://docs.ray.io/en/master/ray-overview/installation.html#windows-support
+- Dask delayed best practices: https://docs.dask.org/en/latest/delayed-best-practices.html
+- Dask futures: https://docs.dask.org/en/stable/futures.html
+- Spark grouped pandas UDF: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.GroupedData.applyInPandas.html
+- Ray Data Parquet loading: https://docs.ray.io/en/latest/data/loading-data.html
+- pandas Parquet IO: https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.read_parquet.html
+- Apache Arrow Feather/IPC: https://arrow.apache.org/docs/3.0/python/feather.html
+- Optuna RDB storage and resume: https://optuna.readthedocs.io/en/v3.0.3/tutorial/20_recipes/001_rdb.html
+- Optuna pruning: https://optuna.readthedocs.io/en/v2.0.0/tutorial/pruning.html

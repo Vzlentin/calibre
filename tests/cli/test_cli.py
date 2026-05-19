@@ -80,7 +80,7 @@ output:
   ledger_path: {output}
   streaming: false
 execution:
-  engine: null
+  backend: local
   seed: 123
 """
 
@@ -117,7 +117,7 @@ output:
   ledger_path: {output}
   streaming: false
 execution:
-  engine: null
+  backend: local
   seed: 123
 """
 
@@ -161,18 +161,24 @@ def test_order_cost_metric_uses_total_cost_column() -> None:
     assert order_cost.labels(currency="EUR", dataset="unit")._value.get() == 4.0
 
 
-def test_load_config_accepts_dask_execution_options(tmp_path) -> None:
+def test_load_config_accepts_ray_execution_options(tmp_path) -> None:
     path = _write_config(tmp_path)
     text = Path(path).read_text(encoding="utf-8")
     Path(path).write_text(
-        text.replace("engine: null", "engine: dask\n  dask_address: tcp://scheduler:8786"),
+        text.replace(
+            "backend: local",
+            "backend: ray\n  ray_address: ray://scheduler:10001\n  ray_threshold: 3\n"
+            "  max_concurrency: 2",
+        ),
         encoding="utf-8",
     )
 
     config = load_config(path)
 
-    assert config.execution.engine == "dask"
-    assert config.execution.dask_address == "tcp://scheduler:8786"
+    assert config.execution.backend == "ray"
+    assert config.execution.ray_address == "ray://scheduler:10001"
+    assert config.execution.ray_threshold == 3
+    assert config.execution.max_concurrency == 2
 
 
 def test_load_config_reads_fsspec_uri() -> None:
@@ -190,13 +196,13 @@ def test_load_config_reads_fsspec_uri() -> None:
     assert config.output.ledger_path == ledger_uri
 
 
-def test_winning_dask_config_uses_dask_engine() -> None:
-    config = load_config("benchmarks/vn2/config/winning_dask.yaml")
+def test_winning_config_uses_auto_backend() -> None:
+    config = load_config("benchmarks/vn2/config/winning.yaml")
 
     assert config.benchmark == "vn2_winning"
-    assert config.execution.engine == "dask"
+    assert config.execution.backend == "auto"
     assert config.tasks[0].config["scope"] == "global"
-    assert "lag_transforms" in config.tasks[0].config
+    assert config.execution.ray_threshold == 10
 
 
 def test_builtin_benchmark_preserves_fsspec_dataset_uri(monkeypatch) -> None:
@@ -228,7 +234,7 @@ def test_builtin_benchmark_preserves_fsspec_dataset_uri(monkeypatch) -> None:
             ],
             "origins": {"start": "2024-01-01", "end": "2024-01-01", "freq": "W-MON"},
             "output": {"streaming": False},
-            "execution": {"engine": None, "seed": 42},
+            "execution": {"backend": "local", "seed": 42},
         }
     )
 

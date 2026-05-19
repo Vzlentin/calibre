@@ -40,7 +40,7 @@ def global_configs():
 
 @pytest.fixture
 def statsforecast_global_config():
-    """statsforecast config with scope='global' (joint dispatch, no Fugue partitioning)."""
+    """statsforecast config with scope='global' (joint dispatch)."""
     return [
         {
             "backend": "statsforecast",
