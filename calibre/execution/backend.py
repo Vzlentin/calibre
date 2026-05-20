@@ -259,8 +259,6 @@ class BackendEngine:
         self.initial_ledger = (
             conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
         )
-        self._owns_ray_runtime = False
-        self._ray: Any | None = None
 
     def execute(
         self,
@@ -357,9 +355,10 @@ class BackendEngine:
 
     def shutdown_owned_ray(self) -> None:
         """Shutdown a local Ray runtime this engine started."""
-        if not self._owns_ray_runtime or self._ray is None:
+        ray = getattr(self, "_ray", None)
+        if not getattr(self, "_owns_ray_runtime", False) or ray is None:
             return
-        self._ray.shutdown()
+        ray.shutdown()
         self._owns_ray_runtime = False
         self._ray = None
 
@@ -557,8 +556,9 @@ class BackendEngine:
         return task_count >= self.execution.ray_threshold
 
     def _ensure_ray(self) -> Any:
-        if self._ray is not None:
-            return self._ray
+        cached_ray = getattr(self, "_ray", None)
+        if cached_ray is not None and cached_ray.is_initialized():
+            return cached_ray
 
         import ray
 
