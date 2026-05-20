@@ -412,7 +412,6 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
     { name = "pyyaml" },
-    { name = "ray", extra = ["default", "tune"] },
     { name = "sqlalchemy" },
     { name = "statsforecast", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
     { name = "statsforecast", version = "2.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or sys_platform != 'win32'" },
@@ -427,6 +426,7 @@ benchmarks = [
     { name = "lightgbm" },
     { name = "mlflow" },
     { name = "mlforecast" },
+    { name = "ray", extra = ["default", "tune"] },
 ]
 cloud = [
     { name = "adlfs" },
@@ -442,6 +442,7 @@ dev = [
     { name = "pandas-stubs" },
     { name = "pre-commit" },
     { name = "pytest" },
+    { name = "ray", extra = ["default", "tune"] },
     { name = "ruff" },
     { name = "types-pyyaml" },
     { name = "xgboost" },
@@ -457,6 +458,9 @@ neural = [
     { name = "neuralforecast" },
     { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
     { name = "torch", version = "2.12.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+ray = [
+    { name = "ray", extra = ["default", "tune"] },
 ]
 s3 = [
     { name = "s3fs" },
@@ -495,7 +499,9 @@ requires-dist = [
     { name = "pyarrow" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pyyaml" },
-    { name = "ray", extras = ["default", "tune"], specifier = ">=2.38,<3" },
+    { name = "ray", extras = ["default", "tune"], marker = "extra == 'benchmarks'", specifier = ">=2.38,<3" },
+    { name = "ray", extras = ["default", "tune"], marker = "extra == 'dev'", specifier = ">=2.38,<3" },
+    { name = "ray", extras = ["default", "tune"], marker = "extra == 'ray'", specifier = ">=2.38,<3" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "s3fs", marker = "extra == 'cloud'" },
     { name = "s3fs", marker = "extra == 's3'" },
@@ -508,7 +514,7 @@ requires-dist = [
     { name = "xgboost", marker = "extra == 'dev'", specifier = "<2" },
     { name = "xgboost", marker = "extra == 'xgboost'", specifier = "<2" },
 ]
-provides-extras = ["dev", "benchmarks", "s3", "azure", "gcs", "cloud", "ml", "neural", "xgboost"]
+provides-extras = ["dev", "benchmarks", "ray", "s3", "azure", "gcs", "cloud", "ml", "neural", "xgboost"]
 
 [[package]]
 name = "certifi"

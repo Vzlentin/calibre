@@ -1,5 +1,6 @@
 import pickle
 
+import fsspec
 import numpy as np
 import pandas as pd
 import pytest
@@ -86,6 +87,121 @@ def test_execute_accepts_grouped_constructor_options(single_series_setup, tmp_pa
 
 def test_ray_worker_function_is_module_level_picklable():
     pickle.dumps(_process_task_ref)
+
+
+def test_remote_ray_staging_uses_shared_uri_and_cleans_up(monkeypatch):
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={"backend": "stub", "model": "stub_model"},
+    )
+    staging_uri = "memory://calibre-backend-staging-test/tasks"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("/calibre-backend-staging-test"):
+        fs.rm("/calibre-backend-staging-test", recursive=True)
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            pass
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-03-03")],
+                    Y_HAT: [1.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    engine = BackendEngine(
+        execution=ExecutionOptions(
+            backend="local",
+            ray_address="ray://scheduler:10001",
+            staging_uri=staging_uri,
+        )
+    )
+
+    result = engine.execute([task], actuals, origins=[dates[-1]])
+
+    assert not result.ledger.to_df().empty
+    staged_parquet = [
+        path for path in fs.find("/calibre-backend-staging-test") if path.endswith(".parquet")
+    ]
+    assert not staged_parquet
+
+
+def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={
+            "backend": "stub",
+            "model": "lightgbm.LGBMRegressor",
+            "n_jobs": -1,
+            "num_threads": 16,
+        },
+    )
+    seen: dict[str, int] = {}
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            seen["n_jobs"] = int(task.model_config["n_jobs"])
+            seen["num_threads"] = int(task.model_config["num_threads"])
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-03-03")],
+                    Y_HAT: [1.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    BackendEngine(execution=ExecutionOptions(backend="local", cpu_per_task=2)).execute(
+        [task], actuals, origins=[dates[-1]]
+    )
+
+    assert seen == {"n_jobs": 2, "num_threads": 2}
+
+
+def test_ray_backend_warns_for_global_only_workloads(monkeypatch):
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={"backend": "stub", "model": "stub_model", "scope": "global"},
+    )
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            pass
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-03-03")],
+                    Y_HAT: [1.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    with pytest.warns(RuntimeWarning, match="global-scope"):
+        BackendEngine(execution=ExecutionOptions(backend="ray")).execute(
+            [task], actuals, origins=[dates[-1]]
+        )
 
 
 def test_forecast_frame_columns_present(single_series_setup):

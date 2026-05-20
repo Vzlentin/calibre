@@ -4,7 +4,7 @@
 Run inside a Databricks notebook cell or as a Databricks job.
 
 Prerequisites:
-- %pip install /dbfs/mnt/calibre/calibre-0.1.0-py3-none-any.whl
+- %pip install /dbfs/mnt/calibre/calibre-0.1.0-py3-none-any.whl[benchmarks,ray]
 - VN2 fixture data copied to /dbfs/mnt/calibre/vn2-fixture/
 
 Expected result:

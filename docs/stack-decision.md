@@ -124,8 +124,11 @@ options:
 
 - `backend`: `local`, `ray`, or `auto`; default `auto`.
 - `ray_address`: optional Ray cluster address; absent means local Ray when needed.
+- `staging_uri`: required when `ray_address` is set; points at shared object storage or
+  a mounted shared filesystem visible to every worker.
 - `ray_threshold`: default `10`; below this count, do not initialize Ray.
 - `max_concurrency`: optional cap on concurrent uid tasks for a run or trial.
+- `cpu_per_task`: optional Ray `num_cpus` resource request and model thread cap.
 - `seed`, `freq`, and metrics fields remain conceptually unchanged.
 
 The CLI config now uses `execution.backend: local | ray | auto` plus
@@ -148,6 +151,8 @@ Remote cluster runs:
   lifecycle.
 - KubeRay, ECS bootstrap scripts, or a platform job runner owns cluster startup and
   shutdown.
+- Remote workers read task Parquet payloads from `staging_uri`, not from driver-local
+  temporary directories.
 - The Ray runtime lifetime should be one Calibre run for CLI jobs and process-scoped for
   long-lived API workers.
 
@@ -382,7 +387,8 @@ Recommended dependency shape after migration:
   psycopg, prometheus-client, statsforecast, optuna, and uvicorn.
 - Remove from core: `fugue`.
 - Legacy optional scheduler extras were removed once migration tests were green.
-- Add `ray = ["ray[default,tune]>=2.38,<3"]`.
+- Keep Ray out of core and expose `ray = ["ray[default,tune]>=2.38,<3"]`.
+- Include Ray in dev, benchmark, and full-image installs.
 - Keep `cloud`, `s3`, `azure`, `gcs`, `ml`, `neural`, `xgboost`, `benchmarks`, and
   `dev` extras.
 - Keep `optuna-integration[mlflow]` only until old Optuna MLflow callback users are
@@ -394,8 +400,8 @@ Keep the slim/full Docker split.
 
 | Image | Contents | Use |
 |-------|----------|-----|
-| Slim | Core Calibre, FastAPI, SQL state store, fsspec, pandas/pyarrow, statsforecast, Prometheus client, Ray runtime | API workers, health checks, small CLI runs, Ray worker base image |
-| Full | Slim plus `ml`, `neural`, `benchmarks`, cloud filesystem extras, MLflow tooling | VN2 benchmarks, HPO jobs, LightGBM/XGBoost/neural experiments |
+| Slim | Core Calibre, FastAPI, SQL state store, fsspec, pandas/pyarrow, statsforecast, Prometheus client | API workers, health checks, small local CLI runs |
+| Full | Slim plus Ray, `ml`, `neural`, cloud filesystem extras, MLflow tooling | Remote Ray workers, VN2 benchmarks, HPO jobs, LightGBM/XGBoost/neural experiments |
 
 Image size is not a decision constraint, so prefer operational consistency over shaving
 Ray or ML libraries out of images that need them.

@@ -25,12 +25,12 @@ else:
 
 # COMMAND ----------
 
-# Install Calibre with benchmark extras.
+# Install Calibre with benchmark and Ray extras.
 # If the wheel is not yet on DBFS, build it locally and upload:
 #   cd /path/to/calibre && uv build --wheel
 #   dbfs cp dist/calibre-0.1.0-py3-none-any.whl dbfs:/mnt/calibre/
 
-%pip install /dbfs/mnt/calibre/calibre-0.1.0-py3-none-any.whl[benchmarks]
+%pip install /dbfs/mnt/calibre/calibre-0.1.0-py3-none-any.whl[benchmarks,ray]
 
 # COMMAND ----------
 

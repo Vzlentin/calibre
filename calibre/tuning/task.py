@@ -26,7 +26,7 @@ class TuningTask:
     freq: str = "W"
     conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None
     seed: int | None = None
-    asha_grace_period: int = 8
+    asha_grace_period: int = 1
     cpu_per_trial: float = 1.0
     max_concurrent_trials: int | None = None
     max_uid_concurrency: int | None = None

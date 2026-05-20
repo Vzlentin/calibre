@@ -89,8 +89,10 @@ class ExecutionConfig:
     backend: Literal["local", "ray", "auto"] = "auto"
     seed: int | None = None
     ray_address: str | None = None
+    staging_uri: str | None = None
     ray_threshold: int = 10
     max_concurrency: int | None = None
+    cpu_per_task: float | None = None
 
     def to_execution_options(self, *, freq: str) -> ExecutionOptions:
         from calibre.execution.backend import ExecutionOptions
@@ -99,8 +101,10 @@ class ExecutionConfig:
             freq=freq,
             backend=self.backend,
             ray_address=self.ray_address,
+            staging_uri=self.staging_uri,
             ray_threshold=self.ray_threshold,
             max_concurrency=self.max_concurrency,
+            cpu_per_task=self.cpu_per_task,
             seed=self.seed,
         )
 
@@ -220,8 +224,18 @@ def _parse_output(data: Any) -> OutputConfig:
 
 def _parse_execution(data: Any) -> ExecutionConfig:
     raw = _require_mapping(data or {}, "execution")
-    if "engine" in raw:
-        raise ValueError("legacy execution engine field has been replaced by execution.backend")
+    allowed = {
+        "backend",
+        "seed",
+        "ray_address",
+        "staging_uri",
+        "ray_threshold",
+        "max_concurrency",
+        "cpu_per_task",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"unknown execution key: {unknown[0]}")
     backend = str(raw.get("backend", "auto"))
     if backend not in {"local", "ray", "auto"}:
         raise ValueError("execution.backend must be 'local', 'ray', or 'auto'")
@@ -233,11 +247,20 @@ def _parse_execution(data: Any) -> ExecutionConfig:
     )
     if max_concurrency is not None and max_concurrency < 1:
         raise ValueError("execution.max_concurrency must be at least 1")
+    cpu_per_task = float(raw["cpu_per_task"]) if raw.get("cpu_per_task") is not None else None
+    if cpu_per_task is not None and cpu_per_task <= 0:
+        raise ValueError("execution.cpu_per_task must be positive")
+    ray_address = str(raw["ray_address"]) if raw.get("ray_address") is not None else None
+    staging_uri = str(raw["staging_uri"]) if raw.get("staging_uri") is not None else None
+    if ray_address is not None and staging_uri is None:
+        raise ValueError("execution.staging_uri is required when execution.ray_address is set")
     return ExecutionConfig(
         backend=backend,  # type: ignore[arg-type]
-        ray_address=str(raw["ray_address"]) if raw.get("ray_address") is not None else None,
+        ray_address=ray_address,
+        staging_uri=staging_uri,
         ray_threshold=ray_threshold,
         max_concurrency=max_concurrency,
+        cpu_per_task=cpu_per_task,
         seed=int(raw["seed"]) if raw.get("seed") is not None else None,
     )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 from contextlib import contextmanager
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
 from calibre.execution.io import join_uri
+from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
 from calibre.tuning.task import TuningTask
 
 _OBJECTIVE_METRIC = "objective"
@@ -144,35 +146,110 @@ def _build_mlflow_callbacks(task: TuningTask) -> list[Any]:
 
 
 def _best_result_config(results: Any) -> dict[str, Any]:
-    best = results.get_best_result(metric=_OBJECTIVE_METRIC, mode="min")
+    valid_results = [
+        result
+        for result in results
+        if result.error is None
+        and result.metrics is not None
+        and _OBJECTIVE_METRIC in result.metrics
+        and isfinite(float(result.metrics[_OBJECTIVE_METRIC]))
+    ]
+    if not valid_results:
+        failed = sum(1 for result in results if result.error is not None)
+        raise RuntimeError(
+            "Ray Tune completed without a valid objective result "
+            f"({failed} failed trial(s)). Check trial logs and model/search-space settings."
+        )
+    best = results.get_best_result(
+        metric=_OBJECTIVE_METRIC,
+        mode="min",
+        filter_nan_and_inf=True,
+    )
     return dict(best.config)
 
 
-def optimize_task(task: TuningTask) -> dict:
-    """Run HPO via Ray Tune and return the best model_config dict."""
-    # Callers may own the Ray runtime; task.ray_local_mode only applies when we start it.
+def _validate_task(task: TuningTask) -> list[pd.Timestamp]:
     if not task.origins:
         raise ValueError("TuningTask.origins must contain at least one origin")
     if task.asha_grace_period < 1:
         raise ValueError("TuningTask.asha_grace_period must be at least 1")
+    if len(task.origins) > 1 and task.asha_grace_period >= len(task.origins):
+        raise ValueError("TuningTask.asha_grace_period must be less than the number of origins")
     if task.cpu_per_trial <= 0:
         raise ValueError("TuningTask.cpu_per_trial must be positive")
+    return [pd.Timestamp(origin) for origin in task.origins]
 
-    # See backend.py:_ensure_ray for rationale.
-    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
 
-    import ray
-    import ray._private.ray_constants as _ray_constants
+def _evaluate_candidate(
+    task: TuningTask,
+    config: dict[str, Any],
+    origins: list[pd.Timestamp],
+) -> float:
+    history = _history_with_uid(task)
+    candidate_config = _cap_threaded_config(
+        {**task.base_model_config, **config, "freq": task.freq},
+        task.cpu_per_trial,
+    )
+    forecast_task = ForecastTask(
+        history=history,
+        horizon=task.horizon,
+        model_config=candidate_config,
+    )
+    conformal_options = (
+        ConformalOptions(runtime=task.conformal_runtime_factory())
+        if task.conformal_runtime_factory is not None
+        else ConformalOptions()
+    )
+    with BackendEngine(
+        execution=ExecutionOptions(
+            freq=task.freq,
+            backend="local",
+            max_concurrency=task.max_uid_concurrency,
+        ),
+        conformal=conformal_options,
+    ) as engine:
+        value = float("inf")
+        with _trial_thread_env(task.cpu_per_trial):
+            for result in engine.iter_origins([forecast_task], task.actuals, origins):
+                resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
+                value = (
+                    float("inf")
+                    if resolved.empty
+                    else float(task.objective.evaluate(resolved, resolved[Y]))
+                )
+        return value
+
+
+def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> dict[str, Any]:
+    study = optuna.create_study(direction="minimize", sampler=create_tpe_sampler(task.seed))
+
+    def _objective(trial: optuna.Trial) -> float:
+        config = task.search_space(trial)
+        trial.set_user_attr("resolved_config", dict(config))
+        return _evaluate_candidate(task, config, origins)
+
+    study.optimize(_objective, n_trials=task.n_trials, gc_after_trial=True)
+    if not study.trials or study.best_trial.value is None or not isfinite(study.best_trial.value):
+        raise RuntimeError("Sequential Optuna completed without a valid objective result")
+    best_config = study.best_trial.user_attrs.get("resolved_config", study.best_trial.params)
+    return {**task.base_model_config, **dict(best_config)}
+
+
+def optimize_task(task: TuningTask) -> dict:
+    """Run HPO and return the best model_config dict."""
+    origins = _validate_task(task)
+
+    if task.conformal_runtime_factory is not None and not task.ray_local_mode:
+        return _optimize_task_sequential(task, origins)
+
+    prepare_ray_environment()
+
     from ray import tune
     from ray.tune.schedulers import ASHAScheduler
     from ray.tune.search.optuna import OptunaSearch
 
-    _ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
-
     history = _history_with_uid(task)
-    origins = [pd.Timestamp(origin) for origin in task.origins]
     max_t = len(origins)
-    grace_period = min(task.asha_grace_period, max_t)
     max_concurrent_trials = _resolved_max_concurrent_trials(task)
     search_alg = OptunaSearch(
         space=task.search_space,
@@ -181,9 +258,11 @@ def optimize_task(task: TuningTask) -> dict:
         sampler=create_tpe_sampler(task.seed),
     )
     scheduler = ASHAScheduler(
+        metric=_OBJECTIVE_METRIC,
+        mode="min",
         time_attr=_ORIGIN_INDEX,
         max_t=max_t,
-        grace_period=grace_period,
+        grace_period=task.asha_grace_period,
     )
 
     def _trainable(config: dict[str, Any]) -> None:
@@ -236,17 +315,10 @@ def optimize_task(task: TuningTask) -> dict:
     if task.tune_experiment_name is not None:
         run_config_kwargs["name"] = task.tune_experiment_name
 
-    ray_was_initialized = ray.is_initialized()
-    if not ray_was_initialized:
-        if task.ray_address is not None:
-            ray.init(address=task.ray_address, ignore_reinit_error=True)
-        else:
-            ray.init(
-                include_dashboard=False,
-                ignore_reinit_error=True,
-                local_mode=task.ray_local_mode,
-                _skip_env_hook=True,
-            )
+    ray_runtime = acquire_ray_runtime(
+        address=task.ray_address,
+        local_mode=task.ray_local_mode,
+    )
     previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
     os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
     previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
@@ -256,8 +328,6 @@ def optimize_task(task: TuningTask) -> dict:
             tuner = tune.Tuner(
                 trainable,
                 tune_config=tune.TuneConfig(
-                    metric=_OBJECTIVE_METRIC,
-                    mode="min",
                     search_alg=search_alg,
                     scheduler=scheduler,
                     num_samples=task.n_trials,
@@ -275,6 +345,5 @@ def optimize_task(task: TuningTask) -> dict:
             os.environ.pop("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", None)
         else:
             os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
-        if not ray_was_initialized and task.ray_address is None:
-            ray.shutdown()
+        ray_runtime.release()
     return {**task.base_model_config, **_best_result_config(results)}

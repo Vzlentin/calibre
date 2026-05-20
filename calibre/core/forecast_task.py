@@ -11,7 +11,9 @@ from calibre.core.forecast_frame import UNIQUE_ID
 
 @lru_cache(maxsize=1024)
 def _read_parquet_cached(uri: str) -> pd.DataFrame:
-    return pd.read_parquet(uri)
+    from calibre.execution.io import read_parquet
+
+    return read_parquet(uri)
 
 
 @dataclass(frozen=True)
@@ -38,16 +40,14 @@ class ForecastTask:
         return self.model_config.get("name", self.model_config["model"])
 
     def to_uri(self, base_uri: str) -> ForecastTaskRef:
-        from calibre.execution.io import ensure_parent_dir, join_uri
+        from calibre.execution.io import join_uri, write_parquet
 
         history_uri = join_uri(base_uri, f"{self.unique_id}.parquet")
-        ensure_parent_dir(history_uri)
-        self.history.to_parquet(history_uri, index=False)
+        write_parquet(self.history, history_uri)
         future_x_uri = None
         if self.future_x is not None:
             future_x_uri = join_uri(base_uri, f"{self.unique_id}.future_x.parquet")
-            ensure_parent_dir(future_x_uri)
-            self.future_x.to_parquet(future_x_uri, index=False)
+            write_parquet(self.future_x, future_x_uri)
         return ForecastTaskRef(
             unique_id=self.unique_id,
             model_config=dict(self.model_config),

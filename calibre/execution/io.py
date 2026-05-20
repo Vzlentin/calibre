@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import posixpath
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -53,3 +54,14 @@ def write_parquet(frame: pd.DataFrame, uri: str | Path) -> None:
     ensure_parent_dir(uri)
     with fsspec.open(str(uri), "wb") as handle:
         frame.to_parquet(handle, index=False)
+
+
+def read_parquet(uri: str | Path) -> pd.DataFrame:
+    with fsspec.open(str(uri), "rb") as handle:
+        return pd.read_parquet(handle)
+
+
+def rm(uri: str | Path, *, recursive: bool = True) -> None:
+    fs, path = open_fs(uri)
+    with suppress(FileNotFoundError):
+        fs.rm(path, recursive=recursive)

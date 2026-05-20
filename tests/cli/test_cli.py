@@ -168,8 +168,9 @@ def test_load_config_accepts_ray_execution_options(tmp_path) -> None:
     Path(path).write_text(
         text.replace(
             "backend: local",
-            "backend: ray\n  ray_address: ray://scheduler:10001\n  ray_threshold: 3\n"
-            "  max_concurrency: 2",
+            "backend: ray\n  ray_address: ray://scheduler:10001\n"
+            "  staging_uri: s3://bucket/calibre-staging\n  ray_threshold: 3\n"
+            "  max_concurrency: 2\n  cpu_per_task: 1.5",
         ),
         encoding="utf-8",
     )
@@ -178,8 +179,34 @@ def test_load_config_accepts_ray_execution_options(tmp_path) -> None:
 
     assert config.execution.backend == "ray"
     assert config.execution.ray_address == "ray://scheduler:10001"
+    assert config.execution.staging_uri == "s3://bucket/calibre-staging"
     assert config.execution.ray_threshold == 3
     assert config.execution.max_concurrency == 2
+    assert config.execution.cpu_per_task == 1.5
+
+
+def test_load_config_rejects_unknown_execution_key(tmp_path) -> None:
+    path = _write_config(tmp_path)
+    text = Path(path).read_text(encoding="utf-8")
+    Path(path).write_text(
+        text.replace("backend: local", "backend: local\n  unknown_scheduler: true"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown execution key: unknown_scheduler"):
+        load_config(path)
+
+
+def test_load_config_requires_staging_uri_for_remote_ray(tmp_path) -> None:
+    path = _write_config(tmp_path)
+    text = Path(path).read_text(encoding="utf-8")
+    Path(path).write_text(
+        text.replace("backend: local", "backend: ray\n  ray_address: ray://scheduler:10001"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="execution.staging_uri is required"):
+        load_config(path)
 
 
 def test_load_config_rejects_hpo_section_until_cli_tuning_is_wired(tmp_path) -> None:

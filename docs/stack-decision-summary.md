@@ -26,7 +26,7 @@ the same scheduler.
 | Small run path | `engine=None` direct bypass | In-process fast path below `ray_threshold=10` |
 | Global models | Direct unless a Fugue engine exists | Always in-process on driver |
 | Worker hand-off | Dispatch DataFrame, base64-pickled configs, Parquet refs | Pickled `ForecastTaskRef` plus existing Parquet URIs |
-| Execution config | `engine: Any`, Dask/Spark Fugue objects | `backend`, `ray_address`, `ray_threshold`, `max_concurrency` |
+| Execution config | `engine: Any`, Dask/Spark Fugue objects | `backend`, `ray_address`, `staging_uri`, `ray_threshold`, `max_concurrency`, `cpu_per_task` |
 | Per-series HPO | Sequential `study.optimize` inside `TuningTask` | Ray Tune trials with OptunaSearch |
 | VN2 panel HPO/cost search | Sequential `study.optimize` | Deferred to [#33](https://github.com/Vzlentin/calibre/issues/33) |
 | Search space API | `Callable[[optuna.Trial], dict]` | Same API, unchanged |
@@ -38,7 +38,7 @@ the same scheduler.
 | Serving | FastAPI | FastAPI |
 | State store | SQLAlchemy/Alembic/Postgres | SQLAlchemy/Alembic/Postgres |
 | Metrics | Prometheus app metrics | Prometheus app metrics plus Ray metrics |
-| Packaging | Fugue core, Dask/Spark extras | Ray extra, remove Fugue/Dask/Spark scheduler deps |
+| Packaging | Fugue core, Dask/Spark extras | Ray extra for dev/benchmark/full installs; slim stays local-only |
 
 ## Effort and Timeline
 
@@ -68,5 +68,6 @@ breaks, stop and fix the behavioral regression before continuing.
 The main risks are Ray startup cost on small CLI invocations, over-aggressive ASHA
 pruning during non-stationary early origins, conditional search-space compatibility,
 large-panel memory pressure, and Windows developer experience. The proposed fast path,
-8-origin grace period, OptunaSearch callable API, URI-backed task refs, streaming ledger,
-and Linux-container-first Ray deployment address those risks directly.
+1-origin default grace period for short studies, OptunaSearch callable API,
+shared-URI task refs, streaming ledger, and Linux-container-first Ray deployment address
+those risks directly.

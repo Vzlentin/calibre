@@ -122,8 +122,10 @@ def _run_builtin_benchmark(config: BackendConfig) -> pd.DataFrame:
         verbose=True,
         execution_backend=config.execution.backend,
         ray_address=config.execution.ray_address,
+        staging_uri=config.execution.staging_uri,
         ray_threshold=config.execution.ray_threshold,
         max_concurrency=config.execution.max_concurrency,
+        cpu_per_task=config.execution.cpu_per_task,
     )
     if config.output.ledger_path is not None:
         write_parquet(summary, config.output.ledger_path)

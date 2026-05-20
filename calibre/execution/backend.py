@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
+import warnings
 from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
@@ -44,7 +45,9 @@ from calibre.core.metrics import observe_forecast_duration, set_conformal_covera
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
 from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
+from calibre.execution.io import join_uri, rm
 from calibre.execution.ledger import ForecastLedger, OrderLedger
+from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
@@ -123,6 +126,30 @@ def _empty_forecast_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
 
+def _thread_budget(cpu_per_task: float | None) -> int:
+    if cpu_per_task is None:
+        return 1
+    return max(1, int(cpu_per_task))
+
+
+def _cap_threaded_config(config: dict[str, Any], cpu_per_task: float | None) -> dict[str, Any]:
+    """Keep library-level parallelism inside the Ray task CPU budget when set."""
+    if cpu_per_task is None:
+        return config
+    capped = dict(config)
+    threads = _thread_budget(cpu_per_task)
+    for key in ("n_jobs", "num_threads", "nthread"):
+        if key not in capped:
+            continue
+        value = capped.get(key)
+        if value is None or int(value) < 1 or int(value) > threads:
+            capped[key] = threads
+    model_name = str(capped.get("model", "")).lower()
+    if "lgbm" in model_name or "lightgbm" in model_name or "xgb" in model_name:
+        capped.setdefault("n_jobs", threads)
+    return capped
+
+
 def _process_task_ref(
     ref: ForecastTaskRef,
     origin: pd.Timestamp,
@@ -182,17 +209,23 @@ class ExecutionOptions:
     freq: str = "W"
     backend: Literal["local", "ray", "auto"] = "auto"
     ray_address: str | None = None
+    staging_uri: str | None = None
     ray_threshold: int = 10
     max_concurrency: int | None = None
+    cpu_per_task: float | None = None
     seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.backend not in {"local", "ray", "auto"}:
             raise ValueError("backend must be 'local', 'ray', or 'auto'")
+        if self.ray_address is not None and self.staging_uri is None:
+            raise ValueError("staging_uri is required when ray_address is set")
         if self.ray_threshold < 1:
             raise ValueError("ray_threshold must be at least 1")
         if self.max_concurrency is not None and self.max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
+        if self.cpu_per_task is not None and self.cpu_per_task <= 0:
+            raise ValueError("cpu_per_task must be positive")
 
 
 @dataclass(frozen=True)
@@ -251,8 +284,14 @@ class BackendEngine:
             conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
         )
         self._ray: Any | None = None
-        self._owns_ray_runtime: bool = False
+        self._ray_runtime: RayRuntimeHandle | None = None
         self._remote_process_task: Any | None = None
+
+    def __enter__(self) -> BackendEngine:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
 
     def execute(
         self,
@@ -300,14 +339,22 @@ class BackendEngine:
                 else:
                     direct_tasks.append(task)
 
-            with tempfile.TemporaryDirectory(prefix="calibre-backend-") as temp_dir:
+            if self.execution.backend == "ray" and direct_tasks and not parallel_tasks:
+                warnings.warn(
+                    "backend='ray' was requested, but all tasks are global-scope and run "
+                    "on the driver",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+            with self._task_staging_prefix() as staging_prefix:
                 parallel_refs = self._materialize_task_refs(
                     parallel_tasks,
-                    str(Path(temp_dir) / "local"),
+                    join_uri(staging_prefix, "local"),
                 )
                 direct_refs = self._materialize_task_refs(
                     direct_tasks,
-                    str(Path(temp_dir) / "global"),
+                    join_uri(staging_prefix, "global"),
                 )
 
                 completed_origins = self._completed_initial_origins()
@@ -349,15 +396,31 @@ class BackendEngine:
 
     def shutdown_owned_ray(self) -> None:
         """Shutdown a local Ray runtime this engine started."""
-        if not self._owns_ray_runtime or self._ray is None:
-            return
-        self._ray.shutdown()
-        self._owns_ray_runtime = False
+        if self._ray_runtime is not None:
+            self._ray_runtime.release()
+        self._ray_runtime = None
         self._ray = None
         self._remote_process_task = None
 
     def close(self) -> None:
         self.shutdown_owned_ray()
+
+    @contextmanager
+    def _task_staging_prefix(self) -> Iterator[str]:
+        if self.execution.ray_address is not None:
+            prefix = join_uri(
+                self.execution.staging_uri or "",
+                f"calibre-backend-{uuid4().hex}",
+            )
+            try:
+                yield prefix
+            finally:
+                with suppress(Exception):
+                    rm(prefix, recursive=True)
+            return
+
+        with tempfile.TemporaryDirectory(prefix="calibre-backend-") as temp_dir:
+            yield temp_dir
 
     def _execute_origin(
         self,
@@ -506,7 +569,8 @@ class BackendEngine:
                 **seed_model_config(task.model_config, self.seed),
                 "freq": self.freq,
             }
-            task_base = str(Path(base_dir) / str(idx))
+            model_config = _cap_threaded_config(model_config, self.execution.cpu_per_task)
+            task_base = join_uri(base_dir, str(idx))
             ref = ForecastTask(
                 history=task.history,
                 horizon=task.horizon,
@@ -552,32 +616,11 @@ class BackendEngine:
     def _ensure_ray(self) -> Any:
         if self._ray is not None and self._ray.is_initialized():
             return self._ray
-
-        # Ray's built-in uv-run hook (RAY_ENABLE_UV_RUN_RUNTIME_ENV, default
-        # True) injects working_dir=<cwd> when the driver runs under `uv run`,
-        # which then fails URI validation in ray.init. We always run a local
-        # Ray cluster and don't need driver→worker working_dir propagation.
-        import os as _os
-
-        _os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
-
-        import ray
-        import ray._private.ray_constants as _ray_constants
-
-        _ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
-
-        if ray.is_initialized():
-            self._ray = ray
-            return ray
-
-        if self.execution.ray_address is not None:
-            ray.init(address=self.execution.ray_address, ignore_reinit_error=True)
-            self._owns_ray_runtime = False
-        else:
-            ray.init(include_dashboard=False, ignore_reinit_error=True, _skip_env_hook=True)
-            self._owns_ray_runtime = True
-        self._ray = ray
-        return ray
+        self._ray = None
+        self._remote_process_task = None
+        self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
+        self._ray = self._ray_runtime.ray
+        return self._ray
 
     def _run_refs_on_ray(
         self,
@@ -588,7 +631,14 @@ class BackendEngine:
     ) -> pd.DataFrame:
         ray = self._ensure_ray()
         if self._remote_process_task is None:
-            self._remote_process_task = ray.remote(_process_task_ref)
+            remote_kwargs: dict[str, float] = {}
+            if self.execution.cpu_per_task is not None:
+                remote_kwargs["num_cpus"] = float(self.execution.cpu_per_task)
+            self._remote_process_task = (
+                ray.remote(**remote_kwargs)(_process_task_ref)
+                if remote_kwargs
+                else ray.remote(_process_task_ref)
+            )
         remote_process = self._remote_process_task
         concurrency = self.execution.max_concurrency or len(refs)
         frames: list[pd.DataFrame] = []
