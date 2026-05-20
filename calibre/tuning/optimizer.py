@@ -14,6 +14,7 @@ import pandas as pd
 from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
+from calibre.execution.io import join_uri
 from calibre.tuning.task import TuningTask
 
 _OBJECTIVE_METRIC = "objective"
@@ -40,28 +41,14 @@ def _thread_budget(cpu_per_trial: float) -> int:
     return max(1, int(cpu_per_trial))
 
 
-def _is_uri(path: str) -> bool:
-    return "://" in path
-
-
-def _join_storage_root(root: str, child: str) -> str:
-    if _is_uri(root):
-        return f"{root.rstrip('/')}/{child}"
-    return str(Path(root) / child)
-
-
-def _absolute_local_storage_path(path: str) -> str:
+def _normalize_tune_storage_path(path: str) -> str:
+    if "://" in path:
+        return path
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
     candidate.mkdir(parents=True, exist_ok=True)
     return str(candidate)
-
-
-def _normalize_tune_storage_path(path: str) -> str:
-    if _is_uri(path):
-        return path
-    return _absolute_local_storage_path(path)
 
 
 def _resolve_tune_storage_path(task: TuningTask) -> str:
@@ -71,7 +58,7 @@ def _resolve_tune_storage_path(task: TuningTask) -> str:
         return _normalize_tune_storage_path(env_storage_path)
     if task.results_dir is not None:
         return _normalize_tune_storage_path(
-            _join_storage_root(task.results_dir, _DEFAULT_TUNE_RESULTS_SUBDIR)
+            join_uri(task.results_dir, _DEFAULT_TUNE_RESULTS_SUBDIR)
         )
     return tempfile.mkdtemp(prefix="calibre-tune-")
 
@@ -90,6 +77,20 @@ def _cap_threaded_config(config: dict[str, Any], cpu_per_trial: float) -> dict[s
     if "lgbm" in model_name or "lightgbm" in model_name or "xgb" in model_name:
         capped.setdefault("n_jobs", threads)
     return capped
+
+
+@contextmanager
+def restore_cwd():
+    """Ray Tune trials chdir into a per-trial working dir and don't always restore it."""
+    original = os.getcwd()
+    try:
+        yield
+    finally:
+        try:
+            if os.getcwd() != original:
+                os.chdir(original)
+        except FileNotFoundError:
+            os.chdir(original)
 
 
 @contextmanager
@@ -248,32 +249,24 @@ def optimize_task(task: TuningTask) -> dict:
             )
     previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
     os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
-    # Tuner.fit chdir's into a per-trial working dir under /tmp/ray/... and
-    # does not always restore cwd on completion. Disable that behavior and
-    # restore cwd defensively.
     previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
     os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"
-    original_cwd = os.getcwd()
     try:
-        tuner = tune.Tuner(
-            trainable,
-            tune_config=tune.TuneConfig(
-                metric=_OBJECTIVE_METRIC,
-                mode="min",
-                search_alg=search_alg,
-                scheduler=scheduler,
-                num_samples=task.n_trials,
-                max_concurrent_trials=max_concurrent_trials,
-            ),
-            run_config=tune.RunConfig(**run_config_kwargs),
-        )
-        results = tuner.fit()
+        with restore_cwd():
+            tuner = tune.Tuner(
+                trainable,
+                tune_config=tune.TuneConfig(
+                    metric=_OBJECTIVE_METRIC,
+                    mode="min",
+                    search_alg=search_alg,
+                    scheduler=scheduler,
+                    num_samples=task.n_trials,
+                    max_concurrent_trials=max_concurrent_trials,
+                ),
+                run_config=tune.RunConfig(**run_config_kwargs),
+            )
+            results = tuner.fit()
     finally:
-        try:
-            if os.getcwd() != original_cwd:
-                os.chdir(original_cwd)
-        except FileNotFoundError:
-            os.chdir(original_cwd)
         if previous_chdir is None:
             os.environ.pop("RAY_CHDIR_TO_TRIAL_DIR", None)
         else:
