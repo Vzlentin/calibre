@@ -21,14 +21,10 @@ def _isolate_mlflow(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _restore_cwd():
-    """Ray Tune trials chdir into a per-trial working dir and don't always restore it."""
-    original = os.getcwd()
-    yield
-    try:
-        if os.getcwd() != original:
-            os.chdir(original)
-    except FileNotFoundError:
-        os.chdir(original)
+    from calibre.tuning.optimizer import restore_cwd
+
+    with restore_cwd():
+        yield
 
 
 def _find_data_dir() -> Path:

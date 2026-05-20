@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -50,8 +50,6 @@ from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
 logger = logging.getLogger(__name__)
-_REMOTE_PROCESS_TASK_REF: Any | None = None
-_REMOTE_PROCESS_TASK_RUNTIME_KEY: str | None = None
 
 
 def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) -> pd.DataFrame:
@@ -164,29 +162,6 @@ def _process_task_ref(
     return _finalize_preds(preds, origin, origin_task.model_name)
 
 
-def _ray_runtime_key(ray: Any) -> str | None:
-    if not ray.is_initialized():
-        return None
-    return str(ray.get_runtime_context().gcs_address)
-
-
-def _clear_remote_process_task_ref() -> None:
-    global _REMOTE_PROCESS_TASK_REF, _REMOTE_PROCESS_TASK_RUNTIME_KEY
-    _REMOTE_PROCESS_TASK_REF = None
-    _REMOTE_PROCESS_TASK_RUNTIME_KEY = None
-
-
-def _get_remote_process_task_ref(ray: Any) -> Any:
-    global _REMOTE_PROCESS_TASK_REF, _REMOTE_PROCESS_TASK_RUNTIME_KEY
-    runtime_key = _ray_runtime_key(ray)
-    if runtime_key is None:
-        _clear_remote_process_task_ref()
-    if _REMOTE_PROCESS_TASK_REF is None or runtime_key != _REMOTE_PROCESS_TASK_RUNTIME_KEY:
-        _REMOTE_PROCESS_TASK_REF = ray.remote(_process_task_ref)
-        _REMOTE_PROCESS_TASK_RUNTIME_KEY = runtime_key
-    return _REMOTE_PROCESS_TASK_REF
-
-
 def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     non_empty = [frame for frame in frames if not frame.empty]
     if not non_empty:
@@ -210,7 +185,6 @@ class ExecutionOptions:
     ray_threshold: int = 10
     max_concurrency: int | None = None
     seed: int | None = None
-    metrics: list[Callable] | None = None
 
     def __post_init__(self) -> None:
         if self.backend not in {"local", "ray", "auto"}:
@@ -247,9 +221,6 @@ _DEFAULT_CONFORMAL = ConformalOptions()
 
 
 class BackendEngine:
-    _owns_ray_runtime: bool
-    _ray: Any | None
-
     def __init__(
         self,
         *,
@@ -279,6 +250,9 @@ class BackendEngine:
         self.initial_ledger = (
             conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
         )
+        self._ray: Any | None = None
+        self._owns_ray_runtime: bool = False
+        self._remote_process_task: Any | None = None
 
     def execute(
         self,
@@ -375,13 +349,12 @@ class BackendEngine:
 
     def shutdown_owned_ray(self) -> None:
         """Shutdown a local Ray runtime this engine started."""
-        ray = getattr(self, "_ray", None)
-        if not getattr(self, "_owns_ray_runtime", False) or ray is None:
+        if not self._owns_ray_runtime or self._ray is None:
             return
-        ray.shutdown()
-        _clear_remote_process_task_ref()
+        self._ray.shutdown()
         self._owns_ray_runtime = False
         self._ray = None
+        self._remote_process_task = None
 
     def close(self) -> None:
         self.shutdown_owned_ray()
@@ -577,9 +550,8 @@ class BackendEngine:
         return task_count >= self.execution.ray_threshold
 
     def _ensure_ray(self) -> Any:
-        cached_ray = getattr(self, "_ray", None)
-        if cached_ray is not None and cached_ray.is_initialized():
-            return cached_ray
+        if self._ray is not None and self._ray.is_initialized():
+            return self._ray
 
         # Ray's built-in uv-run hook (RAY_ENABLE_UV_RUN_RUNTIME_ENV, default
         # True) injects working_dir=<cwd> when the driver runs under `uv run`,
@@ -615,7 +587,9 @@ class BackendEngine:
         local_scope: bool,
     ) -> pd.DataFrame:
         ray = self._ensure_ray()
-        remote_process = _get_remote_process_task_ref(ray)
+        if self._remote_process_task is None:
+            self._remote_process_task = ray.remote(_process_task_ref)
+        remote_process = self._remote_process_task
         concurrency = self.execution.max_concurrency or len(refs)
         frames: list[pd.DataFrame] = []
 

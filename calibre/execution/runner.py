@@ -9,7 +9,6 @@ from typing import Literal
 
 import pandas as pd
 
-from calibre.cli.config import ExecutionConfig
 from calibre.conformal import ConformalRuntime
 from calibre.core.forecast_frame import DS
 from calibre.evaluation.forecast_metrics import compute_metrics
@@ -18,6 +17,7 @@ from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
     ConformalOptions,
+    ExecutionOptions,
 )
 from calibre.execution.data_loading import load_period
 from calibre.execution.dataset import DatasetBundle
@@ -104,13 +104,12 @@ def run_backtest(
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
     result = BackendEngine(
-        execution=ExecutionConfig(
+        execution=ExecutionOptions(
+            freq=freq,
             backend=backend,
             ray_address=ray_address,
             ray_threshold=ray_threshold,
             max_concurrency=max_concurrency,
-        ).to_execution_options(
-            freq=freq,
         ),
         conformal=ConformalOptions(runtime=conformal_runtime),
         order=order_config,
@@ -157,13 +156,12 @@ def run_forecast(
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
     return BackendEngine(
-        execution=ExecutionConfig(
+        execution=ExecutionOptions(
+            freq=freq,
             backend=backend,
             ray_address=ray_address,
             ray_threshold=ray_threshold,
             max_concurrency=max_concurrency,
-        ).to_execution_options(
-            freq=freq,
         ),
         conformal=ConformalOptions(runtime=conformal_runtime),
         order=order_config,
