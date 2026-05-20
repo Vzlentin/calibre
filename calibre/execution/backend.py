@@ -581,7 +581,18 @@ class BackendEngine:
         if cached_ray is not None and cached_ray.is_initialized():
             return cached_ray
 
+        # Ray's built-in uv-run hook (RAY_ENABLE_UV_RUN_RUNTIME_ENV, default
+        # True) injects working_dir=<cwd> when the driver runs under `uv run`,
+        # which then fails URI validation in ray.init. We always run a local
+        # Ray cluster and don't need driver→worker working_dir propagation.
+        import os as _os
+
+        _os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
+
         import ray
+        import ray._private.ray_constants as _ray_constants
+
+        _ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
 
         if ray.is_initialized():
             self._ray = ray

@@ -211,6 +211,7 @@ def test_asha_prunes_trials_between_origins(monkeypatch, tmp_path):
     from ray.tune.schedulers import ASHAScheduler
 
     monkeypatch.setenv("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
+    monkeypatch.setenv("RAY_CHDIR_TO_TRIAL_DIR", "0")
 
     def _trainable(config: dict) -> None:
         for origin_idx in range(1, 4):

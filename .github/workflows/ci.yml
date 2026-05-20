@@ -24,6 +24,8 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    env:
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4

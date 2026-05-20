@@ -157,10 +157,16 @@ def optimize_task(task: TuningTask) -> dict:
     if task.cpu_per_trial <= 0:
         raise ValueError("TuningTask.cpu_per_trial must be positive")
 
+    # See backend.py:_ensure_ray for rationale.
+    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
+
     import ray
+    import ray._private.ray_constants as _ray_constants
     from ray import tune
     from ray.tune.schedulers import ASHAScheduler
     from ray.tune.search.optuna import OptunaSearch
+
+    _ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
 
     history = _history_with_uid(task)
     origins = [pd.Timestamp(origin) for origin in task.origins]
@@ -242,7 +248,12 @@ def optimize_task(task: TuningTask) -> dict:
             )
     previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
     os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
-    original_cwd = Path.cwd()
+    # Tuner.fit chdir's into a per-trial working dir under /tmp/ray/... and
+    # does not always restore cwd on completion. Disable that behavior and
+    # restore cwd defensively.
+    previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
+    os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"
+    original_cwd = os.getcwd()
     try:
         tuner = tune.Tuner(
             trainable,
@@ -258,12 +269,19 @@ def optimize_task(task: TuningTask) -> dict:
         )
         results = tuner.fit()
     finally:
+        try:
+            if os.getcwd() != original_cwd:
+                os.chdir(original_cwd)
+        except FileNotFoundError:
+            os.chdir(original_cwd)
+        if previous_chdir is None:
+            os.environ.pop("RAY_CHDIR_TO_TRIAL_DIR", None)
+        else:
+            os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = previous_chdir
         if previous_auto_loggers is None:
             os.environ.pop("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", None)
         else:
             os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
-        if Path.cwd() != original_cwd:
-            os.chdir(original_cwd)
         if not ray_was_initialized and task.ray_address is None:
             ray.shutdown()
     return {**task.base_model_config, **_best_result_config(results)}
