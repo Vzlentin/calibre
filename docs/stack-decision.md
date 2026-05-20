@@ -5,10 +5,12 @@ Decision date: 2026-05-19
 
 ## Decision
 
-Replace the current Fugue-based execution path and sequential Optuna tuning loop with
-Ray Core for execution fan-out and Ray Tune with OptunaSearch plus ASHA for HPO. Keep
-pandas, Parquet, fsspec, ForecastTaskRef URI materialization, FastAPI, SQLAlchemy,
-Alembic, MLflow, and Prometheus.
+Replace the current Fugue-based execution path with Ray Core for execution fan-out and
+migrate the reusable per-series `TuningTask` optimizer to Ray Tune with OptunaSearch
+plus ASHA. Keep pandas, Parquet, fsspec, ForecastTaskRef URI materialization, FastAPI,
+SQLAlchemy, Alembic, MLflow, and Prometheus. The VN2 benchmark's panel-level HPO and
+cost search still use sequential Optuna in this PR; migrating those loops is tracked in
+[#33](https://github.com/Vzlentin/calibre/issues/33).
 
 This is a targeted scheduler migration, not a platform rewrite. The model adapters in
 `calibre/forecasting/{stats,ml,neural}forecast_adapter.py` remain backend-blind.
@@ -32,8 +34,8 @@ adapting it into a relational transform:
 - The driver still owns conformal interval application, ordering policy, ledger
   appends, and result aggregation.
 
-The tuning layer now delegates trial scheduling to Ray Tune while preserving the Optuna
-search-space contract:
+The reusable per-series tuning layer now delegates trial scheduling to Ray Tune while
+preserving the Optuna search-space contract:
 
 - `calibre/tuning/task.py` keeps `search_space: Callable[[optuna.Trial], dict]`.
 - `calibre/tuning/optimizer.py` uses Ray Tune `Tuner`, `OptunaSearch`, and
@@ -41,6 +43,8 @@ search-space contract:
 - Trial trainables stream completed origins through the execution backend and report
   pruning metrics only between origins.
 - Trial CPU budgets cap UID fan-out and common library thread counts.
+- VN2 panel-level `run_hpo` and `run_cost_search` still call `study.optimize(...)`
+  directly and are not evidence for the Tune path in this PR.
 
 The CLI and packaging expose the Ray/local scheduler fields directly:
 
@@ -188,11 +192,14 @@ constraint, and its abstraction forces non-domain code into `backend.py`.
 
 ### Recommendation
 
-Use Ray Tune with OptunaSearch and ASHAScheduler.
+Use Ray Tune with OptunaSearch and ASHAScheduler for `TuningTask`.
 
 The hard requirements are conditional Optuna search spaces, parallel trials, early
 stopping between origins, resource budgeting, and MLflow tracking. Ray Tune covers the
-scheduler side; OptunaSearch preserves the current search-space API.
+scheduler side for the per-series optimizer; OptunaSearch preserves the current
+search-space API. VN2 panel-level quantile HPO and simulator cost search are larger
+benchmark-specific loops and remain follow-up work in
+[#33](https://github.com/Vzlentin/calibre/issues/33).
 
 ### Preserving `TuningTask.search_space`
 
@@ -207,11 +214,11 @@ parameter dictionaries; that would break conditional sampling.
 
 ### Trial-level parallelism
 
-Ray Tune should schedule trials as the top-level parallel unit. Each trial receives an
-explicit CPU budget. For per-series tuning, the trial usually runs one series and should
-not fan out further. For panel-level sweeps, the trial may use Ray Core inside its budget
-to fan out uid work, but concurrency must be capped so one trial cannot consume the
-whole cluster.
+Ray Tune should schedule `TuningTask` trials as the top-level parallel unit. Each trial
+receives an explicit CPU budget. For per-series tuning, the trial usually runs one
+series and should not fan out further. Future panel-level sweeps may use Ray Core inside
+their trial budget to fan out uid work, but that migration is not included here and must
+cap concurrency so one trial cannot consume the whole cluster.
 
 Set `max_concurrent_trials` from available CPUs and the configured CPU budget per trial.
 Inside each trial, set model-level thread counts and Calibre uid concurrency to the same
@@ -224,9 +231,10 @@ Prune only between origins. The evaluation loop should report a cumulative objec
 after each completed origin. ASHA should use origin index as the monotonic progress
 attribute, with `max_t = len(origins)` and a conservative grace period.
 
-Default grace period: 8 origins for VN2 conformal/order-cost searches. This avoids
-pruning during the conformal warmup period where early origins are not representative of
-later inventory cost. Make the grace period configurable per `TuningTask`.
+Default grace period is configurable per `TuningTask`. VN2 conformal/order-cost
+searches should use a conservative grace period when they are migrated in
+[#33](https://github.com/Vzlentin/calibre/issues/33), because early origins are not
+representative of later inventory cost during conformal warmup.
 
 Do not prune mid-fit, mid-predict, mid-conformal update, or mid-ordering decision.
 Conformal state must remain internally consistent for every reported origin.
@@ -236,12 +244,13 @@ Conformal state must remain internally consistent for every reported origin.
 Keep MLflow as the experiment system.
 
 - Keep `safe_log_metric` and `log_costs_dataframe` for non-HPO benchmark paths.
-- Use Ray's MLflow logger or `setup_mlflow` for Ray Tune HPO paths.
+- Use Ray's MLflow logger or `setup_mlflow` for `TuningTask` Tune paths.
 - Use a remote MLflow tracking URI for multi-node Tune runs.
 - Preserve parent/child run discoverability by tagging Tune trial runs with the parent
   Calibre run id and the Ray trial id.
-- Log the best config, trial table, pruning summary, and cost artifacts as MLflow
-  artifacts.
+- Direct `TuningTask` callers can log Tune trial metadata through Ray's MLflow
+  callback. Benchmark-level cost artifacts stay on the existing benchmark helpers
+  until panel HPO is migrated.
 
 Ray's MLflow callback logs from the driver, not from the trainable. If a trainable must
 log custom artifacts directly, use Ray's MLflow setup helper inside that trainable rather
@@ -254,18 +263,10 @@ contract in `calibre/api/run_store.py:24-31` is about creating, queueing, retrie
 and running backtest jobs. The SQL implementation records status, row counts, errors,
 and artifact pointers. That is the right boundary.
 
-For HPO:
-
-- `RunStore` records the parent run, status, artifact pointers, best config pointer,
-  Tune experiment pointer, and Optuna study name or storage URI.
-- Ray Tune and Optuna own trial-level persistence and resumption.
-- MLflow owns experiment metrics, params, and artifacts.
-- `SqlConformalStateStore` remains for resumable backtests, not for sharing mutable
-  conformal state across parallel trials.
-
-On resume, a queued HPO run should recover the same Tune experiment directory and Optuna
-study identity, then continue unfinished trials. A completed best config is written back
-as a run artifact and can be used by normal `BackendEngine.execute()` runs.
+HPO run metadata is not exposed through CLI/API config until a CLI tuning workflow is
+wired. Ray Tune and Optuna own trial-level persistence for direct `TuningTask` callers.
+MLflow owns experiment metrics, params, and artifacts. `SqlConformalStateStore` remains
+for resumable backtests, not for sharing mutable conformal state across parallel trials.
 
 ### Nested parallelism prevention
 
@@ -343,7 +344,7 @@ Use separate surfaces with shared run identifiers:
 
 - Ray Dashboard for scheduler state, task durations, worker CPU/memory, failed tasks,
   and Tune trial progress.
-- MLflow for experiment parameters, trial metrics, artifacts, and best configs.
+- MLflow for experiment parameters, trial metrics, artifacts, and benchmark costs.
 - Existing FastAPI and CLI logs for Calibre job status and user-facing errors.
 
 A forced "single pane" would hide the different failure modes. Scheduling failures,
@@ -430,8 +431,8 @@ current KubeRay upgrade guide calls out a RayJob readiness/liveness bug in that 
 |-------|----------------|------|---------------|---------------|----------|
 | 0. Baseline and acceptance | This document reviewed; current worktree clean except planned docs | Record baseline commands and expected VN2 winning cost; agree config fields and API compatibility | Baseline run record shows `benchmarks/vn2/config/winning.yaml` returns `total_cost = 4992.20` rounded to cents; no source changes yet | No rollback needed | 0.5 day |
 | 1. Ray Core execution | Phase 0 complete; baseline cost recorded | Replace Fugue dispatch with Ray Core local fan-out; keep global in-process; preserve `BackendEngine.execute`; add fast path and Ray execution config | Unit and integration tests green; ruff and mypy green; no active runtime references to the legacy scheduler path remain in `calibre` or `tests`; VN2 winning cost remains `4992.20` | Revert execution migration commit; old scheduler path was isolated to backend, CLI engine resolution, config, and tests | 2 days |
-| 2. Ray Tune HPO | Phase 1 complete; Ray execution stable locally | Add streaming origin evaluation for tuning; move `optimize_task` to Ray Tune with OptunaSearch and ASHA; add trial budgets and grace period | HPO tests show conditional search spaces work, at least one bad trial prunes after grace period, no nested oversubscription in resource tests; VN2 winning cost remains `4992.20` | Revert tuning migration; keep Ray Core execution | 2 to 3 days |
-| 3. Observability and persistence | Phase 2 complete; MLflow remote URI available | Wire Tune outputs to MLflow; record Tune/Optuna pointers and best config artifacts through RunStore; document resume path | RunStore tests cover HPO artifact pointers and resume metadata; MLflow trial runs are discoverable under parent run id; VN2 winning cost remains `4992.20` | Disable HPO resume metadata and fall back to MLflow artifacts while keeping execution | 1 day |
+| 2. Ray Tune HPO | Phase 1 complete; Ray execution stable locally | Add streaming origin evaluation for `TuningTask`; move `optimize_task` to Ray Tune with OptunaSearch and ASHA; add trial budgets and grace period | HPO tests show callable search spaces work, at least one bad trial prunes after grace period, no nested oversubscription in resource tests; VN2 winning cost remains `4992.20` | Revert tuning migration; keep Ray Core execution | 2 to 3 days |
+| 3. Observability and persistence | Phase 2 complete; MLflow remote URI available | Keep existing benchmark logging intact; defer CLI/API HPO metadata until tuning is wired | Existing RunStore artifact tests remain green; benchmark MLflow helpers still log non-HPO cost artifacts; VN2 winning cost remains `4992.20` | Revert docs/config cleanup only | 1 day |
 | 4. Packaging and deployment | Phase 3 complete; deployment image build available | Remove Fugue/Dask/Spark deps; add Ray extra; update slim/full image install sets; pin Ray/KubeRay versions | Fresh env installs; Docker slim/full build; API health check; local Ray smoke; VN2 winning cost remains `4992.20` | Restore dependency set from previous lockfile and image definitions | 1 day |
 | 5. Cleanup and docs | Phase 4 complete | Remove dead Fugue tests/docs; update deployment docs and examples; add troubleshooting notes for Ray startup and Windows dev | Docs match code; no stale Dask/Spark config examples; final full test suite green; VN2 winning cost remains `4992.20` | Revert docs cleanup only | 0.5 day |
 

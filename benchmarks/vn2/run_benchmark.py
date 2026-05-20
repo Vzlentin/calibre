@@ -382,7 +382,7 @@ def run_hpo(
     ``"_quantile_alpha"`` key (a private debug field — drop before passing
     upstream if needed; the value is also recoverable from ``quantiles[0]``).
 
-    HPO summary metrics and artifacts are logged to the active MLflow parent
+    The best HPO metric and parameters are logged to the active MLflow parent
     run when tracking is enabled.
     """
     week0 = load_period(data_dir, 0)

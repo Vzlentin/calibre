@@ -5,9 +5,12 @@ Recommendation: Go
 
 ## Recommendation
 
-Migrate from Fugue plus sequential Optuna to Ray Core plus Ray Tune with OptunaSearch
-and ASHA. Keep pandas, Parquet, fsspec, ForecastTaskRef, FastAPI, SQLAlchemy/Alembic,
-MLflow, Prometheus, and driver-owned conformal state.
+Migrate Fugue execution fan-out to Ray Core and the reusable per-series
+`TuningTask` path to Ray Tune with OptunaSearch and ASHA. Keep pandas, Parquet,
+fsspec, ForecastTaskRef, FastAPI, SQLAlchemy/Alembic, MLflow, Prometheus, and
+driver-owned conformal state. The VN2 benchmark's panel-level HPO and cost search
+remain sequential Optuna in this PR and are tracked for a follow-up in
+[#33](https://github.com/Vzlentin/calibre/issues/33).
 
 This is worth doing because Calibre's bottleneck is embarrassingly parallel Python work:
 per-series fit/predict and repeated HPO trials. Fugue makes that work look like a
@@ -24,11 +27,12 @@ the same scheduler.
 | Global models | Direct unless a Fugue engine exists | Always in-process on driver |
 | Worker hand-off | Dispatch DataFrame, base64-pickled configs, Parquet refs | Pickled `ForecastTaskRef` plus existing Parquet URIs |
 | Execution config | `engine: Any`, Dask/Spark Fugue objects | `backend`, `ray_address`, `ray_threshold`, `max_concurrency` |
-| HPO | Sequential `study.optimize` | Ray Tune trials with OptunaSearch |
+| Per-series HPO | Sequential `study.optimize` inside `TuningTask` | Ray Tune trials with OptunaSearch |
+| VN2 panel HPO/cost search | Sequential `study.optimize` | Deferred to [#33](https://github.com/Vzlentin/calibre/issues/33) |
 | Search space API | `Callable[[optuna.Trial], dict]` | Same API, unchanged |
 | Pruning | None | ASHA reports after each origin; conservative grace period |
-| MLflow | Current benchmark helpers and Optuna callback | Keep helpers; use Ray MLflow logging for Tune trials |
-| RunStore | Run status and artifact pointers | Same, plus pointers to Tune experiment, study, and best config |
+| MLflow | Current benchmark helpers and Optuna callback | Keep benchmark helpers; Tune callbacks are limited to `TuningTask` |
+| RunStore | Run status and artifact pointers | Same run status and artifact pointers; HPO metadata is deferred |
 | Data frames | pandas | pandas |
 | Serialization | Parquet through fsspec | Parquet through fsspec |
 | Serving | FastAPI | FastAPI |
@@ -42,8 +46,8 @@ the same scheduler.
 |-------|-------|-----------|----------|
 | 0 | Baseline and acceptance | VN2 winning baseline recorded at `total_cost = 4992.20` | 0.5 day |
 | 1 | Ray Core execution | Tests, lint/type checks, no Fugue runtime refs, VN2 cost still `4992.20` | 2 days |
-| 2 | Ray Tune HPO | Conditional search tests, pruning after grace period, resource-budget tests, VN2 cost still `4992.20` | 2 to 3 days |
-| 3 | Observability and persistence | MLflow trial runs, RunStore pointers, resume metadata, VN2 cost still `4992.20` | 1 day |
+| 2 | Ray Tune HPO | Per-series `TuningTask` tests, pruning after grace period, resource-budget tests, VN2 cost still `4992.20` | 2 to 3 days |
+| 3 | Observability and persistence | Existing benchmark logging remains intact; HPO persistence deferred until CLI/API tuning is wired | 1 day |
 | 4 | Packaging and deployment | Fresh install, slim/full images build, local Ray smoke, VN2 cost still `4992.20` | 1 day |
 | 5 | Cleanup and docs | No stale Fugue/Dask/Spark examples, full suite green, VN2 cost still `4992.20` | 0.5 day |
 
