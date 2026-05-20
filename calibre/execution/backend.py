@@ -51,6 +51,7 @@ from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
 logger = logging.getLogger(__name__)
 _REMOTE_PROCESS_TASK_REF: Any | None = None
+_REMOTE_PROCESS_TASK_RUNTIME_KEY: str | None = None
 
 
 def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) -> pd.DataFrame:
@@ -163,10 +164,26 @@ def _process_task_ref(
     return _finalize_preds(preds, origin, origin_task.model_name)
 
 
+def _ray_runtime_key(ray: Any) -> str | None:
+    if not ray.is_initialized():
+        return None
+    return str(ray.get_runtime_context().gcs_address)
+
+
+def _clear_remote_process_task_ref() -> None:
+    global _REMOTE_PROCESS_TASK_REF, _REMOTE_PROCESS_TASK_RUNTIME_KEY
+    _REMOTE_PROCESS_TASK_REF = None
+    _REMOTE_PROCESS_TASK_RUNTIME_KEY = None
+
+
 def _get_remote_process_task_ref(ray: Any) -> Any:
-    global _REMOTE_PROCESS_TASK_REF
-    if _REMOTE_PROCESS_TASK_REF is None:
+    global _REMOTE_PROCESS_TASK_REF, _REMOTE_PROCESS_TASK_RUNTIME_KEY
+    runtime_key = _ray_runtime_key(ray)
+    if runtime_key is None:
+        _clear_remote_process_task_ref()
+    if _REMOTE_PROCESS_TASK_REF is None or runtime_key != _REMOTE_PROCESS_TASK_RUNTIME_KEY:
         _REMOTE_PROCESS_TASK_REF = ray.remote(_process_task_ref)
+        _REMOTE_PROCESS_TASK_RUNTIME_KEY = runtime_key
     return _REMOTE_PROCESS_TASK_REF
 
 
@@ -230,6 +247,9 @@ _DEFAULT_CONFORMAL = ConformalOptions()
 
 
 class BackendEngine:
+    _owns_ray_runtime: bool
+    _ray: Any | None
+
     def __init__(
         self,
         *,
@@ -359,6 +379,7 @@ class BackendEngine:
         if not getattr(self, "_owns_ray_runtime", False) or ray is None:
             return
         ray.shutdown()
+        _clear_remote_process_task_ref()
         self._owns_ray_runtime = False
         self._ray = None
 

@@ -127,6 +127,31 @@ def test_ray_backend_matches_local_backend() -> None:
     pd.testing.assert_frame_equal(_sorted(actual), _sorted(expected))
 
 
+def test_ray_remote_handle_rebuilds_after_owned_runtime_shutdown() -> None:
+    ray = pytest.importorskip("ray")
+
+    if ray.is_initialized():
+        ray.shutdown()
+
+    panel = _panel()
+    tasks = _tasks(panel)
+    origins = [pd.Timestamp("2024-03-17")]
+
+    try:
+        for _ in range(2):
+            engine = BackendEngine(
+                execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
+            )
+            try:
+                result = engine.execute(tasks, panel, origins)
+            finally:
+                engine.close()
+            assert not result.ledger.to_df().empty
+    finally:
+        if ray.is_initialized():
+            ray.shutdown()
+
+
 def test_ray_quantile_columns_survive() -> None:
     pytest.importorskip("ray")
 
