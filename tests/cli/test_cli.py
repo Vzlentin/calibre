@@ -6,6 +6,7 @@ from pathlib import Path
 
 import fsspec
 import pandas as pd
+import pytest
 
 from calibre.cli.commands import (
     _record_order_cost_metric,
@@ -179,6 +180,21 @@ def test_load_config_accepts_ray_execution_options(tmp_path) -> None:
     assert config.execution.ray_address == "ray://scheduler:10001"
     assert config.execution.ray_threshold == 3
     assert config.execution.max_concurrency == 2
+
+
+def test_load_config_rejects_hpo_section_until_cli_tuning_is_wired(tmp_path) -> None:
+    path = _write_config(tmp_path)
+    text = Path(path).read_text(encoding="utf-8")
+    Path(path).write_text(
+        text.replace(
+            "execution:\n  backend: local",
+            "hpo:\n  tune_experiment_dir: results/tune\nexecution:\n  backend: local",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="config.hpo is not supported"):
+        load_config(path)
 
 
 def test_load_config_reads_fsspec_uri() -> None:

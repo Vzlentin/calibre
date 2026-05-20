@@ -82,14 +82,6 @@ class OutputConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class HPOConfig:
-    tune_experiment_dir: str | None = None
-    optuna_study_name: str | None = None
-    optuna_storage_uri: str | None = None
-    best_config_path: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class ExecutionConfig:
     backend: Literal["local", "ray", "auto"] = "auto"
     seed: int | None = None
@@ -105,7 +97,6 @@ class BackendConfig:
     tasks: list[TaskConfig]
     origins: OriginsConfig
     output: OutputConfig
-    hpo: HPOConfig | None = None
     conformal: ConformalConfig | None = None
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
@@ -212,26 +203,6 @@ def _parse_output(data: Any) -> OutputConfig:
     )
 
 
-def _parse_hpo(data: Any) -> HPOConfig | None:
-    raw = _optional_mapping(data, "hpo")
-    if raw is None:
-        return None
-    return HPOConfig(
-        tune_experiment_dir=str(raw["tune_experiment_dir"])
-        if raw.get("tune_experiment_dir") is not None
-        else None,
-        optuna_study_name=str(raw["optuna_study_name"])
-        if raw.get("optuna_study_name") is not None
-        else None,
-        optuna_storage_uri=str(raw["optuna_storage_uri"])
-        if raw.get("optuna_storage_uri") is not None
-        else None,
-        best_config_path=str(raw["best_config_path"])
-        if raw.get("best_config_path") is not None
-        else None,
-    )
-
-
 def _parse_execution(data: Any) -> ExecutionConfig:
     raw = _require_mapping(data or {}, "execution")
     if "engine" in raw:
@@ -263,6 +234,8 @@ def load_config_from_mapping(
     schema = str(_require_key(raw, "config_schema", "config"))
     if schema != CONFIG_SCHEMA:
         raise ValueError(f"config_schema must be {CONFIG_SCHEMA!r}, got {schema!r}")
+    if "hpo" in raw:
+        raise ValueError("config.hpo is not supported until CLI tuning is wired")
 
     tasks = _parse_tasks(_require_key(raw, "tasks", "config"))
     horizons = {task.horizon for task in tasks}
@@ -277,7 +250,6 @@ def load_config_from_mapping(
         ordering=_parse_ordering(raw.get("ordering")),
         origins=_parse_origins(_require_key(raw, "origins", "config")),
         output=_parse_output(raw.get("output")),
-        hpo=_parse_hpo(raw.get("hpo")),
         execution=_parse_execution(raw.get("execution")),
         benchmark=str(raw["benchmark"]) if raw.get("benchmark") is not None else None,
         source_path=str(source_path) if source_path is not None else None,

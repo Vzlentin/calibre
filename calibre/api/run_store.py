@@ -37,35 +37,7 @@ def _pointer_kinds(config) -> list[tuple[str, str]]:
         pairs.append(("ledger", config.output.ledger_path))
     if config.output.order_ledger_path is not None:
         pairs.append(("order_ledger", config.output.order_ledger_path))
-    if config.hpo is not None:
-        if config.hpo.tune_experiment_dir is not None:
-            pairs.append(("hpo_tune_experiment", config.hpo.tune_experiment_dir))
-        if config.hpo.best_config_path is not None:
-            pairs.append(("hpo_best_config", config.hpo.best_config_path))
     return pairs
-
-
-def _hpo_metadata(config) -> dict[str, str]:
-    if config.hpo is None:
-        return {}
-    metadata: dict[str, str] = {}
-    if config.hpo.tune_experiment_dir is not None:
-        metadata["tune_experiment_dir"] = config.hpo.tune_experiment_dir
-    if config.hpo.optuna_study_name is not None:
-        metadata["optuna_study_name"] = config.hpo.optuna_study_name
-    if config.hpo.optuna_storage_uri is not None:
-        metadata["optuna_storage_uri"] = config.hpo.optuna_storage_uri
-    if config.hpo.best_config_path is not None:
-        metadata["best_config_path"] = config.hpo.best_config_path
-    return metadata
-
-
-def _hpo_metadata_from_raw(config: dict) -> dict[str, str]:
-    try:
-        parsed = load_config_from_mapping(config)
-    except Exception:
-        return {}
-    return _hpo_metadata(parsed)
 
 
 def _format_error(exc: Exception) -> str:
@@ -89,7 +61,6 @@ class MemoryRunStore:
         response = RunResponse(
             id=run_id,
             status=RunStatus.QUEUED,
-            hpo_metadata=_hpo_metadata_from_raw(config),
         )
         self._runs[run_id] = response
         self._configs[run_id] = config
@@ -123,9 +94,7 @@ class MemoryRunStore:
         for kind, path in _pointer_kinds(config):
             uri = canonical_ledger_uri(path) if kind == "ledger" else path
             urls[kind] = signed_url(uri)
-        self._runs[run_id] = self._runs[run_id].model_copy(
-            update={"artifact_urls": urls, "hpo_metadata": _hpo_metadata(config)}
-        )
+        self._runs[run_id] = self._runs[run_id].model_copy(update={"artifact_urls": urls})
 
     def run_backtest_job(self, run_id: str) -> None:
         self.mark_running(run_id)
@@ -235,7 +204,6 @@ class SqlRunStore:
             id=str(run.id),
             status=RunStatus(run.status),
             artifact_urls=artifact_urls,
-            hpo_metadata=_hpo_metadata_from_raw(run.config),
             row_count=run.row_count,
             error=run.error,
         )

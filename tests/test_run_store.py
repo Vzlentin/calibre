@@ -113,38 +113,3 @@ def test_sql_run_store_records_artifacts(tmp_path) -> None:
     snapshot = store.get(run.id)
     assert snapshot is not None
     assert Path(snapshot.artifact_urls["ledger"]) == ledger_path
-
-
-def test_run_store_exposes_hpo_metadata(store: RunStore, tmp_path: Path) -> None:
-    tune_dir = tmp_path / "tune-exp"
-    best_config = tmp_path / "best-config.json"
-    tune_dir.mkdir()
-    best_config.write_text("{}", encoding="utf-8")
-    config = {
-        "config_schema": "1.0",
-        "dataset": {"adapter": "unit", "path": "ignored"},
-        "tasks": [
-            {
-                "model": "SeasonalNaive",
-                "horizon": 1,
-                "config": {"backend": "statsforecast"},
-            }
-        ],
-        "origins": {"start": "2024-01-01", "end": "2024-01-01", "freq": "W-MON"},
-        "output": {"streaming": False},
-        "hpo": {
-            "tune_experiment_dir": tune_dir.as_posix(),
-            "optuna_study_name": "calibre-study",
-            "optuna_storage_uri": "sqlite:///optuna.db",
-            "best_config_path": best_config.as_posix(),
-        },
-        "execution": {"backend": "local"},
-    }
-
-    run = store.create(config)
-    snapshot = store.get(run.id)
-
-    assert snapshot is not None
-    assert snapshot.hpo_metadata["tune_experiment_dir"] == tune_dir.as_posix()
-    assert snapshot.hpo_metadata["optuna_study_name"] == "calibre-study"
-    assert snapshot.hpo_metadata["best_config_path"] == best_config.as_posix()
