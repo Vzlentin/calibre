@@ -237,6 +237,7 @@ def optimize_task(task: TuningTask) -> dict:
                 include_dashboard=False,
                 ignore_reinit_error=True,
                 local_mode=task.ray_local_mode,
+                _skip_env_hook=True,
             )
     previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
     os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")

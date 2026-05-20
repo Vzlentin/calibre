@@ -36,7 +36,12 @@ def ray_local_runtime():
     if ray.is_initialized():
         yield
         return
-    ray.init(include_dashboard=False, ignore_reinit_error=True, local_mode=True)
+    ray.init(
+        include_dashboard=False,
+        ignore_reinit_error=True,
+        local_mode=True,
+        _skip_env_hook=True,
+    )
     try:
         yield
     finally:

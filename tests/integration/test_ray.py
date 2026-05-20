@@ -153,7 +153,12 @@ def test_ray_remote_handle_rebuilds_after_owned_runtime_shutdown() -> None:
 
 
 def test_ray_quantile_columns_survive() -> None:
-    pytest.importorskip("ray")
+    ray = pytest.importorskip("ray")
+    pytest.importorskip("mlforecast")
+
+    owns_ray = not ray.is_initialized()
+    if owns_ray:
+        ray.init(include_dashboard=False, ignore_reinit_error=True, _skip_env_hook=True)
 
     all_series = _panel()
     model_config = {
@@ -184,6 +189,8 @@ def test_ray_quantile_columns_survive() -> None:
         actual = engine.execute(tasks, all_series, origins).ledger.to_df()
     finally:
         engine.close()
+        if owns_ray:
+            ray.shutdown()
 
     assert "q_0p5" in actual.columns
     assert "q_0p833" in actual.columns
@@ -196,7 +203,7 @@ def test_ray_worker_loads_mlforecast_adapter_without_mlforecast_importable() -> 
 
     owns_ray = not ray.is_initialized()
     if not ray.is_initialized():
-        ray.init(include_dashboard=False, ignore_reinit_error=True)
+        ray.init(include_dashboard=False, ignore_reinit_error=True, _skip_env_hook=True)
 
     @ray.remote
     def _load_adapter_with_blocked_mlforecast_import() -> str:

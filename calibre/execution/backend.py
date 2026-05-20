@@ -591,7 +591,7 @@ class BackendEngine:
             ray.init(address=self.execution.ray_address, ignore_reinit_error=True)
             self._owns_ray_runtime = False
         else:
-            ray.init(include_dashboard=False, ignore_reinit_error=True)
+            ray.init(include_dashboard=False, ignore_reinit_error=True, _skip_env_hook=True)
             self._owns_ray_runtime = True
         self._ray = ray
         return ray

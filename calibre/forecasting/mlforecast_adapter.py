@@ -38,17 +38,22 @@ _TRANSFORM_ALIASES = {
     "RollingMean": "mlforecast.lag_transforms.RollingMean",
     "RollingStd": "mlforecast.lag_transforms.RollingStd",
 }
+MLForecast: type[Any] | None = None
 
 
 def _load_mlforecast_cls() -> type[Any]:
+    global MLForecast
+    if MLForecast is not None:
+        return MLForecast
     try:
-        from mlforecast import MLForecast
+        from mlforecast import MLForecast as mlforecast_cls
     except ModuleNotFoundError as exc:
         raise ImportError(
             "MLForecastAdapter requires the 'mlforecast' package. "
             "Install calibre with the 'ml' extra to use backend='mlforecast'."
         ) from exc
-    return MLForecast
+    MLForecast = mlforecast_cls
+    return mlforecast_cls
 
 
 def _resolve_dotted_cls(dotted_path: str, *, field: str) -> type:
