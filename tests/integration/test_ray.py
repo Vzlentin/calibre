@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import builtins
+import importlib
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -161,6 +164,45 @@ def test_ray_quantile_columns_survive() -> None:
     assert "q_0p833" in actual.columns
     assert actual["q_0p5"].notna().all()
     assert actual["q_0p833"].notna().all()
+
+
+def test_ray_worker_loads_mlforecast_adapter_without_mlforecast_importable() -> None:
+    ray = pytest.importorskip("ray")
+
+    owns_ray = not ray.is_initialized()
+    if not ray.is_initialized():
+        ray.init(include_dashboard=False, ignore_reinit_error=True)
+
+    @ray.remote
+    def _load_adapter_with_blocked_mlforecast_import() -> str:
+        original_import = builtins.__import__
+        blocked = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == "mlforecast" or name.startswith("mlforecast.")
+        }
+        for name in blocked:
+            sys.modules.pop(name, None)
+        sys.modules.pop("calibre.forecasting.mlforecast_adapter", None)
+
+        def _blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "mlforecast" or name.startswith("mlforecast."):
+                raise ModuleNotFoundError("No module named 'mlforecast'")
+            return original_import(name, globals, locals, fromlist, level)
+
+        builtins.__import__ = _blocked_import
+        try:
+            module = importlib.import_module("calibre.forecasting.mlforecast_adapter")
+            return module.MLForecastAdapter.__name__
+        finally:
+            builtins.__import__ = original_import
+            sys.modules.update(blocked)
+
+    try:
+        assert ray.get(_load_adapter_with_blocked_mlforecast_import.remote()) == "MLForecastAdapter"
+    finally:
+        if owns_ray:
+            ray.shutdown()
 
 
 def _write_cli_config(tmp_path: Path, *, backend: str) -> Path:
