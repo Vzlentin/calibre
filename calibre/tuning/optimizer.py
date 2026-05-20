@@ -223,9 +223,10 @@ def optimize_task(task: TuningTask) -> dict:
         _trainable,
         resources={"cpu": float(task.cpu_per_trial)},
     )
-    run_config_kwargs: dict[str, Any] = {"callbacks": _build_mlflow_callbacks(task)}
-    if task.tune_storage_path is not None:
-        run_config_kwargs["storage_path"] = task.tune_storage_path
+    run_config_kwargs: dict[str, Any] = {
+        "callbacks": _build_mlflow_callbacks(task),
+        "storage_path": _resolve_tune_storage_path(task),
+    }
     if task.tune_experiment_name is not None:
         run_config_kwargs["name"] = task.tune_experiment_name
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import optuna
@@ -113,6 +114,17 @@ def test_optimize_single_trial(tuned_best_config):
     """n_trials=1 should run without error."""
     assert isinstance(tuned_best_config, dict)
     assert "season_length" in tuned_best_config
+
+
+def test_optimize_task_from_tmp_cwd_does_not_use_cwd_as_tune_uri(
+    monkeypatch, tmp_path, tuning_task
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RAYTUNE_RESULTS_DIR", raising=False)
+
+    result = optimize_task(replace(tuning_task, results_dir="results"))
+
+    assert "season_length" in result
 
 
 def test_optimize_with_mae_metric(series_df, dates):
