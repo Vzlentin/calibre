@@ -32,9 +32,9 @@ CI publishes same-repository PR and main-branch images to GHCR as
 `ghcr.io/<owner>/<repo>:pr-<number>-full`, `:pr-<number>-slim`, and short-SHA
 `:<sha>-full` / `:<sha>-slim` tags after both image smoke tests pass.
 
-The slim image is intended for statsforecast/local model configs and omits the
-MLForecast/LightGBM and NeuralForecast stacks. Use the full image for the VN2
-winning benchmark and other global LightGBM or neural configs.
+The slim image is intended for statsforecast/local model configs and omits Ray,
+MLForecast/LightGBM, and NeuralForecast. Use the full image for remote Ray workers,
+the VN2 winning benchmark, and other global LightGBM or neural configs.
 
 ## Kubernetes Job
 
@@ -120,7 +120,10 @@ supported by `adlfs`.
 
 ## Databricks
 
-Calibre runs on Databricks via the Spark execution backend. The workflow is:
+Calibre can run on Databricks as a normal Python job on the driver. Use
+`backend: local` for small smoke tests and submit larger distributed runs to a
+Ray cluster or KubeRay. Global models still run driver-side unless they are
+rewritten as local-scope per-series tasks or migrated to future panel Tune work.
 
 1. **Build and upload the wheel** from your local checkout:
 
@@ -169,3 +172,33 @@ Calibre runs on Databricks via the Spark execution backend. The workflow is:
    )
    display(summary)
    ```
+
+## Ray Notes
+
+`execution.backend: auto` starts Ray only when the per-origin local task count
+meets `execution.ray_threshold` (default `10`). Set `backend: local` for health
+checks, tiny fixtures, and Windows development when startup cost matters. For
+multi-node execution, run Ray on Linux containers or KubeRay and pass
+`execution.ray_address`; Calibre connects to remote clusters without shutting
+them down.
+
+Remote Ray requires `execution.staging_uri`. This URI must point to storage visible
+from every worker, such as `s3://`, `gs://`, `abfs://`, or a mounted shared
+filesystem/PVC path. Calibre stages `ForecastTaskRef` Parquet payloads under a
+run-scoped prefix and cleans that prefix on best effort when the engine closes.
+
+Example:
+
+```yaml
+execution:
+  backend: ray
+  ray_address: ray://calibre-ray-head:10001
+  staging_uri: s3://my-bucket/calibre/staging
+  ray_threshold: 10
+  max_concurrency: 64
+  cpu_per_task: 1
+```
+
+`cpu_per_task` requests Ray task CPU resources and caps common model thread
+settings such as `n_jobs`, `num_threads`, and `nthread` when those keys are present.
+`max_concurrency` limits how many per-series tasks the driver submits at once.

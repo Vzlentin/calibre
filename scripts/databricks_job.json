@@ -13,10 +13,7 @@
       "new_cluster": {
         "spark_version": "15.4.x-scala2.12",
         "node_type_id": "Standard_DS3_v2",
-        "num_workers": 1,
-        "spark_conf": {
-          "spark.sql.adaptive.enabled": "true"
-        }
+        "num_workers": 1
       },
       "libraries": [
         {

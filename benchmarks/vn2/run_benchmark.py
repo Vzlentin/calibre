@@ -44,7 +44,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from functools import cache, partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import optuna
 import pandas as pd
@@ -57,7 +57,6 @@ from benchmarks.common.tracking import (
     log_config_module,
     log_costs_dataframe,
     mlflow,
-    optuna_mlflow_callback,
     start_benchmark_run,
 )
 from benchmarks.vn2.config import (
@@ -373,7 +372,6 @@ def run_hpo(
     series_filter: list[str] | None = None,
     seed: int = 42,
     verbose: bool = True,
-    mlflow_callbacks: list | None = None,
     target_mode: str = "per_horizon",
 ) -> dict[str, Any]:
     """Run the panel-level Optuna HPO and return the best model config.
@@ -384,8 +382,8 @@ def run_hpo(
     ``"_quantile_alpha"`` key (a private debug field — drop before passing
     upstream if needed; the value is also recoverable from ``quantiles[0]``).
 
-    If ``mlflow_callbacks`` is provided, it is passed to ``study.optimize``
-    so each trial is logged as a nested MLflow run under the active parent.
+    The best HPO metric and parameters are logged to the active MLflow parent
+    run when tracking is enabled.
     """
     week0 = load_period(data_dir, 0)
     if series_filter is not None:
@@ -451,13 +449,15 @@ def run_hpo(
 
     started = time.time()
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study.optimize(
-        _objective,
-        n_trials=n_trials,
-        timeout=timeout_sec,
-        gc_after_trial=True,
-        callbacks=mlflow_callbacks or [],
-    )
+    try:
+        study.optimize(
+            _objective,
+            n_trials=n_trials,
+            timeout=timeout_sec,
+            gc_after_trial=True,
+        )
+    finally:
+        engine.close()
     elapsed = time.time() - started
 
     best = dict(study.best_trial.params)
@@ -543,7 +543,12 @@ def _run_order_conformal_warmup(
     runtime: CumulativeRiskRuntime,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
-    execution_engine: Any = None,
+    execution_backend: Literal["local", "ray", "auto"] = "auto",
+    ray_address: str | None = None,
+    staging_uri: str | None = None,
+    ray_threshold: int = 10,
+    max_concurrency: int | None = None,
+    cpu_per_task: float | None = None,
 ) -> None:
     """Calibrate the cumulative order conformal runtime on resolved origins."""
     for frame in _order_conformal_warmup_frames(
@@ -554,7 +559,12 @@ def _run_order_conformal_warmup(
         warmup_origins=warmup_origins,
         series_filter=series_filter,
         cumulative_target=cumulative_target,
-        execution_engine=execution_engine,
+        execution_backend=execution_backend,
+        ray_address=ray_address,
+        staging_uri=staging_uri,
+        ray_threshold=ray_threshold,
+        max_concurrency=max_concurrency,
+        cpu_per_task=cpu_per_task,
     ):
         runtime.observe(runtime.apply(frame))
 
@@ -568,7 +578,12 @@ def _order_conformal_warmup_frames(
     warmup_origins: int,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
-    execution_engine: Any = None,
+    execution_backend: Literal["local", "ray", "auto"] = "auto",
+    ray_address: str | None = None,
+    staging_uri: str | None = None,
+    ray_threshold: int = 10,
+    max_concurrency: int | None = None,
+    cpu_per_task: float | None = None,
 ) -> list[pd.DataFrame]:
     """Return resolved warmup forecast frames for CRC calibration."""
     if warmup_origins <= 0:
@@ -587,13 +602,26 @@ def _order_conformal_warmup_frames(
     if not origin_dates:
         return []
 
-    engine = BackendEngine(execution=ExecutionOptions(freq="W-MON", engine=execution_engine))
-    task = ForecastTask(history=history, horizon=horizon, model_config=model_config)
-    ledger_df = _prepare_policy_forecast_frame(
-        engine.execute([task], actuals=sales, origins=origin_dates).ledger.to_df(),
-        protection_period=horizon,
-        cumulative_target=cumulative_target,
+    engine = BackendEngine(
+        execution=ExecutionOptions(
+            freq="W-MON",
+            backend=execution_backend,
+            ray_address=ray_address,
+            staging_uri=staging_uri,
+            ray_threshold=ray_threshold,
+            max_concurrency=max_concurrency,
+            cpu_per_task=cpu_per_task,
+        )
     )
+    task = ForecastTask(history=history, horizon=horizon, model_config=model_config)
+    try:
+        ledger_df = _prepare_policy_forecast_frame(
+            engine.execute([task], actuals=sales, origins=origin_dates).ledger.to_df(),
+            protection_period=horizon,
+            cumulative_target=cumulative_target,
+        )
+    finally:
+        engine.close()
     if ledger_df.empty:
         return []
 
@@ -751,24 +779,27 @@ def build_replay_cache(
 
     engine = BackendEngine(execution=ExecutionOptions(freq="W-MON"))
     rounds: dict[int, CachedRound] = {}
-    for rn in range(1, decision_rounds + 1):
-        round_sales = load_period(data_dir, rn - 1)
-        if series_filter is not None:
-            round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
-        history = _prepare_model_history(
-            round_sales,
-            instock,
-            protection_period=horizon,
-            cumulative_target=cumulative_target,
-        )
-        origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
-        task = ForecastTask(history=history, horizon=horizon, model_config=engine_config)
-        frame = _prepare_policy_forecast_frame(
-            engine.execute([task], actuals=round_sales, origins=[origin]).ledger.to_df(),
-            protection_period=horizon,
-            cumulative_target=cumulative_target,
-        )
-        rounds[rn] = CachedRound(round_num=rn, origin=origin, frame=frame)
+    try:
+        for rn in range(1, decision_rounds + 1):
+            round_sales = load_period(data_dir, rn - 1)
+            if series_filter is not None:
+                round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
+            history = _prepare_model_history(
+                round_sales,
+                instock,
+                protection_period=horizon,
+                cumulative_target=cumulative_target,
+            )
+            origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
+            task = ForecastTask(history=history, horizon=horizon, model_config=engine_config)
+            frame = _prepare_policy_forecast_frame(
+                engine.execute([task], actuals=round_sales, origins=[origin]).ledger.to_df(),
+                protection_period=horizon,
+                cumulative_target=cumulative_target,
+            )
+            rounds[rn] = CachedRound(round_num=rn, origin=origin, frame=frame)
+    finally:
+        engine.close()
 
     actuals_by_round = {
         rn: _actuals_for_replay_round(data_dir, rn, decision_rounds, initial_states)
@@ -1182,7 +1213,6 @@ def run_cost_search(
                 timeout=timeout_sec,
                 gc_after_trial=True,
                 catch=(Exception,),
-                callbacks=[optuna_mlflow_callback(experiment_name, metric_name="cost/total")],
             )
             completed_trials = [
                 trial
@@ -1614,7 +1644,12 @@ def run_benchmark(
     conformal_config: SymmetricIntervalConfig | None = None,
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_conformal_warmup_origins: int = HPO_N_ORIGINS,
-    execution_engine: Any = None,
+    execution_backend: Literal["local", "ray", "auto"] = "auto",
+    ray_address: str | None = None,
+    staging_uri: str | None = None,
+    ray_threshold: int = 10,
+    max_concurrency: int | None = None,
+    cpu_per_task: float | None = None,
 ) -> pd.DataFrame:
     """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
 
@@ -1644,8 +1679,12 @@ def run_benchmark(
             conformal ``hi_*`` bound rather than the direct quantile path.
         order_conformal_warmup_origins: Resolved week_0 walk-forward origins
             used to seed the one-sided order conformal residual pool.
-        execution_engine: Optional Fugue execution engine passed to the
-            forecast engine during warmup and decision rounds.
+        execution_backend: Forecast scheduler backend: ``local``, ``ray``, or ``auto``.
+        ray_address: Optional Ray cluster address. ``None`` starts local Ray when needed.
+        staging_uri: Shared task staging URI required for remote Ray clusters.
+        ray_threshold: Minimum local task count before ``auto`` uses Ray.
+        max_concurrency: Optional cap on concurrent uid tasks.
+        cpu_per_task: Optional CPU resources requested by each Ray worker task.
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
@@ -1693,9 +1732,6 @@ def run_benchmark(
                     series_filter=series_filter,
                     seed=hpo_seed,
                     verbose=verbose,
-                    mlflow_callbacks=[
-                        optuna_mlflow_callback("vn2", metric_name="pinball_cumulative")
-                    ],
                 )
             else:
                 best_config = deepcopy(BEST_CONFIG)
@@ -1713,7 +1749,6 @@ def run_benchmark(
         # Phase 2: Decision loop — refit each round, conformal-driven R,S
         # ------------------------------------------------------------------ #
         simulator = VN2Simulator(initial_states)
-        engine = BackendEngine(execution=ExecutionOptions(freq="W-MON", engine=execution_engine))
         target_quantile_col = quantile_column(quantile_alpha)
         order_conformal_runtime: CumulativeRiskRuntime | None = None
         conformal_runtime: ConformalRuntime | None = None
@@ -1736,7 +1771,12 @@ def run_benchmark(
                 runtime=order_conformal_runtime,
                 series_filter=list(initial_states),
                 cumulative_target=cumulative_target,
-                execution_engine=execution_engine,
+                execution_backend=execution_backend,
+                ray_address=ray_address,
+                staging_uri=staging_uri,
+                ray_threshold=ray_threshold,
+                max_concurrency=max_concurrency,
+                cpu_per_task=cpu_per_task,
             )
             conformal_runtime = order_conformal_runtime
             observe_fn = observe_cumulative
@@ -1758,6 +1798,18 @@ def run_benchmark(
         else:
             conformal_runtime = None
             observe_fn = None
+
+        engine = BackendEngine(
+            execution=ExecutionOptions(
+                freq="W-MON",
+                backend=execution_backend,
+                ray_address=ray_address,
+                staging_uri=staging_uri,
+                ray_threshold=ray_threshold,
+                max_concurrency=max_concurrency,
+                cpu_per_task=cpu_per_task,
+            )
+        )
 
         def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
             if verbose:
@@ -1832,27 +1884,30 @@ def run_benchmark(
             mlflow.log_metric("cost/shortage", shortage_cum, step=rr.round_num)
             mlflow.log_metric("cost/total", holding_cum + shortage_cum, step=rr.round_num)
 
-        DecisionLoop(
-            engine=engine,
-            simulator=simulator,
-            build_round_tasks=_build_round,
-            policy=_policy,
-            get_actuals=_get_actuals,
-            config=DecisionLoopConfig(
-                n_rounds=decision_rounds,
-                n_delivery_rounds=delivery_weeks,
-                on_round=_on_round,
-            ),
-            runtime=conformal_runtime,
-            observe_fn=observe_fn,
-            ensemble=partial(
-                _prepare_policy_forecast_frame,
-                protection_period=horizon,
-                cumulative_target=cumulative_target,
-            )
-            if cumulative_target
-            else None,
-        ).run()
+        try:
+            DecisionLoop(
+                engine=engine,
+                simulator=simulator,
+                build_round_tasks=_build_round,
+                policy=_policy,
+                get_actuals=_get_actuals,
+                config=DecisionLoopConfig(
+                    n_rounds=decision_rounds,
+                    n_delivery_rounds=delivery_weeks,
+                    on_round=_on_round,
+                ),
+                runtime=conformal_runtime,
+                observe_fn=observe_fn,
+                ensemble=partial(
+                    _prepare_policy_forecast_frame,
+                    protection_period=horizon,
+                    cumulative_target=cumulative_target,
+                )
+                if cumulative_target
+                else None,
+            ).run()
+        finally:
+            engine.close()
 
         # ------------------------------------------------------------------ #
         # Results

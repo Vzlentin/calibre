@@ -24,6 +24,8 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    env:
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
@@ -39,14 +41,6 @@ jobs:
         if: steps.vn2-cache.outputs.cache-hit != 'true'
         run: uv run python benchmarks/vn2/download_vn2_data.py
       - run: uv run pytest
-
-  dask-integration:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev --extra benchmarks --extra dask
-      - run: uv run pytest tests/integration/test_dask.py
 
   s3-ingestion:
     runs-on: ubuntu-latest
@@ -118,15 +112,3 @@ jobs:
           docker push "$image_repo:${sha_tag}-full"
           docker push "$image_repo:${sha_tag}-slim"
 
-  spark-nightly:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev --extra benchmarks --extra spark
-      - run: uv run pytest tests/integration/test_spark.py

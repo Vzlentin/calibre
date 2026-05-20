@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import fsspec  # type: ignore[import-untyped]
 import pandas as pd
@@ -11,6 +11,9 @@ import yaml
 from calibre.conformal.runtime import SymmetricIntervalConfig
 
 CONFIG_SCHEMA = "1.0"
+
+if TYPE_CHECKING:
+    from calibre.execution.backend import ExecutionOptions
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,10 +86,27 @@ class OutputConfig:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionConfig:
-    engine: str | None = None
+    backend: Literal["local", "ray", "auto"] = "auto"
     seed: int | None = None
-    dask_address: str | None = None
-    spark_session: dict[str, Any] = field(default_factory=dict)
+    ray_address: str | None = None
+    staging_uri: str | None = None
+    ray_threshold: int = 10
+    max_concurrency: int | None = None
+    cpu_per_task: float | None = None
+
+    def to_execution_options(self, *, freq: str) -> ExecutionOptions:
+        from calibre.execution.backend import ExecutionOptions
+
+        return ExecutionOptions(
+            freq=freq,
+            backend=self.backend,
+            ray_address=self.ray_address,
+            staging_uri=self.staging_uri,
+            ray_threshold=self.ray_threshold,
+            max_concurrency=self.max_concurrency,
+            cpu_per_task=self.cpu_per_task,
+            seed=self.seed,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,13 +224,43 @@ def _parse_output(data: Any) -> OutputConfig:
 
 def _parse_execution(data: Any) -> ExecutionConfig:
     raw = _require_mapping(data or {}, "execution")
-    engine = raw.get("engine")
-    if engine not in (None, "dask", "spark"):
-        raise ValueError("execution.engine must be null, 'dask', or 'spark'")
+    allowed = {
+        "backend",
+        "seed",
+        "ray_address",
+        "staging_uri",
+        "ray_threshold",
+        "max_concurrency",
+        "cpu_per_task",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"unknown execution key: {unknown[0]}")
+    backend = str(raw.get("backend", "auto"))
+    if backend not in {"local", "ray", "auto"}:
+        raise ValueError("execution.backend must be 'local', 'ray', or 'auto'")
+    ray_threshold = int(raw.get("ray_threshold", 10))
+    if ray_threshold < 1:
+        raise ValueError("execution.ray_threshold must be at least 1")
+    max_concurrency = (
+        int(raw["max_concurrency"]) if raw.get("max_concurrency") is not None else None
+    )
+    if max_concurrency is not None and max_concurrency < 1:
+        raise ValueError("execution.max_concurrency must be at least 1")
+    cpu_per_task = float(raw["cpu_per_task"]) if raw.get("cpu_per_task") is not None else None
+    if cpu_per_task is not None and cpu_per_task <= 0:
+        raise ValueError("execution.cpu_per_task must be positive")
+    ray_address = str(raw["ray_address"]) if raw.get("ray_address") is not None else None
+    staging_uri = str(raw["staging_uri"]) if raw.get("staging_uri") is not None else None
+    if ray_address is not None and staging_uri is None:
+        raise ValueError("execution.staging_uri is required when execution.ray_address is set")
     return ExecutionConfig(
-        engine=engine,
-        dask_address=str(raw["dask_address"]) if raw.get("dask_address") is not None else None,
-        spark_session=dict(raw.get("spark_session", {})),
+        backend=backend,  # type: ignore[arg-type]
+        ray_address=ray_address,
+        staging_uri=staging_uri,
+        ray_threshold=ray_threshold,
+        max_concurrency=max_concurrency,
+        cpu_per_task=cpu_per_task,
         seed=int(raw["seed"]) if raw.get("seed") is not None else None,
     )
 
@@ -222,6 +272,8 @@ def load_config_from_mapping(
     schema = str(_require_key(raw, "config_schema", "config"))
     if schema != CONFIG_SCHEMA:
         raise ValueError(f"config_schema must be {CONFIG_SCHEMA!r}, got {schema!r}")
+    if "hpo" in raw:
+        raise ValueError("config.hpo is not supported until CLI tuning is wired")
 
     tasks = _parse_tasks(_require_key(raw, "tasks", "config"))
     horizons = {task.horizon for task in tasks}

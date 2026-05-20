@@ -58,7 +58,10 @@ class MemoryRunStore:
         if idempotency_key is not None and idempotency_key in self._idempotency:
             return self._runs[self._idempotency[idempotency_key]]
         run_id = str(uuid4())
-        response = RunResponse(id=run_id, status=RunStatus.QUEUED)
+        response = RunResponse(
+            id=run_id,
+            status=RunStatus.QUEUED,
+        )
         self._runs[run_id] = response
         self._configs[run_id] = config
         if idempotency_key is not None:

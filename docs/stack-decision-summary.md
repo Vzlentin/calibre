@@ -1,88 +1,73 @@
-# Calibre Stack Decision — Executive Summary
+# Calibre Stack Decision Summary
 
-> **Decision date:** 2026-05-18 · **Full document:** `docs/stack-decision.md`
-
----
+Decision date: 2026-05-19
+Recommendation: Go
 
 ## Recommendation
 
-**Go.** Replace Fugue + sequential Optuna with Ray Core + Ray Tune (OptunaSearch + ASHA). Keep everything else.
+Migrate Fugue execution fan-out to Ray Core and the reusable per-series
+`TuningTask` path to Ray Tune with OptunaSearch and ASHA. Keep pandas, Parquet,
+fsspec, ForecastTaskRef, FastAPI, SQLAlchemy/Alembic, MLflow, Prometheus, and
+driver-owned conformal state. The VN2 benchmark's panel-level HPO and cost search
+remain sequential Optuna in this PR and are tracked for a follow-up in
+[#33](https://github.com/Vzlentin/calibre/issues/33).
 
----
+This is worth doing because Calibre's bottleneck is embarrassingly parallel Python work:
+per-series fit/predict and repeated HPO trials. Fugue makes that work look like a
+DataFrame transform and forces schema strings, base64 config columns, and Dask/Spark
+engine objects. Ray schedules the real unit of work directly and gives the tuning layer
+the same scheduler.
 
-## Before / After Stack
+## Before / After
 
-| Component | Before | After |
-|-----------|--------|-------|
-| **Per-series fan-out** | `fugue.api.transform(partition_by=UNIQUE_ID, engine=...)` | `@ray.remote _ray_fit_predict_uid` + `ray.get([...])` |
-| **Execution engine config** | `ExecutionOptions(engine: Any)` — Dask/Spark object | `ExecutionOptions(ray_address: str \| None)` |
-| **Single-node fast path** | `_run_direct` bypass for `engine=None` | `ray_threshold=10`: below threshold runs in-process, no Ray init |
-| **Task hand-off** | Base64-pickled config in DataFrame columns + schema strings | `ForecastTaskRef` pickled directly into `@ray.remote` args |
-| **Global scope** | `_run_global_distributed` (Fugue or in-process) | Always in-process on driver (one training job, no fan-out) |
-| **HPO** | Sequential `study.optimize(n_trials=50)`, no pruning | `tune.Tuner(OptunaSearch, ASHAScheduler)`, parallel trials + per-origin ASHA |
-| **Search space API** | `Callable[[optuna.Trial], dict]` | `Callable[[optuna.Trial], dict]` — **unchanged** |
-| **Early stopping** | None | ASHA prunes after `grace_period=8` origins |
-| **MLflow HPO tracking** | `optuna_integration.mlflow.MLflowCallback` | `ray.air.integrations.mlflow.MLflowLoggerCallback` |
-| **Observability** | Fugue worker logs + Optuna local study | Ray Dashboard + MLflow (unchanged) + Prometheus (unchanged) |
-| **In-memory frames** | pandas | pandas (unchanged) |
-| **Serialization** | Parquet (fsspec) | Parquet (fsspec) — unchanged |
-| **State store** | SQLAlchemy + Alembic + Postgres | SQLAlchemy + Alembic + Postgres — unchanged |
-| **Serving** | FastAPI | FastAPI — unchanged |
-| **Dependencies added** | — | `ray[default,tune]>=2.10,<3` |
-| **Dependencies removed** | `fugue`, `dask[distributed]`, `pyspark` | — |
+| Area | Before | After |
+|------|--------|-------|
+| Per-series execution | Fugue `transform` partitioned by `unique_id` | Ray Core task per uid and origin |
+| Small run path | `engine=None` direct bypass | In-process fast path below `ray_threshold=10` |
+| Global models | Direct unless a Fugue engine exists | Always in-process on driver |
+| Worker hand-off | Dispatch DataFrame, base64-pickled configs, Parquet refs | Pickled `ForecastTaskRef` plus existing Parquet URIs |
+| Execution config | `engine: Any`, Dask/Spark Fugue objects | `backend`, `ray_address`, `staging_uri`, `ray_threshold`, `max_concurrency`, `cpu_per_task` |
+| Per-series HPO | Sequential `study.optimize` inside `TuningTask` | Ray Tune trials with OptunaSearch |
+| VN2 panel HPO/cost search | Sequential `study.optimize` | Deferred to [#33](https://github.com/Vzlentin/calibre/issues/33) |
+| Search space API | `Callable[[optuna.Trial], dict]` | Same API, unchanged |
+| Pruning | None | ASHA reports after each origin; conservative grace period |
+| MLflow | Current benchmark helpers and Optuna callback | Keep benchmark helpers; Tune callbacks are limited to `TuningTask` |
+| RunStore | Run status and artifact pointers | Same run status and artifact pointers; HPO metadata is deferred |
+| Data frames | pandas | pandas |
+| Serialization | Parquet through fsspec | Parquet through fsspec |
+| Serving | FastAPI | FastAPI |
+| State store | SQLAlchemy/Alembic/Postgres | SQLAlchemy/Alembic/Postgres |
+| Metrics | Prometheus app metrics | Prometheus app metrics plus Ray metrics |
+| Packaging | Fugue core, Dask/Spark extras | Ray extra for dev/benchmark/full installs; slim stays local-only |
 
----
+## Effort and Timeline
 
-## What does not change
+| Phase | Scope | Exit gate | Estimate |
+|-------|-------|-----------|----------|
+| 0 | Baseline and acceptance | VN2 winning baseline recorded at `total_cost = 4992.20` | 0.5 day |
+| 1 | Ray Core execution | Tests, lint/type checks, no Fugue runtime refs, VN2 cost still `4992.20` | 2 days |
+| 2 | Ray Tune HPO | Per-series `TuningTask` tests, pruning after grace period, resource-budget tests, VN2 cost still `4992.20` | 2 to 3 days |
+| 3 | Observability and persistence | Existing benchmark logging remains intact; HPO persistence deferred until CLI/API tuning is wired | 1 day |
+| 4 | Packaging and deployment | Fresh install, slim/full images build, local Ray smoke, VN2 cost still `4992.20` | 1 day |
+| 5 | Cleanup and docs | No stale Fugue/Dask/Spark examples, full suite green, VN2 cost still `4992.20` | 0.5 day |
 
-- `ForecastTaskRef` URI-based materialization — already Ray-clean
-- `pandas` as the in-memory frame format
-- `fsspec` for object-store IO
-- `FastAPI` + SQLAlchemy + Alembic state store (PR #31)
-- `MLflow` experiment tracking (server running on Tailscale)
-- `Prometheus` operational metrics
-- `ConformalRuntime` on the driver — mutable sequential state, never in a Ray worker
-- `TuningTask.search_space: Callable[[optuna.Trial], dict]` — preserved end-to-end via `OptunaSearch`
-- VN2 cost gate: `benchmarks/vn2/config/winning.yaml` must reproduce ≤ EUR 4,992.20
+Total: 6 to 7 working days.
 
----
+## Go / No-go
 
-## Migration Phases
+Go, with two guardrails.
 
-| Phase | Scope | Exit criteria | Effort |
-|-------|-------|---------------|--------|
-| **A** | Ray Core execution backend | pytest green, no Fugue in codebase, VN2 winning cost ≤ EUR 4,992.20 under Ray | ~2 days |
-| **B** | Ray Tune + ASHA tuning | `test_ray_tune.py` green, ≥1 trial pruned, HPO cost within ±5% of baseline | ~2 days |
-| **C** | Vault sync | architecture.md updated, lessons.md appended, plan status → accepted | <1 day |
+First, keep `BackendEngine.execute()` as the batch API and add a separate streaming
+origin iterator for HPO. Tuning needs intermediate reports; existing callers need the
+current completed-result contract.
 
-Total: **~5 working days.**
+Second, treat the VN2 cost gate as the migration release gate. Every phase must preserve
+`benchmarks/vn2/config/winning.yaml` at `total_cost = 4992.20` rounded to cents. If that
+breaks, stop and fix the behavioral regression before continuing.
 
----
-
-## Why not keep Fugue?
-
-Fugue imposes three artefacts with no benefit for Calibre:
-
-1. **Schema strings.** `_collect_quantile_columns` decodes every model config before every origin to produce a schema string Fugue needs but Calibre does not.
-2. **Base64-pickled configs in DataFrame columns.** A Fugue protocol workaround. Deleted entirely with Ray.
-3. **Dispatch DataFrames.** `_TaskDispatchRecord` and `_dispatch_records_to_frame` exist only to satisfy Fugue's partition-by-column contract. Ray accepts Python objects directly.
-
-Fugue's Dask/Spark portability is not a constraint (stated in PLAN.md: "no deprecation cycles required — nothing is in production").
-
----
-
-## Why not keep sequential Optuna?
-
-VN2 at full scale: 600 series × 50 trials × 40 origins = 1.2 M fit-predicts, all sequential. There is no early stopping — the worst trial runs all 40 origins. ASHA with `grace_period=8` prunes provably bad trials after 8 origins, cutting wall time by an estimated 3–5× on a typical search.
-
----
-
-## Top risks
-
-| Risk | Mitigation |
-|------|-----------|
-| Ray `init` cost per CLI invocation | `ray_threshold=10` fast path skips Ray for small runs |
-| ASHA pruning good trials during conformal warmup | `grace_period=8` = `WARMUP_ORIGINS` for VN2; no pruning before calibration stabilizes |
-| Conditional search spaces break under `OptunaSearch` | Integration test covers `_sample_cost_search_crc_config` conditional branches |
-| Memory pressure at 10k+ series | `LedgerOutputOptions(streaming=True)` bounds driver memory |
-| `@ray.remote` not picklable | Static test asserts module-level functions pickle without `ConformalRuntime` refs |
+The main risks are Ray startup cost on small CLI invocations, over-aggressive ASHA
+pruning during non-stationary early origins, conditional search-space compatibility,
+large-panel memory pressure, and Windows developer experience. The proposed fast path,
+1-origin default grace period for short studies, OptunaSearch callable API,
+shared-URI task refs, streaming ledger, and Linux-container-first Ray deployment address
+those risks directly.

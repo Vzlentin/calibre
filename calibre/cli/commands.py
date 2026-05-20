@@ -15,7 +15,6 @@ from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
     ConformalOptions,
-    ExecutionOptions,
     LedgerOutputOptions,
 )
 from calibre.execution.dataset import DatasetBundle
@@ -45,7 +44,7 @@ _HEALTH_CONFIG: dict[str, Any] = {
     ],
     "origins": {"start": "2024-01-29", "end": "2024-01-29", "freq": "W-MON"},
     "output": {"ledger_path": "results/vn2/smoke-ledger.parquet", "streaming": False},
-    "execution": {"engine": None, "seed": 42},
+    "execution": {"backend": "local", "seed": 42},
 }
 
 
@@ -109,69 +108,25 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
     set_order_cost(currency, dataset, total_cost)
 
 
-def _resolve_execution_engine(config: BackendConfig) -> Any:
-    if config.execution.engine is None:
-        return None
-    if config.execution.engine == "dask":
-        from distributed import Client, LocalCluster
-        from fugue_dask import DaskExecutionEngine
-
-        if config.execution.dask_address is not None:
-            client = Client(config.execution.dask_address)
-            cluster = None
-        else:
-            cluster = LocalCluster(processes=False, dashboard_address=None)
-            client = Client(cluster)
-        engine = DaskExecutionEngine(client)
-        engine._calibre_dask_client = client
-        engine._calibre_dask_cluster = cluster
-        return engine
-    if config.execution.engine == "spark":
-        from fugue_spark import SparkExecutionEngine
-        from pyspark.sql import SparkSession
-
-        session_config = config.execution.spark_session
-        builder = SparkSession.builder
-        if master := session_config.get("master"):
-            builder = builder.master(str(master))
-        if app_name := session_config.get("app_name"):
-            builder = builder.appName(str(app_name))
-        for key, value in session_config.get("config", {}).items():
-            builder = builder.config(str(key), str(value))
-        return SparkExecutionEngine(builder.getOrCreate())
-    raise ValueError(f"Unsupported execution engine: {config.execution.engine!r}")
-
-
-def _close_execution_engine(execution_engine: Any) -> None:
-    if execution_engine is None:
-        return
-    if hasattr(execution_engine, "_calibre_dask_client"):
-        execution_engine._calibre_dask_client.close()
-    if (
-        hasattr(execution_engine, "_calibre_dask_cluster")
-        and execution_engine._calibre_dask_cluster is not None
-    ):
-        execution_engine._calibre_dask_cluster.close()
-
-
 def _run_builtin_benchmark(config: BackendConfig) -> pd.DataFrame:
     if config.benchmark not in {"vn2_winning", "vn2_tuned"}:
         raise ValueError(f"Unknown benchmark runner: {config.benchmark!r}")
 
     from benchmarks.vn2.run_benchmark import run_benchmark
 
-    execution_engine = _resolve_execution_engine(config)
-    try:
-        summary = run_benchmark(
-            data_dir=config.dataset.path,
-            horizon=config.tasks[0].horizon,
-            tune=False,
-            results_dir=None,
-            verbose=True,
-            execution_engine=execution_engine,
-        )
-    finally:
-        _close_execution_engine(execution_engine)
+    summary = run_benchmark(
+        data_dir=config.dataset.path,
+        horizon=config.tasks[0].horizon,
+        tune=False,
+        results_dir=None,
+        verbose=True,
+        execution_backend=config.execution.backend,
+        ray_address=config.execution.ray_address,
+        staging_uri=config.execution.staging_uri,
+        ray_threshold=config.execution.ray_threshold,
+        max_concurrency=config.execution.max_concurrency,
+        cpu_per_task=config.execution.cpu_per_task,
+    )
     if config.output.ledger_path is not None:
         write_parquet(summary, config.output.ledger_path)
     return summary
@@ -222,29 +177,25 @@ def run_config(
     streaming_output = config.output.ledger_path if config.output.streaming else None
     streaming_order_output = config.output.order_ledger_path if config.output.streaming else None
 
-    execution_engine = _resolve_execution_engine(config)
+    engine = BackendEngine(
+        execution=config.execution.to_execution_options(freq=config.origins.freq),
+        output=LedgerOutputOptions(
+            forecast_path=streaming_output,
+            order_path=streaming_order_output,
+            streaming=config.output.streaming,
+        ),
+        conformal=ConformalOptions(
+            config=conformal_config,
+            run_id=run_id,
+            state_store=conformal_state_store,
+            initial_ledger=initial_ledger,
+        ),
+        order=_build_order_config(config),
+    )
     try:
-        result = BackendEngine(
-            execution=ExecutionOptions(
-                freq=config.origins.freq,
-                engine=execution_engine,
-                seed=config.execution.seed,
-            ),
-            output=LedgerOutputOptions(
-                forecast_path=streaming_output,
-                order_path=streaming_order_output,
-                streaming=config.output.streaming,
-            ),
-            conformal=ConformalOptions(
-                config=conformal_config,
-                run_id=run_id,
-                state_store=conformal_state_store,
-                initial_ledger=initial_ledger,
-            ),
-            order=_build_order_config(config),
-        ).execute(tasks, bundle.history, origins)
+        result = engine.execute(tasks, bundle.history, origins)
     finally:
-        _close_execution_engine(execution_engine)
+        engine.close()
 
     if not config.output.streaming and config.output.ledger_path is not None:
         result.ledger.to_parquet(config.output.ledger_path)

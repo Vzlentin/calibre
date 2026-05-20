@@ -1,5 +1,6 @@
 import pickle
 
+import fsspec
 import numpy as np
 import pandas as pd
 import pytest
@@ -33,7 +34,7 @@ from calibre.execution.backend import (
     ConformalOptions,
     ExecutionOptions,
     LedgerOutputOptions,
-    _process_task_ref_partition,
+    _process_task_ref,
 )
 from calibre.execution.ledger import OrderLedger
 from calibre.ordering.policy_config import OrderPolicyConfig
@@ -84,8 +85,123 @@ def test_execute_accepts_grouped_constructor_options(single_series_setup, tmp_pa
     assert len(result.ledger.to_df()) == 8
 
 
-def test_fugue_partition_worker_is_module_level_picklable():
-    pickle.dumps(_process_task_ref_partition)
+def test_ray_worker_function_is_module_level_picklable():
+    pickle.dumps(_process_task_ref)
+
+
+def test_remote_ray_staging_uses_shared_uri_and_cleans_up(monkeypatch):
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={"backend": "stub", "model": "stub_model"},
+    )
+    staging_uri = "memory://calibre-backend-staging-test/tasks"
+    fs = fsspec.filesystem("memory")
+    if fs.exists("/calibre-backend-staging-test"):
+        fs.rm("/calibre-backend-staging-test", recursive=True)
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            pass
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-03-03")],
+                    Y_HAT: [1.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    engine = BackendEngine(
+        execution=ExecutionOptions(
+            backend="local",
+            ray_address="ray://scheduler:10001",
+            staging_uri=staging_uri,
+        )
+    )
+
+    result = engine.execute([task], actuals, origins=[dates[-1]])
+
+    assert not result.ledger.to_df().empty
+    staged_parquet = [
+        path for path in fs.find("/calibre-backend-staging-test") if path.endswith(".parquet")
+    ]
+    assert not staged_parquet
+
+
+def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={
+            "backend": "stub",
+            "model": "lightgbm.LGBMRegressor",
+            "n_jobs": -1,
+            "num_threads": 16,
+        },
+    )
+    seen: dict[str, int] = {}
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            seen["n_jobs"] = int(task.model_config["n_jobs"])
+            seen["num_threads"] = int(task.model_config["num_threads"])
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-03-03")],
+                    Y_HAT: [1.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    BackendEngine(execution=ExecutionOptions(backend="local", cpu_per_task=2)).execute(
+        [task], actuals, origins=[dates[-1]]
+    )
+
+    assert seen == {"n_jobs": 2, "num_threads": 2}
+
+
+def test_ray_backend_warns_for_global_only_workloads(monkeypatch):
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=1,
+        model_config={"backend": "stub", "model": "stub_model", "scope": "global"},
+    )
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            pass
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-03-03")],
+                    Y_HAT: [1.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    with pytest.warns(RuntimeWarning, match="global-scope"):
+        BackendEngine(execution=ExecutionOptions(backend="ray")).execute(
+            [task], actuals, origins=[dates[-1]]
+        )
 
 
 def test_forecast_frame_columns_present(single_series_setup):
@@ -593,3 +709,40 @@ def test_mixed_local_and_global_tasks():
     model_names = set(df[MODEL_NAME].unique())
     assert "SeasonalNaive" in model_names
     assert "global_lgbm" in model_names
+
+
+def test_auto_backend_uses_ray_at_threshold():
+    """backend='auto' with task_count == ray_threshold should use Ray."""
+    pytest.importorskip("ray")
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.concat(
+        [
+            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]}),
+            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [float(i) + 1 for i in range(8)]}),
+        ],
+        ignore_index=True,
+    )
+
+    # Use a real adapter — monkeypatch.setattr cannot reach Ray workers.
+    tasks = [
+        ForecastTask(
+            history=actuals[actuals[UNIQUE_ID] == uid].reset_index(drop=True),
+            horizon=1,
+            model_config={
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "season_length": 2,
+            },
+        )
+        for uid in ("A", "B")
+    ]
+
+    engine = BackendEngine(
+        execution=ExecutionOptions(backend="auto", ray_threshold=2, max_concurrency=1)
+    )
+    try:
+        result = engine.execute(tasks, actuals, origins=[dates[-1]])
+    finally:
+        engine.close()
+
+    assert not result.ledger.to_df().empty

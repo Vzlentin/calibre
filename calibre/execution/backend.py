@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import base64
 import logging
-import pickle
 import tempfile
 import time
-from collections.abc import Callable
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-from uuid import UUID
+from typing import Any, Literal
+from uuid import UUID, uuid4
 
-import fugue.api as fa
 import numpy as np
 import pandas as pd
 
@@ -39,7 +37,6 @@ from calibre.core.forecast_frame import (
     H,
     Y,
     is_quantile_column,
-    quantile_column,
     validate_actuals_frame,
     validate_forecast_frame,
 )
@@ -48,15 +45,13 @@ from calibre.core.metrics import observe_forecast_duration, set_conformal_covera
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
 from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
+from calibre.execution.io import join_uri, rm
 from calibre.execution.ledger import ForecastLedger, OrderLedger
+from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
-_MODEL_CONFIG_PAYLOAD = "model_config_payload"
-_HISTORY_URI = "history_uri"
-_FUTURE_X_URI = "future_x_uri"
-_HAS_FUTURE_X = "has_future_x"
 logger = logging.getLogger(__name__)
 
 
@@ -127,152 +122,78 @@ def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _encode_model_config(model_config: dict) -> str:
-    return base64.b64encode(pickle.dumps(model_config)).decode("ascii")
+def _empty_forecast_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
 
-def _decode_model_config(payload: str) -> dict:
-    return pickle.loads(base64.b64decode(payload.encode("ascii")))  # noqa: S301
+def _thread_budget(cpu_per_task: float | None) -> int:
+    if cpu_per_task is None:
+        return 1
+    return max(1, int(cpu_per_task))
 
 
-def _collect_quantile_columns(records: list[_TaskDispatchRecord]) -> set[str]:
-    """Inspect encoded model configs for declared quantile outputs."""
-    cols: set[str] = set()
-    for record in records:
-        model_config = _decode_model_config(record.model_config_payload)
-        for q in model_config.get("quantiles", []):
-            cols.add(quantile_column(float(q)))
-    return cols
+def _cap_threaded_config(config: dict[str, Any], cpu_per_task: float | None) -> dict[str, Any]:
+    """Keep library-level parallelism inside the Ray task CPU budget when set."""
+    if cpu_per_task is None:
+        return config
+    capped = dict(config)
+    threads = _thread_budget(cpu_per_task)
+    for key in ("n_jobs", "num_threads", "nthread"):
+        if key not in capped:
+            continue
+        value = capped.get(key)
+        if value is None or int(value) < 1 or int(value) > threads:
+            capped[key] = threads
+    model_name = str(capped.get("model", "")).lower()
+    if "lgbm" in model_name or "lightgbm" in model_name or "xgb" in model_name:
+        capped.setdefault("n_jobs", threads)
+    return capped
 
 
-@dataclass(frozen=True)
-class _TaskDispatchRecord:
-    unique_id: str
-    model_config_payload: str
-    horizon: int
-    history_uri: str
-    future_x_uri: str
-    has_future_x: bool
-
-    @classmethod
-    def from_task(
-        cls, task: ForecastTask, base_uri: str, model_config: dict
-    ) -> _TaskDispatchRecord:
-        ref = ForecastTask(
-            history=task.history,
-            horizon=task.horizon,
-            model_config=model_config,
-            forecast_origin=task.forecast_origin,
-            future_x=task.future_x,
-        ).to_uri(base_uri)
-        return cls(
-            unique_id=ref.unique_id,
-            model_config_payload=_encode_model_config(ref.model_config),
-            horizon=ref.horizon,
-            history_uri=ref.history_uri,
-            future_x_uri=ref.future_x_uri or "",
-            has_future_x=ref.future_x_uri is not None,
-        )
-
-
-def _dispatch_records_to_frame(
-    records: list[_TaskDispatchRecord],
+def _process_task_ref(
+    ref: ForecastTaskRef,
     origin: pd.Timestamp,
+    *,
+    local_scope: bool,
 ) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                UNIQUE_ID: record.unique_id,
-                _MODEL_CONFIG_PAYLOAD: record.model_config_payload,
-                H: int(record.horizon),
-                _HISTORY_URI: record.history_uri,
-                _FUTURE_X_URI: record.future_x_uri,
-                _HAS_FUTURE_X: bool(record.has_future_x),
-                FORECAST_ORIGIN: origin,
-            }
-            for record in records
-        ]
+    """Materialize and execute one URI-backed task ref.
+
+    This function is intentionally conformal- and order-blind so all mutable
+    conformal state stays on the driver.
+    """
+    task = ForecastTaskRef(
+        unique_id=ref.unique_id,
+        model_config=dict(ref.model_config),
+        horizon=ref.horizon,
+        forecast_origin=origin,
+        history_uri=ref.history_uri,
+        future_x_uri=ref.future_x_uri,
+    ).materialize()
+
+    history = task.history[task.history[DS] < origin]
+    if history.empty:
+        return _empty_forecast_frame()
+
+    future_x = task.future_x
+    if local_scope and future_x is not None and not future_x.empty:
+        future_x = future_x[future_x[UNIQUE_ID] == ref.unique_id]
+
+    origin_task = ForecastTask(
+        history=history,
+        horizon=task.horizon,
+        model_config=task.model_config,
+        forecast_origin=origin,
+        future_x=future_x,
     )
+    preds = _fit_predict_task(origin_task)
+    return _finalize_preds(preds, origin, origin_task.model_name)
 
 
-def _process_task_ref_partition(df: pd.DataFrame) -> pd.DataFrame:
-    uid = str(df[UNIQUE_ID].iloc[0])
-    results: list[pd.DataFrame] = []
-
-    for _, row in df.iterrows():
-        origin = pd.Timestamp(row[FORECAST_ORIGIN])
-        model_config = _decode_model_config(str(row[_MODEL_CONFIG_PAYLOAD]))
-        future_x_uri = str(row[_FUTURE_X_URI]) if bool(row[_HAS_FUTURE_X]) else None
-        task = ForecastTaskRef(
-            unique_id=uid,
-            model_config=model_config,
-            horizon=int(row[H]),
-            forecast_origin=origin,
-            history_uri=str(row[_HISTORY_URI]),
-            future_x_uri=future_x_uri,
-        ).materialize()
-
-        history = task.history[task.history[DS] < origin]
-        if history.empty:
-            continue
-
-        task_future_x = task.future_x
-        if task_future_x is not None and not task_future_x.empty:
-            task_future_x = task_future_x[task_future_x[UNIQUE_ID] == uid]
-
-        origin_task = ForecastTask(
-            history=history,
-            horizon=task.horizon,
-            model_config=model_config,
-            forecast_origin=origin,
-            future_x=task_future_x,
-        )
-
-        preds = _fit_predict_task(origin_task)
-
-        results.append(_finalize_preds(preds, origin, origin_task.model_name))
-
-    if not results:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS)
-
-    return pd.concat(results, ignore_index=True)
-
-
-def _process_global_task_ref_partition(df: pd.DataFrame) -> pd.DataFrame:
-    results: list[pd.DataFrame] = []
-
-    for _, row in df.iterrows():
-        origin = pd.Timestamp(row[FORECAST_ORIGIN])
-        model_config = _decode_model_config(str(row[_MODEL_CONFIG_PAYLOAD]))
-        task = ForecastTaskRef(
-            unique_id=str(row[UNIQUE_ID]),
-            model_config=model_config,
-            horizon=int(row[H]),
-            forecast_origin=origin,
-            history_uri=str(row[_HISTORY_URI]),
-            future_x_uri=str(row[_FUTURE_X_URI]) if bool(row[_HAS_FUTURE_X]) else None,
-        ).materialize()
-
-        history = task.history[task.history[DS] < origin]
-        if history.empty:
-            continue
-
-        origin_task = ForecastTask(
-            history=history,
-            horizon=task.horizon,
-            model_config=model_config,
-            forecast_origin=origin,
-            future_x=task.future_x,
-        )
-
-        preds = _fit_predict_task(origin_task)
-
-        results.append(_finalize_preds(preds, origin, origin_task.model_name))
-
-    if not results:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS)
-
-    return pd.concat(results, ignore_index=True)
+def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    non_empty = [frame for frame in frames if not frame.empty]
+    if not non_empty:
+        return _empty_forecast_frame()
+    return _coerce_forecast_frame_dtypes(pd.concat(non_empty, ignore_index=True))
 
 
 @dataclass
@@ -286,9 +207,25 @@ class BackendResult:
 @dataclass(frozen=True)
 class ExecutionOptions:
     freq: str = "W"
-    engine: Any = None
+    backend: Literal["local", "ray", "auto"] = "auto"
+    ray_address: str | None = None
+    staging_uri: str | None = None
+    ray_threshold: int = 10
+    max_concurrency: int | None = None
+    cpu_per_task: float | None = None
     seed: int | None = None
-    metrics: list[Callable] | None = None
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"local", "ray", "auto"}:
+            raise ValueError("backend must be 'local', 'ray', or 'auto'")
+        if self.ray_address is not None and self.staging_uri is None:
+            raise ValueError("staging_uri is required when ray_address is set")
+        if self.ray_threshold < 1:
+            raise ValueError("ray_threshold must be at least 1")
+        if self.max_concurrency is not None and self.max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
+        if self.cpu_per_task is not None and self.cpu_per_task <= 0:
+            raise ValueError("cpu_per_task must be positive")
 
 
 @dataclass(frozen=True)
@@ -330,7 +267,6 @@ class BackendEngine:
         self.conformal = conformal
         self.order_config = order
         self.freq = execution.freq
-        self.engine = execution.engine
         self.seed: Seed | None = set_seed(execution.seed) if execution.seed is not None else None
         self.conformal_config = conformal.config
         self.conformal_runtime = (
@@ -347,6 +283,15 @@ class BackendEngine:
         self.initial_ledger = (
             conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
         )
+        self._ray: Any | None = None
+        self._ray_runtime: RayRuntimeHandle | None = None
+        self._remote_process_task: Any | None = None
+
+    def __enter__(self) -> BackendEngine:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
 
     def execute(
         self,
@@ -354,6 +299,24 @@ class BackendEngine:
         actuals: pd.DataFrame,
         origins: list[pd.Timestamp],
     ) -> BackendResult:
+        """Run all origins and return the final batch result."""
+        result: BackendResult | None = None
+        for origin_result in self.iter_origins(tasks, actuals, origins):
+            result = origin_result
+        if result is not None:
+            return result
+        return BackendResult(
+            ledger=ForecastLedger(),
+            order_ledger=OrderLedger() if self.order_config is not None else None,
+        )
+
+    def iter_origins(
+        self,
+        tasks: list[ForecastTask],
+        actuals: pd.DataFrame,
+        origins: list[pd.Timestamp],
+    ) -> Iterator[BackendResult]:
+        """Yield the cumulative backend result after each completed origin."""
         validate_actuals_frame(actuals)
         ledger = ForecastLedger()
         if self.streaming_output is not None:
@@ -376,54 +339,45 @@ class BackendEngine:
                 else:
                     direct_tasks.append(task)
 
-            with tempfile.TemporaryDirectory(prefix="calibre-backend-") as temp_dir:
-                parallel_records = self._materialize_dispatch_records(
-                    parallel_tasks,
-                    str(Path(temp_dir) / "local"),
+            if self.execution.backend == "ray" and direct_tasks and not parallel_tasks:
+                warnings.warn(
+                    "backend='ray' was requested, but all tasks are global-scope and run "
+                    "on the driver",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
-                direct_records = self._materialize_dispatch_records(
+
+            with self._task_staging_prefix() as staging_prefix:
+                parallel_refs = self._materialize_task_refs(
+                    parallel_tasks,
+                    join_uri(staging_prefix, "local"),
+                )
+                direct_refs = self._materialize_task_refs(
                     direct_tasks,
-                    str(Path(temp_dir) / "global"),
+                    join_uri(staging_prefix, "global"),
                 )
 
                 completed_origins = self._completed_initial_origins()
                 for origin in origins:
-                    if pd.Timestamp(origin) in completed_origins:
+                    origin = pd.Timestamp(origin)
+                    if origin in completed_origins:
                         logger.info(
                             "skipping resumed origin",
                             extra={"origin": origin, "phase": "resume"},
                         )
+                        yield BackendResult(ledger=ledger, order_ledger=order_ledger)
                         continue
                     origin_started = time.perf_counter()
                     with span("backtest", origin=str(origin)):
-                        if conformal_runtime is not None:
-                            self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
-
-                        local_preds = self._run_parallel(parallel_records, origin)
-                        global_preds = self._run_direct(direct_records, origin)
-
-                        origin_preds = pd.concat(
-                            [df for df in [local_preds, global_preds] if not df.empty],
-                            ignore_index=True,
+                        self._execute_origin(
+                            ledger=ledger,
+                            order_ledger=order_ledger,
+                            actuals=actuals,
+                            origin=origin,
+                            conformal_runtime=conformal_runtime,
+                            parallel_refs=parallel_refs,
+                            direct_refs=direct_refs,
                         )
-
-                        if conformal_runtime is not None and not origin_preds.empty:
-                            origin_preds = conformal_runtime.apply(origin_preds)
-
-                        if self.order_config is not None and not origin_preds.empty:
-                            order_result = apply_order_policy(origin_preds, self.order_config)
-                            order_ledger.append(order_result)  # type: ignore[union-attr]
-
-                        if not origin_preds.empty:
-                            try:
-                                validate_forecast_frame(origin_preds)
-                            except ValueError as exc:
-                                raise ValueError(
-                                    f"Invalid forecast frame at origin {origin}: {exc}"
-                                ) from exc
-                            ledger.append(origin_preds)
-
-                        self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
                     duration = time.perf_counter() - origin_started
                     observe_forecast_duration("mixed", "origin", duration)
                     logger.info(
@@ -434,12 +388,74 @@ class BackendEngine:
                             "duration_ms": round(duration * 1000.0, 3),
                         },
                     )
+                    yield BackendResult(ledger=ledger, order_ledger=order_ledger)
         finally:
             ledger.close()
             if order_ledger is not None:
                 order_ledger.close()
 
-        return BackendResult(ledger=ledger, order_ledger=order_ledger)
+    def shutdown_owned_ray(self) -> None:
+        """Shutdown a local Ray runtime this engine started."""
+        if self._ray_runtime is not None:
+            self._ray_runtime.release()
+        self._ray_runtime = None
+        self._ray = None
+        self._remote_process_task = None
+
+    def close(self) -> None:
+        self.shutdown_owned_ray()
+
+    @contextmanager
+    def _task_staging_prefix(self) -> Iterator[str]:
+        if self.execution.ray_address is not None:
+            prefix = join_uri(
+                self.execution.staging_uri or "",
+                f"calibre-backend-{uuid4().hex}",
+            )
+            try:
+                yield prefix
+            finally:
+                with suppress(Exception):
+                    rm(prefix, recursive=True)
+            return
+
+        with tempfile.TemporaryDirectory(prefix="calibre-backend-") as temp_dir:
+            yield temp_dir
+
+    def _execute_origin(
+        self,
+        *,
+        ledger: ForecastLedger,
+        order_ledger: OrderLedger | None,
+        actuals: pd.DataFrame,
+        origin: pd.Timestamp,
+        conformal_runtime: ConformalRuntime | None,
+        parallel_refs: list[ForecastTaskRef],
+        direct_refs: list[ForecastTaskRef],
+    ) -> None:
+        if conformal_runtime is not None:
+            self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
+
+        local_preds = self._run_local_scope(parallel_refs, origin)
+        global_preds = self._run_global_scope(direct_refs, origin)
+
+        origin_preds = _concat_prediction_frames([local_preds, global_preds])
+
+        if conformal_runtime is not None and not origin_preds.empty:
+            origin_preds = conformal_runtime.apply(origin_preds)
+
+        if self.order_config is not None and not origin_preds.empty:
+            order_result = apply_order_policy(origin_preds, self.order_config)
+            order_ledger.append(order_result)  # type: ignore[union-attr]
+
+        if not origin_preds.empty:
+            try:
+                validate_forecast_frame(origin_preds)
+            except ValueError as exc:
+                raise ValueError(f"Invalid forecast frame at origin {origin}: {exc}") from exc
+            ledger.append(origin_preds)
+
+        self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
 
     def _resolve_ledger(
         self,
@@ -542,114 +558,98 @@ class BackendEngine:
         origins = pd.to_datetime(self.initial_ledger[FORECAST_ORIGIN], errors="coerce")
         return {pd.Timestamp(origin) for origin in origins.dropna().unique()}
 
-    def _materialize_dispatch_records(
+    def _materialize_task_refs(
         self,
         tasks: list[ForecastTask],
         base_dir: str,
-    ) -> list[_TaskDispatchRecord]:
-        records: list[_TaskDispatchRecord] = []
+    ) -> list[ForecastTaskRef]:
+        refs: list[ForecastTaskRef] = []
         for idx, task in enumerate(tasks):
             model_config = {
                 **seed_model_config(task.model_config, self.seed),
                 "freq": self.freq,
             }
-            task_base = str(Path(base_dir) / str(idx))
-            records.append(_TaskDispatchRecord.from_task(task, task_base, model_config))
-        return records
-
-    def _run_parallel(
-        self,
-        records: list[_TaskDispatchRecord],
-        origin: pd.Timestamp,
-    ) -> pd.DataFrame:
-        """Run per-series adapters in parallel via Fugue, one partition per uid."""
-        if not records:
-            return pd.DataFrame(columns=REQUIRED_COLUMNS)
-
-        task_df = _dispatch_records_to_frame(records, origin)
-
-        # Build schema dynamically so quantile columns survive distributed transforms
-        quantile_cols = _collect_quantile_columns(records)
-        schema = (
-            f"{UNIQUE_ID}:str,{DS}:datetime,{Y}:double,"
-            f"{Y_HAT}:double,{H}:long,"
-            f"{FORECAST_ORIGIN}:datetime,{MODEL_NAME}:str"
-        )
-        if quantile_cols:
-            schema += "," + ",".join(f"{c}:double" for c in sorted(quantile_cols))
-
-        result = fa.transform(
-            task_df,
-            _process_task_ref_partition,
-            schema=schema,
-            partition={"by": UNIQUE_ID},
-            engine=self.engine,
-        )
-
-        return _coerce_forecast_frame_dtypes(fa.as_pandas(result))
-
-    def _run_direct(
-        self,
-        records: list[_TaskDispatchRecord],
-        origin: pd.Timestamp,
-    ) -> pd.DataFrame:
-        """Run global (multi-series) adapters directly or through the configured engine."""
-        if not records:
-            return pd.DataFrame(columns=REQUIRED_COLUMNS)
-        if self.engine is not None:
-            return self._run_global_distributed(records, origin)
-
-        all_preds: list[pd.DataFrame] = []
-
-        for record in records:
-            task = ForecastTaskRef(
-                unique_id=record.unique_id,
-                model_config=_decode_model_config(record.model_config_payload),
-                horizon=record.horizon,
-                forecast_origin=origin,
-                history_uri=record.history_uri,
-                future_x_uri=record.future_x_uri if record.has_future_x else None,
-            ).materialize()
-            history = task.history[task.history[DS] < origin]
-            if history.empty:
-                continue
-
-            origin_task = ForecastTask(
-                history=history,
+            model_config = _cap_threaded_config(model_config, self.execution.cpu_per_task)
+            task_base = join_uri(base_dir, str(idx))
+            ref = ForecastTask(
+                history=task.history,
                 horizon=task.horizon,
-                model_config=task.model_config,
-                forecast_origin=origin,
+                model_config=model_config,
+                forecast_origin=task.forecast_origin,
                 future_x=task.future_x,
-            )
+            ).to_uri(task_base)
+            refs.append(ref)
+        return refs
 
-            preds = _fit_predict_task(origin_task)
-
-            all_preds.append(_finalize_preds(preds, origin, origin_task.model_name))
-
-        if not all_preds:
-            return pd.DataFrame(columns=REQUIRED_COLUMNS)
-
-        return _coerce_forecast_frame_dtypes(pd.concat(all_preds, ignore_index=True))
-
-    def _run_global_distributed(
+    def _run_local_scope(
         self,
-        records: list[_TaskDispatchRecord],
+        refs: list[ForecastTaskRef],
         origin: pd.Timestamp,
     ) -> pd.DataFrame:
-        task_df = _dispatch_records_to_frame(records, origin)
-        quantile_cols = _collect_quantile_columns(records)
-        schema = (
-            f"{UNIQUE_ID}:str,{DS}:datetime,{Y}:double,"
-            f"{Y_HAT}:double,{H}:long,"
-            f"{FORECAST_ORIGIN}:datetime,{MODEL_NAME}:str"
+        if not refs:
+            return _empty_forecast_frame()
+        if self._should_use_ray(len(refs)):
+            return self._run_refs_on_ray(refs, origin, local_scope=True)
+        return _concat_prediction_frames(
+            [_process_task_ref(ref, origin, local_scope=True) for ref in refs]
         )
-        if quantile_cols:
-            schema += "," + ",".join(f"{c}:double" for c in sorted(quantile_cols))
 
-        result = fa.transform(
-            task_df,
-            _process_global_task_ref_partition,
-            schema=schema,
-            engine=self.engine,
+    def _run_global_scope(
+        self,
+        refs: list[ForecastTaskRef],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Run global multi-series adapters on the driver."""
+        if not refs:
+            return _empty_forecast_frame()
+        return _concat_prediction_frames(
+            [_process_task_ref(ref, origin, local_scope=False) for ref in refs]
         )
-        return _coerce_forecast_frame_dtypes(fa.as_pandas(result))
+
+    def _should_use_ray(self, task_count: int) -> bool:
+        if self.execution.backend == "local":
+            return False
+        if self.execution.backend == "ray":
+            return True
+        return task_count >= self.execution.ray_threshold
+
+    def _ensure_ray(self) -> Any:
+        if self._ray is not None and self._ray.is_initialized():
+            return self._ray
+        self._ray = None
+        self._remote_process_task = None
+        self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
+        self._ray = self._ray_runtime.ray
+        # Cache safety: ExecutionOptions is frozen, so cpu_per_task is immutable
+        # for this engine instance. Rebuilding _remote_process_task is safe.
+        return self._ray
+
+    def _run_refs_on_ray(
+        self,
+        refs: list[ForecastTaskRef],
+        origin: pd.Timestamp,
+        *,
+        local_scope: bool,
+    ) -> pd.DataFrame:
+        ray = self._ensure_ray()
+        if self._remote_process_task is None:
+            remote_kwargs: dict[str, float] = {}
+            if self.execution.cpu_per_task is not None:
+                remote_kwargs["num_cpus"] = float(self.execution.cpu_per_task)
+            self._remote_process_task = (
+                ray.remote(**remote_kwargs)(_process_task_ref)
+                if remote_kwargs
+                else ray.remote(_process_task_ref)
+            )
+        remote_process = self._remote_process_task
+        concurrency = self.execution.max_concurrency or len(refs)
+        frames: list[pd.DataFrame] = []
+
+        for start in range(0, len(refs), concurrency):
+            chunk = refs[start : start + concurrency]
+            object_refs = [
+                remote_process.remote(ref, origin, local_scope=local_scope) for ref in chunk
+            ]
+            frames.extend(ray.get(object_refs))
+
+        return _concat_prediction_frames(frames)

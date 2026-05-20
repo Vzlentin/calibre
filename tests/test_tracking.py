@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from uuid import uuid4
-
 import mlflow
-import optuna
 import pandas as pd
 import pytest
 
 from benchmarks.common.tracking import (
     log_costs_dataframe,
-    optuna_mlflow_callback,
     resolve_tracking_uri,
     start_benchmark_run,
 )
@@ -66,25 +62,3 @@ def test_log_costs_dataframe_metrics_and_artifact():
         assert metrics["cost/total"] == pytest.approx(425.0)
         artifacts = client.list_artifacts(run.info.run_id, "costs")
         assert any(a.path == "costs/per_product.csv" for a in artifacts)
-
-
-def test_optuna_callback_logs_trials_in_requested_experiment():
-    study_name = f"tracking_smoke_{uuid4().hex}"
-    with start_benchmark_run("test_experiment", "optuna_parent") as parent:
-        study = optuna.create_study(study_name=study_name, direction="minimize")
-        study.optimize(
-            lambda trial: 1.0,
-            n_trials=1,
-            callbacks=[optuna_mlflow_callback("test_experiment", metric_name="objective")],
-        )
-        parent_run_id = parent.info.run_id
-        experiment_id = parent.info.experiment_id
-
-    client = mlflow.tracking.MlflowClient()
-    runs = client.search_runs(
-        [experiment_id],
-        filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}'",
-    )
-
-    assert runs
-    assert mlflow.get_experiment_by_name(study_name) is None

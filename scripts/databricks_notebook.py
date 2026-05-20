@@ -3,7 +3,7 @@
 # MAGIC %md
 # MAGIC ## Calibre VN2 Smoke Test on Databricks
 # MAGIC
-# MAGIC This notebook runs the Calibre forecasting engine on VN2 fixture data using the Spark backend.
+# MAGIC This notebook runs the Calibre forecasting engine on VN2 fixture data on the Databricks driver.
 # MAGIC
 # MAGIC Prerequisites:
 # MAGIC - Repo cloned into Databricks Repos (or benchmark files on DBFS)
@@ -25,12 +25,12 @@ else:
 
 # COMMAND ----------
 
-# Install Calibre with benchmark + spark extras.
+# Install Calibre with benchmark and Ray extras.
 # If the wheel is not yet on DBFS, build it locally and upload:
 #   cd /path/to/calibre && uv build --wheel
 #   dbfs cp dist/calibre-0.1.0-py3-none-any.whl dbfs:/mnt/calibre/
 
-%pip install /dbfs/mnt/calibre/calibre-0.1.0-py3-none-any.whl[benchmarks,spark]
+%pip install /dbfs/mnt/calibre/calibre-0.1.0-py3-none-any.whl[benchmarks,ray]
 
 # COMMAND ----------
 

@@ -94,7 +94,7 @@ calibre/                 # Python package
 │   └── simulation/      # Inventory simulation (costs, rules, state)
 ├── storage/             # Postgres state store, Alembic migrations
 │   └── migrations/      # Alembic revision scripts
-└── tuning/              # Optuna-based hyper-parameter tuning
+└── tuning/              # Ray Tune + OptunaSearch hyper-parameter tuning
 
 benchmarks/              # Benchmark suites
 ├── vn2/                 # VN2 inventory challenge

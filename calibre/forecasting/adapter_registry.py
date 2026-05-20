@@ -50,7 +50,7 @@ def get_adapter_cls(model_config: dict) -> type[ModelAdapter]:
 def get_scope(model_config: dict) -> ScopeType:
     """Return the dispatch scope for a model config.
 
-    'local' fits one model per unique_id (Fugue-partitioned).
+    'local' fits one model per unique_id.
     'global' fits one model per config across all unique_ids.
     """
     scope = model_config.get("scope", DEFAULT_SCOPE)

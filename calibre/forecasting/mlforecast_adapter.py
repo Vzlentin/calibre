@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
-from mlforecast import MLForecast
 
 from calibre.core.forecast_frame import (
     DS,
@@ -39,6 +38,22 @@ _TRANSFORM_ALIASES = {
     "RollingMean": "mlforecast.lag_transforms.RollingMean",
     "RollingStd": "mlforecast.lag_transforms.RollingStd",
 }
+MLForecast: type[Any] | None = None
+
+
+def _load_mlforecast_cls() -> type[Any]:
+    global MLForecast
+    if MLForecast is not None:
+        return MLForecast
+    try:
+        from mlforecast import MLForecast as mlforecast_cls
+    except ModuleNotFoundError as exc:
+        raise ImportError(
+            "MLForecastAdapter requires the 'mlforecast' package. "
+            "Install calibre with the 'ml' extra to use backend='mlforecast'."
+        ) from exc
+    MLForecast = mlforecast_cls
+    return mlforecast_cls
 
 
 def _resolve_dotted_cls(dotted_path: str, *, field: str) -> type:
@@ -120,10 +135,11 @@ def _build_quantile_predict_frame(
 class MLForecastAdapter(ModelAdapter):
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
-        self._mlf: MLForecast | None = None
+        self._mlf: Any | None = None
         self._name_to_quantile: dict[str, float] = {}
 
     def fit(self, task: ForecastTask) -> None:
+        mlforecast_cls = _load_mlforecast_cls()
         model_cls = _resolve_model_cls(self._config["model"])
         params = {k: v for k, v in self._config.items() if k not in _RESERVED_KEYS}
 
@@ -160,7 +176,7 @@ class MLForecastAdapter(ModelAdapter):
         mlf_df = task.history[[UNIQUE_ID, DS, Y, *exogenous_columns(task.history)]].copy()
         mlf_df[Y] = mlf_df[Y].astype("float32")
 
-        self._mlf = MLForecast(**mlf_kwargs)
+        self._mlf = mlforecast_cls(**mlf_kwargs)
         fit_kwargs: dict[str, Any] = {}
         if strategy == "direct":
             fit_kwargs["max_horizon"] = task.horizon

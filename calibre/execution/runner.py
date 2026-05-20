@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Literal
 
 import pandas as pd
 
@@ -74,7 +74,12 @@ def run_backtest(
     metrics: list[Callable] | None = None,
     series_filter: list[str] | None = None,
     freq: str = "W",
-    engine: Any = None,
+    backend: Literal["local", "ray", "auto"] = "auto",
+    ray_address: str | None = None,
+    staging_uri: str | None = None,
+    ray_threshold: int = 10,
+    max_concurrency: int | None = None,
+    cpu_per_task: float | None = None,
     conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None,
     order_config: OrderPolicyConfig | None = None,
 ) -> PipelineResult:
@@ -100,11 +105,20 @@ def run_backtest(
     conformal_runtime = (
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
-    result = BackendEngine(
-        execution=ExecutionOptions(freq=freq, engine=engine),
+    with BackendEngine(
+        execution=ExecutionOptions(
+            freq=freq,
+            backend=backend,
+            ray_address=ray_address,
+            staging_uri=staging_uri,
+            ray_threshold=ray_threshold,
+            max_concurrency=max_concurrency,
+            cpu_per_task=cpu_per_task,
+        ),
         conformal=ConformalOptions(runtime=conformal_runtime),
         order=order_config,
-    ).execute(tasks, sales, origins)
+    ) as engine:
+        result = engine.execute(tasks, sales, origins)
 
     ledger = result.ledger
 
@@ -128,7 +142,12 @@ def run_forecast(
     horizon: int,
     series_filter: list[str] | None = None,
     freq: str = "W",
-    engine: Any = None,
+    backend: Literal["local", "ray", "auto"] = "auto",
+    ray_address: str | None = None,
+    staging_uri: str | None = None,
+    ray_threshold: int = 10,
+    max_concurrency: int | None = None,
+    cpu_per_task: float | None = None,
     conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None,
     order_config: OrderPolicyConfig | None = None,
 ) -> BackendResult:
@@ -143,8 +162,17 @@ def run_forecast(
     conformal_runtime = (
         conformal_runtime_factory() if conformal_runtime_factory is not None else None
     )
-    return BackendEngine(
-        execution=ExecutionOptions(freq=freq, engine=engine),
+    with BackendEngine(
+        execution=ExecutionOptions(
+            freq=freq,
+            backend=backend,
+            ray_address=ray_address,
+            staging_uri=staging_uri,
+            ray_threshold=ray_threshold,
+            max_concurrency=max_concurrency,
+            cpu_per_task=cpu_per_task,
+        ),
         conformal=ConformalOptions(runtime=conformal_runtime),
         order=order_config,
-    ).execute(tasks, sales, origins)
+    ) as engine:
+        return engine.execute(tasks, sales, origins)

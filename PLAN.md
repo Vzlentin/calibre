@@ -1,140 +1,253 @@
-# /goal: Determine and document the perfect execution + tuning stack for Calibre
+# /goal: Migrate Calibre execution and tuning to Ray Core + Ray Tune
 
-## Context (read before proposing anything)
+Status: implemented
+Decision date: 2026-05-19
+Long-form rationale: `docs/stack-decision.md`
 
-Calibre is a demand-planning engine that combines probabilistic forecasting (`statsforecast`, `mlforecast`, `neuralforecast`), conformal prediction intervals, and ordering policies into a single backtestable pipeline. It targets retail clients with many SKUs/series (embarrassingly parallel workloads), is cloud-native (containers, K8s, ECS, Databricks), and values elegance over speculative abstraction.
+## Decision
 
-**Current state:**
-- `calibre/execution/backend.py` uses `fugue.api.transform` for per-series fan-out, forcing: parquet round-trips via `ForecastTask.to_uri`/`materialize`, base64-pickled `model_config` columns, dynamic schema string construction (`_collect_quantile_columns`), and a `_run_direct` single-node bypass because Fugue overhead is wasteful at small scale.
-- `calibre/tuning/optimizer.py` runs `study.optimize(_objective, n_trials=...)` sequentially. Each trial spins up its own Fugue context. No parallel HPO, no early stopping, no resource sharing.
-- The two distributed frameworks (Optuna + Fugue/Dask) cannot nest, so the system serializes at the trial level. VN2 (~600 series × ~50 trials × N origins ≈ 150k fit-predicts) runs sequentially today.
-- Cloud MVP (PRs #26–31, May 17–18): slim/full Docker split, FastAPI surface, SQLAlchemy + Alembic state store, GHCR publishing, ECS Terraform, fsspec IO consolidation, `RunStore`/options dataclasses.
+Replace Fugue per-series fan-out and sequential Optuna tuning with **Ray Core**
+(execution) and **Ray Tune with OptunaSearch + ASHAScheduler** (HPO). Keep
+everything else: pandas, Parquet, fsspec, `ForecastTaskRef` URI hand-off,
+FastAPI, SQLAlchemy/Alembic, MLflow, Prometheus, driver-owned conformal state.
 
-**Non-negotiables:**
-- Model adapters in `calibre/forecasting/{stats,ml,neural}forecast_adapter.py` must remain backend-blind. No distributed-framework imports in adapters.
-- VN2 cost gate: `benchmarks/vn2/config/winning.yaml` must reproduce `total_cost = 4992.20` on every milestone.
-- The FastAPI surface, SQLAlchemy/Alembic state store, and fsspec IO consolidation from PR #31 stay untouched.
+This is a scheduler migration, not a platform rewrite. Model adapters in
+`calibre/forecasting/{stats,ml,neural}forecast_adapter.py` remain backend-blind.
 
-**Not constraints:**
-- No deprecation cycles required — nothing is in production.
-- Image size is not a concern.
-- The current stack (Fugue + Optuna) is not sacred. Full rewrites of `backend.py` and `optimizer.py` are on the table.
+## Non-negotiables
 
-**Existing plan (one option among many):** Read `~/.claude/plans/i-want-to-switch-polished-ocean.md`. It proposes replacing Fugue/Dask/Spark with Ray Core + Ray Tune, making `execute()` a generator, and deleting all Fugue code. Treat this as a candidate, not a mandate. Disagree with it where warranted.
+1. **VN2 cost gate.** `benchmarks/vn2/config/winning.yaml` must reproduce
+   `total_cost = 4992.20` rounded to cents at every phase exit. If it breaks,
+   stop and fix the behavioral regression before continuing.
+2. **Backend-blind adapters.** No `ray`, `fugue`, `dask`, or `pyspark` imports
+   in `calibre/forecasting/*_adapter.py`.
+3. **Driver-owned conformal state.** `ConformalRuntime` and its mutable
+   `_issued_count` stay on the driver. Never inside a Ray worker.
+4. **Search-space API unchanged.** `TuningTask.search_space:
+   Callable[[optuna.Trial], dict]` is load-bearing (conditional sampling).
+   Use `OptunaSearch` callable form. Do not convert to Ray Tune declarative
+   parameter dicts.
+5. **`BackendEngine.execute(tasks, actuals, origins) -> BackendResult`
+   survives** as the batch API. Add a separate streaming origin iterator for
+   tuning; do not turn `execute()` into a generator.
 
-**Vault context:** Read `~/obsidian-vault/vault/Val/Wiki/_wiki/Calibre Conformal Mission.md` and `Autoreason for Calibre.md` for mission context — Calibre's thesis is making conformal prediction competitive with direct quantile for inventory decisions (VN2 Silver: < EUR 5,000 achieved; Gold: < EUR 4,831; Diamond: < EUR 4,677).
+## Target API shape
 
-**Real use cases driving the stack:**
-1. **Per-series forecasting**: 100–10,000 SKUs, each fits its own model (SeasonalNaive, local LightGBM). Embarrassingly parallel.
-2. **Global forecasting**: One model across all series (global LightGBM quantile regressor). Not fan-out parallel.
-3. **Hyperparameter tuning**: Panel-level sweep over lag sets, quantile alphas, tree hyperparams. Needs trial parallelism + early stopping.
-4. **Conformal calibration**: Sequential per-origin `observe → apply → observe`. Mutable state (`_issued_count`). Must stay on the driver or equivalent.
-5. **Inventory simulation**: Walk-forward decision loop with R,S or newsvendor policies. Cost is the only metric that matters.
-6. **Cloud deployment**: Stateless containers, object-store URIs, K8s Jobs, ECS Fargate, Databricks notebooks. No persistent local disk.
+`ExecutionOptions` replaces `engine: Any` with explicit scheduler fields:
 
-## Task
+- `backend`: `"local" | "ray" | "auto"`, default `"auto"`.
+- `ray_address`: optional Ray cluster address; `None` means local Ray when needed.
+- `ray_threshold`: default `10`; below this, never initialize Ray.
+- `max_concurrency`: optional cap on concurrent uid tasks per run/trial.
+- `seed`, `freq`, `metrics`: unchanged.
 
-Determine and document the perfect execution + tuning stack for Calibre. Do not write implementation code. Produce a written decision document that answers:
+CLI config moves from `execution.engine: null | dask | spark` to
+`execution.backend: local | ray | auto` plus `execution.ray_address`.
 
-### 1. Execution layer
+## Phases
 
-Propose the best approach for fanning out per-series fit+predict work across cores/nodes. You may suggest anything — Ray, Dask, Spark, ProcessPoolExecutor, multiprocessing, a custom thread pool, or something else entirely. If the best answer is "keep Fugue but fix it," say so.
+Each phase ends with: `uv run pytest` green, `uv run ruff check .` green,
+`uv run mypy calibre/` green, VN2 winning cost still `4992.20`.
 
-For your proposal, specify:
-- How local-scope (per-uid) fan-out works
-- How global-scope (single model on full panel) works
-- How tasks are handed to workers (pickle, URI, ObjectRef, plasma, etc.)
-- How `ExecutionOptions` and engine resolution change
-- Cluster/worker lifecycle: who starts it, who stops it, lifetime
-- The single-node fast path for small invocations (< 10 tasks)
-- Whether the current `BackendEngine.execute()` signature survives or becomes something else
+### Phase 0 — Baseline and acceptance (0.5 day)
 
-### 2. Tuning layer
+**Entry.** This document reviewed; worktree clean except planned doc changes.
 
-Propose the best approach for parallel hyperparameter search. You may suggest anything — Ray Tune, Optuna + joblib, Optuna + Dask, Hyperopt, Ax, SMAC3, or something else. If the best answer is "keep sequential Optuna but add pruning," say so.
+**Work.** Record baseline VN2 winning cost and command. Agree config field
+names and `BackendEngine` API compatibility before any source change.
 
-For your proposal, specify:
-- How `TuningTask.search_space: Callable[[optuna.Trial], dict]` is preserved (conditional sampling is load-bearing)
-- How trial-level parallelism works
-- How early stopping / pruning hooks into the per-origin evaluation loop
-- How MLflow experiment tracking works (replace `safe_log_metric` / `optuna_mlflow_callback` or keep them)
-- How `RunStore` (PR #31) integrates with trial persistence and resumption
-- Resource budget per trial and nested parallelism prevention
+**Exit.** Baseline run record shows `benchmarks/vn2/config/winning.yaml`
+returns `total_cost = 4992.20` rounded to cents. No source changes yet.
 
-### 3. Scheduler depth: how deep does the chosen framework go?
+**Rollback.** None needed.
 
-Evaluate every layer that could be added and give a **do / defer / skip** verdict. Do not limit yourself to Ray. If Dask is your execution pick, evaluate Dask Bags, Dask Delayed, Dask Distributed, etc. If Spark, evaluate SparkSQL, Structured Streaming, etc.
+### Phase 1 — Ray Core execution (2 days)
 
-| Layer | What it means | Verdict | Why |
-|-------|--------------|---------|-----|
-| 0 | Execution framework (fan-out) | ? | ? |
-| 1 | Tuning framework (HPO) | ? | ? |
-| 2 | Data loading (parallel IO, column pruning) | ? | ? |
-| 3 | Stateful actors (caching, shared mutable state) | ? | ? |
-| 4 | Model training (distributed LightGBM/XGBoost) | ? | ? |
-| 5 | Serving (replace FastAPI or colocate with execution) | ? | ? |
-| 6 | State store (replace SQLAlchemy/Alembic) | ? | ? |
-| 7 | Orchestration (replace CLI / ECS / K8s Jobs) | ? | ? |
+**Entry.** Phase 0 complete; baseline cost recorded.
 
-Justify each verdict with Calibre-specific reasoning.
+**Work.**
 
-### 4. Data layer
+- Add the Ray dependency path needed for execution work:
+  `ray = ["ray[default,tune]>=2.38,<3"]`. Final dependency cleanup happens
+  in Phase 5.
+- Replace `fa.transform(...)` per-uid fan-out in `calibre/execution/backend.py`
+  with a `@ray.remote` task that materializes `ForecastTaskRef`, filters
+  `history[ds] < origin`, calls the existing adapter, and returns a pandas
+  frame. Driver concatenates, normalizes dtypes, applies conformal intervals,
+  applies ordering policy, appends to ledger.
+- Delete `_collect_quantile_columns`, `_encode_model_config` /
+  `_decode_model_config`, `_TaskDispatchRecord`, `_dispatch_records_to_frame`.
+- Delete `_run_global_distributed`; global-scope models always run in-process
+  on the driver.
+- Add the in-process fast path: when local task count is below
+  `ray_threshold`, run the existing sequential loop. Do not initialize Ray.
+- Lifecycle: if Ray is needed and no `ray_address` is provided, start a local
+  Ray runtime for the process and own shutdown at the CLI run boundary. If
+  `ray_address` is provided, connect and do not own lifecycle.
+- Replace `ExecutionOptions.engine: Any` with the field set above. Update
+  `calibre/cli/config.py` and `calibre/cli/commands.py` to stop constructing
+  Dask/Spark Fugue engines.
 
-Propose the best approach for in-memory frames, serialization, and IO:
-- `fsspec` for object-store IO: keep, extend, or replace?
-- `pandas` as the in-memory frame format: keep or move to Arrow / Polars / Ray Data / something else?
-- Parquet as the serialization format: keep or add IPC / Plasma / something else?
-- `ForecastTaskRef` (URI-based materialization): keep, extend, or replace?
+**Exit.**
 
-### 5. Observability
+- `rg -n "fugue|fa\.transform|DaskExecutionEngine|SparkExecutionEngine" calibre tests`
+  returns no active runtime references.
+- Unit and integration tests green.
+- VN2 winning cost still `4992.20`.
 
-Propose the best approach for monitoring and debugging:
-- Dashboard: unified (Ray/Dask/Spark) or separate surfaces?
-- Experiment tracking: MLflow, Weights & Biases, Ray's native tracking, or something else?
-- Metrics: Prometheus, built-in framework metrics, or both?
-- Logging: structured JSON logs, distributed tracing, or both?
+**Rollback.** Revert the execution migration commit. The Fugue path is
+isolated to `backend.py`, `cli/config.py`, `cli/commands.py`, and the related
+tests, so revert is a localized operation.
 
-### 6. Packaging
+### Phase 2 — Streaming origin API (1 day)
 
-Propose the best approach for dependencies and deployment:
-- What extras should `pyproject.toml` have post-migration?
-- Slim vs full image: what goes in each?
-- Databricks compatibility: does the stack need a Databricks path, and if so, how?
-- Version pinning strategy for the distributed framework
+**Entry.** Phase 1 complete; Ray execution stable locally.
 
-### 7. Staged migration sequence
+**Work.**
 
-If the decision is to migrate, define phases. If the decision is to keep the current stack, define improvement phases. Each phase needs:
-- Entry criteria
-- Exit criteria (tests + cost gate)
-- Rollback plan
-- Effort estimate in working days
+- Add a streaming origin iterator on `BackendEngine` for HPO.
+- Keep `BackendEngine.execute(...) -> BackendResult` as the batch API.
+- Refactor shared origin-loop internals so `execute()` and the streaming
+  iterator use the same conformal/order/ledger behavior.
+- Add parity tests proving streaming aggregation matches `execute()` output,
+  conformal state advances identically, and ordering costs match.
 
-### 8. Risk register
+**Exit.**
 
-List the top 5 risks with likelihood, impact, and mitigation. Must include:
-- Framework setup cost per CLI invocation
-- Early stopping pruning good trials because origin ordering is non-stationary
-- Conditional search spaces breaking under the chosen scheduler
-- Memory pressure on large panels
-- Dev experience on the platforms you actually develop on
+- Existing batch callers still pass.
+- Streaming parity tests pass.
+- VN2 winning cost still `4992.20`.
 
-## Output format
+**Rollback.** Remove the streaming iterator and restore the single batch
+origin loop. Phase 1 Ray execution stays.
 
-Write the decision document as `docs/stack-decision.md` in the repo. It must be self-contained: a reader with no knowledge of this conversation can understand why every choice was made.
+### Phase 3 — Ray Tune HPO (2 to 3 days)
 
-Also append a one-page executive summary to `docs/stack-decision-summary.md` with:
-- Before / after stack comparison table
-- Effort estimate and timeline
-- Go / no-go recommendation
+**Entry.** Phase 2 complete; streaming origin API matches batch behavior.
 
-## Rules
+**Work.**
 
-- **Do not write implementation code.** No edits to `backend.py`, `optimizer.py`, `pyproject.toml`, or tests. Research and document only.
-- **Do not run tests or benchmarks.** Analysis only.
-- **Read the existing canonical plan** at `~/.claude/plans/i-want-to-switch-polished-ocean.md` before forming opinions. Cite it where you agree or disagree.
-- **Read the vault** at `~/obsidian-vault/vault/Val/Wiki/_wiki/Calibre Conformal Mission.md` and `Autoreason for Calibre.md` for mission context.
-- **Read the code** in `calibre/execution/backend.py`, `calibre/tuning/optimizer.py`, `calibre/tuning/task.py`, `calibre/cli/commands.py`, `calibre/core/forecast_task.py`, and `pyproject.toml` to ground decisions in actual lines.
-- **Show your reasoning.** Every verdict needs a "because" clause tied to Calibre's use cases.
-- **Be direct.** No filler, no hedging. If something is wrong with the canonical plan, say so plainly.
-- **Propose your own ideas.** The options listed above are starting points, not a closed set. If the best stack includes something not mentioned (e.g. Prefect for orchestration, Polars for frames, Modal for serverless GPU), include it and justify it.
+- Per-origin cumulative objective is reported through Tune's
+  `train.report(...)`.
+- Rewrite `calibre/tuning/optimizer.py::optimize_task` to use
+  `tune.Tuner(trainable, search_alg=OptunaSearch(space=task.search_space),
+  scheduler=ASHAScheduler(...))`.
+- ASHA configuration: progress attribute is origin index, `max_t =
+  len(origins)`, default `grace_period = 8` (matches VN2 `WARMUP_ORIGINS`),
+  per-`TuningTask` override allowed.
+- Pruning only between origins. No mid-fit, mid-predict, mid-conformal-update,
+  or mid-ordering pruning.
+- Trial resource budget: explicit CPU request per trial. Cap uid fan-out and
+  library thread counts (LightGBM, NumPy, Torch) to that budget. No nested
+  Fugue/Dask/Spark/joblib/ThreadPool inside trials.
+- Set `max_concurrent_trials` from available CPUs and the per-trial budget.
+
+**Exit.**
+
+- Integration test exercises a conditional search space (one sampled value
+  suppresses later parameters) and passes.
+- At least one trial is pruned after the grace period in the HPO test.
+- Resource-budget test confirms no nested oversubscription.
+- VN2 winning cost still `4992.20`.
+
+**Rollback.** Revert tuning migration commit. Phase 1 Ray execution and
+Phase 2 streaming API stay.
+
+### Phase 4 — Observability and persistence (1 day)
+
+**Entry.** Phase 3 complete; MLflow remote URI available.
+
+**Work.**
+
+- Replace `optuna_mlflow_callback` on HPO paths with
+  `ray.air.integrations.mlflow.MLflowLoggerCallback` (or `setup_mlflow` inside
+  the trainable for custom artifacts). Keep `safe_log_metric` and
+  `log_costs_dataframe` for non-HPO benchmark paths.
+- Tag Tune trial runs with the parent Calibre `run_id` and Ray `trial_id` so
+  parent/child runs are discoverable in MLflow.
+- Log best config, trial table, pruning summary, and cost artifacts to MLflow.
+- Extend `RunStore` (`calibre/api/run_store.py`) only with HPO-level
+  metadata/artifact pointers: Tune experiment directory, Optuna study name or
+  storage URI, best-config artifact pointer. Do not store every trial as SQL
+  business state. Resume reuses the same Tune experiment dir and Optuna study
+  identity.
+
+**Exit.**
+
+- `RunStore` tests cover HPO artifact pointers and resume metadata.
+- MLflow trial runs are discoverable under the parent `run_id`.
+- VN2 winning cost still `4992.20`.
+
+**Rollback.** Disable HPO resume metadata and fall back to MLflow artifacts.
+Phases 1-3 stay.
+
+### Phase 5 — Packaging and deployment (1 day)
+
+**Entry.** Phase 4 complete; deployment image build available.
+
+**Work.**
+
+- `pyproject.toml`: keep the Ray extra added in Phase 1. Remove `fugue` from
+  core. Remove `dask`, `spark`, `fugue_dask`, `fugue_spark` extras. Keep
+  `optuna-integration[mlflow]` only until old callback users are removed.
+- Update slim/full Docker image install sets. Ray runtime in slim; ML/neural
+  extras only in full.
+- Pin Ray and KubeRay versions in `uv.lock` and Helm values. **Do not use
+  Ray 2.11.0–2.37.0 for KubeRay deployments** (RayJob readiness/liveness bug
+  per KubeRay upgrade guide).
+
+**Exit.**
+
+- Fresh `uv sync --extra dev --extra benchmarks` installs cleanly.
+- Slim and full Docker images build.
+- API health check passes. Local Ray smoke test passes.
+- VN2 winning cost still `4992.20`.
+
+**Rollback.** Restore dependency set from previous lockfile and image
+definitions.
+
+### Phase 6 — Cleanup and docs (0.5 day)
+
+**Entry.** Phase 5 complete.
+
+**Work.**
+
+- Remove dead Fugue/Dask/Spark tests, doc examples, and config snippets.
+- Update deployment docs and CLI examples to the new `backend` field.
+- Add troubleshooting notes for Ray startup cost and Windows dev experience
+  (multi-node Ray on Linux containers / KubeRay; Windows local-only).
+
+**Exit.**
+
+- Docs match code. No stale Dask/Spark config examples.
+- Full test suite green.
+- VN2 winning cost still `4992.20`.
+
+**Rollback.** Revert docs cleanup commit only.
+
+**Total expected effort: 7 to 8 working days.**
+
+## Risk register
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Ray `init` cost per CLI invocation | Medium | Medium | `ray_threshold=10` fast path skips Ray for small runs. Own local Ray shutdown at CLI run boundary. |
+| Local Ray runtime leak after CLI jobs | Medium | Medium | Local CLI-created Ray is owned by the run and explicitly shut down. Remote Ray clusters are externally owned and never shut down by Calibre. |
+| ASHA prunes good trials during conformal warmup | Medium | High | Report metrics only after completed origins. `grace_period=8` matches VN2 `WARMUP_ORIGINS`. Compare ASHA results against a no-pruning sample before accepting HPO migration. Allow disabling pruning per `TuningTask`. |
+| Conditional search spaces break under `OptunaSearch` | Low | High | Use callable search-space form. Add a test where an early sampled value suppresses later parameters. Pin Ray and Optuna versions. Do not convert to Ray declarative spaces. |
+| Nested parallelism oversubscribes CPUs | High | High | Make Tune trial resources the outer budget. Cap uid fan-out inside trials and set LightGBM, NumPy, and Torch thread counts to fit the trial budget. |
+| Memory pressure on large panels | Medium | High | Keep URI-backed `ForecastTaskRef`. Cap uid concurrency. Use streaming ledger output above a documented panel size. Do not put full panels into Ray object storage by default. |
+| Ray/KubeRay version mismatch | Medium | High | Pin Ray exactly in `uv.lock` and pin KubeRay operator/Helm values compatibly. Avoid Ray 2.11.0-2.37.0 for KubeRay deployments per the upgrade warning. |
+| Windows / platform dev experience | Medium | Medium | Local fast path is independent of Ray. Run Ray tests primarily on Linux CI. Document Windows Ray as local-development only; multi-node Ray runs on Linux containers / KubeRay. Path handling stays URI-based. |
+
+## References
+
+- `docs/stack-decision.md` — full rationale, code evidence, scheduler-depth
+  verdicts (layers 0–7), data-layer and observability decisions, Databricks
+  compatibility, version pinning.
+- Key source files touched by this migration:
+  - `calibre/execution/backend.py`
+  - `calibre/tuning/optimizer.py`, `calibre/tuning/task.py`
+  - `calibre/cli/config.py`, `calibre/cli/commands.py`
+  - `calibre/api/run_store.py`
+  - `pyproject.toml`, `uv.lock`

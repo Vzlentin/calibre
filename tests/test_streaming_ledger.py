@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import pandas as pd
 
+from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import BackendEngine, LedgerOutputOptions
+from calibre.core.order_types import NewsvendorPolicyParameters
+from calibre.execution.backend import BackendEngine, ConformalOptions, LedgerOutputOptions
 from calibre.execution.ledger import ForecastLedger
+from calibre.ordering.policy_config import OrderPolicyConfig
 
 
 class _StubAdapter:
@@ -95,6 +98,61 @@ def test_streaming_resolution_keeps_only_pending_rows(monkeypatch, tmp_path) -> 
     pd.testing.assert_frame_equal(actual, expected)
     assert len(result.ledger._pending) <= 10
     assert len(pd.read_parquet(path)) == len(origins) * task.horizon
+
+
+def test_origin_iterator_matches_batch_conformal_and_ordering(monkeypatch) -> None:
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(12)]})
+    task = ForecastTask(
+        history=actuals,
+        horizon=2,
+        model_config={"backend": "stub", "model": "stub_model"},
+    )
+    origins = [dates[4], dates[5], dates[6]]
+    conformal_config = SymmetricIntervalConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=4,
+        gamma=0.05,
+    )
+    order_config = OrderPolicyConfig(
+        policy="newsvendor",
+        params=[
+            NewsvendorPolicyParameters(
+                unique_id="A",
+                underage_cost=3.0,
+                overage_cost=1.0,
+                inventory_position=0.0,
+            )
+        ],
+        coverage=0.9,
+    )
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    batch_runtime = SymmetricIntervalRuntime(conformal_config)
+    batch_result = BackendEngine(
+        conformal=ConformalOptions(runtime=batch_runtime),
+        order=order_config,
+    ).execute([task], actuals, origins)
+
+    stream_runtime = SymmetricIntervalRuntime(conformal_config)
+    engine = BackendEngine(
+        conformal=ConformalOptions(runtime=stream_runtime),
+        order=order_config,
+    )
+    yielded = list(engine.iter_origins([task], actuals, origins))
+
+    assert len(yielded) == len(origins)
+    pd.testing.assert_frame_equal(
+        yielded[-1].ledger.to_df().reset_index(drop=True),
+        batch_result.ledger.to_df().reset_index(drop=True),
+    )
+    pd.testing.assert_frame_equal(
+        yielded[-1].order_ledger.to_df().reset_index(drop=True),
+        batch_result.order_ledger.to_df().reset_index(drop=True),
+    )
+    assert stream_runtime._issued_count == batch_runtime._issued_count
 
 
 def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:

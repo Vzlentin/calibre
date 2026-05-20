@@ -20,5 +20,5 @@ output:
   order_ledger_path: results/vn2/orders.parquet
   streaming: false
 execution:
-  engine: null
+  backend: auto
   seed: 42
