@@ -709,3 +709,50 @@ def test_mixed_local_and_global_tasks():
     model_names = set(df[MODEL_NAME].unique())
     assert "SeasonalNaive" in model_names
     assert "global_lgbm" in model_names
+
+
+def test_auto_backend_uses_ray_at_threshold(monkeypatch):
+    """backend='auto' with task_count == ray_threshold should use Ray."""
+    pytest.importorskip("ray")
+    dates = pd.date_range("2024-01-07", periods=8, freq="W")
+    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+
+    class _StubAdapter:
+        def fit(self, task: ForecastTask) -> None:
+            pass
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-03-03")],
+                    Y_HAT: [1.0],
+                    H: [1],
+                }
+            )
+
+    # Exactly 2 tasks with ray_threshold=2 should trigger Ray path
+    tasks = [
+        ForecastTask(
+            history=actuals,
+            horizon=1,
+            model_config={"backend": "stub", "model": "stub_model"},
+        ),
+        ForecastTask(
+            history=actuals,
+            horizon=1,
+            model_config={"backend": "stub", "model": "stub_model"},
+        ),
+    ]
+
+    engine = BackendEngine(
+        execution=ExecutionOptions(backend="auto", ray_threshold=2, max_concurrency=1)
+    )
+    try:
+        result = engine.execute(tasks, actuals, origins=[dates[-1]])
+    finally:
+        engine.close()
+
+    assert not result.ledger.to_df().empty

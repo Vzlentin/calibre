@@ -44,7 +44,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from functools import cache, partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import optuna
 import pandas as pd
@@ -543,7 +543,7 @@ def _run_order_conformal_warmup(
     runtime: CumulativeRiskRuntime,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
-    execution_backend: str = "auto",
+    execution_backend: Literal["local", "ray", "auto"] = "auto",
     ray_address: str | None = None,
     staging_uri: str | None = None,
     ray_threshold: int = 10,
@@ -578,7 +578,7 @@ def _order_conformal_warmup_frames(
     warmup_origins: int,
     series_filter: list[str] | None,
     cumulative_target: bool = False,
-    execution_backend: str = "auto",
+    execution_backend: Literal["local", "ray", "auto"] = "auto",
     ray_address: str | None = None,
     staging_uri: str | None = None,
     ray_threshold: int = 10,
@@ -605,7 +605,7 @@ def _order_conformal_warmup_frames(
     engine = BackendEngine(
         execution=ExecutionOptions(
             freq="W-MON",
-            backend=execution_backend,  # type: ignore[arg-type]
+            backend=execution_backend,
             ray_address=ray_address,
             staging_uri=staging_uri,
             ray_threshold=ray_threshold,
@@ -1644,7 +1644,7 @@ def run_benchmark(
     conformal_config: SymmetricIntervalConfig | None = None,
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_conformal_warmup_origins: int = HPO_N_ORIGINS,
-    execution_backend: str = "auto",
+    execution_backend: Literal["local", "ray", "auto"] = "auto",
     ray_address: str | None = None,
     staging_uri: str | None = None,
     ray_threshold: int = 10,
@@ -1802,7 +1802,7 @@ def run_benchmark(
         engine = BackendEngine(
             execution=ExecutionOptions(
                 freq="W-MON",
-                backend=execution_backend,  # type: ignore[arg-type]
+                backend=execution_backend,
                 ray_address=ray_address,
                 staging_uri=staging_uri,
                 ray_threshold=ray_threshold,

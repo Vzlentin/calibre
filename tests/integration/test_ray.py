@@ -199,6 +199,9 @@ def test_ray_quantile_columns_survive() -> None:
 
 
 def test_ray_worker_loads_mlforecast_adapter_without_mlforecast_importable() -> None:
+    # NOTE: This monkeypatch is safe only in local_mode because workers are
+    # not reused. On real clusters with reused workers, the patched state could
+    # leak to subsequent tasks.
     ray = pytest.importorskip("ray")
 
     owns_ray = not ray.is_initialized()

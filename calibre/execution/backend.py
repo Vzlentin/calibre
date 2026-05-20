@@ -620,6 +620,8 @@ class BackendEngine:
         self._remote_process_task = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
         self._ray = self._ray_runtime.ray
+        # Cache safety: ExecutionOptions is frozen, so cpu_per_task is immutable
+        # for this engine instance. Rebuilding _remote_process_task is safe.
         return self._ray
 
     def _run_refs_on_ray(

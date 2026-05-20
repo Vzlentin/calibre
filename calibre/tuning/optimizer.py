@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from math import isfinite
 from pathlib import Path
 from typing import Any
+import warnings
 
 import optuna
 import pandas as pd
@@ -240,6 +241,12 @@ def optimize_task(task: TuningTask) -> dict:
     origins = _validate_task(task)
 
     if task.conformal_runtime_factory is not None and not task.ray_local_mode:
+        warnings.warn(
+            "conformal_runtime_factory is set: falling back to sequential Optuna "
+            "instead of Ray Tune. Set ray_local_mode=True to use Ray Tune with conformal.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return _optimize_task_sequential(task, origins)
 
     prepare_ray_environment()
