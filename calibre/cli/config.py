@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import fsspec  # type: ignore[import-untyped]
 import pandas as pd
@@ -11,6 +11,9 @@ import yaml
 from calibre.conformal.runtime import SymmetricIntervalConfig
 
 CONFIG_SCHEMA = "1.0"
+
+if TYPE_CHECKING:
+    from calibre.execution.backend import ExecutionOptions
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +91,18 @@ class ExecutionConfig:
     ray_address: str | None = None
     ray_threshold: int = 10
     max_concurrency: int | None = None
+
+    def to_execution_options(self, *, freq: str) -> ExecutionOptions:
+        from calibre.execution.backend import ExecutionOptions
+
+        return ExecutionOptions(
+            freq=freq,
+            backend=self.backend,
+            ray_address=self.ray_address,
+            ray_threshold=self.ray_threshold,
+            max_concurrency=self.max_concurrency,
+            seed=self.seed,
+        )
 
 
 @dataclass(frozen=True, slots=True)

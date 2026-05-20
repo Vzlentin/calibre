@@ -15,7 +15,6 @@ from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
     ConformalOptions,
-    ExecutionOptions,
     LedgerOutputOptions,
 )
 from calibre.execution.dataset import DatasetBundle
@@ -177,14 +176,7 @@ def run_config(
     streaming_order_output = config.output.order_ledger_path if config.output.streaming else None
 
     engine = BackendEngine(
-        execution=ExecutionOptions(
-            freq=config.origins.freq,
-            backend=config.execution.backend,
-            ray_address=config.execution.ray_address,
-            ray_threshold=config.execution.ray_threshold,
-            max_concurrency=config.execution.max_concurrency,
-            seed=config.execution.seed,
-        ),
+        execution=config.execution.to_execution_options(freq=config.origins.freq),
         output=LedgerOutputOptions(
             forecast_path=streaming_output,
             order_path=streaming_order_output,
