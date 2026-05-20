@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import optuna
 import pandas as pd
 import pytest
@@ -7,7 +9,7 @@ import pytest
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.evaluation.point_metrics import mae, smape
 from calibre.tuning.objectives import Accuracy
-from calibre.tuning.optimizer import _cap_threaded_config, optimize_task
+from calibre.tuning.optimizer import _cap_threaded_config, _resolve_tune_storage_path, optimize_task
 from calibre.tuning.task import TuningTask
 
 
@@ -170,6 +172,20 @@ def test_resource_budget_caps_threaded_model_configs():
 def test_resource_budget_does_not_add_threads_to_unthreaded_model():
     capped = _cap_threaded_config({"model": "SeasonalNaive"}, cpu_per_trial=2.0)
     assert "n_jobs" not in capped
+
+
+def test_default_tune_storage_path_stays_under_results_dir_when_home_unwritable(
+    monkeypatch, tmp_path, tuning_task
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RAYTUNE_RESULTS_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "not-writable-home"))
+
+    storage_path = Path(_resolve_tune_storage_path(tuning_task))
+
+    assert storage_path.is_absolute()
+    assert storage_path.is_dir()
+    assert storage_path.is_relative_to(tmp_path / "results")
 
 
 def test_asha_prunes_trials_between_origins(monkeypatch):

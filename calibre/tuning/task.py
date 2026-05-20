@@ -33,6 +33,7 @@ class TuningTask:
     ray_address: str | None = None
     ray_local_mode: bool = False
     tune_storage_path: str | None = None
+    results_dir: str | None = "results"
     tune_experiment_name: str | None = None
     mlflow_tracking_uri: str | None = None
     mlflow_experiment_name: str | None = None

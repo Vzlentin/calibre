@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import optuna
@@ -16,6 +18,7 @@ from calibre.tuning.task import TuningTask
 
 _OBJECTIVE_METRIC = "objective"
 _ORIGIN_INDEX = "origin_index"
+_DEFAULT_TUNE_RESULTS_SUBDIR = "ray_tune"
 
 
 def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
@@ -35,6 +38,42 @@ def _resolved_max_concurrent_trials(task: TuningTask) -> int:
 
 def _thread_budget(cpu_per_trial: float) -> int:
     return max(1, int(cpu_per_trial))
+
+
+def _is_uri(path: str) -> bool:
+    return "://" in path
+
+
+def _join_storage_root(root: str, child: str) -> str:
+    if _is_uri(root):
+        return f"{root.rstrip('/')}/{child}"
+    return str(Path(root) / child)
+
+
+def _absolute_local_storage_path(path: str) -> str:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate.mkdir(parents=True, exist_ok=True)
+    return str(candidate)
+
+
+def _normalize_tune_storage_path(path: str) -> str:
+    if _is_uri(path):
+        return path
+    return _absolute_local_storage_path(path)
+
+
+def _resolve_tune_storage_path(task: TuningTask) -> str:
+    if task.tune_storage_path is not None:
+        return _normalize_tune_storage_path(task.tune_storage_path)
+    if env_storage_path := os.environ.get("RAYTUNE_RESULTS_DIR"):
+        return _normalize_tune_storage_path(env_storage_path)
+    if task.results_dir is not None:
+        return _normalize_tune_storage_path(
+            _join_storage_root(task.results_dir, _DEFAULT_TUNE_RESULTS_SUBDIR)
+        )
+    return tempfile.mkdtemp(prefix="calibre-tune-")
 
 
 def _cap_threaded_config(config: dict[str, Any], cpu_per_trial: float) -> dict[str, Any]:
