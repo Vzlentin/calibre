@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -8,10 +9,14 @@ import pandas as pd
 import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
-from calibre.evaluation.point_metrics import mae, smape
+from calibre.evaluation.point_metrics import mae, pinball_linear, smape
 from calibre.tuning.objectives import Accuracy
 from calibre.tuning.optimizer import _cap_threaded_config, _resolve_tune_storage_path, optimize_task
 from calibre.tuning.task import TuningTask
+
+
+def pinball_loss(actual, predicted):
+    return pinball_linear(actual, predicted, tau=0.5)
 
 
 def _space_season_length(trial: optuna.Trial) -> dict:
@@ -66,12 +71,11 @@ def tuning_task(series_df, dates):
         n_trials=1,
         freq="W",
         seed=3,
-        ray_local_mode=True,
     )
 
 
-@pytest.fixture(scope="module")
-def tuned_best_config():
+@pytest.fixture(scope="module", params=[pinball_loss, mae], ids=["pinball_loss", "mae"])
+def tuned_best_config(request):
     dates = pd.date_range("2024-01-07", periods=20, freq="W")
     series = pd.DataFrame(
         {
@@ -93,11 +97,10 @@ def tuned_best_config():
             search_space=_space_season_length,
             actuals=series,
             origins=[dates[15]],
-            objective=Accuracy(metric=smape),
+            objective=Accuracy(metric=request.param),
             n_trials=1,
             freq="W",
             seed=3,
-            ray_local_mode=True,
         )
     )
 
@@ -132,10 +135,9 @@ def test_optimize_task_from_tmp_cwd_does_not_use_cwd_as_tune_uri(
     assert "season_length" in result
 
 
-def test_optimize_with_mae_metric(series_df, dates):
-    """Custom metric (mae) should also converge to season_length=4."""
-    objective = Accuracy(metric=mae)
-    assert objective.metric.__name__ == "mae"
+def test_optimize_converges_for_metric(tuned_best_config):
+    """Both configured metrics should run end-to-end and pick season_length=4."""
+    assert tuned_best_config["season_length"] == 4
 
 
 def test_optimize_accepts_conformal_config(series_df, dates):
@@ -170,7 +172,6 @@ def test_optimize_accepts_conformal_config(series_df, dates):
         freq="W",
         conformal_runtime_factory=_runtime_factory,
         seed=3,
-        ray_local_mode=True,
     )
     result = optimize_task(task)
     assert isinstance(result, dict)
@@ -205,7 +206,7 @@ def test_default_tune_storage_path_stays_under_results_dir_when_home_unwritable(
     assert storage_path.is_relative_to(tmp_path / "results")
 
 
-def test_asha_prunes_trials_between_origins(monkeypatch):
+def test_asha_prunes_trials_between_origins(monkeypatch, tmp_path):
     from ray import tune
     from ray.tune.schedulers import ASHAScheduler
 
@@ -233,10 +234,17 @@ def test_asha_prunes_trials_between_origins(monkeypatch):
             ),
             num_samples=1,
         ),
-        run_config=tune.RunConfig(verbose=0),
+        run_config=tune.RunConfig(storage_path=str(tmp_path / "asha-tune"), verbose=0),
     )
 
-    results = tuner.fit()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Pickle, copy, and deepcopy support will be removed from itertools",
+            category=DeprecationWarning,
+            module="ray.cloudpickle.cloudpickle",
+        )
+        results = tuner.fit()
 
     pruned = [
         result

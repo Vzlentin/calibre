@@ -149,6 +149,7 @@ def _best_result_config(results: Any) -> dict[str, Any]:
 
 def optimize_task(task: TuningTask) -> dict:
     """Run HPO via Ray Tune and return the best model_config dict."""
+    # Callers may own the Ray runtime; task.ray_local_mode only applies when we start it.
     if not task.origins:
         raise ValueError("TuningTask.origins must contain at least one origin")
     if task.asha_grace_period < 1:
@@ -241,6 +242,7 @@ def optimize_task(task: TuningTask) -> dict:
             )
     previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
     os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
+    original_cwd = Path.cwd()
     try:
         tuner = tune.Tuner(
             trainable,
@@ -260,6 +262,8 @@ def optimize_task(task: TuningTask) -> dict:
             os.environ.pop("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", None)
         else:
             os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
+        if Path.cwd() != original_cwd:
+            os.chdir(original_cwd)
         if not ray_was_initialized and task.ray_address is None:
             ray.shutdown()
     return {**task.base_model_config, **_best_result_config(results)}
