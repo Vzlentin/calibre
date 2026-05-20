@@ -173,8 +173,6 @@ def optimize_task(task: TuningTask) -> dict:
         sampler=create_tpe_sampler(task.seed),
     )
     scheduler = ASHAScheduler(
-        metric=_OBJECTIVE_METRIC,
-        mode="min",
         time_attr=_ORIGIN_INDEX,
         max_t=max_t,
         grace_period=grace_period,
@@ -246,6 +244,8 @@ def optimize_task(task: TuningTask) -> dict:
         tuner = tune.Tuner(
             trainable,
             tune_config=tune.TuneConfig(
+                metric=_OBJECTIVE_METRIC,
+                mode="min",
                 search_alg=search_alg,
                 scheduler=scheduler,
                 num_samples=task.n_trials,

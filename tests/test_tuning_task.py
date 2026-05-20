@@ -219,9 +219,9 @@ def test_asha_prunes_trials_between_origins(monkeypatch):
         _trainable,
         param_space={"loss": tune.grid_search([0.0, 100.0])},
         tune_config=tune.TuneConfig(
+            metric="objective",
+            mode="min",
             scheduler=ASHAScheduler(
-                metric="objective",
-                mode="min",
                 time_attr="origin_index",
                 max_t=3,
                 grace_period=1,
