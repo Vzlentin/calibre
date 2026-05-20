@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
 from contextlib import contextmanager
 from math import isfinite
 from pathlib import Path
 from typing import Any
-import warnings
 
 import optuna
 import pandas as pd

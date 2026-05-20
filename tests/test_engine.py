@@ -711,40 +711,30 @@ def test_mixed_local_and_global_tasks():
     assert "global_lgbm" in model_names
 
 
-def test_auto_backend_uses_ray_at_threshold(monkeypatch):
+def test_auto_backend_uses_ray_at_threshold():
     """backend='auto' with task_count == ray_threshold should use Ray."""
     pytest.importorskip("ray")
     dates = pd.date_range("2024-01-07", periods=8, freq="W")
-    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
+    actuals = pd.concat(
+        [
+            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]}),
+            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [float(i) + 1 for i in range(8)]}),
+        ],
+        ignore_index=True,
+    )
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
-
-    class _StubAdapter:
-        def fit(self, task: ForecastTask) -> None:
-            pass
-
-        def predict(self, task: ForecastTask) -> pd.DataFrame:
-            return pd.DataFrame(
-                {
-                    UNIQUE_ID: [task.unique_id],
-                    DS: [pd.Timestamp("2024-03-03")],
-                    Y_HAT: [1.0],
-                    H: [1],
-                }
-            )
-
-    # Exactly 2 tasks with ray_threshold=2 should trigger Ray path
+    # Use a real adapter — monkeypatch.setattr cannot reach Ray workers.
     tasks = [
         ForecastTask(
-            history=actuals,
+            history=actuals[actuals[UNIQUE_ID] == uid].reset_index(drop=True),
             horizon=1,
-            model_config={"backend": "stub", "model": "stub_model"},
-        ),
-        ForecastTask(
-            history=actuals,
-            horizon=1,
-            model_config={"backend": "stub", "model": "stub_model"},
-        ),
+            model_config={
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "season_length": 2,
+            },
+        )
+        for uid in ("A", "B")
     ]
 
     engine = BackendEngine(
