@@ -11,7 +11,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from calibre.core.run_status import RunStatus
-from calibre.storage.models import ConformalState, ForecastPointer, Run
+from calibre.storage.models import ConformalState, ForecastPointer, PendingObservation, Run
 
 
 def database_url() -> str | None:
@@ -82,16 +82,42 @@ class ConformalStateRepo:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def get(self, run_id: UUID, partition: str) -> dict | None:
-        row = self.session.get(ConformalState, (run_id, partition))
+    def get(self, session_id: str, partition: str) -> dict | None:
+        row = self.session.get(ConformalState, (session_id, partition))
         return dict(row.state) if row is not None else None
 
-    def upsert(self, run_id: UUID, partition: str, state: dict) -> None:
-        row = self.session.get(ConformalState, (run_id, partition))
+    def list_for_session(self, session_id: str) -> dict[str, dict]:
+        rows = self.session.scalars(
+            select(ConformalState).where(ConformalState.session_id == session_id)
+        )
+        return {row.partition: dict(row.state) for row in rows}
+
+    def upsert(self, session_id: str, partition: str, state: dict, *, run_id: UUID) -> None:
+        row = self.session.get(ConformalState, (session_id, partition))
         if row is None:
-            self.session.add(ConformalState(run_id=run_id, partition=partition, state=dict(state)))
+            self.session.add(
+                ConformalState(
+                    session_id=session_id,
+                    run_id=run_id,
+                    partition=partition,
+                    state=dict(state),
+                )
+            )
         else:
+            row.run_id = run_id
             row.state = dict(state)
+
+
+class PendingObservationRepo:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def list_for_session(self, session_id: str) -> list[PendingObservation]:
+        return list(
+            self.session.scalars(
+                select(PendingObservation).where(PendingObservation.session_id == session_id)
+            )
+        )
 
 
 class ForecastPointerRepo:

@@ -19,8 +19,11 @@ def test_storage_alembic_upgrade_creates_run_tables(tmp_path, monkeypatch) -> No
         "runs",
         "conformal_state",
         "forecast_pointers",
+        "pending_observations",
         "alembic_version",
     }.issubset(inspector.get_table_names())
+    conformal_pk = inspector.get_pk_constraint("conformal_state")["constrained_columns"]
+    assert conformal_pk == ["session_id", "partition"]
     with engine.connect() as connection:
         revision = connection.execute(text("select version_num from alembic_version")).scalar_one()
-    assert revision == "0001_initial"
+    assert revision == "0002_session_keyed_state"

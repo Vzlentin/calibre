@@ -26,6 +26,14 @@ notes: "Cost now validates conformal_mode and dispatches perhorizon vs cumulativ
 phase: 1
 last_completed_task: "Phase 1 DoD and cross-phase regression gate"
 next_task: "2.a per-partition state + session identity"
-last_commit: "pending in phase-1 boundary commit"
+last_commit: "d26cb05"
 notes: "targeted Phase 1 pytest passed; uv run pytest passed 414/414 with 3 skipped; uv run mypy calibre/ passed; uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml passed with vn2_baseline_total_cost=4992.20"
+```
+
+```yaml
+phase: 2
+last_completed_task: "2.a session-keyed conformal state schema"
+next_task: "2.b persist conformal runtime state per real partition"
+last_commit: "pending in phase-2.a commit"
+notes: "added deterministic derive_session_id; migrated conformal_state primary key to (session_id, partition) while retaining run_id as audit FK; added pending_observations table; storage/migration/state-resume tests passed"
 ```
