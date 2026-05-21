@@ -138,6 +138,6 @@ notes: "added calibre/forecasting/cache.py with ModelArtifactCache(uri) backed b
 phase: 4
 last_completed_task: "4.e calibre_conformal_coverage_drift gauge"
 next_task: "4.f POST /tune + GET /studies/{id}"
-last_commit: "pending in phase-4.e commit"
+last_commit: "a50711d"
 notes: "added calibre_conformal_coverage_drift{model, partition} Gauge with set_conformal_coverage_drift helper; added AdaptiveAlphaController.target_alpha property; added _adaptive_controller_drift helper returning mean(error_history) - target_alpha or None when controller is fixed / history empty; BackendEngine._record_coverage_drift emits one gauge per (model, partition) pair from the resolved frame, falling back to __global__ when CONFORMAL_PARTITION is absent; tests/observability/test_coverage_drift.py covers helper math, fixed-controller no-op, empty-history None, multi-partition emission, and global fallback; targeted pytest (6/6), ruff, and mypy on metrics/backend/controllers passed"
 ```
