@@ -58,6 +58,14 @@ notes: "DecisionLoop can use pending_observations as the restart-safe buffer via
 phase: 2
 last_completed_task: "2.d verify session-keyed backend resume"
 next_task: "Phase 2 cross-phase regression gate and phase-boundary push"
-last_commit: "pending in phase-2.d commit"
+last_commit: "4a15b43"
 notes: "added backend integration evidence that a new run_id with the same deterministic session_id hydrates partitioned conformal state and matches the uninterrupted resumed-origin ledger; Phase 2 targeted storage/execution/migration tests passed"
+```
+
+```yaml
+phase: 2
+last_completed_task: "Phase 2 DoD and cross-phase regression gate"
+next_task: "3.a InventoryAdapter + injected initial ProductState"
+last_commit: "pending in phase-2 boundary commit"
+notes: "uv run pytest passed 420/420 with 3 skipped; uv run mypy calibre/ passed; uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml passed with total_cost=4992.20; same-session backend resume is byte-identical for resumed origin"
 ```

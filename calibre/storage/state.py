@@ -68,4 +68,4 @@ def compact_old_state(session_id: str, older_than_days: int) -> int:
             )
         )
         session.commit()
-        return int(result.rowcount or 0)
+        return int(getattr(result, "rowcount", 0) or 0)
