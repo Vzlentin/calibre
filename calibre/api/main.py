@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import traceback
 from collections.abc import Callable
 
@@ -60,6 +61,8 @@ from calibre.tuning import (
 )
 
 app = FastAPI(title="Calibre", version="0.1.0")
+
+logger = logging.getLogger(__name__)
 
 _MEMORY_STORE = MemoryRunStore()
 _DB_URL: str | None = None
@@ -389,22 +392,38 @@ def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
 def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
     store = _LIFECYCLE_STORE
     record = store.first_fit_for_session(session_id)
-    if (
-        record is None
-        or record.conformal_config is None
-        or record.last_calibrated is None
-        or record.last_calibrated.empty
-    ):
+    if record is None:
+        logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
+        return
+    if record.conformal_config is None:
+        logger.warning(
+            "observe skipped: session has no conformal config",
+            extra={"session_id": session_id},
+        )
+        return
+    if record.last_calibrated is None or record.last_calibrated.empty:
+        logger.warning(
+            "observe skipped: no calibrated frame on session (call /calibrate first)",
+            extra={"session_id": session_id},
+        )
         return
 
     actuals = _frame_from_records(actual_records)
     if actuals.empty or UNIQUE_ID not in actuals.columns or DS not in actuals.columns:
+        logger.warning(
+            "observe skipped: actuals empty or missing unique_id/ds",
+            extra={"session_id": session_id, "rows": len(actuals)},
+        )
         return
 
     runtime = _runtime_for_session(record)
     lower_col, upper_col = runtime.interval_columns
     calibrated = record.last_calibrated.copy()
     if lower_col not in calibrated.columns or upper_col not in calibrated.columns:
+        logger.warning(
+            "observe skipped: calibrated frame missing interval columns",
+            extra={"session_id": session_id, "expected": [lower_col, upper_col]},
+        )
         return
 
     merged = calibrated.merge(
@@ -419,6 +438,10 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
     merged = merged.drop(columns=["_y_actual"])
     resolved = merged.dropna(subset=[Y, lower_col, upper_col])
     if resolved.empty:
+        logger.warning(
+            "observe skipped: no rows resolved after merging actuals",
+            extra={"session_id": session_id, "calibrated_rows": len(calibrated)},
+        )
         return
     runtime.observe(resolved)
     store.upsert_conformal_state(session_id, runtime.get_partition_states())
