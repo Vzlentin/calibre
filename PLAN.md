@@ -32,6 +32,8 @@ agent advances. The VN2 backtest baseline cost is read from
 Use conventional-commit style: `phase-N.x: <subject>`. Push at phase boundary, 
 after the cross-phase regression gate is green. CI runs on push (PR is open); a separate review agent 
 watches PR status and fixes red builds on the same branch.
+Before each push, run `git pull --rebase origin deployment-lifecycle` to incorporate any ci-fix: commits from the review agent. 
+If rebase produces conflicts you can't auto-resolve, write HALT.md and stop — do not force-push.
 
 ## Conventions
 
