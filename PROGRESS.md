@@ -85,3 +85,11 @@ next_task: "3.c API lifecycle split"
 last_commit: "pending in phase-3.b commit"
 notes: "ForecastTask and ForecastTaskRef now carry task_group; BackendEngine assigns default groups, preserves grouped scheduling results, and dispatches one global panel fit per distinct model_config with Ray fan-out when enabled; global fanout/task grouping tests, ruff, and module mypy passed"
 ```
+
+```yaml
+phase: 3
+last_completed_task: "3.c API lifecycle split"
+next_task: "Phase 3 DoD: cross-phase regression gate"
+last_commit: "pending in phase-3.c commit"
+notes: "added /fit (async), /predict, /calibrate, /order, /observe (async), /sessions/{tenant}/{uid}, and /fits/{fit_id} endpoints wired via an in-process LifecycleStore; session_id is derived deterministically via derive_session_id; lifecycle tests, existing api tests, ruff on api/, and api mypy passed"
+```

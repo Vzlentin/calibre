@@ -12,6 +12,7 @@ Cost rules:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,7 +117,7 @@ class VN2Simulator:
     HOLDING_COST_RATE: float = HOLDING_COST_RATE
     SHORTAGE_COST_RATE: float = SHORTAGE_COST_RATE
 
-    def __init__(self, states: dict[str, ProductState | GenericProductState]) -> None:
+    def __init__(self, states: Mapping[str, ProductState | GenericProductState]) -> None:
         self.states: dict[str, ProductState] = {}
         generic_states: dict[str, GenericProductState] = {}
         for uid, state in states.items():
