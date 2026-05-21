@@ -2,8 +2,7 @@
 
 The architectural reasoning, code citations, and seam audit live in
 [`docs/deployment-audit.md`](docs/deployment-audit.md). This file is the
-executable plan: phases, files, tests, and DoD. Dispatched one phase at a
-time via `/goal implement Phase N of PLAN.md`.
+executable plan: phases, files, tests, and DoD.
 
 ## Conventions
 
