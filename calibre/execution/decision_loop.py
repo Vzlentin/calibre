@@ -24,6 +24,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine
+from calibre.storage.postgres import PendingObservationRepo
 
 
 @dataclass
@@ -172,9 +173,13 @@ class DecisionLoop:
         ensemble: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
         observe_fn: Callable[[ConformalRuntime, list[pd.DataFrame], pd.Series], list[pd.DataFrame]]
         | None = None,
+        pending_observation_repo: PendingObservationRepo | None = None,
+        session_id: str | None = None,
     ) -> None:
         if observe_fn is not None and runtime is None:
             raise ValueError("observe_fn requires runtime")
+        if pending_observation_repo is not None and session_id is None:
+            raise ValueError("session_id is required with pending_observation_repo")
         self._engine = engine
         self._simulator = simulator
         self._build_round_tasks = build_round_tasks
@@ -184,6 +189,8 @@ class DecisionLoop:
         self._runtime = runtime
         self._ensemble = ensemble
         self._observe_fn = observe_fn
+        self._pending_observation_repo = pending_observation_repo
+        self._session_id = session_id
 
     def run(self) -> list[RoundResult]:
         """Execute all decision and delivery rounds; return per-round results."""
@@ -207,7 +214,15 @@ class DecisionLoop:
             if self._runtime is not None:
                 conformal_frame = self._runtime.apply(frame)
                 if lower_col in conformal_frame.columns and upper_col in conformal_frame.columns:
-                    pending.append(conformal_frame.copy())
+                    if self._pending_observation_repo is not None:
+                        self._pending_observation_repo.upsert_frame(
+                            self._session_id or "",
+                            conformal_frame,
+                            lower_col=lower_col,
+                            upper_col=upper_col,
+                        )
+                    else:
+                        pending.append(conformal_frame.copy())
                 policy_frame = conformal_frame
             else:
                 policy_frame = frame
@@ -241,7 +256,21 @@ class DecisionLoop:
                 lookup = pd.Series(actuals_cache, dtype=float)
                 if not lookup.empty:
                     lookup.index = pd.MultiIndex.from_tuples(lookup.index)
-                pending = self._observe_fn(self._runtime, pending, lookup)
+                if self._pending_observation_repo is not None:
+                    pending_frames = self._pending_observation_repo.to_frames(
+                        self._session_id or "",
+                        lower_col=lower_col,
+                        upper_col=upper_col,
+                    )
+                    remaining = self._observe_fn(self._runtime, pending_frames, lookup)
+                    self._pending_observation_repo.replace_session(
+                        self._session_id or "",
+                        remaining,
+                        lower_col=lower_col,
+                        upper_col=upper_col,
+                    )
+                else:
+                    pending = self._observe_fn(self._runtime, pending, lookup)
 
         for week_offset in range(1, self._config.n_delivery_rounds + 1):
             delivery_num = self._config.n_rounds + week_offset

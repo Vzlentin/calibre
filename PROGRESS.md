@@ -42,6 +42,14 @@ notes: "added deterministic derive_session_id; migrated conformal_state primary 
 phase: 2
 last_completed_task: "2.b persist conformal runtime state per real partition"
 next_task: "2.c persist pending observations across DecisionLoop restarts"
-last_commit: "pending in phase-2.b commit"
+last_commit: "8f41d29"
 notes: "SymmetricIntervalRuntime exposes partition_keys and per-partition snapshots; BackendEngine persists and restores partition rows through list_for_run; state-resume, storage partition, engine, and pipeline-runner tests passed"
+```
+
+```yaml
+phase: 2
+last_completed_task: "2.c persist pending observations across DecisionLoop restarts"
+next_task: "Phase 2 DoD: verify session-keyed backend resume and run phase gate"
+last_commit: "pending in phase-2.c commit"
+notes: "DecisionLoop can use pending_observations as the restart-safe buffer via PendingObservationRepo; unresolved rows are reloaded and replaced after observe; pending restart, decision-loop, migration, ruff, and module mypy tests passed"
 ```

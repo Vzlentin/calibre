@@ -46,8 +46,10 @@ class PendingObservation(Base):
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     uid: Mapped[str] = mapped_column(String, primary_key=True)
+    model_name: Mapped[str] = mapped_column(String, primary_key=True)
     origin: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     h: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ds: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     lo: Mapped[float | None] = mapped_column(Float, nullable=True)
     hi: Mapped[float | None] = mapped_column(Float, nullable=True)
     y_hat: Mapped[float | None] = mapped_column(Float, nullable=True)
