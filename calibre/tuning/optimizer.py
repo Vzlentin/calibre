@@ -18,7 +18,7 @@ from calibre.conformal.runtime import (
     SymmetricIntervalRuntime,
     to_json_safe_state,
 )
-from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, Y
+from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
 from calibre.execution.io import join_uri
@@ -28,6 +28,7 @@ from calibre.tuning.task import TuningTask
 _OBJECTIVE_METRIC = "objective"
 _ORIGIN_INDEX = "origin_index"
 _DEFAULT_TUNE_RESULTS_SUBDIR = "ray_tune"
+_FORECAST_KEY_COLUMNS = [UNIQUE_ID, DS, FORECAST_ORIGIN, MODEL_NAME, H]
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +181,43 @@ def _resolve_state_ref(state_ref: Any) -> dict[str, Any]:
     return dict(state_ref)
 
 
+def _newly_resolved_frame(
+    ledger_df: pd.DataFrame,
+    seen_keys: set[tuple[Any, ...]],
+) -> pd.DataFrame:
+    resolved = ledger_df.dropna(subset=[Y, Y_HAT])
+    if resolved.empty:
+        return resolved
+
+    missing = [col for col in _FORECAST_KEY_COLUMNS if col not in resolved.columns]
+    if missing:
+        raise ValueError(f"Resolved ledger is missing key columns: {missing}")
+
+    keys = list(
+        resolved[_FORECAST_KEY_COLUMNS].itertuples(
+            index=False,
+            name=None,
+        )
+    )
+    is_new = [key not in seen_keys for key in keys]
+    newly_resolved = resolved.loc[is_new].copy()
+    for key, keep in zip(keys, is_new, strict=True):
+        if keep:
+            seen_keys.add(key)
+    return newly_resolved
+
+
+def _objective_contribution(
+    task: TuningTask,
+    ledger_df: pd.DataFrame,
+    seen_keys: set[tuple[Any, ...]],
+) -> float:
+    resolved = _newly_resolved_frame(ledger_df, seen_keys)
+    if resolved.empty:
+        return float("inf")
+    return float(task.objective.evaluate(resolved, resolved[Y]))
+
+
 def _best_result_config(results: Any) -> dict[str, Any]:
     valid_results = [
         result
@@ -249,16 +287,19 @@ def _evaluate_candidate(
         ),
         conformal=conformal_options,
     ) as engine:
-        value = float("inf")
+        total_cost = 0.0
+        seen_keys: set[tuple[Any, ...]] = set()
         with _trial_thread_env(task.cpu_per_trial):
             for result in engine.iter_origins([forecast_task], task.actuals, origins):
-                resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
-                value = (
-                    float("inf")
-                    if resolved.empty
-                    else float(task.objective.evaluate(resolved, resolved[Y]))
+                contribution = _objective_contribution(
+                    task,
+                    result.ledger.to_df(),
+                    seen_keys,
                 )
-        return value
+                if not isfinite(contribution):
+                    return float("inf")
+                total_cost += contribution
+        return total_cost
 
 
 def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> dict[str, Any]:
@@ -335,18 +376,24 @@ def optimize_task(task: TuningTask) -> dict:
             conformal=conformal_options,
         )
         try:
+            total_cost = 0.0
+            seen_keys: set[tuple[Any, ...]] = set()
             with _trial_thread_env(worker_task.cpu_per_trial):
                 for origin_idx, result in enumerate(
                     engine.iter_origins([forecast_task], worker_task.actuals, origins),
                     start=1,
                 ):
-                    resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
-                    value = (
-                        float("inf")
-                        if resolved.empty
-                        else float(worker_task.objective.evaluate(resolved, resolved[Y]))
+                    contribution = _objective_contribution(
+                        worker_task,
+                        result.ledger.to_df(),
+                        seen_keys,
                     )
-                    tune.report({_OBJECTIVE_METRIC: value, _ORIGIN_INDEX: origin_idx})
+                    if not isfinite(contribution):
+                        total_cost = float("inf")
+                        tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
+                        break
+                    total_cost += contribution
+                    tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
         finally:
             engine.close()
 
