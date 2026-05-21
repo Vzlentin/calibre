@@ -194,6 +194,6 @@ notes: "uv run pytest passed 472/472 with 3 skipped; uv run mypy calibre/ passed
 phase: 5
 last_completed_task: "Completion audit"
 next_task: "Complete"
-last_commit: "pending in completion audit commit"
+last_commit: "5a14ec1"
 notes: "verified PLAN.md has phases 1-5 plus the cross-phase gate; PROGRESS.md records every phase task and DoD with no pending markers; no HALT.md exists; Phase 3 VN2 global fan-out timing evidence is recorded; Phase 5 boundary gate passed; branch deployment-lifecycle was rebased and pushed to origin"
 ```
