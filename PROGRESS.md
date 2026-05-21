@@ -122,6 +122,6 @@ notes: "added TuningCandidate(model_config, conformal_config, ordering_config) d
 phase: 4
 last_completed_task: "4.c Regret TuningObjective"
 next_task: "4.d ModelArtifactCache + ModelAdapter.cache_key"
-last_commit: "pending in phase-4.c commit"
+last_commit: "6a0911a"
 notes: "added Regret(decision_rule, arithmetic, costs, oracle_cost, mode) in calibre/tuning/objectives.py; evaluate delegates to Cost(..., mode=mode).evaluate then returns compute_regret on a single-element realized vs oracle Series; oracle_cost is a precomputed scalar (perfect-foresight benchmark) so the simulator is not re-run inside each trial; targeted regret_objective + cost_mode_dispatch + evaluation.regret tests passed; tuning mypy and ruff passed"
 ```
