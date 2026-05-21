@@ -28,6 +28,11 @@ the agent writes `HALT.md` with `phase`, `failing_test`, `last_error`,
 agent advances. The VN2 backtest baseline cost is read from
 `PROGRESS.md`, not hard-coded.
 
+**Commit cadence.** Commit after each completed task (the unit that produces one `PROGRESS.md` block). 
+Use conventional-commit style: `phase-N.x: <subject>`. Push at phase boundary, 
+after the cross-phase regression gate is green. CI runs on push (PR is open); a separate review agent 
+watches PR status and fixes red builds on the same branch.
+
 ## Conventions
 
 - Every command is invoked through `uv run` (CLAUDE.md).
@@ -448,20 +453,3 @@ The VN2 backtest is compared against the baseline cost recorded in
 `PROGRESS.md`, not a fixed number — Phase 1 intentionally moves the
 baseline, and later phases may move it again as caching / fan-out change
 which configs win.
-
----
-
-## Out of scope (deferred to cloud-native roadmap or revenue gate)
-
-- Multi-tenancy, RLS, white-box packaging, BYOI OIDC
-- Managed Ray / KubeRay cluster operations
-- Full OpenTelemetry SDK
-- Real-time inference endpoint
-- Per-SKU `CostStruct` loader (owned by cloud-native Phase 1.2)
-- fsspec / DatasetAdapter Protocol (owned by cloud-native Phase 1)
-- MLflow model registry with versioning + lineage — `ModelArtifactCache`
-  in Phase 4 is hash-keyed blobs only; the registry layer (versions,
-  metadata, signed-URL artifact downloads) is owned by cloud-native
-  Phase 5
-- Hierarchical reconciliation — `DatasetBundle.hierarchy` is typed but
-  unconsumed; lands when M5 is wired (architecture.md scope boundary)
