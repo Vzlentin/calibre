@@ -82,7 +82,7 @@ notes: "added InventoryAdapter protocol with SyntheticInventoryAdapter, Snapshot
 phase: 3
 last_completed_task: "3.b task_group scheduling and global model fan-out"
 next_task: "3.c API lifecycle split"
-last_commit: "pending in phase-3.b commit"
+last_commit: "b21da75"
 notes: "ForecastTask and ForecastTaskRef now carry task_group; BackendEngine assigns default groups, preserves grouped scheduling results, and dispatches one global panel fit per distinct model_config with Ray fan-out when enabled; global fanout/task grouping tests, ruff, and module mypy passed"
 ```
 
