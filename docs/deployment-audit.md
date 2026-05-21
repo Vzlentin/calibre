@@ -27,8 +27,8 @@ pending" status is stale and should be struck. The seven Protocols and the
 forecast-frame contract are stable.
 
 This document is not an implementation plan. It's an audit of what a
-**deployed Calibre** would actually look like against a real client — Sales
-+ Orders + Inventory + Events + Promotions — and whether the seams that
+**deployed Calibre** would actually look like against a real client — 
+Sales + Orders + Inventory + Events + Promotions — and whether the seams that
 landed with Ray (and the seams Phase 1–5 will land) cover the four concerns
 raised:
 
