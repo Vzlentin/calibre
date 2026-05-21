@@ -11,13 +11,14 @@ recalibration, and predict-then-optimize HPO?*
 | Ask | Coverage |
 | --- | --- |
 | Scale seams (many SKUs, local + global ensembles, HPO in the loop) | ~70% |
-| Train + inference endpoints | ~85% |
-| Conformal state + online recalibration | ~90% |
+| Train + inference endpoints | ~60% |
+| Conformal state + online recalibration | ~75% |
 | HPO against cost (predict-then-optimize) | ~80% |
 
 The PR materially advances every axis. The remaining gaps are concentrated
 on the **data-plane edge**: ingestion, persistent state for fits/orders/
-inventory, and eager training.
+inventory, and eager training. Two of the scores are lower than a first
+read suggests because the gaps are structural, not just missing code.
 
 ## 1. Scale seams — solid plumbing, thin data ingress
 
@@ -35,7 +36,7 @@ real volume (thousands of SKUs × weekly) you need a parquet / SQL ingestion
 seam. The `DatasetAdapter` / `InventoryAdapter` protocols are the right
 shape but only `SyntheticInventoryAdapter` is implemented.
 
-## 2. Train + inference endpoints — split is right, `/fit` is hollow
+## 2. Train + inference endpoints — split is right, `/fit` is structurally wrong
 
 - `/fit`, `/predict`, `/calibrate`, `/order`, `/observe`,
   `/tune` + `/studies/{id}`, `/sessions/{tenant}/{uid}` — the lifecycle is
@@ -43,19 +44,24 @@ shape but only `SyntheticInventoryAdapter` is implemented.
 - `derive_session_id(tenant, sku_set, forecaster_config, conformal_config)`
   is a real content-addressed identity; reruns coalesce.
 
-**Gap that surprised me:** `_run_fit_job` (`calibre/api/main.py:267`) just
-flips status flags — **no actual model fitting happens at `/fit` time.**
+**Gap that is worse than it looks:** `_run_fit_job` (`calibre/api/main.py:267`)
+just flips status flags — **no actual model fitting happens at `/fit` time.**
 The fit runs lazily inside `/predict` (`_fit_predict_task(task)` at
 `calibre/api/main.py:326`). For client deployment you almost certainly
 want eager training so prediction latency is bounded and model artifacts
 are cacheable. `ModelArtifactCache` exists but isn't wired into the
 lifecycle.
 
+**Worse:** `/fit` returns `SUCCEEDED` without validating that the model config
+is compatible with the data (frequency, regressors, horizon). You can POST
+garbage, get 202 → `SUCCEEDED`, and only discover the failure at `/predict`
+time. The endpoint promises readiness it cannot deliver.
+
 **Gap:** `LifecycleStore` is an in-memory dict. `RunStore` has SQL,
 conformal state has SQL, but fit / study records don't — they evaporate
 on restart.
 
-## 3. Conformal + online recalibration — the strongest part
+## 3. Conformal + online recalibration — strong abstractions, one operational hazard
 
 - Per-`(session_id, partition)` state in `ConformalState`, with
   `SqlConformalStateStore.list_for_run` returning the full partition map.
@@ -67,9 +73,11 @@ on restart.
 - `/observe` background-merges actuals into `last_calibrated` and upserts
   the new state; `compact_old_state` covers retention.
 
-**Watch-out:** `_run_observe_job` silently returns when `last_calibrated`
-is empty (`calibre/api/main.py:396`) — easy to miss in operations. Worth
-a metric or warning log.
+**Operational hazard:** `_run_observe_job` silently returns when
+`last_calibrated` is empty (`calibre/api/main.py:396`). No log, no metric,
+no exception. In production this means the online recalibration pipeline
+can be dead for weeks without alarming. This is not a watch-out — it is a
+coverage-drift failure mode that won't self-report.
 
 ## 4. Predict-then-optimize HPO — abstraction is right, one rough edge
 
@@ -100,7 +108,9 @@ oracle. The path is sketched, not paved.
 ## Recommended next steps before "deployed"
 
 1. **Make `/fit` actually fit** and persist artifacts via
-   `ModelArtifactCache`. Bounded `/predict` latency falls out for free.
+   `ModelArtifactCache`. Include a config-validation pass (frequency, horizon,
+   regressor compatibility) so the endpoint only returns `SUCCEEDED` when the
+   model is proven loadable. Bounded `/predict` latency falls out for free.
 2. **Back `LifecycleStore` with SQL** (mirror the `ConformalState`
    pattern) so sessions survive restarts.
 3. **Ship a SQL-backed `InventoryAdapter`** and a thin `SalesAdapter` for
@@ -109,10 +119,13 @@ oracle. The path is sketched, not paved.
    honor-system string in the session_id).
 5. **Wire `Regret` end-to-end:** precompute oracle inside `/tune`, store
    on `TuneRecord`, surface in `/studies/{id}`.
+6. **Add a loud failure path to `_run_observe_job`** when `last_calibrated`
+   is missing or empty — metric, log, or exception, not a silent return.
 
 ## Bottom line
 
 The bones of a deployable demand-planning service are in this PR. What's
 missing is the data-plane edge — ingestion, persistent state for fits /
-orders / inventory, and eager training. Small in code, but the difference
-between *demoable* and *deployable*.
+orders / inventory, eager training, and operational safety on the
+observability path. Small in code, but the difference between *demoable* and
+*deployable*.
