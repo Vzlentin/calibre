@@ -125,3 +125,11 @@ next_task: "4.d ModelArtifactCache + ModelAdapter.cache_key"
 last_commit: "6a0911a"
 notes: "added Regret(decision_rule, arithmetic, costs, oracle_cost, mode) in calibre/tuning/objectives.py; evaluate delegates to Cost(..., mode=mode).evaluate then returns compute_regret on a single-element realized vs oracle Series; oracle_cost is a precomputed scalar (perfect-foresight benchmark) so the simulator is not re-run inside each trial; targeted regret_objective + cost_mode_dispatch + evaluation.regret tests passed; tuning mypy and ruff passed"
 ```
+
+```yaml
+phase: 4
+last_completed_task: "4.d ModelArtifactCache + ModelAdapter.cache_key"
+next_task: "4.e calibre_conformal_coverage_drift gauge"
+last_commit: "pending in phase-4.d commit"
+notes: "added calibre/forecasting/cache.py with ModelArtifactCache(uri) backed by per-key blob files; added ModelAdapter.cache_key(task) default (SHA256 over history.to_csv + model_config JSON), ModelAdapter.dump_state/load_state hooks raising NotImplementedError by default, and ModelAdapter.fit_with_cache(task, cache) returning True on miss-and-fit, False on hit-and-restore; tests/forecasting/test_model_cache.py covers miss-writes, hit-skips-fit, cache_key sensitivity to model_config and history, no-cache passthrough, default dump_state guard, and key-traversal rejection; pytest, forecasting mypy, and ruff passed"
+```
