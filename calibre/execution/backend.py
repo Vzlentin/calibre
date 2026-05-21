@@ -497,6 +497,15 @@ class BackendEngine:
             or self.conformal_config is None
         ):
             return
+        list_for_run = getattr(self.conformal_state_store, "list_for_run", None)
+        if callable(list_for_run):
+            partition_states = list_for_run(self.run_id)
+            if partition_states:
+                self.conformal_runtime = SymmetricIntervalRuntime.from_partition_states(
+                    self.conformal_config,
+                    partition_states,
+                )
+                return
         state = self.conformal_state_store.get(self.run_id, RUNTIME_PARTITION)
         if state is None:
             return
@@ -505,6 +514,17 @@ class BackendEngine:
     def _persist_conformal_state(self, conformal_runtime: ConformalRuntime | None) -> None:
         if self.run_id is None or self.conformal_state_store is None or conformal_runtime is None:
             return
+        get_partition_states = getattr(conformal_runtime, "get_partition_states", None)
+        if callable(get_partition_states):
+            partition_states = get_partition_states()
+            if partition_states:
+                for partition, state in partition_states.items():
+                    self.conformal_state_store.upsert(
+                        self.run_id,
+                        str(partition),
+                        to_json_safe_state(state),
+                    )
+                return
         state = to_json_safe_state(conformal_runtime.get_resume_state())
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
 

@@ -34,6 +34,14 @@ notes: "targeted Phase 1 pytest passed; uv run pytest passed 414/414 with 3 skip
 phase: 2
 last_completed_task: "2.a session-keyed conformal state schema"
 next_task: "2.b persist conformal runtime state per real partition"
-last_commit: "pending in phase-2.a commit"
+last_commit: "aec239a"
 notes: "added deterministic derive_session_id; migrated conformal_state primary key to (session_id, partition) while retaining run_id as audit FK; added pending_observations table; storage/migration/state-resume tests passed"
+```
+
+```yaml
+phase: 2
+last_completed_task: "2.b persist conformal runtime state per real partition"
+next_task: "2.c persist pending observations across DecisionLoop restarts"
+last_commit: "pending in phase-2.b commit"
+notes: "SymmetricIntervalRuntime exposes partition_keys and per-partition snapshots; BackendEngine persists and restores partition rows through list_for_run; state-resume, storage partition, engine, and pipeline-runner tests passed"
 ```
