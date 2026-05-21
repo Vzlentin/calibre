@@ -101,3 +101,11 @@ next_task: "4.a evaluation/regret.py + AdaptiveAlphaController.error_history"
 last_commit: "59ab0d2"
 notes: "removed stale test_ray_backend_warns_for_global_only_workloads (Phase 3.b made Ray fan-out the actual behaviour, so the warning no longer fires); uv run pytest passed 428/428 with 3 skipped; uv run mypy calibre/ passed; uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml total_cost=4992.20 (matches Phase 2 baseline)"
 ```
+
+```yaml
+phase: 4
+last_completed_task: "4.a evaluation/regret.py + AdaptiveAlphaController.error_history"
+next_task: "4.b TuningCandidate + Regret objective wiring"
+last_commit: "pending in phase-4.a commit"
+notes: "added calibre/evaluation/regret.py with compute_regret(realized, oracle) returning sum of positive excess; exposed AdaptiveAlphaController.error_history as a read-only list copy following the current_alpha pattern; targeted regret + adaptive controller tests, module mypy, and ruff passed"
+```
