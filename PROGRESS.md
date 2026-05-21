@@ -157,3 +157,11 @@ next_task: "5.a Multi-SKU HPO fan-out in /tune + tuning_runs table"
 last_commit: "8eb0b8b"
 notes: "uv run pytest passed 465/465 with 3 skipped; uv run mypy calibre/ passed (94 source files); uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml total_cost=4992.20 (matches Phase 2 baseline exactly)"
 ```
+
+```yaml
+phase: 5
+last_completed_task: "5.a tuning_runs table + Alembic migration"
+next_task: "5.b multi-SKU /tune fan-out + per-SKU persistence"
+last_commit: "pending in phase-5.a commit"
+notes: "added TuningRun(session_id, unique_id, candidate, score, finished_at) model with composite PK (session_id, unique_id); added TuningRunRepo with get/list_for_session/upsert (overwrites candidate/score, refreshes finished_at via datetime.now(UTC)); added Alembic migration 0004_tuning_runs with downgrade; extended test_storage_alembic_upgrade_creates_run_tables to assert tuning_runs table + PK + revision pointer; tests/storage/test_tuning_runs.py covers round-trip across two SKUs, overriding existing rows, and finished_at advancing on re-upsert; targeted pytest (4/4), ruff, and mypy on calibre/storage passed"
+```

@@ -55,6 +55,20 @@ class PendingObservation(Base):
     y_hat: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class TuningRun(Base):
+    __tablename__ = "tuning_runs"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    unique_id: Mapped[str] = mapped_column(String, primary_key=True)
+    candidate: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class ForecastPointer(Base):
     __tablename__ = "forecast_pointers"
 

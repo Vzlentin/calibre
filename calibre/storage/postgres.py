@@ -23,7 +23,13 @@ from calibre.core.forecast_frame import (
     Y,
 )
 from calibre.core.run_status import RunStatus
-from calibre.storage.models import ConformalState, ForecastPointer, PendingObservation, Run
+from calibre.storage.models import (
+    ConformalState,
+    ForecastPointer,
+    PendingObservation,
+    Run,
+    TuningRun,
+)
 
 
 def database_url() -> str | None:
@@ -261,6 +267,43 @@ class PendingObservationRepo:
                 lower_col=lower_col,
                 upper_col=upper_col,
             )
+
+
+class TuningRunRepo:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get(self, session_id: str, unique_id: str) -> TuningRun | None:
+        return self.session.get(TuningRun, (session_id, unique_id))
+
+    def list_for_session(self, session_id: str) -> list[TuningRun]:
+        return list(
+            self.session.scalars(select(TuningRun).where(TuningRun.session_id == session_id))
+        )
+
+    def upsert(
+        self,
+        session_id: str,
+        unique_id: str,
+        *,
+        candidate: dict,
+        score: float | None,
+    ) -> None:
+        row = self.session.get(TuningRun, (session_id, unique_id))
+        if row is None:
+            self.session.add(
+                TuningRun(
+                    session_id=session_id,
+                    unique_id=unique_id,
+                    candidate=dict(candidate),
+                    score=score,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+        else:
+            row.candidate = dict(candidate)
+            row.score = score
+            row.finished_at = datetime.now(UTC)
 
 
 class ForecastPointerRepo:
