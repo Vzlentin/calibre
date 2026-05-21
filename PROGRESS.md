@@ -170,6 +170,6 @@ notes: "added TuningRun(session_id, unique_id, candidate, score, finished_at) mo
 phase: 5
 last_completed_task: "5.b multi-SKU /tune fan-out + per-SKU persistence"
 next_task: "5.c /predict future_x_override"
-last_commit: "pending in phase-5.b commit"
+last_commit: "43973d7"
 notes: "TuneRecord now stores best_candidates: dict[unique_id, {model_config, conformal_config, ordering_config}] (single-SKU fields removed); TuneStudyResponse exposes best_candidates: dict[uid, TuneCandidatePayload]; /tune background task fans out per-SKU: filters history/actuals to UNIQUE_ID==uid, calls optimize_task_candidate per SKU, persists each candidate to tuning_runs via TuningRunRepo, and skips SKUs that already have a tuning_runs row (resume support); added _db_session_factory() shared between SqlRunStore and tuning_runs writes; tests/api/test_tune_fanout.py covers 5-SKU per-SKU persistence (DB rows keyed by same session_id with distinct candidate payloads) and partial-resume (pre-existing A+B rows skipped, only C tuned); test_tune_endpoint asserts updated to best_candidates dict; targeted pytest (9/9 on tune endpoint+fanout), ruff on api/+tests/api, and mypy on calibre/api passed"
 ```
