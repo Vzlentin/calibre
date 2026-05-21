@@ -154,6 +154,6 @@ notes: "added optimize_task_candidate(task) -> TuningCandidate in calibre/tuning
 phase: 4
 last_completed_task: "Phase 4 DoD and cross-phase regression gate"
 next_task: "5.a Multi-SKU HPO fan-out in /tune + tuning_runs table"
-last_commit: "pending in phase-4-gate commit"
+last_commit: "8eb0b8b"
 notes: "uv run pytest passed 465/465 with 3 skipped; uv run mypy calibre/ passed (94 source files); uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml total_cost=4992.20 (matches Phase 2 baseline exactly)"
 ```
