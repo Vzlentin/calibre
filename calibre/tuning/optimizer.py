@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 import tempfile
-import warnings
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,11 @@ from typing import Any
 import optuna
 import pandas as pd
 
+from calibre.conformal.runtime import (
+    SymmetricIntervalConfig,
+    SymmetricIntervalRuntime,
+    to_json_safe_state,
+)
 from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
@@ -23,6 +28,12 @@ from calibre.tuning.task import TuningTask
 _OBJECTIVE_METRIC = "objective"
 _ORIGIN_INDEX = "origin_index"
 _DEFAULT_TUNE_RESULTS_SUBDIR = "ray_tune"
+
+
+@dataclass(frozen=True, slots=True)
+class _ConformalRuntimeSnapshot:
+    config: SymmetricIntervalConfig
+    state: dict[str, Any]
 
 
 def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
@@ -146,6 +157,29 @@ def _build_mlflow_callbacks(task: TuningTask) -> list[Any]:
     ]
 
 
+def _snapshot_conformal_runtime(task: TuningTask) -> _ConformalRuntimeSnapshot | None:
+    if task.conformal_runtime_factory is None:
+        return None
+    seed_runtime = task.conformal_runtime_factory()
+    if not isinstance(seed_runtime, SymmetricIntervalRuntime):
+        raise TypeError(
+            "Ray Tune conformal optimization requires conformal_runtime_factory "
+            "to return SymmetricIntervalRuntime"
+        )
+    return _ConformalRuntimeSnapshot(
+        config=seed_runtime.config,
+        state=to_json_safe_state(seed_runtime.get_resume_state()),
+    )
+
+
+def _resolve_state_ref(state_ref: Any) -> dict[str, Any]:
+    import ray
+
+    if isinstance(state_ref, ray.ObjectRef):
+        return ray.get(state_ref)
+    return dict(state_ref)
+
+
 def _best_result_config(results: Any) -> dict[str, Any]:
     valid_results = [
         result
@@ -187,6 +221,7 @@ def _evaluate_candidate(
     origins: list[pd.Timestamp],
 ) -> float:
     history = _history_with_uid(task)
+    runtime_snapshot = _snapshot_conformal_runtime(task)
     candidate_config = _cap_threaded_config(
         {**task.base_model_config, **config, "freq": task.freq},
         task.cpu_per_trial,
@@ -197,8 +232,13 @@ def _evaluate_candidate(
         model_config=candidate_config,
     )
     conformal_options = (
-        ConformalOptions(runtime=task.conformal_runtime_factory())
-        if task.conformal_runtime_factory is not None
+        ConformalOptions(
+            runtime=SymmetricIntervalRuntime.from_state(
+                runtime_snapshot.config,
+                runtime_snapshot.state,
+            )
+        )
+        if runtime_snapshot is not None
         else ConformalOptions()
     )
     with BackendEngine(
@@ -239,15 +279,9 @@ def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> 
 def optimize_task(task: TuningTask) -> dict:
     """Run HPO and return the best model_config dict."""
     origins = _validate_task(task)
-
-    if task.conformal_runtime_factory is not None and not task.ray_local_mode:
-        warnings.warn(
-            "conformal_runtime_factory is set: falling back to sequential Optuna "
-            "instead of Ray Tune. Set ray_local_mode=True to use Ray Tune with conformal.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return _optimize_task_sequential(task, origins)
+    runtime_snapshot = _snapshot_conformal_runtime(task)
+    conformal_config = runtime_snapshot.config if runtime_snapshot is not None else None
+    worker_task = replace(task, conformal_runtime_factory=None)
 
     prepare_ray_environment()
 
@@ -255,77 +289,90 @@ def optimize_task(task: TuningTask) -> dict:
     from ray.tune.schedulers import ASHAScheduler
     from ray.tune.search.optuna import OptunaSearch
 
-    history = _history_with_uid(task)
+    history = _history_with_uid(worker_task)
     max_t = len(origins)
-    max_concurrent_trials = _resolved_max_concurrent_trials(task)
+    max_concurrent_trials = _resolved_max_concurrent_trials(worker_task)
     search_alg = OptunaSearch(
-        space=task.search_space,
+        space=worker_task.search_space,
         metric=_OBJECTIVE_METRIC,
         mode="min",
-        sampler=create_tpe_sampler(task.seed),
+        sampler=create_tpe_sampler(worker_task.seed),
     )
     scheduler = ASHAScheduler(
         metric=_OBJECTIVE_METRIC,
         mode="min",
         time_attr=_ORIGIN_INDEX,
         max_t=max_t,
-        grace_period=task.asha_grace_period,
+        grace_period=worker_task.asha_grace_period,
     )
 
-    def _trainable(config: dict[str, Any]) -> None:
+    def _trainable(config: dict[str, Any], *, state_ref: Any | None = None) -> None:
         candidate_config = _cap_threaded_config(
-            {**task.base_model_config, **config, "freq": task.freq},
-            task.cpu_per_trial,
+            {**worker_task.base_model_config, **config, "freq": worker_task.freq},
+            worker_task.cpu_per_trial,
         )
         forecast_task = ForecastTask(
             history=history,
-            horizon=task.horizon,
+            horizon=worker_task.horizon,
             model_config=candidate_config,
         )
         conformal_options = (
-            ConformalOptions(runtime=task.conformal_runtime_factory())
-            if task.conformal_runtime_factory is not None
+            ConformalOptions(
+                runtime=SymmetricIntervalRuntime.from_state(
+                    conformal_config,
+                    _resolve_state_ref(state_ref),
+                )
+            )
+            if conformal_config is not None
             else ConformalOptions()
         )
         engine = BackendEngine(
             execution=ExecutionOptions(
-                freq=task.freq,
+                freq=worker_task.freq,
                 backend="local",
-                max_concurrency=task.max_uid_concurrency,
+                max_concurrency=worker_task.max_uid_concurrency,
             ),
             conformal=conformal_options,
         )
         try:
-            with _trial_thread_env(task.cpu_per_trial):
+            with _trial_thread_env(worker_task.cpu_per_trial):
                 for origin_idx, result in enumerate(
-                    engine.iter_origins([forecast_task], task.actuals, origins),
+                    engine.iter_origins([forecast_task], worker_task.actuals, origins),
                     start=1,
                 ):
                     resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
                     value = (
                         float("inf")
                         if resolved.empty
-                        else float(task.objective.evaluate(resolved, resolved[Y]))
+                        else float(worker_task.objective.evaluate(resolved, resolved[Y]))
                     )
                     tune.report({_OBJECTIVE_METRIC: value, _ORIGIN_INDEX: origin_idx})
         finally:
             engine.close()
 
+    ray_runtime = acquire_ray_runtime(
+        address=worker_task.ray_address,
+        local_mode=worker_task.ray_local_mode,
+    )
+    state_ref = (
+        ray_runtime.ray.put(runtime_snapshot.state) if runtime_snapshot is not None else None
+    )
+    trainable_fn = (
+        tune.with_parameters(_trainable, state_ref=state_ref)
+        if state_ref is not None
+        else _trainable
+    )
     trainable = tune.with_resources(
-        _trainable,
-        resources={"cpu": float(task.cpu_per_trial)},
+        trainable_fn,
+        resources={"cpu": float(worker_task.cpu_per_trial)},
     )
     run_config_kwargs: dict[str, Any] = {
-        "callbacks": _build_mlflow_callbacks(task),
-        "storage_path": _resolve_tune_storage_path(task),
+        "callbacks": _build_mlflow_callbacks(worker_task),
+        "storage_path": _resolve_tune_storage_path(worker_task),
     }
-    if task.tune_experiment_name is not None:
-        run_config_kwargs["name"] = task.tune_experiment_name
+    if worker_task.tune_experiment_name is not None:
+        run_config_kwargs["name"] = worker_task.tune_experiment_name
 
-    ray_runtime = acquire_ray_runtime(
-        address=task.ray_address,
-        local_mode=task.ray_local_mode,
-    )
     previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
     os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
     previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
@@ -337,7 +384,7 @@ def optimize_task(task: TuningTask) -> dict:
                 tune_config=tune.TuneConfig(
                     search_alg=search_alg,
                     scheduler=scheduler,
-                    num_samples=task.n_trials,
+                    num_samples=worker_task.n_trials,
                     max_concurrent_trials=max_concurrent_trials,
                 ),
                 run_config=tune.RunConfig(**run_config_kwargs),
