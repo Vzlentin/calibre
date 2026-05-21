@@ -186,6 +186,6 @@ notes: "PredictRequest now accepts future_x_override keyed by unique_id; /predic
 phase: 5
 last_completed_task: "Phase 5 DoD and cross-phase regression gate"
 next_task: "Completion audit"
-last_commit: "pending in phase-5 gate commit"
+last_commit: "90bf0e3"
 notes: "uv run pytest passed 472/472 with 3 skipped; uv run mypy calibre/ passed (95 source files); uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml total_cost=4992.20 (matches recorded Phase 2+ baseline)"
 ```
