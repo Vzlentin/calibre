@@ -106,6 +106,6 @@ notes: "removed stale test_ray_backend_warns_for_global_only_workloads (Phase 3.
 phase: 4
 last_completed_task: "4.a evaluation/regret.py + AdaptiveAlphaController.error_history"
 next_task: "4.b TuningCandidate + Regret objective wiring"
-last_commit: "pending in phase-4.a commit"
+last_commit: "ea58250"
 notes: "added calibre/evaluation/regret.py with compute_regret(realized, oracle) returning sum of positive excess; exposed AdaptiveAlphaController.error_history as a read-only list copy following the current_alpha pattern; targeted regret + adaptive controller tests, module mypy, and ruff passed"
 ```
