@@ -146,6 +146,6 @@ notes: "added calibre_conformal_coverage_drift{model, partition} Gauge with set_
 phase: 4
 last_completed_task: "4.f POST /tune + GET /studies/{id}"
 next_task: "Phase 4 DoD: cross-phase regression gate"
-last_commit: "pending in phase-4.f commit"
+last_commit: "7007436"
 notes: "added optimize_task_candidate(task) -> TuningCandidate in calibre/tuning/optimizer.py (re-derives full candidate from best Optuna params via FixedTrial replay, merges base_model_config); refactored optimize_task to call optimize_task_candidate so the dict-returning API stays back-compat; added TuneRecord to LifecycleStore with study_id/session_id/status/best_*_config fields; added TuneRequest/TuneHandle/TuneStudyResponse/TuneCandidatePayload schemas; added in-process search-space + objective registries with register_tuning_search_space/register_tuning_objective helpers (HTTP cannot carry Callables, so trials route through named registrations); POST /tune validates inputs, derives deterministic session_id via derive_session_id, returns 202 with study_id, and runs optimize_task_candidate inside a BackgroundTask; GET /studies/{id} returns the best TuningCandidate serialized; tests/api/test_tune_endpoint.py covers unknown search-space/objective rejection, persistence of best candidate (model + conformal channels), 404 for unknown study, deterministic session_id across submissions, and FAILED status capturing the error string; targeted pytest (33/33 on tuning+api+observability), ruff, and mypy on tuning/api passed"
 ```
