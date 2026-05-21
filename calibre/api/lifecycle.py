@@ -37,9 +37,7 @@ class TuneRecord:
     sku_set: list[str]
     status: RunStatus = RunStatus.QUEUED
     error: str | None = None
-    best_model_config: dict | None = None
-    best_conformal_config: dict | None = None
-    best_ordering_config: dict | None = None
+    best_candidates: dict[str, dict[str, dict]] = field(default_factory=dict)
 
 
 class LifecycleStore:

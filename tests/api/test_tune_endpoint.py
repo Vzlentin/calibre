@@ -112,9 +112,9 @@ def test_tune_endpoint_persists_best_candidate(monkeypatch, client) -> None:
     assert detail.status_code == 200, detail.text
     body = detail.json()
     assert body["status"] == "succeeded"
-    assert body["best_candidate"]["model_config_values"]["season_length"] == 26
-    assert body["best_candidate"]["conformal_config"]["gamma"] == 0.07
-    assert body["best_candidate"]["ordering_config"] == {}
+    assert body["best_candidates"]["A"]["model_config_values"]["season_length"] == 26
+    assert body["best_candidates"]["A"]["conformal_config"]["gamma"] == 0.07
+    assert body["best_candidates"]["A"]["ordering_config"] == {}
     assert body["sku_set"] == ["A"]
 
     assert captured["task"].unique_id == "A"
@@ -167,4 +167,4 @@ def test_failed_study_records_error(monkeypatch, client) -> None:
 
     assert detail["status"] == "failed"
     assert "optuna exploded" in detail["error"]
-    assert detail["best_candidate"] is None
+    assert detail["best_candidates"] == {}

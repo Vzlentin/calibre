@@ -165,3 +165,11 @@ next_task: "5.b multi-SKU /tune fan-out + per-SKU persistence"
 last_commit: "8879915"
 notes: "added TuningRun(session_id, unique_id, candidate, score, finished_at) model with composite PK (session_id, unique_id); added TuningRunRepo with get/list_for_session/upsert (overwrites candidate/score, refreshes finished_at via datetime.now(UTC)); added Alembic migration 0004_tuning_runs with downgrade; extended test_storage_alembic_upgrade_creates_run_tables to assert tuning_runs table + PK + revision pointer; tests/storage/test_tuning_runs.py covers round-trip across two SKUs, overriding existing rows, and finished_at advancing on re-upsert; targeted pytest (4/4), ruff, and mypy on calibre/storage passed"
 ```
+
+```yaml
+phase: 5
+last_completed_task: "5.b multi-SKU /tune fan-out + per-SKU persistence"
+next_task: "5.c /predict future_x_override"
+last_commit: "pending in phase-5.b commit"
+notes: "TuneRecord now stores best_candidates: dict[unique_id, {model_config, conformal_config, ordering_config}] (single-SKU fields removed); TuneStudyResponse exposes best_candidates: dict[uid, TuneCandidatePayload]; /tune background task fans out per-SKU: filters history/actuals to UNIQUE_ID==uid, calls optimize_task_candidate per SKU, persists each candidate to tuning_runs via TuningRunRepo, and skips SKUs that already have a tuning_runs row (resume support); added _db_session_factory() shared between SqlRunStore and tuning_runs writes; tests/api/test_tune_fanout.py covers 5-SKU per-SKU persistence (DB rows keyed by same session_id with distinct candidate payloads) and partial-resume (pre-existing A+B rows skipped, only C tuned); test_tune_endpoint asserts updated to best_candidates dict; targeted pytest (9/9 on tune endpoint+fanout), ruff on api/+tests/api, and mypy on calibre/api passed"
+```

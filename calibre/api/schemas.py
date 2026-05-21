@@ -134,7 +134,7 @@ class TuneStudyResponse(BaseModel):
     tenant: str
     sku_set: list[str]
     status: RunStatus
-    best_candidate: TuneCandidatePayload | None = None
+    best_candidates: dict[str, TuneCandidatePayload] = Field(default_factory=dict)
     error: str | None = None
 
 

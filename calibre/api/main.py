@@ -46,7 +46,13 @@ from calibre.execution.backend import (
     _fit_predict_task,
 )
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
-from calibre.storage.postgres import database_url, make_engine, make_session_factory
+from calibre.storage.postgres import (
+    TuningRunRepo,
+    database_url,
+    make_engine,
+    make_session_factory,
+    session_scope,
+)
 from calibre.storage.session import derive_session_id
 from calibre.tuning import (
     TuningCandidate,
@@ -78,15 +84,25 @@ def register_tuning_objective(name: str, objective: TuningObjective) -> None:
     _OBJECTIVES[name] = objective
 
 
-def _run_store() -> RunStore:
+def _db_session_factory() -> sessionmaker | None:
     global _DB_FACTORY, _DB_URL, _SQL_STORE
     url = database_url()
     if not url:
-        return _MEMORY_STORE
-    if _DB_FACTORY is None or _SQL_STORE is None or url != _DB_URL:
+        return None
+    if _DB_FACTORY is None or url != _DB_URL:
         _DB_URL = url
         _DB_FACTORY = make_session_factory(make_engine(url))
-        _SQL_STORE = SqlRunStore(_DB_FACTORY)
+        _SQL_STORE = None
+    return _DB_FACTORY
+
+
+def _run_store() -> RunStore:
+    global _SQL_STORE
+    factory = _db_session_factory()
+    if factory is None:
+        return _MEMORY_STORE
+    if _SQL_STORE is None:
+        _SQL_STORE = SqlRunStore(factory)
     return _SQL_STORE
 
 
@@ -416,6 +432,54 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
     return TuneHandle(study_id=study_id, session_id=session_id, status=RunStatus.QUEUED)
 
 
+def _filter_uid(frame: pd.DataFrame, uid: str) -> pd.DataFrame:
+    if frame.empty or UNIQUE_ID not in frame.columns:
+        return frame
+    return frame[frame[UNIQUE_ID] == uid].reset_index(drop=True)
+
+
+def _candidate_to_payload(candidate: TuningCandidate) -> dict[str, dict]:
+    return {
+        "model_config": dict(candidate.model_config),
+        "conformal_config": dict(candidate.conformal_config),
+        "ordering_config": dict(candidate.ordering_config),
+    }
+
+
+def _load_existing_tuning_run(
+    factory: sessionmaker | None, session_id: str, unique_id: str
+) -> dict[str, dict] | None:
+    if factory is None:
+        return None
+    with session_scope(factory) as session:
+        row = TuningRunRepo(session).get(session_id, unique_id)
+        if row is None:
+            return None
+        candidate = dict(row.candidate)
+    return {
+        "model_config": dict(candidate.get("model_config", {})),
+        "conformal_config": dict(candidate.get("conformal_config", {})),
+        "ordering_config": dict(candidate.get("ordering_config", {})),
+    }
+
+
+def _persist_tuning_run(
+    factory: sessionmaker | None,
+    session_id: str,
+    unique_id: str,
+    payload: dict[str, dict],
+) -> None:
+    if factory is None:
+        return
+    with session_scope(factory) as session:
+        TuningRunRepo(session).upsert(
+            session_id,
+            unique_id,
+            candidate=payload,
+            score=None,
+        )
+
+
 def _run_tune_job(
     study_id: str,
     req: TuneRequest,
@@ -424,29 +488,39 @@ def _run_tune_job(
     origins: list[pd.Timestamp],
 ) -> None:
     store = _lifecycle_store()
-    if store.get_study(study_id) is None:
+    record = store.get_study(study_id)
+    if record is None:
         return
     store.update_study(study_id, status=RunStatus.RUNNING)
+    session_id = record.session_id
+    factory = _db_session_factory()
+    candidates: dict[str, dict[str, dict]] = {}
     try:
-        task = TuningTask(
-            unique_id=req.sku_set[0],
-            history=history,
-            horizon=int(req.horizon),
-            base_model_config=dict(req.base_model_config),
-            search_space=_SEARCH_SPACES[req.search_space_id],
-            actuals=actuals,
-            origins=origins,
-            objective=_OBJECTIVES[req.objective_id],
-            n_trials=int(req.n_trials),
-            freq=req.freq,
-        )
-        candidate = optimize_task_candidate(task)
+        for uid in req.sku_set:
+            existing = _load_existing_tuning_run(factory, session_id, uid)
+            if existing is not None:
+                candidates[uid] = existing
+                continue
+            task = TuningTask(
+                unique_id=uid,
+                history=_filter_uid(history, uid),
+                horizon=int(req.horizon),
+                base_model_config=dict(req.base_model_config),
+                search_space=_SEARCH_SPACES[req.search_space_id],
+                actuals=_filter_uid(actuals, uid),
+                origins=origins,
+                objective=_OBJECTIVES[req.objective_id],
+                n_trials=int(req.n_trials),
+                freq=req.freq,
+            )
+            candidate = optimize_task_candidate(task)
+            payload = _candidate_to_payload(candidate)
+            _persist_tuning_run(factory, session_id, uid, payload)
+            candidates[uid] = payload
         store.update_study(
             study_id,
             status=RunStatus.SUCCEEDED,
-            best_model_config=dict(candidate.model_config),
-            best_conformal_config=dict(candidate.conformal_config),
-            best_ordering_config=dict(candidate.ordering_config),
+            best_candidates=candidates,
         )
     except Exception as exc:  # pragma: no cover - background task safety net
         store.update_study(study_id, status=RunStatus.FAILED, error=_format_error(exc))
@@ -457,22 +531,21 @@ def get_study(study_id: str) -> TuneStudyResponse:
     record = _lifecycle_store().get_study(study_id)
     if record is None:
         raise HTTPException(status_code=404, detail="study not found")
-    best_candidate = (
-        TuneCandidatePayload(
-            model_config_values=dict(record.best_model_config or {}),
-            conformal_config=dict(record.best_conformal_config or {}),
-            ordering_config=dict(record.best_ordering_config or {}),
+    best_candidates = {
+        uid: TuneCandidatePayload(
+            model_config_values=dict(payload.get("model_config", {})),
+            conformal_config=dict(payload.get("conformal_config", {})),
+            ordering_config=dict(payload.get("ordering_config", {})),
         )
-        if record.status == RunStatus.SUCCEEDED and record.best_model_config is not None
-        else None
-    )
+        for uid, payload in record.best_candidates.items()
+    }
     return TuneStudyResponse(
         study_id=record.study_id,
         session_id=record.session_id,
         tenant=record.tenant,
         sku_set=list(record.sku_set),
         status=record.status,
-        best_candidate=best_candidate,
+        best_candidates=best_candidates,
         error=record.error,
     )
 
