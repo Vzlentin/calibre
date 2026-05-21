@@ -12,15 +12,17 @@ from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.evaluation.point_metrics import mae, pinball_linear, smape
 from calibre.tuning.objectives import Accuracy
 from calibre.tuning.optimizer import _cap_threaded_config, _resolve_tune_storage_path, optimize_task
-from calibre.tuning.task import TuningTask
+from calibre.tuning.task import TuningCandidate, TuningTask
 
 
 def pinball_loss(actual, predicted):
     return pinball_linear(actual, predicted, tau=0.5)
 
 
-def _space_season_length(trial: optuna.Trial) -> dict:
-    return {"season_length": trial.suggest_categorical("season_length", [2, 4])}
+def _space_season_length(trial: optuna.Trial) -> TuningCandidate:
+    return TuningCandidate(
+        model_config={"season_length": trial.suggest_categorical("season_length", [2, 4])}
+    )
 
 
 @pytest.fixture

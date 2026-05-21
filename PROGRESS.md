@@ -109,3 +109,11 @@ next_task: "4.b TuningCandidate + Regret objective wiring"
 last_commit: "ea58250"
 notes: "added calibre/evaluation/regret.py with compute_regret(realized, oracle) returning sum of positive excess; exposed AdaptiveAlphaController.error_history as a read-only list copy following the current_alpha pattern; targeted regret + adaptive controller tests, module mypy, and ruff passed"
 ```
+
+```yaml
+phase: 4
+last_completed_task: "4.b TuningCandidate + per-trial config routing"
+next_task: "4.c Regret objective in calibre/tuning/objectives.py"
+last_commit: "pending in phase-4.b commit"
+notes: "added TuningCandidate(model_config, conformal_config, ordering_config) dataclass in calibre/tuning/task.py; TuningTask.search_space now returns TuningCandidate; optimizer routes model_config to ForecastTask, conformal_config via dataclasses.replace on SymmetricIntervalConfig, and ordering_config via dataclasses.replace on the (dataclass) objective; Tune-side trainable rebuilds the candidate via FixedTrial; module-level _OptunaSearchSpaceAdapter keeps OptunaSearch happy and remains picklable for Ray Tune state checkpoints; existing dict-returning search spaces in tests and benchmarks/vn2/tuning.py updated to return TuningCandidate; tuning tests (27/27), benchmarks/vn2/tuning mypy, and ruff passed"
+```

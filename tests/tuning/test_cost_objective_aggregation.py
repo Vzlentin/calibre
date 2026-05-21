@@ -8,11 +8,11 @@ import pandas as pd
 import calibre.tuning.optimizer as optimizer
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.tuning.optimizer import _OBJECTIVE_METRIC, _ORIGIN_INDEX, _evaluate_candidate
-from calibre.tuning.task import TuningTask
+from calibre.tuning.task import TuningCandidate, TuningTask
 
 
-def _constant_space(trial: optuna.Trial) -> dict:
-    return {"season_length": 1}
+def _constant_space(trial: optuna.Trial) -> TuningCandidate:
+    return TuningCandidate(model_config={"season_length": 1})
 
 
 class _SumCostObjective:
@@ -104,7 +104,7 @@ def test_total_cost_accumulates_across_origins(monkeypatch) -> None:
     ]
     monkeypatch.setattr(optimizer, "BackendEngine", _FakeBackendEngine)
 
-    value = _evaluate_candidate(task, {"season_length": 1}, origins)
+    value = _evaluate_candidate(task, TuningCandidate(model_config={"season_length": 1}), origins)
 
     assert value == 30.0
 

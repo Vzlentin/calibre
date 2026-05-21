@@ -9,11 +9,13 @@ import calibre.tuning.optimizer as optimizer
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.evaluation.point_metrics import smape
 from calibre.tuning.objectives import Accuracy
-from calibre.tuning.task import TuningTask
+from calibre.tuning.task import TuningCandidate, TuningTask
 
 
-def _space_season_length(trial: optuna.Trial) -> dict:
-    return {"season_length": trial.suggest_categorical("season_length", [2, 4])}
+def _space_season_length(trial: optuna.Trial) -> TuningCandidate:
+    return TuningCandidate(
+        model_config={"season_length": trial.suggest_categorical("season_length", [2, 4])}
+    )
 
 
 def test_no_sequential_fallback_when_conformal_in_loop(monkeypatch, tmp_path) -> None:
