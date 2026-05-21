@@ -178,6 +178,6 @@ notes: "TuneRecord now stores best_candidates: dict[unique_id, {model_config, co
 phase: 5
 last_completed_task: "5.c /predict future_x_override"
 next_task: "Phase 5 DoD: cross-phase regression gate"
-last_commit: "pending in phase-5.c commit"
+last_commit: "c1ae1c4"
 notes: "PredictRequest now accepts future_x_override keyed by unique_id; /predict merges override rows onto the fit-time future_x by (unique_id, ds), adds new regressor columns, replaces provided values for matching rows, and uses a non-mutating copy so scenario overrides do not persist across later baseline calls; tests/api/test_predict_what_if.py covers forecast changes and non-persistence; Phase 5 API target pytest (test_tune_fanout + test_predict_what_if), ruff on api/+new tests, and mypy on calibre/api passed"
 ```
