@@ -18,6 +18,14 @@ notes: "objective contributions are accumulated as monotone total_cost over newl
 phase: 1
 last_completed_task: "1.c make Cost.evaluate mode-aware"
 next_task: "Phase 1 DoD: run targeted gate, record VN2 baseline, then cross-phase regression gate"
-last_commit: "pending in phase-1.c commit"
+last_commit: "15b7ffa"
 notes: "Cost now validates conformal_mode and dispatches perhorizon vs cumulative semantics; Pareto forwards mode; Phase 1 targeted pytest passed"
+```
+
+```yaml
+phase: 1
+last_completed_task: "Phase 1 DoD and cross-phase regression gate"
+next_task: "2.a per-partition state + session identity"
+last_commit: "pending in phase-1 boundary commit"
+notes: "targeted Phase 1 pytest passed; uv run pytest passed 414/414 with 3 skipped; uv run mypy calibre/ passed; uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml passed with vn2_baseline_total_cost=4992.20"
 ```
