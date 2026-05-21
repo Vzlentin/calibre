@@ -55,6 +55,7 @@ class FitHandle(BaseModel):
 class PredictRequest(BaseModel):
     fit_id: str
     origin: str
+    future_x_override: dict[str, list[dict[str, Any]]] | None = None
 
 
 class PredictResponse(BaseModel):

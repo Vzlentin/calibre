@@ -131,6 +131,44 @@ def _frame_from_records(records: list[dict]) -> pd.DataFrame:
     return frame
 
 
+def _merge_future_x_override(
+    base: pd.DataFrame | None,
+    override: dict[str, list[dict]] | None,
+) -> pd.DataFrame | None:
+    if not override:
+        return base.copy() if base is not None else None
+
+    override_frames: list[pd.DataFrame] = []
+    for uid, records in override.items():
+        if not records:
+            continue
+        frame = pd.DataFrame(records).copy()
+        if DS not in frame.columns:
+            raise ValueError(f"future_x_override for {uid!r} must include ds")
+        frame[UNIQUE_ID] = uid
+        frame[DS] = pd.to_datetime(frame[DS])
+        override_frames.append(frame)
+
+    if not override_frames:
+        return base.copy() if base is not None else None
+
+    override_frame = pd.concat(override_frames, ignore_index=True).drop_duplicates(
+        [UNIQUE_ID, DS],
+        keep="last",
+    )
+    base_frame = base.copy() if base is not None else pd.DataFrame(columns=[UNIQUE_ID, DS])
+    if base_frame.empty:
+        base_frame = pd.DataFrame(columns=[UNIQUE_ID, DS])
+    if UNIQUE_ID not in base_frame.columns or DS not in base_frame.columns:
+        raise ValueError("future_x must include unique_id and ds to apply an override")
+    base_frame[UNIQUE_ID] = base_frame[UNIQUE_ID].astype(str)
+    base_frame[DS] = pd.to_datetime(base_frame[DS])
+
+    key = [UNIQUE_ID, DS]
+    merged = override_frame.set_index(key).combine_first(base_frame.set_index(key))
+    return merged.reset_index()
+
+
 def _format_error(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
@@ -285,12 +323,16 @@ def predict(req: PredictRequest) -> PredictResponse:
         raise HTTPException(status_code=400, detail="history is empty before origin")
 
     forecaster_config = {**record.forecaster_config, "freq": record.freq}
+    try:
+        future_x = _merge_future_x_override(record.future_x, req.future_x_override)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     task = ForecastTask(
         history=history,
         horizon=record.horizon,
         model_config=forecaster_config,
         forecast_origin=origin,
-        future_x=record.future_x,
+        future_x=future_x,
     )
     try:
         preds = _fit_predict_task(task)
