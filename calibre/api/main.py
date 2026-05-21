@@ -12,12 +12,11 @@ from sqlalchemy.orm import sessionmaker
 from calibre.api.lifecycle import FitRecord, LifecycleStore, TuneRecord
 from calibre.api.run_store import MemoryRunStore, RunStore, SqlRunStore
 from calibre.api.schemas import (
+    BacktestRequest,
     CalibrateRequest,
     CalibrateResponse,
     FitHandle,
     FitRequest,
-    ForecastRequest,
-    ForecastResponse,
     ObserveRequest,
     ObserveResponse,
     OrderRequest,
@@ -31,7 +30,6 @@ from calibre.api.schemas import (
     TuneRequest,
     TuneStudyResponse,
 )
-from calibre.cli.commands import run_config
 from calibre.cli.config import ConformalConfig
 from calibre.conformal.runtime import (
     SymmetricIntervalRuntime,
@@ -62,7 +60,6 @@ from calibre.tuning import (
 )
 
 app = FastAPI(title="Calibre", version="0.1.0")
-MAX_FORECAST_UNIQUE_IDS = 30
 
 _MEMORY_STORE = MemoryRunStore()
 _DB_URL: str | None = None
@@ -205,20 +202,9 @@ def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-@app.post("/forecasts", response_model=ForecastResponse)
-def forecasts(req: ForecastRequest) -> ForecastResponse:
-    try:
-        config = req.as_backend_config()
-        result = run_config(config, max_unique_ids=MAX_FORECAST_UNIQUE_IDS)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    frame = result if isinstance(result, pd.DataFrame) else result.ledger.to_df()
-    return ForecastResponse(rows=len(frame), forecasts=_json_records(frame))
-
-
 @app.post("/backtests", response_model=RunResponse, status_code=202)
 def backtests(
-    req: ForecastRequest,
+    req: BacktestRequest,
     bg: BackgroundTasks,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> RunResponse:

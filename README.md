@@ -84,7 +84,6 @@ uv run uvicorn calibre.api.main:app --host 0.0.0.0 --port 8000
 |---|---|---|
 | `/healthz` | `GET` | Liveness probe |
 | `/metrics` | `GET` | Prometheus metrics |
-| `/forecasts` | `POST` | Legacy synchronous forecast/backtest request (≤30 SKUs) |
 | `/backtests` | `POST` | Asynchronous backtest job (returns `run_id`) |
 | `/runs/{run_id}` | `GET` | Poll run status and artifact pointers |
 | `/fit` | `POST` | Start a fit lifecycle and return `fit_id` + deterministic `session_id` |

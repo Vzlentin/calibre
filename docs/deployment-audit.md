@@ -89,7 +89,7 @@ Weekly cycle for a fashion retailer (one tenant, ~50K SKU-locations):
 |---|---|---|---|
 | **Tune** — search model/conformal/order configs | Quarterly | `tuning.optimize_task` per series; Ray Tune unless conformal in loop | falls back to sequential when conformal_runtime_factory set (`optimizer.py:243–250`); search space is model-only |
 | **Fit** — train models on latest history | Weekly | inlined inside `BackendEngine.execute`; refits every origin | no model artifact cache; `forecasting/cache.py` planned (Phase 3) not landed |
-| **Predict** — produce H-step forecast at next origin | Weekly | `engine.iter_origins([task], ..., [next_origin])` | conflated with fit; no `/predict` endpoint distinct from `/forecasts` |
+| **Predict** — produce H-step forecast at next origin | Weekly | `engine.iter_origins([task], ..., [next_origin])` | lifecycle endpoint now exists; model artifact cache still missing |
 | **Calibrate** — apply prior conformal state | Weekly | `ConformalRuntime.apply()` after engine emits frame | within-run resume works (`backend.py:496–509`); cross-run resume blocked by run-scoped state key (see §3.3) |
 | **Order** — combine forecast + inventory + costs | Weekly | `DecisionRule × OrderingArithmetic`; pure function | inventory_position comes from simulator object, not adapter |
 | **Observe** — feed last week's actuals back | Weekly (lagged by lead time) | `decision_loop.observe_per_horizon / observe_cumulative` | runs in-process; pending-forecast buffer is `list[pd.DataFrame]` in memory; state keyed by `run_id`, not by stable session |
@@ -139,14 +139,12 @@ What doesn't:
 ### 3.2 Endpoints — train vs inference vs observe
 
 Current surface (`calibre/api/main.py`):
-- `POST /forecasts` — sync, ≤30 SKUs, runs `run_config` end-to-end
 - `POST /backtests` — async, full run
-- `GET /runs/{id}`, `/healthz`, `/metrics`
+- `POST /fit`, `/predict`, `/calibrate`, `/order`, `/observe`, `/tune` — lifecycle steps
+- `GET /runs/{id}`, `/fits/{id}`, `/studies/{id}`, `/sessions/{tenant}/{uid}`, `/healthz`, `/metrics`
 
-`/forecasts` and `/backtests` are both the *same execution path* with
-different scope — there is no separation between fit, predict, calibrate,
-and observe at the HTTP surface, and no `/tune` endpoint at all. For a
-deployed engine this is the surface that has to exist:
+The old synchronous, backtest-shaped route has been removed. `/backtests`
+remains the full-run job endpoint, and the deployed lifecycle surface is:
 
 ```
 POST /tune     {tenant, sku_set, search_space, objective}     → study_id, best_configs
@@ -357,8 +355,8 @@ Files: `calibre/execution/dataset.py` (new `InventoryAdapter` Protocol),
 Files: `calibre/api/main.py`, `calibre/api/schemas.py`,
 `calibre/cli/commands.py`.
 
-- Split `POST /forecasts` (today: backtest-shaped) into:
-  `/tune`, `/fit`, `/predict`, `/calibrate`, `/order`, `/observe`.
+- Keep the lifecycle API split across `/tune`, `/fit`, `/predict`,
+  `/calibrate`, `/order`, and `/observe`.
 - Each accepts `session_id` (or returns one on first call).
 - `/predict` and `/order` are sync; `/tune` and `/fit` are async via the
   existing `RunStore`.

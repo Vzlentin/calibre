@@ -17,7 +17,6 @@ from calibre.core.forecast_frame import (
     Y_HAT,
     H,
     Y,
-    interval_column_names,
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import CostStruct
@@ -50,36 +49,6 @@ class _ApiDatasetAdapter:
         )
 
 
-class _ManyApiDatasetAdapter:
-    count = 31
-
-    def name(self) -> str:
-        return "unit_api_many"
-
-    def load(self, path: str, **kwargs) -> DatasetBundle:
-        del path, kwargs
-        dates = pd.date_range("2024-01-07", periods=8, freq="W")
-        rows = [
-            {UNIQUE_ID: f"SKU_{idx:02d}", DS: ds, Y: float(step)}
-            for idx in range(self.count)
-            for step, ds in enumerate(dates)
-        ]
-        return DatasetBundle(
-            history=pd.DataFrame(rows),
-            future_x=None,
-            costs=CostStruct(),
-            hierarchy=None,
-            censoring=None,
-        )
-
-
-class _ThirtyApiDatasetAdapter(_ManyApiDatasetAdapter):
-    count = 30
-
-    def name(self) -> str:
-        return "unit_api_thirty"
-
-
 class _StubAdapter:
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
@@ -99,8 +68,6 @@ class _StubAdapter:
 
 
 register_dataset_adapter("unit_api")(_ApiDatasetAdapter)
-register_dataset_adapter("unit_api_many")(_ManyApiDatasetAdapter)
-register_dataset_adapter("unit_api_thirty")(_ThirtyApiDatasetAdapter)
 
 
 def _payload(adapter: str = "unit_api") -> dict:
@@ -122,19 +89,6 @@ def _payload(adapter: str = "unit_api") -> dict:
     }
 
 
-def test_forecasts_endpoint(monkeypatch) -> None:
-    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
-    client = TestClient(app)
-
-    response = client.post("/forecasts", json=_payload())
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["rows"] == 1
-    assert body["forecasts"][0][UNIQUE_ID] == "A"
-
-
 def test_metrics_endpoint_exposes_prometheus_payload() -> None:
     client = TestClient(app)
 
@@ -145,35 +99,11 @@ def test_metrics_endpoint_exposes_prometheus_payload() -> None:
     assert "calibre_forecast_duration_seconds" in response.text
 
 
-def test_forecasts_endpoint_rejects_more_than_30_skus() -> None:
+def test_forecasts_route_is_removed() -> None:
     client = TestClient(app)
 
-    response = client.post("/forecasts", json=_payload(adapter="unit_api_many"))
-
-    assert response.status_code == 400
-    assert "maximum allowed is 30" in response.json()["detail"]
-
-
-def test_forecasts_endpoint_accepts_30_skus_and_returns_intervals(monkeypatch) -> None:
-    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
-    payload = _payload(adapter="unit_api_thirty")
-    payload["config"]["conformal"] = {
-        "method": "aci",
-        "coverage": 0.9,
-        "calibration_window": 4,
-        "gamma": 0.05,
-    }
-    client = TestClient(app)
-
-    response = client.post("/forecasts", json=payload)
-
-    assert response.status_code == 200
-    body = response.json()
-    lower_col, upper_col = interval_column_names(0.9)
-    assert body["rows"] == 30
-    assert {row[UNIQUE_ID] for row in body["forecasts"]} == {f"SKU_{idx:02d}" for idx in range(30)}
-    assert all(lower_col in row and upper_col in row for row in body["forecasts"])
+    assert "/forecasts" not in client.get("/openapi.json").json()["paths"]
+    assert client.post("/forecasts", json=_payload()).status_code == 404
 
 
 def test_backtests_endpoint_records_status(monkeypatch) -> None:

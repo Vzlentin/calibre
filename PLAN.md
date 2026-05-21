@@ -257,7 +257,7 @@ configs in parallel, and exposes a deployable HTTP lifecycle.
   schedules grouped tasks together so a category can be prioritised or a
   warm-start can be shared across SKUs in the same group later (Phase 4
   picks this up for the artifact cache).
-- **API lifecycle split.** Replace the monolithic `POST /forecasts` with:
+- **API lifecycle split.** Use the lifecycle HTTP surface:
   - `POST /fit` — async, returns `fit_handle` (artifact URIs + session_id)
   - `POST /predict` — sync, `fit_handle` + origin → forecast frame
   - `POST /calibrate` — sync, `session_id` + forecast frame → calibrated
@@ -414,7 +414,7 @@ can run promotion scenarios.
   Read by `/fit` so the next weekly cycle uses the tuned configs without
   a human in the loop.
 - **`/predict` future_x override.** Add optional `future_x_override:
-  dict[str, list[dict]]` field on `ForecastRequest` (uid → list of
+  dict[str, list[dict]]` field on `PredictRequest` (uid → list of
   `{ds, regressor_name: value}` rows). Merged onto the loaded `future_x`
   by `[unique_id, ds]`: missing columns are added, existing columns are
   replaced. Merge happens before the engine runs. Enables "what if promo
