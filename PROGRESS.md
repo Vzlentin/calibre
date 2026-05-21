@@ -66,6 +66,14 @@ notes: "added backend integration evidence that a new run_id with the same deter
 phase: 2
 last_completed_task: "Phase 2 DoD and cross-phase regression gate"
 next_task: "3.a InventoryAdapter + injected initial ProductState"
-last_commit: "pending in phase-2 boundary commit"
+last_commit: "81881ae"
 notes: "uv run pytest passed 420/420 with 3 skipped; uv run mypy calibre/ passed; uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml passed with total_cost=4992.20; same-session backend resume is byte-identical for resumed origin"
+```
+
+```yaml
+phase: 3
+last_completed_task: "3.a InventoryAdapter + injected initial ProductState"
+next_task: "3.b task_group scheduling and global model fan-out"
+last_commit: "pending in phase-3.a commit"
+notes: "added InventoryAdapter protocol with SyntheticInventoryAdapter, SnapshotInventoryAdapter, and ErpInventoryAdapter stub; VN2Simulator now accepts generic ProductState directly; inventory adapter, VN2 simulator, ruff, and module mypy tests passed"
 ```

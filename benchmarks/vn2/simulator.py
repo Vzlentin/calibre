@@ -75,6 +75,19 @@ def _to_generic(state: ProductState) -> GenericProductState:
     )
 
 
+def _from_generic(state: GenericProductState) -> ProductState:
+    pipeline = list(state.pipeline)
+    padded = pipeline + [0.0] * max(0, LEAD_TIME_DEPTH - len(pipeline))
+    return ProductState(
+        unique_id=state.unique_id,
+        end_inventory=float(state.end_inventory),
+        in_transit_w1=float(padded[0]) if padded else 0.0,
+        in_transit_w2=float(padded[1]) if len(padded) > 1 else 0.0,
+        cumulative_holding_cost=float(state.cumulative_costs.get("holding", 0.0)),
+        cumulative_shortage_cost=float(state.cumulative_costs.get("shortage", 0.0)),
+    )
+
+
 def _to_week_result(result: PeriodResult) -> WeekResult:
     return WeekResult(
         unique_id=result.unique_id,
@@ -103,12 +116,19 @@ class VN2Simulator:
     HOLDING_COST_RATE: float = HOLDING_COST_RATE
     SHORTAGE_COST_RATE: float = SHORTAGE_COST_RATE
 
-    def __init__(self, states: dict[str, ProductState]) -> None:
-        self.states: dict[str, ProductState] = {
-            uid: ProductState(**vars(s)) for uid, s in states.items()
-        }
+    def __init__(self, states: dict[str, ProductState | GenericProductState]) -> None:
+        self.states: dict[str, ProductState] = {}
+        generic_states: dict[str, GenericProductState] = {}
+        for uid, state in states.items():
+            if isinstance(state, GenericProductState):
+                generic = state.copy()
+                self.states[uid] = _from_generic(generic)
+            else:
+                self.states[uid] = ProductState(**vars(state))
+                generic = _to_generic(state)
+            generic_states[uid] = generic
         self._sim = Simulator(
-            states={uid: _to_generic(s) for uid, s in self.states.items()},
+            states=generic_states,
             rule=LostSalesRule(lead_time_depth=LEAD_TIME_DEPTH),
             cost_model=LinearCostModel(
                 rates={"holding": HOLDING_COST_RATE, "shortage": SHORTAGE_COST_RATE}
