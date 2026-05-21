@@ -173,37 +173,6 @@ def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
     assert seen == {"n_jobs": 2, "num_threads": 2}
 
 
-def test_ray_backend_warns_for_global_only_workloads(monkeypatch):
-    dates = pd.date_range("2024-01-07", periods=8, freq="W")
-    actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
-    task = ForecastTask(
-        history=actuals,
-        horizon=1,
-        model_config={"backend": "stub", "model": "stub_model", "scope": "global"},
-    )
-
-    class _StubAdapter:
-        def fit(self, task: ForecastTask) -> None:
-            pass
-
-        def predict(self, task: ForecastTask) -> pd.DataFrame:
-            return pd.DataFrame(
-                {
-                    UNIQUE_ID: [task.unique_id],
-                    DS: [pd.Timestamp("2024-03-03")],
-                    Y_HAT: [1.0],
-                    H: [1],
-                }
-            )
-
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
-
-    with pytest.warns(RuntimeWarning, match="global-scope"):
-        BackendEngine(execution=ExecutionOptions(backend="ray")).execute(
-            [task], actuals, origins=[dates[-1]]
-        )
-
-
 def test_forecast_frame_columns_present(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()

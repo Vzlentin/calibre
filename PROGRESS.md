@@ -90,6 +90,14 @@ notes: "ForecastTask and ForecastTaskRef now carry task_group; BackendEngine ass
 phase: 3
 last_completed_task: "3.c API lifecycle split"
 next_task: "Phase 3 DoD: cross-phase regression gate"
-last_commit: "pending in phase-3.c commit"
+last_commit: "08ce4f5"
 notes: "added /fit (async), /predict, /calibrate, /order, /observe (async), /sessions/{tenant}/{uid}, and /fits/{fit_id} endpoints wired via an in-process LifecycleStore; session_id is derived deterministically via derive_session_id; lifecycle tests, existing api tests, ruff on api/, and api mypy passed"
+```
+
+```yaml
+phase: 3
+last_completed_task: "Phase 3 DoD and cross-phase regression gate"
+next_task: "4.a evaluation/regret.py + AdaptiveAlphaController.error_history"
+last_commit: "pending Phase 3 gate commit"
+notes: "removed stale test_ray_backend_warns_for_global_only_workloads (Phase 3.b made Ray fan-out the actual behaviour, so the warning no longer fires); uv run pytest passed 428/428 with 3 skipped; uv run mypy calibre/ passed; uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml total_cost=4992.20 (matches Phase 2 baseline)"
 ```
