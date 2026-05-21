@@ -162,6 +162,6 @@ notes: "uv run pytest passed 465/465 with 3 skipped; uv run mypy calibre/ passed
 phase: 5
 last_completed_task: "5.a tuning_runs table + Alembic migration"
 next_task: "5.b multi-SKU /tune fan-out + per-SKU persistence"
-last_commit: "pending in phase-5.a commit"
+last_commit: "8879915"
 notes: "added TuningRun(session_id, unique_id, candidate, score, finished_at) model with composite PK (session_id, unique_id); added TuningRunRepo with get/list_for_session/upsert (overwrites candidate/score, refreshes finished_at via datetime.now(UTC)); added Alembic migration 0004_tuning_runs with downgrade; extended test_storage_alembic_upgrade_creates_run_tables to assert tuning_runs table + PK + revision pointer; tests/storage/test_tuning_runs.py covers round-trip across two SKUs, overriding existing rows, and finished_at advancing on re-upsert; targeted pytest (4/4), ruff, and mypy on calibre/storage passed"
 ```
