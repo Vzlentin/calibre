@@ -50,6 +50,14 @@ notes: "SymmetricIntervalRuntime exposes partition_keys and per-partition snapsh
 phase: 2
 last_completed_task: "2.c persist pending observations across DecisionLoop restarts"
 next_task: "Phase 2 DoD: verify session-keyed backend resume and run phase gate"
-last_commit: "pending in phase-2.c commit"
+last_commit: "7ebef28"
 notes: "DecisionLoop can use pending_observations as the restart-safe buffer via PendingObservationRepo; unresolved rows are reloaded and replaced after observe; pending restart, decision-loop, migration, ruff, and module mypy tests passed"
+```
+
+```yaml
+phase: 2
+last_completed_task: "2.d verify session-keyed backend resume"
+next_task: "Phase 2 cross-phase regression gate and phase-boundary push"
+last_commit: "pending in phase-2.d commit"
+notes: "added backend integration evidence that a new run_id with the same deterministic session_id hydrates partitioned conformal state and matches the uninterrupted resumed-origin ledger; Phase 2 targeted storage/execution/migration tests passed"
 ```
