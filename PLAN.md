@@ -6,10 +6,6 @@ executable plan: phases, files, tests, and DoD.
 
 ## Execution mode
 
-Single autonomous run: `/goal implement PLAN.md phase by phase`. No human
-pause between phases — every signature, path, and dependency is frozen in
-this file before dispatch.
-
 **Resume protocol.** Maintain `PROGRESS.md` at the repo root with the
 format below. Append one block per task as it completes. On (re)start the
 agent reads the tail and resumes from `next_task`.
