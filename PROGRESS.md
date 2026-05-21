@@ -133,3 +133,11 @@ next_task: "4.e calibre_conformal_coverage_drift gauge"
 last_commit: "2f5029b"
 notes: "added calibre/forecasting/cache.py with ModelArtifactCache(uri) backed by per-key blob files; added ModelAdapter.cache_key(task) default (SHA256 over history.to_csv + model_config JSON), ModelAdapter.dump_state/load_state hooks raising NotImplementedError by default, and ModelAdapter.fit_with_cache(task, cache) returning True on miss-and-fit, False on hit-and-restore; tests/forecasting/test_model_cache.py covers miss-writes, hit-skips-fit, cache_key sensitivity to model_config and history, no-cache passthrough, default dump_state guard, and key-traversal rejection; pytest, forecasting mypy, and ruff passed"
 ```
+
+```yaml
+phase: 4
+last_completed_task: "4.e calibre_conformal_coverage_drift gauge"
+next_task: "4.f POST /tune + GET /studies/{id}"
+last_commit: "pending in phase-4.e commit"
+notes: "added calibre_conformal_coverage_drift{model, partition} Gauge with set_conformal_coverage_drift helper; added AdaptiveAlphaController.target_alpha property; added _adaptive_controller_drift helper returning mean(error_history) - target_alpha or None when controller is fixed / history empty; BackendEngine._record_coverage_drift emits one gauge per (model, partition) pair from the resolved frame, falling back to __global__ when CONFORMAL_PARTITION is absent; tests/observability/test_coverage_drift.py covers helper math, fixed-controller no-op, empty-history None, multi-partition emission, and global fallback; targeted pytest (6/6), ruff, and mypy on metrics/backend/controllers passed"
+```

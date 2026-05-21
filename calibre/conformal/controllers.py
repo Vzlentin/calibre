@@ -58,6 +58,10 @@ class AdaptiveAlphaController:
         return float(self._alpha)
 
     @property
+    def target_alpha(self) -> float:
+        return float(self._target_alpha)
+
+    @property
     def error_history(self) -> list[int]:
         return list(self._error_history)
 

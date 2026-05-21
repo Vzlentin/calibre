@@ -41,7 +41,11 @@ from calibre.core.forecast_frame import (
     validate_forecast_frame,
 )
 from calibre.core.forecast_task import ForecastTask, ForecastTaskRef
-from calibre.core.metrics import observe_forecast_duration, set_conformal_coverage
+from calibre.core.metrics import (
+    observe_forecast_duration,
+    set_conformal_coverage,
+    set_conformal_coverage_drift,
+)
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
 from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
@@ -240,6 +244,17 @@ def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     if not non_empty:
         return _empty_forecast_frame()
     return _coerce_forecast_frame_dtypes(pd.concat(non_empty, ignore_index=True))
+
+
+def _adaptive_controller_drift(conformal_runtime: ConformalRuntime) -> float | None:
+    """Return ``mean(error_history) - target_alpha`` when adaptive, else None."""
+    controller = getattr(conformal_runtime, "controller", None)
+    history = getattr(controller, "error_history", None)
+    target_alpha = getattr(controller, "target_alpha", None)
+    if history is None or target_alpha is None or len(history) == 0:
+        return None
+    running_mean = sum(int(x) for x in history) / len(history)
+    return float(running_mean) - float(target_alpha)
 
 
 @dataclass
@@ -591,6 +606,26 @@ class BackendEngine:
         for model_name, group in comparable.groupby(MODEL_NAME, sort=False):
             covered = (group[Y] >= group[lower_col]) & (group[Y] <= group[upper_col])
             set_conformal_coverage(str(model_name), mode, float(covered.mean()))
+        self._record_coverage_drift(comparable, conformal_runtime)
+
+    def _record_coverage_drift(
+        self,
+        resolved: pd.DataFrame,
+        conformal_runtime: ConformalRuntime,
+    ) -> None:
+        drift = _adaptive_controller_drift(conformal_runtime)
+        if drift is None:
+            return
+        partitions = (
+            sorted(set(resolved[CONFORMAL_PARTITION].dropna().astype(str)))
+            if CONFORMAL_PARTITION in resolved.columns
+            else ["__global__"]
+        )
+        if not partitions:
+            partitions = ["__global__"]
+        for model_name in sorted(set(resolved[MODEL_NAME].dropna().astype(str))):
+            for partition in partitions:
+                set_conformal_coverage_drift(model_name, partition, drift)
 
     def _advance_issued_count_from_initial_ledger(self) -> None:
         """Recover issued-origin accounting from a resumed ledger snapshot."""
