@@ -74,6 +74,14 @@ notes: "uv run pytest passed 420/420 with 3 skipped; uv run mypy calibre/ passed
 phase: 3
 last_completed_task: "3.a InventoryAdapter + injected initial ProductState"
 next_task: "3.b task_group scheduling and global model fan-out"
-last_commit: "pending in phase-3.a commit"
+last_commit: "32d191a"
 notes: "added InventoryAdapter protocol with SyntheticInventoryAdapter, SnapshotInventoryAdapter, and ErpInventoryAdapter stub; VN2Simulator now accepts generic ProductState directly; inventory adapter, VN2 simulator, ruff, and module mypy tests passed"
+```
+
+```yaml
+phase: 3
+last_completed_task: "3.b task_group scheduling and global model fan-out"
+next_task: "3.c API lifecycle split"
+last_commit: "pending in phase-3.b commit"
+notes: "ForecastTask and ForecastTaskRef now carry task_group; BackendEngine assigns default groups, preserves grouped scheduling results, and dispatches one global panel fit per distinct model_config with Ray fan-out when enabled; global fanout/task grouping tests, ruff, and module mypy passed"
 ```

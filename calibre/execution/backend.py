@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import time
-import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -168,6 +168,7 @@ def _process_task_ref(
         forecast_origin=origin,
         history_uri=ref.history_uri,
         future_x_uri=ref.future_x_uri,
+        task_group=ref.task_group,
     ).materialize()
 
     history = task.history[task.history[DS] < origin]
@@ -184,6 +185,51 @@ def _process_task_ref(
         model_config=task.model_config,
         forecast_origin=origin,
         future_x=future_x,
+        task_group=task.task_group,
+    )
+    preds = _fit_predict_task(origin_task)
+    return _finalize_preds(preds, origin, origin_task.model_name)
+
+
+def _process_global_panel(
+    refs: list[ForecastTaskRef],
+    model_config: dict,
+    origin: pd.Timestamp,
+) -> pd.DataFrame:
+    """Fit one global adapter for a config over the full multi-SKU panel."""
+    histories: list[pd.DataFrame] = []
+    future_frames: list[pd.DataFrame] = []
+    horizon: int | None = None
+    task_group: str | None = None
+
+    for ref in refs:
+        task = ref.materialize()
+        history = task.history[task.history[DS] < origin]
+        if not history.empty:
+            histories.append(history)
+        if task.future_x is not None and not task.future_x.empty:
+            future_frames.append(task.future_x)
+        if horizon is None:
+            horizon = task.horizon
+        if task_group is None:
+            task_group = task.task_group
+
+    if not histories or horizon is None:
+        return _empty_forecast_frame()
+
+    panel = pd.concat(histories, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
+    future_x = (
+        pd.concat(future_frames, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
+        if future_frames
+        else None
+    )
+    origin_task = ForecastTask(
+        history=panel,
+        horizon=horizon,
+        model_config=dict(model_config),
+        forecast_origin=origin,
+        future_x=future_x,
+        task_group=task_group,
     )
     preds = _fit_predict_task(origin_task)
     return _finalize_preds(preds, origin, origin_task.model_name)
@@ -286,6 +332,7 @@ class BackendEngine:
         self._ray: Any | None = None
         self._ray_runtime: RayRuntimeHandle | None = None
         self._remote_process_task: Any | None = None
+        self._remote_process_global_panel: Any | None = None
 
     def __enter__(self) -> BackendEngine:
         return self
@@ -334,18 +381,18 @@ class BackendEngine:
             parallel_tasks: list[ForecastTask] = []
             direct_tasks: list[ForecastTask] = []
             for task in tasks:
-                if get_scope(task.model_config) == "local":
-                    parallel_tasks.append(task)
-                else:
-                    direct_tasks.append(task)
-
-            if self.execution.backend == "ray" and direct_tasks and not parallel_tasks:
-                warnings.warn(
-                    "backend='ray' was requested, but all tasks are global-scope and run "
-                    "on the driver",
-                    RuntimeWarning,
-                    stacklevel=2,
+                grouped_task = ForecastTask(
+                    history=task.history,
+                    horizon=task.horizon,
+                    model_config=task.model_config,
+                    forecast_origin=task.forecast_origin,
+                    future_x=task.future_x,
+                    task_group=task.task_group or task.unique_id,
                 )
+                if get_scope(task.model_config) == "local":
+                    parallel_tasks.append(grouped_task)
+                else:
+                    direct_tasks.append(grouped_task)
 
             with self._task_staging_prefix() as staging_prefix:
                 parallel_refs = self._materialize_task_refs(
@@ -401,6 +448,7 @@ class BackendEngine:
         self._ray_runtime = None
         self._ray = None
         self._remote_process_task = None
+        self._remote_process_global_panel = None
 
     def close(self) -> None:
         self.shutdown_owned_ray()
@@ -597,6 +645,7 @@ class BackendEngine:
                 model_config=model_config,
                 forecast_origin=task.forecast_origin,
                 future_x=task.future_x,
+                task_group=task.task_group,
             ).to_uri(task_base)
             refs.append(ref)
         return refs
@@ -619,11 +668,14 @@ class BackendEngine:
         refs: list[ForecastTaskRef],
         origin: pd.Timestamp,
     ) -> pd.DataFrame:
-        """Run global multi-series adapters on the driver."""
+        """Run one global multi-series adapter per distinct model config."""
         if not refs:
             return _empty_forecast_frame()
+        groups = _group_global_refs_by_config(refs)
+        if self._should_use_ray(len(groups)):
+            return self._run_global_groups_on_ray(groups, origin)
         return _concat_prediction_frames(
-            [_process_task_ref(ref, origin, local_scope=False) for ref in refs]
+            [_process_global_panel(group_refs, config, origin) for config, group_refs in groups]
         )
 
     def _should_use_ray(self, task_count: int) -> bool:
@@ -638,11 +690,40 @@ class BackendEngine:
             return self._ray
         self._ray = None
         self._remote_process_task = None
+        self._remote_process_global_panel = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
         self._ray = self._ray_runtime.ray
         # Cache safety: ExecutionOptions is frozen, so cpu_per_task is immutable
         # for this engine instance. Rebuilding _remote_process_task is safe.
         return self._ray
+
+    def _run_global_groups_on_ray(
+        self,
+        groups: list[tuple[dict, list[ForecastTaskRef]]],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        ray = self._ensure_ray()
+        if self._remote_process_global_panel is None:
+            remote_kwargs: dict[str, float] = {}
+            if self.execution.cpu_per_task is not None:
+                remote_kwargs["num_cpus"] = float(self.execution.cpu_per_task)
+            self._remote_process_global_panel = (
+                ray.remote(**remote_kwargs)(_process_global_panel)
+                if remote_kwargs
+                else ray.remote(_process_global_panel)
+            )
+        remote_process = self._remote_process_global_panel
+        concurrency = self.execution.max_concurrency or len(groups)
+        frames: list[pd.DataFrame] = []
+
+        for start in range(0, len(groups), concurrency):
+            chunk = groups[start : start + concurrency]
+            object_refs = [
+                remote_process.remote(group_refs, config, origin) for config, group_refs in chunk
+            ]
+            frames.extend(ray.get(object_refs))
+
+        return _concat_prediction_frames(frames)
 
     def _run_refs_on_ray(
         self,
@@ -673,3 +754,19 @@ class BackendEngine:
             frames.extend(ray.get(object_refs))
 
         return _concat_prediction_frames(frames)
+
+
+def _model_config_key(config: dict) -> str:
+    return json.dumps(config, sort_keys=True, default=str)
+
+
+def _group_global_refs_by_config(
+    refs: list[ForecastTaskRef],
+) -> list[tuple[dict, list[ForecastTaskRef]]]:
+    grouped: dict[str, tuple[dict, list[ForecastTaskRef]]] = {}
+    for ref in refs:
+        key = _model_config_key(ref.model_config)
+        if key not in grouped:
+            grouped[key] = (dict(ref.model_config), [])
+        grouped[key][1].append(ref)
+    return list(grouped.values())

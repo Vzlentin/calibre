@@ -23,6 +23,7 @@ class ForecastTask:
     model_config: dict
     forecast_origin: pd.Timestamp | None = None
     future_x: pd.DataFrame | None = None
+    task_group: str | None = None
 
     def __post_init__(self) -> None:
         if UNIQUE_ID not in self.history.columns:
@@ -55,6 +56,7 @@ class ForecastTask:
             forecast_origin=self.forecast_origin,
             history_uri=history_uri,
             future_x_uri=future_x_uri,
+            task_group=self.task_group,
         )
 
 
@@ -66,6 +68,7 @@ class ForecastTaskRef:
     forecast_origin: pd.Timestamp | None
     history_uri: str
     future_x_uri: str | None = None
+    task_group: str | None = None
 
     def materialize(self) -> ForecastTask:
         history = _read_parquet_cached(self.history_uri).copy()
@@ -80,4 +83,5 @@ class ForecastTaskRef:
             model_config=dict(self.model_config),
             forecast_origin=self.forecast_origin,
             future_x=future_x,
+            task_group=self.task_group,
         )
