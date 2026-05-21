@@ -103,10 +103,6 @@ def _run_store() -> RunStore:
     return _SQL_STORE
 
 
-def _lifecycle_store() -> LifecycleStore:
-    return _LIFECYCLE_STORE
-
-
 def _json_records(frame: pd.DataFrame) -> list[dict]:
     clean = frame.copy()
     for col in clean.columns:
@@ -188,7 +184,7 @@ def _runtime_for_session(
 ) -> SymmetricIntervalRuntime:
     assert record.conformal_config is not None
     runtime_config = _conformal_config_from_dict(record.conformal_config).to_runtime_config()
-    saved = _lifecycle_store().get_conformal_state(record.session_id)
+    saved = _LIFECYCLE_STORE.get_conformal_state(record.session_id)
     if saved:
         return SymmetricIntervalRuntime.from_partition_states(runtime_config, saved)
     return build_symmetric_interval_runtime(runtime_config)
@@ -255,7 +251,7 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
         conformal_config=dict(req.conformal_config) if req.conformal_config else None,
         status=RunStatus.QUEUED,
     )
-    _lifecycle_store().put_fit(record)
+    _LIFECYCLE_STORE.put_fit(record)
     bg.add_task(_run_fit_job, fit_id)
     return FitHandle(
         fit_id=fit_id,
@@ -265,7 +261,7 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
 
 
 def _run_fit_job(fit_id: str) -> None:
-    store = _lifecycle_store()
+    store = _LIFECYCLE_STORE
     record = store.get_fit(fit_id)
     if record is None:
         return
@@ -282,7 +278,7 @@ def _run_fit_job(fit_id: str) -> None:
 
 @app.get("/fits/{fit_id}", response_model=FitHandle)
 def get_fit(fit_id: str) -> FitHandle:
-    record = _lifecycle_store().get_fit(fit_id)
+    record = _LIFECYCLE_STORE.get_fit(fit_id)
     if record is None:
         raise HTTPException(status_code=404, detail="fit not found")
     return FitHandle(
@@ -296,7 +292,7 @@ def get_fit(fit_id: str) -> FitHandle:
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest) -> PredictResponse:
-    record = _lifecycle_store().get_fit(req.fit_id)
+    record = _LIFECYCLE_STORE.get_fit(req.fit_id)
     if record is None:
         raise HTTPException(status_code=404, detail="fit not found")
     if record.status != RunStatus.SUCCEEDED:
@@ -327,13 +323,13 @@ def predict(req: PredictRequest) -> PredictResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))
-    _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
+    _LIFECYCLE_STORE.update_fit(record.fit_id, last_forecast=forecast_frame)
     return PredictResponse(rows=len(forecast_frame), forecast=_json_records(forecast_frame))
 
 
 @app.post("/calibrate", response_model=CalibrateResponse)
 def calibrate(req: CalibrateRequest) -> CalibrateResponse:
-    store = _lifecycle_store()
+    store = _LIFECYCLE_STORE
     record = store.first_fit_for_session(req.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -371,7 +367,7 @@ def order(req: OrderRequest) -> OrderResponse:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=_format_error(exc)) from exc
     if req.session_id is not None:
-        store = _lifecycle_store()
+        store = _LIFECYCLE_STORE
         record = store.first_fit_for_session(req.session_id)
         if record is not None:
             store.update_fit(record.fit_id, last_orders=orders_frame)
@@ -380,7 +376,7 @@ def order(req: OrderRequest) -> OrderResponse:
 
 @app.post("/observe", response_model=ObserveResponse, status_code=202)
 def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
-    store = _lifecycle_store()
+    store = _LIFECYCLE_STORE
     record = store.first_fit_for_session(req.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -391,7 +387,7 @@ def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
 
 
 def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
-    store = _lifecycle_store()
+    store = _LIFECYCLE_STORE
     record = store.first_fit_for_session(session_id)
     if (
         record is None
@@ -455,7 +451,7 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         req.conformal_config or {},
     )
     study_id = LifecycleStore.new_study_id()
-    _lifecycle_store().put_study(
+    _LIFECYCLE_STORE.put_study(
         TuneRecord(
             study_id=study_id,
             session_id=session_id,
@@ -523,7 +519,7 @@ def _run_tune_job(
     actuals: pd.DataFrame,
     origins: list[pd.Timestamp],
 ) -> None:
-    store = _lifecycle_store()
+    store = _LIFECYCLE_STORE
     record = store.get_study(study_id)
     if record is None:
         return
@@ -564,7 +560,7 @@ def _run_tune_job(
 
 @app.get("/studies/{study_id}", response_model=TuneStudyResponse)
 def get_study(study_id: str) -> TuneStudyResponse:
-    record = _lifecycle_store().get_study(study_id)
+    record = _LIFECYCLE_STORE.get_study(study_id)
     if record is None:
         raise HTTPException(status_code=404, detail="study not found")
     best_candidates = {
@@ -594,7 +590,7 @@ def _maybe_json_records(frame: pd.DataFrame | None) -> list[dict] | None:
 
 @app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
 def session_state(tenant: str, uid: str) -> SessionStateResponse:
-    store = _lifecycle_store()
+    store = _LIFECYCLE_STORE
     fits = store.fits_for_tenant_uid(tenant, uid)
     if not fits:
         raise HTTPException(status_code=404, detail="session not found")

@@ -44,7 +44,6 @@ class _FutureXAdapter:
 def _reset_lifecycle_store(monkeypatch):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
-    monkeypatch.setattr(api_main, "_lifecycle_store", lambda: fresh)
     monkeypatch.setattr(
         "calibre.execution.backend.resolve_adapter",
         lambda cfg: _FutureXAdapter(cfg),

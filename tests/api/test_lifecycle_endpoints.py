@@ -41,7 +41,6 @@ class _StubAdapter:
 def _reset_lifecycle_store(monkeypatch):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
-    monkeypatch.setattr(api_main, "_lifecycle_store", lambda: fresh)
     return fresh
 
 
@@ -148,8 +147,7 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter):
     assert observe_resp.status_code == 202, observe_resp.text
     assert observe_resp.json()["session_id"] == session_id
 
-    fresh = api_main._lifecycle_store()
-    state = fresh.get_conformal_state(session_id)
+    state = api_main._LIFECYCLE_STORE.get_conformal_state(session_id)
     assert state, "observe should persist conformal state"
 
 

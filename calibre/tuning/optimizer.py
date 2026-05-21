@@ -198,14 +198,6 @@ def _newly_resolved_frame(
     return resolved.loc[mask].copy()
 
 
-def _objective_contribution(
-    task: TuningTask,
-    ledger_df: pd.DataFrame,
-    seen_keys: set[tuple[Any, ...]],
-) -> float:
-    return _objective_contribution_with(task.objective, ledger_df, seen_keys)
-
-
 def _objective_contribution_with(
     objective: Any,
     ledger_df: pd.DataFrame,

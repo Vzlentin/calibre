@@ -84,7 +84,6 @@ def tuning_db(tmp_path, monkeypatch):
 def _reset_state(monkeypatch):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
-    monkeypatch.setattr(api_main, "_lifecycle_store", lambda: fresh)
     monkeypatch.setattr(api_main, "_SEARCH_SPACES", {})
     monkeypatch.setattr(api_main, "_OBJECTIVES", {})
     return fresh
