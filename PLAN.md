@@ -51,39 +51,53 @@ agent advances. The VN2 backtest baseline cost is read from
   already takes a `dict` (`conformal/runtime.py:185–198`); pass it through
   Ray's object store, not a file URI. Mechanism:
   1. Before `tune.Tuner.fit()`, call `state_ref = ray.put(seed_runtime.get_state())`.
-  2. Bind `state_ref` into the Tune trial config (`tune.with_parameters(...)`
-     or a closure capture; do **not** put the `ObjectRef` directly in the
-     search space).
-  3. Inside `_trainable`, build the runtime via
+  2. Bind via `tune.with_parameters(_trainable, state_ref=state_ref)` — do
+     **not** use closure capture (ObjectRefs must be passed explicitly so
+     Ray serialises them correctly to workers) and do **not** put the
+     `ObjectRef` directly in the Optuna search space.
+  3. Inside `_trainable(config, *, state_ref)`, build the runtime via
      `SymmetricIntervalRuntime.from_state(task.conformal_config, ray.get(state_ref))`.
   Delete the sequential fallback at `optimizer.py:243–250` and the
   `RuntimeWarning` it emits. State is sub-10KB per partition; the object
   store is the right medium, not fsspec.
 - **(b) Accumulate cost across origins, single scale.** Maintain
   `total_cost` across the `iter_origins` loop in both `_evaluate_candidate`
-  and `_trainable`. Report cumulative `total_cost` as both the
-  per-iteration metric (so ASHA prunes on a monotone-non-decreasing
-  signal) and the trial's final objective. Do not use a running mean —
-  intermediate and final must share the same scale so the value ASHA
-  ranks on is the value Optuna receives.
-- **(c) Make `Cost.evaluate` mode-aware.** Add a **kw-only field with
-  default** to preserve `Pareto`'s positional construction
+  and `_trainable`. Report `total_cost` (cumulative sum, monotone-non-decreasing)
+  as the per-iteration `_OBJECTIVE_METRIC` so ASHA can prune consistently.
+  Return `total_cost` as the trial's final objective. Do **not** report a
+  running mean (`total_cost / origin_idx`) — a normalized average is not
+  monotone and ASHA's pruning would be inconsistent across trials that have
+  seen different origin counts. If any origin yields an empty resolved frame,
+  treat that origin's contribution as `float("inf")` and stop accumulating
+  (propagate infinity).
+- **(c) Make `Cost.evaluate` mode-aware.** Add a kw-only field with a
+  default using `dataclasses.field(default="perhorizon", kw_only=True)`
+  (Python 3.10+) to preserve `Pareto`'s positional construction
   (`Pareto.evaluate` builds `Cost(decision_rule, arithmetic, costs)` at
   `objectives.py:76`):
   ```python
+  from dataclasses import dataclass, field
+  from typing import Literal
+
   @dataclass(frozen=True, slots=True)
   class Cost:
       decision_rule: DecisionRule
       arithmetic: OrderingArithmetic
       costs: CostStruct
-      mode: Literal["perhorizon", "cumulative"] = "perhorizon"  # kw-only via dataclass
+      mode: Literal["perhorizon", "cumulative"] = field(
+          default="perhorizon", kw_only=True
+      )
   ```
-  In `perhorizon`, group the frame by `(forecast_origin, h)`, evaluate
-  cost per group, sum. In `cumulative`, assert the frame is a single
-  `(uid, origin)` window and keep the current `demand = actuals.sum()`
-  semantics. Raise a clear error if `Cost(mode=...)` disagrees with the
-  frame's `conformal_mode` column. `Pareto.evaluate` is updated to forward
-  `mode` so a cumulative tune produces cumulative Pareto evaluations.
+  The frame is already filtered to a single `(uid, origin)` window when
+  `evaluate` is called. In `perhorizon`, group by `h`, run
+  `decision_rule` + `arithmetic` once per horizon row, and sum the
+  per-horizon over/under-age costs. In `cumulative`, assert the frame is a
+  single `(uid, origin)` window and keep the current
+  `demand = actuals.sum()` semantics. Mode is governed by the frame's
+  `conformal_mode` column when present: raise `ValueError` if
+  `Cost(mode=...)` disagrees with that column. `Pareto.evaluate` is updated
+  to forward `mode` so a cumulative tune produces cumulative Pareto
+  evaluations.
 
 **Tests:**
 - `tests/tuning/test_ray_tune_with_conformal.py` —
@@ -121,16 +135,20 @@ per-partition rows keyed by a stable cross-run session.
 - `calibre/execution/backend.py:243, 282, 496–509` (wire real partition)
 - `calibre/conformal/runtime.py` (expose partition keys)
 - `calibre/execution/decision_loop.py:135–185` (replace
-  `pending: list[pd.DataFrame]` with a `PendingStore`)
+  `pending: list[pd.DataFrame]` with direct table writes)
 
 **Changes:**
 - Replace the hard-coded `RUNTIME_PARTITION = "__runtime__"` literal.
   Thread the real per-`(uid, model, horizon)` partition string through
   `get`/`upsert` so the existing `(run_id, partition)` schema gets used
-  as designed.
-- Add `session_id: str` (16-char hex) to `conformal_state` (Alembic
-  migration). `dict`s are unhashable, so use a deterministic JSON
-  serialisation:
+  as designed. The partition keys live on the `SymmetricIntervalRuntime`
+  object; the backend iterates them when calling `upsert` after each
+  origin.
+- Add `session_id: str` (32-char hex) to `conformal_state` (Alembic
+  migration). `session_id` must be **deterministic** — same config tuple
+  across weekly cron runs must produce the same id — so UUID4 (random) is
+  wrong here. Use SHA256 over a canonical JSON payload, keeping the full
+  32-char hex to avoid birthday collisions at scale:
   ```python
   import hashlib, json
   def derive_session_id(tenant: str, sku_set: list[str],
@@ -141,16 +159,27 @@ per-partition rows keyed by a stable cross-run session.
            "model_config": model_config,
            "conformal_config": conformal_config},
           sort_keys=True, default=str)
-      return hashlib.sha256(payload.encode()).hexdigest()[:16]
+      return hashlib.sha256(payload.encode()).hexdigest()  # 64 hex chars
   ```
   Lives in `calibre/storage/session.py`. `run_id` becomes an audit
-  pointer on `runs`, not a state primary key.
-- Add `PendingStore` Protocol and `SqlPendingStore` implementation. Table
-  `pending_observations(session_id, uid, origin, h, lo, hi, y_hat)`.
-  Observed rows are deleted on `observe`.
-- Add a `last_updated_at` column on `conformal_state` and a
-  `calibre maint compact-state --older-than 90d` CLI sub-command for
-  scheduled compaction.
+  pointer on `runs`, not a state primary key. Migration steps: (1) add
+  `session_id` as a nullable `String` column, (2) backfill existing rows
+  with a sentinel (e.g. `"legacy-" + run_id.hex[:57]`) so NOT NULL can be
+  added, (3) alter to NOT NULL, (4) redefine primary key as
+  `(session_id, partition)` and drop `run_id` from the PK (it stays as
+  a non-PK FK to `runs`).
+- Persist pending forecasts to a `pending_observations(session_id, uid,
+  origin, h, lo, hi, y_hat)` table. No Protocol abstraction needed:
+  replace the `pending: list[pd.DataFrame]` in `DecisionLoop` with
+  direct writes to this table on each `observe` call, and delete matching
+  rows on resolution. The in-process list disappears; the table is the
+  buffer.
+- `conformal_state` already has an `updated_at` column (models.py:36–40)
+  with `onupdate=func.now()`. Reuse it as the TTL anchor. Add a helper
+  function `compact_old_state(session_id, older_than_days)` in
+  `calibre/storage/state.py` that deletes rows untouched past the
+  threshold. A CLI sub-command or scheduled job calling this function is
+  deferred to Phase 3+.
 
 **Tests:**
 - `tests/storage/test_per_partition_state.py` —
@@ -159,13 +188,11 @@ per-partition rows keyed by a stable cross-run session.
 - `tests/storage/test_session_keyed_resume.py` —
   `test_same_session_id_resumes_across_runs`,
   `test_different_session_id_starts_fresh`
-- `tests/execution/test_pending_store.py` —
+- `tests/execution/test_pending_observations.py` —
   `test_pending_persists_across_process_restart`
-- `tests/cli/test_maint_compact.py`
 
 **DoD:**
-- `uv run pytest tests/storage/ tests/execution/test_pending_store.py
-  tests/cli/test_maint_compact.py` green.
+- `uv run pytest tests/storage/ tests/execution/test_pending_observations.py` green.
 - Alembic migration applies on a fresh database without manual fixup.
 - Running the same config twice with the same `session_id` → second run
   hydrates from the first run's last state (byte-identical final ledger
@@ -198,27 +225,31 @@ configs in parallel, and exposes a deployable HTTP lifecycle.
   (today's behaviour); `SnapshotInventoryAdapter` reads from a parquet
   snapshot URI; `ErpInventoryAdapter` stub left for client implementations.
 - **Global-model fan-out.** Today `global_refs` execute in a driver loop
-  (`backend.py:_run_global_scope:597–607`). Do **not** reuse
-  `_process_task_ref` — that function takes a single ref. Add a new
-  module-level function:
+  (`backend.py:_run_global_scope:597–607`). Add a new module-level
+  function:
   ```python
   @ray.remote
   def _process_global_panel(
       refs: list[ForecastTaskRef],
+      model_config: dict,
       origin: pd.Timestamp,
   ) -> pd.DataFrame:
-      """Materialise all refs, concat histories into the full panel,
-      fit the global model once, return predictions for all SKUs."""
+      """Materialise each ref's per-SKU history, concat into the full
+      multi-SKU panel, fit the global adapter once with model_config,
+      return predictions for all SKUs in one frame."""
   ```
   `_run_global_scope` groups `global_refs` by `model_config` hash and
-  dispatches one `_process_global_panel.remote(group, origin)` per
-  config. Results concat into the per-origin merge alongside local
-  outputs.
-- **Task grouping.** Add `task_group: str | None` to `ForecastTask`
-  (defaults to `unique_id`). `BackendEngine` schedules grouped tasks
-  together so a category can be prioritised or a warm-start can be shared
-  across SKUs in the same group later (Phase 4 picks this up for the
-  artifact cache).
+  dispatches one `_process_global_panel.remote(group, model_config, origin)`
+  per distinct config. Results concat into the per-origin merge alongside
+  local outputs. The existing `_process_task_ref` is not reused here: it
+  handles single-SKU local scope, while `_process_global_panel` operates
+  on the full cross-SKU panel.
+- **Task grouping.** Add `task_group: str | None = None` to `ForecastTask`
+  as a trailing field with a default (so all existing call sites remain
+  valid). Semantics: `None` means "group by `unique_id`". `BackendEngine`
+  schedules grouped tasks together so a category can be prioritised or a
+  warm-start can be shared across SKUs in the same group later (Phase 4
+  picks this up for the artifact cache).
 - **API lifecycle split.** Replace the monolithic `POST /forecasts` with:
   - `POST /fit` — async, returns `fit_handle` (artifact URIs + session_id)
   - `POST /predict` — sync, `fit_handle` + origin → forecast frame
@@ -252,6 +283,9 @@ configs in parallel, and exposes a deployable HTTP lifecycle.
   tests/api/test_lifecycle_endpoints.py` green.
 - A two-config global ensemble on VN2 runs strictly faster than the
   driver-loop baseline (recorded in `PROGRESS.md`).
+- **Note:** `/calibrate` and `/observe` depend on Phase 2's
+  `session_id` column. Phase 3 API tests must run against a database
+  that has the Phase 2 migration applied.
 
 ---
 
@@ -265,10 +299,12 @@ artifacts are reused across origins; conformal coverage drift is observable.
   exists today)
 - `calibre/conformal/controllers.py` (add public `error_history` property
   on `AdaptiveAlphaController`)
-- `calibre/tuning/task.py` (`TuningTask.search_space` signature)
+- `calibre/tuning/task.py` (`TuningTask.search_space` signature;
+  `TuningCandidate` dataclass added here — **not** a new file)
 - `calibre/tuning/optimizer.py` (consume `TuningCandidate`)
 - `calibre/tuning/objectives.py` (`Regret`)
-- `calibre/forecasting/cache.py` (new), adapter base
+- `calibre/forecasting/cache.py` (new), `calibre/forecasting/adapter_base.py`
+  (add `cache_key` method)
 - `calibre/core/metrics.py` (drift gauge)
 - `calibre/api/main.py` (`/tune` endpoint)
 
@@ -280,25 +316,40 @@ artifacts are reused across origins; conformal coverage drift is observable.
   with `actuals` as the demand quantile. No `Regret` objective ships
   without this file.
 - **`TuningCandidate(model_config, conformal_config, ordering_config)`**
-  dataclass in `calibre/tuning/candidate.py`; `search_space` return type
-  becomes `Callable[[optuna.Trial], TuningCandidate]`. The optimiser
-  routes `model_config` to `ForecastTask`, `conformal_config` to the
-  trial's conformal runtime factory (passed via `ray.put` from Phase 1),
-  and `ordering_config` to the `Cost` / `Pareto` objective constructors.
-- **`Regret(decision_rule, arithmetic, costs, mode="perhorizon")`** as a
-  sibling `TuningObjective` to `Cost` and `Pareto`. Implementation
-  composes `Cost` (for realized) + an oracle path that replays the
-  decision-rule with `actuals` standing in for `y_hat`. Returns
-  `compute_regret(realized, oracle)`.
+  dataclass added to `calibre/tuning/task.py` (alongside `TuningTask` —
+  no new file). `search_space` return type becomes
+  `Callable[[optuna.Trial], TuningCandidate]`. The optimiser routes
+  `model_config` to `ForecastTask`, `conformal_config` to the trial's
+  conformal runtime factory (passed via `ray.put` from Phase 1), and
+  `ordering_config` to the `Cost` / `Pareto` objective constructors.
+- **`Regret(decision_rule, arithmetic, costs, oracle_cost: float,
+  mode="perhorizon")`** as a sibling `TuningObjective` to `Cost` and
+  `Pareto`. `oracle_cost` is the perfect-foresight benchmark cost
+  pre-computed once before the HPO study (e.g. from a backtest run with
+  `actuals` substituted as the demand quantile). `Regret.evaluate`
+  calls `Cost(decision_rule, arithmetic, costs, mode=mode).evaluate(frame,
+  actuals)` and returns
+  `compute_regret(pd.Series([realized]), pd.Series([oracle_cost]))`.
+  This avoids re-running the simulator inside each trial.
 - **`AdaptiveAlphaController.error_history` public property.**
-  `_error_history` (private, `controllers.py:54`) gains a read-only
-  `property` wrapper. Drift gauge reads the property, not the
-  private attribute, so no `AttributeError` and no test mocking
-  underscore-prefixed names.
-- **`ModelArtifactCache(uri)`** keyed by `adapter.cache_key(task)` (hash
-  of history rows + config). Adapters check the cache before fitting.
-  Conservative: identical-hash hits only. No warm-start, no partial
-  reuse.
+  `_error_history` (private list, `controllers.py:54`) gains a read-only
+  `@property` wrapper following the same pattern as `current_alpha`
+  (`controllers.py:56`):
+  ```python
+  @property
+  def error_history(self) -> list[int]:
+      return self._error_history
+  ```
+  Drift gauge reads the property; no `AttributeError` and no test mocking
+  of underscore-prefixed names.
+- **`ModelArtifactCache(uri)`** in `calibre/forecasting/cache.py`, keyed
+  by `adapter.cache_key(task)`. Add `cache_key(self, task: ForecastTask)
+  -> str` to `ModelAdapter` in `calibre/forecasting/adapter_base.py`;
+  default implementation returns
+  `hashlib.sha256((task.history.to_csv() + json.dumps(task.model_config,
+  sort_keys=True)).encode()).hexdigest()`. Adapters check the cache before
+  fitting. Conservative: identical-hash hits only. No warm-start, no
+  partial reuse.
 - **`calibre_conformal_coverage_drift{model, partition}`** gauge derived
   from `controller.error_history` running mean minus target alpha.
 - **`POST /tune`** — async, returns `study_id`; `GET /studies/{id}`
@@ -335,45 +386,46 @@ deployable bundle; let `/predict` accept a regressor override so planners
 can run promotion scenarios.
 
 **Files:**
-- `calibre/tuning/orchestrator.py` (**new**)
 - `calibre/api/main.py`, `calibre/api/schemas.py` (`/predict` future_x
-  override)
+  override; `/tune` fan-out logic lives inline in the endpoint handler)
 - `calibre/storage/models.py` (new `tuning_runs` table for per-SKU best
   configs)
 - `calibre/storage/migrations/` (Alembic migration)
 
 **Changes:**
-- **`TuningOrchestrator(session_id, sku_set, candidate_space, objective)`**
-  in `calibre/tuning/orchestrator.py`. Fans one `optimize_task` per
-  `unique_id` (or per `task_group` from Phase 3 when set), runs them
-  concurrently on Ray, and aggregates results:
-  ```python
-  class TuningOrchestrator:
-      def run(self) -> dict[str, TuningCandidate]:
-          """Return {unique_id: best_candidate} after all trials complete."""
-  ```
-  Persists per-SKU best configs to `tuning_runs(session_id, unique_id,
-  candidate_json, score, finished_at)`. Read by `/fit` so the next
-  weekly cycle uses the tuned configs without a human in the loop.
+- **Multi-SKU HPO fan-out** lives directly in the `/tune` endpoint
+  handler — no separate `TuningOrchestrator` class. Ray already provides
+  parallel task coordination; wrapping it in a class adds indirection
+  without value. The handler:
+  1. Resolves the SKU set to a `dict[unique_id, TuningTask]`.
+  2. Fans out with `ray.get([ray.remote(optimize_task).remote(task) for
+     task in tasks.values()])`.
+  3. Persists results to `tuning_runs(session_id, unique_id,
+     candidate_json, score, finished_at)`.
+  Partial-completion resume: on restart, query `tuning_runs` for the
+  `session_id` and skip SKUs that already have a `finished_at` row.
+  Read by `/fit` so the next weekly cycle uses the tuned configs without
+  a human in the loop.
 - **`/predict` future_x override.** Add optional `future_x_override:
   dict[str, list[dict]]` field on `ForecastRequest` (uid → list of
   `{ds, regressor_name: value}` rows). Merged onto the loaded `future_x`
-  before the engine runs. Enables "what if promo X is on next week"
-  scenarios without retraining. No backend changes; only adapter
-  forwarding (which already passes `future_x` through).
+  by `[unique_id, ds]`: missing columns are added, existing columns are
+  replaced. Merge happens before the engine runs. Enables "what if promo
+  X is on next week" scenarios without retraining. No backend changes;
+  only adapter forwarding (which already passes `future_x` through).
 
 **Tests:**
-- `tests/tuning/test_orchestrator.py` —
+- `tests/api/test_tune_fanout.py` —
   `test_per_sku_best_configs_persisted`,
-  `test_orchestrator_resumes_partial_completion`
+  `test_tune_resumes_partial_completion`
 - `tests/api/test_predict_what_if.py` —
   `test_future_x_override_changes_forecast`,
   `test_override_does_not_persist_across_calls`
 
 **DoD:**
-- `uv run pytest tests/tuning/test_orchestrator.py
+- `uv run pytest tests/api/test_tune_fanout.py
   tests/api/test_predict_what_if.py` green.
-- Running orchestrator over a 5-SKU set produces 5 rows in `tuning_runs`
+- Running `/tune` over a 5-SKU set produces 5 rows in `tuning_runs`
   keyed by the same `session_id`.
 - `/predict` called twice with and without the same `future_x_override`
   returns different forecasts in the first call and the baseline in the
