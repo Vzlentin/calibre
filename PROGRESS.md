@@ -117,3 +117,11 @@ next_task: "4.c Regret objective in calibre/tuning/objectives.py"
 last_commit: "0265923"
 notes: "added TuningCandidate(model_config, conformal_config, ordering_config) dataclass in calibre/tuning/task.py; TuningTask.search_space now returns TuningCandidate; optimizer routes model_config to ForecastTask, conformal_config via dataclasses.replace on SymmetricIntervalConfig, and ordering_config via dataclasses.replace on the (dataclass) objective; Tune-side trainable rebuilds the candidate via FixedTrial; module-level _OptunaSearchSpaceAdapter keeps OptunaSearch happy and remains picklable for Ray Tune state checkpoints; existing dict-returning search spaces in tests and benchmarks/vn2/tuning.py updated to return TuningCandidate; tuning tests (27/27), benchmarks/vn2/tuning mypy, and ruff passed"
 ```
+
+```yaml
+phase: 4
+last_completed_task: "4.c Regret TuningObjective"
+next_task: "4.d ModelArtifactCache + ModelAdapter.cache_key"
+last_commit: "pending in phase-4.c commit"
+notes: "added Regret(decision_rule, arithmetic, costs, oracle_cost, mode) in calibre/tuning/objectives.py; evaluate delegates to Cost(..., mode=mode).evaluate then returns compute_regret on a single-element realized vs oracle Series; oracle_cost is a precomputed scalar (perfect-foresight benchmark) so the simulator is not re-run inside each trial; targeted regret_objective + cost_mode_dispatch + evaluation.regret tests passed; tuning mypy and ruff passed"
+```

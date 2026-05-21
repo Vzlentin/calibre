@@ -10,6 +10,7 @@ import pandas as pd
 from calibre.core.forecast_frame import CONFORMAL_MODE, FORECAST_ORIGIN, UNIQUE_ID, Y_HAT, H
 from calibre.core.order_types import INVENTORY_POSITION, REORDER_POINT, CostStruct
 from calibre.evaluation.point_metrics import METRICS
+from calibre.evaluation.regret import compute_regret
 from calibre.ordering.policy_protocols import DecisionRule, OrderingArithmetic
 
 
@@ -134,3 +135,33 @@ class Pareto:
         if self.reduction == "mean":
             return float(np.mean(values))
         raise ValueError(f"Unknown Pareto reduction: {self.reduction!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class Regret:
+    """Positive regret of the realized policy cost against a fixed oracle.
+
+    ``oracle_cost`` is the perfect-foresight benchmark precomputed once
+    before the HPO study (e.g. a backtest with ``actuals`` substituted
+    for the demand quantile). Each trial only re-evaluates the policy
+    via the wrapped ``Cost`` and compares the scalar realized cost
+    against ``oracle_cost``.
+    """
+
+    decision_rule: DecisionRule
+    arithmetic: OrderingArithmetic
+    costs: CostStruct
+    oracle_cost: float
+    mode: Literal["perhorizon", "cumulative"] = field(default="perhorizon", kw_only=True)
+
+    def evaluate(self, frame: pd.DataFrame, actuals: pd.Series) -> float:
+        realized = Cost(
+            self.decision_rule,
+            self.arithmetic,
+            self.costs,
+            mode=self.mode,
+        ).evaluate(frame, actuals)
+        return compute_regret(
+            pd.Series([float(realized)]),
+            pd.Series([float(self.oracle_cost)]),
+        )
