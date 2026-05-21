@@ -98,6 +98,6 @@ notes: "added /fit (async), /predict, /calibrate, /order, /observe (async), /ses
 phase: 3
 last_completed_task: "Phase 3 DoD and cross-phase regression gate"
 next_task: "4.a evaluation/regret.py + AdaptiveAlphaController.error_history"
-last_commit: "pending Phase 3 gate commit"
+last_commit: "59ab0d2"
 notes: "removed stale test_ray_backend_warns_for_global_only_workloads (Phase 3.b made Ray fan-out the actual behaviour, so the warning no longer fires); uv run pytest passed 428/428 with 3 skipped; uv run mypy calibre/ passed; uv run ruff check . passed; uv run calibre run --config benchmarks/vn2/config/winning.yaml total_cost=4992.20 (matches Phase 2 baseline)"
 ```
