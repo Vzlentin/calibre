@@ -135,11 +135,11 @@ def _merge_future_x_override(
     if not override:
         return base.copy() if base is not None else None
 
-    override_frames: list[pd.DataFrame] = []
+    override_frames = []
     for uid, records in override.items():
         if not records:
             continue
-        frame = pd.DataFrame(records).copy()
+        frame = pd.DataFrame(records)
         if DS not in frame.columns:
             raise ValueError(f"future_x_override for {uid!r} must include ds")
         frame[UNIQUE_ID] = uid
@@ -150,19 +150,21 @@ def _merge_future_x_override(
         return base.copy() if base is not None else None
 
     override_frame = pd.concat(override_frames, ignore_index=True).drop_duplicates(
-        [UNIQUE_ID, DS],
-        keep="last",
+        [UNIQUE_ID, DS], keep="last"
     )
-    base_frame = base.copy() if base is not None else pd.DataFrame(columns=[UNIQUE_ID, DS])
-    if base_frame.empty:
+
+    if base is None or base.empty:
         base_frame = pd.DataFrame(columns=[UNIQUE_ID, DS])
+    else:
+        base_frame = base.copy()
     if UNIQUE_ID not in base_frame.columns or DS not in base_frame.columns:
         raise ValueError("future_x must include unique_id and ds to apply an override")
     base_frame[UNIQUE_ID] = base_frame[UNIQUE_ID].astype(str)
     base_frame[DS] = pd.to_datetime(base_frame[DS])
 
-    key = [UNIQUE_ID, DS]
-    merged = override_frame.set_index(key).combine_first(base_frame.set_index(key))
+    merged = override_frame.set_index([UNIQUE_ID, DS]).combine_first(
+        base_frame.set_index([UNIQUE_ID, DS])
+    )
     return merged.reset_index()
 
 
@@ -391,18 +393,24 @@ def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
 def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
     store = _lifecycle_store()
     record = store.first_fit_for_session(session_id)
-    if record is None or record.conformal_config is None:
+    if (
+        record is None
+        or record.conformal_config is None
+        or record.last_calibrated is None
+        or record.last_calibrated.empty
+    ):
         return
-    if record.last_calibrated is None or record.last_calibrated.empty:
-        return
+
     actuals = _frame_from_records(actual_records)
     if actuals.empty or UNIQUE_ID not in actuals.columns or DS not in actuals.columns:
         return
+
     runtime = _runtime_for_session(record)
     lower_col, upper_col = runtime.interval_columns
     calibrated = record.last_calibrated.copy()
     if lower_col not in calibrated.columns or upper_col not in calibrated.columns:
         return
+
     merged = calibrated.merge(
         actuals[[UNIQUE_ID, DS, Y]].rename(columns={Y: "_y_actual"}),
         on=[UNIQUE_ID, DS],
@@ -561,9 +569,9 @@ def get_study(study_id: str) -> TuneStudyResponse:
         raise HTTPException(status_code=404, detail="study not found")
     best_candidates = {
         uid: TuneCandidatePayload(
-            model_config_values=dict(payload.get("model_config", {})),
-            conformal_config=dict(payload.get("conformal_config", {})),
-            ordering_config=dict(payload.get("ordering_config", {})),
+            model_config_values=payload.get("model_config", {}),
+            conformal_config=payload.get("conformal_config", {}),
+            ordering_config=payload.get("ordering_config", {}),
         )
         for uid, payload in record.best_candidates.items()
     }
@@ -578,6 +586,12 @@ def get_study(study_id: str) -> TuneStudyResponse:
     )
 
 
+def _maybe_json_records(frame: pd.DataFrame | None) -> list[dict] | None:
+    if frame is None or frame.empty:
+        return None
+    return _json_records(frame)
+
+
 @app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
 def session_state(tenant: str, uid: str) -> SessionStateResponse:
     store = _lifecycle_store()
@@ -585,22 +599,11 @@ def session_state(tenant: str, uid: str) -> SessionStateResponse:
     if not fits:
         raise HTTPException(status_code=404, detail="session not found")
     record = fits[-1]
-    state = store.get_conformal_state(record.session_id)
-    last_forecast = (
-        _json_records(record.last_forecast)
-        if record.last_forecast is not None and not record.last_forecast.empty
-        else None
-    )
-    open_orders = (
-        _json_records(record.last_orders)
-        if record.last_orders is not None and not record.last_orders.empty
-        else None
-    )
     return SessionStateResponse(
         session_id=record.session_id,
         tenant=tenant,
         unique_id=uid,
-        state=state,
-        last_forecast=last_forecast,
-        open_orders=open_orders,
+        state=store.get_conformal_state(record.session_id),
+        last_forecast=_maybe_json_records(record.last_forecast),
+        open_orders=_maybe_json_records(record.last_orders),
     )

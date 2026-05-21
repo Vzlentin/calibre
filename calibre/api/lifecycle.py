@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -107,6 +106,3 @@ class LifecycleStore:
         store = self._conformal_state.setdefault(session_id, {})
         for partition, state in partition_states.items():
             store[str(partition)] = dict(state)
-
-    def all_session_ids(self) -> Iterable[str]:
-        return list(self._fits.keys())

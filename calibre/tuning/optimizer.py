@@ -86,11 +86,11 @@ def _cap_threaded_config(config: dict[str, Any], cpu_per_trial: float) -> dict[s
     for key in ("n_jobs", "num_threads", "nthread"):
         if key not in capped:
             continue
-        value = capped.get(key)
+        value = capped[key]
         if value is None or int(value) < 1 or int(value) > threads:
             capped[key] = threads
     model_name = str(capped.get("model", "")).lower()
-    if "lgbm" in model_name or "lightgbm" in model_name or "xgb" in model_name:
+    if any(name in model_name for name in ("lgbm", "lightgbm", "xgb")):
         capped.setdefault("n_jobs", threads)
     return capped
 
@@ -102,11 +102,7 @@ def restore_cwd():
     try:
         yield
     finally:
-        try:
-            if os.getcwd() != original:
-                os.chdir(original)
-        except FileNotFoundError:
-            os.chdir(original)
+        os.chdir(original)
 
 
 @contextmanager
@@ -194,18 +190,12 @@ def _newly_resolved_frame(
     if missing:
         raise ValueError(f"Resolved ledger is missing key columns: {missing}")
 
-    keys = list(
-        resolved[_FORECAST_KEY_COLUMNS].itertuples(
-            index=False,
-            name=None,
-        )
-    )
-    is_new = [key not in seen_keys for key in keys]
-    newly_resolved = resolved.loc[is_new].copy()
-    for key, keep in zip(keys, is_new, strict=True):
+    keys = list(resolved[_FORECAST_KEY_COLUMNS].itertuples(index=False, name=None))
+    mask = [key not in seen_keys for key in keys]
+    for key, keep in zip(keys, mask, strict=True):
         if keep:
             seen_keys.add(key)
-    return newly_resolved
+    return resolved.loc[mask].copy()
 
 
 def _objective_contribution(
