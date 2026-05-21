@@ -29,14 +29,44 @@ class FitRecord:
     last_orders: pd.DataFrame | None = None
 
 
+@dataclass
+class TuneRecord:
+    study_id: str
+    session_id: str
+    tenant: str
+    sku_set: list[str]
+    status: RunStatus = RunStatus.QUEUED
+    error: str | None = None
+    best_model_config: dict | None = None
+    best_conformal_config: dict | None = None
+    best_ordering_config: dict | None = None
+
+
 class LifecycleStore:
     def __init__(self) -> None:
         self._fits: dict[str, FitRecord] = {}
         self._conformal_state: dict[str, dict[str, dict]] = {}
+        self._studies: dict[str, TuneRecord] = {}
 
     @staticmethod
     def new_fit_id() -> str:
         return uuid4().hex
+
+    @staticmethod
+    def new_study_id() -> str:
+        return uuid4().hex
+
+    def put_study(self, record: TuneRecord) -> None:
+        self._studies[record.study_id] = record
+
+    def get_study(self, study_id: str) -> TuneRecord | None:
+        return self._studies.get(study_id)
+
+    def update_study(self, study_id: str, **fields: object) -> TuneRecord:
+        record = self._studies[study_id]
+        for key, value in fields.items():
+            setattr(record, key, value)
+        return record
 
     def put_fit(self, record: FitRecord) -> None:
         self._fits[record.fit_id] = record

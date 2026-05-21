@@ -1,5 +1,14 @@
 from calibre.tuning.objectives import Accuracy, Cost, Pareto, TuningObjective
-from calibre.tuning.optimizer import optimize_task
-from calibre.tuning.task import TuningTask
+from calibre.tuning.optimizer import optimize_task, optimize_task_candidate
+from calibre.tuning.task import TuningCandidate, TuningTask
 
-__all__ = ["Accuracy", "Cost", "Pareto", "TuningObjective", "optimize_task", "TuningTask"]
+__all__ = [
+    "Accuracy",
+    "Cost",
+    "Pareto",
+    "TuningCandidate",
+    "TuningObjective",
+    "TuningTask",
+    "optimize_task",
+    "optimize_task_candidate",
+]

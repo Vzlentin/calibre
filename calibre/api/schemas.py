@@ -96,6 +96,48 @@ class ObserveResponse(BaseModel):
     status: RunStatus
 
 
+class TuneRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    tenant: str
+    sku_set: list[str]
+    horizon: int
+    freq: str = "W"
+    history: list[dict[str, Any]]
+    actuals: list[dict[str, Any]]
+    origins: list[str]
+    base_model_config: dict[str, Any]
+    search_space_id: str
+    objective_id: str
+    n_trials: int = 20
+    conformal_config: dict[str, Any] | None = None
+
+
+class TuneHandle(BaseModel):
+    study_id: str
+    session_id: str
+    status: RunStatus
+    error: str | None = None
+
+
+class TuneCandidatePayload(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_config_values: dict[str, Any] = Field(default_factory=dict)
+    conformal_config: dict[str, Any] = Field(default_factory=dict)
+    ordering_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class TuneStudyResponse(BaseModel):
+    study_id: str
+    session_id: str
+    tenant: str
+    sku_set: list[str]
+    status: RunStatus
+    best_candidate: TuneCandidatePayload | None = None
+    error: str | None = None
+
+
 class SessionStateResponse(BaseModel):
     session_id: str
     tenant: str

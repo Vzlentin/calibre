@@ -374,8 +374,34 @@ def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> 
     return {**task.base_model_config, **dict(best_config)}
 
 
+def _candidate_from_params(task: TuningTask, params: dict[str, Any]) -> TuningCandidate:
+    """Replay ``task.search_space`` against best Optuna params to rebuild the candidate."""
+    return _resolve_candidate(
+        task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(params))))
+    )
+
+
+def _merge_with_base_model(task: TuningTask, candidate: TuningCandidate) -> TuningCandidate:
+    return TuningCandidate(
+        model_config={**task.base_model_config, **dict(candidate.model_config)},
+        conformal_config=dict(candidate.conformal_config),
+        ordering_config=dict(candidate.ordering_config),
+    )
+
+
+def optimize_task_candidate(task: TuningTask) -> TuningCandidate:
+    """Run HPO and return the best :class:`TuningCandidate` (model + conformal + ordering)."""
+    optuna_params = _run_optuna_study(task)
+    return _merge_with_base_model(task, _candidate_from_params(task, optuna_params))
+
+
 def optimize_task(task: TuningTask) -> dict:
     """Run HPO and return the best model_config dict."""
+    return dict(optimize_task_candidate(task).model_config)
+
+
+def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
+    """Run Ray Tune for ``task`` and return the best trial's Optuna params dict."""
     origins = _validate_task(task)
     runtime_snapshot = _snapshot_conformal_runtime(task)
     conformal_config = runtime_snapshot.config if runtime_snapshot is not None else None
@@ -514,4 +540,4 @@ def optimize_task(task: TuningTask) -> dict:
         else:
             os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
         ray_runtime.release()
-    return {**task.base_model_config, **_best_result_config(results)}
+    return _best_result_config(results)

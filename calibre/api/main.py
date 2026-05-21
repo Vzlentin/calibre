@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import traceback
+from collections.abc import Callable
 
+import optuna
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.orm import sessionmaker
 
-from calibre.api.lifecycle import FitRecord, LifecycleStore
+from calibre.api.lifecycle import FitRecord, LifecycleStore, TuneRecord
 from calibre.api.run_store import MemoryRunStore, RunStore, SqlRunStore
 from calibre.api.schemas import (
     CalibrateRequest,
@@ -24,6 +26,10 @@ from calibre.api.schemas import (
     PredictResponse,
     RunResponse,
     SessionStateResponse,
+    TuneCandidatePayload,
+    TuneHandle,
+    TuneRequest,
+    TuneStudyResponse,
 )
 from calibre.cli.commands import run_config
 from calibre.cli.config import ConformalConfig
@@ -42,6 +48,12 @@ from calibre.execution.backend import (
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.postgres import database_url, make_engine, make_session_factory
 from calibre.storage.session import derive_session_id
+from calibre.tuning import (
+    TuningCandidate,
+    TuningObjective,
+    TuningTask,
+    optimize_task_candidate,
+)
 
 app = FastAPI(title="Calibre", version="0.1.0")
 MAX_FORECAST_UNIQUE_IDS = 30
@@ -51,6 +63,19 @@ _DB_URL: str | None = None
 _DB_FACTORY: sessionmaker | None = None
 _SQL_STORE: SqlRunStore | None = None
 _LIFECYCLE_STORE = LifecycleStore()
+
+_SEARCH_SPACES: dict[str, Callable[[optuna.Trial], TuningCandidate]] = {}
+_OBJECTIVES: dict[str, TuningObjective] = {}
+
+
+def register_tuning_search_space(
+    name: str, search_space: Callable[[optuna.Trial], TuningCandidate]
+) -> None:
+    _SEARCH_SPACES[name] = search_space
+
+
+def register_tuning_objective(name: str, objective: TuningObjective) -> None:
+    _OBJECTIVES[name] = objective
 
 
 def _run_store() -> RunStore:
@@ -349,6 +374,107 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
         return
     runtime.observe(resolved)
     store.upsert_conformal_state(session_id, runtime.get_partition_states())
+
+
+@app.post("/tune", response_model=TuneHandle, status_code=202)
+def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
+    if not req.sku_set:
+        raise HTTPException(status_code=400, detail="sku_set must not be empty")
+    if req.search_space_id not in _SEARCH_SPACES:
+        raise HTTPException(
+            status_code=400, detail=f"unknown search_space_id: {req.search_space_id}"
+        )
+    if req.objective_id not in _OBJECTIVES:
+        raise HTTPException(status_code=400, detail=f"unknown objective_id: {req.objective_id}")
+    history = _frame_from_records(req.history)
+    if UNIQUE_ID not in history.columns or DS not in history.columns:
+        raise HTTPException(status_code=400, detail="history must include unique_id and ds")
+    actuals = _frame_from_records(req.actuals)
+    if not req.origins:
+        raise HTTPException(status_code=400, detail="origins must not be empty")
+    try:
+        origins = [pd.Timestamp(o) for o in req.origins]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid origins: {exc}") from exc
+    session_id = derive_session_id(
+        req.tenant,
+        req.sku_set,
+        req.base_model_config,
+        req.conformal_config or {},
+    )
+    study_id = LifecycleStore.new_study_id()
+    _lifecycle_store().put_study(
+        TuneRecord(
+            study_id=study_id,
+            session_id=session_id,
+            tenant=req.tenant,
+            sku_set=list(req.sku_set),
+            status=RunStatus.QUEUED,
+        )
+    )
+    bg.add_task(_run_tune_job, study_id, req, history, actuals, origins)
+    return TuneHandle(study_id=study_id, session_id=session_id, status=RunStatus.QUEUED)
+
+
+def _run_tune_job(
+    study_id: str,
+    req: TuneRequest,
+    history: pd.DataFrame,
+    actuals: pd.DataFrame,
+    origins: list[pd.Timestamp],
+) -> None:
+    store = _lifecycle_store()
+    if store.get_study(study_id) is None:
+        return
+    store.update_study(study_id, status=RunStatus.RUNNING)
+    try:
+        task = TuningTask(
+            unique_id=req.sku_set[0],
+            history=history,
+            horizon=int(req.horizon),
+            base_model_config=dict(req.base_model_config),
+            search_space=_SEARCH_SPACES[req.search_space_id],
+            actuals=actuals,
+            origins=origins,
+            objective=_OBJECTIVES[req.objective_id],
+            n_trials=int(req.n_trials),
+            freq=req.freq,
+        )
+        candidate = optimize_task_candidate(task)
+        store.update_study(
+            study_id,
+            status=RunStatus.SUCCEEDED,
+            best_model_config=dict(candidate.model_config),
+            best_conformal_config=dict(candidate.conformal_config),
+            best_ordering_config=dict(candidate.ordering_config),
+        )
+    except Exception as exc:  # pragma: no cover - background task safety net
+        store.update_study(study_id, status=RunStatus.FAILED, error=_format_error(exc))
+
+
+@app.get("/studies/{study_id}", response_model=TuneStudyResponse)
+def get_study(study_id: str) -> TuneStudyResponse:
+    record = _lifecycle_store().get_study(study_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="study not found")
+    best_candidate = (
+        TuneCandidatePayload(
+            model_config_values=dict(record.best_model_config or {}),
+            conformal_config=dict(record.best_conformal_config or {}),
+            ordering_config=dict(record.best_ordering_config or {}),
+        )
+        if record.status == RunStatus.SUCCEEDED and record.best_model_config is not None
+        else None
+    )
+    return TuneStudyResponse(
+        study_id=record.study_id,
+        session_id=record.session_id,
+        tenant=record.tenant,
+        sku_set=list(record.sku_set),
+        status=record.status,
+        best_candidate=best_candidate,
+        error=record.error,
+    )
 
 
 @app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
