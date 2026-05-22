@@ -24,6 +24,7 @@ from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
 from calibre.execution.io import join_uri
 from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
+from calibre.execution.threading import _cap_threaded_config, _thread_budget
 from calibre.tuning.task import TuningCandidate, TuningTask
 
 _OBJECTIVE_METRIC = "objective"
@@ -53,10 +54,6 @@ def _resolved_max_concurrent_trials(task: TuningTask) -> int:
     return max(1, int(_available_cpus() // cpu_per_trial))
 
 
-def _thread_budget(cpu_per_trial: float) -> int:
-    return max(1, int(cpu_per_trial))
-
-
 def _normalize_tune_storage_path(path: str) -> str:
     if "://" in path:
         return path
@@ -77,22 +74,6 @@ def _resolve_tune_storage_path(task: TuningTask) -> str:
             join_uri(task.results_dir, _DEFAULT_TUNE_RESULTS_SUBDIR)
         )
     return tempfile.mkdtemp(prefix="calibre-tune-")
-
-
-def _cap_threaded_config(config: dict[str, Any], cpu_per_trial: float) -> dict[str, Any]:
-    """Keep library-level parallelism inside the Tune trial CPU budget."""
-    capped = dict(config)
-    threads = _thread_budget(cpu_per_trial)
-    for key in ("n_jobs", "num_threads", "nthread"):
-        if key not in capped:
-            continue
-        value = capped[key]
-        if value is None or int(value) < 1 or int(value) > threads:
-            capped[key] = threads
-    model_name = str(capped.get("model", "")).lower()
-    if any(name in model_name for name in ("lgbm", "lightgbm", "xgb")):
-        capped.setdefault("n_jobs", threads)
-    return capped
 
 
 @contextmanager

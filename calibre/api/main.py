@@ -44,6 +44,7 @@ from calibre.execution.backend import (
     _finalize_preds,
     _fit_predict_task,
 )
+from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.postgres import (
     TuningRunRepo,
@@ -426,24 +427,15 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
         )
         return
 
-    merged = calibrated.merge(
-        actuals[[UNIQUE_ID, DS, Y]].rename(columns={Y: "_y_actual"}),
-        on=[UNIQUE_ID, DS],
-        how="left",
+    actuals_lookup = pd.Series(
+        actuals[Y].to_numpy(),
+        index=pd.MultiIndex.from_arrays([actuals[UNIQUE_ID].to_numpy(), actuals[DS].to_numpy()]),
     )
-    if Y in merged.columns:
-        merged[Y] = merged["_y_actual"].combine_first(merged[Y])
+    mode = getattr(runtime, "mode", "perhorizon")
+    if mode == "cumulative":
+        observe_cumulative(runtime, [calibrated], actuals_lookup)
     else:
-        merged[Y] = merged["_y_actual"]
-    merged = merged.drop(columns=["_y_actual"])
-    resolved = merged.dropna(subset=[Y, lower_col, upper_col])
-    if resolved.empty:
-        logger.warning(
-            "observe skipped: no rows resolved after merging actuals",
-            extra={"session_id": session_id, "calibrated_rows": len(calibrated)},
-        )
-        return
-    runtime.observe(resolved)
+        observe_per_horizon(runtime, [calibrated], actuals_lookup, lower_col, upper_col)
     store.upsert_conformal_state(session_id, runtime.get_partition_states())
 
 

@@ -15,6 +15,7 @@ import pandas as pd
 
 from calibre.conformal.runtime import (
     ConformalRuntime,
+    PartitionedConformalRuntime,
     SymmetricIntervalConfig,
     SymmetricIntervalRuntime,
     build_symmetric_interval_runtime,
@@ -52,6 +53,7 @@ from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actu
 from calibre.execution.io import join_uri, rm
 from calibre.execution.ledger import ForecastLedger, OrderLedger
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
+from calibre.execution.threading import _cap_threaded_config
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
@@ -128,30 +130,6 @@ def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _empty_forecast_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
-
-
-def _thread_budget(cpu_per_task: float | None) -> int:
-    if cpu_per_task is None:
-        return 1
-    return max(1, int(cpu_per_task))
-
-
-def _cap_threaded_config(config: dict[str, Any], cpu_per_task: float | None) -> dict[str, Any]:
-    """Keep library-level parallelism inside the Ray task CPU budget when set."""
-    if cpu_per_task is None:
-        return config
-    capped = dict(config)
-    threads = _thread_budget(cpu_per_task)
-    for key in ("n_jobs", "num_threads", "nthread"):
-        if key not in capped:
-            continue
-        value = capped.get(key)
-        if value is None or int(value) < 1 or int(value) > threads:
-            capped[key] = threads
-    model_name = str(capped.get("model", "")).lower()
-    if "lgbm" in model_name or "lightgbm" in model_name or "xgb" in model_name:
-        capped.setdefault("n_jobs", threads)
-    return capped
 
 
 def _process_task_ref(
@@ -560,15 +538,13 @@ class BackendEngine:
             or self.conformal_config is None
         ):
             return
-        list_for_run = getattr(self.conformal_state_store, "list_for_run", None)
-        if callable(list_for_run):
-            partition_states = list_for_run(self.run_id)
-            if partition_states:
-                self.conformal_runtime = SymmetricIntervalRuntime.from_partition_states(
-                    self.conformal_config,
-                    partition_states,
-                )
-                return
+        partition_states = self.conformal_state_store.list_for_run(self.run_id)
+        if partition_states:
+            self.conformal_runtime = SymmetricIntervalRuntime.from_partition_states(
+                self.conformal_config,
+                partition_states,
+            )
+            return
         state = self.conformal_state_store.get(self.run_id, RUNTIME_PARTITION)
         if state is None:
             return
@@ -577,9 +553,8 @@ class BackendEngine:
     def _persist_conformal_state(self, conformal_runtime: ConformalRuntime | None) -> None:
         if self.run_id is None or self.conformal_state_store is None or conformal_runtime is None:
             return
-        get_partition_states = getattr(conformal_runtime, "get_partition_states", None)
-        if callable(get_partition_states):
-            partition_states = get_partition_states()
+        if isinstance(conformal_runtime, PartitionedConformalRuntime):
+            partition_states = conformal_runtime.get_partition_states()
             if partition_states:
                 for partition, state in partition_states.items():
                     self.conformal_state_store.upsert(
