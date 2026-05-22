@@ -27,7 +27,7 @@ class JsonFormatter(logging.Formatter):
 def _json_safe(value):
     if hasattr(value, "isoformat"):
         return value.isoformat()
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, str | int | float | bool) or value is None:
         return value
     return str(value)
 

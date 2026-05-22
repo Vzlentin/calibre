@@ -12,14 +12,16 @@ from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.evaluation.point_metrics import smape
 from calibre.tuning.objectives import Accuracy
 from calibre.tuning.optimizer import optimize_task
-from calibre.tuning.task import TuningTask
+from calibre.tuning.task import TuningCandidate, TuningTask
 
 
-def seasonal_naive_search_space(trial: optuna.Trial) -> dict:
+def seasonal_naive_search_space(trial: optuna.Trial) -> TuningCandidate:
     """Search space for SeasonalNaive: tune season_length."""
-    return {
-        "season_length": trial.suggest_categorical("season_length", [4, 13, 26, 52]),
-    }
+    return TuningCandidate(
+        model_config={
+            "season_length": trial.suggest_categorical("season_length", [4, 13, 26, 52]),
+        }
+    )
 
 
 def tune_one_series(
@@ -27,7 +29,7 @@ def tune_one_series(
     sales: pd.DataFrame,
     horizon: int,
     base_config: dict,
-    search_space: Callable[[optuna.Trial], dict] = seasonal_naive_search_space,
+    search_space: Callable[[optuna.Trial], TuningCandidate] = seasonal_naive_search_space,
     n_trials: int = 20,
     n_origins: int = 5,
     freq: str = "W",
@@ -65,7 +67,7 @@ def tune_all_series(
     sales: pd.DataFrame,
     horizon: int,
     base_config: dict,
-    search_space: Callable[[optuna.Trial], dict] = seasonal_naive_search_space,
+    search_space: Callable[[optuna.Trial], TuningCandidate] = seasonal_naive_search_space,
     n_trials: int = 20,
     n_origins: int = 5,
     freq: str = "W",

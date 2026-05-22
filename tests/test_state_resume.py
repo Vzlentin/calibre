@@ -38,6 +38,13 @@ class _MemoryStateStore:
     def get(self, run_id: UUID, partition: str = RUNTIME_PARTITION) -> dict | None:
         return self.states.get((run_id, partition))
 
+    def list_for_run(self, run_id: UUID) -> dict[str, dict]:
+        return {
+            partition: state
+            for (stored_run_id, partition), state in self.states.items()
+            if stored_run_id == run_id
+        }
+
     def upsert(self, run_id: UUID, partition: str, state: dict) -> None:
         self.states[(run_id, partition)] = dict(state)
 
@@ -110,10 +117,12 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
         conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
     ).execute([task], actuals, origins=[dates[7], dates[8]])
 
-    persisted = store.get(run_id, RUNTIME_PARTITION)
-    assert persisted is not None
-    assert "alpha_history" not in persisted["controller"]
-    assert "error_history" not in persisted["controller"]
+    persisted = store.list_for_run(run_id)
+    assert "SeasonalNaive:h1:__global__" in persisted
+    persisted_state = persisted["SeasonalNaive:h1:__global__"]
+    assert RUNTIME_PARTITION not in persisted
+    assert "alpha_history" not in persisted_state["controller"]
+    assert "error_history" not in persisted_state["controller"]
 
     resumed = BackendEngine(
         conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),

@@ -8,7 +8,12 @@ from calibre.storage.objstore import read_run_artifacts, signed_url, write_ledge
 
 
 def test_storage_metadata_contains_plan_tables() -> None:
-    assert {"runs", "conformal_state", "forecast_pointers"}.issubset(Base.metadata.tables)
+    assert {
+        "runs",
+        "conformal_state",
+        "forecast_pointers",
+        "pending_observations",
+    }.issubset(Base.metadata.tables)
 
 
 def test_objstore_round_trips_ledger_shard(tmp_path) -> None:

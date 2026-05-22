@@ -12,6 +12,11 @@ conformal_coverage_ratio = Gauge(
     "Observed conformal coverage ratio.",
     ["model", "mode"],
 )
+conformal_coverage_drift = Gauge(
+    "calibre_conformal_coverage_drift",
+    "Adaptive-controller miscoverage drift: mean(error_history) - target_alpha.",
+    ["model", "partition"],
+)
 order_cost = Gauge(
     "calibre_order_cost",
     "Order policy cost.",
@@ -29,6 +34,10 @@ def observe_forecast_duration(model: str, phase: str, seconds: float) -> None:
 
 def set_conformal_coverage(model: str, mode: str, ratio: float) -> None:
     conformal_coverage_ratio.labels(model=model, mode=mode).set(float(ratio))
+
+
+def set_conformal_coverage_drift(model: str, partition: str, drift: float) -> None:
+    conformal_coverage_drift.labels(model=model, partition=partition).set(float(drift))
 
 
 def set_order_cost(currency: str, dataset: str, cost: float) -> None:

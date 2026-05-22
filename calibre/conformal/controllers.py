@@ -57,6 +57,14 @@ class AdaptiveAlphaController:
     def current_alpha(self) -> float:
         return float(self._alpha)
 
+    @property
+    def target_alpha(self) -> float:
+        return float(self._target_alpha)
+
+    @property
+    def error_history(self) -> list[int]:
+        return list(self._error_history)
+
     def _error(self, y_true: Any, y_pred: Any) -> int:
         if isinstance(y_pred, IntervalPrediction):
             return int(not y_pred.contains(float(y_true)))

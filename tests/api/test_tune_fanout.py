@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import optuna
+import pandas as pd
+import pytest
+from alembic import command
+from alembic.config import Config
+from fastapi.testclient import TestClient
+
+from calibre.api import main as api_main
+from calibre.api.lifecycle import LifecycleStore
+from calibre.api.main import (
+    app,
+    register_tuning_objective,
+    register_tuning_search_space,
+)
+from calibre.core.forecast_frame import UNIQUE_ID
+from calibre.evaluation.point_metrics import smape
+from calibre.storage.postgres import (
+    TuningRunRepo,
+    make_engine,
+    make_session_factory,
+    session_scope,
+)
+from calibre.tuning import Accuracy, TuningCandidate, TuningTask
+
+SKU_SET = ["A", "B", "C", "D", "E"]
+
+
+def _seasonal_search_space(trial: optuna.Trial) -> TuningCandidate:
+    return TuningCandidate(
+        model_config={
+            "season_length": trial.suggest_categorical("season_length", [4, 13, 26, 52]),
+        },
+        conformal_config={"gamma": trial.suggest_float("gamma", 0.01, 0.1)},
+    )
+
+
+def _history_records(uids: list[str]) -> list[dict]:
+    dates = pd.date_range("2024-01-07", periods=8, freq="W-SUN")
+    return [
+        {UNIQUE_ID: uid, "ds": ds.strftime("%Y-%m-%d"), "y": float(idx + 1)}
+        for uid in uids
+        for idx, ds in enumerate(dates)
+    ]
+
+
+def _tune_payload(sku_set: list[str]) -> dict:
+    return {
+        "tenant": "acme",
+        "sku_set": sku_set,
+        "horizon": 2,
+        "freq": "W-SUN",
+        "history": _history_records(sku_set),
+        "actuals": _history_records(sku_set),
+        "origins": ["2024-02-04"],
+        "base_model_config": {"backend": "stub", "model": "stub_model"},
+        "search_space_id": "seasonal",
+        "objective_id": "accuracy",
+        "n_trials": 1,
+        "conformal_config": {
+            "method": "aci",
+            "coverage": 0.9,
+            "calibration_window": 4,
+            "gamma": 0.05,
+        },
+    }
+
+
+@pytest.fixture
+def tuning_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "tune.db"
+    db_url = f"sqlite+pysqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("CALIBRE_DATABASE_URL", db_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "head")
+    monkeypatch.setattr(api_main, "_DB_FACTORY", None)
+    monkeypatch.setattr(api_main, "_DB_URL", None)
+    monkeypatch.setattr(api_main, "_SQL_STORE", None)
+    return db_url
+
+
+@pytest.fixture(autouse=True)
+def _reset_state(monkeypatch):
+    fresh = LifecycleStore()
+    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
+    monkeypatch.setattr(api_main, "_SEARCH_SPACES", {})
+    monkeypatch.setattr(api_main, "_OBJECTIVES", {})
+    return fresh
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+def _factory_for(db_url: str):
+    return make_session_factory(make_engine(db_url))
+
+
+def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client) -> None:
+    register_tuning_search_space("seasonal", _seasonal_search_space)
+    register_tuning_objective("accuracy", Accuracy(metric=smape))
+
+    seen_uids: list[str] = []
+
+    def _fake_optimize(task: TuningTask) -> TuningCandidate:
+        seen_uids.append(task.unique_id)
+        idx = SKU_SET.index(task.unique_id)
+        return TuningCandidate(
+            model_config={
+                "backend": "stub",
+                "model": "stub_model",
+                "season_length": [4, 13, 26, 52][idx % 4],
+            },
+            conformal_config={"gamma": 0.01 + 0.01 * idx},
+            ordering_config={},
+        )
+
+    monkeypatch.setattr(api_main, "optimize_task_candidate", _fake_optimize)
+
+    submit = client.post("/tune", json=_tune_payload(SKU_SET))
+    assert submit.status_code == 202, submit.text
+    handle = submit.json()
+    study_id = handle["study_id"]
+    session_id = handle["session_id"]
+
+    detail = client.get(f"/studies/{study_id}").json()
+    assert detail["status"] == "succeeded"
+    assert set(detail["best_candidates"]) == set(SKU_SET)
+    for idx, uid in enumerate(SKU_SET):
+        payload = detail["best_candidates"][uid]
+        assert payload["model_config_values"]["season_length"] == [4, 13, 26, 52][idx % 4]
+        assert payload["conformal_config"]["gamma"] == pytest.approx(0.01 + 0.01 * idx)
+
+    assert sorted(seen_uids) == sorted(SKU_SET)
+
+    factory = _factory_for(tuning_db)
+    with session_scope(factory) as session:
+        rows = TuningRunRepo(session).list_for_session(session_id)
+    assert {row.unique_id for row in rows} == set(SKU_SET)
+    for row in rows:
+        idx = SKU_SET.index(row.unique_id)
+        assert row.candidate["model_config"]["season_length"] == [4, 13, 26, 52][idx % 4]
+        assert row.candidate["conformal_config"]["gamma"] == pytest.approx(0.01 + 0.01 * idx)
+
+
+def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client) -> None:
+    register_tuning_search_space("seasonal", _seasonal_search_space)
+    register_tuning_objective("accuracy", Accuracy(metric=smape))
+
+    payload = _tune_payload(SKU_SET[:3])
+
+    factory = _factory_for(tuning_db)
+    handle_session = client.post("/tune", json=payload).json()
+    pre_session_id = handle_session["session_id"]
+
+    with session_scope(factory) as session:
+        TuningRunRepo(session).upsert(
+            pre_session_id,
+            "A",
+            candidate={
+                "model_config": {"season_length": 99},
+                "conformal_config": {"gamma": 0.42},
+                "ordering_config": {},
+            },
+            score=None,
+        )
+        TuningRunRepo(session).upsert(
+            pre_session_id,
+            "B",
+            candidate={
+                "model_config": {"season_length": 88},
+                "conformal_config": {"gamma": 0.33},
+                "ordering_config": {},
+            },
+            score=None,
+        )
+
+    tuned_uids: list[str] = []
+
+    def _fake_optimize(task: TuningTask) -> TuningCandidate:
+        tuned_uids.append(task.unique_id)
+        return TuningCandidate(
+            model_config={"season_length": 13},
+            conformal_config={"gamma": 0.05},
+            ordering_config={},
+        )
+
+    monkeypatch.setattr(api_main, "optimize_task_candidate", _fake_optimize)
+
+    submit = client.post("/tune", json=payload)
+    study_id = submit.json()["study_id"]
+    detail = client.get(f"/studies/{study_id}").json()
+
+    assert detail["status"] == "succeeded"
+    assert tuned_uids == ["C"]
+    candidates = detail["best_candidates"]
+    assert candidates["A"]["model_config_values"]["season_length"] == 99
+    assert candidates["B"]["model_config_values"]["season_length"] == 88
+    assert candidates["C"]["model_config_values"]["season_length"] == 13

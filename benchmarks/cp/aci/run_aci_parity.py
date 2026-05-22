@@ -75,18 +75,18 @@ def slugify_lr(lr: float) -> str:
 def to_python(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: to_python(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [to_python(val) for val in value]
-    if isinstance(value, (np.integer,)):
+    if isinstance(value, np.integer):
         return int(value)
-    if isinstance(value, (np.floating, float)):
+    if isinstance(value, np.floating | float):
         number = float(value)
         if math.isnan(number):
             return "nan"
         if math.isinf(number):
             return "inf" if number > 0 else "-inf"
         return number
-    if isinstance(value, (np.bool_,)):
+    if isinstance(value, np.bool_):
         return bool(value)
     return value
 

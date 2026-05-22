@@ -4,25 +4,38 @@ from __future__ import annotations
 
 import os
 import tempfile
-import warnings
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass, is_dataclass, replace
 from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import optuna
 import pandas as pd
 
-from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, Y
+from calibre.conformal.runtime import (
+    SymmetricIntervalConfig,
+    SymmetricIntervalRuntime,
+    to_json_safe_state,
+)
+from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
 from calibre.execution.io import join_uri
 from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
-from calibre.tuning.task import TuningTask
+from calibre.tuning.task import TuningCandidate, TuningTask
 
 _OBJECTIVE_METRIC = "objective"
 _ORIGIN_INDEX = "origin_index"
 _DEFAULT_TUNE_RESULTS_SUBDIR = "ray_tune"
+_FORECAST_KEY_COLUMNS = [UNIQUE_ID, DS, FORECAST_ORIGIN, MODEL_NAME, H]
+
+
+@dataclass(frozen=True, slots=True)
+class _ConformalRuntimeSnapshot:
+    config: SymmetricIntervalConfig
+    state: dict[str, Any]
 
 
 def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
@@ -73,11 +86,11 @@ def _cap_threaded_config(config: dict[str, Any], cpu_per_trial: float) -> dict[s
     for key in ("n_jobs", "num_threads", "nthread"):
         if key not in capped:
             continue
-        value = capped.get(key)
+        value = capped[key]
         if value is None or int(value) < 1 or int(value) > threads:
             capped[key] = threads
     model_name = str(capped.get("model", "")).lower()
-    if "lgbm" in model_name or "lightgbm" in model_name or "xgb" in model_name:
+    if any(name in model_name for name in ("lgbm", "lightgbm", "xgb")):
         capped.setdefault("n_jobs", threads)
     return capped
 
@@ -89,11 +102,7 @@ def restore_cwd():
     try:
         yield
     finally:
-        try:
-            if os.getcwd() != original:
-                os.chdir(original)
-        except FileNotFoundError:
-            os.chdir(original)
+        os.chdir(original)
 
 
 @contextmanager
@@ -146,6 +155,60 @@ def _build_mlflow_callbacks(task: TuningTask) -> list[Any]:
     ]
 
 
+def _snapshot_conformal_runtime(task: TuningTask) -> _ConformalRuntimeSnapshot | None:
+    if task.conformal_runtime_factory is None:
+        return None
+    seed_runtime = task.conformal_runtime_factory()
+    if not isinstance(seed_runtime, SymmetricIntervalRuntime):
+        raise TypeError(
+            "Ray Tune conformal optimization requires conformal_runtime_factory "
+            "to return SymmetricIntervalRuntime"
+        )
+    return _ConformalRuntimeSnapshot(
+        config=seed_runtime.config,
+        state=to_json_safe_state(seed_runtime.get_resume_state()),
+    )
+
+
+def _resolve_state_ref(state_ref: Any) -> dict[str, Any]:
+    import ray
+
+    if isinstance(state_ref, ray.ObjectRef):
+        return ray.get(state_ref)
+    return dict(state_ref)
+
+
+def _newly_resolved_frame(
+    ledger_df: pd.DataFrame,
+    seen_keys: set[tuple[Any, ...]],
+) -> pd.DataFrame:
+    resolved = ledger_df.dropna(subset=[Y, Y_HAT])
+    if resolved.empty:
+        return resolved
+
+    missing = [col for col in _FORECAST_KEY_COLUMNS if col not in resolved.columns]
+    if missing:
+        raise ValueError(f"Resolved ledger is missing key columns: {missing}")
+
+    keys = list(resolved[_FORECAST_KEY_COLUMNS].itertuples(index=False, name=None))
+    mask = [key not in seen_keys for key in keys]
+    for key, keep in zip(keys, mask, strict=True):
+        if keep:
+            seen_keys.add(key)
+    return resolved.loc[mask].copy()
+
+
+def _objective_contribution_with(
+    objective: Any,
+    ledger_df: pd.DataFrame,
+    seen_keys: set[tuple[Any, ...]],
+) -> float:
+    resolved = _newly_resolved_frame(ledger_df, seen_keys)
+    if resolved.empty:
+        return float("inf")
+    return float(objective.evaluate(resolved, resolved[Y]))
+
+
 def _best_result_config(results: Any) -> dict[str, Any]:
     valid_results = [
         result
@@ -181,14 +244,62 @@ def _validate_task(task: TuningTask) -> list[pd.Timestamp]:
     return [pd.Timestamp(origin) for origin in task.origins]
 
 
+def _resolve_candidate(value: Any) -> TuningCandidate:
+    if isinstance(value, TuningCandidate):
+        return value
+    raise TypeError(
+        f"TuningTask.search_space must return a TuningCandidate; got {type(value).__name__}"
+    )
+
+
+class _OptunaSearchSpaceAdapter:
+    """Picklable wrapper that exposes ``search_space`` to OptunaSearch.
+
+    OptunaSearch requires the define-by-run callable to return ``None`` or a
+    plain ``dict``; we discard the ``TuningCandidate`` return value while
+    keeping the ``suggest_*`` calls (which are what OptunaSearch actually
+    needs to record the parameter space). Defined at module scope so Ray
+    Tune can pickle the searcher state.
+    """
+
+    __slots__ = ("_search_space",)
+
+    def __init__(self, search_space: Callable[[optuna.Trial], TuningCandidate]) -> None:
+        self._search_space = search_space
+
+    def __call__(self, trial: optuna.Trial) -> None:
+        _resolve_candidate(self._search_space(trial))
+        return None
+
+
+def _apply_conformal_overrides(
+    config: SymmetricIntervalConfig, overrides: dict[str, Any]
+) -> SymmetricIntervalConfig:
+    if not overrides:
+        return config
+    return replace(config, **overrides)
+
+
+def _apply_ordering_overrides(objective: Any, overrides: dict[str, Any]) -> Any:
+    if not overrides:
+        return objective
+    if not is_dataclass(objective) or isinstance(objective, type):
+        raise TypeError(
+            "ordering_config overrides require the tuning objective to be a "
+            f"dataclass instance; got {type(objective).__name__}"
+        )
+    return replace(objective, **overrides)
+
+
 def _evaluate_candidate(
     task: TuningTask,
-    config: dict[str, Any],
+    candidate: TuningCandidate,
     origins: list[pd.Timestamp],
 ) -> float:
     history = _history_with_uid(task)
+    runtime_snapshot = _snapshot_conformal_runtime(task)
     candidate_config = _cap_threaded_config(
-        {**task.base_model_config, **config, "freq": task.freq},
+        {**task.base_model_config, **candidate.model_config, "freq": task.freq},
         task.cpu_per_trial,
     )
     forecast_task = ForecastTask(
@@ -197,10 +308,16 @@ def _evaluate_candidate(
         model_config=candidate_config,
     )
     conformal_options = (
-        ConformalOptions(runtime=task.conformal_runtime_factory())
-        if task.conformal_runtime_factory is not None
+        ConformalOptions(
+            runtime=SymmetricIntervalRuntime.from_state(
+                _apply_conformal_overrides(runtime_snapshot.config, candidate.conformal_config),
+                runtime_snapshot.state,
+            )
+        )
+        if runtime_snapshot is not None
         else ConformalOptions()
     )
+    objective = _apply_ordering_overrides(task.objective, candidate.ordering_config)
     with BackendEngine(
         execution=ExecutionOptions(
             freq=task.freq,
@@ -209,25 +326,28 @@ def _evaluate_candidate(
         ),
         conformal=conformal_options,
     ) as engine:
-        value = float("inf")
+        total_cost = 0.0
+        seen_keys: set[tuple[Any, ...]] = set()
         with _trial_thread_env(task.cpu_per_trial):
             for result in engine.iter_origins([forecast_task], task.actuals, origins):
-                resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
-                value = (
-                    float("inf")
-                    if resolved.empty
-                    else float(task.objective.evaluate(resolved, resolved[Y]))
+                contribution = _objective_contribution_with(
+                    objective,
+                    result.ledger.to_df(),
+                    seen_keys,
                 )
-        return value
+                if not isfinite(contribution):
+                    return float("inf")
+                total_cost += contribution
+        return total_cost
 
 
 def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> dict[str, Any]:
     study = optuna.create_study(direction="minimize", sampler=create_tpe_sampler(task.seed))
 
     def _objective(trial: optuna.Trial) -> float:
-        config = task.search_space(trial)
-        trial.set_user_attr("resolved_config", dict(config))
-        return _evaluate_candidate(task, config, origins)
+        candidate = _resolve_candidate(task.search_space(trial))
+        trial.set_user_attr("resolved_config", dict(candidate.model_config))
+        return _evaluate_candidate(task, candidate, origins)
 
     study.optimize(_objective, n_trials=task.n_trials, gc_after_trial=True)
     if not study.trials or study.best_trial.value is None or not isfinite(study.best_trial.value):
@@ -236,18 +356,38 @@ def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> 
     return {**task.base_model_config, **dict(best_config)}
 
 
+def _candidate_from_params(task: TuningTask, params: dict[str, Any]) -> TuningCandidate:
+    """Replay ``task.search_space`` against best Optuna params to rebuild the candidate."""
+    return _resolve_candidate(
+        task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(params))))
+    )
+
+
+def _merge_with_base_model(task: TuningTask, candidate: TuningCandidate) -> TuningCandidate:
+    return TuningCandidate(
+        model_config={**task.base_model_config, **dict(candidate.model_config)},
+        conformal_config=dict(candidate.conformal_config),
+        ordering_config=dict(candidate.ordering_config),
+    )
+
+
+def optimize_task_candidate(task: TuningTask) -> TuningCandidate:
+    """Run HPO and return the best :class:`TuningCandidate` (model + conformal + ordering)."""
+    optuna_params = _run_optuna_study(task)
+    return _merge_with_base_model(task, _candidate_from_params(task, optuna_params))
+
+
 def optimize_task(task: TuningTask) -> dict:
     """Run HPO and return the best model_config dict."""
-    origins = _validate_task(task)
+    return dict(optimize_task_candidate(task).model_config)
 
-    if task.conformal_runtime_factory is not None and not task.ray_local_mode:
-        warnings.warn(
-            "conformal_runtime_factory is set: falling back to sequential Optuna "
-            "instead of Ray Tune. Set ray_local_mode=True to use Ray Tune with conformal.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return _optimize_task_sequential(task, origins)
+
+def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
+    """Run Ray Tune for ``task`` and return the best trial's Optuna params dict."""
+    origins = _validate_task(task)
+    runtime_snapshot = _snapshot_conformal_runtime(task)
+    conformal_config = runtime_snapshot.config if runtime_snapshot is not None else None
+    worker_task = replace(task, conformal_runtime_factory=None)
 
     prepare_ray_environment()
 
@@ -255,77 +395,106 @@ def optimize_task(task: TuningTask) -> dict:
     from ray.tune.schedulers import ASHAScheduler
     from ray.tune.search.optuna import OptunaSearch
 
-    history = _history_with_uid(task)
+    history = _history_with_uid(worker_task)
     max_t = len(origins)
-    max_concurrent_trials = _resolved_max_concurrent_trials(task)
+    max_concurrent_trials = _resolved_max_concurrent_trials(worker_task)
+
     search_alg = OptunaSearch(
-        space=task.search_space,
+        space=_OptunaSearchSpaceAdapter(worker_task.search_space),
         metric=_OBJECTIVE_METRIC,
         mode="min",
-        sampler=create_tpe_sampler(task.seed),
+        sampler=create_tpe_sampler(worker_task.seed),
     )
     scheduler = ASHAScheduler(
         metric=_OBJECTIVE_METRIC,
         mode="min",
         time_attr=_ORIGIN_INDEX,
         max_t=max_t,
-        grace_period=task.asha_grace_period,
+        grace_period=worker_task.asha_grace_period,
     )
 
-    def _trainable(config: dict[str, Any]) -> None:
+    def _trainable(config: dict[str, Any], *, state_ref: Any | None = None) -> None:
+        candidate = _resolve_candidate(
+            worker_task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
+        )
         candidate_config = _cap_threaded_config(
-            {**task.base_model_config, **config, "freq": task.freq},
-            task.cpu_per_trial,
+            {**worker_task.base_model_config, **candidate.model_config, "freq": worker_task.freq},
+            worker_task.cpu_per_trial,
         )
         forecast_task = ForecastTask(
             history=history,
-            horizon=task.horizon,
+            horizon=worker_task.horizon,
             model_config=candidate_config,
         )
+        runtime_config = (
+            _apply_conformal_overrides(conformal_config, candidate.conformal_config)
+            if conformal_config is not None
+            else None
+        )
         conformal_options = (
-            ConformalOptions(runtime=task.conformal_runtime_factory())
-            if task.conformal_runtime_factory is not None
+            ConformalOptions(
+                runtime=SymmetricIntervalRuntime.from_state(
+                    runtime_config,
+                    _resolve_state_ref(state_ref),
+                )
+            )
+            if runtime_config is not None
             else ConformalOptions()
         )
+        objective = _apply_ordering_overrides(worker_task.objective, candidate.ordering_config)
         engine = BackendEngine(
             execution=ExecutionOptions(
-                freq=task.freq,
+                freq=worker_task.freq,
                 backend="local",
-                max_concurrency=task.max_uid_concurrency,
+                max_concurrency=worker_task.max_uid_concurrency,
             ),
             conformal=conformal_options,
         )
         try:
-            with _trial_thread_env(task.cpu_per_trial):
+            total_cost = 0.0
+            seen_keys: set[tuple[Any, ...]] = set()
+            with _trial_thread_env(worker_task.cpu_per_trial):
                 for origin_idx, result in enumerate(
-                    engine.iter_origins([forecast_task], task.actuals, origins),
+                    engine.iter_origins([forecast_task], worker_task.actuals, origins),
                     start=1,
                 ):
-                    resolved = result.ledger.to_df().dropna(subset=[Y, Y_HAT])
-                    value = (
-                        float("inf")
-                        if resolved.empty
-                        else float(task.objective.evaluate(resolved, resolved[Y]))
+                    contribution = _objective_contribution_with(
+                        objective,
+                        result.ledger.to_df(),
+                        seen_keys,
                     )
-                    tune.report({_OBJECTIVE_METRIC: value, _ORIGIN_INDEX: origin_idx})
+                    if not isfinite(contribution):
+                        total_cost = float("inf")
+                        tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
+                        break
+                    total_cost += contribution
+                    tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
         finally:
             engine.close()
 
+    ray_runtime = acquire_ray_runtime(
+        address=worker_task.ray_address,
+        local_mode=worker_task.ray_local_mode,
+    )
+    state_ref = (
+        ray_runtime.ray.put(runtime_snapshot.state) if runtime_snapshot is not None else None
+    )
+    trainable_fn = (
+        tune.with_parameters(_trainable, state_ref=state_ref)
+        if state_ref is not None
+        else _trainable
+    )
     trainable = tune.with_resources(
-        _trainable,
-        resources={"cpu": float(task.cpu_per_trial)},
+        trainable_fn,
+        resources={"cpu": float(worker_task.cpu_per_trial)},
     )
     run_config_kwargs: dict[str, Any] = {
-        "callbacks": _build_mlflow_callbacks(task),
-        "storage_path": _resolve_tune_storage_path(task),
+        "callbacks": _build_mlflow_callbacks(worker_task),
+        "storage_path": _resolve_tune_storage_path(worker_task),
     }
-    if task.tune_experiment_name is not None:
-        run_config_kwargs["name"] = task.tune_experiment_name
+    if worker_task.tune_experiment_name is not None:
+        run_config_kwargs["name"] = worker_task.tune_experiment_name
 
-    ray_runtime = acquire_ray_runtime(
-        address=task.ray_address,
-        local_mode=task.ray_local_mode,
-    )
     previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
     os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
     previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
@@ -337,7 +506,7 @@ def optimize_task(task: TuningTask) -> dict:
                 tune_config=tune.TuneConfig(
                     search_alg=search_alg,
                     scheduler=scheduler,
-                    num_samples=task.n_trials,
+                    num_samples=worker_task.n_trials,
                     max_concurrent_trials=max_concurrent_trials,
                 ),
                 run_config=tune.RunConfig(**run_config_kwargs),
@@ -353,4 +522,4 @@ def optimize_task(task: TuningTask) -> dict:
         else:
             os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
         ray_runtime.release()
-    return {**task.base_model_config, **_best_result_config(results)}
+    return _best_result_config(results)

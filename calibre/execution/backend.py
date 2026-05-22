@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import time
-import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -41,7 +41,11 @@ from calibre.core.forecast_frame import (
     validate_forecast_frame,
 )
 from calibre.core.forecast_task import ForecastTask, ForecastTaskRef
-from calibre.core.metrics import observe_forecast_duration, set_conformal_coverage
+from calibre.core.metrics import (
+    observe_forecast_duration,
+    set_conformal_coverage,
+    set_conformal_coverage_drift,
+)
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
 from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
@@ -168,6 +172,7 @@ def _process_task_ref(
         forecast_origin=origin,
         history_uri=ref.history_uri,
         future_x_uri=ref.future_x_uri,
+        task_group=ref.task_group,
     ).materialize()
 
     history = task.history[task.history[DS] < origin]
@@ -184,6 +189,51 @@ def _process_task_ref(
         model_config=task.model_config,
         forecast_origin=origin,
         future_x=future_x,
+        task_group=task.task_group,
+    )
+    preds = _fit_predict_task(origin_task)
+    return _finalize_preds(preds, origin, origin_task.model_name)
+
+
+def _process_global_panel(
+    refs: list[ForecastTaskRef],
+    model_config: dict,
+    origin: pd.Timestamp,
+) -> pd.DataFrame:
+    """Fit one global adapter for a config over the full multi-SKU panel."""
+    histories: list[pd.DataFrame] = []
+    future_frames: list[pd.DataFrame] = []
+    horizon: int | None = None
+    task_group: str | None = None
+
+    for ref in refs:
+        task = ref.materialize()
+        history = task.history[task.history[DS] < origin]
+        if not history.empty:
+            histories.append(history)
+        if task.future_x is not None and not task.future_x.empty:
+            future_frames.append(task.future_x)
+        if horizon is None:
+            horizon = task.horizon
+        if task_group is None:
+            task_group = task.task_group
+
+    if not histories or horizon is None:
+        return _empty_forecast_frame()
+
+    panel = pd.concat(histories, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
+    future_x = (
+        pd.concat(future_frames, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
+        if future_frames
+        else None
+    )
+    origin_task = ForecastTask(
+        history=panel,
+        horizon=horizon,
+        model_config=dict(model_config),
+        forecast_origin=origin,
+        future_x=future_x,
+        task_group=task_group,
     )
     preds = _fit_predict_task(origin_task)
     return _finalize_preds(preds, origin, origin_task.model_name)
@@ -194,6 +244,17 @@ def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     if not non_empty:
         return _empty_forecast_frame()
     return _coerce_forecast_frame_dtypes(pd.concat(non_empty, ignore_index=True))
+
+
+def _adaptive_controller_drift(conformal_runtime: ConformalRuntime) -> float | None:
+    """Return ``mean(error_history) - target_alpha`` when adaptive, else None."""
+    controller = getattr(conformal_runtime, "controller", None)
+    history = getattr(controller, "error_history", None)
+    target_alpha = getattr(controller, "target_alpha", None)
+    if history is None or target_alpha is None or len(history) == 0:
+        return None
+    running_mean = sum(int(x) for x in history) / len(history)
+    return float(running_mean) - float(target_alpha)
 
 
 @dataclass
@@ -286,6 +347,7 @@ class BackendEngine:
         self._ray: Any | None = None
         self._ray_runtime: RayRuntimeHandle | None = None
         self._remote_process_task: Any | None = None
+        self._remote_process_global_panel: Any | None = None
 
     def __enter__(self) -> BackendEngine:
         return self
@@ -334,18 +396,18 @@ class BackendEngine:
             parallel_tasks: list[ForecastTask] = []
             direct_tasks: list[ForecastTask] = []
             for task in tasks:
-                if get_scope(task.model_config) == "local":
-                    parallel_tasks.append(task)
-                else:
-                    direct_tasks.append(task)
-
-            if self.execution.backend == "ray" and direct_tasks and not parallel_tasks:
-                warnings.warn(
-                    "backend='ray' was requested, but all tasks are global-scope and run "
-                    "on the driver",
-                    RuntimeWarning,
-                    stacklevel=2,
+                grouped_task = ForecastTask(
+                    history=task.history,
+                    horizon=task.horizon,
+                    model_config=task.model_config,
+                    forecast_origin=task.forecast_origin,
+                    future_x=task.future_x,
+                    task_group=task.task_group or task.unique_id,
                 )
+                if get_scope(task.model_config) == "local":
+                    parallel_tasks.append(grouped_task)
+                else:
+                    direct_tasks.append(grouped_task)
 
             with self._task_staging_prefix() as staging_prefix:
                 parallel_refs = self._materialize_task_refs(
@@ -401,6 +463,7 @@ class BackendEngine:
         self._ray_runtime = None
         self._ray = None
         self._remote_process_task = None
+        self._remote_process_global_panel = None
 
     def close(self) -> None:
         self.shutdown_owned_ray()
@@ -497,6 +560,15 @@ class BackendEngine:
             or self.conformal_config is None
         ):
             return
+        list_for_run = getattr(self.conformal_state_store, "list_for_run", None)
+        if callable(list_for_run):
+            partition_states = list_for_run(self.run_id)
+            if partition_states:
+                self.conformal_runtime = SymmetricIntervalRuntime.from_partition_states(
+                    self.conformal_config,
+                    partition_states,
+                )
+                return
         state = self.conformal_state_store.get(self.run_id, RUNTIME_PARTITION)
         if state is None:
             return
@@ -505,6 +577,17 @@ class BackendEngine:
     def _persist_conformal_state(self, conformal_runtime: ConformalRuntime | None) -> None:
         if self.run_id is None or self.conformal_state_store is None or conformal_runtime is None:
             return
+        get_partition_states = getattr(conformal_runtime, "get_partition_states", None)
+        if callable(get_partition_states):
+            partition_states = get_partition_states()
+            if partition_states:
+                for partition, state in partition_states.items():
+                    self.conformal_state_store.upsert(
+                        self.run_id,
+                        str(partition),
+                        to_json_safe_state(state),
+                    )
+                return
         state = to_json_safe_state(conformal_runtime.get_resume_state())
         self.conformal_state_store.upsert(self.run_id, RUNTIME_PARTITION, state)
 
@@ -523,6 +606,26 @@ class BackendEngine:
         for model_name, group in comparable.groupby(MODEL_NAME, sort=False):
             covered = (group[Y] >= group[lower_col]) & (group[Y] <= group[upper_col])
             set_conformal_coverage(str(model_name), mode, float(covered.mean()))
+        self._record_coverage_drift(comparable, conformal_runtime)
+
+    def _record_coverage_drift(
+        self,
+        resolved: pd.DataFrame,
+        conformal_runtime: ConformalRuntime,
+    ) -> None:
+        drift = _adaptive_controller_drift(conformal_runtime)
+        if drift is None:
+            return
+        partitions = (
+            sorted(set(resolved[CONFORMAL_PARTITION].dropna().astype(str)))
+            if CONFORMAL_PARTITION in resolved.columns
+            else ["__global__"]
+        )
+        if not partitions:
+            partitions = ["__global__"]
+        for model_name in sorted(set(resolved[MODEL_NAME].dropna().astype(str))):
+            for partition in partitions:
+                set_conformal_coverage_drift(model_name, partition, drift)
 
     def _advance_issued_count_from_initial_ledger(self) -> None:
         """Recover issued-origin accounting from a resumed ledger snapshot."""
@@ -577,6 +680,7 @@ class BackendEngine:
                 model_config=model_config,
                 forecast_origin=task.forecast_origin,
                 future_x=task.future_x,
+                task_group=task.task_group,
             ).to_uri(task_base)
             refs.append(ref)
         return refs
@@ -599,11 +703,14 @@ class BackendEngine:
         refs: list[ForecastTaskRef],
         origin: pd.Timestamp,
     ) -> pd.DataFrame:
-        """Run global multi-series adapters on the driver."""
+        """Run one global multi-series adapter per distinct model config."""
         if not refs:
             return _empty_forecast_frame()
+        groups = _group_global_refs_by_config(refs)
+        if self._should_use_ray(len(groups)):
+            return self._run_global_groups_on_ray(groups, origin)
         return _concat_prediction_frames(
-            [_process_task_ref(ref, origin, local_scope=False) for ref in refs]
+            [_process_global_panel(group_refs, config, origin) for config, group_refs in groups]
         )
 
     def _should_use_ray(self, task_count: int) -> bool:
@@ -618,11 +725,40 @@ class BackendEngine:
             return self._ray
         self._ray = None
         self._remote_process_task = None
+        self._remote_process_global_panel = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
         self._ray = self._ray_runtime.ray
         # Cache safety: ExecutionOptions is frozen, so cpu_per_task is immutable
         # for this engine instance. Rebuilding _remote_process_task is safe.
         return self._ray
+
+    def _run_global_groups_on_ray(
+        self,
+        groups: list[tuple[dict, list[ForecastTaskRef]]],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        ray = self._ensure_ray()
+        if self._remote_process_global_panel is None:
+            remote_kwargs: dict[str, float] = {}
+            if self.execution.cpu_per_task is not None:
+                remote_kwargs["num_cpus"] = float(self.execution.cpu_per_task)
+            self._remote_process_global_panel = (
+                ray.remote(**remote_kwargs)(_process_global_panel)
+                if remote_kwargs
+                else ray.remote(_process_global_panel)
+            )
+        remote_process = self._remote_process_global_panel
+        concurrency = self.execution.max_concurrency or len(groups)
+        frames: list[pd.DataFrame] = []
+
+        for start in range(0, len(groups), concurrency):
+            chunk = groups[start : start + concurrency]
+            object_refs = [
+                remote_process.remote(group_refs, config, origin) for config, group_refs in chunk
+            ]
+            frames.extend(ray.get(object_refs))
+
+        return _concat_prediction_frames(frames)
 
     def _run_refs_on_ray(
         self,
@@ -653,3 +789,19 @@ class BackendEngine:
             frames.extend(ray.get(object_refs))
 
         return _concat_prediction_frames(frames)
+
+
+def _model_config_key(config: dict) -> str:
+    return json.dumps(config, sort_keys=True, default=str)
+
+
+def _group_global_refs_by_config(
+    refs: list[ForecastTaskRef],
+) -> list[tuple[dict, list[ForecastTaskRef]]]:
+    grouped: dict[str, tuple[dict, list[ForecastTaskRef]]] = {}
+    for ref in refs:
+        key = _model_config_key(ref.model_config)
+        if key not in grouped:
+            grouped[key] = (dict(ref.model_config), [])
+        grouped[key][1].append(ref)
+    return list(grouped.values())

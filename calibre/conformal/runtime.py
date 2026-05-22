@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -475,6 +476,66 @@ class SymmetricIntervalRuntime:
             "controller": self._controller_resume_state(),
             "calibrator": calibrator_state,
         }
+
+    @property
+    def partition_keys(self) -> tuple[str, ...]:
+        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        score_history = calibrator_state.get("score_history", {})
+        if not isinstance(score_history, dict):
+            return ()
+        return tuple(str(partition) for partition in score_history)
+
+    def get_partition_states(self) -> dict[str, dict[str, Any]]:
+        state = self.get_resume_state()
+        calibrator_state = state.get("calibrator", {})
+        score_history = calibrator_state.get("score_history", {})
+        if not isinstance(score_history, dict) or not score_history:
+            return {}
+
+        partition_states: dict[str, dict[str, Any]] = {}
+        for partition, scores in score_history.items():
+            partition_key = str(partition)
+            partition_state = deepcopy(state)
+            partition_state["partition"] = partition_key
+            partition_state["calibrator"]["score_history"] = {partition_key: scores}
+            partition_states[partition_key] = partition_state
+        return partition_states
+
+    @classmethod
+    def from_partition_states(
+        cls,
+        config: SymmetricIntervalConfig,
+        partition_states: Mapping[str, dict[str, Any]],
+    ) -> SymmetricIntervalRuntime:
+        if not partition_states:
+            return cls(config)
+
+        merged_state: dict[str, Any] | None = None
+        score_history: dict[str, Any] = {}
+        max_issued_count = 0
+        for fallback_partition, state in partition_states.items():
+            if merged_state is None:
+                merged_state = deepcopy(state)
+            issued_count = int(state.get("issued_count", 0))
+            if issued_count >= max_issued_count:
+                max_issued_count = issued_count
+                merged_state["controller"] = deepcopy(state.get("controller", {}))
+                merged_state["method"] = state.get("method", config.method)
+
+            calibrator_state = state.get("calibrator", {})
+            partition_scores = calibrator_state.get("score_history", {})
+            if isinstance(partition_scores, dict) and partition_scores:
+                for partition, scores in partition_scores.items():
+                    score_history[str(partition)] = scores
+            else:
+                partition = str(state.get("partition", fallback_partition))
+                score_history[partition] = []
+
+        assert merged_state is not None
+        merged_state["issued_count"] = max_issued_count
+        merged_state.setdefault("calibrator", {})
+        merged_state["calibrator"]["score_history"] = score_history
+        return cls.from_state(config, merged_state)
 
 
 def _components_from_config(
