@@ -36,10 +36,12 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from functools import cache, partial
@@ -123,6 +125,214 @@ from calibre.tuning.optimizer import create_tpe_sampler
 # carry the seasonal signal MLForecastAdapter would otherwise drop.
 ROLLING_WINDOWS = [4, 13, 26]
 logger = logging.getLogger(__name__)
+_TUNE_OBJECTIVE_METRIC = "objective"
+_TUNE_STEP_ATTR = "tune_step"
+_TUNE_RESULTS_PREFIX = "calibre-vn2-tune-"
+
+
+@contextmanager
+def _restore_cwd():
+    original = os.getcwd()
+    try:
+        yield
+    finally:
+        os.chdir(original)
+
+
+@contextmanager
+def _trial_thread_env(cpu_per_trial: float):
+    threads = str(max(1, int(cpu_per_trial)))
+    keys = (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "TORCH_NUM_THREADS",
+    )
+    previous = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            os.environ[key] = threads
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _cap_threaded_model_config(config: dict[str, Any], cpu_per_trial: float) -> dict[str, Any]:
+    capped = dict(config)
+    threads = max(1, int(cpu_per_trial))
+    for key in ("n_jobs", "num_threads", "nthread"):
+        if key not in capped:
+            continue
+        value = capped[key]
+        if value is None or int(value) < 1 or int(value) > threads:
+            capped[key] = threads
+    model_name = str(capped.get("model", "")).lower()
+    if any(name in model_name for name in ("lgbm", "lightgbm", "xgb")):
+        capped.setdefault("n_jobs", threads)
+    return capped
+
+
+def _resolve_max_concurrent_trials(
+    max_concurrent_trials: int | None,
+    *,
+    n_trials: int,
+    cpu_per_trial: float,
+) -> int:
+    if max_concurrent_trials is not None:
+        return max(1, min(n_trials, int(max_concurrent_trials)))
+    cpus = max(1, os.cpu_count() or 1)
+    by_cpu = max(1, int(cpus // max(cpu_per_trial, 1e-9)))
+    return max(1, min(n_trials, by_cpu))
+
+
+def _resolve_tune_storage_path(path: str | Path | None) -> str:
+    if path is None:
+        return tempfile.mkdtemp(prefix=_TUNE_RESULTS_PREFIX)
+    raw = str(path)
+    if "://" in raw:
+        return raw
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate.mkdir(parents=True, exist_ok=True)
+    return str(candidate)
+
+
+def _short_tune_trial_name(trial: Any) -> str:
+    return f"trial_{trial.trial_id}"
+
+
+def _best_tune_result(results: Any) -> Any:
+    valid = [
+        result
+        for result in results
+        if result.error is None
+        and result.metrics is not None
+        and _TUNE_OBJECTIVE_METRIC in result.metrics
+        and math.isfinite(float(result.metrics[_TUNE_OBJECTIVE_METRIC]))
+    ]
+    if not valid:
+        failed = sum(1 for result in results if result.error is not None)
+        raise RuntimeError(
+            "Ray Tune completed without a valid VN2 objective result "
+            f"({failed} failed trial(s)). Check the trial logs and benchmark settings."
+        )
+    return results.get_best_result(
+        metric=_TUNE_OBJECTIVE_METRIC,
+        mode="min",
+        filter_nan_and_inf=True,
+    )
+
+
+def _run_optuna_tune(
+    trainable: Callable[[dict[str, Any]], None],
+    search_space: Callable[[optuna.Trial], None],
+    *,
+    n_trials: int,
+    max_t: int,
+    seed: int | None,
+    timeout_sec: int | None,
+    asha_grace_period: int,
+    cpu_per_trial: float,
+    max_concurrent_trials: int | None,
+    ray_address: str | None,
+    ray_local_mode: bool,
+    tune_storage_path: str | Path | None,
+    tune_experiment_name: str | None,
+) -> tuple[Any, Any]:
+    """Run a VN2 Optuna search space through Ray Tune and return results + searcher."""
+    if n_trials < 1:
+        raise ValueError("n_trials must be at least 1")
+    if max_t < 1:
+        raise ValueError("max_t must be at least 1")
+    if cpu_per_trial <= 0:
+        raise ValueError("cpu_per_trial must be positive")
+
+    from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
+
+    prepare_ray_environment()
+    from ray import tune
+    from ray.tune.schedulers import ASHAScheduler
+    from ray.tune.search.optuna import OptunaSearch
+
+    grace_period = max(1, min(int(asha_grace_period), max_t))
+    search_alg = OptunaSearch(
+        space=search_space,
+        metric=_TUNE_OBJECTIVE_METRIC,
+        mode="min",
+        sampler=create_tpe_sampler(seed),
+    )
+    scheduler = ASHAScheduler(
+        metric=_TUNE_OBJECTIVE_METRIC,
+        mode="min",
+        time_attr=_TUNE_STEP_ATTR,
+        max_t=max_t,
+        grace_period=grace_period,
+    )
+    trainable_with_resources = tune.with_resources(
+        trainable,
+        resources={"cpu": float(cpu_per_trial)},
+    )
+    tune_config_kwargs: dict[str, Any] = {
+        "search_alg": search_alg,
+        "scheduler": scheduler,
+        "num_samples": n_trials,
+        "trial_name_creator": _short_tune_trial_name,
+        "trial_dirname_creator": _short_tune_trial_name,
+        "max_concurrent_trials": _resolve_max_concurrent_trials(
+            max_concurrent_trials,
+            n_trials=n_trials,
+            cpu_per_trial=cpu_per_trial,
+        ),
+    }
+    if timeout_sec is not None:
+        tune_config_kwargs["time_budget_s"] = timeout_sec
+    run_config_kwargs: dict[str, Any] = {
+        "storage_path": _resolve_tune_storage_path(tune_storage_path),
+        "verbose": 0,
+    }
+    if tune_experiment_name is not None:
+        run_config_kwargs["name"] = tune_experiment_name
+
+    previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
+    os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
+    previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
+    os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"
+    ray_runtime = acquire_ray_runtime(address=ray_address, local_mode=ray_local_mode)
+    try:
+        with _restore_cwd():
+            tuner = tune.Tuner(
+                trainable_with_resources,
+                tune_config=tune.TuneConfig(**tune_config_kwargs),
+                run_config=tune.RunConfig(**run_config_kwargs),
+            )
+            results = tuner.fit()
+    finally:
+        if previous_chdir is None:
+            os.environ.pop("RAY_CHDIR_TO_TRIAL_DIR", None)
+        else:
+            os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = previous_chdir
+        if previous_auto_loggers is None:
+            os.environ.pop("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", None)
+        else:
+            os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
+        ray_runtime.release()
+    return results, search_alg
+
+
+class _HpoSearchSpaceAdapter:
+    """Expose VN2 panel HPO's Optuna search space to Ray Tune."""
+
+    def __call__(self, trial: optuna.Trial) -> None:
+        for name, spec in HPO_SEARCH_SPACE.items():
+            _suggest_from_spec(trial, name, spec)
+        return None
 
 
 # ------------------------------------------------------------------ #
@@ -373,8 +583,15 @@ def run_hpo(
     seed: int = 42,
     verbose: bool = True,
     target_mode: str = "per_horizon",
+    asha_grace_period: int = 1,
+    cpu_per_trial: float = 1.0,
+    max_concurrent_trials: int | None = None,
+    ray_address: str | None = None,
+    ray_local_mode: bool = False,
+    tune_storage_path: str | Path | None = None,
+    tune_experiment_name: str | None = "vn2_hpo",
 ) -> dict[str, Any]:
-    """Run the panel-level Optuna HPO and return the best model config.
+    """Run the panel-level Ray Tune/Optuna HPO and return the best model config.
 
     The returned dict is a fully-formed ``model_config`` ready to feed into
     a ``ForecastTask(scope="global", strategy="direct", quantiles=[alpha])``
@@ -407,39 +624,67 @@ def run_hpo(
     if not origins:
         raise ValueError(f"Not enough history to build {n_origins} origins with horizon {horizon}")
 
-    engine = BackendEngine(execution=ExecutionOptions(freq="W-MON"))
+    def _trainable(params: dict[str, Any]) -> None:
+        from ray import tune
 
-    def _objective(trial: optuna.Trial) -> float:
-        params: dict[str, Any] = {
-            name: _suggest_from_spec(trial, name, spec) for name, spec in HPO_SEARCH_SPACE.items()
-        }
+        params = dict(params)
         lags = HPO_LAG_SETS[int(params.pop("lag_set_idx"))]
         quantile_alpha = float(params.pop("quantile_alpha"))
-        config = _build_model_config(quantile_alpha=quantile_alpha, lags=lags, **params)
+        config = _cap_threaded_model_config(
+            _build_model_config(quantile_alpha=quantile_alpha, lags=lags, **params),
+            cpu_per_trial,
+        )
         if cumulative_target:
             config["_target_mode"] = "cumulative"
 
         task = ForecastTask(history=history, horizon=horizon, model_config=_strip_private(config))
-        result = engine.execute([task], actuals=actuals, origins=origins)
-        forecast_df = _prepare_policy_forecast_frame(
-            result.ledger.to_df(),
-            protection_period=horizon,
-            cumulative_target=cumulative_target,
+        engine = BackendEngine(
+            execution=ExecutionOptions(
+                freq="W-MON",
+                backend="local",
+            )
         )
-
-        return _cumulative_pinball(
-            forecast_df, actuals, horizon, quantile_alpha, tau=cost_optimal_tau
-        )
-
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=create_tpe_sampler(seed),
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
-    )
+        try:
+            total = 0.0
+            with _trial_thread_env(cpu_per_trial):
+                for origin_idx, result in enumerate(
+                    engine.iter_origins([task], actuals=actuals, origins=origins),
+                    start=1,
+                ):
+                    forecast_df = _prepare_policy_forecast_frame(
+                        result.ledger.to_df(),
+                        protection_period=horizon,
+                        cumulative_target=cumulative_target,
+                    )
+                    value = _cumulative_pinball(
+                        forecast_df,
+                        actuals,
+                        horizon,
+                        quantile_alpha,
+                        tau=cost_optimal_tau,
+                    )
+                    if not math.isfinite(value):
+                        tune.report(
+                            {
+                                _TUNE_OBJECTIVE_METRIC: float("inf"),
+                                _TUNE_STEP_ATTR: origin_idx,
+                            }
+                        )
+                        return
+                    total += value
+                    tune.report(
+                        {
+                            _TUNE_OBJECTIVE_METRIC: total / origin_idx,
+                            "total_pinball": total,
+                            _TUNE_STEP_ATTR: origin_idx,
+                        }
+                    )
+        finally:
+            engine.close()
 
     if verbose:
         logger.info(
-            "HPO: %s trials, %s origins, timeout %ss, panel size %s series, cost-optimal tau=%.3f",
+            "Ray Tune HPO: %s trials, %s origins, timeout %ss, panel size %s series, cost-optimal tau=%.3f",
             n_trials,
             n_origins,
             timeout_sec,
@@ -449,18 +694,26 @@ def run_hpo(
 
     started = time.time()
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    try:
-        study.optimize(
-            _objective,
-            n_trials=n_trials,
-            timeout=timeout_sec,
-            gc_after_trial=True,
-        )
-    finally:
-        engine.close()
+    results, _ = _run_optuna_tune(
+        _trainable,
+        _HpoSearchSpaceAdapter(),
+        n_trials=n_trials,
+        max_t=len(origins),
+        seed=seed,
+        timeout_sec=timeout_sec,
+        asha_grace_period=asha_grace_period,
+        cpu_per_trial=cpu_per_trial,
+        max_concurrent_trials=max_concurrent_trials,
+        ray_address=ray_address,
+        ray_local_mode=ray_local_mode,
+        tune_storage_path=tune_storage_path,
+        tune_experiment_name=tune_experiment_name,
+    )
     elapsed = time.time() - started
 
-    best = dict(study.best_trial.params)
+    best_result = _best_tune_result(results)
+    best_metric = float(best_result.metrics[_TUNE_OBJECTIVE_METRIC])
+    best = dict(best_result.config)
     lags = HPO_LAG_SETS[int(best.pop("lag_set_idx"))]
     quantile_alpha = float(best.pop("quantile_alpha"))
     best_config = _build_model_config(quantile_alpha=quantile_alpha, lags=lags, **best)
@@ -472,16 +725,14 @@ def run_hpo(
         logger.info(
             "HPO done in %.1fs. Best pinball=%.4f alpha=%.2f lags=%s",
             elapsed,
-            study.best_value,
+            best_metric,
             quantile_alpha,
             lags,
         )
 
     if mlflow.active_run() is not None:
-        mlflow.log_metric("hpo/best_pinball", study.best_value)
-        mlflow.log_params(
-            {f"hpo/best_{k}": str(v)[:500] for k, v in study.best_trial.params.items()}
-        )
+        mlflow.log_metric("hpo/best_pinball", best_metric)
+        mlflow.log_params({f"hpo/best_{k}": str(v)[:500] for k, v in best_result.config.items()})
 
     return best_config
 
@@ -829,6 +1080,7 @@ def replay_cached_cost(
     order_base_scale: float = 1.0,
     reorder_point_scale: float | None = None,
     on_policy_error: Callable[[int, Exception], None] | None = None,
+    on_progress: Callable[[int, float], None] | None = None,
 ) -> ReplayResult:
     """Replay cached forecasts through the exact VN2 simulator.
 
@@ -855,6 +1107,7 @@ def replay_cached_cost(
     pending: list[pd.DataFrame] = []
     actuals_cache: dict[tuple[str, pd.Timestamp], float] = {}
     freq_offset = pd.tseries.frequencies.to_offset("W-MON")
+    progress_step = 0
 
     for rn in range(1, cache.decision_rounds + 1):
         cached_round = cache.rounds[rn]
@@ -889,6 +1142,9 @@ def replay_cached_cost(
         actual_demand = cache.actuals_by_round.get(rn, dict.fromkeys(cache.initial_states, 0.0))
         simulator.step(rn, orders=orders, actual_demand=actual_demand)
         orders_by_round[rn] = orders
+        progress_step += 1
+        if on_progress is not None:
+            on_progress(progress_step, simulator.total_cost())
 
         if runtime is not None and actual_demand:
             actuals_ds = cached_round.origin + freq_offset
@@ -910,6 +1166,9 @@ def replay_cached_cost(
             orders={uid: 0.0 for uid in actual_demand},
             actual_demand=actual_demand,
         )
+        progress_step += 1
+        if on_progress is not None:
+            on_progress(progress_step, simulator.total_cost())
 
     return ReplayResult(
         summary=_summary_from_simulator(simulator),
@@ -1019,6 +1278,8 @@ def _sample_cost_search_crc_config(
     trial: optuna.Trial,
     protection_period: int,
     crc_partitions: list[str] | None = None,
+    *,
+    validate_buffer: bool = True,
 ) -> CumulativeConformalRiskConfig | None:
     if not trial.suggest_categorical("crc_enabled", [True, False]):
         return None
@@ -1035,7 +1296,12 @@ def _sample_cost_search_crc_config(
     buffer_max_choice = trial.suggest_categorical("crc_buffer_max", ["none", 0.0, 5.0, 10.0])
     buffer_min = None if buffer_min_choice == "none" else float(buffer_min_choice)
     buffer_max = None if buffer_max_choice == "none" else float(buffer_max_choice)
-    if buffer_min is not None and buffer_max is not None and buffer_min > buffer_max:
+    if (
+        validate_buffer
+        and buffer_min is not None
+        and buffer_max is not None
+        and buffer_min > buffer_max
+    ):
         # Prune rather than silently swap so trial parameters match the
         # realised config when reproducing a best trial.
         raise optuna.TrialPruned("buffer_min > buffer_max")
@@ -1070,6 +1336,53 @@ def _crc_partition_key(name: str):
     raise ValueError(f"Unknown crc partition: {name!r}")
 
 
+class _CostSearchSpaceAdapter:
+    """Expose VN2 simulator-cost search parameters to Ray Tune's OptunaSearch."""
+
+    __slots__ = (
+        "_base_config",
+        "_crc_partitions",
+        "_include_order_calibration",
+        "_protection_period",
+        "_search_forecast",
+    )
+
+    def __init__(
+        self,
+        *,
+        base_config: dict[str, Any],
+        search_forecast: bool,
+        include_order_calibration: bool,
+        protection_period: int,
+        crc_partitions: list[str] | None,
+    ) -> None:
+        self._base_config = base_config
+        self._search_forecast = search_forecast
+        self._include_order_calibration = include_order_calibration
+        self._protection_period = protection_period
+        self._crc_partitions = crc_partitions
+
+    def __call__(self, trial: optuna.Trial) -> None:
+        _sample_cost_search_model_config(trial, self._base_config, self._search_forecast)
+        if self._include_order_calibration:
+            trial.suggest_float("order_base_scale", 0.85, 1.15)
+            trial.suggest_float("reorder_point_scale", 0.0, 1.0)
+        _sample_cost_search_crc_config(
+            trial,
+            self._protection_period,
+            crc_partitions=self._crc_partitions,
+            validate_buffer=False,
+        )
+        return None
+
+
+def _optuna_study_from_search_alg(search_alg: Any) -> optuna.Study:
+    study = getattr(search_alg, "_ot_study", None)
+    if study is None:
+        raise RuntimeError("Ray Tune OptunaSearch did not expose a completed Optuna study")
+    return study
+
+
 def run_cost_search(
     *,
     data_dir: Path = DATA_DIR,
@@ -1089,15 +1402,23 @@ def run_cost_search(
     log_mlflow: bool = False,
     experiment_name: str = "vn2",
     run_name: str = "cost_search",
+    asha_grace_period: int = 1,
+    cpu_per_trial: float = 1.0,
+    max_concurrent_trials: int | None = None,
+    ray_address: str | None = None,
+    ray_local_mode: bool = False,
+    tune_storage_path: str | Path | None = None,
+    ray_tune_experiment_name: str | None = "vn2_cost_search",
 ) -> optuna.Study:
-    """Optimize simulator EUR cost with cached forecast replays.
+    """Optimize simulator EUR cost with Ray Tune over cached forecast replays.
 
     By default the search varies CRC parameters against a fixed forecast model.
     Set ``search_forecast=True`` to include LightGBM, lag-set, quantile, and
-    direct-cumulative target choices in the same objective.
+    direct-cumulative target choices in the same objective. ``ray_local_mode``,
+    ``max_concurrent_trials``, and small ``n_trials`` values keep smoke/local-dev
+    runs cheap without changing the production Tune path.
     """
     base_config = deepcopy(model_config if model_config is not None else BEST_CONFIG)
-    forecast_cache: dict[str, VN2ReplayCache] = {}
     fixed_cache: VN2ReplayCache | None = None
     if not search_forecast:
         fixed_cache = build_replay_cache(
@@ -1111,40 +1432,37 @@ def run_cost_search(
             series_filter=series_filter,
         )
 
-    def _objective(trial: optuna.Trial) -> float:
-        candidate_model = _sample_cost_search_model_config(trial, base_config, search_forecast)
-        order_base_scale = (
-            trial.suggest_float("order_base_scale", 0.85, 1.15)
-            if include_order_calibration
-            else 1.0
-        )
-        reorder_point_scale = (
-            trial.suggest_float("reorder_point_scale", 0.0, 1.0)
-            if include_order_calibration
-            else None
-        )
-        crc_config = _sample_cost_search_crc_config(
-            trial,
-            lead_time + review_period,
-            crc_partitions=crc_partitions,
-        )
-        cache_key = _stable_config_key(
-            {
-                "model": candidate_model,
-                "horizon": horizon,
-                "lead_time": lead_time,
-                "review_period": review_period,
-                "decision_rounds": decision_rounds,
-                "delivery_weeks": delivery_weeks,
-                "series_filter": series_filter,
-            }
-        )
+    max_t = max(1, decision_rounds + delivery_weeks)
 
+    def _trainable(config: dict[str, Any]) -> None:
+        from ray import tune
+
+        fixed_trial = optuna.trial.FixedTrial(dict(config))
         try:
-            if fixed_cache is not None:
-                forecast_cache[cache_key] = fixed_cache
-            elif cache_key not in forecast_cache:
-                forecast_cache[cache_key] = build_replay_cache(
+            candidate_model = _sample_cost_search_model_config(
+                fixed_trial,
+                base_config,
+                search_forecast,
+            )
+            order_base_scale = (
+                fixed_trial.suggest_float("order_base_scale", 0.85, 1.15)
+                if include_order_calibration
+                else 1.0
+            )
+            reorder_point_scale = (
+                fixed_trial.suggest_float("reorder_point_scale", 0.0, 1.0)
+                if include_order_calibration
+                else None
+            )
+            crc_config = _sample_cost_search_crc_config(
+                fixed_trial,
+                lead_time + review_period,
+                crc_partitions=crc_partitions,
+            )
+            replay_cache = (
+                fixed_cache
+                if fixed_cache is not None
+                else build_replay_cache(
                     data_dir=data_dir,
                     model_config=candidate_model,
                     horizon=horizon,
@@ -1154,31 +1472,54 @@ def run_cost_search(
                     delivery_weeks=delivery_weeks,
                     series_filter=series_filter,
                 )
+            )
             policy_errors: list[str] = []
+
+            def _report_progress(step: int, total_cost: float) -> None:
+                tune.report(
+                    {
+                        _TUNE_OBJECTIVE_METRIC: float(total_cost),
+                        _TUNE_STEP_ATTR: step,
+                        "policy_error_count": len(policy_errors),
+                    }
+                )
+
             result = replay_cached_cost(
-                forecast_cache[cache_key],
+                replay_cache,
                 order_conformal_config=crc_config,
                 order_base_scale=order_base_scale,
                 reorder_point_scale=reorder_point_scale,
                 on_policy_error=lambda rn, exc: policy_errors.append(f"round {rn}: {exc!r}"),
+                on_progress=_report_progress,
             )
-            if policy_errors:
-                trial.set_user_attr("policy_errors", policy_errors)
         except optuna.TrialPruned:
-            raise
-        except Exception as exc:  # pragma: no cover - exercised by Optuna on bad trials.
-            trial.set_user_attr("error", repr(exc))
-            raise
+            tune.report(
+                {
+                    _TUNE_OBJECTIVE_METRIC: float("inf"),
+                    _TUNE_STEP_ATTR: 1,
+                    "pruned": 1,
+                }
+            )
+            return
+        except Exception as exc:  # pragma: no cover - exercised by Tune on bad trials.
+            tune.report(
+                {
+                    _TUNE_OBJECTIVE_METRIC: float("inf"),
+                    _TUNE_STEP_ATTR: 1,
+                    "error": repr(exc)[:500],
+                }
+            )
+            return
 
-        trial.set_user_attr("total_holding_cost", float(result.summary["holding_cost"].sum()))
-        trial.set_user_attr("total_shortage_cost", float(result.summary["shortage_cost"].sum()))
-        trial.set_user_attr("order_base_scale", order_base_scale)
-        trial.set_user_attr("reorder_point_scale", reorder_point_scale)
-        return result.total_cost
+        if max_t == 1 and decision_rounds + delivery_weeks == 0:
+            tune.report({_TUNE_OBJECTIVE_METRIC: result.total_cost, _TUNE_STEP_ATTR: 1})
 
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=create_tpe_sampler(seed),
+    search_space = _CostSearchSpaceAdapter(
+        base_config=base_config,
+        search_forecast=search_forecast,
+        include_order_calibration=include_order_calibration,
+        protection_period=lead_time + review_period,
+        crc_partitions=crc_partitions,
     )
 
     if log_mlflow:
@@ -1207,17 +1548,29 @@ def run_cost_search(
                     "series_filter_size": len(series_filter) if series_filter is not None else None,
                 }
             )
-            study.optimize(
-                _objective,
+            results, search_alg = _run_optuna_tune(
+                _trainable,
+                search_space,
                 n_trials=n_trials,
-                timeout=timeout_sec,
-                gc_after_trial=True,
-                catch=(Exception,),
+                timeout_sec=timeout_sec,
+                max_t=max_t,
+                seed=seed,
+                asha_grace_period=asha_grace_period,
+                cpu_per_trial=cpu_per_trial,
+                max_concurrent_trials=max_concurrent_trials,
+                ray_address=ray_address,
+                ray_local_mode=ray_local_mode,
+                tune_storage_path=tune_storage_path,
+                tune_experiment_name=ray_tune_experiment_name,
             )
+            _best_tune_result(results)
+            study = _optuna_study_from_search_alg(search_alg)
             completed_trials = [
                 trial
                 for trial in study.trials
-                if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None
+                if trial.state == optuna.trial.TrialState.COMPLETE
+                and trial.value is not None
+                and math.isfinite(float(trial.value))
             ]
             if completed_trials:
                 mlflow.log_metric("best/cost_total", float(study.best_value))
@@ -1230,13 +1583,23 @@ def run_cost_search(
                     study.trials_dataframe().to_csv(trials_path, index=False)
                     mlflow.log_artifact(str(trials_path), artifact_path="optuna")
     else:
-        study.optimize(
-            _objective,
+        results, search_alg = _run_optuna_tune(
+            _trainable,
+            search_space,
             n_trials=n_trials,
-            timeout=timeout_sec,
-            gc_after_trial=True,
-            catch=(Exception,),
+            timeout_sec=timeout_sec,
+            max_t=max_t,
+            seed=seed,
+            asha_grace_period=asha_grace_period,
+            cpu_per_trial=cpu_per_trial,
+            max_concurrent_trials=max_concurrent_trials,
+            ray_address=ray_address,
+            ray_local_mode=ray_local_mode,
+            tune_storage_path=tune_storage_path,
+            tune_experiment_name=ray_tune_experiment_name,
         )
+        _best_tune_result(results)
+        study = _optuna_study_from_search_alg(search_alg)
     return study
 
 

@@ -9,7 +9,9 @@ per-product cost dataframe shape.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import optuna
 import pandas as pd
 import pytest
 from mlforecast.lag_transforms import RollingMean
@@ -297,6 +299,66 @@ def test_cost_search_smoke_runs_one_cached_trial() -> None:
 
     assert len(study.trials) == 1
     assert study.best_value >= 0.0
+
+
+def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeResult:
+        error = None
+        metrics = {run_benchmark_module._TUNE_OBJECTIVE_METRIC: 123.0}
+        config = {"crc_enabled": False}
+
+    class _FakeResults(list):
+        def get_best_result(self, *args, **kwargs):
+            return self[0]
+
+    study = optuna.create_study(direction="minimize")
+    study.add_trial(
+        optuna.create_trial(
+            value=123.0,
+            params={"crc_enabled": False},
+            distributions={
+                "crc_enabled": optuna.distributions.CategoricalDistribution([True, False])
+            },
+        )
+    )
+
+    class _FakeSearchAlg:
+        _ot_study = study
+
+    def _fake_run_optuna_tune(trainable, search_space, **kwargs):
+        captured.update(kwargs)
+        captured["trainable"] = trainable
+        captured["search_space"] = search_space
+        return _FakeResults([_FakeResult()]), _FakeSearchAlg()
+
+    monkeypatch.setattr(run_benchmark_module, "_run_optuna_tune", _fake_run_optuna_tune)
+
+    result = run_cost_search(
+        data_dir=DATA_DIR,
+        model_config=_FAST_BEST_CONFIG,
+        horizon=3,
+        lead_time=2,
+        review_period=1,
+        decision_rounds=2,
+        delivery_weeks=1,
+        series_filter=_get_first_n_series(2),
+        n_trials=2,
+        timeout_sec=30,
+        seed=0,
+        search_forecast=True,
+        max_concurrent_trials=1,
+        ray_local_mode=True,
+    )
+
+    assert result.best_value == pytest.approx(123.0)
+    assert captured["n_trials"] == 2
+    assert captured["max_t"] == 3
+    assert captured["timeout_sec"] == 30
+    assert captured["asha_grace_period"] == 1
+    assert captured["max_concurrent_trials"] == 1
+    assert captured["ray_local_mode"] is True
 
 
 def test_oracle_order_path_matches_simple_known_lead_time_case() -> None:
