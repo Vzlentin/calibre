@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from calibre.api import main as api_main
-from calibre.api.lifecycle import LifecycleStore
+from calibre.api.lifecycle import MemoryLifecycleStore
 from calibre.api.main import (
     app,
     register_tuning_objective,
@@ -28,7 +28,7 @@ def _seasonal_search_space(trial: optuna.Trial) -> TuningCandidate:
 
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch):
-    fresh = LifecycleStore()
+    fresh = MemoryLifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
     monkeypatch.setattr(api_main, "_SEARCH_SPACES", {})
     monkeypatch.setattr(api_main, "_OBJECTIVES", {})

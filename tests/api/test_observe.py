@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.api import main as api_main
-from calibre.api.lifecycle import FitRecord, LifecycleStore
+from calibre.api.lifecycle import FitRecord, LifecycleStore, MemoryLifecycleStore
 from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -69,7 +69,7 @@ def _calibrated_frame(*, cumulative: bool) -> pd.DataFrame:
 
 
 def test_observe_cumulative_does_not_drop_intermediate_rows(monkeypatch) -> None:
-    store = LifecycleStore()
+    store = MemoryLifecycleStore()
     runtime = _RuntimeSpy("cumulative")
     session_id = "session-cumulative"
     store.put_fit(_record(session_id, _calibrated_frame(cumulative=True)))
@@ -92,7 +92,7 @@ def test_observe_cumulative_does_not_drop_intermediate_rows(monkeypatch) -> None
 
 
 def test_observe_perhorizon_drops_unresolved_rows(monkeypatch) -> None:
-    store = LifecycleStore()
+    store = MemoryLifecycleStore()
     runtime = _RuntimeSpy("perhorizon")
     session_id = "session-perhorizon"
     store.put_fit(_record(session_id, _calibrated_frame(cumulative=False)))

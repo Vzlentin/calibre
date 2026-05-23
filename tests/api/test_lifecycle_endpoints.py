@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from calibre.api import main as api_main
-from calibre.api.lifecycle import LifecycleStore
+from calibre.api.lifecycle import MemoryLifecycleStore
 from calibre.api.main import app
 from calibre.core.forecast_frame import (
     DS,
@@ -39,7 +39,7 @@ class _StubAdapter:
 
 @pytest.fixture(autouse=True)
 def _reset_lifecycle_store(monkeypatch):
-    fresh = LifecycleStore()
+    fresh = MemoryLifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
     return fresh
 

@@ -76,3 +76,49 @@ class ForecastPointer(Base):
     kind: Mapped[str] = mapped_column(String, primary_key=True)
     uri: Mapped[str] = mapped_column(String, nullable=False)
     byte_size: Mapped[int] = mapped_column(nullable=False)
+
+
+class LifecycleFitRecord(Base):
+    __tablename__ = "fit_records"
+
+    fit_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    tenant: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    sku_set: Mapped[list] = mapped_column(JsonDict, nullable=False)
+    forecaster_config: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    horizon: Mapped[int] = mapped_column(Integer, nullable=False)
+    freq: Mapped[str] = mapped_column(String, nullable=False)
+    history: Mapped[list] = mapped_column(JsonDict, nullable=False)
+    future_x: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
+    conformal_config: Mapped[dict | None] = mapped_column(JsonDict, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    artifact_urls: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    last_forecast: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
+    last_calibrated: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
+    last_orders: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
+    conformal_state: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class LifecycleTuneRecord(Base):
+    __tablename__ = "tune_records"
+
+    study_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    tenant: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    sku_set: Mapped[list] = mapped_column(JsonDict, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    best_candidates: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+    )
