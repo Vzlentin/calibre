@@ -157,3 +157,11 @@ next_task: "6.d extract optimizer trainable setup"
 last_commit: "d92ac5e"
 notes: "Replaced CLI boundary print calls with logger.info while preserving structured return values; CLI tests, ruff, and mypy passed."
 ```
+
+```yaml
+phase: 6
+last_completed_task: "6.d extract optimizer trainable setup"
+next_task: "6.e fix remaining type ignores"
+last_commit: "a90bd5d"
+notes: "Moved Ray trainable to module scope and shared candidate trial setup/evaluation between sequential and Ray paths; optimizer tests, ruff, and mypy passed."
+```
