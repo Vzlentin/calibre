@@ -45,3 +45,11 @@ next_task: "2.b make /fit actually fit"
 last_commit: "54f9979"
 notes: "Added SqlLifecycleStore, lifecycle SQL tables/migration, and SQL API mode; tests/api passed with memory and LIFECYCLE_STORE=sql."
 ```
+
+```yaml
+phase: 2
+last_completed_task: "2.b make /fit actually fit"
+next_task: "phase 2 DoD and cross-phase regression gate"
+last_commit: "2b7f9ac"
+notes: "Fit jobs now validate config, train adapters, persist ModelArtifactCache artifacts, and /predict reuses cache hits."
+```
