@@ -37,3 +37,11 @@ next_task: "2.a SQL-back LifecycleStore"
 last_commit: "0fbe817"
 notes: "Phase 1 gate green: ruff check ., mypy calibre/, pytest; baseline type_ignore_count=16 any_count=158."
 ```
+
+```yaml
+phase: 2
+last_completed_task: "2.a SQL-back LifecycleStore"
+next_task: "2.b make /fit actually fit"
+last_commit: "54f9979"
+notes: "Added SqlLifecycleStore, lifecycle SQL tables/migration, and SQL API mode; tests/api passed with memory and LIFECYCLE_STORE=sql."
+```
