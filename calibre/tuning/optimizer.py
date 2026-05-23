@@ -39,6 +39,13 @@ class _ConformalRuntimeSnapshot:
     state: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class _TrialSetup:
+    forecast_task: ForecastTask
+    conformal_options: ConformalOptions
+    objective: Any
+
+
 def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
     return optuna.samplers.TPESampler(seed=seed)
 
@@ -272,13 +279,15 @@ def _apply_ordering_overrides(objective: Any, overrides: dict[str, Any]) -> Any:
     return replace(objective, **overrides)
 
 
-def _evaluate_candidate(
+def _build_trial_task(
     task: TuningTask,
     candidate: TuningCandidate,
-    origins: list[pd.Timestamp],
-) -> float:
-    history = _history_with_uid(task)
-    runtime_snapshot = _snapshot_conformal_runtime(task)
+    *,
+    history: pd.DataFrame,
+    runtime_snapshot: _ConformalRuntimeSnapshot | None = None,
+    conformal_config: SymmetricIntervalConfig | None = None,
+    conformal_state: dict[str, Any] | None = None,
+) -> _TrialSetup:
     candidate_config = _cap_threaded_config(
         {**task.base_model_config, **candidate.model_config, "freq": task.freq},
         task.cpu_per_trial,
@@ -288,38 +297,85 @@ def _evaluate_candidate(
         horizon=task.horizon,
         model_config=candidate_config,
     )
+    if runtime_snapshot is not None:
+        conformal_config = runtime_snapshot.config
+        conformal_state = runtime_snapshot.state
+    runtime_config = (
+        _apply_conformal_overrides(conformal_config, candidate.conformal_config)
+        if conformal_config is not None
+        else None
+    )
+    if runtime_config is not None and conformal_state is None:
+        raise ValueError("conformal_state is required when conformal_config is provided")
     conformal_options = (
         ConformalOptions(
             runtime=SymmetricIntervalRuntime.from_state(
-                _apply_conformal_overrides(runtime_snapshot.config, candidate.conformal_config),
-                runtime_snapshot.state,
+                runtime_config,
+                conformal_state,
             )
         )
-        if runtime_snapshot is not None
+        if runtime_config is not None
         else ConformalOptions()
     )
-    objective = _apply_ordering_overrides(task.objective, candidate.ordering_config)
+    return _TrialSetup(
+        forecast_task=forecast_task,
+        conformal_options=conformal_options,
+        objective=_apply_ordering_overrides(task.objective, candidate.ordering_config),
+    )
+
+
+def _run_trial(
+    task: TuningTask,
+    setup: _TrialSetup,
+    origins: list[pd.Timestamp],
+    *,
+    report: Callable[[float, int], None] | None = None,
+) -> float:
     with BackendEngine(
         execution=ExecutionOptions(
             freq=task.freq,
             backend="local",
             max_concurrency=task.max_uid_concurrency,
         ),
-        conformal=conformal_options,
+        conformal=setup.conformal_options,
     ) as engine:
         total_cost = 0.0
         seen_keys: set[tuple[Any, ...]] = set()
         with _trial_thread_env(task.cpu_per_trial):
-            for result in engine.iter_origins([forecast_task], task.actuals, origins):
+            for origin_idx, result in enumerate(
+                engine.iter_origins([setup.forecast_task], task.actuals, origins),
+                start=1,
+            ):
                 contribution = _objective_contribution_with(
-                    objective,
+                    setup.objective,
                     result.ledger.to_df(),
                     seen_keys,
                 )
                 if not isfinite(contribution):
-                    return float("inf")
+                    total_cost = float("inf")
+                    if report is not None:
+                        report(total_cost, origin_idx)
+                    break
                 total_cost += contribution
+                if report is not None:
+                    report(total_cost, origin_idx)
         return total_cost
+
+
+def _evaluate_candidate(
+    task: TuningTask,
+    candidate: TuningCandidate,
+    origins: list[pd.Timestamp],
+) -> float:
+    history = _history_with_uid(task)
+    runtime_snapshot = _snapshot_conformal_runtime(task)
+    setup = _build_trial_task(
+        task,
+        candidate,
+        history=history,
+        runtime_snapshot=runtime_snapshot,
+    )
+    return _run_trial(task, setup, origins)
 
 
 def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> dict[str, Any]:
@@ -363,6 +419,34 @@ def optimize_task(task: TuningTask) -> dict:
     return dict(optimize_task_candidate(task).model_config)
 
 
+def _trainable(
+    config: dict[str, Any],
+    *,
+    worker_task: TuningTask,
+    history: pd.DataFrame,
+    origins: list[pd.Timestamp],
+    conformal_config: SymmetricIntervalConfig | None = None,
+    state_ref: Any | None = None,
+) -> None:
+    from ray import tune
+
+    candidate = _resolve_candidate(
+        worker_task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
+    )
+    setup = _build_trial_task(
+        worker_task,
+        candidate,
+        history=history,
+        conformal_config=conformal_config,
+        conformal_state=_resolve_state_ref(state_ref) if state_ref is not None else None,
+    )
+
+    def _report(total_cost: float, origin_idx: int) -> None:
+        tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
+
+    _run_trial(worker_task, setup, origins, report=_report)
+
+
 def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
     """Run Ray Tune for ``task`` and return the best trial's Optuna params dict."""
     origins = _validate_task(task)
@@ -394,65 +478,6 @@ def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
         grace_period=worker_task.asha_grace_period,
     )
 
-    def _trainable(config: dict[str, Any], *, state_ref: Any | None = None) -> None:
-        candidate = _resolve_candidate(
-            worker_task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
-        )
-        candidate_config = _cap_threaded_config(
-            {**worker_task.base_model_config, **candidate.model_config, "freq": worker_task.freq},
-            worker_task.cpu_per_trial,
-        )
-        forecast_task = ForecastTask(
-            history=history,
-            horizon=worker_task.horizon,
-            model_config=candidate_config,
-        )
-        runtime_config = (
-            _apply_conformal_overrides(conformal_config, candidate.conformal_config)
-            if conformal_config is not None
-            else None
-        )
-        conformal_options = (
-            ConformalOptions(
-                runtime=SymmetricIntervalRuntime.from_state(
-                    runtime_config,
-                    _resolve_state_ref(state_ref),
-                )
-            )
-            if runtime_config is not None
-            else ConformalOptions()
-        )
-        objective = _apply_ordering_overrides(worker_task.objective, candidate.ordering_config)
-        engine = BackendEngine(
-            execution=ExecutionOptions(
-                freq=worker_task.freq,
-                backend="local",
-                max_concurrency=worker_task.max_uid_concurrency,
-            ),
-            conformal=conformal_options,
-        )
-        try:
-            total_cost = 0.0
-            seen_keys: set[tuple[Any, ...]] = set()
-            with _trial_thread_env(worker_task.cpu_per_trial):
-                for origin_idx, result in enumerate(
-                    engine.iter_origins([forecast_task], worker_task.actuals, origins),
-                    start=1,
-                ):
-                    contribution = _objective_contribution_with(
-                        objective,
-                        result.ledger.to_df(),
-                        seen_keys,
-                    )
-                    if not isfinite(contribution):
-                        total_cost = float("inf")
-                        tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
-                        break
-                    total_cost += contribution
-                    tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
-        finally:
-            engine.close()
-
     ray_runtime = acquire_ray_runtime(
         address=worker_task.ray_address,
         local_mode=worker_task.ray_local_mode,
@@ -460,10 +485,13 @@ def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
     state_ref = (
         ray_runtime.ray.put(runtime_snapshot.state) if runtime_snapshot is not None else None
     )
-    trainable_fn = (
-        tune.with_parameters(_trainable, state_ref=state_ref)
-        if state_ref is not None
-        else _trainable
+    trainable_fn = tune.with_parameters(
+        _trainable,
+        worker_task=worker_task,
+        history=history,
+        origins=origins,
+        conformal_config=conformal_config,
+        state_ref=state_ref,
     )
     trainable = tune.with_resources(
         trainable_fn,
