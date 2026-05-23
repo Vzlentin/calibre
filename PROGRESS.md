@@ -149,3 +149,11 @@ next_task: "6.c replace print in CLI boundary"
 last_commit: "c095b51"
 notes: "Runtime safety-net exceptions now log tracebacks immediately, order-policy errors are narrowed to request validation, and broad-exception grep satisfies the logging invariant."
 ```
+
+```yaml
+phase: 6
+last_completed_task: "6.c replace print in CLI boundary"
+next_task: "6.d extract optimizer trainable setup"
+last_commit: "d92ac5e"
+notes: "Replaced CLI boundary print calls with logger.info while preserving structured return values; CLI tests, ruff, and mypy passed."
+```
