@@ -61,3 +61,11 @@ next_task: "3.a replace manual YAML parsing with pydantic models"
 last_commit: "678e795"
 notes: "Phase 2 gate green: tests/api, LIFECYCLE_STORE=sql tests/api, ruff check ., mypy calibre/, pytest."
 ```
+
+```yaml
+phase: 3
+last_completed_task: "3.a replace manual YAML parsing with pydantic models"
+next_task: "phase 3 DoD and cross-phase regression gate"
+last_commit: "1921634"
+notes: "Replaced CLI config parsing helpers with pydantic section models; tests/cli, mypy calibre/cli, and ruff config checks passed."
+```
