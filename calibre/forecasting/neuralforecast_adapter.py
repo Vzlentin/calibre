@@ -5,13 +5,14 @@ from typing import Any
 import pandas as pd
 
 try:
-    import neuralforecast.models
-    from neuralforecast import NeuralForecast
+    import neuralforecast.models as neuralforecast_models
+    from neuralforecast import NeuralForecast as _NeuralForecast
 
+    NeuralForecast: Any | None = _NeuralForecast
     _NEURALFORECAST_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    neuralforecast = None  # type: ignore[assignment]
-    NeuralForecast = None  # type: ignore[misc, assignment]
+    neuralforecast_models = None
+    NeuralForecast = None
     _NEURALFORECAST_AVAILABLE = False
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
@@ -29,11 +30,13 @@ class NeuralForecastAdapter(ModelAdapter):
                 "pip install calibre[neural]"
             )
         self._config = model_config
-        self._nf: NeuralForecast | None = None
+        self._nf: Any | None = None
 
     def fit(self, task: ForecastTask) -> None:
         model_name = self._config["model"]
-        model_cls = getattr(neuralforecast.models, model_name, None)
+        if neuralforecast_models is None or NeuralForecast is None:
+            raise RuntimeError("neuralforecast is not installed")
+        model_cls = getattr(neuralforecast_models, model_name, None)
         if model_cls is None:
             raise ValueError(f"Unknown neuralforecast model: {model_name!r}")
 

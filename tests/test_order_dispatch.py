@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,7 +21,7 @@ from calibre.core.order_types import (
     RsPolicyParameters,
     RssPolicyParameters,
 )
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import OrderPolicyConfig, OrderPolicyType, apply_order_policy
 
 
 def _forecast_frame(
@@ -223,7 +225,11 @@ class TestDispatchErrors:
     def test_dispatch_rejects_unknown_policy(self) -> None:
         """Unknown policy type should raise ValueError."""
         frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0))
-        config = OrderPolicyConfig(policy="unknown", params=pd.DataFrame(), coverage=0.9)  # type: ignore
+        config = OrderPolicyConfig(
+            policy=cast(OrderPolicyType, "unknown"),
+            params=pd.DataFrame(),
+            coverage=0.9,
+        )
 
         with pytest.raises(ValueError, match="Unknown order policy: 'unknown'"):
             apply_order_policy(frame, config)

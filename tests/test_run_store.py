@@ -65,10 +65,12 @@ def test_run_store_contract_status_and_idempotency(store: RunStore) -> None:
     assert first.id == second.id
     assert first.status is RunStatus.QUEUED
 
-    store.mark_running(first.id)  # type: ignore[attr-defined]
-    assert store.get(first.id).status is RunStatus.RUNNING  # type: ignore[union-attr]
+    store.mark_running(first.id)
+    running = store.get(first.id)
+    assert running is not None
+    assert running.status is RunStatus.RUNNING
 
-    store.mark_failed(first.id, error="boom")  # type: ignore[attr-defined]
+    store.mark_failed(first.id, error="boom")
     failed = store.create({"name": "contract"}, idempotency_key="same")
     assert failed.id == first.id
     assert failed.status is RunStatus.FAILED
@@ -77,7 +79,7 @@ def test_run_store_contract_status_and_idempotency(store: RunStore) -> None:
     assert queued.status is RunStatus.QUEUED
     assert queued.error is None
 
-    store.mark_succeeded(first.id, rows=7)  # type: ignore[attr-defined]
+    store.mark_succeeded(first.id, rows=7)
     succeeded = store.get(first.id)
     assert succeeded is not None
     assert succeeded.status is RunStatus.SUCCEEDED

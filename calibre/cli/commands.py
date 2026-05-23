@@ -81,7 +81,7 @@ def _build_order_config(config: BackendConfig) -> OrderPolicyConfig | None:
     if isinstance(params, dict):
         params = [params]
     return OrderPolicyConfig(
-        policy=config.ordering.policy,  # type: ignore[arg-type]
+        policy=config.ordering.policy,
         params=pd.DataFrame(params),
         coverage=config.ordering.coverage,
         quantile=config.ordering.quantile,

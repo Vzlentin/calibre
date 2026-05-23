@@ -33,8 +33,9 @@ def test_frozen(history):
         horizon=4,
         model_config={"model": "SeasonalNaive"},
     )
+    field = "horizon"
     with pytest.raises((AttributeError, TypeError)):
-        task.horizon = 99  # type: ignore[misc]
+        setattr(task, field, 99)
 
 
 def test_model_name_from_model_key(history):

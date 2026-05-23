@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from calibre.conformal.runtime import SymmetricIntervalConfig
+from calibre.ordering.policy_config import OrderPolicyType
 
 CONFIG_SCHEMA = "1.0"
 ConfigMap = dict[str, object]
@@ -62,7 +63,7 @@ class ConformalConfig:
 
 @dataclass(frozen=True, slots=True)
 class OrderingConfig:
-    policy: str
+    policy: OrderPolicyType
     coverage: float = 0.9
     quantile: float | None = None
     params: list[ConfigMap] | ConfigMap | None = None
@@ -182,7 +183,7 @@ class _ConformalSection(_StrictSection):
 
 
 class _OrderingSection(_StrictSection):
-    policy: str
+    policy: OrderPolicyType
     coverage: float = 0.9
     quantile: float | None = None
     params: list[ConfigMap] | ConfigMap | None = None
