@@ -38,6 +38,7 @@ from calibre.api.schemas import (
     BacktestRequest,
     CalibrateRequest,
     CalibrateResponse,
+    DataSourceSpec,
     FitHandle,
     FitRequest,
     ObserveRequest,
@@ -64,7 +65,7 @@ from calibre.core.run_status import RunStatus
 from calibre.execution import backend as backend_module
 from calibre.execution.backend import coerce_forecast_frame_dtypes
 from calibre.forecasting.cache import ModelArtifactCache
-from calibre.storage.adapters import OrderRepo
+from calibre.storage.adapters import OrderRepo, SqlSalesAdapter
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
@@ -236,6 +237,46 @@ def _format_error(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 
+def _resolve_history_source(
+    field_name: str,
+    inline: list[dict] | None,
+    source: DataSourceSpec | None,
+    tenant: str,
+    sku_set: list[str],
+) -> pd.DataFrame:
+    if (inline is None) == (source is None):
+        raise HTTPException(
+            status_code=400,
+            detail=f"exactly one of {field_name!r} or {field_name}_source must be provided",
+        )
+    if inline is not None:
+        return _frame_from_records(inline)
+
+    assert source is not None  # narrowed by the XOR check above
+    if source.kind == "parquet":
+        if not source.uri:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name}_source.uri is required when kind='parquet'",
+            )
+        adapter = SqlSalesAdapter(source=source.uri)
+    else:
+        factory = _db_session_factory()
+        if factory is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name}_source kind='sql' requires CALIBRE_DATABASE_URL",
+            )
+        adapter = SqlSalesAdapter(factory=factory, tenant=tenant)
+    try:
+        frame = adapter.load_history()
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if sku_set:
+        frame = frame[frame[UNIQUE_ID].isin(sku_set)].reset_index(drop=True)
+    return frame
+
+
 def _runtime_for_session(record: FitRecord) -> SymmetricIntervalRuntime:
     return runtime_for_session(record, _lifecycle_store())
 
@@ -285,7 +326,9 @@ def get_run_status(run_id: str) -> RunResponse:
 def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
     if not req.sku_set:
         raise HTTPException(status_code=400, detail="sku_set must not be empty")
-    history = _frame_from_records(req.history)
+    history = _resolve_history_source(
+        "history", req.history, req.history_source, req.tenant, list(req.sku_set)
+    )
     if UNIQUE_ID not in history.columns or DS not in history.columns:
         raise HTTPException(status_code=400, detail="history must include unique_id and ds")
     future_x = _frame_from_records(req.future_x) if req.future_x else None
@@ -454,10 +497,14 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         )
     if req.objective_id not in _OBJECTIVES:
         raise HTTPException(status_code=400, detail=f"unknown objective_id: {req.objective_id}")
-    history = _frame_from_records(req.history)
+    history = _resolve_history_source(
+        "history", req.history, req.history_source, req.tenant, list(req.sku_set)
+    )
     if UNIQUE_ID not in history.columns or DS not in history.columns:
         raise HTTPException(status_code=400, detail="history must include unique_id and ds")
-    actuals = _frame_from_records(req.actuals)
+    actuals = _resolve_history_source(
+        "actuals", req.actuals, req.actuals_source, req.tenant, list(req.sku_set)
+    )
     if not req.origins:
         raise HTTPException(status_code=400, detail="origins must not be empty")
     try:

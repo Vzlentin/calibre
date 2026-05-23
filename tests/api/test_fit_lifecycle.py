@@ -110,6 +110,42 @@ def test_fit_fails_on_invalid_config(client) -> None:
     assert "Unknown backend" in status["error"]
 
 
+def test_fit_loads_history_from_parquet_source(client, counting_adapter, tmp_path) -> None:
+    parquet_path = tmp_path / "history.parquet"
+    pd.DataFrame(_history_records()).to_parquet(parquet_path)
+    payload = _fit_payload()
+    payload.pop("history")
+    payload["history_source"] = {
+        "kind": "parquet",
+        "uri": parquet_path.as_uri(),
+    }
+
+    response = client.post("/fit", json=payload)
+
+    assert response.status_code == 202, response.text
+    status = client.get(f"/fits/{response.json()['fit_id']}").json()
+    assert status["status"] == "succeeded"
+    assert _CountingAdapter.fit_calls == 1
+
+
+def test_fit_rejects_both_history_and_source(client) -> None:
+    payload = _fit_payload()
+    payload["history_source"] = {"kind": "parquet", "uri": "file:///tmp/x.parquet"}
+
+    response = client.post("/fit", json=payload)
+    assert response.status_code == 400
+    assert "exactly one" in response.json()["detail"]
+
+
+def test_fit_rejects_missing_history(client) -> None:
+    payload = _fit_payload()
+    payload.pop("history")
+
+    response = client.post("/fit", json=payload)
+    assert response.status_code == 400
+    assert "exactly one" in response.json()["detail"]
+
+
 def test_fit_artifact_stored_and_loadable(client, counting_adapter) -> None:
     fit = client.post("/fit", json=_fit_payload()).json()
     status = client.get(f"/fits/{fit['fit_id']}").json()

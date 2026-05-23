@@ -1,10 +1,22 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from calibre.core.run_status import RunStatus
+
+
+class DataSourceSpec(BaseModel):
+    """Pointer to an external history source resolved server-side.
+
+    ``kind="parquet"`` reads from ``uri`` (file://, s3://, …) via
+    :class:`SqlSalesAdapter`. ``kind="sql"`` reads ``sales_records`` rows
+    for the request tenant and ignores ``uri``.
+    """
+
+    kind: Literal["parquet", "sql"]
+    uri: str | None = None
 
 
 class BacktestRequest(BaseModel):
@@ -26,7 +38,8 @@ class FitRequest(BaseModel):
     sku_set: list[str]
     horizon: int
     freq: str = "W"
-    history: list[dict[str, Any]]
+    history: list[dict[str, Any]] | None = None
+    history_source: DataSourceSpec | None = None
     forecaster_config: dict[str, Any] = Field(
         ..., description="model_config dict resolved by the forecasting adapter registry"
     )
@@ -94,8 +107,10 @@ class TuneRequest(BaseModel):
     sku_set: list[str]
     horizon: int
     freq: str = "W"
-    history: list[dict[str, Any]]
-    actuals: list[dict[str, Any]]
+    history: list[dict[str, Any]] | None = None
+    history_source: DataSourceSpec | None = None
+    actuals: list[dict[str, Any]] | None = None
+    actuals_source: DataSourceSpec | None = None
     origins: list[str]
     base_model_config: dict[str, Any]
     search_space_id: str
