@@ -165,3 +165,11 @@ next_task: "6.e fix remaining type ignores"
 last_commit: "a90bd5d"
 notes: "Moved Ray trainable to module scope and shared candidate trial setup/evaluation between sequential and Ray paths; optimizer tests, ruff, and mypy passed."
 ```
+
+```yaml
+phase: 6
+last_completed_task: "6.e fix remaining type ignores"
+next_task: "6.f decide tenant auth"
+last_commit: "cc7f615"
+notes: "Removed local/test type ignores across backend, CLI ordering, forecast metrics, neuralforecast optional import handling, and run-store tests; remaining type_ignore_count=4."
+```
