@@ -117,3 +117,11 @@ next_task: "5.b wire Regret end-to-end through /tune"
 last_commit: "152c487"
 notes: "Added SQL inventory/sales/order tables, SqlInventoryAdapter, SqlSalesAdapter, OrderRepo, and SQL order persistence; focused adapter/storage/API checks passed."
 ```
+
+```yaml
+phase: 5
+last_completed_task: "5.b wire Regret end-to-end through /tune"
+next_task: "phase 5 DoD and cross-phase regression gate"
+last_commit: "7617df2"
+notes: "Regret /tune requests precompute oracle_cost, persist it on TuneRecord, pass oracle-backed objectives to HPO, and expose oracle_cost on study responses."
+```
