@@ -40,8 +40,7 @@ def test_symmetric_interval_runtime_implements_protocol() -> None:
     runtime.observe(observed)
 
     states = runtime.get_partition_states()
-    restored = SymmetricIntervalRuntime(config)
-    restored.set_partition_states(states)
+    restored = SymmetricIntervalRuntime.from_partition_states(config, states)
 
     assert states
     assert restored.partition_keys == runtime.partition_keys

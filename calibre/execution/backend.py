@@ -557,8 +557,9 @@ class BackendEngine:
             return
         partition_states = self.conformal_state_store.list_for_run(self.run_id)
         if partition_states:
-            self.conformal_runtime = SymmetricIntervalRuntime(self.conformal_config)
-            self.conformal_runtime.set_partition_states(partition_states)
+            self.conformal_runtime = SymmetricIntervalRuntime.from_partition_states(
+                self.conformal_config, partition_states
+            )
             return
         state = self.conformal_state_store.get(self.run_id, RUNTIME_PARTITION)
         if state is None:

@@ -94,9 +94,15 @@ class ConformalRuntime(Protocol):
 
 @runtime_checkable
 class PartitionedConformalRuntime(ConformalRuntime, Protocol):
-    def get_partition_states(self) -> dict[str, dict[str, Any]]: ...
+    """Conformal runtime that exposes its calibration state per partition.
 
-    def set_partition_states(self, partition_states: Mapping[str, dict[str, Any]]) -> None: ...
+    Restoration is a factory boundary on the implementing class (see
+    ``SymmetricIntervalRuntime.from_partition_states``). The protocol does
+    not require partitioned runtimes to support in-place state mutation —
+    the runtime returned by the factory is the only restoration path.
+    """
+
+    def get_partition_states(self) -> dict[str, dict[str, Any]]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,14 +513,6 @@ class SymmetricIntervalRuntime(PartitionedConformalRuntime):
             partition_state["calibrator"]["score_history"] = {partition_key: scores}
             partition_states[partition_key] = partition_state
         return partition_states
-
-    def set_partition_states(self, partition_states: Mapping[str, dict[str, Any]]) -> None:
-        restored = self.from_partition_states(self.config, partition_states)
-        self.score = restored.score
-        self.calibrator = restored.calibrator
-        self.controller = restored.controller
-        self.method_name = restored.method_name
-        self._issued_count = restored._issued_count
 
     @classmethod
     def from_partition_states(
