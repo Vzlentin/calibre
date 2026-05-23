@@ -101,3 +101,11 @@ next_task: "phase 4 DoD and cross-phase regression gate"
 last_commit: "d55bd78"
 notes: "HPO replay raises policy errors, infra exceptions log and re-raise, and zero-order fallback remains only degraded replay behavior."
 ```
+
+```yaml
+phase: 4
+last_completed_task: "phase 4 DoD and cross-phase regression gate"
+next_task: "5.a ship SqlInventoryAdapter and SqlSalesAdapter"
+last_commit: "102542a"
+notes: "Phase 4 gate green: tests/benchmarks plus VN2 tests, run_benchmark.py <=800 LOC, tuning/replay grep invariants, ruff check ., mypy calibre/, pytest."
+```
