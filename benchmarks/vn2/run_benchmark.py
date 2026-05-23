@@ -92,12 +92,13 @@ from calibre.execution.io import join_uri
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 
 logger = logging.getLogger(__name__)
-_TUNE_OBJECTIVE_METRIC = _tuning._TUNE_OBJECTIVE_METRIC
-_run_optuna_tune = _tuning._run_optuna_tune
+TUNE_OBJECTIVE_METRIC = _tuning.TUNE_OBJECTIVE_METRIC
+run_optuna_tune = _tuning.run_optuna_tune
 run_hpo = _tuning.run_hpo
+run_cost_search = _tuning.run_cost_search
 
 __all__ = [
-    "_TUNE_OBJECTIVE_METRIC",
+    "TUNE_OBJECTIVE_METRIC",
     "_as_cumulative_decision_frame",
     "_optimal_order_path_for_sku",
     "_prepare_cumulative_target_history",
@@ -112,16 +113,8 @@ __all__ = [
     "run_benchmark",
     "run_cost_search",
     "run_hpo",
+    "run_optuna_tune",
 ]
-
-
-def run_cost_search(*args: Any, **kwargs: Any):
-    original = _tuning._run_optuna_tune
-    _tuning._run_optuna_tune = globals().get("_run_optuna_tune", original)
-    try:
-        return _tuning.run_cost_search(*args, **kwargs)
-    finally:
-        _tuning._run_optuna_tune = original
 
 
 def run_benchmark(

@@ -62,7 +62,7 @@ from calibre.tuning.optimizer import create_tpe_sampler, optimize_task, restore_
 from calibre.tuning.task import TuningCandidate, TuningTask
 
 logger = logging.getLogger(__name__)
-_TUNE_OBJECTIVE_METRIC = "objective"
+TUNE_OBJECTIVE_METRIC = "objective"
 _TUNE_STEP_ATTR = "tune_step"
 _TUNE_RESULTS_PREFIX = "calibre-vn2-tune-"
 
@@ -202,8 +202,8 @@ def _best_tune_result(results: Any) -> Any:
         for result in results
         if result.error is None
         and result.metrics is not None
-        and _TUNE_OBJECTIVE_METRIC in result.metrics
-        and math.isfinite(float(result.metrics[_TUNE_OBJECTIVE_METRIC]))
+        and TUNE_OBJECTIVE_METRIC in result.metrics
+        and math.isfinite(float(result.metrics[TUNE_OBJECTIVE_METRIC]))
     ]
     if not valid:
         failed = sum(1 for result in results if result.error is not None)
@@ -212,13 +212,23 @@ def _best_tune_result(results: Any) -> Any:
             f"({failed} failed trial(s)). Check the trial logs and benchmark settings."
         )
     return results.get_best_result(
-        metric=_TUNE_OBJECTIVE_METRIC,
+        metric=TUNE_OBJECTIVE_METRIC,
         mode="min",
         filter_nan_and_inf=True,
     )
 
 
-def _run_optuna_tune(
+TuneRunner = Callable[..., tuple[Any, Any]]
+"""Signature for an Optuna-via-Ray-Tune runner.
+
+Accepts the trainable and search-space callables positionally, plus the
+keyword-only configuration in :func:`run_optuna_tune`. Returns
+``(results, search_alg)``. Used as an injection point so tests can supply
+fakes without monkey-patching module state.
+"""
+
+
+def run_optuna_tune(
     trainable: Callable[[dict[str, Any]], None],
     search_space: Callable[[optuna.Trial], None],
     *,
@@ -252,12 +262,12 @@ def _run_optuna_tune(
     grace_period = max(1, min(int(asha_grace_period), max_t))
     search_alg = OptunaSearch(
         space=search_space,
-        metric=_TUNE_OBJECTIVE_METRIC,
+        metric=TUNE_OBJECTIVE_METRIC,
         mode="min",
         sampler=create_tpe_sampler(seed),
     )
     scheduler = ASHAScheduler(
-        metric=_TUNE_OBJECTIVE_METRIC,
+        metric=TUNE_OBJECTIVE_METRIC,
         mode="min",
         time_attr=_TUNE_STEP_ATTR,
         max_t=max_t,
@@ -341,6 +351,7 @@ def run_hpo(
     ray_local_mode: bool = False,
     tune_storage_path: str | Path | None = None,
     tune_experiment_name: str | None = "vn2_hpo",
+    tune_runner: TuneRunner | None = None,
 ) -> dict[str, Any]:
     """Run the panel-level Ray Tune/Optuna HPO and return the best model config.
 
@@ -417,7 +428,7 @@ def run_hpo(
                     if not math.isfinite(value):
                         tune.report(
                             {
-                                _TUNE_OBJECTIVE_METRIC: float("inf"),
+                                TUNE_OBJECTIVE_METRIC: float("inf"),
                                 _TUNE_STEP_ATTR: origin_idx,
                             }
                         )
@@ -425,7 +436,7 @@ def run_hpo(
                     total += value
                     tune.report(
                         {
-                            _TUNE_OBJECTIVE_METRIC: total / origin_idx,
+                            TUNE_OBJECTIVE_METRIC: total / origin_idx,
                             "total_pinball": total,
                             _TUNE_STEP_ATTR: origin_idx,
                         }
@@ -445,7 +456,8 @@ def run_hpo(
 
     started = time.time()
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    results, _ = _run_optuna_tune(
+    runner = tune_runner if tune_runner is not None else run_optuna_tune
+    results, _ = runner(
         _trainable,
         _HpoSearchSpaceAdapter(),
         n_trials=n_trials,
@@ -463,7 +475,7 @@ def run_hpo(
     elapsed = time.time() - started
 
     best_result = _best_tune_result(results)
-    best_metric = float(best_result.metrics[_TUNE_OBJECTIVE_METRIC])
+    best_metric = float(best_result.metrics[TUNE_OBJECTIVE_METRIC])
     best = dict(best_result.config)
     lags = HPO_LAG_SETS[int(best.pop("lag_set_idx"))]
     quantile_alpha = float(best.pop("quantile_alpha"))
@@ -663,6 +675,7 @@ def run_cost_search(
     ray_local_mode: bool = False,
     tune_storage_path: str | Path | None = None,
     ray_tune_experiment_name: str | None = "vn2_cost_search",
+    tune_runner: TuneRunner | None = None,
 ) -> optuna.Study:
     """Optimize simulator EUR cost with Ray Tune over cached forecast replays.
 
@@ -732,7 +745,7 @@ def run_cost_search(
             def _report_progress(step: int, total_cost: float) -> None:
                 tune.report(
                     {
-                        _TUNE_OBJECTIVE_METRIC: float(total_cost),
+                        TUNE_OBJECTIVE_METRIC: float(total_cost),
                         _TUNE_STEP_ATTR: step,
                         "policy_error_count": len(policy_errors),
                     }
@@ -750,7 +763,7 @@ def run_cost_search(
         except optuna.TrialPruned:
             tune.report(
                 {
-                    _TUNE_OBJECTIVE_METRIC: float("inf"),
+                    TUNE_OBJECTIVE_METRIC: float("inf"),
                     _TUNE_STEP_ATTR: 1,
                     "pruned": 1,
                 }
@@ -759,7 +772,7 @@ def run_cost_search(
         except (ValueError, KeyError) as exc:
             tune.report(
                 {
-                    _TUNE_OBJECTIVE_METRIC: float("inf"),
+                    TUNE_OBJECTIVE_METRIC: float("inf"),
                     _TUNE_STEP_ATTR: 1,
                     "bad_trial": 1,
                     "error": repr(exc)[:500],
@@ -770,7 +783,7 @@ def run_cost_search(
             logger.exception("VN2 cost-search infrastructure failure")
             tune.report(
                 {
-                    _TUNE_OBJECTIVE_METRIC: float("inf"),
+                    TUNE_OBJECTIVE_METRIC: float("inf"),
                     _TUNE_STEP_ATTR: 1,
                     "infra_failure": 1,
                     "error": repr(exc)[:500],
@@ -779,7 +792,7 @@ def run_cost_search(
             raise
 
         if max_t == 1 and decision_rounds + delivery_weeks == 0:
-            tune.report({_TUNE_OBJECTIVE_METRIC: result.total_cost, _TUNE_STEP_ATTR: 1})
+            tune.report({TUNE_OBJECTIVE_METRIC: result.total_cost, _TUNE_STEP_ATTR: 1})
 
     search_space = _CostSearchSpaceAdapter(
         base_config=base_config,
@@ -788,6 +801,8 @@ def run_cost_search(
         protection_period=lead_time + review_period,
         crc_partitions=crc_partitions,
     )
+
+    runner = tune_runner if tune_runner is not None else run_optuna_tune
 
     if log_mlflow:
         with start_benchmark_run(
@@ -815,7 +830,7 @@ def run_cost_search(
                     "series_filter_size": len(series_filter) if series_filter is not None else None,
                 }
             )
-            results, search_alg = _run_optuna_tune(
+            results, search_alg = runner(
                 _trainable,
                 search_space,
                 n_trials=n_trials,
@@ -850,7 +865,7 @@ def run_cost_search(
                     study.trials_dataframe().to_csv(trials_path, index=False)
                     mlflow.log_artifact(str(trials_path), artifact_path="optuna")
     else:
-        results, search_alg = _run_optuna_tune(
+        results, search_alg = runner(
             _trainable,
             search_space,
             n_trials=n_trials,

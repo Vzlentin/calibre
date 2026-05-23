@@ -301,12 +301,12 @@ def test_cost_search_smoke_runs_one_cached_trial() -> None:
     assert study.best_value >= 0.0
 
 
-def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
+def test_cost_search_uses_ray_tune_scheduler_handoff() -> None:
     captured: dict[str, Any] = {}
 
     class _FakeResult:
         error = None
-        metrics = {run_benchmark_module._TUNE_OBJECTIVE_METRIC: 123.0}
+        metrics = {run_benchmark_module.TUNE_OBJECTIVE_METRIC: 123.0}
         config = {"crc_enabled": False}
 
     class _FakeResults(list):
@@ -333,8 +333,6 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
         captured["search_space"] = search_space
         return _FakeResults([_FakeResult()]), _FakeSearchAlg()
 
-    monkeypatch.setattr(run_benchmark_module, "_run_optuna_tune", _fake_run_optuna_tune)
-
     result = run_cost_search(
         data_dir=DATA_DIR,
         model_config=_FAST_BEST_CONFIG,
@@ -350,6 +348,7 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
         search_forecast=True,
         max_concurrent_trials=1,
         ray_local_mode=True,
+        tune_runner=_fake_run_optuna_tune,
     )
 
     assert result.best_value == pytest.approx(123.0)

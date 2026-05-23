@@ -39,7 +39,6 @@ def test_infra_exception_not_swallowed_as_inf(monkeypatch) -> None:
         raise AssertionError("trainable should have re-raised the infrastructure failure")
 
     monkeypatch.setattr(tuning, "build_replay_cache", _raise_infra_failure)
-    monkeypatch.setattr(tuning, "_run_optuna_tune", _fake_run_optuna_tune)
     monkeypatch.setattr("ray.tune.report", _fake_report)
 
     with pytest.raises(RuntimeError, match="worker import failed"):
@@ -50,6 +49,7 @@ def test_infra_exception_not_swallowed_as_inf(monkeypatch) -> None:
             delivery_weeks=0,
             search_forecast=True,
             n_trials=1,
+            tune_runner=_fake_run_optuna_tune,
         )
 
     assert reports[-1]["infra_failure"] == 1
