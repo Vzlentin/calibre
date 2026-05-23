@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import fsspec  # type: ignore[import-untyped]
 import pandas as pd
 import yaml
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from calibre.conformal.runtime import SymmetricIntervalConfig
 
@@ -123,96 +124,135 @@ class BackendConfig:
     source_path: str | None = None
 
 
-def _require_mapping(data: Any, section: str) -> dict[str, Any]:
+# ── pydantic input schemas (parse-time validation only) ──────────────────────
+
+
+class _RawConformal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    method: Literal["mscp", "aci"]
+    coverage: float = 0.9
+    calibration_window: int = 100
+    gamma: float = 0.05
+    mode: Literal["perhorizon", "cumulative"] = "perhorizon"
+    protection_period: int | None = None
+
+
+class _RawExecution(BaseModel):
+    model_config = ConfigDict(extra="allow")  # extra checked manually for compat
+    backend: Literal["local", "ray", "auto"] = "auto"
+    seed: int | None = None
+    ray_address: str | None = None
+    staging_uri: str | None = None
+    ray_threshold: int = 10
+    max_concurrency: int | None = None
+    cpu_per_task: float | None = None
+
+    @model_validator(mode="after")
+    def _cross_field_checks(self) -> _RawExecution:
+        if self.ray_address is not None and self.staging_uri is None:
+            raise ValueError("execution.staging_uri is required when execution.ray_address is set")
+        if self.ray_threshold < 1:
+            raise ValueError("execution.ray_threshold must be at least 1")
+        if self.max_concurrency is not None and self.max_concurrency < 1:
+            raise ValueError("execution.max_concurrency must be at least 1")
+        if self.cpu_per_task is not None and self.cpu_per_task <= 0:
+            raise ValueError("execution.cpu_per_task must be positive")
+        return self
+
+
+# ── section parsers ─────────────────────────────────────────────────────────
+
+
+def _parse_dataset(data: object) -> DatasetConfig:
     if not isinstance(data, dict):
-        raise ValueError(f"{section} must be a mapping")
-    return data
-
-
-def _optional_mapping(data: Any, section: str) -> dict[str, Any] | None:
-    if data is None:
-        return None
-    return _require_mapping(data, section)
-
-
-def _require_key(mapping: dict[str, Any], key: str, section: str) -> Any:
-    if key not in mapping:
-        raise ValueError(f"{section} missing required key: {key}")
-    return mapping[key]
-
-
-def _parse_dataset(data: Any) -> DatasetConfig:
-    raw = _require_mapping(data, "dataset")
-    options = dict(raw)
-    adapter = str(_require_key(options, "adapter", "dataset"))
-    path = str(_require_key(options, "path", "dataset"))
-    period = options.pop("period", None)
-    options.pop("adapter", None)
-    options.pop("path", None)
+        raise ValueError("dataset must be a mapping")
+    if "adapter" not in data:
+        raise ValueError("dataset missing required key: adapter")
+    if "path" not in data:
+        raise ValueError("dataset missing required key: path")
+    options = {k: v for k, v in data.items() if k not in ("adapter", "path", "period")}
     return DatasetConfig(
-        adapter=adapter,
-        path=path,
-        period=int(period) if period is not None else None,
+        adapter=str(data["adapter"]),
+        path=str(data["path"]),
+        period=int(data["period"]) if data.get("period") is not None else None,
         options=options,
     )
 
 
-def _parse_tasks(data: Any) -> list[TaskConfig]:
+def _parse_tasks(data: object) -> list[TaskConfig]:
     if not isinstance(data, list) or not data:
         raise ValueError("tasks must be a non-empty list")
     tasks: list[TaskConfig] = []
     for idx, item in enumerate(data):
-        raw = _require_mapping(item, f"tasks[{idx}]")
-        model = str(_require_key(raw, "model", f"tasks[{idx}]"))
-        horizon = int(_require_key(raw, "horizon", f"tasks[{idx}]"))
+        if not isinstance(item, dict):
+            raise ValueError(f"tasks[{idx}] must be a mapping")
+        if "model" not in item:
+            raise ValueError(f"tasks[{idx}] missing required key: model")
+        if "horizon" not in item:
+            raise ValueError(f"tasks[{idx}] missing required key: horizon")
+        horizon = int(item["horizon"])
         if horizon < 1:
             raise ValueError(f"tasks[{idx}].horizon must be at least 1")
-        config = raw.get("config", {})
+        config = item.get("config", {})
         if not isinstance(config, dict):
             raise ValueError(f"tasks[{idx}].config must be a mapping")
-        tasks.append(TaskConfig(model=model, horizon=horizon, config=dict(config)))
+        tasks.append(TaskConfig(model=str(item["model"]), horizon=horizon, config=dict(config)))
     return tasks
 
 
-def _parse_conformal(data: Any) -> ConformalConfig | None:
-    raw = _optional_mapping(data, "conformal")
-    if raw is None:
+def _parse_conformal(data: object) -> ConformalConfig | None:
+    if data is None:
         return None
+    if not isinstance(data, dict):
+        raise ValueError("conformal must be a mapping")
+    try:
+        raw = _RawConformal.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(str(exc)) from exc
     return ConformalConfig(
-        method=str(_require_key(raw, "method", "conformal")),  # type: ignore[arg-type]
-        coverage=float(raw.get("coverage", 0.9)),
-        calibration_window=int(raw.get("calibration_window", 100)),
-        gamma=float(raw.get("gamma", 0.05)),
-        mode=str(raw.get("mode", "perhorizon")),  # type: ignore[arg-type]
-        protection_period=int(raw["protection_period"])
-        if raw.get("protection_period") is not None
-        else None,
+        method=raw.method,
+        coverage=raw.coverage,
+        calibration_window=raw.calibration_window,
+        gamma=raw.gamma,
+        mode=raw.mode,
+        protection_period=raw.protection_period,
     )
 
 
-def _parse_ordering(data: Any) -> OrderingConfig | None:
-    raw = _optional_mapping(data, "ordering")
-    if raw is None:
+def _parse_ordering(data: object) -> OrderingConfig | None:
+    if data is None:
         return None
+    if not isinstance(data, dict):
+        raise ValueError("ordering must be a mapping")
+    if "policy" not in data:
+        raise ValueError("ordering missing required key: policy")
+    raw: dict[str, Any] = data
     return OrderingConfig(
-        policy=str(_require_key(raw, "policy", "ordering")),
+        policy=str(raw["policy"]),
         coverage=float(raw.get("coverage", 0.9)),
         quantile=float(raw["quantile"]) if raw.get("quantile") is not None else None,
         params=raw.get("params"),
     )
 
 
-def _parse_origins(data: Any) -> OriginsConfig:
-    raw = _require_mapping(data, "origins")
-    start = pd.Timestamp(_require_key(raw, "start", "origins"))
-    end = pd.Timestamp(_require_key(raw, "end", "origins"))
+def _parse_origins(data: object) -> OriginsConfig:
+    if not isinstance(data, dict):
+        raise ValueError("origins must be a mapping")
+    if "start" not in data:
+        raise ValueError("origins missing required key: start")
+    if "end" not in data:
+        raise ValueError("origins missing required key: end")
+    if "freq" not in data:
+        raise ValueError("origins missing required key: freq")
+    start = pd.Timestamp(data["start"])
+    end = pd.Timestamp(data["end"])
     if end < start:
         raise ValueError("origins.end must be greater than or equal to origins.start")
-    return OriginsConfig(start=start, end=end, freq=str(_require_key(raw, "freq", "origins")))
+    return OriginsConfig(start=start, end=end, freq=str(data["freq"]))
 
 
-def _parse_output(data: Any) -> OutputConfig:
-    raw = _require_mapping(data or {}, "output")
+def _parse_output(data: object) -> OutputConfig:
+    raw = data if isinstance(data, dict) else {}
     return OutputConfig(
         ledger_path=str(raw["ledger_path"]) if raw.get("ledger_path") is not None else None,
         order_ledger_path=str(raw["order_ledger_path"])
@@ -222,9 +262,9 @@ def _parse_output(data: Any) -> OutputConfig:
     )
 
 
-def _parse_execution(data: Any) -> ExecutionConfig:
-    raw = _require_mapping(data or {}, "execution")
-    allowed = {
+def _parse_execution(data: object) -> ExecutionConfig:
+    raw: dict[str, object] = data if isinstance(data, dict) else {}
+    _EXECUTION_KEYS = {
         "backend",
         "seed",
         "ray_address",
@@ -233,63 +273,56 @@ def _parse_execution(data: Any) -> ExecutionConfig:
         "max_concurrency",
         "cpu_per_task",
     }
-    unknown = sorted(set(raw) - allowed)
+    unknown = sorted(set(raw) - _EXECUTION_KEYS)
     if unknown:
         raise ValueError(f"unknown execution key: {unknown[0]}")
-    backend = str(raw.get("backend", "auto"))
-    if backend not in {"local", "ray", "auto"}:
-        raise ValueError("execution.backend must be 'local', 'ray', or 'auto'")
-    ray_threshold = int(raw.get("ray_threshold", 10))
-    if ray_threshold < 1:
-        raise ValueError("execution.ray_threshold must be at least 1")
-    max_concurrency = (
-        int(raw["max_concurrency"]) if raw.get("max_concurrency") is not None else None
-    )
-    if max_concurrency is not None and max_concurrency < 1:
-        raise ValueError("execution.max_concurrency must be at least 1")
-    cpu_per_task = float(raw["cpu_per_task"]) if raw.get("cpu_per_task") is not None else None
-    if cpu_per_task is not None and cpu_per_task <= 0:
-        raise ValueError("execution.cpu_per_task must be positive")
-    ray_address = str(raw["ray_address"]) if raw.get("ray_address") is not None else None
-    staging_uri = str(raw["staging_uri"]) if raw.get("staging_uri") is not None else None
-    if ray_address is not None and staging_uri is None:
-        raise ValueError("execution.staging_uri is required when execution.ray_address is set")
+    try:
+        parsed = _RawExecution.model_validate(raw)
+    except ValidationError as exc:
+        raise ValueError(str(exc)) from exc
     return ExecutionConfig(
-        backend=backend,  # type: ignore[arg-type]
-        ray_address=ray_address,
-        staging_uri=staging_uri,
-        ray_threshold=ray_threshold,
-        max_concurrency=max_concurrency,
-        cpu_per_task=cpu_per_task,
-        seed=int(raw["seed"]) if raw.get("seed") is not None else None,
+        backend=parsed.backend,
+        ray_address=parsed.ray_address,
+        staging_uri=parsed.staging_uri,
+        ray_threshold=parsed.ray_threshold,
+        max_concurrency=parsed.max_concurrency,
+        cpu_per_task=parsed.cpu_per_task,
+        seed=parsed.seed,
     )
 
 
 def load_config_from_mapping(
     data: dict[str, Any], *, source_path: str | Path | None = None
 ) -> BackendConfig:
-    raw = _require_mapping(data, "config")
-    schema = str(_require_key(raw, "config_schema", "config"))
+    if not isinstance(data, dict):
+        raise ValueError("config must be a mapping")
+    schema = str(data.get("config_schema", ""))
     if schema != CONFIG_SCHEMA:
         raise ValueError(f"config_schema must be {CONFIG_SCHEMA!r}, got {schema!r}")
-    if "hpo" in raw:
+    if "hpo" in data:
         raise ValueError("config.hpo is not supported until CLI tuning is wired")
+    if "tasks" not in data:
+        raise ValueError("config missing required key: tasks")
+    if "dataset" not in data:
+        raise ValueError("config missing required key: dataset")
+    if "origins" not in data:
+        raise ValueError("config missing required key: origins")
 
-    tasks = _parse_tasks(_require_key(raw, "tasks", "config"))
+    tasks = _parse_tasks(data["tasks"])
     horizons = {task.horizon for task in tasks}
     if len(horizons) != 1:
         raise ValueError("all tasks in a single CLI run must use the same horizon")
 
     config = BackendConfig(
         config_schema=schema,
-        dataset=_parse_dataset(_require_key(raw, "dataset", "config")),
+        dataset=_parse_dataset(data["dataset"]),
         tasks=tasks,
-        conformal=_parse_conformal(raw.get("conformal")),
-        ordering=_parse_ordering(raw.get("ordering")),
-        origins=_parse_origins(_require_key(raw, "origins", "config")),
-        output=_parse_output(raw.get("output")),
-        execution=_parse_execution(raw.get("execution")),
-        benchmark=str(raw["benchmark"]) if raw.get("benchmark") is not None else None,
+        conformal=_parse_conformal(data.get("conformal")),
+        ordering=_parse_ordering(data.get("ordering")),
+        origins=_parse_origins(data["origins"]),
+        output=_parse_output(data.get("output")),
+        execution=_parse_execution(data.get("execution")),
+        benchmark=str(data["benchmark"]) if data.get("benchmark") is not None else None,
         source_path=str(source_path) if source_path is not None else None,
     )
     if config.output.streaming and config.output.ledger_path is None:
