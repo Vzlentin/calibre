@@ -100,6 +100,9 @@ When `CALIBRE_DATABASE_URL` is set, run metadata and conformal calibration state
 are persisted in Postgres. Conformal state is keyed by stable `session_id` and
 partition, unresolved observations are buffered in `pending_observations`, and
 multi-SKU HPO results are stored in `tuning_runs` for partial-completion resume.
+The `tenant` field is a storage partitioning key in this wave, not an
+application-level authorization boundary; deployments must enforce tenant claims
+at an API gateway, service mesh, or JWT middleware before requests reach Calibre.
 See [`docs/deployment.md`](docs/deployment.md) for Terraform, AWS Batch, Azure
 Container Instances, and Databricks setup.
 
