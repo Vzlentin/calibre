@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -24,6 +24,8 @@ from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import OrderPolicyConfig
 from calibre.storage.state import ConformalStateStore
+
+logger = logging.getLogger(__name__)
 
 
 def _fs_result_uri(fs, path: str) -> str:
@@ -159,7 +161,12 @@ def run_config(
             dataset=config.benchmark,
             currency=_metric_currency(config),
         )
-        print(f"benchmark={config.benchmark} rows={len(summary)} total_cost={total_cost:.2f}")
+        logger.info(
+            "benchmark=%s rows=%s total_cost=%.2f",
+            config.benchmark,
+            len(summary),
+            total_cost,
+        )
         return summary
 
     bundle = _load_dataset(config)
@@ -213,15 +220,15 @@ def run_config(
         )
 
     ledger_rows = len(result.ledger.to_df())
-    print(f"run complete rows={ledger_rows}")
+    logger.info("run complete rows=%s", ledger_rows)
     if config.output.ledger_path is not None:
-        print(f"ledger={config.output.ledger_path}")
+        logger.info("ledger=%s", config.output.ledger_path)
     return result
 
 
 def validate(config_path: str | Path) -> BackendConfig:
     config = load_config(config_path)
-    print(f"valid config_schema={config.config_schema} tasks={len(config.tasks)}")
+    logger.info("valid config_schema=%s tasks=%s", config.config_schema, len(config.tasks))
     return config
 
 
@@ -242,7 +249,7 @@ def health() -> dict[str, Any]:
         "fixture_rows": len(bundle.history),
         "fixture_series": int(bundle.history[UNIQUE_ID].astype(str).nunique()),
     }
-    print(json.dumps(payload, sort_keys=True))
+    logger.info("health=%s", payload)
     return payload
 
 
