@@ -12,19 +12,17 @@ def _thread_budget(cpu_budget: float | None) -> int:
 def _cap_threaded_config(
     config: dict[str, Any],
     cpu_budget: float | None = None,
-    *,
-    cpu_per_task: float | None = None,
-    cpu_per_trial: float | None = None,
 ) -> dict[str, Any]:
-    """Keep library-level parallelism inside the assigned CPU budget."""
-    explicit_budgets = [
-        budget for budget in (cpu_budget, cpu_per_task, cpu_per_trial) if budget is not None
-    ]
-    if not explicit_budgets:
+    """Keep library-level parallelism inside the assigned CPU budget.
+
+    Callers translate their domain-specific vocabularies (``cpu_per_task``,
+    ``cpu_per_trial``) to ``cpu_budget`` before invoking this helper.
+    """
+    if cpu_budget is None:
         return config
 
     capped = dict(config)
-    threads = _thread_budget(explicit_budgets[-1])
+    threads = _thread_budget(cpu_budget)
     for key in ("n_jobs", "num_threads", "nthread"):
         if key not in capped:
             continue

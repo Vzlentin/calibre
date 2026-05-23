@@ -183,14 +183,14 @@ def test_optimize_accepts_conformal_config(series_df, dates):
 def test_resource_budget_caps_threaded_model_configs():
     capped = _cap_threaded_config(
         {"model": "lightgbm.LGBMRegressor", "n_jobs": -1, "num_threads": 16},
-        cpu_per_trial=2.0,
+        cpu_budget=2.0,
     )
     assert capped["n_jobs"] == 2
     assert capped["num_threads"] == 2
 
 
 def test_resource_budget_does_not_add_threads_to_unthreaded_model():
-    capped = _cap_threaded_config({"model": "SeasonalNaive"}, cpu_per_trial=2.0)
+    capped = _cap_threaded_config({"model": "SeasonalNaive"}, cpu_budget=2.0)
     assert "n_jobs" not in capped
 
 
