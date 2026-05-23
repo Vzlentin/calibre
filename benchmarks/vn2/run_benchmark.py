@@ -149,6 +149,7 @@ def run_benchmark(
     ray_threshold: int = 10,
     max_concurrency: int | None = None,
     cpu_per_task: float | None = None,
+    policy_error_mode: Literal["raise", "zero"] = "raise",
 ) -> pd.DataFrame:
     """Run Calibre's tuned VN2 benchmark and return per-product cost summary.
 
@@ -184,6 +185,11 @@ def run_benchmark(
         ray_threshold: Minimum local task count before ``auto`` uses Ray.
         max_concurrency: Optional cap on concurrent uid tasks.
         cpu_per_task: Optional CPU resources requested by each Ray worker task.
+        policy_error_mode: ``"raise"`` (default) fails fast when the policy
+            frame is structurally invalid or order computation raises. ``"zero"``
+            is the legacy diagnostic mode that emits zero orders on these
+            errors; choose it deliberately when running a degraded replay so
+            broken wiring is not silently masked.
 
     Returns:
         DataFrame with columns: unique_id, holding_cost, shortage_cost, total_cost.
@@ -334,9 +340,15 @@ def run_benchmark(
 
         def _policy(frame: pd.DataFrame) -> dict[str, float]:
             if frame.empty:
-                if verbose:
-                    logger.info("  Empty forecast, using zero orders.")
-                return dict.fromkeys(initial_states, 0.0)
+                if policy_error_mode == "zero":
+                    logger.warning(
+                        "  Empty forecast frame; emitting zero orders (policy_error_mode=zero)."
+                    )
+                    return dict.fromkeys(initial_states, 0.0)
+                raise ValueError(
+                    "VN2 policy received an empty forecast frame; set "
+                    "policy_error_mode='zero' to keep diagnostic replay behavior."
+                )
             try:
                 if order_conformal_runtime is not None:
                     order_config = OrderPolicyConfig(
@@ -345,9 +357,17 @@ def run_benchmark(
                         coverage=order_conformal_runtime.config.coverage,
                     )
                 elif target_quantile_col not in frame.columns:
-                    if verbose:
-                        logger.info("  Missing quantile column, using zero orders.")
-                    return dict.fromkeys(initial_states, 0.0)
+                    if policy_error_mode == "zero":
+                        logger.warning(
+                            "  Missing quantile column %s; emitting zero orders "
+                            "(policy_error_mode=zero).",
+                            target_quantile_col,
+                        )
+                        return dict.fromkeys(initial_states, 0.0)
+                    raise KeyError(
+                        f"VN2 policy frame is missing quantile column {target_quantile_col!r}; "
+                        "set policy_error_mode='zero' to keep diagnostic replay behavior."
+                    )
                 else:
                     order_config = OrderPolicyConfig(
                         policy="rs",
@@ -357,9 +377,14 @@ def run_benchmark(
                 order_result = apply_order_policy(frame, order_config)
                 return _orders_from_policy_result(order_result, initial_states)
             except (ValueError, KeyError) as exc:
-                if verbose:
-                    logger.info("  Order computation failed: %s. Using zero orders.", exc)
-                return dict.fromkeys(initial_states, 0.0)
+                if policy_error_mode == "zero":
+                    logger.warning(
+                        "  Order computation failed: %s. Emitting zero orders "
+                        "(policy_error_mode=zero).",
+                        exc,
+                    )
+                    return dict.fromkeys(initial_states, 0.0)
+                raise
 
         def _get_actuals(rn: int) -> dict[str, float]:
             if rn <= decision_rounds:
