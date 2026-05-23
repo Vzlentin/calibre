@@ -126,6 +126,7 @@ class TuneStudyResponse(BaseModel):
     sku_set: list[str]
     status: RunStatus
     best_candidates: dict[str, TuneCandidatePayload] = Field(default_factory=dict)
+    oracle_cost: float | None = None
     error: str | None = None
 
 

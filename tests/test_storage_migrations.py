@@ -38,6 +38,8 @@ def test_storage_alembic_upgrade_creates_run_tables(tmp_path, monkeypatch) -> No
     assert fit_pk == ["fit_id"]
     tune_pk = inspector.get_pk_constraint("tune_records")["constrained_columns"]
     assert tune_pk == ["study_id"]
+    tune_columns = {column["name"] for column in inspector.get_columns("tune_records")}
+    assert "oracle_cost" in tune_columns
     inventory_pk = inspector.get_pk_constraint("inventory_snapshots")["constrained_columns"]
     assert inventory_pk == ["tenant", "unique_id", "as_of"]
     sales_pk = inspector.get_pk_constraint("sales_records")["constrained_columns"]
@@ -46,4 +48,4 @@ def test_storage_alembic_upgrade_creates_run_tables(tmp_path, monkeypatch) -> No
     assert order_pk == ["order_id"]
     with engine.connect() as connection:
         revision = connection.execute(text("select version_num from alembic_version")).scalar_one()
-    assert revision == "0006_data_plane_tables"
+    assert revision == "0007_tune_oracle_cost"

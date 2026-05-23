@@ -45,6 +45,7 @@ class TuneRecord:
     status: RunStatus = RunStatus.QUEUED
     error: str | None = None
     best_candidates: dict[str, dict[str, dict]] = field(default_factory=dict)
+    oracle_cost: float | None = None
 
 
 def _records_from_frame(frame: pd.DataFrame | None) -> list[dict[str, Any]] | None:
@@ -397,6 +398,7 @@ def _tune_row_values(record: TuneRecord) -> dict[str, object]:
         "status": _status_value(record.status),
         "error": record.error,
         "best_candidates": dict(record.best_candidates),
+        "oracle_cost": record.oracle_cost,
     }
 
 
@@ -409,6 +411,7 @@ def _tune_from_row(row: LifecycleTuneRecord) -> TuneRecord:
         status=RunStatus(row.status),
         error=row.error,
         best_candidates=dict(row.best_candidates),
+        oracle_cost=row.oracle_cost,
     )
 
 

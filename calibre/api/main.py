@@ -5,7 +5,9 @@ import os
 import tempfile
 import traceback
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import optuna
 import pandas as pd
@@ -71,11 +73,13 @@ from calibre.storage.postgres import (
 )
 from calibre.storage.session import derive_session_id
 from calibre.tuning import (
+    Regret,
     TuningCandidate,
     TuningObjective,
     TuningTask,
     optimize_task_candidate,
 )
+from calibre.tuning.objectives import perfect_foresight_oracle_cost
 
 app = FastAPI(title="Calibre", version="0.1.0")
 
@@ -626,6 +630,7 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         req.base_model_config,
         req.conformal_config or {},
     )
+    oracle_cost = _oracle_cost_for_request(req, actuals, origins)
     study_id = LifecycleStore.new_study_id()
     _lifecycle_store().put_study(
         TuneRecord(
@@ -634,6 +639,7 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
             tenant=req.tenant,
             sku_set=list(req.sku_set),
             status=RunStatus.QUEUED,
+            oracle_cost=oracle_cost,
         )
     )
     bg.add_task(_run_tune_job, study_id, req, history, actuals, origins)
@@ -688,6 +694,43 @@ def _persist_tuning_run(
         )
 
 
+def _oracle_cost_for_request(
+    req: TuneRequest,
+    actuals: pd.DataFrame,
+    origins: list[pd.Timestamp],
+) -> float | None:
+    objective = _OBJECTIVES[req.objective_id]
+    if req.objective_id == "regret" and not isinstance(objective, Regret):
+        raise HTTPException(
+            status_code=400,
+            detail="objective_id 'regret' must be registered with a Regret objective",
+        )
+    if not isinstance(objective, Regret):
+        return None
+    try:
+        return perfect_foresight_oracle_cost(
+            objective,
+            actuals,
+            origins,
+            int(req.horizon),
+            unique_ids=req.sku_set,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"could not compute regret oracle_cost: {exc}",
+        ) from exc
+
+
+def _objective_for_study(objective_id: str, oracle_cost: float | None) -> TuningObjective:
+    objective = _OBJECTIVES[objective_id]
+    if not isinstance(objective, Regret):
+        return objective
+    if oracle_cost is None:
+        raise ValueError("regret objective requires precomputed oracle_cost")
+    return cast(TuningObjective, replace(objective, oracle_cost=float(oracle_cost)))
+
+
 def _run_tune_job(
     study_id: str,
     req: TuneRequest,
@@ -704,6 +747,7 @@ def _run_tune_job(
     factory = _db_session_factory()
     candidates: dict[str, dict[str, dict]] = {}
     try:
+        objective = _objective_for_study(req.objective_id, record.oracle_cost)
         for uid in req.sku_set:
             existing = _load_existing_tuning_run(factory, session_id, uid)
             if existing is not None:
@@ -717,7 +761,7 @@ def _run_tune_job(
                 search_space=_SEARCH_SPACES[req.search_space_id],
                 actuals=_filter_uid(actuals, uid),
                 origins=origins,
-                objective=_OBJECTIVES[req.objective_id],
+                objective=objective,
                 n_trials=int(req.n_trials),
                 freq=req.freq,
             )
@@ -754,6 +798,7 @@ def get_study(study_id: str) -> TuneStudyResponse:
         sku_set=list(record.sku_set),
         status=record.status,
         best_candidates=best_candidates,
+        oracle_cost=record.oracle_cost,
         error=record.error,
     )
 

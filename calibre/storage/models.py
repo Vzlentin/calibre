@@ -116,6 +116,7 @@ class LifecycleTuneRecord(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
     best_candidates: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    oracle_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from calibre.api.lifecycle import FitRecord, LifecycleStore, SqlLifecycleStore
+from calibre.api.lifecycle import FitRecord, LifecycleStore, SqlLifecycleStore, TuneRecord
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.run_status import RunStatus
 from calibre.storage.models import Base
@@ -80,3 +80,23 @@ def test_sql_lifecycle_store_fit_round_trip(tmp_path) -> None:
     assert loaded.status == RunStatus.SUCCEEDED
     assert loaded.artifact_urls == {"model": "file:///tmp/model.bin"}
     pd.testing.assert_frame_equal(loaded.last_forecast, forecast)
+
+
+def test_sql_lifecycle_store_tune_oracle_round_trip(tmp_path) -> None:
+    db_url = f"sqlite+pysqlite:///{(tmp_path / 'lifecycle.db').as_posix()}"
+    store = _store(db_url)
+    study_id = LifecycleStore.new_study_id()
+    store.put_study(
+        TuneRecord(
+            study_id=study_id,
+            session_id="session-a",
+            tenant="tenant",
+            sku_set=["A"],
+            oracle_cost=12.5,
+        )
+    )
+
+    loaded = store.get_study(study_id)
+
+    assert loaded is not None
+    assert loaded.oracle_cost == 12.5
