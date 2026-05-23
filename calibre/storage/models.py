@@ -97,8 +97,20 @@ class LifecycleFitRecord(Base):
     last_forecast: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
     last_calibrated: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
     last_orders: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
-    conformal_state: Mapped[dict] = mapped_column(JsonDict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class LifecycleConformalState(Base):
+    __tablename__ = "lifecycle_conformal_state"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    partition: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[dict] = mapped_column(JsonDict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),

@@ -22,7 +22,6 @@ from calibre.api.lifecycle import (
     FitRecord,
     LifecycleStore,
     MemoryLifecycleStore,
-    SqlLifecycleStore,
     TuneRecord,
 )
 from calibre.api.observe_service import (
@@ -66,6 +65,7 @@ from calibre.execution import backend as backend_module
 from calibre.execution.backend import coerce_forecast_frame_dtypes
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.storage.adapters import OrderRepo
+from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
     database_url,

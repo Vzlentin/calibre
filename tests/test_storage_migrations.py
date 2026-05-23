@@ -18,6 +18,7 @@ def test_storage_alembic_upgrade_creates_run_tables(tmp_path, monkeypatch) -> No
     assert {
         "runs",
         "conformal_state",
+        "lifecycle_conformal_state",
         "forecast_pointers",
         "pending_observations",
         "tuning_runs",
@@ -46,6 +47,12 @@ def test_storage_alembic_upgrade_creates_run_tables(tmp_path, monkeypatch) -> No
     assert sales_pk == ["tenant", "unique_id", "ds"]
     order_pk = inspector.get_pk_constraint("order_records")["constrained_columns"]
     assert order_pk == ["order_id"]
+    lifecycle_conformal_pk = inspector.get_pk_constraint("lifecycle_conformal_state")[
+        "constrained_columns"
+    ]
+    assert lifecycle_conformal_pk == ["session_id", "partition"]
+    fit_columns = {column["name"] for column in inspector.get_columns("fit_records")}
+    assert "conformal_state" not in fit_columns
     with engine.connect() as connection:
         revision = connection.execute(text("select version_num from alembic_version")).scalar_one()
-    assert revision == "0007_tune_oracle_cost"
+    assert revision == "0008_lifecycle_conformal_state"
