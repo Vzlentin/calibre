@@ -69,3 +69,11 @@ next_task: "phase 3 DoD and cross-phase regression gate"
 last_commit: "1921634"
 notes: "Replaced CLI config parsing helpers with pydantic section models; tests/cli, mypy calibre/cli, and ruff config checks passed."
 ```
+
+```yaml
+phase: 3
+last_completed_task: "phase 3 DoD and cross-phase regression gate"
+next_task: "4.a split run_benchmark.py into coordinated modules"
+last_commit: "1a6846c"
+notes: "Phase 3 gate green: tests/cli, mypy calibre/cli, ruff config, ruff check ., mypy calibre/, pytest."
+```
