@@ -125,3 +125,11 @@ next_task: "phase 5 DoD and cross-phase regression gate"
 last_commit: "7617df2"
 notes: "Regret /tune requests precompute oracle_cost, persist it on TuneRecord, pass oracle-backed objectives to HPO, and expose oracle_cost on study responses."
 ```
+
+```yaml
+phase: 5
+last_completed_task: "phase 5 DoD and cross-phase regression gate"
+next_task: "6.a conformal numeric type fixes"
+last_commit: "d91f94f"
+notes: "Phase 5 gate green: SQL adapter and tune-regret DoD tests, ruff check ., mypy calibre/, pytest."
+```
