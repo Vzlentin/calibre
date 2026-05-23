@@ -21,3 +21,11 @@ next_task: "1.d add PartitionedConformalRuntime Protocol"
 last_commit: "8c12edb"
 notes: "Moved threaded config capping to calibre.execution.threading; focused threading and tuning tests passed."
 ```
+
+```yaml
+phase: 1
+last_completed_task: "1.d add PartitionedConformalRuntime Protocol"
+next_task: "phase 1 DoD and cross-phase regression gate"
+last_commit: "e02708b"
+notes: "Added typed partitioned runtime/store access; focused conformal and state-resume tests passed."
+```
