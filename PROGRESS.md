@@ -181,3 +181,11 @@ next_task: "phase 6 DoD and cross-phase regression gate"
 last_commit: "80806c4"
 notes: "Tenant is documented as a storage partitioning key, not an in-app auth boundary; deployments must enforce tenant claims before requests reach Calibre."
 ```
+
+```yaml
+phase: 6
+last_completed_task: "phase 6 DoD and cross-phase regression gate"
+next_task: "complete"
+last_commit: "731f2be"
+notes: "Phase 6 gate green: type_ignore_count=4, any_count=147, no CLI prints, broad exceptions log tracebacks, ruff check ., mypy calibre/, pytest."
+```
