@@ -13,3 +13,11 @@ next_task: "1.c extract _cap_threaded_config"
 last_commit: "08c6cb4"
 notes: "Routed /observe through observe_cumulative or observe_per_horizon; uv run pytest tests/api/test_observe.py passed."
 ```
+
+```yaml
+phase: 1
+last_completed_task: "1.c extract _cap_threaded_config"
+next_task: "1.d add PartitionedConformalRuntime Protocol"
+last_commit: "8c12edb"
+notes: "Moved threaded config capping to calibre.execution.threading; focused threading and tuning tests passed."
+```
