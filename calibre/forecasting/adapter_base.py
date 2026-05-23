@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pickle
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -45,20 +46,18 @@ class ModelAdapter(ABC):
     def dump_state(self) -> bytes:
         """Serialize the fitted adapter state for caching.
 
-        Default implementation refuses; subclasses must override to opt
-        into the artifact cache.
+        Subclasses can override for a compact or framework-native format.
+        The default pickles the adapter's attribute dictionary, which keeps
+        simple adapters cacheable without extra boilerplate.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement dump_state; "
-            "subclass must override to use ModelArtifactCache."
-        )
+        return pickle.dumps(self.__dict__)
 
     def load_state(self, blob: bytes) -> None:
         """Restore adapter state previously produced by ``dump_state``."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement load_state; "
-            "subclass must override to use ModelArtifactCache."
-        )
+        state = pickle.loads(blob)
+        if not isinstance(state, dict):
+            raise TypeError(f"Invalid adapter state for {type(self).__name__}")
+        self.__dict__.update(state)
 
     def fit_with_cache(
         self,

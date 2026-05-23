@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import traceback
 from collections.abc import Callable
+from pathlib import Path
 
 import optuna
 import pandas as pd
@@ -47,12 +49,16 @@ from calibre.conformal.runtime import (
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.run_status import RunStatus
+from calibre.execution import backend as backend_module
 from calibre.execution.backend import (
     _coerce_forecast_frame_dtypes,
     _finalize_preds,
+    _fit_adapter_for_task,
     _fit_predict_task,
 )
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
+from calibre.forecasting.adapter_registry import get_scope
+from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
@@ -80,6 +86,8 @@ _DB_FACTORY: sessionmaker | None = None
 _SQL_STORE: SqlRunStore | None = None
 _LIFECYCLE_STORE: LifecycleStore | None = MemoryLifecycleStore()
 _LIFECYCLE_STORE_KEY: tuple[str, str | None] = ("memory", None)
+_MODEL_CACHE: ModelArtifactCache | None = None
+_MODEL_CACHE_URI: str | None = None
 
 _SEARCH_SPACES: dict[str, Callable[[optuna.Trial], TuningCandidate]] = {}
 _OBJECTIVES: dict[str, TuningObjective] = {}
@@ -147,6 +155,17 @@ def _lifecycle_store() -> LifecycleStore:
         _LIFECYCLE_STORE = SqlLifecycleStore(make_session_factory(engine))
         _LIFECYCLE_STORE_KEY = key
     return _LIFECYCLE_STORE
+
+
+def _model_artifact_cache() -> ModelArtifactCache:
+    global _MODEL_CACHE, _MODEL_CACHE_URI
+    uri = os.environ.get("CALIBRE_MODEL_CACHE_DIR") or str(
+        Path(tempfile.gettempdir()) / "calibre-model-cache"
+    )
+    if _MODEL_CACHE is None or uri != _MODEL_CACHE_URI:
+        _MODEL_CACHE = ModelArtifactCache(uri)
+        _MODEL_CACHE_URI = uri
+    return _MODEL_CACHE
 
 
 def _json_records(frame: pd.DataFrame) -> list[dict]:
@@ -236,6 +255,80 @@ def _runtime_for_session(
     return build_symmetric_interval_runtime(runtime_config)
 
 
+def _model_config_for_fit(record: FitRecord) -> dict:
+    return {**record.forecaster_config, "freq": record.freq}
+
+
+def _validate_fit_record(record: FitRecord, model_config: dict) -> None:
+    if int(record.horizon) < 1:
+        raise ValueError("horizon must be at least 1")
+    if Y not in record.history.columns:
+        raise ValueError("history must include y")
+    pd.tseries.frequencies.to_offset(record.freq)
+    present = {str(uid) for uid in record.history[UNIQUE_ID].dropna().unique()}
+    missing = sorted(set(record.sku_set) - present)
+    if missing:
+        raise ValueError(f"history missing sku(s): {missing}")
+    if record.future_x is not None and not record.future_x.empty:
+        required = {UNIQUE_ID, DS}
+        missing_future_cols = sorted(required - set(record.future_x.columns))
+        if missing_future_cols:
+            raise ValueError(f"future_x missing columns: {missing_future_cols}")
+    backend_module.resolve_adapter(model_config)
+
+
+def _fit_tasks_for_record(
+    record: FitRecord,
+    model_config: dict,
+) -> list[tuple[str, ForecastTask]]:
+    scope = get_scope(model_config)
+    if scope == "global":
+        return [
+            (
+                "__global__",
+                ForecastTask(
+                    history=record.history,
+                    horizon=record.horizon,
+                    model_config=model_config,
+                    future_x=record.future_x,
+                ),
+            )
+        ]
+
+    tasks: list[tuple[str, ForecastTask]] = []
+    for uid in record.sku_set:
+        history = record.history[record.history[UNIQUE_ID] == uid].reset_index(drop=True)
+        future_x = record.future_x
+        if future_x is not None and not future_x.empty:
+            future_x = future_x[future_x[UNIQUE_ID] == uid].reset_index(drop=True)
+        tasks.append(
+            (
+                uid,
+                ForecastTask(
+                    history=history,
+                    horizon=record.horizon,
+                    model_config=model_config,
+                    future_x=future_x,
+                ),
+            )
+        )
+    return tasks
+
+
+def _fit_model_artifacts(record: FitRecord) -> dict[str, str]:
+    model_config = _model_config_for_fit(record)
+    _validate_fit_record(record, model_config)
+    cache = _model_artifact_cache()
+    artifacts: dict[str, str] = {}
+    for label, task in _fit_tasks_for_record(record, model_config):
+        adapter = backend_module.resolve_adapter(task.model_config)
+        _fit_adapter_for_task(adapter, task, cache)
+        cache_key = getattr(adapter, "cache_key", None)
+        if callable(cache_key):
+            artifacts[label] = cache.uri_for(str(cache_key(task)))
+    return artifacts
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -313,10 +406,11 @@ def _run_fit_job(fit_id: str) -> None:
         return
     store.update_fit(fit_id, status=RunStatus.RUNNING)
     try:
+        artifact_urls = _fit_model_artifacts(record)
         store.update_fit(
             fit_id,
             status=RunStatus.SUCCEEDED,
-            artifact_urls={"session_id": record.session_id},
+            artifact_urls=artifact_urls,
         )
     except Exception as exc:  # pragma: no cover - background task safety net
         store.update_fit(fit_id, status=RunStatus.FAILED, error=_format_error(exc))
@@ -365,7 +459,8 @@ def predict(req: PredictRequest) -> PredictResponse:
         future_x=future_x,
     )
     try:
-        preds = _fit_predict_task(task)
+        cache = _model_artifact_cache() if record.artifact_urls else None
+        preds = _fit_predict_task(task, cache=cache)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))

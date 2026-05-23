@@ -14,7 +14,7 @@ class ModelArtifactCache:
     """
 
     def __init__(self, uri: str) -> None:
-        self._root = Path(uri).expanduser()
+        self._root = Path(uri).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
 
     def get(self, key: str) -> bytes | None:
@@ -25,6 +25,9 @@ class ModelArtifactCache:
 
     def put(self, key: str, blob: bytes) -> None:
         self._path_for(key).write_bytes(blob)
+
+    def uri_for(self, key: str) -> str:
+        return self._path_for(key).as_uri()
 
     def _path_for(self, key: str) -> Path:
         if not key or "/" in key or "\\" in key:

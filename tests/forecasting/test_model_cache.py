@@ -120,19 +120,25 @@ def test_fit_with_cache_no_cache_runs_fit() -> None:
     assert _CountingAdapter.fit_calls == 1
 
 
-def test_default_dump_state_raises_without_subclass_override() -> None:
-    class _NoStateAdapter(ModelAdapter):
+def test_default_dump_state_round_trips_adapter_attributes() -> None:
+    class _DefaultStateAdapter(ModelAdapter):
         def __init__(self, model_config: dict) -> None:
             self._config = model_config
+            self._seen = False
 
         def fit(self, task: ForecastTask) -> None:
+            self._seen = True
             return None
 
         def predict(self, task: ForecastTask) -> pd.DataFrame:
             return pd.DataFrame()
 
-    with pytest.raises(NotImplementedError, match="dump_state"):
-        _NoStateAdapter({}).dump_state()
+    adapter = _DefaultStateAdapter({})
+    adapter.fit(_task())
+    restored = _DefaultStateAdapter({})
+    restored.load_state(adapter.dump_state())
+
+    assert restored._seen is True
 
 
 def test_cache_rejects_invalid_keys(tmp_path: Path) -> None:
