@@ -56,7 +56,6 @@ from calibre.execution.backend import (
     _coerce_forecast_frame_dtypes,
     _finalize_preds,
     _fit_adapter_for_task,
-    _fit_predict_task,
 )
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.forecasting.adapter_registry import get_scope
@@ -448,31 +447,78 @@ def predict(req: PredictRequest) -> PredictResponse:
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid origin: {exc}") from exc
 
-    history = record.history[record.history[DS] < origin]
-    if history.empty:
-        raise HTTPException(status_code=400, detail="history is empty before origin")
-
     forecaster_config = {**record.forecaster_config, "freq": record.freq}
     try:
         future_x = _merge_future_x_override(record.future_x, req.future_x_override)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    task = ForecastTask(
-        history=history,
-        horizon=record.horizon,
-        model_config=forecaster_config,
-        forecast_origin=origin,
-        future_x=future_x,
-    )
+
     try:
-        cache = _model_artifact_cache() if record.artifact_urls else None
-        preds = _fit_predict_task(task, cache=cache)
+        forecast_frame = _predict_from_artifacts(record, origin, forecaster_config, future_x)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("predict failed", extra={"fit_id": record.fit_id})
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
-    forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))
+
+    forecast_frame = _coerce_forecast_frame_dtypes(forecast_frame)
     _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
     return PredictResponse(rows=len(forecast_frame), forecast=_json_records(forecast_frame))
+
+
+def _predict_from_artifacts(
+    record: FitRecord,
+    origin: pd.Timestamp,
+    forecaster_config: dict,
+    future_x: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Load each fit artifact through its persisted URI and predict.
+
+    The fit record's ``artifact_urls`` is the source of truth for which
+    adapter state to load — we never recompute cache keys from the task at
+    predict time. Labels that don't map to a stored artifact fall back to
+    fit-on-predict against the per-label history slice.
+    """
+    scope = get_scope(forecaster_config)
+    labels = ["__global__"] if scope == "global" else list(record.sku_set)
+    cache = _model_artifact_cache() if record.artifact_urls else None
+
+    pred_frames: list[pd.DataFrame] = []
+    for label in labels:
+        if scope == "global":
+            label_history = record.history
+            label_future_x = future_x
+        else:
+            label_history = record.history[record.history[UNIQUE_ID] == label]
+            if future_x is not None and not future_x.empty:
+                label_future_x = future_x[future_x[UNIQUE_ID] == label].reset_index(drop=True)
+            else:
+                label_future_x = future_x
+
+        label_history = label_history[label_history[DS] < origin].reset_index(drop=True)
+        if label_history.empty:
+            continue
+
+        task = ForecastTask(
+            history=label_history,
+            horizon=record.horizon,
+            model_config=forecaster_config,
+            forecast_origin=origin,
+            future_x=label_future_x,
+        )
+        adapter = backend_module.resolve_adapter(task.model_config)
+        artifact_uri = record.artifact_urls.get(label) if record.artifact_urls else None
+        blob = cache.load_by_uri(artifact_uri) if (cache is not None and artifact_uri) else None
+        if blob is not None and hasattr(adapter, "load_state"):
+            adapter.load_state(blob)
+        else:
+            adapter.fit(task)
+        preds = adapter.predict(task)
+        pred_frames.append(_finalize_preds(preds, origin, task.model_name))
+
+    if not pred_frames:
+        raise HTTPException(status_code=400, detail="history is empty before origin")
+    return pd.concat(pred_frames, ignore_index=True)
 
 
 @app.post("/calibrate", response_model=CalibrateResponse)
