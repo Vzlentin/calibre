@@ -109,3 +109,11 @@ next_task: "5.a ship SqlInventoryAdapter and SqlSalesAdapter"
 last_commit: "102542a"
 notes: "Phase 4 gate green: tests/benchmarks plus VN2 tests, run_benchmark.py <=800 LOC, tuning/replay grep invariants, ruff check ., mypy calibre/, pytest."
 ```
+
+```yaml
+phase: 5
+last_completed_task: "5.a ship SqlInventoryAdapter and SqlSalesAdapter"
+next_task: "5.b wire Regret end-to-end through /tune"
+last_commit: "152c487"
+notes: "Added SQL inventory/sales/order tables, SqlInventoryAdapter, SqlSalesAdapter, OrderRepo, and SQL order persistence; focused adapter/storage/API checks passed."
+```
