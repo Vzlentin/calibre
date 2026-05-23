@@ -10,7 +10,13 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.orm import sessionmaker
 
-from calibre.api.lifecycle import FitRecord, LifecycleStore, TuneRecord
+from calibre.api.lifecycle import (
+    FitRecord,
+    LifecycleStore,
+    MemoryLifecycleStore,
+    SqlLifecycleStore,
+    TuneRecord,
+)
 from calibre.api.run_store import MemoryRunStore, RunStore, SqlRunStore
 from calibre.api.schemas import (
     BacktestRequest,
@@ -69,7 +75,7 @@ _MEMORY_STORE = MemoryRunStore()
 _DB_URL: str | None = None
 _DB_FACTORY: sessionmaker | None = None
 _SQL_STORE: SqlRunStore | None = None
-_LIFECYCLE_STORE = LifecycleStore()
+_LIFECYCLE_STORE: MemoryLifecycleStore | SqlLifecycleStore = LifecycleStore()
 
 _SEARCH_SPACES: dict[str, Callable[[optuna.Trial], TuningCandidate]] = {}
 _OBJECTIVES: dict[str, TuningObjective] = {}
@@ -241,7 +247,7 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
         req.forecaster_config,
         req.conformal_config or {},
     )
-    fit_id = LifecycleStore.new_fit_id()
+    fit_id = MemoryLifecycleStore.new_fit_id()
     record = FitRecord(
         fit_id=fit_id,
         session_id=session_id,
@@ -264,6 +270,17 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
     )
 
 
+def _validate_fit_config(record: FitRecord) -> str | None:
+    """Return an error string if the config is structurally incompatible, else None."""
+    if int(record.horizon) < 1:
+        return "horizon must be >= 1"
+    if not record.freq:
+        return "freq must be non-empty"
+    if not record.forecaster_config.get("backend"):
+        return "forecaster_config must include a 'backend' key"
+    return None
+
+
 def _run_fit_job(fit_id: str) -> None:
     store = _LIFECYCLE_STORE
     record = store.get_fit(fit_id)
@@ -271,12 +288,29 @@ def _run_fit_job(fit_id: str) -> None:
         return
     store.update_fit(fit_id, status=RunStatus.RUNNING)
     try:
+        error = _validate_fit_config(record)
+        if error is not None:
+            store.update_fit(fit_id, status=RunStatus.FAILED, error=error)
+            return
+        forecaster_config = {**record.forecaster_config, "freq": record.freq}
+        for uid in record.sku_set:
+            uid_history = record.history[record.history[UNIQUE_ID] == uid]
+            if uid_history.empty:
+                continue
+            task = ForecastTask(
+                history=uid_history,
+                horizon=record.horizon,
+                model_config=forecaster_config,
+                forecast_origin=uid_history[DS].max(),
+                future_x=record.future_x,
+            )
+            _fit_predict_task(task)
         store.update_fit(
             fit_id,
             status=RunStatus.SUCCEEDED,
             artifact_urls={"session_id": record.session_id},
         )
-    except Exception as exc:  # pragma: no cover - background task safety net
+    except Exception as exc:
         store.update_fit(fit_id, status=RunStatus.FAILED, error=_format_error(exc))
 
 
@@ -465,7 +499,7 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         req.base_model_config,
         req.conformal_config or {},
     )
-    study_id = LifecycleStore.new_study_id()
+    study_id = MemoryLifecycleStore.new_study_id()
     _LIFECYCLE_STORE.put_study(
         TuneRecord(
             study_id=study_id,
