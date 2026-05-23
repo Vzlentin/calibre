@@ -133,3 +133,11 @@ next_task: "6.a conformal numeric type fixes"
 last_commit: "d91f94f"
 notes: "Phase 5 gate green: SQL adapter and tune-regret DoD tests, ruff check ., mypy calibre/, pytest."
 ```
+
+```yaml
+phase: 6
+last_completed_task: "6.a conformal numeric type fixes"
+next_task: "6.b narrow broad exceptions"
+last_commit: "37181d7"
+notes: "Typed conformal scalar/array alpha helpers, removed adaptive/numerics type ignores, and verified focused conformal tests plus ruff/mypy."
+```
