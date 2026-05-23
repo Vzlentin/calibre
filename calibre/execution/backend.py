@@ -66,7 +66,7 @@ from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 logger = logging.getLogger(__name__)
 
 
-def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) -> pd.DataFrame:
+def finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) -> pd.DataFrame:
     preds[FORECAST_ORIGIN] = origin
     preds[MODEL_NAME] = model_name
     preds[Y] = np.nan
@@ -74,7 +74,7 @@ def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) 
     return preds[REQUIRED_COLUMNS + extras]
 
 
-def _fit_adapter_for_task(
+def fit_adapter_for_task(
     adapter: Any,
     task: ForecastTask,
     cache: ModelArtifactCache | None = None,
@@ -95,7 +95,7 @@ def _fit_predict_task(
     origin = task.forecast_origin
 
     fit_started = time.perf_counter()
-    fitted = _fit_adapter_for_task(adapter, task, cache)
+    fitted = fit_adapter_for_task(adapter, task, cache)
     logger.info(
         "completed adapter fit" if fitted else "loaded adapter fit from cache",
         extra={
@@ -123,7 +123,7 @@ def _fit_predict_task(
     return preds
 
 
-def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
+def coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     result = frame.copy()
@@ -190,7 +190,7 @@ def _process_task_ref(
         task_group=task.task_group,
     )
     preds = _fit_predict_task(origin_task)
-    return _finalize_preds(preds, origin, origin_task.model_name)
+    return finalize_preds(preds, origin, origin_task.model_name)
 
 
 def _process_global_panel(
@@ -234,14 +234,14 @@ def _process_global_panel(
         task_group=task_group,
     )
     preds = _fit_predict_task(origin_task)
-    return _finalize_preds(preds, origin, origin_task.model_name)
+    return finalize_preds(preds, origin, origin_task.model_name)
 
 
 def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     non_empty = [frame for frame in frames if not frame.empty]
     if not non_empty:
         return _empty_forecast_frame()
-    return _coerce_forecast_frame_dtypes(pd.concat(non_empty, ignore_index=True))
+    return coerce_forecast_frame_dtypes(pd.concat(non_empty, ignore_index=True))
 
 
 def _adaptive_controller_drift(conformal_runtime: ConformalRuntime) -> float | None:
@@ -382,7 +382,7 @@ class BackendEngine:
         if self.streaming_output is not None:
             ledger.stream_to(self.streaming_output)
         if self.initial_ledger is not None and not self.initial_ledger.empty:
-            ledger.append(_coerce_forecast_frame_dtypes(self.initial_ledger))
+            ledger.append(coerce_forecast_frame_dtypes(self.initial_ledger))
         order_ledger = OrderLedger() if self.order_config is not None else None
         if order_ledger is not None and self.streaming_order_output is not None:
             order_ledger.stream_to(self.streaming_order_output)

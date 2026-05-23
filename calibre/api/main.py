@@ -5,9 +5,7 @@ import os
 import tempfile
 import traceback
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
-from typing import cast
 
 import optuna
 import pandas as pd
@@ -16,12 +14,25 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from calibre.api.fit_service import (
+    fit_model_artifacts,
+    predict_from_artifacts,
+)
 from calibre.api.lifecycle import (
     FitRecord,
     LifecycleStore,
     MemoryLifecycleStore,
     SqlLifecycleStore,
     TuneRecord,
+)
+from calibre.api.observe_service import (
+    run_observe,
+    runtime_for_session,
+)
+from calibre.api.order_service import (
+    apply_order_policy,
+    build_policy_config,
+    persist_orders,
 )
 from calibre.api.run_store import MemoryRunStore, RunStore, SqlRunStore
 from calibre.api.schemas import (
@@ -43,42 +54,30 @@ from calibre.api.schemas import (
     TuneRequest,
     TuneStudyResponse,
 )
-from calibre.cli.config import ConformalConfig
-from calibre.conformal.runtime import (
-    SymmetricIntervalRuntime,
-    build_symmetric_interval_runtime,
+from calibre.api.tune_service import (
+    objective_for_study,
+    oracle_cost_for_request,
+    run_tune_job,
 )
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
-from calibre.core.forecast_task import ForecastTask
+from calibre.conformal.runtime import SymmetricIntervalRuntime
+from calibre.core.forecast_frame import DS, UNIQUE_ID
 from calibre.core.run_status import RunStatus
 from calibre.execution import backend as backend_module
-from calibre.execution.backend import (
-    _coerce_forecast_frame_dtypes,
-    _finalize_preds,
-    _fit_adapter_for_task,
-)
-from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
-from calibre.forecasting.adapter_registry import get_scope
+from calibre.execution.backend import coerce_forecast_frame_dtypes
 from calibre.forecasting.cache import ModelArtifactCache
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.adapters import OrderRepo
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
-    TuningRunRepo,
     database_url,
     make_engine,
     make_session_factory,
-    session_scope,
 )
 from calibre.storage.session import derive_session_id
 from calibre.tuning import (
-    Regret,
     TuningCandidate,
     TuningObjective,
-    TuningTask,
     optimize_task_candidate,
 )
-from calibre.tuning.objectives import perfect_foresight_oracle_cost
 
 app = FastAPI(title="Calibre", version="0.1.0")
 
@@ -237,100 +236,16 @@ def _format_error(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 
-def _conformal_config_from_dict(payload: dict) -> ConformalConfig:
-    return ConformalConfig(
-        method=payload["method"],
-        coverage=float(payload.get("coverage", 0.9)),
-        calibration_window=int(payload.get("calibration_window", 100)),
-        gamma=float(payload.get("gamma", 0.05)),
-        mode=payload.get("mode", "perhorizon"),
-        protection_period=payload.get("protection_period"),
-    )
-
-
-def _runtime_for_session(
-    record: FitRecord,
-) -> SymmetricIntervalRuntime:
-    assert record.conformal_config is not None
-    runtime_config = _conformal_config_from_dict(record.conformal_config).to_runtime_config()
-    saved = _lifecycle_store().get_conformal_state(record.session_id)
-    if saved:
-        return SymmetricIntervalRuntime.from_partition_states(runtime_config, saved)
-    return build_symmetric_interval_runtime(runtime_config)
-
-
-def _model_config_for_fit(record: FitRecord) -> dict:
-    return {**record.forecaster_config, "freq": record.freq}
-
-
-def _validate_fit_record(record: FitRecord, model_config: dict) -> None:
-    if int(record.horizon) < 1:
-        raise ValueError("horizon must be at least 1")
-    if Y not in record.history.columns:
-        raise ValueError("history must include y")
-    pd.tseries.frequencies.to_offset(record.freq)
-    present = {str(uid) for uid in record.history[UNIQUE_ID].dropna().unique()}
-    missing = sorted(set(record.sku_set) - present)
-    if missing:
-        raise ValueError(f"history missing sku(s): {missing}")
-    if record.future_x is not None and not record.future_x.empty:
-        required = {UNIQUE_ID, DS}
-        missing_future_cols = sorted(required - set(record.future_x.columns))
-        if missing_future_cols:
-            raise ValueError(f"future_x missing columns: {missing_future_cols}")
-    backend_module.resolve_adapter(model_config)
-
-
-def _fit_tasks_for_record(
-    record: FitRecord,
-    model_config: dict,
-) -> list[tuple[str, ForecastTask]]:
-    scope = get_scope(model_config)
-    if scope == "global":
-        return [
-            (
-                "__global__",
-                ForecastTask(
-                    history=record.history,
-                    horizon=record.horizon,
-                    model_config=model_config,
-                    future_x=record.future_x,
-                ),
-            )
-        ]
-
-    tasks: list[tuple[str, ForecastTask]] = []
-    for uid in record.sku_set:
-        history = record.history[record.history[UNIQUE_ID] == uid].reset_index(drop=True)
-        future_x = record.future_x
-        if future_x is not None and not future_x.empty:
-            future_x = future_x[future_x[UNIQUE_ID] == uid].reset_index(drop=True)
-        tasks.append(
-            (
-                uid,
-                ForecastTask(
-                    history=history,
-                    horizon=record.horizon,
-                    model_config=model_config,
-                    future_x=future_x,
-                ),
-            )
-        )
-    return tasks
+def _runtime_for_session(record: FitRecord) -> SymmetricIntervalRuntime:
+    return runtime_for_session(record, _lifecycle_store())
 
 
 def _fit_model_artifacts(record: FitRecord) -> dict[str, str]:
-    model_config = _model_config_for_fit(record)
-    _validate_fit_record(record, model_config)
-    cache = _model_artifact_cache()
-    artifacts: dict[str, str] = {}
-    for label, task in _fit_tasks_for_record(record, model_config):
-        adapter = backend_module.resolve_adapter(task.model_config)
-        _fit_adapter_for_task(adapter, task, cache)
-        cache_key = getattr(adapter, "cache_key", None)
-        if callable(cache_key):
-            artifacts[label] = cache.uri_for(str(cache_key(task)))
-    return artifacts
+    return fit_model_artifacts(
+        record,
+        cache=_model_artifact_cache(),
+        resolver=backend_module.resolve_adapter,
+    )
 
 
 @app.get("/healthz")
@@ -454,71 +369,22 @@ def predict(req: PredictRequest) -> PredictResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        forecast_frame = _predict_from_artifacts(record, origin, forecaster_config, future_x)
-    except HTTPException:
-        raise
+        forecast_frame = predict_from_artifacts(
+            record,
+            origin,
+            forecaster_config,
+            future_x,
+            cache=_model_artifact_cache(),
+            resolver=backend_module.resolve_adapter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("predict failed", extra={"fit_id": record.fit_id})
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
 
-    forecast_frame = _coerce_forecast_frame_dtypes(forecast_frame)
     _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
     return PredictResponse(rows=len(forecast_frame), forecast=_json_records(forecast_frame))
-
-
-def _predict_from_artifacts(
-    record: FitRecord,
-    origin: pd.Timestamp,
-    forecaster_config: dict,
-    future_x: pd.DataFrame | None,
-) -> pd.DataFrame:
-    """Load each fit artifact through its persisted URI and predict.
-
-    The fit record's ``artifact_urls`` is the source of truth for which
-    adapter state to load — we never recompute cache keys from the task at
-    predict time. Labels that don't map to a stored artifact fall back to
-    fit-on-predict against the per-label history slice.
-    """
-    scope = get_scope(forecaster_config)
-    labels = ["__global__"] if scope == "global" else list(record.sku_set)
-    cache = _model_artifact_cache() if record.artifact_urls else None
-
-    pred_frames: list[pd.DataFrame] = []
-    for label in labels:
-        if scope == "global":
-            label_history = record.history
-            label_future_x = future_x
-        else:
-            label_history = record.history[record.history[UNIQUE_ID] == label]
-            if future_x is not None and not future_x.empty:
-                label_future_x = future_x[future_x[UNIQUE_ID] == label].reset_index(drop=True)
-            else:
-                label_future_x = future_x
-
-        label_history = label_history[label_history[DS] < origin].reset_index(drop=True)
-        if label_history.empty:
-            continue
-
-        task = ForecastTask(
-            history=label_history,
-            horizon=record.horizon,
-            model_config=forecaster_config,
-            forecast_origin=origin,
-            future_x=label_future_x,
-        )
-        adapter = backend_module.resolve_adapter(task.model_config)
-        artifact_uri = record.artifact_urls.get(label) if record.artifact_urls else None
-        blob = cache.load_by_uri(artifact_uri) if (cache is not None and artifact_uri) else None
-        if blob is not None and hasattr(adapter, "load_state"):
-            adapter.load_state(blob)
-        else:
-            adapter.fit(task)
-        preds = adapter.predict(task)
-        pred_frames.append(_finalize_preds(preds, origin, task.model_name))
-
-    if not pred_frames:
-        raise HTTPException(status_code=400, detail="history is empty before origin")
-    return pd.concat(pred_frames, ignore_index=True)
 
 
 @app.post("/calibrate", response_model=CalibrateResponse)
@@ -529,7 +395,7 @@ def calibrate(req: CalibrateRequest) -> CalibrateResponse:
         raise HTTPException(status_code=404, detail="session not found")
     if record.conformal_config is None:
         raise HTTPException(status_code=400, detail="session has no conformal config")
-    forecast_frame = _coerce_forecast_frame_dtypes(_frame_from_records(req.forecast))
+    forecast_frame = coerce_forecast_frame_dtypes(_frame_from_records(req.forecast))
     runtime = _runtime_for_session(record)
     calibrated_frame = runtime.apply(forecast_frame)
     partition_states = runtime.get_partition_states()
@@ -543,17 +409,9 @@ def calibrate(req: CalibrateRequest) -> CalibrateResponse:
 
 @app.post("/order", response_model=OrderResponse)
 def order(req: OrderRequest) -> OrderResponse:
-    frame = _coerce_forecast_frame_dtypes(_frame_from_records(req.calibrated))
+    frame = coerce_forecast_frame_dtypes(_frame_from_records(req.calibrated))
     try:
-        params = req.ordering["params"]
-        params_frame = params if isinstance(params, pd.DataFrame) else pd.DataFrame(params)
-        policy_config = OrderPolicyConfig(
-            policy=req.ordering["policy"],
-            params=params_frame,
-            coverage=float(req.ordering.get("coverage", 0.9)),
-            period=int(req.ordering.get("period", 1)),
-            quantile=req.ordering.get("quantile"),
-        )
+        policy_config = build_policy_config(req.ordering)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid ordering spec: {exc}") from exc
     try:
@@ -561,17 +419,7 @@ def order(req: OrderRequest) -> OrderResponse:
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=_format_error(exc)) from exc
     if req.session_id is not None:
-        store = _lifecycle_store()
-        record = store.first_fit_for_session(req.session_id)
-        if record is not None:
-            store.update_fit(record.fit_id, last_orders=orders_frame)
-            factory = _db_session_factory()
-            if factory is not None:
-                OrderRepo(factory).append_frame(
-                    tenant=record.tenant,
-                    session_id=req.session_id,
-                    frame=orders_frame,
-                )
+        persist_orders(_lifecycle_store(), _db_session_factory(), req.session_id, orders_frame)
     return OrderResponse(rows=len(orders_frame), orders=_json_records(orders_frame))
 
 
@@ -588,68 +436,12 @@ def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
 
 
 def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
-    store = _lifecycle_store()
-    record = store.first_fit_for_session(session_id)
-    if record is None:
-        logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
-        return
-    if record.conformal_config is None:
-        logger.warning(
-            "observe skipped: session has no conformal config",
-            extra={"session_id": session_id},
-        )
-        return
-    if record.last_calibrated is None or record.last_calibrated.empty:
-        logger.warning(
-            "observe skipped: no calibrated frame on session (call /calibrate first)",
-            extra={"session_id": session_id},
-        )
-        return
-
-    actuals = _frame_from_records(actual_records)
-    if actuals.empty or UNIQUE_ID not in actuals.columns or DS not in actuals.columns:
-        logger.warning(
-            "observe skipped: actuals empty or missing unique_id/ds",
-            extra={"session_id": session_id, "rows": len(actuals)},
-        )
-        return
-
-    runtime = _runtime_for_session(record)
-    lower_col, upper_col = runtime.interval_columns
-    calibrated = record.last_calibrated.copy()
-    if lower_col not in calibrated.columns or upper_col not in calibrated.columns:
-        logger.warning(
-            "observe skipped: calibrated frame missing interval columns",
-            extra={"session_id": session_id, "expected": [lower_col, upper_col]},
-        )
-        return
-
-    merged = calibrated.merge(
-        actuals[[UNIQUE_ID, DS, Y]].rename(columns={Y: "_y_actual"}),
-        on=[UNIQUE_ID, DS],
-        how="left",
+    run_observe(
+        _lifecycle_store(),
+        session_id,
+        actual_records,
+        runtime_factory=_runtime_for_session,
     )
-    if Y in merged.columns:
-        merged[Y] = merged["_y_actual"].combine_first(merged[Y])
-    else:
-        merged[Y] = merged["_y_actual"]
-    merged = merged.drop(columns=["_y_actual"])
-
-    actuals_lookup = actuals.dropna(subset=[Y]).set_index([UNIQUE_ID, DS])[Y]
-    actuals_lookup = actuals_lookup[~actuals_lookup.index.duplicated(keep="last")]
-    mode = getattr(runtime, "mode", "perhorizon")
-    if mode == "cumulative":
-        remaining = observe_cumulative(runtime, [merged], actuals_lookup)
-    else:
-        remaining = observe_per_horizon(runtime, [merged], actuals_lookup, lower_col, upper_col)
-    pending_rows = sum(len(frame) for frame in remaining)
-    if pending_rows >= len(merged):
-        logger.warning(
-            "observe skipped: no rows resolved after merging actuals",
-            extra={"session_id": session_id, "calibrated_rows": len(calibrated)},
-        )
-        return
-    store.upsert_conformal_state(session_id, runtime.get_partition_states())
 
 
 @app.post("/tune", response_model=TuneHandle, status_code=202)
@@ -678,7 +470,16 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         req.base_model_config,
         req.conformal_config or {},
     )
-    oracle_cost = _oracle_cost_for_request(req, actuals, origins)
+    try:
+        oracle_cost = oracle_cost_for_request(req, _OBJECTIVES[req.objective_id], actuals, origins)
+    except TypeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"could not compute regret oracle_cost: {exc}",
+        ) from exc
+
     study_id = LifecycleStore.new_study_id()
     _lifecycle_store().put_study(
         TuneRecord(
@@ -694,91 +495,6 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
     return TuneHandle(study_id=study_id, session_id=session_id, status=RunStatus.QUEUED)
 
 
-def _filter_uid(frame: pd.DataFrame, uid: str) -> pd.DataFrame:
-    if frame.empty or UNIQUE_ID not in frame.columns:
-        return frame
-    return frame[frame[UNIQUE_ID] == uid].reset_index(drop=True)
-
-
-def _candidate_to_payload(candidate: TuningCandidate) -> dict[str, dict]:
-    return {
-        "model_config": dict(candidate.model_config),
-        "conformal_config": dict(candidate.conformal_config),
-        "ordering_config": dict(candidate.ordering_config),
-    }
-
-
-def _load_existing_tuning_run(
-    factory: sessionmaker | None, session_id: str, unique_id: str
-) -> dict[str, dict] | None:
-    if factory is None:
-        return None
-    with session_scope(factory) as session:
-        row = TuningRunRepo(session).get(session_id, unique_id)
-        if row is None:
-            return None
-        candidate = dict(row.candidate)
-    return {
-        "model_config": dict(candidate.get("model_config", {})),
-        "conformal_config": dict(candidate.get("conformal_config", {})),
-        "ordering_config": dict(candidate.get("ordering_config", {})),
-    }
-
-
-def _persist_tuning_run(
-    factory: sessionmaker | None,
-    session_id: str,
-    unique_id: str,
-    payload: dict[str, dict],
-) -> None:
-    if factory is None:
-        return
-    with session_scope(factory) as session:
-        TuningRunRepo(session).upsert(
-            session_id,
-            unique_id,
-            candidate=payload,
-            score=None,
-        )
-
-
-def _oracle_cost_for_request(
-    req: TuneRequest,
-    actuals: pd.DataFrame,
-    origins: list[pd.Timestamp],
-) -> float | None:
-    objective = _OBJECTIVES[req.objective_id]
-    if req.objective_id == "regret" and not isinstance(objective, Regret):
-        raise HTTPException(
-            status_code=400,
-            detail="objective_id 'regret' must be registered with a Regret objective",
-        )
-    if not isinstance(objective, Regret):
-        return None
-    try:
-        return perfect_foresight_oracle_cost(
-            objective,
-            actuals,
-            origins,
-            int(req.horizon),
-            unique_ids=req.sku_set,
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"could not compute regret oracle_cost: {exc}",
-        ) from exc
-
-
-def _objective_for_study(objective_id: str, oracle_cost: float | None) -> TuningObjective:
-    objective = _OBJECTIVES[objective_id]
-    if not isinstance(objective, Regret):
-        return objective
-    if oracle_cost is None:
-        raise ValueError("regret objective requires precomputed oracle_cost")
-    return cast(TuningObjective, replace(objective, oracle_cost=float(oracle_cost)))
-
-
 def _run_tune_job(
     study_id: str,
     req: TuneRequest,
@@ -790,41 +506,23 @@ def _run_tune_job(
     record = store.get_study(study_id)
     if record is None:
         return
-    store.update_study(study_id, status=RunStatus.RUNNING)
-    session_id = record.session_id
-    factory = _db_session_factory()
-    candidates: dict[str, dict[str, dict]] = {}
     try:
-        objective = _objective_for_study(req.objective_id, record.oracle_cost)
-        for uid in req.sku_set:
-            existing = _load_existing_tuning_run(factory, session_id, uid)
-            if existing is not None:
-                candidates[uid] = existing
-                continue
-            task = TuningTask(
-                unique_id=uid,
-                history=_filter_uid(history, uid),
-                horizon=int(req.horizon),
-                base_model_config=dict(req.base_model_config),
-                search_space=_SEARCH_SPACES[req.search_space_id],
-                actuals=_filter_uid(actuals, uid),
-                origins=origins,
-                objective=objective,
-                n_trials=int(req.n_trials),
-                freq=req.freq,
-            )
-            candidate = optimize_task_candidate(task)
-            payload = _candidate_to_payload(candidate)
-            _persist_tuning_run(factory, session_id, uid, payload)
-            candidates[uid] = payload
-        store.update_study(
-            study_id,
-            status=RunStatus.SUCCEEDED,
-            best_candidates=candidates,
-        )
-    except Exception as exc:  # pragma: no cover - background task safety net
-        logger.exception("tune job failed", extra={"study_id": study_id})
+        objective = objective_for_study(_OBJECTIVES[req.objective_id], record.oracle_cost)
+    except ValueError as exc:
         store.update_study(study_id, status=RunStatus.FAILED, error=_format_error(exc))
+        return
+    run_tune_job(
+        store=store,
+        factory=_db_session_factory(),
+        study_id=study_id,
+        req=req,
+        history=history,
+        actuals=actuals,
+        origins=origins,
+        objective=objective,
+        search_space=_SEARCH_SPACES[req.search_space_id],
+        optimizer=optimize_task_candidate,
+    )
 
 
 @app.get("/studies/{study_id}", response_model=TuneStudyResponse)
