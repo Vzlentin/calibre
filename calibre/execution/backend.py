@@ -7,8 +7,12 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from typing import Any, Literal
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from ray.remote_function import RemoteFunction
 
 import numpy as np
 import pandas as pd
@@ -338,10 +342,10 @@ class BackendEngine:
         self.initial_ledger = (
             conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
         )
-        self._ray: Any | None = None
+        self._ray: ModuleType | None = None
         self._ray_runtime: RayRuntimeHandle | None = None
-        self._remote_process_task: Any | None = None
-        self._remote_process_global_panel: Any | None = None
+        self._remote_process_task: RemoteFunction | None = None
+        self._remote_process_global_panel: RemoteFunction | None = None
 
     def __enter__(self) -> BackendEngine:
         return self
@@ -711,7 +715,7 @@ class BackendEngine:
             return True
         return task_count >= self.execution.ray_threshold
 
-    def _ensure_ray(self) -> Any:
+    def _ensure_ray(self) -> ModuleType:
         if self._ray is not None and self._ray.is_initialized():
             return self._ray
         self._ray = None

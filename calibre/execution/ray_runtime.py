@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any
+from types import ModuleType
 
 _LOCK = threading.RLock()
 _LOCAL_REFCOUNT = 0
-_LOCAL_RAY: Any | None = None
+_LOCAL_RAY: ModuleType | None = None
 
 
 def prepare_ray_environment() -> None:
@@ -23,7 +23,7 @@ def prepare_ray_environment() -> None:
 
 @dataclass
 class RayRuntimeHandle:
-    ray: Any
+    ray: ModuleType
     owns_local_runtime: bool = False
 
     def release(self) -> None:
