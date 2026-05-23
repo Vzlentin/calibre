@@ -17,12 +17,12 @@ except ImportError:  # pragma: no cover
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
+from calibre.forecasting.adapter_base import CacheableAdapter, ModelAdapter, _build_predict_frame
 
 _RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", "backend", "scope"})
 
 
-class NeuralForecastAdapter(ModelAdapter):
+class NeuralForecastAdapter(CacheableAdapter, ModelAdapter):
     def __init__(self, model_config: dict) -> None:
         if not _NEURALFORECAST_AVAILABLE:
             raise RuntimeError(

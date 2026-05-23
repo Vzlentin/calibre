@@ -8,11 +8,11 @@ import pytest
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter
+from calibre.forecasting.adapter_base import CacheableAdapter, ModelAdapter
 from calibre.forecasting.cache import ModelArtifactCache
 
 
-class _CountingAdapter(ModelAdapter):
+class _CountingAdapter(CacheableAdapter, ModelAdapter):
     """Records every fit() call; pickle-based dump/load."""
 
     fit_calls = 0
@@ -121,7 +121,7 @@ def test_fit_with_cache_no_cache_runs_fit() -> None:
 
 
 def test_default_dump_state_round_trips_adapter_attributes() -> None:
-    class _DefaultStateAdapter(ModelAdapter):
+    class _DefaultStateAdapter(CacheableAdapter, ModelAdapter):
         def __init__(self, model_config: dict) -> None:
             self._config = model_config
             self._seen = False
@@ -139,6 +139,25 @@ def test_default_dump_state_round_trips_adapter_attributes() -> None:
     restored.load_state(adapter.dump_state())
 
     assert restored._seen is True
+
+
+def test_non_cacheable_adapter_has_no_cache_methods() -> None:
+    """Adapters that do not mix in CacheableAdapter must not be cached implicitly."""
+
+    class _NoCacheAdapter(ModelAdapter):
+        def __init__(self, model_config: dict) -> None:
+            self._config = model_config
+
+        def fit(self, task: ForecastTask) -> None:
+            return None
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    adapter = _NoCacheAdapter({})
+    assert not hasattr(adapter, "dump_state")
+    assert not hasattr(adapter, "load_state")
+    assert not hasattr(adapter, "fit_with_cache")
 
 
 def test_cache_rejects_invalid_keys(tmp_path: Path) -> None:

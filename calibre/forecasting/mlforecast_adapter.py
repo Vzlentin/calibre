@@ -16,7 +16,7 @@ from calibre.core.forecast_frame import (
     quantile_column,
 )
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
+from calibre.forecasting.adapter_base import CacheableAdapter, ModelAdapter, _build_predict_frame
 
 _RESERVED_KEYS = frozenset(
     {
@@ -132,7 +132,7 @@ def _build_quantile_predict_frame(
     return out
 
 
-class MLForecastAdapter(ModelAdapter):
+class MLForecastAdapter(CacheableAdapter, ModelAdapter):
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._mlf: Any | None = None

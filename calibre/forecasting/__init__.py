@@ -1,6 +1,6 @@
 """Forecasting: adapters, ensembles, and feature transforms."""
 
-from calibre.forecasting.adapter_base import ModelAdapter
+from calibre.forecasting.adapter_base import CacheableAdapter, ModelAdapter
 from calibre.forecasting.adapter_registry import get_adapter_cls, get_scope, resolve_adapter
 from calibre.forecasting.ensemble import (
     ensemble_inverse_error,
@@ -9,6 +9,7 @@ from calibre.forecasting.ensemble import (
 )
 
 __all__ = [
+    "CacheableAdapter",
     "ModelAdapter",
     "get_adapter_cls",
     "get_scope",

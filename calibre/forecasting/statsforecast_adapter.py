@@ -8,12 +8,12 @@ from statsforecast import StatsForecast
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
+from calibre.forecasting.adapter_base import CacheableAdapter, ModelAdapter, _build_predict_frame
 
 _RESERVED_KEYS = frozenset({"model", "name", "freq", "backend", "scope"})
 
 
-class StatsForecastAdapter(ModelAdapter):
+class StatsForecastAdapter(CacheableAdapter, ModelAdapter):
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._sf: StatsForecast | None = None

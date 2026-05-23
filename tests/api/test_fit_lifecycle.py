@@ -13,10 +13,10 @@ from calibre.api.lifecycle import MemoryLifecycleStore
 from calibre.api.main import app
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter
+from calibre.forecasting.adapter_base import CacheableAdapter, ModelAdapter
 
 
-class _CountingAdapter(ModelAdapter):
+class _CountingAdapter(CacheableAdapter, ModelAdapter):
     fit_calls = 0
 
     def __init__(self, model_config: dict) -> None:
