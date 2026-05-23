@@ -320,9 +320,9 @@ def evaluate(actual: np.ndarray, predicted: np.ndarray, metrics=("mae", "mse", "
     for name in metrics:
         try:
             results[name] = METRICS[name](actual, predicted)
-        except Exception as err:
+        except Exception:
+            logger.exception("Unable to compute metric %s", name)
             results[name] = np.nan
-            logger.warning("Unable to compute metric %s: %s", name, err)
     return results
 
 

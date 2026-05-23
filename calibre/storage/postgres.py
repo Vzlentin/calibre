@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -31,6 +32,8 @@ from calibre.storage.models import (
     TuningRun,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def database_url() -> str | None:
     return os.environ.get("CALIBRE_DATABASE_URL")
@@ -51,6 +54,7 @@ def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
         yield session
         session.commit()
     except Exception:
+        logger.exception("database session failed; rolling back")
         session.rollback()
         raise
     finally:

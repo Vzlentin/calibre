@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import traceback
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -19,6 +20,8 @@ from calibre.storage.objstore import (
 )
 from calibre.storage.postgres import ConformalStateRepo, ForecastPointerRepo, RunRepo, session_scope
 from calibre.storage.state import SqlConformalStateStore
+
+logger = logging.getLogger(__name__)
 
 
 class RunStore(Protocol):
@@ -104,6 +107,7 @@ class MemoryRunStore:
             self._record_artifact_urls(run_id, config)
             self.mark_succeeded(run_id, rows=_result_rows(result))
         except Exception as exc:
+            logger.exception("backtest job failed", extra={"run_id": run_id})
             self.mark_failed(run_id, error=_format_error(exc))
 
 
@@ -193,6 +197,7 @@ class SqlRunStore:
                     )
                 run_repo.set_status(parsed, RunStatus.SUCCEEDED)
         except Exception as exc:
+            logger.exception("backtest job failed", extra={"run_id": run_id})
             self.mark_failed(run_id, error=_format_error(exc))
 
     @staticmethod
