@@ -30,10 +30,16 @@ not hard-coded.
 
 **Commit cadence.** Commit after each completed task (the unit that produces
 one `PROGRESS.md` block). Use conventional-commit style: `phase-N.x: <subject>`.
-Push at phase boundary, after the cross-phase regression gate is green.
-Before each push, run `git pull --rebase origin <branch>` to incorporate
-any ci-fix commits. If rebase produces conflicts you can't auto-resolve,
-write `HALT.md` and stop — do not force-push.
+
+**Push cadence — phase by phase.** Commits accumulate locally during a phase
+and are **pushed only at the phase boundary**, after the cross-phase
+regression gate (`ruff`, `mypy`, `pytest`) is green for that phase. Never
+push mid-phase, and never bundle commits from multiple phases into a single
+push. Each `git push` corresponds to exactly one completed phase on the
+`cardinal-improvements` branch, in order (Phase 1 → 2 → 3 → 4 → 5 → 6).
+Before each push, run `git pull --rebase origin cardinal-improvements` to
+incorporate any ci-fix commits. If rebase produces conflicts you can't
+auto-resolve, write `HALT.md` and stop — do not force-push.
 
 ## Conventions
 
