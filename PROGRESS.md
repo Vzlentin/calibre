@@ -53,3 +53,11 @@ next_task: "phase 2 DoD and cross-phase regression gate"
 last_commit: "2b7f9ac"
 notes: "Fit jobs now validate config, train adapters, persist ModelArtifactCache artifacts, and /predict reuses cache hits."
 ```
+
+```yaml
+phase: 2
+last_completed_task: "phase 2 DoD and cross-phase regression gate"
+next_task: "3.a replace manual YAML parsing with pydantic models"
+last_commit: "678e795"
+notes: "Phase 2 gate green: tests/api, LIFECYCLE_STORE=sql tests/api, ruff check ., mypy calibre/, pytest."
+```
