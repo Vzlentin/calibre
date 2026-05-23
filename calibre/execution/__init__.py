@@ -13,7 +13,7 @@ from calibre.execution.data_loading import (
     melt_wide_instock,
     melt_wide_sales,
 )
-from calibre.execution.dataset import DatasetAdapter, DatasetBundle
+from calibre.execution.dataset import DatasetAdapter, DatasetBundle, InventoryAdapter, SalesAdapter
 from calibre.execution.dataset_registry import (
     available_dataset_adapters,
     get_dataset_adapter_cls,
@@ -45,6 +45,8 @@ __all__ = [
     "melt_wide_sales",
     "DatasetAdapter",
     "DatasetBundle",
+    "InventoryAdapter",
+    "SalesAdapter",
     "available_dataset_adapters",
     "get_dataset_adapter_cls",
     "register_dataset_adapter",

@@ -23,6 +23,9 @@ def test_storage_alembic_upgrade_creates_run_tables(tmp_path, monkeypatch) -> No
         "tuning_runs",
         "fit_records",
         "tune_records",
+        "inventory_snapshots",
+        "sales_records",
+        "order_records",
         "alembic_version",
     }.issubset(inspector.get_table_names())
     conformal_pk = inspector.get_pk_constraint("conformal_state")["constrained_columns"]
@@ -35,6 +38,12 @@ def test_storage_alembic_upgrade_creates_run_tables(tmp_path, monkeypatch) -> No
     assert fit_pk == ["fit_id"]
     tune_pk = inspector.get_pk_constraint("tune_records")["constrained_columns"]
     assert tune_pk == ["study_id"]
+    inventory_pk = inspector.get_pk_constraint("inventory_snapshots")["constrained_columns"]
+    assert inventory_pk == ["tenant", "unique_id", "as_of"]
+    sales_pk = inspector.get_pk_constraint("sales_records")["constrained_columns"]
+    assert sales_pk == ["tenant", "unique_id", "ds"]
+    order_pk = inspector.get_pk_constraint("order_records")["constrained_columns"]
+    assert order_pk == ["order_id"]
     with engine.connect() as connection:
         revision = connection.execute(text("select version_num from alembic_version")).scalar_one()
-    assert revision == "0005_lifecycle_store"
+    assert revision == "0006_data_plane_tables"

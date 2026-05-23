@@ -26,6 +26,10 @@ class DatasetAdapter(Protocol):
     def name(self) -> str: ...
 
 
+class SalesAdapter(Protocol):
+    def load_history(self, source: str | Path | None = None) -> pd.DataFrame: ...
+
+
 class InventoryAdapter(Protocol):
     def load_state(self, unique_id: str, at_origin: pd.Timestamp) -> ProductState: ...
 

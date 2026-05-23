@@ -60,6 +60,7 @@ from calibre.execution.decision_loop import observe_cumulative, observe_per_hori
 from calibre.forecasting.adapter_registry import get_scope
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.storage.adapters import OrderRepo
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
     TuningRunRepo,
@@ -512,6 +513,13 @@ def order(req: OrderRequest) -> OrderResponse:
         record = store.first_fit_for_session(req.session_id)
         if record is not None:
             store.update_fit(record.fit_id, last_orders=orders_frame)
+            factory = _db_session_factory()
+            if factory is not None:
+                OrderRepo(factory).append_frame(
+                    tenant=record.tenant,
+                    session_id=req.session_id,
+                    frame=orders_frame,
+                )
     return OrderResponse(rows=len(orders_frame), orders=_json_records(orders_frame))
 
 
@@ -763,11 +771,17 @@ def session_state(tenant: str, uid: str) -> SessionStateResponse:
     if not fits:
         raise HTTPException(status_code=404, detail="session not found")
     record = fits[-1]
+    factory = _db_session_factory()
+    open_orders = (
+        OrderRepo(factory).list_for_session(record.session_id, tenant=tenant, unique_id=uid)
+        if factory is not None
+        else record.last_orders
+    )
     return SessionStateResponse(
         session_id=record.session_id,
         tenant=tenant,
         unique_id=uid,
         state=store.get_conformal_state(record.session_id),
         last_forecast=_maybe_json_records(record.last_forecast),
-        open_orders=_maybe_json_records(record.last_orders),
+        open_orders=_maybe_json_records(open_orders),
     )

@@ -122,3 +122,45 @@ class LifecycleTuneRecord(Base):
         default=func.now(),
         onupdate=func.now(),
     )
+
+
+class InventorySnapshot(Base):
+    __tablename__ = "inventory_snapshots"
+
+    tenant: Mapped[str] = mapped_column(String, primary_key=True)
+    unique_id: Mapped[str] = mapped_column(String, primary_key=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    end_inventory: Mapped[float] = mapped_column(Float, nullable=False)
+    pipeline: Mapped[list] = mapped_column(JsonDict, nullable=False)
+    lead_time_depth: Mapped[int] = mapped_column(Integer, nullable=False)
+    cumulative_costs: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class SalesRecord(Base):
+    __tablename__ = "sales_records"
+
+    tenant: Mapped[str] = mapped_column(String, primary_key=True)
+    unique_id: Mapped[str] = mapped_column(String, primary_key=True)
+    ds: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    y: Mapped[float] = mapped_column(Float, nullable=False)
+    payload: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+
+
+class OrderRecord(Base):
+    __tablename__ = "order_records"
+
+    order_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid4().hex)
+    tenant: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    session_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    unique_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    forecast_origin: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ds: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    order_qty: Mapped[float] = mapped_column(Float, nullable=False)
+    payload: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    placed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
