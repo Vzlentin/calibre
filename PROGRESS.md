@@ -77,3 +77,27 @@ next_task: "4.a split run_benchmark.py into coordinated modules"
 last_commit: "1a6846c"
 notes: "Phase 3 gate green: tests/cli, mypy calibre/cli, ruff config, ruff check ., mypy calibre/, pytest."
 ```
+
+```yaml
+phase: 4
+last_completed_task: "4.a split run_benchmark.py into coordinated modules"
+next_task: "4.b deduplicate VN2 tuning against calibre.tuning.optimizer"
+last_commit: "d55bd78"
+notes: "Split data, tuning, replay, and diagnostics modules; run_benchmark.py is 401 LOC and old documented gaps are explicitly resolved/tracked."
+```
+
+```yaml
+phase: 4
+last_completed_task: "4.b deduplicate VN2 tuning against calibre.tuning.optimizer"
+next_task: "4.c fix cost-search error handling and zero-order fallback"
+last_commit: "d55bd78"
+notes: "VN2 tuning now reuses calibre.tuning.optimizer optimize_task, create_tpe_sampler, restore_cwd, and shared threaded-config capping."
+```
+
+```yaml
+phase: 4
+last_completed_task: "4.c fix cost-search error handling and zero-order fallback"
+next_task: "phase 4 DoD and cross-phase regression gate"
+last_commit: "d55bd78"
+notes: "HPO replay raises policy errors, infra exceptions log and re-raise, and zero-order fallback remains only degraded replay behavior."
+```
