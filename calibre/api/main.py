@@ -14,10 +14,6 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from calibre.api.fit_service import (
-    fit_model_artifacts,
-    predict_from_artifacts,
-)
 from calibre.api.lifecycle import (
     FitRecord,
     LifecycleStore,
@@ -64,6 +60,10 @@ from calibre.core.forecast_frame import DS, UNIQUE_ID
 from calibre.core.run_status import RunStatus
 from calibre.execution import backend as backend_module
 from calibre.execution.backend import coerce_forecast_frame_dtypes
+from calibre.execution.model_lifecycle import (
+    fit_model_artifacts,
+    predict_from_artifacts,
+)
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.storage.adapters import OrderRepo, SqlSalesAdapter
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
@@ -282,8 +282,14 @@ def _runtime_for_session(record: FitRecord) -> SymmetricIntervalRuntime:
 
 
 def _fit_model_artifacts(record: FitRecord) -> dict[str, str]:
+    history = _lifecycle_store().get_fit_frame(record.fit_id, "history")
+    if history is None:
+        raise ValueError("fit record is missing history artifact")
+    future_x = _lifecycle_store().get_fit_frame(record.fit_id, "future_x")
     return fit_model_artifacts(
         record,
+        history=history,
+        future_x=future_x,
         cache=_model_artifact_cache(),
         resolver=backend_module.resolve_adapter,
     )
@@ -347,12 +353,14 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
         forecaster_config=dict(req.forecaster_config),
         horizon=int(req.horizon),
         freq=req.freq,
-        history=history,
-        future_x=future_x,
         conformal_config=dict(req.conformal_config) if req.conformal_config else None,
         status=RunStatus.QUEUED,
     )
-    _lifecycle_store().put_fit(record)
+    store = _lifecycle_store()
+    store.put_fit(record)
+    store.put_fit_frame(fit_id, "history", history)
+    if future_x is not None:
+        store.put_fit_frame(fit_id, "future_x", future_x)
     bg.add_task(_run_fit_job, fit_id)
     return FitHandle(
         fit_id=fit_id,
@@ -406,14 +414,19 @@ def predict(req: PredictRequest) -> PredictResponse:
         raise HTTPException(status_code=400, detail=f"invalid origin: {exc}") from exc
 
     forecaster_config = {**record.forecaster_config, "freq": record.freq}
+    history = _lifecycle_store().get_fit_frame(record.fit_id, "history")
+    if history is None:
+        raise HTTPException(status_code=500, detail="fit record is missing history artifact")
+    base_future_x = _lifecycle_store().get_fit_frame(record.fit_id, "future_x")
     try:
-        future_x = _merge_future_x_override(record.future_x, req.future_x_override)
+        future_x = _merge_future_x_override(base_future_x, req.future_x_override)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         forecast_frame = predict_from_artifacts(
             record,
+            history,
             origin,
             forecaster_config,
             future_x,
@@ -614,13 +627,13 @@ def session_state(tenant: str, uid: str) -> SessionStateResponse:
     open_orders = (
         OrderRepo(factory).list_for_session(record.session_id, tenant=tenant, unique_id=uid)
         if factory is not None
-        else record.last_orders
+        else store.get_fit_frame(record.fit_id, "last_orders")
     )
     return SessionStateResponse(
         session_id=record.session_id,
         tenant=tenant,
         unique_id=uid,
         state=store.get_conformal_state(record.session_id),
-        last_forecast=_maybe_json_records(record.last_forecast),
+        last_forecast=_maybe_json_records(store.get_fit_frame(record.fit_id, "last_forecast")),
         open_orders=_maybe_json_records(open_orders),
     )

@@ -18,19 +18,24 @@ from mlforecast.lag_transforms import RollingMean
 
 import benchmarks.vn2.run_benchmark as run_benchmark_module
 from benchmarks.vn2.config import BEST_CONFIG, CUMULATIVE_BEST_CONFIG, TOP1_CRC_CONFIG
-from benchmarks.vn2.run_benchmark import (
-    _as_cumulative_decision_frame,
-    _optimal_order_path_for_sku,
-    _prepare_cumulative_target_history,
-    _round_actuals,
-    _run_order_conformal_warmup,
+from benchmarks.vn2.data import (
+    as_cumulative_decision_frame,
+    prepare_cumulative_target_history,
+)
+from benchmarks.vn2.diagnostics import optimal_order_path_for_sku
+from benchmarks.vn2.replay import (
     build_replay_cache,
     replay_cached_cost,
+    round_actuals,
+    run_order_conformal_warmup,
+)
+from benchmarks.vn2.run_benchmark import (
     run_benchmark,
     run_cost_search,
     run_hpo,
 )
 from benchmarks.vn2.simulator import ProductState, extract_new_actuals, load_initial_states
+from benchmarks.vn2.tuning import OptunaStudyHandle
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
     CumulativeRiskRuntime,
@@ -179,7 +184,7 @@ def test_cumulative_target_history_uses_trailing_protection_period_sum() -> None
         }
     )
 
-    history = _prepare_cumulative_target_history(sales, instock=None, protection_period=3)
+    history = prepare_cumulative_target_history(sales, instock=None, protection_period=3)
 
     assert history[DS].tolist() == sales[DS].iloc[2:].tolist()
     assert history[Y].tolist() == [6.0, 9.0]
@@ -200,7 +205,7 @@ def test_cumulative_decision_frame_keeps_only_terminal_base_forecast() -> None:
         }
     )
 
-    cumulative = _as_cumulative_decision_frame(frame, protection_period=3)
+    cumulative = as_cumulative_decision_frame(frame, protection_period=3)
 
     assert cumulative[Y_HAT].tolist() == [0.0, 0.0, 30.0]
     assert cumulative[qcol].tolist() == [0.0, 0.0, 300.0]
@@ -324,14 +329,11 @@ def test_cost_search_uses_ray_tune_scheduler_handoff() -> None:
         )
     )
 
-    class _FakeSearchAlg:
-        _ot_study = study
-
     def _fake_run_optuna_tune(trainable, search_space, **kwargs):
         captured.update(kwargs)
         captured["trainable"] = trainable
         captured["search_space"] = search_space
-        return _FakeResults([_FakeResult()]), _FakeSearchAlg()
+        return _FakeResults([_FakeResult()]), OptunaStudyHandle(study)
 
     result = run_cost_search(
         data_dir=DATA_DIR,
@@ -361,7 +363,7 @@ def test_cost_search_uses_ray_tune_scheduler_handoff() -> None:
 
 
 def test_oracle_order_path_matches_simple_known_lead_time_case() -> None:
-    orders = _optimal_order_path_for_sku(
+    orders = optimal_order_path_for_sku(
         ProductState(unique_id="A", end_inventory=0.0, in_transit_w1=0.0, in_transit_w2=0.0),
         {1: 0.0, 2: 0.0, 3: 5.0},
         decision_rounds=1,
@@ -375,7 +377,7 @@ def test_round_actuals_uses_current_round_demand() -> None:
     series = _get_first_n_series(3)
     expected = extract_new_actuals(DATA_DIR, 1)
 
-    actuals = _round_actuals(DATA_DIR, 1, {uid: object() for uid in series})
+    actuals = round_actuals(DATA_DIR, 1, {uid: object() for uid in series})
 
     assert actuals == {uid: expected.get(uid, 0.0) for uid in series}
 
@@ -400,7 +402,7 @@ def test_run_order_conformal_warmup_seeds_residual_pool() -> None:
 
     assert runtime.get_diagnostics()["n_scores"] == 0
 
-    _run_order_conformal_warmup(
+    run_order_conformal_warmup(
         sales=sales,
         instock=None,
         model_config=engine_config,

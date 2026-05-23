@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -34,16 +35,17 @@ from benchmarks.vn2.config import (
     REVIEW_PERIOD,
 )
 from benchmarks.vn2.data import (
-    _build_model_config,
-    _cumulative_pinball,
-    _load_instock,
-    _prepare_model_history,
-    _prepare_policy_forecast_frame,
-    _strip_private,
-    _suggest_from_spec,
-    _walk_forward_origins,
+    build_model_config,
+    cumulative_pinball,
+    load_instock,
+    prepare_model_history,
+    prepare_policy_forecast_frame,
+    strip_private,
+    suggest_from_spec,
+    walk_forward_origins,
 )
 from benchmarks.vn2.replay import (
+    PolicyApplicationError,
     VN2ReplayCache,
     _log_mlflow_params,
     build_replay_cache,
@@ -218,12 +220,17 @@ def _best_tune_result(results: Any) -> Any:
     )
 
 
-TuneRunner = Callable[..., tuple[Any, Any]]
+@dataclass(frozen=True)
+class OptunaStudyHandle:
+    study: optuna.Study
+
+
+TuneRunner = Callable[..., tuple[Any, OptunaStudyHandle]]
 """Signature for an Optuna-via-Ray-Tune runner.
 
 Accepts the trainable and search-space callables positionally, plus the
 keyword-only configuration in :func:`run_optuna_tune`. Returns
-``(results, search_alg)``. Used as an injection point so tests can supply
+    ``(results, OptunaStudyHandle)``. Used as an injection point so tests can supply
 fakes without monkey-patching module state.
 """
 
@@ -243,7 +250,7 @@ def run_optuna_tune(
     ray_local_mode: bool,
     tune_storage_path: str | Path | None,
     tune_experiment_name: str | None,
-) -> tuple[Any, Any]:
+) -> tuple[Any, OptunaStudyHandle]:
     """Run a VN2 Optuna search space through Ray Tune and return results + searcher."""
     if n_trials < 1:
         raise ValueError("n_trials must be at least 1")
@@ -321,7 +328,7 @@ def run_optuna_tune(
         else:
             os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
         ray_runtime.release()
-    return results, search_alg
+    return results, OptunaStudyHandle(_study_from_optuna_search(search_alg))
 
 
 class _HpoSearchSpaceAdapter:
@@ -329,7 +336,7 @@ class _HpoSearchSpaceAdapter:
 
     def __call__(self, trial: optuna.Trial) -> None:
         for name, spec in HPO_SEARCH_SPACE.items():
-            _suggest_from_spec(trial, name, spec)
+            suggest_from_spec(trial, name, spec)
         return None
 
 
@@ -372,9 +379,9 @@ def run_hpo(
     if target_mode not in {"per_horizon", "cumulative"}:
         raise ValueError("target_mode must be 'per_horizon' or 'cumulative'")
 
-    instock = _load_instock(data_dir, series_filter)
+    instock = load_instock(data_dir, series_filter)
     cumulative_target = target_mode == "cumulative"
-    history = _prepare_model_history(
+    history = prepare_model_history(
         week0,
         instock,
         protection_period=horizon,
@@ -382,7 +389,7 @@ def run_hpo(
     )
     actuals = week0[[UNIQUE_ID, DS, Y]].copy()
 
-    origins = _walk_forward_origins(history, n_origins, horizon)
+    origins = walk_forward_origins(history, n_origins, horizon)
     if not origins:
         raise ValueError(f"Not enough history to build {n_origins} origins with horizon {horizon}")
 
@@ -393,13 +400,13 @@ def run_hpo(
         lags = HPO_LAG_SETS[int(params.pop("lag_set_idx"))]
         quantile_alpha = float(params.pop("quantile_alpha"))
         config = _cap_threaded_model_config(
-            _build_model_config(quantile_alpha=quantile_alpha, lags=lags, **params),
+            build_model_config(quantile_alpha=quantile_alpha, lags=lags, **params),
             cpu_per_trial,
         )
         if cumulative_target:
             config["_target_mode"] = "cumulative"
 
-        task = ForecastTask(history=history, horizon=horizon, model_config=_strip_private(config))
+        task = ForecastTask(history=history, horizon=horizon, model_config=strip_private(config))
         engine = BackendEngine(
             execution=ExecutionOptions(
                 freq="W-MON",
@@ -413,12 +420,12 @@ def run_hpo(
                     engine.iter_origins([task], actuals=actuals, origins=origins),
                     start=1,
                 ):
-                    forecast_df = _prepare_policy_forecast_frame(
+                    forecast_df = prepare_policy_forecast_frame(
                         result.ledger.to_df(),
                         protection_period=horizon,
                         cumulative_target=cumulative_target,
                     )
-                    value = _cumulative_pinball(
+                    value = cumulative_pinball(
                         forecast_df,
                         actuals,
                         horizon,
@@ -479,7 +486,7 @@ def run_hpo(
     best = dict(best_result.config)
     lags = HPO_LAG_SETS[int(best.pop("lag_set_idx"))]
     quantile_alpha = float(best.pop("quantile_alpha"))
-    best_config = _build_model_config(quantile_alpha=quantile_alpha, lags=lags, **best)
+    best_config = build_model_config(quantile_alpha=quantile_alpha, lags=lags, **best)
     best_config["_quantile_alpha"] = quantile_alpha
     if cumulative_target:
         best_config["_target_mode"] = "cumulative"
@@ -511,7 +518,7 @@ def _sample_cost_search_model_config(
     lag_idx = trial.suggest_categorical("lag_set_idx", list(range(len(HPO_LAG_SETS))))
     target_mode = trial.suggest_categorical("target_mode", ["per_horizon", "cumulative"])
     quantile_alpha = trial.suggest_float("quantile_alpha", 0.45, 0.9)
-    config = _build_model_config(
+    config = build_model_config(
         quantile_alpha=quantile_alpha,
         n_estimators=trial.suggest_int("n_estimators", 200, 800, step=50),
         learning_rate=trial.suggest_float("learning_rate", 0.02, 0.10, log=True),
@@ -642,7 +649,8 @@ class _CostSearchSpaceAdapter:
         return None
 
 
-def _optuna_study_from_search_alg(search_alg: Any) -> optuna.Study:
+def _study_from_optuna_search(search_alg: Any) -> optuna.Study:
+    """Isolate Ray Tune's OptunaSearch study extraction at the runner boundary."""
     study = getattr(search_alg, "_ot_study", None)
     if study is None:
         raise RuntimeError("Ray Tune OptunaSearch did not expose a completed Optuna study")
@@ -769,6 +777,17 @@ def run_cost_search(
                 }
             )
             return
+        except PolicyApplicationError as exc:
+            logger.exception("VN2 cost-search policy failure")
+            tune.report(
+                {
+                    TUNE_OBJECTIVE_METRIC: float("inf"),
+                    _TUNE_STEP_ATTR: 1,
+                    "policy_failure": 1,
+                    "error": repr(exc)[:500],
+                }
+            )
+            raise
         except (ValueError, KeyError) as exc:
             tune.report(
                 {
@@ -830,7 +849,7 @@ def run_cost_search(
                     "series_filter_size": len(series_filter) if series_filter is not None else None,
                 }
             )
-            results, search_alg = runner(
+            results, study_handle = runner(
                 _trainable,
                 search_space,
                 n_trials=n_trials,
@@ -846,7 +865,7 @@ def run_cost_search(
                 tune_experiment_name=ray_tune_experiment_name,
             )
             _best_tune_result(results)
-            study = _optuna_study_from_search_alg(search_alg)
+            study = study_handle.study
             completed_trials = [
                 trial
                 for trial in study.trials
@@ -865,7 +884,7 @@ def run_cost_search(
                     study.trials_dataframe().to_csv(trials_path, index=False)
                     mlflow.log_artifact(str(trials_path), artifact_path="optuna")
     else:
-        results, search_alg = runner(
+        results, study_handle = runner(
             _trainable,
             search_space,
             n_trials=n_trials,
@@ -881,5 +900,5 @@ def run_cost_search(
             tune_experiment_name=ray_tune_experiment_name,
         )
         _best_tune_result(results)
-        study = _optuna_study_from_search_alg(search_alg)
+        study = study_handle.study
     return study

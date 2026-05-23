@@ -8,13 +8,15 @@ should prefer importing from the owning module going forward.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 import pandas as pd
 
 from calibre.conformal.runtime import to_json_safe_state
 from calibre.core.run_status import RunStatus
+
+FitFrameKind = Literal["history", "future_x", "last_forecast", "last_calibrated", "last_orders"]
 
 
 @dataclass
@@ -26,15 +28,15 @@ class FitRecord:
     forecaster_config: dict
     horizon: int
     freq: str
-    history: pd.DataFrame
-    future_x: pd.DataFrame | None
     conformal_config: dict | None
+    history_ref: str | None = None
+    future_x_ref: str | None = None
+    last_forecast_ref: str | None = None
+    last_calibrated_ref: str | None = None
+    last_orders_ref: str | None = None
     status: RunStatus = RunStatus.QUEUED
     error: str | None = None
     artifact_urls: dict[str, str] = field(default_factory=dict)
-    last_forecast: pd.DataFrame | None = None
-    last_calibrated: pd.DataFrame | None = None
-    last_orders: pd.DataFrame | None = None
 
 
 @dataclass
@@ -70,6 +72,15 @@ class LifecycleStore(Protocol):
 
     def update_fit(self, fit_id: str, **fields: object) -> FitRecord: ...
 
+    def put_fit_frame(
+        self,
+        fit_id: str,
+        kind: FitFrameKind,
+        frame: pd.DataFrame,
+    ) -> str: ...
+
+    def get_fit_frame(self, fit_id: str, kind: FitFrameKind) -> pd.DataFrame | None: ...
+
     def fits_for_session(self, session_id: str) -> list[FitRecord]: ...
 
     def first_fit_for_session(self, session_id: str) -> FitRecord | None: ...
@@ -88,6 +99,7 @@ class LifecycleStore(Protocol):
 class MemoryLifecycleStore:
     def __init__(self) -> None:
         self._fits: dict[str, FitRecord] = {}
+        self._fit_frames: dict[tuple[str, FitFrameKind], pd.DataFrame] = {}
         self._conformal_state: dict[str, dict[str, dict]] = {}
         self._studies: dict[str, TuneRecord] = {}
 
@@ -120,8 +132,35 @@ class MemoryLifecycleStore:
     def update_fit(self, fit_id: str, **fields: object) -> FitRecord:
         record = self._fits[fit_id]
         for key, value in fields.items():
+            if key in _FIT_FRAME_REF_FIELDS:
+                kind = cast(FitFrameKind, key)
+                if value is None:
+                    setattr(record, _FIT_FRAME_REF_FIELDS[kind], None)
+                    self._fit_frames.pop((fit_id, kind), None)
+                    continue
+                if not isinstance(value, pd.DataFrame):
+                    raise TypeError(f"{key} must be a DataFrame or None")
+                self.put_fit_frame(fit_id, kind, value)
+                continue
             setattr(record, key, value)
         return record
+
+    def put_fit_frame(
+        self,
+        fit_id: str,
+        kind: FitFrameKind,
+        frame: pd.DataFrame,
+    ) -> str:
+        if fit_id not in self._fits:
+            raise KeyError(f"Unknown fit_id: {fit_id}")
+        ref = _fit_frame_ref(fit_id, kind)
+        self._fit_frames[(fit_id, kind)] = frame.copy()
+        setattr(self._fits[fit_id], _FIT_FRAME_REF_FIELDS[kind], ref)
+        return ref
+
+    def get_fit_frame(self, fit_id: str, kind: FitFrameKind) -> pd.DataFrame | None:
+        frame = self._fit_frames.get((fit_id, kind))
+        return frame.copy() if frame is not None else None
 
     def fits_for_session(self, session_id: str) -> list[FitRecord]:
         return [r for r in self._fits.values() if r.session_id == session_id]
@@ -163,8 +202,22 @@ def __getattr__(name: str) -> object:
 
 
 __all__ = [
+    "FitFrameKind",
     "FitRecord",
     "LifecycleStore",
     "MemoryLifecycleStore",
     "TuneRecord",
 ]
+
+
+_FIT_FRAME_REF_FIELDS: dict[FitFrameKind, str] = {
+    "history": "history_ref",
+    "future_x": "future_x_ref",
+    "last_forecast": "last_forecast_ref",
+    "last_calibrated": "last_calibrated_ref",
+    "last_orders": "last_orders_ref",
+}
+
+
+def _fit_frame_ref(fit_id: str, kind: FitFrameKind) -> str:
+    return f"lifecycle://fits/{fit_id}/frames/{kind}"

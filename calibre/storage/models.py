@@ -88,16 +88,32 @@ class LifecycleFitRecord(Base):
     forecaster_config: Mapped[dict] = mapped_column(JsonDict, nullable=False)
     horizon: Mapped[int] = mapped_column(Integer, nullable=False)
     freq: Mapped[str] = mapped_column(String, nullable=False)
-    history: Mapped[list] = mapped_column(JsonDict, nullable=False)
-    future_x: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
     conformal_config: Mapped[dict | None] = mapped_column(JsonDict, nullable=True)
+    history_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    future_x_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_forecast_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_calibrated_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_orders_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
     artifact_urls: Mapped[dict] = mapped_column(JsonDict, nullable=False)
-    last_forecast: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
-    last_calibrated: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
-    last_orders: Mapped[list | None] = mapped_column(JsonDict, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class LifecycleFitFrame(Base):
+    __tablename__ = "fit_frame_artifacts"
+
+    fit_id: Mapped[str] = mapped_column(
+        ForeignKey("fit_records.fit_id"),
+        primary_key=True,
+    )
+    kind: Mapped[str] = mapped_column(String, primary_key=True)
+    records: Mapped[list] = mapped_column(JsonDict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=func.now(),

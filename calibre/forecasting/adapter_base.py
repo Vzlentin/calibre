@@ -4,7 +4,7 @@ import hashlib
 import json
 import pickle
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -35,15 +35,46 @@ class ModelAdapter(ABC):
     def predict(self, task: ForecastTask) -> pd.DataFrame: ...
 
     def cache_key(self, task: ForecastTask) -> str:
-        """Default identity-hash key over history + model_config.
+        """Default identity-hash key over fit-affecting task fields.
 
         Subclasses can override to incorporate additional adapter-specific
         state (e.g. registered exogenous columns). ``cache_key`` is also
         used by adapters that do not opt into persistent caching — it only
-        identifies the (history, config) pair, not how to serialize state.
+        identifies the task, not how to serialize state.
         """
-        payload = task.history.to_csv() + json.dumps(task.model_config, sort_keys=True)
+        payload = json.dumps(
+            {
+                "forecast_origin": _json_safe(task.forecast_origin),
+                "future_x": _frame_payload(task.future_x),
+                "history": _frame_payload(task.history),
+                "horizon": int(task.horizon),
+                "model_config": _json_safe(task.model_config),
+                "task_group": task.task_group,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _frame_payload(frame: pd.DataFrame | None) -> dict[str, Any] | None:
+    if frame is None:
+        return None
+    normalized = frame.copy()
+    normalized = normalized.reindex(sorted(normalized.columns), axis=1)
+    return json.loads(normalized.to_json(orient="split", date_format="iso"))
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float | int | str | bool) or value is None:
+        return value
+    return repr(value)
 
 
 class CacheableAdapter:

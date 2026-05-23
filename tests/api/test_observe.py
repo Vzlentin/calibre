@@ -31,7 +31,7 @@ class _RuntimeSpy:
         return {"partition": {"observed_batches": len(self.observed)}}
 
 
-def _record(session_id: str, last_calibrated: pd.DataFrame) -> FitRecord:
+def _record(session_id: str) -> FitRecord:
     return FitRecord(
         fit_id=LifecycleStore.new_fit_id(),
         session_id=session_id,
@@ -40,10 +40,7 @@ def _record(session_id: str, last_calibrated: pd.DataFrame) -> FitRecord:
         forecaster_config={"model": "stub"},
         horizon=2,
         freq="D",
-        history=pd.DataFrame(),
-        future_x=None,
         conformal_config={"method": "mscp", "coverage": 0.9},
-        last_calibrated=last_calibrated,
     )
 
 
@@ -72,7 +69,9 @@ def test_observe_cumulative_does_not_drop_intermediate_rows(monkeypatch) -> None
     store = MemoryLifecycleStore()
     runtime = _RuntimeSpy("cumulative")
     session_id = "session-cumulative"
-    store.put_fit(_record(session_id, _calibrated_frame(cumulative=True)))
+    record = _record(session_id)
+    store.put_fit(record)
+    store.put_fit_frame(record.fit_id, "last_calibrated", _calibrated_frame(cumulative=True))
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", store)
     monkeypatch.setattr(api_main, "_runtime_for_session", lambda record: runtime)
 
@@ -95,7 +94,9 @@ def test_observe_perhorizon_drops_unresolved_rows(monkeypatch) -> None:
     store = MemoryLifecycleStore()
     runtime = _RuntimeSpy("perhorizon")
     session_id = "session-perhorizon"
-    store.put_fit(_record(session_id, _calibrated_frame(cumulative=False)))
+    record = _record(session_id)
+    store.put_fit(record)
+    store.put_fit_frame(record.fit_id, "last_calibrated", _calibrated_frame(cumulative=False))
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", store)
     monkeypatch.setattr(api_main, "_runtime_for_session", lambda record: runtime)
 

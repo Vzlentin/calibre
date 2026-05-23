@@ -18,12 +18,13 @@ import pandas as pd
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from calibre.api.lifecycle import FitRecord, LifecycleStore, TuneRecord
+from calibre.api.lifecycle import FitFrameKind, FitRecord, LifecycleStore, TuneRecord
 from calibre.conformal.runtime import to_json_safe_state
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN
 from calibre.core.run_status import RunStatus
 from calibre.storage.models import (
     LifecycleConformalState,
+    LifecycleFitFrame,
     LifecycleFitRecord,
     LifecycleTuneRecord,
 )
@@ -53,13 +54,6 @@ def _frame_from_records(records: list[dict[str, Any]] | None) -> pd.DataFrame | 
     for col in (DS, FORECAST_ORIGIN):
         if col in frame.columns:
             frame[col] = pd.to_datetime(frame[col])
-    return frame
-
-
-def _required_frame_from_records(records: list[dict[str, Any]]) -> pd.DataFrame:
-    frame = _frame_from_records(records)
-    if frame is None:
-        return pd.DataFrame()
     return frame
 
 
@@ -129,9 +123,31 @@ class SqlLifecycleStore:
             if row is None:
                 raise KeyError(f"Unknown fit_id: {fit_id}")
             for key, value in fields.items():
+                if key in _FIT_FRAME_REF_FIELDS:
+                    _set_fit_frame(session, row, key, value)
+                    continue
                 _set_fit_field(row, key, value)
             session.flush()
             return _fit_from_row(row)
+
+    def put_fit_frame(
+        self,
+        fit_id: str,
+        kind: FitFrameKind,
+        frame: pd.DataFrame,
+    ) -> str:
+        with session_scope(self.factory) as session:
+            row = session.get(LifecycleFitRecord, fit_id)
+            if row is None:
+                raise KeyError(f"Unknown fit_id: {fit_id}")
+            ref = _upsert_fit_frame(session, fit_id, kind, frame)
+            setattr(row, _FIT_FRAME_REF_FIELDS[kind], ref)
+            return ref
+
+    def get_fit_frame(self, fit_id: str, kind: FitFrameKind) -> pd.DataFrame | None:
+        with session_scope(self.factory) as session:
+            row = session.get(LifecycleFitFrame, (fit_id, kind))
+            return _frame_from_records(row.records) if row is not None else None
 
     def fits_for_session(self, session_id: str) -> list[FitRecord]:
         with session_scope(self.factory) as session:
@@ -223,15 +239,15 @@ def _fit_row_values(record: FitRecord) -> dict[str, object]:
         "forecaster_config": dict(record.forecaster_config),
         "horizon": int(record.horizon),
         "freq": record.freq,
-        "history": _records_from_frame(record.history) or [],
-        "future_x": _records_from_frame(record.future_x),
         "conformal_config": dict(record.conformal_config) if record.conformal_config else None,
+        "history_ref": record.history_ref,
+        "future_x_ref": record.future_x_ref,
+        "last_forecast_ref": record.last_forecast_ref,
+        "last_calibrated_ref": record.last_calibrated_ref,
+        "last_orders_ref": record.last_orders_ref,
         "status": _status_value(record.status),
         "error": record.error,
         "artifact_urls": dict(record.artifact_urls),
-        "last_forecast": _records_from_frame(record.last_forecast),
-        "last_calibrated": _records_from_frame(record.last_calibrated),
-        "last_orders": _records_from_frame(record.last_orders),
     }
 
 
@@ -244,24 +260,19 @@ def _fit_from_row(row: LifecycleFitRecord) -> FitRecord:
         forecaster_config=dict(row.forecaster_config),
         horizon=int(row.horizon),
         freq=row.freq,
-        history=_required_frame_from_records(row.history),
-        future_x=_frame_from_records(row.future_x),
         conformal_config=dict(row.conformal_config) if row.conformal_config else None,
+        history_ref=row.history_ref,
+        future_x_ref=row.future_x_ref,
+        last_forecast_ref=row.last_forecast_ref,
+        last_calibrated_ref=row.last_calibrated_ref,
+        last_orders_ref=row.last_orders_ref,
         status=RunStatus(row.status),
         error=row.error,
         artifact_urls={str(key): str(value) for key, value in dict(row.artifact_urls).items()},
-        last_forecast=_frame_from_records(row.last_forecast),
-        last_calibrated=_frame_from_records(row.last_calibrated),
-        last_orders=_frame_from_records(row.last_orders),
     )
 
 
 def _set_fit_field(row: LifecycleFitRecord, key: str, value: object) -> None:
-    if key in {"history", "future_x", "last_forecast", "last_calibrated", "last_orders"}:
-        if value is not None and not isinstance(value, pd.DataFrame):
-            raise TypeError(f"{key} must be a DataFrame or None")
-        setattr(row, key, _records_from_frame(value))
-        return
     if key == "status":
         row.status = _status_value_from_object(value)
         return
@@ -277,6 +288,26 @@ def _set_fit_field(row: LifecycleFitRecord, key: str, value: object) -> None:
     if not hasattr(row, key):
         raise AttributeError(f"Unknown FitRecord field: {key}")
     setattr(row, key, value)
+
+
+def _set_fit_frame(
+    session: Session,
+    row: LifecycleFitRecord,
+    key: str,
+    value: object,
+) -> None:
+    if value is None:
+        session.execute(
+            delete(LifecycleFitFrame)
+            .where(LifecycleFitFrame.fit_id == row.fit_id)
+            .where(LifecycleFitFrame.kind == key)
+        )
+        setattr(row, _FIT_FRAME_REF_FIELDS[key], None)
+        return
+    if not isinstance(value, pd.DataFrame):
+        raise TypeError(f"{key} must be a DataFrame or None")
+    ref = _upsert_fit_frame(session, row.fit_id, key, value)
+    setattr(row, _FIT_FRAME_REF_FIELDS[key], ref)
 
 
 def _tune_row_values(record: TuneRecord) -> dict[str, object]:
@@ -330,6 +361,35 @@ def _expect_iterable(key: str, value: object) -> Iterable[object]:
     if isinstance(value, str | bytes) or not isinstance(value, Iterable):
         raise TypeError(f"{key} must be an iterable")
     return value
+
+
+_FIT_FRAME_REF_FIELDS: dict[str, str] = {
+    "history": "history_ref",
+    "future_x": "future_x_ref",
+    "last_forecast": "last_forecast_ref",
+    "last_calibrated": "last_calibrated_ref",
+    "last_orders": "last_orders_ref",
+}
+
+
+def _fit_frame_ref(fit_id: str, kind: str) -> str:
+    return f"lifecycle://fits/{fit_id}/frames/{kind}"
+
+
+def _upsert_fit_frame(
+    session: Session,
+    fit_id: str,
+    kind: str,
+    frame: pd.DataFrame,
+) -> str:
+    ref = _fit_frame_ref(fit_id, kind)
+    records = _records_from_frame(frame) or []
+    row = session.get(LifecycleFitFrame, (fit_id, kind))
+    if row is None:
+        session.add(LifecycleFitFrame(fit_id=fit_id, kind=kind, records=records))
+    else:
+        row.records = records
+    return ref
 
 
 __all__ = ["SqlLifecycleStore"]

@@ -265,3 +265,31 @@ def _cumulative_pinball(
 def _strip_private(config: dict[str, Any]) -> dict[str, Any]:
     """Drop debug ``_*`` keys before handing the config to the engine."""
     return {k: v for k, v in config.items() if not k.startswith("_")}
+
+
+as_cumulative_decision_frame = _as_cumulative_decision_frame
+build_model_config = _build_model_config
+cumulative_pinball = _cumulative_pinball
+load_instock = _load_instock
+model_uses_cumulative_target = _model_uses_cumulative_target
+prepare_cumulative_target_history = _prepare_cumulative_target_history
+prepare_model_history = _prepare_model_history
+prepare_policy_forecast_frame = _prepare_policy_forecast_frame
+strip_private = _strip_private
+suggest_from_spec = _suggest_from_spec
+walk_forward_origins = _walk_forward_origins
+
+__all__ = [
+    "ROLLING_WINDOWS",
+    "as_cumulative_decision_frame",
+    "build_model_config",
+    "cumulative_pinball",
+    "load_instock",
+    "model_uses_cumulative_target",
+    "prepare_cumulative_target_history",
+    "prepare_model_history",
+    "prepare_policy_forecast_frame",
+    "strip_private",
+    "suggest_from_spec",
+    "walk_forward_origins",
+]

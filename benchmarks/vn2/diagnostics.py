@@ -21,9 +21,9 @@ from benchmarks.vn2.config import (
 )
 from benchmarks.vn2.replay import (
     ReplayResult,
-    _summary_from_simulator,
     build_replay_cache,
     replay_cached_cost,
+    summary_from_simulator,
 )
 from benchmarks.vn2.simulator import ProductState, VN2Simulator
 from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
@@ -373,7 +373,7 @@ def oracle_diagnostic(
         decision_rounds=decision_rounds,
         delivery_weeks=delivery_weeks,
     )
-    oracle_summary = _summary_from_simulator(oracle_simulator)
+    oracle_summary = summary_from_simulator(oracle_simulator)
     oracle_history = oracle_simulator.to_dataframe()
 
     order_rows = []
@@ -412,4 +412,8 @@ def oracle_diagnostic(
     }
 
 
-# ------------------------------------------------------------------ #
+optimal_order_path_for_sku = _optimal_order_path_for_sku
+__all__ = [
+    "optimal_order_path_for_sku",
+    "oracle_diagnostic",
+]

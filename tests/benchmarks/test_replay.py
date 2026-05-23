@@ -3,7 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from benchmarks.vn2.replay import CachedRound, VN2ReplayCache, replay_cached_cost
+from benchmarks.vn2.replay import (
+    CachedRound,
+    PolicyApplicationError,
+    VN2ReplayCache,
+    replay_cached_cost,
+)
 from benchmarks.vn2.simulator import ProductState
 from calibre.core.forecast_frame import (
     DS,
@@ -53,5 +58,20 @@ def test_policy_error_fails_trial_in_hpo_path(monkeypatch) -> None:
 
     monkeypatch.setattr("benchmarks.vn2.replay.apply_order_policy", _raise_policy_error)
 
-    with pytest.raises(ValueError, match="broken policy"):
-        replay_cached_cost(_cache(), order_conformal_config=None, policy_error_mode="raise")
+    with pytest.raises(PolicyApplicationError, match="broken policy"):
+        replay_cached_cost(_cache(), order_conformal_config=None)
+
+
+def test_policy_error_degraded_mode_is_explicit(monkeypatch) -> None:
+    def _raise_policy_error(*args, **kwargs):
+        raise ValueError("broken policy")
+
+    monkeypatch.setattr("benchmarks.vn2.replay.apply_order_policy", _raise_policy_error)
+
+    result = replay_cached_cost(
+        _cache(),
+        order_conformal_config=None,
+        policy_error_mode="degraded",
+    )
+
+    assert result.orders_by_round[1] == {"A": 0.0}

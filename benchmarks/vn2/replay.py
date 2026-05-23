@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import tempfile
 from collections.abc import Callable, Mapping
@@ -55,6 +56,8 @@ from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+
+logger = logging.getLogger(__name__)
 
 
 def _build_rs_params(
@@ -257,6 +260,15 @@ class ReplayResult:
         return float(self.summary["total_cost"].sum())
 
 
+class PolicyApplicationError(RuntimeError):
+    """Order-policy application failed during a replay round."""
+
+    def __init__(self, round_num: int, original: Exception) -> None:
+        super().__init__(f"VN2 policy failed in round {round_num}: {original}")
+        self.round_num = round_num
+        self.original = original
+
+
 def _scale_base_forecasts(frame: pd.DataFrame, scale: float) -> pd.DataFrame:
     """Apply an explicit base-forecast calibration scale for ablation searches."""
     if scale == 1.0 or frame.empty:
@@ -391,16 +403,15 @@ def replay_cached_cost(
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_base_scale: float = 1.0,
     reorder_point_scale: float | None = None,
-    policy_error_mode: Literal["degraded", "raise"] = "degraded",
+    policy_error_mode: Literal["degraded", "raise"] = "raise",
     on_policy_error: Callable[[int, Exception], None] | None = None,
     on_progress: Callable[[int, float], None] | None = None,
 ) -> ReplayResult:
     """Replay cached forecasts through the exact VN2 simulator.
 
-    In degraded replay mode, a failure in ``apply_order_policy`` for a single
-    round falls back to zero orders so the cost trajectory remains comparable
-    across rounds. Cost-search callers pass ``policy_error_mode="raise"`` so a
-    broken policy fails the trial instead of looking artificially cheap.
+    Fail-fast is the default. In explicit degraded replay mode, a failure in
+    ``apply_order_policy`` for a single round falls back to zero orders so the
+    cost trajectory remains comparable across rounds.
     """
     simulator = VN2Simulator(cache.initial_states)
     target_quantile_col = quantile_column(cache.quantile_alpha)
@@ -451,7 +462,11 @@ def replay_cached_cost(
             if on_policy_error is not None:
                 on_policy_error(rn, exc)
             if policy_error_mode == "raise":
-                raise
+                raise PolicyApplicationError(rn, exc) from exc
+            logger.warning(
+                "VN2 replay emitted zero orders after policy failure (policy_error_mode=degraded)",
+                extra={"round_num": rn, "error": repr(exc)},
+            )
             orders = dict.fromkeys(cache.initial_states, 0.0)
 
         actual_demand = cache.actuals_by_round.get(rn, dict.fromkeys(cache.initial_states, 0.0))
@@ -557,3 +572,25 @@ def log_cached_replay_run(
         with tempfile.TemporaryDirectory() as tmp:
             history_path = Path(tmp) / "history.csv"
             result.history.to_csv(history_path, index=False)
+
+
+build_rs_params = _build_rs_params
+orders_from_policy_result = _orders_from_policy_result
+round_actuals = _round_actuals
+run_order_conformal_warmup = _run_order_conformal_warmup
+summary_from_simulator = _summary_from_simulator
+
+__all__ = [
+    "CachedRound",
+    "PolicyApplicationError",
+    "ReplayResult",
+    "VN2ReplayCache",
+    "build_replay_cache",
+    "build_rs_params",
+    "log_cached_replay_run",
+    "orders_from_policy_result",
+    "replay_cached_cost",
+    "round_actuals",
+    "run_order_conformal_warmup",
+    "summary_from_simulator",
+]

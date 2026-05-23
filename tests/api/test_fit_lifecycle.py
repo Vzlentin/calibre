@@ -163,3 +163,32 @@ def test_fit_artifact_stored_and_loadable(client, counting_adapter) -> None:
     assert predict.status_code == 200, predict.text
     assert _CountingAdapter.fit_calls == 1
     assert [row[Y_HAT] for row in predict.json()["forecast"]] == [2.5, 2.5]
+
+
+def test_predict_rejects_origin_inside_eager_fit_history(client, counting_adapter) -> None:
+    fit = client.post("/fit", json=_fit_payload()).json()
+
+    predict = client.post(
+        "/predict",
+        json={"fit_id": fit["fit_id"], "origin": "2024-01-21"},
+    )
+
+    assert predict.status_code == 400
+    assert "fit history cutoff" in predict.json()["detail"]
+    assert _CountingAdapter.fit_calls == 1
+
+
+def test_predict_fails_when_persisted_artifact_is_missing(client, counting_adapter) -> None:
+    fit = client.post("/fit", json=_fit_payload()).json()
+    status = client.get(f"/fits/{fit['fit_id']}").json()
+    artifact_uri = next(iter(status["artifact_urls"].values()))
+    _path_from_file_uri(artifact_uri).unlink()
+
+    predict = client.post(
+        "/predict",
+        json={"fit_id": fit["fit_id"], "origin": "2024-02-04"},
+    )
+
+    assert predict.status_code == 500
+    assert "Persisted model artifact" in predict.json()["detail"]
+    assert _CountingAdapter.fit_calls == 1

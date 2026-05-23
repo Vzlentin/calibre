@@ -49,26 +49,24 @@ from benchmarks.vn2.config import (
     REVIEW_PERIOD,
 )
 from benchmarks.vn2.data import (
-    _as_cumulative_decision_frame,
-    _load_instock,
-    _model_uses_cumulative_target,
-    _prepare_cumulative_target_history,
-    _prepare_model_history,
-    _prepare_policy_forecast_frame,
-    _strip_private,
+    load_instock,
+    model_uses_cumulative_target,
+    prepare_model_history,
+    prepare_policy_forecast_frame,
+    strip_private,
 )
-from benchmarks.vn2.diagnostics import _optimal_order_path_for_sku, oracle_diagnostic
+from benchmarks.vn2.diagnostics import oracle_diagnostic
 from benchmarks.vn2.replay import (
     ReplayResult,
     VN2ReplayCache,
-    _build_rs_params,
-    _orders_from_policy_result,
-    _round_actuals,
-    _run_order_conformal_warmup,
-    _summary_from_simulator,
     build_replay_cache,
+    build_rs_params,
     log_cached_replay_run,
+    orders_from_policy_result,
     replay_cached_cost,
+    round_actuals,
+    run_order_conformal_warmup,
+    summary_from_simulator,
 )
 from benchmarks.vn2.simulator import VN2Simulator, extract_new_actuals, load_initial_states
 from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig, CumulativeRiskRuntime
@@ -99,11 +97,6 @@ run_cost_search = _tuning.run_cost_search
 
 __all__ = [
     "TUNE_OBJECTIVE_METRIC",
-    "_as_cumulative_decision_frame",
-    "_optimal_order_path_for_sku",
-    "_prepare_cumulative_target_history",
-    "_round_actuals",
-    "_run_order_conformal_warmup",
     "ReplayResult",
     "VN2ReplayCache",
     "build_replay_cache",
@@ -211,7 +204,7 @@ def run_benchmark(
         if series_filter is not None:
             initial_states = {uid: s for uid, s in initial_states.items() if uid in series_filter}
 
-        instock = _load_instock(data_dir, series_filter)
+        instock = load_instock(data_dir, series_filter)
 
         if verbose:
             logger.info("Loaded %s products.", len(initial_states))
@@ -234,8 +227,8 @@ def run_benchmark(
             else:
                 best_config = deepcopy(BEST_CONFIG)
         quantile_alpha = float(best_config.get("_quantile_alpha", best_config["quantiles"][0]))
-        cumulative_target = _model_uses_cumulative_target(best_config)
-        engine_config = _strip_private(best_config)
+        cumulative_target = model_uses_cumulative_target(best_config)
+        engine_config = strip_private(best_config)
 
         if verbose:
             logger.info("Best alpha: %.3f", quantile_alpha)
@@ -260,7 +253,7 @@ def run_benchmark(
             week0_sales = load_period(data_dir, 0)
             if series_filter is not None:
                 week0_sales = week0_sales[week0_sales[UNIQUE_ID].isin(initial_states)]
-            _run_order_conformal_warmup(
+            run_order_conformal_warmup(
                 sales=week0_sales,
                 instock=instock,
                 model_config=engine_config,
@@ -317,7 +310,7 @@ def run_benchmark(
             round_sales = load_period(data_dir, rn - 1)
             if series_filter is not None:
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(initial_states)]
-            history = _prepare_model_history(
+            history = prepare_model_history(
                 round_sales,
                 instock,
                 protection_period=horizon,
@@ -346,7 +339,7 @@ def run_benchmark(
                 if order_conformal_runtime is not None:
                     order_config = OrderPolicyConfig(
                         policy="rs",
-                        params=_build_rs_params(simulator, lead_time, review_period),
+                        params=build_rs_params(simulator, lead_time, review_period),
                         coverage=order_conformal_runtime.config.coverage,
                     )
                 elif target_quantile_col not in frame.columns:
@@ -364,11 +357,11 @@ def run_benchmark(
                 else:
                     order_config = OrderPolicyConfig(
                         policy="rs",
-                        params=_build_rs_params(simulator, lead_time, review_period),
+                        params=build_rs_params(simulator, lead_time, review_period),
                         quantile=quantile_alpha,
                     )
                 order_result = apply_order_policy(frame, order_config)
-                return _orders_from_policy_result(order_result, initial_states)
+                return orders_from_policy_result(order_result, initial_states)
             except (ValueError, KeyError) as exc:
                 if policy_error_mode == "zero":
                     logger.warning(
@@ -381,7 +374,7 @@ def run_benchmark(
 
         def _get_actuals(rn: int) -> dict[str, float]:
             if rn <= decision_rounds:
-                return _round_actuals(data_dir, rn, initial_states)
+                return round_actuals(data_dir, rn, initial_states)
             try:
                 actuals = extract_new_actuals(data_dir, rn)
                 return {uid: actuals.get(uid, 0.0) for uid in initial_states}
@@ -416,7 +409,7 @@ def run_benchmark(
                 runtime=conformal_runtime,
                 observe_fn=observe_fn,
                 ensemble=partial(
-                    _prepare_policy_forecast_frame,
+                    prepare_policy_forecast_frame,
                     protection_period=horizon,
                     cumulative_target=cumulative_target,
                 )
@@ -429,7 +422,7 @@ def run_benchmark(
         # ------------------------------------------------------------------ #
         # Results
         # ------------------------------------------------------------------ #
-        summary_df = _summary_from_simulator(simulator)
+        summary_df = summary_from_simulator(simulator)
 
         if verbose:
             total_holding = summary_df["holding_cost"].sum()

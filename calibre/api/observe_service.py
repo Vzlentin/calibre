@@ -77,7 +77,8 @@ def run_observe(
             extra={"session_id": session_id},
         )
         return
-    if record.last_calibrated is None or record.last_calibrated.empty:
+    calibrated = store.get_fit_frame(record.fit_id, "last_calibrated")
+    if calibrated is None or calibrated.empty:
         logger.warning(
             "observe skipped: no calibrated frame on session (call /calibrate first)",
             extra={"session_id": session_id},
@@ -94,7 +95,7 @@ def run_observe(
 
     runtime = runtime_factory(record)
     lower_col, upper_col = runtime.interval_columns
-    calibrated = record.last_calibrated.copy()
+    calibrated = calibrated.copy()
     if lower_col not in calibrated.columns or upper_col not in calibrated.columns:
         logger.warning(
             "observe skipped: calibrated frame missing interval columns",

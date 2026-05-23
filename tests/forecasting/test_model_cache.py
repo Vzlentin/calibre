@@ -112,6 +112,43 @@ def test_cache_key_changes_with_history(tmp_path: Path) -> None:
     assert adapter.cache_key(task_a) != adapter.cache_key(task_b)
 
 
+def test_cache_key_changes_with_fit_affecting_task_fields() -> None:
+    task = _task()
+    adapter = _CountingAdapter({"model": "Mean"})
+    future_x = pd.DataFrame(
+        {
+            UNIQUE_ID: ["sku", "sku"],
+            DS: pd.date_range("2024-02-01", periods=2, freq="W"),
+            "promo": [0.0, 1.0],
+        }
+    )
+
+    variants = [
+        ForecastTask(history=task.history, horizon=3, model_config=task.model_config),
+        ForecastTask(
+            history=task.history,
+            horizon=task.horizon,
+            model_config=task.model_config,
+            future_x=future_x,
+        ),
+        ForecastTask(
+            history=task.history,
+            horizon=task.horizon,
+            model_config=task.model_config,
+            forecast_origin=pd.Timestamp("2024-02-01"),
+        ),
+        ForecastTask(
+            history=task.history,
+            horizon=task.horizon,
+            model_config=task.model_config,
+            task_group="group-a",
+        ),
+    ]
+
+    base_key = adapter.cache_key(task)
+    assert all(adapter.cache_key(variant) != base_key for variant in variants)
+
+
 def test_fit_with_cache_no_cache_runs_fit() -> None:
     adapter = _CountingAdapter({"model": "Mean"})
     fitted = adapter.fit_with_cache(_task(), None)
