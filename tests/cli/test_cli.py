@@ -193,7 +193,7 @@ def test_load_config_rejects_unknown_execution_key(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="unknown execution key: unknown_scheduler"):
+    with pytest.raises(ValueError, match="execution.unknown_scheduler"):
         load_config(path)
 
 
