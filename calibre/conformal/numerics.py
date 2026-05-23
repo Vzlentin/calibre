@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import Literal, TypeAlias, overload
 
 import numpy as np
 
@@ -37,23 +37,37 @@ def _validate_bounds(bounds) -> tuple[float, float] | None:
     return float(lower), float(upper)
 
 
-def _clip_alpha(alpha, bounds) -> np.ndarray | float:
+AlphaInput: TypeAlias = float | np.ndarray
+AlphaBounds: TypeAlias = tuple[float, float] | None
+
+
+@overload
+def _clip_alpha(alpha: float, bounds: AlphaBounds) -> float: ...
+
+
+@overload
+def _clip_alpha(alpha: np.ndarray, bounds: AlphaBounds) -> np.ndarray: ...
+
+
+def _clip_alpha(alpha: AlphaInput, bounds: AlphaBounds) -> np.ndarray | float:
     if bounds is None:
         arr = np.asarray(alpha, dtype=float)
         if arr.ndim == 0:
             return float(arr)
         return arr.astype(float, copy=True)
     lower, upper = bounds
-    clipped = np.clip(alpha, lower, upper)
-    if np.ndim(clipped) == 0:
+    clipped = np.clip(np.asarray(alpha, dtype=float), lower, upper)
+    if clipped.ndim == 0:
         return float(clipped)
-    return clipped
+    return clipped.astype(float, copy=True)
 
 
 def _validate_quantile_rule(quantile_rule: str) -> Literal["conformal", "higher"]:
-    if quantile_rule not in {"conformal", "higher"}:
-        raise ValueError("quantile_rule must be 'conformal' or 'higher'")
-    return quantile_rule  # type: ignore[return-value]
+    if quantile_rule == "conformal":
+        return "conformal"
+    if quantile_rule == "higher":
+        return "higher"
+    raise ValueError("quantile_rule must be 'conformal' or 'higher'")
 
 
 def _finite_sample_radius(

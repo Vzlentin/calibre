@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Literal
+from collections.abc import Iterable, Sequence
+from typing import Literal, TypeAlias
 
 import numpy as np
 
@@ -19,6 +19,8 @@ from calibre.conformal.protocols import Score
 from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 
+AlphaLike: TypeAlias = float | Sequence[float] | np.ndarray
+
 
 class AdaptiveConformalInference(OnlineConformalController):
     """One-step adaptive conformal inference controller."""
@@ -33,7 +35,7 @@ class AdaptiveConformalInference(OnlineConformalController):
         initial_radius: float = 0.0,
         alpha_bounds: tuple[float, float] | None = (1e-6, 1.0 - 1e-6),
         quantile_rule: Literal["conformal", "higher"] = "conformal",
-    ):
+    ) -> None:
         if gamma < 0:
             raise ValueError("gamma must be non-negative")
         self._bounds = _validate_bounds(alpha_bounds)
@@ -134,15 +136,15 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
     def __init__(
         self,
         horizon: int,
-        alpha,
-        gamma,
-        initial_alpha=None,
+        alpha: AlphaLike,
+        gamma: AlphaLike,
+        initial_alpha: AlphaLike | None = None,
         score: Score = absolute_error_score,
         initial_scores: Iterable[Iterable[float]] | None = None,
-        initial_radius=0.0,
+        initial_radius: AlphaLike = 0.0,
         alpha_bounds: tuple[float, float] | None = (1e-6, 1.0 - 1e-6),
         quantile_rule: Literal["conformal", "higher"] = "conformal",
-    ):
+    ) -> None:
         if horizon < 1:
             raise ValueError("horizon must be at least 1")
         self._horizon = int(horizon)
@@ -150,7 +152,7 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         self._quantile_rule = _validate_quantile_rule(quantile_rule)
         self._target_alpha: np.ndarray = _clip_alpha(
             _as_1d_array(alpha, "alpha", self._horizon), self._bounds
-        )  # type: ignore[assignment]
+        )
         self._gamma: np.ndarray = _as_1d_array(gamma, "gamma", self._horizon)
         if np.any(self._gamma < 0):
             raise ValueError("gamma must be non-negative")
@@ -159,12 +161,12 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
             if initial_alpha is None
             else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
             self._bounds,
-        )  # type: ignore[assignment]
+        )
         self._score = score
         self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
         self._score_history = self._normalize_score_histories(initial_scores)
         self._error_history: list[np.ndarray] = []
-        self._alpha_history: list[np.ndarray] = [self._alpha.copy()]  # type: ignore[union-attr]
+        self._alpha_history: list[np.ndarray] = [self._alpha.copy()]
         self._radius_history: list[np.ndarray] = []
         self._pending_predictions: dict[int, MultiStepIntervalPrediction] = {}
         self._issued_count = 0
