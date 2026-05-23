@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Hashable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -92,6 +92,13 @@ class ConformalRuntime(Protocol):
     def get_diagnostics(self) -> dict[str, Any]: ...
 
 
+@runtime_checkable
+class PartitionedConformalRuntime(ConformalRuntime, Protocol):
+    def get_partition_states(self) -> dict[str, dict[str, Any]]: ...
+
+    def set_partition_states(self, partition_states: Mapping[str, dict[str, Any]]) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class SymmetricIntervalConfig:
     method: ConformalMethod
@@ -163,7 +170,7 @@ def _hashable(value: Hashable) -> Hashable:
     return value
 
 
-class SymmetricIntervalRuntime:
+class SymmetricIntervalRuntime(PartitionedConformalRuntime):
     def __init__(
         self,
         config: SymmetricIntervalConfig,
@@ -500,6 +507,14 @@ class SymmetricIntervalRuntime:
             partition_state["calibrator"]["score_history"] = {partition_key: scores}
             partition_states[partition_key] = partition_state
         return partition_states
+
+    def set_partition_states(self, partition_states: Mapping[str, dict[str, Any]]) -> None:
+        restored = self.from_partition_states(self.config, partition_states)
+        self.score = restored.score
+        self.calibrator = restored.calibrator
+        self.controller = restored.controller
+        self.method_name = restored.method_name
+        self._issued_count = restored._issued_count
 
     @classmethod
     def from_partition_states(

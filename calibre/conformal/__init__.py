@@ -24,6 +24,7 @@ from calibre.conformal.partitions import (
 from calibre.conformal.policies import OnlineConformalController
 from calibre.conformal.runtime import (
     ConformalRuntime,
+    PartitionedConformalRuntime,
     SymmetricIntervalConfig,
     SymmetricIntervalRuntime,
     build_symmetric_interval_runtime,
@@ -52,6 +53,7 @@ __all__ = [
     "MultiStepSplitConformalInference",
     "MultiStepIntervalPrediction",
     "OnlineConformalController",
+    "PartitionedConformalRuntime",
     "AbsoluteErrorScore",
     "ScaledAbsoluteErrorScore",
     "absolute_error",
