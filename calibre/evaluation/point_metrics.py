@@ -315,12 +315,22 @@ METRICS: dict[str, Callable[..., float]] = {
 }
 
 
+_METRIC_FAILURE_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    ValueError,
+    TypeError,
+    IndexError,
+    ZeroDivisionError,
+    ArithmeticError,
+)
+
+
 def evaluate(actual: np.ndarray, predicted: np.ndarray, metrics=("mae", "mse", "smape", "umbrae")):
     results = {}
     for name in metrics:
+        metric_fn = METRICS[name]
         try:
-            results[name] = METRICS[name](actual, predicted)
-        except Exception:
+            results[name] = metric_fn(actual, predicted)
+        except _METRIC_FAILURE_EXCEPTIONS:
             logger.exception("Unable to compute metric %s", name)
             results[name] = np.nan
     return results
