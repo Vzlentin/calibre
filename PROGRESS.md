@@ -141,3 +141,11 @@ next_task: "6.b narrow broad exceptions"
 last_commit: "37181d7"
 notes: "Typed conformal scalar/array alpha helpers, removed adaptive/numerics type ignores, and verified focused conformal tests plus ruff/mypy."
 ```
+
+```yaml
+phase: 6
+last_completed_task: "6.b narrow broad exceptions"
+next_task: "6.c replace print in CLI boundary"
+last_commit: "c095b51"
+notes: "Runtime safety-net exceptions now log tracebacks immediately, order-policy errors are narrowed to request validation, and broad-exception grep satisfies the logging invariant."
+```
