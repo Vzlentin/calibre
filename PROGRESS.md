@@ -173,3 +173,11 @@ next_task: "6.f decide tenant auth"
 last_commit: "cc7f615"
 notes: "Removed local/test type ignores across backend, CLI ordering, forecast metrics, neuralforecast optional import handling, and run-store tests; remaining type_ignore_count=4."
 ```
+
+```yaml
+phase: 6
+last_completed_task: "6.f decide tenant auth"
+next_task: "phase 6 DoD and cross-phase regression gate"
+last_commit: "80806c4"
+notes: "Tenant is documented as a storage partitioning key, not an in-app auth boundary; deployments must enforce tenant claims before requests reach Calibre."
+```
