@@ -29,3 +29,11 @@ next_task: "phase 1 DoD and cross-phase regression gate"
 last_commit: "e02708b"
 notes: "Added typed partitioned runtime/store access; focused conformal and state-resume tests passed."
 ```
+
+```yaml
+phase: 1
+last_completed_task: "phase 1 DoD and cross-phase regression gate"
+next_task: "2.a SQL-back LifecycleStore"
+last_commit: "0fbe817"
+notes: "Phase 1 gate green: ruff check ., mypy calibre/, pytest; baseline type_ignore_count=16 any_count=158."
+```
