@@ -44,6 +44,7 @@ from calibre.execution.backend import (
     _finalize_preds,
     _fit_predict_task,
 )
+from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.postgres import (
     TuningRunRepo,
@@ -125,6 +126,24 @@ def _frame_from_records(records: list[dict]) -> pd.DataFrame:
     if "forecast_origin" in frame.columns:
         frame["forecast_origin"] = pd.to_datetime(frame["forecast_origin"])
     return frame
+
+
+def _actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
+    """Build a ``(unique_id, ds) -> y`` Series for the decision-loop observe fns.
+
+    Mirrors the lookup ``DecisionLoop.run`` constructs so the API observes
+    through the same code path: ``(str, Timestamp)`` keys, dropping rows with no
+    actual ``y`` to record.
+    """
+    cache = {
+        (str(row[UNIQUE_ID]), pd.Timestamp(row[DS])): float(row[Y])
+        for _, row in actuals.iterrows()
+        if not pd.isna(row[Y])
+    }
+    lookup = pd.Series(cache, dtype=float)
+    if not lookup.empty:
+        lookup.index = pd.MultiIndex.from_tuples(lookup.index)
+    return lookup
 
 
 def _merge_future_x_override(
@@ -409,9 +428,14 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
         return
 
     actuals = _frame_from_records(actual_records)
-    if actuals.empty or UNIQUE_ID not in actuals.columns or DS not in actuals.columns:
+    if (
+        actuals.empty
+        or UNIQUE_ID not in actuals.columns
+        or DS not in actuals.columns
+        or Y not in actuals.columns
+    ):
         logger.warning(
-            "observe skipped: actuals empty or missing unique_id/ds",
+            "observe skipped: actuals empty or missing unique_id/ds/y",
             extra={"session_id": session_id, "rows": len(actuals)},
         )
         return
@@ -426,24 +450,24 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
         )
         return
 
-    merged = calibrated.merge(
-        actuals[[UNIQUE_ID, DS, Y]].rename(columns={Y: "_y_actual"}),
-        on=[UNIQUE_ID, DS],
-        how="left",
-    )
-    if Y in merged.columns:
-        merged[Y] = merged["_y_actual"].combine_first(merged[Y])
-    else:
-        merged[Y] = merged["_y_actual"]
-    merged = merged.drop(columns=["_y_actual"])
-    resolved = merged.dropna(subset=[Y, lower_col, upper_col])
-    if resolved.empty:
+    actuals_lookup = _actuals_lookup(actuals)
+    if actuals_lookup.empty:
         logger.warning(
-            "observe skipped: no rows resolved after merging actuals",
-            extra={"session_id": session_id, "calibrated_rows": len(calibrated)},
+            "observe skipped: no usable actuals (no non-null y rows)",
+            extra={"session_id": session_id, "rows": len(actuals)},
         )
         return
-    runtime.observe(resolved)
+
+    # Dispatch on the conformal mode rather than pre-filtering rows with NaN
+    # bounds. Cumulative mode emits NaN bounds on a window's intermediate
+    # horizons by construction, so dropping NaN-bound rows (the old behaviour)
+    # discarded exactly the observations the cumulative runtime needs to
+    # complete a window (lessons.md §40). decision_loop owns the per-horizon vs
+    # cumulative readiness logic; route through it so the API cannot diverge.
+    if runtime.mode == "cumulative":
+        observe_cumulative(runtime, [calibrated], actuals_lookup)
+    else:
+        observe_per_horizon(runtime, [calibrated], actuals_lookup, lower_col, upper_col)
     store.upsert_conformal_state(session_id, runtime.get_partition_states())
 
 
