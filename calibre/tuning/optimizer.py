@@ -24,6 +24,7 @@ from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
 from calibre.execution.io import join_uri
 from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
+from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.tuning.task import TuningCandidate, TuningTask
 
 _OBJECTIVE_METRIC = "objective"
@@ -53,10 +54,6 @@ def _resolved_max_concurrent_trials(task: TuningTask) -> int:
     return max(1, int(_available_cpus() // cpu_per_trial))
 
 
-def _thread_budget(cpu_per_trial: float) -> int:
-    return max(1, int(cpu_per_trial))
-
-
 def _normalize_tune_storage_path(path: str) -> str:
     if "://" in path:
         return path
@@ -79,22 +76,6 @@ def _resolve_tune_storage_path(task: TuningTask) -> str:
     return tempfile.mkdtemp(prefix="calibre-tune-")
 
 
-def _cap_threaded_config(config: dict[str, Any], cpu_per_trial: float) -> dict[str, Any]:
-    """Keep library-level parallelism inside the Tune trial CPU budget."""
-    capped = dict(config)
-    threads = _thread_budget(cpu_per_trial)
-    for key in ("n_jobs", "num_threads", "nthread"):
-        if key not in capped:
-            continue
-        value = capped[key]
-        if value is None or int(value) < 1 or int(value) > threads:
-            capped[key] = threads
-    model_name = str(capped.get("model", "")).lower()
-    if any(name in model_name for name in ("lgbm", "lightgbm", "xgb")):
-        capped.setdefault("n_jobs", threads)
-    return capped
-
-
 @contextmanager
 def restore_cwd():
     """Ray Tune trials chdir into a per-trial working dir and don't always restore it."""
@@ -107,7 +88,7 @@ def restore_cwd():
 
 @contextmanager
 def _trial_thread_env(cpu_per_trial: float):
-    threads = str(_thread_budget(cpu_per_trial))
+    threads = str(thread_budget(cpu_per_trial))
     keys = (
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
@@ -298,7 +279,7 @@ def _evaluate_candidate(
 ) -> float:
     history = _history_with_uid(task)
     runtime_snapshot = _snapshot_conformal_runtime(task)
-    candidate_config = _cap_threaded_config(
+    candidate_config = cap_threaded_config(
         {**task.base_model_config, **candidate.model_config, "freq": task.freq},
         task.cpu_per_trial,
     )
@@ -417,7 +398,7 @@ def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
         candidate = _resolve_candidate(
             worker_task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
         )
-        candidate_config = _cap_threaded_config(
+        candidate_config = cap_threaded_config(
             {**worker_task.base_model_config, **candidate.model_config, "freq": worker_task.freq},
             worker_task.cpu_per_trial,
         )

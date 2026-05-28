@@ -52,6 +52,7 @@ from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actu
 from calibre.execution.io import join_uri, rm
 from calibre.execution.ledger import ForecastLedger, OrderLedger
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
+from calibre.execution.threading import cap_threaded_config
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
@@ -128,30 +129,6 @@ def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _empty_forecast_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
-
-
-def _thread_budget(cpu_per_task: float | None) -> int:
-    if cpu_per_task is None:
-        return 1
-    return max(1, int(cpu_per_task))
-
-
-def _cap_threaded_config(config: dict[str, Any], cpu_per_task: float | None) -> dict[str, Any]:
-    """Keep library-level parallelism inside the Ray task CPU budget when set."""
-    if cpu_per_task is None:
-        return config
-    capped = dict(config)
-    threads = _thread_budget(cpu_per_task)
-    for key in ("n_jobs", "num_threads", "nthread"):
-        if key not in capped:
-            continue
-        value = capped.get(key)
-        if value is None or int(value) < 1 or int(value) > threads:
-            capped[key] = threads
-    model_name = str(capped.get("model", "")).lower()
-    if "lgbm" in model_name or "lightgbm" in model_name or "xgb" in model_name:
-        capped.setdefault("n_jobs", threads)
-    return capped
 
 
 def _process_task_ref(
@@ -672,7 +649,7 @@ class BackendEngine:
                 **seed_model_config(task.model_config, self.seed),
                 "freq": self.freq,
             }
-            model_config = _cap_threaded_config(model_config, self.execution.cpu_per_task)
+            model_config = cap_threaded_config(model_config, self.execution.cpu_per_task)
             task_base = join_uri(base_dir, str(idx))
             ref = ForecastTask(
                 history=task.history,
