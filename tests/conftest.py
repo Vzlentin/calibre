@@ -59,6 +59,30 @@ def data_dir() -> Path:
 
 
 @pytest.fixture
+def fresh_db_url(tmp_path) -> str:
+    """A clean database URL for migration / deploy-smoke tests.
+
+    In CI, ``CALIBRE_TEST_DATABASE_URL`` points at a Postgres service (the
+    production-shaped backend); we reset its ``public`` schema so each test
+    starts from an empty database. Locally, with no env var set, we fall back
+    to a throwaway SQLite file. The gate that matters — does the schema built
+    by ``alembic upgrade head`` match the ORM — is dialect-independent, so it
+    runs meaningfully in both modes.
+    """
+    url = os.environ.get("CALIBRE_TEST_DATABASE_URL")
+    if url:
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(url, future=True)
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+        engine.dispose()
+        return url
+    return f"sqlite+pysqlite:///{(tmp_path / 'storage.db').as_posix()}"
+
+
+@pytest.fixture
 def period0_sales_path(data_dir: Path) -> Path:
     return data_dir / "week_0_sales.csv"
 
