@@ -5,7 +5,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "0004_tuning_runs"
-down_revision = "0003_pending_observation_metadata"
+down_revision = "0003_pending_obs_metadata"
 branch_labels = None
 depends_on = None
 

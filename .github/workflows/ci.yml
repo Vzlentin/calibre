@@ -26,6 +26,24 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+      # Routes the migration-parity and deploy-smoke gates at a real Postgres
+      # (the production-shaped backend) instead of SQLite. Only tests that use
+      # the `fresh_db_url` fixture pick this up; the rest are unaffected.
+      CALIBRE_TEST_DATABASE_URL: postgresql+psycopg://calibre:calibre@localhost:5432/calibre
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: calibre
+          POSTGRES_PASSWORD: calibre
+          POSTGRES_DB: calibre
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U calibre"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
