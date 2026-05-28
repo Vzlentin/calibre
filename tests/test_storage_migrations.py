@@ -44,6 +44,22 @@ def _render(entry: tuple) -> str:
     return repr(entry)
 
 
+def test_revision_ids_fit_alembic_version_column() -> None:
+    """Revision ids must fit Alembic's ``alembic_version.version_num``.
+
+    That column is ``VARCHAR(32)`` by default. SQLite does not enforce VARCHAR
+    length, so an over-length id (e.g. the 33-char ``0003_pending_observation_
+    metadata``) passed locally and in every prior CI run but truncated and
+    errored on the first real Postgres ``upgrade head``. This guard fails fast
+    with a clear message instead of a cryptic ``StringDataRightTruncation``.
+    """
+    script = ScriptDirectory.from_config(Config("alembic.ini"))
+    too_long = {
+        rev.revision: len(rev.revision) for rev in script.walk_revisions() if len(rev.revision) > 32
+    }
+    assert not too_long, f"revision ids exceed alembic_version VARCHAR(32): {too_long}"
+
+
 def test_migrations_match_orm(fresh_db_url, monkeypatch) -> None:
     """``alembic upgrade head`` must produce a schema that matches the ORM.
 
