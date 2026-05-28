@@ -155,3 +155,21 @@ def test_observe_perhorizon_drops_unresolved_rows(session):
     assert len(runtime.observed) == 1
     observed = runtime.observed[0]
     assert observed[H].tolist() == [1], "only the resolved horizon should be observed"
+
+
+def test_observe_calibrated_without_y_column_does_not_crash(session):
+    """A hand-crafted /calibrate payload may omit y; observe adds it, not KeyError.
+
+    The old code handled a missing y explicitly; routing through the dispatch
+    must not regress that — _fill_actuals needs the column to exist.
+    """
+    session_id, make = session
+    calibrated = _calibrated_window(bounds_at_each_horizon=True).drop(columns=[Y])
+    runtime = make("perhorizon", calibrated)
+
+    api_main._run_observe_job(session_id, _actual_records(WINDOW_DS[:1]))
+
+    assert len(runtime.observed) == 1
+    observed = runtime.observed[0]
+    assert observed[H].tolist() == [1]
+    assert observed[Y].tolist() == [9.0], "actual should be filled into the added y column"

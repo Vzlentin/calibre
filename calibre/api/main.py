@@ -449,6 +449,12 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
             extra={"session_id": session_id, "expected": [lower_col, upper_col]},
         )
         return
+    if Y not in calibrated.columns:
+        # last_calibrated normally carries y (a NaN placeholder) from the
+        # predict output, but a hand-crafted /calibrate payload may omit it.
+        # The observe dispatch fills actuals into this column, so ensure it
+        # exists rather than letting _fill_actuals raise KeyError.
+        calibrated[Y] = float("nan")
 
     actuals_lookup = _actuals_lookup(actuals)
     if actuals_lookup.empty:
