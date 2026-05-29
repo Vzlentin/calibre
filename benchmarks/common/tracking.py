@@ -3,6 +3,7 @@
 from __future__ import annotations  # keeps pd.DataFrame annotation lazy at runtime
 
 import dataclasses
+import json
 import logging
 import os
 import platform
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import types
 import warnings
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -98,7 +100,10 @@ def resolve_tracking_uri() -> str:
     raw = os.environ.get("MLFLOW_TRACKING_URI", str(_REPO_ROOT / "mlruns"))
     if "://" in raw or raw in {"databricks", "databricks-uc", "uc"}:
         return raw
-    return Path(raw).as_uri()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = _REPO_ROOT / path
+    return path.as_uri()
 
 
 def git_sha() -> str | None:
@@ -200,6 +205,53 @@ def log_config_module(mod: types.ModuleType) -> None:
             )
         except Exception as exc:
             warnings.warn(f"Could not log non-scalar config: {exc}", stacklevel=2)
+
+
+def stable_value(value: Any) -> Any:
+    """Return a JSON-stable representation for benchmark params."""
+    if isinstance(value, Mapping):
+        return {str(k): stable_value(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [stable_value(v) for v in value]
+    if isinstance(value, float | int | str | bool) or value is None:
+        return value
+    state = getattr(value, "__dict__", None)
+    if state is not None:
+        return {
+            "class": f"{value.__class__.__module__}.{value.__class__.__name__}",
+            "state": stable_value(state),
+        }
+    return repr(value)
+
+
+def stable_config_key(config: dict[str, Any]) -> str:
+    """Return a deterministic JSON key for cacheable benchmark configs."""
+    return json.dumps(stable_value(config), sort_keys=True)
+
+
+def log_mlflow_params(params: Mapping[str, Any]) -> None:
+    """Log params while writing non-scalar values as a JSON artifact."""
+    if _tracking_disabled():
+        return
+
+    scalar_params: dict[str, str] = {}
+    non_scalar: dict[str, Any] = {}
+
+    for key, value in params.items():
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            for field_name, field_value in dataclasses.asdict(value).items():
+                scalar_params[f"{key}.{field_name}"[:250]] = str(field_value)[:500]
+            continue
+
+        if isinstance(value, Path | bool | int | float | str) or value is None:
+            scalar_params[str(key)[:250]] = str(value)[:500]
+        else:
+            non_scalar[str(key)] = stable_value(value)
+
+    if scalar_params:
+        mlflow.log_params(scalar_params)
+    if non_scalar:
+        mlflow.log_dict(non_scalar, "params_non_scalar.json")
 
 
 def safe_log_metric(key: str, value: float, step: int | None = None) -> None:
