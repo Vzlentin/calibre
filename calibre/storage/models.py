@@ -76,3 +76,51 @@ class ForecastPointer(Base):
     kind: Mapped[str] = mapped_column(String, primary_key=True)
     uri: Mapped[str] = mapped_column(String, nullable=False)
     byte_size: Mapped[int] = mapped_column(nullable=False)
+
+
+class LifecycleFitRecord(Base):
+    """Fit lifecycle metadata. Data-plane frames live as parquet under
+    ``frame_uris`` (object store), never inline on this row."""
+
+    __tablename__ = "lifecycle_fit_records"
+
+    fit_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tenant: Mapped[str] = mapped_column(String, nullable=False)
+    sku_set: Mapped[list] = mapped_column(JsonDict, nullable=False)
+    forecaster_config: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    horizon: Mapped[int] = mapped_column(Integer, nullable=False)
+    freq: Mapped[str] = mapped_column(String, nullable=False)
+    conformal_config: Mapped[dict | None] = mapped_column(JsonDict, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    artifact_urls: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
+    frame_uris: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
+
+
+class LifecycleConformalState(Base):
+    """Session-owned conformal state, keyed by ``(session_id, partition)`` and
+    referenced by fits rather than copied onto each fit row."""
+
+    __tablename__ = "lifecycle_conformal_state"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    partition: Mapped[str] = mapped_column(String, primary_key=True)
+    state: Mapped[dict] = mapped_column(JsonDict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class LifecycleTuneRecord(Base):
+    __tablename__ = "lifecycle_tune_records"
+
+    study_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    tenant: Mapped[str] = mapped_column(String, nullable=False)
+    sku_set: Mapped[list] = mapped_column(JsonDict, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    best_candidates: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
