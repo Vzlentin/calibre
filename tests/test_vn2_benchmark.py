@@ -17,19 +17,18 @@ import pytest
 from mlforecast.lag_transforms import RollingMean
 
 import benchmarks.vn2.run_benchmark as run_benchmark_module
+import benchmarks.vn2.search as search_module
 from benchmarks.vn2.config import BEST_CONFIG, CUMULATIVE_BEST_CONFIG, TOP1_CRC_CONFIG
-from benchmarks.vn2.run_benchmark import (
-    _as_cumulative_decision_frame,
-    _optimal_order_path_for_sku,
-    _prepare_cumulative_target_history,
-    _round_actuals,
-    _run_order_conformal_warmup,
+from benchmarks.vn2.data import as_cumulative_decision_frame, prepare_cumulative_target_history
+from benchmarks.vn2.diagnostics import optimal_order_path_for_sku
+from benchmarks.vn2.replay import (
     build_replay_cache,
     replay_cached_cost,
-    run_benchmark,
-    run_cost_search,
-    run_hpo,
+    round_actuals,
+    run_order_conformal_warmup,
 )
+from benchmarks.vn2.run_benchmark import run_benchmark
+from benchmarks.vn2.search import run_cost_search, run_hpo
 from benchmarks.vn2.simulator import ProductState, extract_new_actuals, load_initial_states
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
@@ -46,6 +45,7 @@ from calibre.core.forecast_frame import (
     quantile_column,
 )
 from calibre.execution.data_loading import load_period
+from calibre.tuning import CumulativePinball, StudyOutcome
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
 
@@ -127,9 +127,18 @@ class TestVN2BenchmarkIntegration:
         assert set(result["unique_id"]) == set(series)
 
 
-def test_run_hpo_returns_valid_config() -> None:
-    """run_hpo with 1 trial returns a complete, engine-ready model config."""
+def test_run_hpo_returns_valid_config(monkeypatch) -> None:
+    """run_hpo builds a PanelTuningTask and returns an engine-ready model config."""
     series = _get_first_n_series(2)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_optimize_panel_task(task):
+        captured["task"] = task
+        return {k: v for k, v in _FAST_BEST_CONFIG.items() if k != "_quantile_alpha"}
+
+    monkeypatch.setattr(search_module, "optimize_panel_task", _fake_optimize_panel_task)
+
     config = run_hpo(
         data_dir=DATA_DIR,
         horizon=3,
@@ -145,6 +154,12 @@ def test_run_hpo_returns_valid_config() -> None:
     assert config["backend"] == "mlforecast"
     assert config["scope"] == "global"
     assert 0.0 < config["_quantile_alpha"] < 1.0
+
+    task = captured["task"]
+    assert task.base_model_config["scope"] == "global"
+    assert task.study_config.n_trials == 1
+    assert len(task.origins) == 1
+    assert isinstance(task.objective, CumulativePinball)
 
 
 def test_committed_best_config_is_structurally_complete() -> None:
@@ -179,7 +194,7 @@ def test_cumulative_target_history_uses_trailing_protection_period_sum() -> None
         }
     )
 
-    history = _prepare_cumulative_target_history(sales, instock=None, protection_period=3)
+    history = prepare_cumulative_target_history(sales, instock=None, protection_period=3)
 
     assert history[DS].tolist() == sales[DS].iloc[2:].tolist()
     assert history[Y].tolist() == [6.0, 9.0]
@@ -200,10 +215,40 @@ def test_cumulative_decision_frame_keeps_only_terminal_base_forecast() -> None:
         }
     )
 
-    cumulative = _as_cumulative_decision_frame(frame, protection_period=3)
+    cumulative = as_cumulative_decision_frame(frame, protection_period=3)
 
     assert cumulative[Y_HAT].tolist() == [0.0, 0.0, 30.0]
     assert cumulative[qcol].tolist() == [0.0, 0.0, 300.0]
+
+
+def test_cumulative_hpo_objective_scores_terminal_horizon_only() -> None:
+    """Cumulative-target HPO must collapse to the terminal horizon before scoring.
+
+    Without the collapse, CumulativePinball sums the cumulative prediction across
+    every horizon (3+6+9=18) and compares it to the realised cumulative demand
+    (9), inflating the loss; the terminal-only objective compares 9 vs 9.
+    """
+    qcol = quantile_column(0.5)
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A"] * 3,
+            FORECAST_ORIGIN: [pd.Timestamp("2024-01-01")] * 3,
+            DS: pd.date_range("2024-01-08", periods=3, freq="W-MON"),
+            Y_HAT: [3.0, 6.0, 9.0],
+            H: [1, 2, 3],
+            MODEL_NAME: ["M"] * 3,
+            qcol: [3.0, 6.0, 9.0],
+        }
+    )
+    actuals = pd.Series([2.0, 3.0, 4.0])  # cumulative demand over the window = 9.0
+
+    terminal = search_module._CumulativeTerminalPinball(
+        quantile=0.5, tau=0.833, protection_period=3
+    )
+    raw = CumulativePinball(quantile=0.5, tau=0.833)
+
+    assert terminal.evaluate(frame, actuals) == pytest.approx(0.0)
+    assert raw.evaluate(frame, actuals) > terminal.evaluate(frame, actuals)
 
 
 def test_run_benchmark_defaults_to_committed_best_config(monkeypatch) -> None:
@@ -306,7 +351,7 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
 
     class _FakeResult:
         error = None
-        metrics = {run_benchmark_module._TUNE_OBJECTIVE_METRIC: 123.0}
+        metrics = {"objective": 123.0}
         config = {"crc_enabled": False}
 
     class _FakeResults(list):
@@ -324,16 +369,14 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
         )
     )
 
-    class _FakeSearchAlg:
-        _ot_study = study
-
-    def _fake_run_optuna_tune(trainable, search_space, **kwargs):
+    def _fake_run_optuna_study(**kwargs):
         captured.update(kwargs)
-        captured["trainable"] = trainable
-        captured["search_space"] = search_space
-        return _FakeResults([_FakeResult()]), _FakeSearchAlg()
+        return StudyOutcome(
+            best_config={"crc_enabled": False},
+            results=_FakeResults([_FakeResult()]),
+        )
 
-    monkeypatch.setattr(run_benchmark_module, "_run_optuna_tune", _fake_run_optuna_tune)
+    monkeypatch.setattr(search_module, "run_optuna_study", _fake_run_optuna_study)
 
     result = run_cost_search(
         data_dir=DATA_DIR,
@@ -355,14 +398,15 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
     assert result.best_value == pytest.approx(123.0)
     assert captured["n_trials"] == 2
     assert captured["max_t"] == 3
-    assert captured["timeout_sec"] == 30
     assert captured["asha_grace_period"] == 1
     assert captured["max_concurrent_trials"] == 1
     assert captured["ray_local_mode"] is True
+    assert captured["metric"] == "objective"
+    assert captured["time_attr"] == "tune_step"
 
 
 def test_oracle_order_path_matches_simple_known_lead_time_case() -> None:
-    orders = _optimal_order_path_for_sku(
+    orders = optimal_order_path_for_sku(
         ProductState(unique_id="A", end_inventory=0.0, in_transit_w1=0.0, in_transit_w2=0.0),
         {1: 0.0, 2: 0.0, 3: 5.0},
         decision_rounds=1,
@@ -376,7 +420,7 @@ def test_round_actuals_uses_current_round_demand() -> None:
     series = _get_first_n_series(3)
     expected = extract_new_actuals(DATA_DIR, 1)
 
-    actuals = _round_actuals(DATA_DIR, 1, {uid: object() for uid in series})
+    actuals = round_actuals(DATA_DIR, 1, {uid: object() for uid in series})
 
     assert actuals == {uid: expected.get(uid, 0.0) for uid in series}
 
@@ -401,7 +445,7 @@ def test_run_order_conformal_warmup_seeds_residual_pool() -> None:
 
     assert runtime.get_diagnostics()["n_scores"] == 0
 
-    _run_order_conformal_warmup(
+    run_order_conformal_warmup(
         sales=sales,
         instock=None,
         model_config=engine_config,
