@@ -27,21 +27,12 @@ class TuningCandidate:
     ordering_config: dict = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class TuningTask:
-    """Per-series hyperparameter optimization task."""
+@dataclass(frozen=True, slots=True)
+class StudyConfig:
+    """Shared study/execution settings for per-series and panel tuning."""
 
-    unique_id: str
-    history: pd.DataFrame
-    horizon: int
-    base_model_config: dict
-    search_space: Callable[[optuna.Trial], TuningCandidate]
-    actuals: pd.DataFrame
-    origins: list[pd.Timestamp]
-    objective: TuningObjective
     n_trials: int = 50
     freq: str = "W"
-    conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None
     seed: int | None = None
     asha_grace_period: int = 1
     cpu_per_trial: float = 1.0
@@ -55,3 +46,33 @@ class TuningTask:
     mlflow_tracking_uri: str | None = None
     mlflow_experiment_name: str | None = None
     mlflow_parent_run_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TuningTask:
+    """Per-series hyperparameter optimization task."""
+
+    unique_id: str
+    history: pd.DataFrame
+    horizon: int
+    base_model_config: dict
+    search_space: Callable[[optuna.Trial], TuningCandidate]
+    actuals: pd.DataFrame
+    origins: list[pd.Timestamp]
+    objective: TuningObjective
+    conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None
+    study_config: StudyConfig = field(default_factory=StudyConfig)
+
+
+@dataclass(frozen=True, slots=True)
+class PanelTuningTask:
+    """Panel/global hyperparameter optimization task."""
+
+    history: pd.DataFrame
+    horizon: int
+    base_model_config: dict
+    search_space: Callable[[optuna.Trial], TuningCandidate]
+    actuals: pd.DataFrame
+    origins: list[pd.Timestamp]
+    objective: TuningObjective
+    study_config: StudyConfig = field(default_factory=StudyConfig)
