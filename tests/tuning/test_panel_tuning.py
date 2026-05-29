@@ -7,7 +7,7 @@ import pytest
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y, quantile_column
 from calibre.tuning.objectives import CumulativePinball
 from calibre.tuning.optimizer import optimize_panel_task
-from calibre.tuning.task import PanelTuningTask, TuningCandidate
+from calibre.tuning.task import PanelTuningTask, StudyConfig, TuningCandidate
 
 
 def _constant_n_estimators_space(trial: optuna.Trial) -> TuningCandidate:
@@ -84,11 +84,13 @@ def test_optimize_panel_task_returns_complete_global_model_config(tmp_path) -> N
             actuals=history,
             origins=[dates[15]],
             objective=CumulativePinball(quantile=0.5, tau=0.8),
-            n_trials=1,
-            freq="W",
-            seed=7,
-            ray_local_mode=True,
-            tune_storage_path=str(tmp_path / "ray-tune"),
+            study_config=StudyConfig(
+                n_trials=1,
+                freq="W",
+                seed=7,
+                ray_local_mode=True,
+                tune_storage_path=str(tmp_path / "ray-tune"),
+            ),
         )
     )
 

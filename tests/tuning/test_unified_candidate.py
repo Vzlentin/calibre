@@ -16,7 +16,7 @@ from calibre.tuning.optimizer import (
     _evaluate_candidate,
     _resolve_candidate,
 )
-from calibre.tuning.task import TuningCandidate, TuningTask
+from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
 
 
 class _ConstObjective:
@@ -105,8 +105,7 @@ def _task(objective: Any) -> TuningTask:
         actuals=history,
         origins=[pd.Timestamp("2024-01-14")],
         objective=objective,
-        n_trials=1,
-        asha_grace_period=1,
+        study_config=StudyConfig(n_trials=1, asha_grace_period=1),
     )
 
 
@@ -159,8 +158,8 @@ def test_conformal_params_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
         actuals=history,
         origins=[pd.Timestamp("2024-01-14")],
         objective=_ConstObjective(),
-        n_trials=1,
         conformal_runtime_factory=_factory,
+        study_config=StudyConfig(n_trials=1),
     )
 
     candidate = task.search_space(optuna.trial.FixedTrial({}))
@@ -221,7 +220,7 @@ def test_ordering_params_propagate_to_objective(monkeypatch: pytest.MonkeyPatch)
         actuals=history,
         origins=[pd.Timestamp("2024-01-14")],
         objective=_RecordingObjective(weight=1.0),
-        n_trials=1,
+        study_config=StudyConfig(n_trials=1),
     )
 
     candidate = task.search_space(optuna.trial.FixedTrial({}))

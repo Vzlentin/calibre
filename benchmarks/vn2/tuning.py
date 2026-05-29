@@ -12,7 +12,7 @@ from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.evaluation.point_metrics import smape
 from calibre.tuning.objectives import Accuracy
 from calibre.tuning.optimizer import optimize_task
-from calibre.tuning.task import TuningCandidate, TuningTask
+from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
 
 
 def seasonal_naive_search_space(trial: optuna.Trial) -> TuningCandidate:
@@ -57,8 +57,7 @@ def tune_one_series(
         actuals=actuals,
         origins=origins,
         objective=Accuracy(metric=smape),
-        n_trials=n_trials,
-        freq=freq,
+        study_config=StudyConfig(n_trials=n_trials, freq=freq),
     )
     return optimize_task(task)
 

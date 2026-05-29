@@ -58,6 +58,7 @@ from calibre.storage.postgres import (
 )
 from calibre.storage.session import derive_session_id
 from calibre.tuning import (
+    StudyConfig,
     TuningCandidate,
     TuningObjective,
     TuningTask,
@@ -629,8 +630,7 @@ def _run_tune_job(
                 actuals=_filter_uid(actuals, uid),
                 origins=origins,
                 objective=_OBJECTIVES[req.objective_id],
-                n_trials=int(req.n_trials),
-                freq=req.freq,
+                study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
             )
             candidate = optimize_task_candidate(task)
             payload = _candidate_to_payload(candidate)

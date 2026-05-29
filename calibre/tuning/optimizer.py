@@ -282,6 +282,8 @@ def run_optuna_study(
         raise ValueError("max_t must be at least 1")
     if asha_grace_period < 1:
         raise ValueError("asha_grace_period must be at least 1")
+    if max_t > 1 and asha_grace_period >= max_t:
+        raise ValueError("asha_grace_period must be less than max_t (number of origins)")
     if cpu_per_trial <= 0:
         raise ValueError("cpu_per_trial must be positive")
     if max_concurrent_trials < 1:
@@ -558,12 +560,12 @@ def optimize_panel_task(task: PanelTuningTask) -> dict:
         config.cpu_per_trial,
     )
 
-    def _trainable(config: dict[str, Any], *, state_ref: Any | None = None) -> None:
+    def _trainable(trial_config: dict[str, Any], *, state_ref: Any | None = None) -> None:
         del state_ref
         from ray import tune
 
         candidate = _resolve_candidate(
-            task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
+            task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(trial_config))))
         )
         study_config = task.study_config
         forecast_task = ForecastTask(
@@ -619,11 +621,13 @@ def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
         config.cpu_per_trial,
     )
 
-    def _trainable(config: dict[str, Any], *, state_ref: Any | None = None) -> None:
+    def _trainable(trial_config: dict[str, Any], *, state_ref: Any | None = None) -> None:
         from ray import tune
 
         candidate = _resolve_candidate(
-            worker_task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
+            worker_task.search_space(
+                cast(optuna.Trial, optuna.trial.FixedTrial(dict(trial_config)))
+            )
         )
         study_config = worker_task.study_config
         forecast_task = ForecastTask(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import optuna
@@ -8,7 +9,7 @@ import pandas as pd
 import calibre.tuning.optimizer as optimizer
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.tuning.optimizer import _OBJECTIVE_METRIC, _ORIGIN_INDEX, _evaluate_candidate
-from calibre.tuning.task import TuningCandidate, TuningTask
+from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
 
 
 def _constant_space(trial: optuna.Trial) -> TuningCandidate:
@@ -70,8 +71,7 @@ def _task(origins: list[pd.Timestamp]) -> TuningTask:
         actuals=history,
         origins=origins,
         objective=_SumCostObjective(),
-        n_trials=1,
-        asha_grace_period=1,
+        study_config=StudyConfig(n_trials=1, asha_grace_period=1),
     )
 
 
@@ -158,11 +158,9 @@ def test_intermediate_metric_matches_final(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(tune, "Tuner", _FakeTuner)
 
     task = _task(origins)
-    task = TuningTask(
-        **{
-            **task.__dict__,
-            "tune_storage_path": str(tmp_path / "ray-tune"),
-        }
+    task = replace(
+        task,
+        study_config=replace(task.study_config, tune_storage_path=str(tmp_path / "ray-tune")),
     )
 
     result = optimizer.optimize_task(task)

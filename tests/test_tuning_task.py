@@ -12,8 +12,8 @@ from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.evaluation.point_metrics import mae, pinball_linear, smape
 from calibre.execution.threading import cap_threaded_config
 from calibre.tuning.objectives import Accuracy
-from calibre.tuning.optimizer import _resolve_tune_storage_path, optimize_task
-from calibre.tuning.task import TuningCandidate, TuningTask
+from calibre.tuning.optimizer import _resolve_tune_storage_path, optimize_task, run_optuna_study
+from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
 
 
 def pinball_loss(actual, predicted):
@@ -71,9 +71,7 @@ def tuning_task(series_df, dates):
         actuals=series_df,
         origins=[dates[15]],
         objective=Accuracy(metric=smape),
-        n_trials=1,
-        freq="W",
-        seed=3,
+        study_config=StudyConfig(n_trials=1, freq="W", seed=3),
     )
 
 
@@ -101,9 +99,7 @@ def tuned_best_config(request):
             actuals=series,
             origins=[dates[15]],
             objective=Accuracy(metric=request.param),
-            n_trials=1,
-            freq="W",
-            seed=3,
+            study_config=StudyConfig(n_trials=1, freq="W", seed=3),
         )
     )
 
@@ -133,7 +129,9 @@ def test_optimize_task_from_tmp_cwd_does_not_use_cwd_as_tune_uri(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("RAYTUNE_RESULTS_DIR", raising=False)
 
-    result = optimize_task(replace(tuning_task, results_dir="results"))
+    result = optimize_task(
+        replace(tuning_task, study_config=replace(tuning_task.study_config, results_dir="results"))
+    )
 
     assert "season_length" in result
 
@@ -171,10 +169,8 @@ def test_optimize_accepts_conformal_config(series_df, dates):
         actuals=series_df,
         origins=[dates[15]],
         objective=Accuracy(metric=smape),
-        n_trials=1,
-        freq="W",
         conformal_runtime_factory=_runtime_factory,
-        seed=3,
+        study_config=StudyConfig(n_trials=1, freq="W", seed=3),
     )
     result = optimize_task(task)
     assert isinstance(result, dict)
@@ -207,6 +203,23 @@ def test_default_tune_storage_path_stays_under_results_dir_when_home_unwritable(
     assert storage_path.is_absolute()
     assert storage_path.is_dir()
     assert storage_path.is_relative_to(tmp_path / "results")
+
+
+def test_run_optuna_study_rejects_grace_period_not_less_than_max_t():
+    with pytest.raises(ValueError, match="asha_grace_period must be less than max_t"):
+        run_optuna_study(
+            space=lambda trial: None,
+            trainable=lambda config, **kwargs: None,
+            n_trials=1,
+            max_t=2,
+            seed=None,
+            asha_grace_period=2,
+            cpu_per_trial=1.0,
+            max_concurrent_trials=1,
+            ray_address=None,
+            ray_local_mode=False,
+            tune_storage_path="unused",
+        )
 
 
 def test_asha_prunes_trials_between_origins(monkeypatch, tmp_path):

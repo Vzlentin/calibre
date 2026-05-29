@@ -118,7 +118,7 @@ def test_tune_endpoint_persists_best_candidate(monkeypatch, client) -> None:
 
     assert captured["task"].unique_id == "A"
     assert captured["task"].horizon == 2
-    assert captured["task"].n_trials == 3
+    assert captured["task"].study_config.n_trials == 3
 
 
 def test_get_study_returns_404_for_unknown_id(client) -> None:
