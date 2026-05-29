@@ -26,18 +26,27 @@ from calibre.api.run_store import SqlRunStore
 from calibre.core.forecast_frame import UNIQUE_ID, interval_column_names
 
 
-@pytest.fixture
-def migrated_client(fresh_db_url, monkeypatch):
-    """App booted against a freshly migrated database, with clean stores."""
+@pytest.fixture(params=["memory", "sql"])
+def migrated_client(request, fresh_db_url, tmp_path, monkeypatch):
+    """App booted against a freshly migrated database, with clean stores.
+
+    Parametrized over the lifecycle backend so the full roundtrip runs against
+    both the in-memory store and the SQL store (frames -> parquet on a migrated
+    DB) — the SQL path is the one PR #38 broke.
+    """
     monkeypatch.setenv("CALIBRE_DATABASE_URL", fresh_db_url)
+    if request.param == "sql":
+        monkeypatch.setenv("LIFECYCLE_STORE", "sql")
+        monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
     command.upgrade(Config("alembic.ini"), "head")
 
-    # Reset module globals so the app re-resolves the SQL store / lifecycle
-    # store against this test's database rather than leaking prior state.
+    # Reset module globals so the app re-resolves stores against this test's
+    # database rather than leaking prior state.
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", LifecycleStore())
     monkeypatch.setattr(api_main, "_DB_FACTORY", None)
     monkeypatch.setattr(api_main, "_DB_URL", None)
     monkeypatch.setattr(api_main, "_SQL_STORE", None)
+    monkeypatch.setattr(api_main, "_SQL_LIFECYCLE_STORE", None)
     return TestClient(app)
 
 
@@ -124,6 +133,6 @@ def test_lifecycle_roundtrip_on_migrated_db(migrated_client) -> None:
         },
     )
     assert observe.status_code == 202, observe.text
-    assert api_main._LIFECYCLE_STORE.get_conformal_state(session_id), (
+    assert api_main._lifecycle_store().get_conformal_state(session_id), (
         "observe should persist conformal state"
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import traceback
 from collections.abc import Callable
 
@@ -10,7 +11,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.orm import sessionmaker
 
-from calibre.api.lifecycle import FitRecord, LifecycleStore, TuneRecord
+from calibre.api.lifecycle import FitRecord, LifecycleStore, LifecycleStoreProtocol, TuneRecord
 from calibre.api.run_store import MemoryRunStore, RunStore, SqlRunStore
 from calibre.api.schemas import (
     BacktestRequest,
@@ -46,6 +47,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.postgres import (
     TuningRunRepo,
     database_url,
@@ -70,6 +72,7 @@ _DB_URL: str | None = None
 _DB_FACTORY: sessionmaker | None = None
 _SQL_STORE: SqlRunStore | None = None
 _LIFECYCLE_STORE = LifecycleStore()
+_SQL_LIFECYCLE_STORE: SqlLifecycleStore | None = None
 
 _SEARCH_SPACES: dict[str, Callable[[optuna.Trial], TuningCandidate]] = {}
 _OBJECTIVES: dict[str, TuningObjective] = {}
@@ -86,7 +89,7 @@ def register_tuning_objective(name: str, objective: TuningObjective) -> None:
 
 
 def _db_session_factory() -> sessionmaker | None:
-    global _DB_FACTORY, _DB_URL, _SQL_STORE
+    global _DB_FACTORY, _DB_URL, _SQL_STORE, _SQL_LIFECYCLE_STORE
     url = database_url()
     if not url:
         return None
@@ -94,6 +97,7 @@ def _db_session_factory() -> sessionmaker | None:
         _DB_URL = url
         _DB_FACTORY = make_session_factory(make_engine(url))
         _SQL_STORE = None
+        _SQL_LIFECYCLE_STORE = None
     return _DB_FACTORY
 
 
@@ -105,6 +109,24 @@ def _run_store() -> RunStore:
     if _SQL_STORE is None:
         _SQL_STORE = SqlRunStore(factory)
     return _SQL_STORE
+
+
+def _lifecycle_store() -> LifecycleStoreProtocol:
+    """Select the lifecycle store: SQL when LIFECYCLE_STORE=sql, else in-memory.
+
+    The in-memory store is process-local (lost on restart, invisible across
+    workers); set LIFECYCLE_STORE=sql with CALIBRE_DATABASE_URL for a
+    deployment that survives both.
+    """
+    global _SQL_LIFECYCLE_STORE
+    if os.environ.get("LIFECYCLE_STORE") != "sql":
+        return _LIFECYCLE_STORE
+    factory = _db_session_factory()
+    if factory is None:
+        raise RuntimeError("LIFECYCLE_STORE=sql requires CALIBRE_DATABASE_URL to be set")
+    if _SQL_LIFECYCLE_STORE is None:
+        _SQL_LIFECYCLE_STORE = SqlLifecycleStore(factory)
+    return _SQL_LIFECYCLE_STORE
 
 
 def _json_records(frame: pd.DataFrame) -> list[dict]:
@@ -206,7 +228,7 @@ def _runtime_for_session(
 ) -> SymmetricIntervalRuntime:
     assert record.conformal_config is not None
     runtime_config = _conformal_config_from_dict(record.conformal_config).to_runtime_config()
-    saved = _LIFECYCLE_STORE.get_conformal_state(record.session_id)
+    saved = _lifecycle_store().get_conformal_state(record.session_id)
     if saved:
         return SymmetricIntervalRuntime.from_partition_states(runtime_config, saved)
     return build_symmetric_interval_runtime(runtime_config)
@@ -273,7 +295,7 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
         conformal_config=dict(req.conformal_config) if req.conformal_config else None,
         status=RunStatus.QUEUED,
     )
-    _LIFECYCLE_STORE.put_fit(record)
+    _lifecycle_store().put_fit(record)
     bg.add_task(_run_fit_job, fit_id)
     return FitHandle(
         fit_id=fit_id,
@@ -283,7 +305,7 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
 
 
 def _run_fit_job(fit_id: str) -> None:
-    store = _LIFECYCLE_STORE
+    store = _lifecycle_store()
     record = store.get_fit(fit_id)
     if record is None:
         return
@@ -300,7 +322,7 @@ def _run_fit_job(fit_id: str) -> None:
 
 @app.get("/fits/{fit_id}", response_model=FitHandle)
 def get_fit(fit_id: str) -> FitHandle:
-    record = _LIFECYCLE_STORE.get_fit(fit_id)
+    record = _lifecycle_store().get_fit(fit_id)
     if record is None:
         raise HTTPException(status_code=404, detail="fit not found")
     return FitHandle(
@@ -314,7 +336,7 @@ def get_fit(fit_id: str) -> FitHandle:
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest) -> PredictResponse:
-    record = _LIFECYCLE_STORE.get_fit(req.fit_id)
+    record = _lifecycle_store().get_fit(req.fit_id)
     if record is None:
         raise HTTPException(status_code=404, detail="fit not found")
     if record.status != RunStatus.SUCCEEDED:
@@ -345,13 +367,13 @@ def predict(req: PredictRequest) -> PredictResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))
-    _LIFECYCLE_STORE.update_fit(record.fit_id, last_forecast=forecast_frame)
+    _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
     return PredictResponse(rows=len(forecast_frame), forecast=_json_records(forecast_frame))
 
 
 @app.post("/calibrate", response_model=CalibrateResponse)
 def calibrate(req: CalibrateRequest) -> CalibrateResponse:
-    store = _LIFECYCLE_STORE
+    store = _lifecycle_store()
     record = store.first_fit_for_session(req.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -389,7 +411,7 @@ def order(req: OrderRequest) -> OrderResponse:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=_format_error(exc)) from exc
     if req.session_id is not None:
-        store = _LIFECYCLE_STORE
+        store = _lifecycle_store()
         record = store.first_fit_for_session(req.session_id)
         if record is not None:
             store.update_fit(record.fit_id, last_orders=orders_frame)
@@ -398,7 +420,7 @@ def order(req: OrderRequest) -> OrderResponse:
 
 @app.post("/observe", response_model=ObserveResponse, status_code=202)
 def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
-    store = _LIFECYCLE_STORE
+    store = _lifecycle_store()
     record = store.first_fit_for_session(req.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -409,7 +431,7 @@ def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
 
 
 def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
-    store = _LIFECYCLE_STORE
+    store = _lifecycle_store()
     record = store.first_fit_for_session(session_id)
     if record is None:
         logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
@@ -504,7 +526,7 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         req.conformal_config or {},
     )
     study_id = LifecycleStore.new_study_id()
-    _LIFECYCLE_STORE.put_study(
+    _lifecycle_store().put_study(
         TuneRecord(
             study_id=study_id,
             session_id=session_id,
@@ -572,7 +594,7 @@ def _run_tune_job(
     actuals: pd.DataFrame,
     origins: list[pd.Timestamp],
 ) -> None:
-    store = _LIFECYCLE_STORE
+    store = _lifecycle_store()
     record = store.get_study(study_id)
     if record is None:
         return
@@ -613,7 +635,7 @@ def _run_tune_job(
 
 @app.get("/studies/{study_id}", response_model=TuneStudyResponse)
 def get_study(study_id: str) -> TuneStudyResponse:
-    record = _LIFECYCLE_STORE.get_study(study_id)
+    record = _lifecycle_store().get_study(study_id)
     if record is None:
         raise HTTPException(status_code=404, detail="study not found")
     best_candidates = {
@@ -643,11 +665,14 @@ def _maybe_json_records(frame: pd.DataFrame | None) -> list[dict] | None:
 
 @app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
 def session_state(tenant: str, uid: str) -> SessionStateResponse:
-    store = _LIFECYCLE_STORE
+    store = _lifecycle_store()
     fits = store.fits_for_tenant_uid(tenant, uid)
     if not fits:
         raise HTTPException(status_code=404, detail="session not found")
-    record = fits[-1]
+    # fits_for_tenant_uid returns metadata only; load frames for the selected fit.
+    record = store.get_fit(fits[-1].fit_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="session not found")
     return SessionStateResponse(
         session_id=record.session_id,
         tenant=tenant,

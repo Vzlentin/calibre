@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import os
+import tempfile
 from typing import Protocol
 from uuid import UUID
 
@@ -7,6 +10,28 @@ import pandas as pd
 
 from calibre.execution.io import exists, open_fs, write_parquet
 from calibre.execution.ledger import resolved_ledger_uri
+
+logger = logging.getLogger(__name__)
+
+
+def artifact_base_uri() -> str:
+    """Base URI for lifecycle frame parquet artifacts.
+
+    Reads ``CALIBRE_ARTIFACT_URI``. Falls back to a local directory, which is
+    correct for single-host use only: multi-worker / multi-host deployments
+    must point this at a shared object store (e.g. ``s3://bucket/prefix``) or
+    workers cannot read each other's fit frames.
+    """
+    uri = os.environ.get("CALIBRE_ARTIFACT_URI")
+    if uri:
+        return uri
+    fallback = os.path.join(tempfile.gettempdir(), "calibre-artifacts")
+    logger.warning(
+        "CALIBRE_ARTIFACT_URI is unset; using local path %s. Multi-worker "
+        "deployments must set a shared object store (CALIBRE_ARTIFACT_URI=s3://...).",
+        fallback,
+    )
+    return fallback
 
 
 class _Pointer(Protocol):
