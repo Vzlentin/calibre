@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 
@@ -53,7 +53,7 @@ def _clip_alpha(alpha, bounds) -> np.ndarray | float:
 def _validate_quantile_rule(quantile_rule: str) -> Literal["conformal", "higher"]:
     if quantile_rule not in {"conformal", "higher"}:
         raise ValueError("quantile_rule must be 'conformal' or 'higher'")
-    return quantile_rule  # type: ignore[return-value]
+    return cast(Literal["conformal", "higher"], quantile_rule)
 
 
 def _finite_sample_radius(

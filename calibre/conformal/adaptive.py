@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 
@@ -148,23 +148,27 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         self._horizon = int(horizon)
         self._bounds = _validate_bounds(alpha_bounds)
         self._quantile_rule = _validate_quantile_rule(quantile_rule)
-        self._target_alpha: np.ndarray = _clip_alpha(
-            _as_1d_array(alpha, "alpha", self._horizon), self._bounds
-        )  # type: ignore[assignment]
+        self._target_alpha: np.ndarray = cast(
+            np.ndarray,
+            _clip_alpha(_as_1d_array(alpha, "alpha", self._horizon), self._bounds),
+        )
         self._gamma: np.ndarray = _as_1d_array(gamma, "gamma", self._horizon)
         if np.any(self._gamma < 0):
             raise ValueError("gamma must be non-negative")
-        self._alpha: np.ndarray = _clip_alpha(
-            self._target_alpha
-            if initial_alpha is None
-            else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
-            self._bounds,
-        )  # type: ignore[assignment]
+        self._alpha: np.ndarray = cast(
+            np.ndarray,
+            _clip_alpha(
+                self._target_alpha
+                if initial_alpha is None
+                else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
+                self._bounds,
+            ),
+        )
         self._score = score
         self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
         self._score_history = self._normalize_score_histories(initial_scores)
         self._error_history: list[np.ndarray] = []
-        self._alpha_history: list[np.ndarray] = [self._alpha.copy()]  # type: ignore[union-attr]
+        self._alpha_history: list[np.ndarray] = [self._alpha.copy()]
         self._radius_history: list[np.ndarray] = []
         self._pending_predictions: dict[int, MultiStepIntervalPrediction] = {}
         self._issued_count = 0

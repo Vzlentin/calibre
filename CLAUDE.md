@@ -33,7 +33,7 @@ Entry points: CLI `calibre.cli.main:app`, API `calibre.api.main:app`.
 ## Commands
 
 Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
-`ruff`, or `mypy` directly.
+`ruff`, or `ty` directly.
 
 | Task                   | Command                                                   |
 | ---------------------- | --------------------------------------------------------- |
@@ -42,7 +42,7 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
 | Run single test | `uv run pytest path/to/test_file.py::test_name` |
 | Lint            | `uv run ruff check .`                           |
 | Format          | `uv run ruff format .`                          |
-| Type check      | `uv run mypy calibre/`                          |
+| Type check      | `uv run ty check calibre/`                      |
 | Run a backtest  | `uv run calibre run --config <cfg.yaml>` (also `validate`, `health`, `run-sweep`) |
 | Serve API       | `uv run uvicorn calibre.api.main:app`           |
 

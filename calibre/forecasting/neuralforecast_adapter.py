@@ -10,8 +10,8 @@ try:
 
     _NEURALFORECAST_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    neuralforecast = None  # type: ignore[assignment]
-    NeuralForecast = None  # type: ignore[misc, assignment]
+    neuralforecast = None
+    NeuralForecast = None
     _NEURALFORECAST_AVAILABLE = False
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns

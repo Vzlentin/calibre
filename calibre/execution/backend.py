@@ -486,8 +486,9 @@ class BackendEngine:
             origin_preds = conformal_runtime.apply(origin_preds)
 
         if self.order_config is not None and not origin_preds.empty:
+            assert order_ledger is not None  # guaranteed when order_config is set
             order_result = apply_order_policy(origin_preds, self.order_config)
-            order_ledger.append(order_result)  # type: ignore[union-attr]
+            order_ledger.append(order_result)
 
         if not origin_preds.empty:
             try:

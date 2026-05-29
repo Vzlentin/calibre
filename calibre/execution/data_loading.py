@@ -24,7 +24,9 @@ def _detect_date_columns(columns: list[str]) -> list[str]:
 
 def _make_unique_id(df: pd.DataFrame) -> pd.Series:
     """Return a Series of unique_id strings formatted as '{Store}_{Product}'."""
-    return df["Store"].astype(int).astype(str) + "_" + df["Product"].astype(int).astype(str)
+    store = df["Store"].astype(int).astype(str)
+    product = df["Product"].astype(int).astype(str)
+    return store.str.cat(product, sep="_")
 
 
 def melt_wide_sales(path: str | Path) -> pd.DataFrame:
