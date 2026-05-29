@@ -25,7 +25,7 @@ from calibre.execution.backend import BackendEngine, ConformalOptions, Execution
 from calibre.execution.io import join_uri
 from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
 from calibre.execution.threading import cap_threaded_config, thread_budget
-from calibre.tuning.task import TuningCandidate, TuningTask
+from calibre.tuning.task import PanelTuningTask, TuningCandidate, TuningTask
 
 _OBJECTIVE_METRIC = "objective"
 _ORIGIN_INDEX = "origin_index"
@@ -39,6 +39,12 @@ class _ConformalRuntimeSnapshot:
     state: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class StudyOutcome:
+    best_config: dict[str, Any]
+    results: Any
+
+
 def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
     return optuna.samplers.TPESampler(seed=seed)
 
@@ -47,10 +53,13 @@ def _available_cpus() -> int:
     return max(1, os.cpu_count() or 1)
 
 
-def _resolved_max_concurrent_trials(task: TuningTask) -> int:
-    if task.max_concurrent_trials is not None:
-        return max(1, int(task.max_concurrent_trials))
-    cpu_per_trial = max(float(task.cpu_per_trial), 1e-9)
+def _resolve_max_concurrent_trials(
+    max_concurrent_trials: int | None,
+    cpu_per_trial: float,
+) -> int:
+    if max_concurrent_trials is not None:
+        return max(1, int(max_concurrent_trials))
+    cpu_per_trial = max(float(cpu_per_trial), 1e-9)
     return max(1, int(_available_cpus() // cpu_per_trial))
 
 
@@ -64,16 +73,21 @@ def _normalize_tune_storage_path(path: str) -> str:
     return str(candidate)
 
 
-def _resolve_tune_storage_path(task: TuningTask) -> str:
-    if task.tune_storage_path is not None:
-        return _normalize_tune_storage_path(task.tune_storage_path)
+def _resolve_tune_storage_path_values(
+    tune_storage_path: str | None,
+    results_dir: str | None,
+) -> str:
+    if tune_storage_path is not None:
+        return _normalize_tune_storage_path(tune_storage_path)
     if env_storage_path := os.environ.get("RAYTUNE_RESULTS_DIR"):
         return _normalize_tune_storage_path(env_storage_path)
-    if task.results_dir is not None:
-        return _normalize_tune_storage_path(
-            join_uri(task.results_dir, _DEFAULT_TUNE_RESULTS_SUBDIR)
-        )
+    if results_dir is not None:
+        return _normalize_tune_storage_path(join_uri(results_dir, _DEFAULT_TUNE_RESULTS_SUBDIR))
     return tempfile.mkdtemp(prefix="calibre-tune-")
+
+
+def _resolve_tune_storage_path(task: TuningTask | PanelTuningTask) -> str:
+    return _resolve_tune_storage_path_values(task.tune_storage_path, task.results_dir)
 
 
 @contextmanager
@@ -117,7 +131,7 @@ def _history_with_uid(task: TuningTask) -> pd.DataFrame:
     return history
 
 
-def _build_mlflow_callbacks(task: TuningTask) -> list[Any]:
+def _build_mlflow_callbacks(task: TuningTask | PanelTuningTask) -> list[Any]:
     if task.mlflow_tracking_uri is None and task.mlflow_experiment_name is None:
         return []
     from ray.air.integrations.mlflow import MLflowLoggerCallback
@@ -190,14 +204,19 @@ def _objective_contribution_with(
     return float(objective.evaluate(resolved, resolved[Y]))
 
 
-def _best_result_config(results: Any) -> dict[str, Any]:
+def _best_result_config(
+    results: Any,
+    *,
+    metric: str = _OBJECTIVE_METRIC,
+    mode: str = "min",
+) -> dict[str, Any]:
     valid_results = [
         result
         for result in results
         if result.error is None
         and result.metrics is not None
-        and _OBJECTIVE_METRIC in result.metrics
-        and isfinite(float(result.metrics[_OBJECTIVE_METRIC]))
+        and metric in result.metrics
+        and isfinite(float(result.metrics[metric]))
     ]
     if not valid_results:
         failed = sum(1 for result in results if result.error is not None)
@@ -206,11 +225,114 @@ def _best_result_config(results: Any) -> dict[str, Any]:
             f"({failed} failed trial(s)). Check trial logs and model/search-space settings."
         )
     best = results.get_best_result(
-        metric=_OBJECTIVE_METRIC,
-        mode="min",
+        metric=metric,
+        mode=mode,
         filter_nan_and_inf=True,
     )
     return dict(best.config)
+
+
+def run_optuna_study(
+    *,
+    space: Callable[[optuna.Trial], None],
+    trainable: Callable[..., None],
+    n_trials: int,
+    max_t: int,
+    seed: int | None,
+    asha_grace_period: int,
+    cpu_per_trial: float,
+    max_concurrent_trials: int,
+    ray_address: str | None,
+    ray_local_mode: bool,
+    tune_storage_path: str,
+    metric: str = _OBJECTIVE_METRIC,
+    mode: str = "min",
+    time_attr: str = _ORIGIN_INDEX,
+    experiment_name: str | None = None,
+    callbacks: list[Any] | None = None,
+    trial_state: Any | None = None,
+) -> StudyOutcome:
+    """Run a Ray Tune/Optuna study for any Tune-compatible trainable."""
+    if n_trials < 1:
+        raise ValueError("n_trials must be at least 1")
+    if max_t < 1:
+        raise ValueError("max_t must be at least 1")
+    if asha_grace_period < 1:
+        raise ValueError("asha_grace_period must be at least 1")
+    if cpu_per_trial <= 0:
+        raise ValueError("cpu_per_trial must be positive")
+
+    prepare_ray_environment()
+
+    from ray import tune
+    from ray.tune.schedulers import ASHAScheduler
+    from ray.tune.search.optuna import OptunaSearch
+
+    search_alg = OptunaSearch(
+        space=space,
+        metric=metric,
+        mode=mode,
+        sampler=create_tpe_sampler(seed),
+    )
+    scheduler = ASHAScheduler(
+        metric=metric,
+        mode=mode,
+        time_attr=time_attr,
+        max_t=max_t,
+        grace_period=asha_grace_period,
+    )
+
+    ray_runtime = acquire_ray_runtime(
+        address=ray_address,
+        local_mode=ray_local_mode,
+    )
+    previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
+    os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
+    previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
+    os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"
+    try:
+        state_ref = ray_runtime.ray.put(trial_state) if trial_state is not None else None
+        trainable_fn = (
+            tune.with_parameters(trainable, state_ref=state_ref)
+            if state_ref is not None
+            else trainable
+        )
+        trainable_with_resources = tune.with_resources(
+            trainable_fn,
+            resources={"cpu": float(cpu_per_trial)},
+        )
+        run_config_kwargs: dict[str, Any] = {
+            "callbacks": callbacks or [],
+            "storage_path": tune_storage_path,
+        }
+        if experiment_name is not None:
+            run_config_kwargs["name"] = experiment_name
+
+        with restore_cwd():
+            tuner = tune.Tuner(
+                trainable_with_resources,
+                tune_config=tune.TuneConfig(
+                    search_alg=search_alg,
+                    scheduler=scheduler,
+                    num_samples=n_trials,
+                    max_concurrent_trials=max(1, int(max_concurrent_trials)),
+                ),
+                run_config=tune.RunConfig(**run_config_kwargs),
+            )
+            results = tuner.fit()
+    finally:
+        if previous_chdir is None:
+            os.environ.pop("RAY_CHDIR_TO_TRIAL_DIR", None)
+        else:
+            os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = previous_chdir
+        if previous_auto_loggers is None:
+            os.environ.pop("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", None)
+        else:
+            os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
+        ray_runtime.release()
+    return StudyOutcome(
+        best_config=_best_result_config(results, metric=metric, mode=mode), results=results
+    )
 
 
 def _validate_task(task: TuningTask) -> list[pd.Timestamp]:
@@ -222,6 +344,22 @@ def _validate_task(task: TuningTask) -> list[pd.Timestamp]:
         raise ValueError("TuningTask.asha_grace_period must be less than the number of origins")
     if task.cpu_per_trial <= 0:
         raise ValueError("TuningTask.cpu_per_trial must be positive")
+    return [pd.Timestamp(origin) for origin in task.origins]
+
+
+def _validate_panel_task(task: PanelTuningTask) -> list[pd.Timestamp]:
+    if not task.origins:
+        raise ValueError("PanelTuningTask.origins must contain at least one origin")
+    if task.asha_grace_period < 1:
+        raise ValueError("PanelTuningTask.asha_grace_period must be at least 1")
+    if len(task.origins) > 1 and task.asha_grace_period >= len(task.origins):
+        raise ValueError(
+            "PanelTuningTask.asha_grace_period must be less than the number of origins"
+        )
+    if task.cpu_per_trial <= 0:
+        raise ValueError("PanelTuningTask.cpu_per_trial must be positive")
+    if task.base_model_config.get("scope") != "global":
+        raise ValueError("PanelTuningTask.base_model_config must set scope='global'")
     return [pd.Timestamp(origin) for origin in task.origins]
 
 
@@ -363,6 +501,83 @@ def optimize_task(task: TuningTask) -> dict:
     return dict(optimize_task_candidate(task).model_config)
 
 
+def optimize_panel_task(task: PanelTuningTask) -> dict:
+    """Run panel/global HPO and return the best model_config dict."""
+    origins = _validate_panel_task(task)
+    history = task.history.copy()
+    max_t = len(origins)
+    max_concurrent_trials = _resolve_max_concurrent_trials(
+        task.max_concurrent_trials,
+        task.cpu_per_trial,
+    )
+
+    def _trainable(config: dict[str, Any], *, state_ref: Any | None = None) -> None:
+        del state_ref
+        from ray import tune
+
+        candidate = _resolve_candidate(
+            task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
+        )
+        candidate_config = cap_threaded_config(
+            {**task.base_model_config, **candidate.model_config, "freq": task.freq},
+            task.cpu_per_trial,
+        )
+        forecast_task = ForecastTask(
+            history=history,
+            horizon=task.horizon,
+            model_config=candidate_config,
+        )
+        objective = _apply_ordering_overrides(task.objective, candidate.ordering_config)
+        engine = BackendEngine(
+            execution=ExecutionOptions(
+                freq=task.freq,
+                backend="local",
+                max_concurrency=task.max_uid_concurrency,
+            )
+        )
+        try:
+            total_cost = 0.0
+            seen_keys: set[tuple[Any, ...]] = set()
+            with _trial_thread_env(task.cpu_per_trial):
+                for origin_idx, result in enumerate(
+                    engine.iter_origins([forecast_task], task.actuals, origins),
+                    start=1,
+                ):
+                    contribution = _objective_contribution_with(
+                        objective,
+                        result.ledger.to_df(),
+                        seen_keys,
+                    )
+                    if not isfinite(contribution):
+                        total_cost = float("inf")
+                        tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
+                        break
+                    total_cost += contribution
+                    tune.report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
+        finally:
+            engine.close()
+
+    outcome = run_optuna_study(
+        space=_OptunaSearchSpaceAdapter(task.search_space),
+        trainable=_trainable,
+        n_trials=task.n_trials,
+        max_t=max_t,
+        seed=task.seed,
+        asha_grace_period=task.asha_grace_period,
+        cpu_per_trial=task.cpu_per_trial,
+        max_concurrent_trials=max_concurrent_trials,
+        ray_address=task.ray_address,
+        ray_local_mode=task.ray_local_mode,
+        tune_storage_path=_resolve_tune_storage_path(task),
+        experiment_name=task.tune_experiment_name,
+        callbacks=_build_mlflow_callbacks(task),
+    )
+    candidate = _resolve_candidate(
+        task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(outcome.best_config))))
+    )
+    return {**task.base_model_config, **dict(candidate.model_config)}
+
+
 def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
     """Run Ray Tune for ``task`` and return the best trial's Optuna params dict."""
     origins = _validate_task(task)
@@ -370,31 +585,16 @@ def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
     conformal_config = runtime_snapshot.config if runtime_snapshot is not None else None
     worker_task = replace(task, conformal_runtime_factory=None)
 
-    prepare_ray_environment()
-
-    from ray import tune
-    from ray.tune.schedulers import ASHAScheduler
-    from ray.tune.search.optuna import OptunaSearch
-
     history = _history_with_uid(worker_task)
     max_t = len(origins)
-    max_concurrent_trials = _resolved_max_concurrent_trials(worker_task)
-
-    search_alg = OptunaSearch(
-        space=_OptunaSearchSpaceAdapter(worker_task.search_space),
-        metric=_OBJECTIVE_METRIC,
-        mode="min",
-        sampler=create_tpe_sampler(worker_task.seed),
-    )
-    scheduler = ASHAScheduler(
-        metric=_OBJECTIVE_METRIC,
-        mode="min",
-        time_attr=_ORIGIN_INDEX,
-        max_t=max_t,
-        grace_period=worker_task.asha_grace_period,
+    max_concurrent_trials = _resolve_max_concurrent_trials(
+        worker_task.max_concurrent_trials,
+        worker_task.cpu_per_trial,
     )
 
     def _trainable(config: dict[str, Any], *, state_ref: Any | None = None) -> None:
+        from ray import tune
+
         candidate = _resolve_candidate(
             worker_task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(config))))
         )
@@ -453,54 +653,20 @@ def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
         finally:
             engine.close()
 
-    ray_runtime = acquire_ray_runtime(
-        address=worker_task.ray_address,
-        local_mode=worker_task.ray_local_mode,
+    outcome = run_optuna_study(
+        space=_OptunaSearchSpaceAdapter(worker_task.search_space),
+        trainable=_trainable,
+        n_trials=worker_task.n_trials,
+        max_t=max_t,
+        seed=worker_task.seed,
+        asha_grace_period=worker_task.asha_grace_period,
+        cpu_per_trial=worker_task.cpu_per_trial,
+        max_concurrent_trials=max_concurrent_trials,
+        ray_address=worker_task.ray_address,
+        ray_local_mode=worker_task.ray_local_mode,
+        tune_storage_path=_resolve_tune_storage_path(worker_task),
+        experiment_name=worker_task.tune_experiment_name,
+        callbacks=_build_mlflow_callbacks(worker_task),
+        trial_state=runtime_snapshot.state if runtime_snapshot is not None else None,
     )
-    state_ref = (
-        ray_runtime.ray.put(runtime_snapshot.state) if runtime_snapshot is not None else None
-    )
-    trainable_fn = (
-        tune.with_parameters(_trainable, state_ref=state_ref)
-        if state_ref is not None
-        else _trainable
-    )
-    trainable = tune.with_resources(
-        trainable_fn,
-        resources={"cpu": float(worker_task.cpu_per_trial)},
-    )
-    run_config_kwargs: dict[str, Any] = {
-        "callbacks": _build_mlflow_callbacks(worker_task),
-        "storage_path": _resolve_tune_storage_path(worker_task),
-    }
-    if worker_task.tune_experiment_name is not None:
-        run_config_kwargs["name"] = worker_task.tune_experiment_name
-
-    previous_auto_loggers = os.environ.get("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS")
-    os.environ.setdefault("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", "1")
-    previous_chdir = os.environ.get("RAY_CHDIR_TO_TRIAL_DIR")
-    os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"
-    try:
-        with restore_cwd():
-            tuner = tune.Tuner(
-                trainable,
-                tune_config=tune.TuneConfig(
-                    search_alg=search_alg,
-                    scheduler=scheduler,
-                    num_samples=worker_task.n_trials,
-                    max_concurrent_trials=max_concurrent_trials,
-                ),
-                run_config=tune.RunConfig(**run_config_kwargs),
-            )
-            results = tuner.fit()
-    finally:
-        if previous_chdir is None:
-            os.environ.pop("RAY_CHDIR_TO_TRIAL_DIR", None)
-        else:
-            os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = previous_chdir
-        if previous_auto_loggers is None:
-            os.environ.pop("TUNE_DISABLE_AUTO_CALLBACK_LOGGERS", None)
-        else:
-            os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
-        ray_runtime.release()
-    return _best_result_config(results)
+    return outcome.best_config

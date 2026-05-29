@@ -55,3 +55,31 @@ class TuningTask:
     mlflow_tracking_uri: str | None = None
     mlflow_experiment_name: str | None = None
     mlflow_parent_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PanelTuningTask:
+    """Panel/global hyperparameter optimization task."""
+
+    history: pd.DataFrame
+    horizon: int
+    base_model_config: dict
+    search_space: Callable[[optuna.Trial], TuningCandidate]
+    actuals: pd.DataFrame
+    origins: list[pd.Timestamp]
+    objective: TuningObjective
+    n_trials: int = 50
+    freq: str = "W"
+    seed: int | None = None
+    asha_grace_period: int = 1
+    cpu_per_trial: float = 1.0
+    max_concurrent_trials: int | None = None
+    max_uid_concurrency: int | None = None
+    ray_address: str | None = None
+    ray_local_mode: bool = False
+    tune_storage_path: str | None = None
+    results_dir: str | None = "results"
+    tune_experiment_name: str | None = None
+    mlflow_tracking_uri: str | None = None
+    mlflow_experiment_name: str | None = None
+    mlflow_parent_run_id: str | None = None

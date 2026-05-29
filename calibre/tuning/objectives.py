@@ -7,9 +7,17 @@ from typing import Literal, Protocol
 import numpy as np
 import pandas as pd
 
-from calibre.core.forecast_frame import CONFORMAL_MODE, FORECAST_ORIGIN, UNIQUE_ID, Y_HAT, H
+from calibre.core.forecast_frame import (
+    CONFORMAL_MODE,
+    FORECAST_ORIGIN,
+    UNIQUE_ID,
+    Y_HAT,
+    H,
+    Y,
+    quantile_column,
+)
 from calibre.core.order_types import INVENTORY_POSITION, REORDER_POINT, CostStruct
-from calibre.evaluation.point_metrics import METRICS
+from calibre.evaluation.point_metrics import METRICS, pinball_linear
 from calibre.evaluation.regret import compute_regret
 from calibre.ordering.policy_protocols import DecisionRule, OrderingArithmetic
 
@@ -41,6 +49,44 @@ class Accuracy:
             return float("inf")
         metric_fn = _metric_callable(self.metric)
         return float(metric_fn(actual_arr[valid], pred_arr[valid]))
+
+
+@dataclass(frozen=True, slots=True)
+class CumulativePinball:
+    quantile: float
+    tau: float
+
+    def evaluate(self, frame: pd.DataFrame, actuals: pd.Series) -> float:
+        qcol = quantile_column(self.quantile)
+        if frame.empty or qcol not in frame.columns:
+            return float("inf")
+        missing = [col for col in (UNIQUE_ID, FORECAST_ORIGIN) if col not in frame.columns]
+        if missing:
+            raise ValueError(f"CumulativePinball frame missing window key columns: {missing}")
+
+        actual_values = actuals.to_numpy(dtype=float)
+        if len(actual_values) != len(frame):
+            raise ValueError("actuals length must match frame length")
+
+        df = frame[[UNIQUE_ID, FORECAST_ORIGIN, qcol]].copy()
+        df[Y] = actual_values
+        valid = np.isfinite(df[Y].to_numpy(dtype=float)) & np.isfinite(
+            df[qcol].to_numpy(dtype=float)
+        )
+        df = df.loc[valid]
+        if df.empty:
+            return float("inf")
+
+        sums = df.groupby([UNIQUE_ID, FORECAST_ORIGIN], sort=False)[[Y, qcol]].sum()
+        if sums.empty:
+            return float("inf")
+        return float(
+            pinball_linear(
+                sums[Y].to_numpy(dtype=float),
+                sums[qcol].to_numpy(dtype=float),
+                tau=self.tau,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
