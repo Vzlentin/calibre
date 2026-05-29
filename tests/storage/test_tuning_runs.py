@@ -18,12 +18,14 @@ def test_tuning_run_upsert_round_trip(tmp_path) -> None:
         TuningRunRepo(session).upsert(
             "session_a",
             "sku_1",
+            config_signature="sig_a",
             candidate={"model_config": {"season_length": 13}},
             score=4.2,
         )
         TuningRunRepo(session).upsert(
             "session_a",
             "sku_2",
+            config_signature="sig_a",
             candidate={"model_config": {"season_length": 26}},
             score=3.1,
         )
@@ -46,6 +48,7 @@ def test_tuning_run_upsert_overrides_existing(tmp_path) -> None:
         TuningRunRepo(session).upsert(
             "session_b",
             "sku_1",
+            config_signature="sig_b",
             candidate={"model_config": {"season_length": 13}},
             score=4.2,
         )
@@ -53,6 +56,7 @@ def test_tuning_run_upsert_overrides_existing(tmp_path) -> None:
         TuningRunRepo(session).upsert(
             "session_b",
             "sku_1",
+            config_signature="sig_b",
             candidate={"model_config": {"season_length": 52}},
             score=2.0,
         )
@@ -73,13 +77,17 @@ def test_tuning_run_finished_at_updates(tmp_path) -> None:
         return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
 
     with session_scope(factory) as session:
-        TuningRunRepo(session).upsert("session_c", "sku_1", candidate={"k": "v"}, score=None)
+        TuningRunRepo(session).upsert(
+            "session_c", "sku_1", config_signature="sig_c", candidate={"k": "v"}, score=None
+        )
         row = TuningRunRepo(session).get("session_c", "sku_1")
         assert row is not None
         first_finished = _naive(row.finished_at)
 
     with session_scope(factory) as session:
-        TuningRunRepo(session).upsert("session_c", "sku_1", candidate={"k": "v2"}, score=None)
+        TuningRunRepo(session).upsert(
+            "session_c", "sku_1", config_signature="sig_c", candidate={"k": "v2"}, score=None
+        )
         row = TuningRunRepo(session).get("session_c", "sku_1")
         assert row is not None
         second_finished = _naive(row.finished_at)

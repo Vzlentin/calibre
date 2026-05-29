@@ -84,6 +84,26 @@ def test_tune_rejects_unknown_objective(client) -> None:
     assert "objective_id" in response.json()["detail"]
 
 
+def test_tune_rejects_global_hpo_with_local_model(client) -> None:
+    register_tuning_search_space("seasonal", _seasonal_search_space)
+    register_tuning_objective("accuracy", Accuracy(metric=smape))
+    payload = _tune_payload()
+    payload["hpo_scope"] = "global"
+    response = client.post("/tune", json=payload)
+    assert response.status_code == 422
+    assert "scope" in response.json()["detail"]
+
+
+def test_tune_rejects_local_hpo_with_global_model(client) -> None:
+    register_tuning_search_space("seasonal", _seasonal_search_space)
+    register_tuning_objective("accuracy", Accuracy(metric=smape))
+    payload = _tune_payload()
+    payload["base_model_config"] = {"backend": "stub", "model": "stub_model", "scope": "global"}
+    response = client.post("/tune", json=payload)
+    assert response.status_code == 422
+    assert "scope" in response.json()["detail"]
+
+
 def test_tune_endpoint_persists_best_candidate(monkeypatch, client) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))

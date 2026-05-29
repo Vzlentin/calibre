@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import logging
 import os
 import traceback
@@ -47,9 +50,11 @@ from calibre.execution.backend import (
 )
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.execution.fit_service import validate_fit_config
+from calibre.forecasting import get_scope
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.postgres import (
+    GlobalTuningRunRepo,
     TuningRunRepo,
     database_url,
     make_engine,
@@ -58,10 +63,12 @@ from calibre.storage.postgres import (
 )
 from calibre.storage.session import derive_session_id
 from calibre.tuning import (
+    PanelTuningTask,
     StudyConfig,
     TuningCandidate,
     TuningObjective,
     TuningTask,
+    optimize_panel_task_candidate,
     optimize_task_candidate,
 )
 
@@ -522,6 +529,18 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         )
     if req.objective_id not in _OBJECTIVES:
         raise HTTPException(status_code=400, detail=f"unknown objective_id: {req.objective_id}")
+    try:
+        model_scope = get_scope(req.base_model_config)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if req.hpo_scope != model_scope:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"hpo_scope={req.hpo_scope!r} does not match "
+                f"base_model_config scope={model_scope!r}"
+            ),
+        )
     history = _frame_from_records(req.history)
     if UNIQUE_ID not in history.columns or DS not in history.columns:
         raise HTTPException(status_code=400, detail="history must include unique_id and ds")
@@ -566,16 +585,8 @@ def _candidate_to_payload(candidate: TuningCandidate) -> dict[str, dict]:
     }
 
 
-def _load_existing_tuning_run(
-    factory: sessionmaker | None, session_id: str, unique_id: str
-) -> dict[str, dict] | None:
-    if factory is None:
-        return None
-    with session_scope(factory) as session:
-        row = TuningRunRepo(session).get(session_id, unique_id)
-        if row is None:
-            return None
-        candidate = dict(row.candidate)
+def _stored_candidate_payload(candidate: dict) -> dict[str, dict]:
+    """Normalise a persisted ``candidate`` blob into the uniform payload shape."""
     return {
         "model_config": dict(candidate.get("model_config", {})),
         "conformal_config": dict(candidate.get("conformal_config", {})),
@@ -583,10 +594,52 @@ def _load_existing_tuning_run(
     }
 
 
+def _tuning_signature(req: TuneRequest, origins: list[pd.Timestamp]) -> str:
+    """Hash the tuning inputs not already encoded in ``session_id``.
+
+    ``session_id`` covers tenant/sku_set/base_model_config/conformal_config, so
+    a cached result is only reused when the remaining inputs (search space,
+    objective, n_trials, horizon, freq, origins) also match. Both local and
+    global scope share this signature so their resume semantics cannot diverge.
+    """
+    payload = json.dumps(
+        {
+            "search_space_id": req.search_space_id,
+            "objective_id": req.objective_id,
+            "n_trials": int(req.n_trials),
+            "horizon": int(req.horizon),
+            "freq": req.freq,
+            "origins": [pd.Timestamp(origin).isoformat() for origin in origins],
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _load_existing_local_runs(
+    factory: sessionmaker | None, session_id: str, signature: str
+) -> dict[str, dict[str, dict]]:
+    """Return cached per-uid candidates for this session in a single query.
+
+    Rows tuned under a different signature (changed search space, n_trials,
+    objective, horizon, or origins) are skipped, so a stale candidate is never
+    resumed when the tuning inputs change.
+    """
+    if factory is None:
+        return {}
+    with session_scope(factory) as session:
+        return {
+            row.unique_id: _stored_candidate_payload(dict(row.candidate))
+            for row in TuningRunRepo(session).list_for_session(session_id)
+            if row.config_signature == signature
+        }
+
+
 def _persist_tuning_run(
     factory: sessionmaker | None,
     session_id: str,
     unique_id: str,
+    signature: str,
     payload: dict[str, dict],
 ) -> None:
     if factory is None:
@@ -595,9 +648,108 @@ def _persist_tuning_run(
         TuningRunRepo(session).upsert(
             session_id,
             unique_id,
+            config_signature=signature,
             candidate=payload,
             score=None,
         )
+
+
+def _load_existing_global_tuning_run(
+    factory: sessionmaker | None, session_id: str, signature: str
+) -> dict[str, dict] | None:
+    if factory is None:
+        return None
+    with session_scope(factory) as session:
+        row = GlobalTuningRunRepo(session).get(session_id)
+        if row is None or row.config_signature != signature:
+            return None
+        return _stored_candidate_payload(dict(row.candidate))
+
+
+def _persist_global_tuning_run(
+    factory: sessionmaker | None,
+    session_id: str,
+    signature: str,
+    payload: dict[str, dict],
+) -> None:
+    if factory is None:
+        return
+    with session_scope(factory) as session:
+        GlobalTuningRunRepo(session).upsert(
+            session_id,
+            config_signature=signature,
+            candidate=payload,
+            score=None,
+        )
+
+
+def _run_local_hpo(
+    req: TuneRequest,
+    history: pd.DataFrame,
+    actuals: pd.DataFrame,
+    origins: list[pd.Timestamp],
+    factory: sessionmaker | None,
+    session_id: str,
+) -> dict[str, dict[str, dict]]:
+    """Per-series HPO: one candidate per uid, with signature-checked per-uid resume."""
+    signature = _tuning_signature(req, origins)
+    cached = _load_existing_local_runs(factory, session_id, signature)
+    candidates: dict[str, dict[str, dict]] = {}
+    for uid in req.sku_set:
+        existing = cached.get(uid)
+        if existing is not None:
+            candidates[uid] = existing
+            continue
+        task = TuningTask(
+            unique_id=uid,
+            history=_filter_uid(history, uid),
+            horizon=int(req.horizon),
+            base_model_config=dict(req.base_model_config),
+            search_space=_SEARCH_SPACES[req.search_space_id],
+            actuals=_filter_uid(actuals, uid),
+            origins=origins,
+            objective=_OBJECTIVES[req.objective_id],
+            study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
+        )
+        payload = _candidate_to_payload(optimize_task_candidate(task))
+        _persist_tuning_run(factory, session_id, uid, signature, payload)
+        candidates[uid] = payload
+    return candidates
+
+
+def _run_global_hpo(
+    req: TuneRequest,
+    history: pd.DataFrame,
+    actuals: pd.DataFrame,
+    origins: list[pd.Timestamp],
+    factory: sessionmaker | None,
+    session_id: str,
+) -> dict[str, dict[str, dict]]:
+    """Panel/global HPO: one candidate shared across all uids, broadcast on return.
+
+    The single result is the authoritative row in ``global_tuning_runs`` (keyed
+    by session + config signature for cross-submission resume); the broadcast
+    keeps the study response a uniform ``dict[uid -> candidate]``.
+    """
+    signature = _tuning_signature(req, origins)
+    payload = _load_existing_global_tuning_run(factory, session_id, signature)
+    if payload is None:
+        task = PanelTuningTask(
+            history=history,
+            horizon=int(req.horizon),
+            base_model_config=dict(req.base_model_config),
+            search_space=_SEARCH_SPACES[req.search_space_id],
+            actuals=actuals,
+            origins=origins,
+            objective=_OBJECTIVES[req.objective_id],
+            study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
+        )
+        payload = _candidate_to_payload(optimize_panel_task_candidate(task))
+        _persist_global_tuning_run(factory, session_id, signature, payload)
+    return {uid: copy.deepcopy(payload) for uid in req.sku_set}
+
+
+_HPO_RUNNERS = {"local": _run_local_hpo, "global": _run_global_hpo}
 
 
 def _run_tune_job(
@@ -614,28 +766,9 @@ def _run_tune_job(
     store.update_study(study_id, status=RunStatus.RUNNING)
     session_id = record.session_id
     factory = _db_session_factory()
-    candidates: dict[str, dict[str, dict]] = {}
+    runner = _HPO_RUNNERS[req.hpo_scope]
     try:
-        for uid in req.sku_set:
-            existing = _load_existing_tuning_run(factory, session_id, uid)
-            if existing is not None:
-                candidates[uid] = existing
-                continue
-            task = TuningTask(
-                unique_id=uid,
-                history=_filter_uid(history, uid),
-                horizon=int(req.horizon),
-                base_model_config=dict(req.base_model_config),
-                search_space=_SEARCH_SPACES[req.search_space_id],
-                actuals=_filter_uid(actuals, uid),
-                origins=origins,
-                objective=_OBJECTIVES[req.objective_id],
-                study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
-            )
-            candidate = optimize_task_candidate(task)
-            payload = _candidate_to_payload(candidate)
-            _persist_tuning_run(factory, session_id, uid, payload)
-            candidates[uid] = payload
+        candidates = runner(req, history, actuals, origins, factory, session_id)
         store.update_study(
             study_id,
             status=RunStatus.SUCCEEDED,

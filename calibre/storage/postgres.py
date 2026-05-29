@@ -26,6 +26,7 @@ from calibre.core.run_status import RunStatus
 from calibre.storage.models import (
     ConformalState,
     ForecastPointer,
+    GlobalTuningRun,
     PendingObservation,
     Run,
     TuningRun,
@@ -286,6 +287,7 @@ class TuningRunRepo:
         session_id: str,
         unique_id: str,
         *,
+        config_signature: str,
         candidate: dict,
         score: float | None,
     ) -> None:
@@ -295,12 +297,47 @@ class TuningRunRepo:
                 TuningRun(
                     session_id=session_id,
                     unique_id=unique_id,
+                    config_signature=config_signature,
                     candidate=dict(candidate),
                     score=score,
                     finished_at=datetime.now(UTC),
                 )
             )
         else:
+            row.config_signature = config_signature
+            row.candidate = dict(candidate)
+            row.score = score
+            row.finished_at = datetime.now(UTC)
+
+
+class GlobalTuningRunRepo:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get(self, session_id: str) -> GlobalTuningRun | None:
+        return self.session.get(GlobalTuningRun, session_id)
+
+    def upsert(
+        self,
+        session_id: str,
+        *,
+        config_signature: str,
+        candidate: dict,
+        score: float | None,
+    ) -> None:
+        row = self.session.get(GlobalTuningRun, session_id)
+        if row is None:
+            self.session.add(
+                GlobalTuningRun(
+                    session_id=session_id,
+                    config_signature=config_signature,
+                    candidate=dict(candidate),
+                    score=score,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+        else:
+            row.config_signature = config_signature
             row.candidate = dict(candidate)
             row.score = score
             row.finished_at = datetime.now(UTC)

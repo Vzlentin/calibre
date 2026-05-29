@@ -549,8 +549,8 @@ def optimize_task(task: TuningTask) -> dict:
     return dict(optimize_task_candidate(task).model_config)
 
 
-def optimize_panel_task(task: PanelTuningTask) -> dict:
-    """Run panel/global HPO and return the best model_config dict."""
+def optimize_panel_task_candidate(task: PanelTuningTask) -> TuningCandidate:
+    """Run panel/global HPO and return the best :class:`TuningCandidate`."""
     origins = _validate_panel_task(task)
     history = task.history.copy()
     config = task.study_config
@@ -603,7 +603,16 @@ def optimize_panel_task(task: PanelTuningTask) -> dict:
     candidate = _resolve_candidate(
         task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(outcome.best_config))))
     )
-    return {**task.base_model_config, **dict(candidate.model_config)}
+    return TuningCandidate(
+        model_config={**task.base_model_config, **dict(candidate.model_config)},
+        conformal_config=dict(candidate.conformal_config),
+        ordering_config=dict(candidate.ordering_config),
+    )
+
+
+def optimize_panel_task(task: PanelTuningTask) -> dict:
+    """Run panel/global HPO and return the best model_config dict."""
+    return dict(optimize_panel_task_candidate(task).model_config)
 
 
 def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
