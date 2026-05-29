@@ -75,5 +75,7 @@ Long-lived project memory lives in an Obsidian vault and is governed by the
 Read it at the start of any non-trivial task.
 
 The vault location is read from the `OBSIDIAN_VAULT_PATH` environment
-variable. The project folder inside the vault is `calibre/`. If the env var
-is unset, skip vault operations and proceed without persistent memory.
+variable. The project folder inside the vault is `Projects/calibre/`; durable
+engineering memory lives under `Projects/calibre/engineering/`
+(`architecture.md`, `lessons.md`, `vision.md`, and per-task `plans/`). If the
+env var is unset, skip vault operations and proceed without persistent memory.
