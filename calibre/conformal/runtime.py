@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Hashable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 import pandas as pd
@@ -88,6 +88,20 @@ class ConformalRuntime(Protocol):
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
 
     def get_resume_state(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class PartitionedConformalRuntime(Protocol):
+    """A conformal runtime that exposes per-partition state for persistence.
+
+    The backend uses this to persist one row per ``(uid, model)`` partition
+    instead of a single blob. Restoration is factory-only — see
+    ``SymmetricIntervalRuntime.from_partition_states`` — so this protocol has no
+    in-place state setter by design (avoiding the mutate-existing-instance
+    pattern that FIX #6 called out).
+    """
+
+    def get_partition_states(self) -> dict[str, dict[str, Any]]: ...
 
     def get_diagnostics(self) -> dict[str, Any]: ...
 
