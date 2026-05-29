@@ -14,6 +14,7 @@ dependencies = [
     "pyyaml",
     "fsspec",
     "fastapi",
+    "pydantic",
     "sqlalchemy",
     "alembic",
     "psycopg[binary]",

@@ -164,7 +164,7 @@ def run_config(
 
     bundle = _load_dataset(config)
     _enforce_unique_id_limit(bundle, max_unique_ids)
-    model_configs = [task.model_config() for task in config.tasks]
+    model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
     tasks = build_tasks(bundle.history, model_configs, horizon)
     origins = config.origins.to_list()
