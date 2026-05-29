@@ -48,11 +48,6 @@ def _reset_lifecycle_store(monkeypatch):
 def stub_adapter(monkeypatch):
     monkeypatch.setattr("calibre.api.main.resolve_adapter", lambda _: _StubAdapter(), raising=False)
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda cfg: _StubAdapter(cfg))
-    # /fit now eagerly validates by fitting, which resolves the adapter via
-    # fit_service; route that to the stub too.
-    monkeypatch.setattr(
-        "calibre.execution.fit_service.resolve_adapter", lambda cfg: _StubAdapter(cfg)
-    )
     yield
 
 

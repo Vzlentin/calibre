@@ -43,7 +43,7 @@ from calibre.core.run_status import RunStatus
 from calibre.execution.backend import (
     _coerce_forecast_frame_dtypes,
     _finalize_preds,
-    _fit_predict_task,
+    fit_predict_task,
 )
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.execution.fit_service import validate_fit_config
@@ -375,7 +375,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         future_x=future_x,
     )
     try:
-        preds = _fit_predict_task(task)
+        preds = fit_predict_task(task)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))

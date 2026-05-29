@@ -69,7 +69,7 @@ def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) 
     return preds[REQUIRED_COLUMNS + extras]
 
 
-def _fit_predict_task(task: ForecastTask) -> pd.DataFrame:
+def fit_predict_task(task: ForecastTask) -> pd.DataFrame:
     adapter = resolve_adapter(task.model_config)
     model_name = task.model_name
     uid = task.unique_id
@@ -169,7 +169,7 @@ def _process_task_ref(
         future_x=future_x,
         task_group=task.task_group,
     )
-    preds = _fit_predict_task(origin_task)
+    preds = fit_predict_task(origin_task)
     return _finalize_preds(preds, origin, origin_task.model_name)
 
 
@@ -213,7 +213,7 @@ def _process_global_panel(
         future_x=future_x,
         task_group=task_group,
     )
-    preds = _fit_predict_task(origin_task)
+    preds = fit_predict_task(origin_task)
     return _finalize_preds(preds, origin, origin_task.model_name)
 
 
