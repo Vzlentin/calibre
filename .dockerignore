@@ -3,7 +3,7 @@
 .worktrees
 .vscode
 .claude
-.mypy_cache
+.ty_cache
 .pytest_cache
 .ruff_cache
 __pycache__

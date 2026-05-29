@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pandas as pd
@@ -22,7 +22,7 @@ from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.io import is_local_fs, open_fs, write_parquet
 from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
-from calibre.ordering.policy_config import OrderPolicyConfig
+from calibre.ordering.policy_config import OrderPolicyConfig, OrderPolicyType
 from calibre.storage.state import ConformalStateStore
 
 
@@ -79,7 +79,7 @@ def _build_order_config(config: BackendConfig) -> OrderPolicyConfig | None:
     if isinstance(params, dict):
         params = [params]
     return OrderPolicyConfig(
-        policy=config.ordering.policy,  # type: ignore[arg-type]
+        policy=cast(OrderPolicyType, config.ordering.policy),
         params=pd.DataFrame(params),
         coverage=config.ordering.coverage,
         quantile=config.ordering.quantile,

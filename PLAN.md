@@ -5,7 +5,7 @@
 > are as of the `main` referenced below; re-locate by symbol name if they drift.
 >
 > Base commit: `066f296` (`main`). Repo conventions in `CLAUDE.md` — **always**
-> prefix Python tooling with `uv run` (never bare `python`/`pytest`/`ruff`/`mypy`).
+> prefix Python tooling with `uv run` (never bare `python`/`pytest`/`ruff`/`ty`).
 
 ---
 
@@ -214,7 +214,7 @@ frames; only the existing `Accuracy`/`Cost` assume single windows.
   - `optimize_panel_task` smoke: tiny global model, `ray_local_mode=True`,
     `n_trials=1`, 2 series, assert a complete best `model_config` dict.
 - Verify: `uv run pytest tests/test_tuning_task.py tests/tuning/
-  tests/storage/test_tuning_runs.py`, then `uv run mypy calibre/`,
+  tests/storage/test_tuning_runs.py`, then `uv run ty check calibre/`,
   `uv run ruff check .`, `uv run ruff format .`. Confirm `calibre/api/main.py`
   still imports (`uv run python -c "import calibre.api.main"`).
 
@@ -300,7 +300,7 @@ bare package marker (no re-exports).
   cheaply in CI.
 - Verify: `uv run pytest tests/test_vn2_benchmark.py tests/integration/test_ray.py
   tests/cli/test_cli.py tests/test_vn2_seasonal.py`; smoke
-  `uv run python benchmarks/vn2/run_benchmark.py`; `uv run mypy calibre/`
+  `uv run python benchmarks/vn2/run_benchmark.py`; `uv run ty check calibre/`
   (and the benchmark if configured), `uv run ruff check .`, `uv run ruff format .`.
 
 ### G2 — ship

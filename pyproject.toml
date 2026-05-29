@@ -33,7 +33,7 @@ dev = [
     "pre-commit",
     "pytest",
     "ruff",
-    "mypy",
+    "ty",
     "moto[server,s3]",
     "types-PyYAML",
     "pandas-stubs>=3.0.0.260204",
@@ -90,31 +90,16 @@ select = [
 "benchmarks/**" = ["E501"]
 "calibre/cli/**" = ["T20"]
 
-[tool.mypy]
-python_version = "3.11"
-warn_return_any = false
-warn_unused_configs = true
+[tool.ty.environment]
+python-version = "3.11"
 
-[[tool.mypy.overrides]]
-module = [
-    "numpy.*",
-    "pandas.*",
-    "statsforecast.*",
-    "neuralforecast.*",
-    "mlforecast.*",
-    "lightgbm.*",
-    "xgboost.*",
-    "ray.*",
-    "fsspec",
-    "fsspec.*",
-    "fsspec.core.*",
-    "distributed.*",
-    "sqlalchemy.*",
-    "alembic.*",
-    "psycopg.*",
-    "optuna.*",
-    "mlflow.*",
-    "requests.*",
-    "pyarrow.*",
-]
-ignore_missing_imports = true
+# neuralforecast is an optional dependency (the `neural` extra) that is not
+# installed in the type-checking environment, so its import and the symbols
+# derived from it are unresolved here. Scope the suppression to that adapter.
+[[tool.ty.overrides]]
+include = ["calibre/forecasting/neuralforecast_adapter.py"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+unresolved-attribute = "ignore"
+call-non-callable = "ignore"

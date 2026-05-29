@@ -45,7 +45,7 @@ Always run Python tooling through `uv`.
 | Run a single test | `uv run pytest tests/test_conformal.py::test_name` |
 | Lint | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
-| Type check | `uv run mypy calibre/` |
+| Type check | `uv run ty check calibre/` |
 
 ### CLI
 
@@ -159,5 +159,5 @@ tests/                   # pytest suite
 docs/                    # Deployment guides
 infra/                   # Terraform modules
 scripts/                 # Databricks notebooks, jobs
-.github/workflows/       # CI: ruff, mypy, pytest
+.github/workflows/       # CI: ruff, ty, pytest
 ```

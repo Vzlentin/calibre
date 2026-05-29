@@ -6,13 +6,10 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.14.0
+  - repo: local
     hooks:
-      - id: mypy
-        additional_dependencies:
-          - pydantic
-          - types-PyYAML
-          - types-python-dateutil
-        args: [--ignore-missing-imports]
-        exclude: ^(benchmarks/|scripts/|tests/)
+      - id: ty
+        name: ty check
+        entry: uv run ty check calibre/
+        language: system
+        pass_filenames: false

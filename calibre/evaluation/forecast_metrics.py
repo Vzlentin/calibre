@@ -76,7 +76,7 @@ def compute_metrics(
 
         row = dict(zip(group_by, keys, strict=False))
         for metric_fn in metrics:
-            name: str = getattr(metric_fn, "__name__", None)  # type: ignore[assignment]
+            name: str | None = getattr(metric_fn, "__name__", None)
             if name is None:
                 if isinstance(metric_fn, functools.partial):
                     name = getattr(metric_fn.func, "__name__", str(metric_fn))

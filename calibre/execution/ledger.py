@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
-import fsspec  # type: ignore[import-untyped]
+import fsspec
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq

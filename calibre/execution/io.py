@@ -5,9 +5,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-import fsspec  # type: ignore[import-untyped]
+import fsspec
 import pandas as pd
-from fsspec.spec import AbstractFileSystem  # type: ignore[import-untyped]
+from fsspec.spec import AbstractFileSystem
 
 
 def open_fs(uri: str | Path, **storage_options: Any) -> tuple[AbstractFileSystem, str]:
