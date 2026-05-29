@@ -107,6 +107,20 @@ CALIBRE_DATABASE_URL="postgresql+psycopg://..." \
   uv run alembic -c alembic.ini upgrade head
 ```
 
+### Lifecycle store (multi-worker)
+
+The `/fit` and `/tune` lifecycle state defaults to an in-memory store — lost on
+restart and invisible across workers. For any multi-worker / multi-host
+deployment, set:
+
+| Env var | Purpose |
+| --- | --- |
+| `LIFECYCLE_STORE=sql` | Persist fit/tune records + session-owned conformal state in Postgres (requires `CALIBRE_DATABASE_URL`). |
+| `CALIBRE_ARTIFACT_URI` | Base URI for fit-frame parquet artifacts (`history`, `future_x`, `last_*`). Must be a **shared** object store (`s3://…`, `abfs://…`) so every worker can read frames written by any other; a local path works single-host only and logs a warning. |
+
+Both the in-memory and SQL stores serve the same API; only the SQL store
+survives restarts and shares state across workers.
+
 ## Azure Container Instances
 
 Use command override:
