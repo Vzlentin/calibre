@@ -287,6 +287,7 @@ class TuningRunRepo:
         session_id: str,
         unique_id: str,
         *,
+        config_signature: str,
         candidate: dict,
         score: float | None,
     ) -> None:
@@ -296,12 +297,14 @@ class TuningRunRepo:
                 TuningRun(
                     session_id=session_id,
                     unique_id=unique_id,
+                    config_signature=config_signature,
                     candidate=dict(candidate),
                     score=score,
                     finished_at=datetime.now(UTC),
                 )
             )
         else:
+            row.config_signature = config_signature
             row.candidate = dict(candidate)
             row.score = score
             row.finished_at = datetime.now(UTC)

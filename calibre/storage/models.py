@@ -60,6 +60,7 @@ class TuningRun(Base):
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     unique_id: Mapped[str] = mapped_column(String, primary_key=True)
+    config_signature: Mapped[str] = mapped_column(String, nullable=False, server_default="")
     candidate: Mapped[dict] = mapped_column(JsonDict, nullable=False)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     finished_at: Mapped[datetime] = mapped_column(
