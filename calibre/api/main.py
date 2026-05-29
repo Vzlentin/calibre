@@ -43,9 +43,10 @@ from calibre.core.run_status import RunStatus
 from calibre.execution.backend import (
     _coerce_forecast_frame_dtypes,
     _finalize_preds,
-    _fit_predict_task,
+    fit_predict_task,
 )
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
+from calibre.execution.fit_service import validate_fit_config
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.postgres import (
@@ -311,12 +312,23 @@ def _run_fit_job(fit_id: str) -> None:
         return
     store.update_fit(fit_id, status=RunStatus.RUNNING)
     try:
+        # Eagerly fit to validate the config against the data, so an
+        # incompatible config FAILS here rather than silently succeeding and
+        # only blowing up at /predict.
+        validate_fit_config(
+            forecaster_config=record.forecaster_config,
+            history=record.history,
+            future_x=record.future_x,
+            horizon=record.horizon,
+            freq=record.freq,
+            sku_set=record.sku_set,
+        )
         store.update_fit(
             fit_id,
             status=RunStatus.SUCCEEDED,
             artifact_urls={"session_id": record.session_id},
         )
-    except Exception as exc:  # pragma: no cover - background task safety net
+    except Exception as exc:
         store.update_fit(fit_id, status=RunStatus.FAILED, error=_format_error(exc))
 
 
@@ -363,7 +375,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         future_x=future_x,
     )
     try:
-        preds = _fit_predict_task(task)
+        preds = fit_predict_task(task)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))
