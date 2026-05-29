@@ -16,7 +16,7 @@ def _constant_n_estimators_space(trial: optuna.Trial) -> TuningCandidate:
     )
 
 
-def test_cumulative_pinball_averages_window_losses() -> None:
+def test_cumulative_pinball_averages_cumulative_window_pinball() -> None:
     qcol = quantile_column(0.5)
     origin_a = pd.Timestamp("2024-01-07")
     origin_b = pd.Timestamp("2024-01-14")

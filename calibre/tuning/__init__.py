@@ -6,7 +6,7 @@ from calibre.tuning.optimizer import (
     optimize_task_candidate,
     run_optuna_study,
 )
-from calibre.tuning.task import PanelTuningTask, TuningCandidate, TuningTask
+from calibre.tuning.task import PanelTuningTask, StudyConfig, TuningCandidate, TuningTask
 
 __all__ = [
     "Accuracy",
@@ -14,6 +14,7 @@ __all__ = [
     "CumulativePinball",
     "PanelTuningTask",
     "Pareto",
+    "StudyConfig",
     "StudyOutcome",
     "TuningCandidate",
     "TuningObjective",
