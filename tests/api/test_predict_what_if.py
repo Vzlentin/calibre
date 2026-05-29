@@ -48,6 +48,11 @@ def _reset_lifecycle_store(monkeypatch):
         "calibre.execution.backend.resolve_adapter",
         lambda cfg: _FutureXAdapter(cfg),
     )
+    # /fit now eagerly validates by fitting (resolves via fit_service).
+    monkeypatch.setattr(
+        "calibre.execution.fit_service.resolve_adapter",
+        lambda cfg: _FutureXAdapter(cfg),
+    )
     return fresh
 
 
