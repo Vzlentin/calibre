@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -101,6 +101,7 @@ class TuneRequest(BaseModel):
     search_space_id: str
     objective_id: str
     n_trials: int = 20
+    hpo_scope: Literal["local", "global"] = "local"
     conformal_config: dict[str, Any] | None = None
 
 
