@@ -15,7 +15,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from calibre.api.lifecycle import FitRecord, TuneRecord
@@ -34,6 +34,31 @@ from calibre.storage.postgres import session_scope
 _FRAME_ATTRS = ("history", "future_x", "last_forecast", "last_calibrated", "last_orders")
 _FIT_SCALAR_FIELDS = ("status", "error", "artifact_urls")
 _STUDY_SCALAR_FIELDS = ("status", "error", "best_candidates")
+
+
+def _conformal_upsert(dialect: str, values: dict[str, Any]) -> Any:
+    """Dialect-aware INSERT ... ON CONFLICT DO UPDATE for conformal state.
+
+    Avoids the get-then-add race on the ``(session_id, partition)`` PK under
+    concurrent /observe. Only the engines this project runs on are supported.
+    """
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        pg_stmt = pg_insert(LifecycleConformalState).values(**values)
+        return pg_stmt.on_conflict_do_update(
+            index_elements=["session_id", "partition"],
+            set_={"state": pg_stmt.excluded.state, "updated_at": func.now()},
+        )
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        lite_stmt = sqlite_insert(LifecycleConformalState).values(**values)
+        return lite_stmt.on_conflict_do_update(
+            index_elements=["session_id", "partition"],
+            set_={"state": lite_stmt.excluded.state, "updated_at": func.now()},
+        )
+    raise NotImplementedError(f"conformal upsert unsupported on dialect {dialect!r}")
 
 
 class SqlLifecycleStore:
@@ -108,14 +133,21 @@ class SqlLifecycleStore:
 
     def update_fit(self, fit_id: str, **fields: object) -> FitRecord:
         frame_updates = {attr: fields.pop(attr) for attr in _FRAME_ATTRS if attr in fields}
-        written = self._write_frames(fit_id, frame_updates)  # type: ignore[arg-type]
         unknown = set(fields) - set(_FIT_SCALAR_FIELDS)
         if unknown:
             raise ValueError(f"update_fit got unsupported fields: {sorted(unknown)}")
         with session_scope(self._factory) as session:
-            row = session.get(LifecycleFitRecord, fit_id)
+            # Lock the row so concurrent updates to the same fit (e.g. /predict
+            # and /order on different workers) can't lose each other's
+            # frame_uris in the read-modify-write below.
+            row = session.get(LifecycleFitRecord, fit_id, with_for_update=True)
             if row is None:
                 raise KeyError(fit_id)
+            # Write frames only after the row is confirmed, so a failed update
+            # leaves no orphan parquet.
+            written = self._write_frames(
+                fit_id, cast("dict[str, pd.DataFrame | None]", frame_updates)
+            )
             if "status" in fields:
                 row.status = RunStatus(cast("Any", fields["status"])).value
             if "error" in fields:
@@ -125,23 +157,27 @@ class SqlLifecycleStore:
             if written:
                 row.frame_uris = {**row.frame_uris, **written}
             session.flush()
-            return self._row_to_fit(row)
+            # Callers discard the return; skip re-reading the frames we didn't change.
+            return self._row_to_fit(row, load_frames=False)
 
     def fits_for_session(self, session_id: str) -> list[FitRecord]:
         with session_scope(self._factory) as session:
             rows = session.scalars(
                 select(LifecycleFitRecord)
                 .where(LifecycleFitRecord.session_id == session_id)
-                .order_by(LifecycleFitRecord.fit_id)
+                .order_by(LifecycleFitRecord.created_at, LifecycleFitRecord.fit_id)
             ).all()
             return [self._row_to_fit(row) for row in rows]
 
     def first_fit_for_session(self, session_id: str) -> FitRecord | None:
         with session_scope(self._factory) as session:
+            # Earliest-created fit is the canonical "first" for a session, to
+            # match the in-memory store's insertion order (a session can hold
+            # several fits). fit_id breaks ties deterministically.
             row = session.scalars(
                 select(LifecycleFitRecord)
                 .where(LifecycleFitRecord.session_id == session_id)
-                .order_by(LifecycleFitRecord.fit_id)
+                .order_by(LifecycleFitRecord.created_at, LifecycleFitRecord.fit_id)
                 .limit(1)
             ).first()
             return self._row_to_fit(row) if row is not None else None
@@ -151,12 +187,14 @@ class SqlLifecycleStore:
             rows = session.scalars(
                 select(LifecycleFitRecord)
                 .where(LifecycleFitRecord.tenant == tenant)
-                .order_by(LifecycleFitRecord.fit_id)
+                .order_by(LifecycleFitRecord.created_at, LifecycleFitRecord.fit_id)
             ).all()
-            return [self._row_to_fit(row) for row in rows if uid in row.sku_set]
+            # Metadata only: the caller picks one fit, then loads its frames via
+            # get_fit — so we don't pull every matching fit's parquet here.
+            return [self._row_to_fit(row, load_frames=False) for row in rows if uid in row.sku_set]
 
-    def _row_to_fit(self, row: LifecycleFitRecord) -> FitRecord:
-        frames = self._read_frames(dict(row.frame_uris))
+    def _row_to_fit(self, row: LifecycleFitRecord, *, load_frames: bool = True) -> FitRecord:
+        frames = self._read_frames(dict(row.frame_uris)) if load_frames else {}
         return FitRecord(
             fit_id=row.fit_id,
             session_id=row.session_id,
@@ -191,22 +229,19 @@ class SqlLifecycleStore:
         if not partition_states:
             return
         with session_scope(self._factory) as session:
+            dialect = session.get_bind().dialect.name
             for partition, state in partition_states.items():
                 # Conformal partition state carries numpy arrays/scalars; coerce
                 # to JSON-safe values before it hits the JSONB column.
-                safe_state = to_json_safe_state(dict(state))
-                key = (session_id, str(partition))
-                row = session.get(LifecycleConformalState, key)
-                if row is None:
-                    session.add(
-                        LifecycleConformalState(
-                            session_id=session_id,
-                            partition=str(partition),
-                            state=safe_state,
-                        )
-                    )
-                else:
-                    row.state = safe_state
+                values = {
+                    "session_id": session_id,
+                    "partition": str(partition),
+                    "state": to_json_safe_state(dict(state)),
+                }
+                # Atomic upsert so concurrent /observe jobs for the same
+                # (session, partition) don't race get-then-add into a PK error.
+                stmt = _conformal_upsert(dialect, values)
+                session.execute(stmt)
 
     # --- tune --------------------------------------------------------------
 

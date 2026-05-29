@@ -669,7 +669,10 @@ def session_state(tenant: str, uid: str) -> SessionStateResponse:
     fits = store.fits_for_tenant_uid(tenant, uid)
     if not fits:
         raise HTTPException(status_code=404, detail="session not found")
-    record = fits[-1]
+    # fits_for_tenant_uid returns metadata only; load frames for the selected fit.
+    record = store.get_fit(fits[-1].fit_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="session not found")
     return SessionStateResponse(
         session_id=record.session_id,
         tenant=tenant,

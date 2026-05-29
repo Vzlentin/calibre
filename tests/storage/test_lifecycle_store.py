@@ -8,14 +8,16 @@ restart — a brand-new store/engine on the same database + artifact base.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pandas as pd
 
 from calibre.api.lifecycle import FitRecord, TuneRecord
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, Y
 from calibre.core.run_status import RunStatus
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
-from calibre.storage.models import Base
-from calibre.storage.postgres import make_engine, make_session_factory
+from calibre.storage.models import Base, LifecycleFitRecord
+from calibre.storage.postgres import make_engine, make_session_factory, session_scope
 
 
 def _stores(tmp_path):
@@ -135,3 +137,38 @@ def test_study_round_trip_and_update(tmp_path):
     assert loaded is not None
     assert loaded.status == RunStatus.SUCCEEDED
     assert loaded.best_candidates == {"A": {"model_config": {"season_length": 4}}}
+
+
+def test_first_fit_uses_creation_order_not_fit_id(tmp_path):
+    """A session can hold several fits; "first" must be the earliest created,
+    not the lexicographically smallest (random) fit_id."""
+    db_url = f"sqlite+pysqlite:///{(tmp_path / 'lc.db').as_posix()}"
+    Base.metadata.create_all(make_engine(db_url))
+    factory = make_session_factory(make_engine(db_url))
+
+    earlier = datetime(2024, 1, 1, tzinfo=UTC)
+    # The earlier-created fit deliberately has the LARGER fit_id, so ordering by
+    # fit_id alone would wrongly pick the later one.
+    with session_scope(factory) as session:
+        for fit_id, created in [("zzz", earlier), ("aaa", earlier + timedelta(hours=1))]:
+            session.add(
+                LifecycleFitRecord(
+                    fit_id=fit_id,
+                    session_id="s",
+                    tenant="t",
+                    sku_set=["A"],
+                    forecaster_config={},
+                    horizon=1,
+                    freq="W",
+                    conformal_config=None,
+                    status="queued",
+                    artifact_urls={},
+                    frame_uris={},
+                    created_at=created,
+                )
+            )
+
+    store = SqlLifecycleStore(make_session_factory(make_engine(db_url)), str(tmp_path / "art"))
+    first = store.first_fit_for_session("s")
+    assert first is not None
+    assert first.fit_id == "zzz", "first_fit should be the earliest created, not min fit_id"

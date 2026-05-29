@@ -29,8 +29,16 @@ def upgrade() -> None:
         sa.Column("error", sa.String(), nullable=True),
         sa.Column("artifact_urls", _json(), nullable=False),
         sa.Column("frame_uris", _json(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("fit_id"),
     )
+    op.create_index("ix_lifecycle_fit_records_session_id", "lifecycle_fit_records", ["session_id"])
+    op.create_index("ix_lifecycle_fit_records_tenant", "lifecycle_fit_records", ["tenant"])
     op.create_table(
         "lifecycle_conformal_state",
         sa.Column("session_id", sa.String(length=64), nullable=False),
@@ -60,4 +68,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("lifecycle_tune_records")
     op.drop_table("lifecycle_conformal_state")
+    op.drop_index("ix_lifecycle_fit_records_tenant", table_name="lifecycle_fit_records")
+    op.drop_index("ix_lifecycle_fit_records_session_id", table_name="lifecycle_fit_records")
     op.drop_table("lifecycle_fit_records")

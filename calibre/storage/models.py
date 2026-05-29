@@ -85,8 +85,8 @@ class LifecycleFitRecord(Base):
     __tablename__ = "lifecycle_fit_records"
 
     fit_id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    tenant: Mapped[str] = mapped_column(String, nullable=False)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    tenant: Mapped[str] = mapped_column(String, nullable=False, index=True)
     sku_set: Mapped[list] = mapped_column(JsonDict, nullable=False)
     forecaster_config: Mapped[dict] = mapped_column(JsonDict, nullable=False)
     horizon: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -96,6 +96,12 @@ class LifecycleFitRecord(Base):
     error: Mapped[str | None] = mapped_column(String, nullable=True)
     artifact_urls: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
     frame_uris: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
+    # Insertion order — the canonical "first fit" for a session (a session can
+    # hold several fits, since session_id is derived from config). Postgres has
+    # sub-second resolution; fit_id breaks any tie deterministically.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class LifecycleConformalState(Base):
