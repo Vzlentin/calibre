@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import fsspec  # type: ignore[import-untyped]
 import pandas as pd
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from calibre.conformal.runtime import SymmetricIntervalConfig
 
@@ -16,29 +16,45 @@ if TYPE_CHECKING:
     from calibre.execution.backend import ExecutionOptions
 
 
-@dataclass(frozen=True, slots=True)
-class DatasetConfig:
+class _Section(BaseModel):
+    """Base for frozen config sections that reject unknown keys."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class DatasetConfig(_Section):
     adapter: str
     path: str
     period: int | None = None
-    options: dict[str, Any] = field(default_factory=dict)
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _collect_options(cls, data: Any) -> Any:
+        # The dataset section is a flat mapping: ``adapter``, ``path`` and
+        # ``period`` are reserved; every other key is adapter-specific and
+        # collected into ``options``.
+        if not isinstance(data, dict):
+            return data
+        reserved = {"adapter", "path", "period"}
+        structured = {key: data[key] for key in reserved if key in data}
+        structured["options"] = {key: value for key, value in data.items() if key not in reserved}
+        return structured
 
 
-@dataclass(frozen=True, slots=True)
-class TaskConfig:
+class TaskConfig(_Section):
     model: str
-    horizon: int
-    config: dict[str, Any] = field(default_factory=dict)
+    horizon: int = Field(ge=1)
+    config: dict[str, Any] = Field(default_factory=dict)
 
-    def model_config(self) -> dict[str, Any]:
+    def resolved_model_config(self) -> dict[str, Any]:
         resolved = dict(self.config)
         resolved.setdefault("model", self.model)
         resolved.setdefault("name", self.model)
         return resolved
 
 
-@dataclass(frozen=True, slots=True)
-class ConformalConfig:
+class ConformalConfig(_Section):
     method: Literal["mscp", "aci"]
     coverage: float = 0.9
     calibration_window: int = 100
@@ -57,19 +73,30 @@ class ConformalConfig:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class OrderingConfig:
+class OrderingConfig(_Section):
     policy: str
     coverage: float = 0.9
     quantile: float | None = None
     params: list[dict[str, Any]] | dict[str, Any] | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class OriginsConfig:
+class OriginsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
     start: pd.Timestamp
     end: pd.Timestamp
     freq: str
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def _coerce_timestamp(cls, value: Any) -> pd.Timestamp:
+        return pd.Timestamp(value)
+
+    @model_validator(mode="after")
+    def _check_order(self) -> OriginsConfig:
+        if self.end < self.start:
+            raise ValueError("origins.end must be greater than or equal to origins.start")
+        return self
 
     def to_list(self) -> list[pd.Timestamp]:
         return [
@@ -77,22 +104,42 @@ class OriginsConfig:
         ]
 
 
-@dataclass(frozen=True, slots=True)
-class OutputConfig:
+class OutputConfig(_Section):
     ledger_path: str | None = None
     order_ledger_path: str | None = None
     streaming: bool = False
 
+    @model_validator(mode="after")
+    def _check_streaming(self) -> OutputConfig:
+        if self.streaming and self.ledger_path is None:
+            raise ValueError("output.ledger_path is required when output.streaming is true")
+        return self
 
-@dataclass(frozen=True, slots=True)
-class ExecutionConfig:
+
+class ExecutionConfig(_Section):
     backend: Literal["local", "ray", "auto"] = "auto"
     seed: int | None = None
     ray_address: str | None = None
     staging_uri: str | None = None
-    ray_threshold: int = 10
-    max_concurrency: int | None = None
-    cpu_per_task: float | None = None
+    ray_threshold: int = Field(default=10, ge=1)
+    max_concurrency: int | None = Field(default=None, ge=1)
+    cpu_per_task: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_keys(cls, data: Any) -> Any:
+        # Preserve the legacy single-key error message that callers rely on.
+        if isinstance(data, dict):
+            unknown = sorted(set(data) - set(cls.model_fields))
+            if unknown:
+                raise ValueError(f"unknown execution key: {unknown[0]}")
+        return data
+
+    @model_validator(mode="after")
+    def _require_staging_uri(self) -> ExecutionConfig:
+        if self.ray_address is not None and self.staging_uri is None:
+            raise ValueError("execution.staging_uri is required when execution.ray_address is set")
+        return self
 
     def to_execution_options(self, *, freq: str) -> ExecutionOptions:
         from calibre.execution.backend import ExecutionOptions
@@ -109,192 +156,50 @@ class ExecutionConfig:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class BackendConfig:
+class BackendConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     config_schema: str
     dataset: DatasetConfig
-    tasks: list[TaskConfig]
+    tasks: list[TaskConfig] = Field(min_length=1)
     origins: OriginsConfig
-    output: OutputConfig
+    output: OutputConfig = Field(default_factory=OutputConfig)
     conformal: ConformalConfig | None = None
     ordering: OrderingConfig | None = None
-    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     benchmark: str | None = None
     source_path: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_hpo(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "hpo" in data:
+            raise ValueError("config.hpo is not supported until CLI tuning is wired")
+        return data
 
-def _require_mapping(data: Any, section: str) -> dict[str, Any]:
-    if not isinstance(data, dict):
-        raise ValueError(f"{section} must be a mapping")
-    return data
+    @field_validator("config_schema")
+    @classmethod
+    def _check_schema(cls, value: str) -> str:
+        if value != CONFIG_SCHEMA:
+            raise ValueError(f"config_schema must be {CONFIG_SCHEMA!r}, got {value!r}")
+        return value
 
-
-def _optional_mapping(data: Any, section: str) -> dict[str, Any] | None:
-    if data is None:
-        return None
-    return _require_mapping(data, section)
-
-
-def _require_key(mapping: dict[str, Any], key: str, section: str) -> Any:
-    if key not in mapping:
-        raise ValueError(f"{section} missing required key: {key}")
-    return mapping[key]
-
-
-def _parse_dataset(data: Any) -> DatasetConfig:
-    raw = _require_mapping(data, "dataset")
-    options = dict(raw)
-    adapter = str(_require_key(options, "adapter", "dataset"))
-    path = str(_require_key(options, "path", "dataset"))
-    period = options.pop("period", None)
-    options.pop("adapter", None)
-    options.pop("path", None)
-    return DatasetConfig(
-        adapter=adapter,
-        path=path,
-        period=int(period) if period is not None else None,
-        options=options,
-    )
-
-
-def _parse_tasks(data: Any) -> list[TaskConfig]:
-    if not isinstance(data, list) or not data:
-        raise ValueError("tasks must be a non-empty list")
-    tasks: list[TaskConfig] = []
-    for idx, item in enumerate(data):
-        raw = _require_mapping(item, f"tasks[{idx}]")
-        model = str(_require_key(raw, "model", f"tasks[{idx}]"))
-        horizon = int(_require_key(raw, "horizon", f"tasks[{idx}]"))
-        if horizon < 1:
-            raise ValueError(f"tasks[{idx}].horizon must be at least 1")
-        config = raw.get("config", {})
-        if not isinstance(config, dict):
-            raise ValueError(f"tasks[{idx}].config must be a mapping")
-        tasks.append(TaskConfig(model=model, horizon=horizon, config=dict(config)))
-    return tasks
-
-
-def _parse_conformal(data: Any) -> ConformalConfig | None:
-    raw = _optional_mapping(data, "conformal")
-    if raw is None:
-        return None
-    return ConformalConfig(
-        method=str(_require_key(raw, "method", "conformal")),  # type: ignore[arg-type]
-        coverage=float(raw.get("coverage", 0.9)),
-        calibration_window=int(raw.get("calibration_window", 100)),
-        gamma=float(raw.get("gamma", 0.05)),
-        mode=str(raw.get("mode", "perhorizon")),  # type: ignore[arg-type]
-        protection_period=int(raw["protection_period"])
-        if raw.get("protection_period") is not None
-        else None,
-    )
-
-
-def _parse_ordering(data: Any) -> OrderingConfig | None:
-    raw = _optional_mapping(data, "ordering")
-    if raw is None:
-        return None
-    return OrderingConfig(
-        policy=str(_require_key(raw, "policy", "ordering")),
-        coverage=float(raw.get("coverage", 0.9)),
-        quantile=float(raw["quantile"]) if raw.get("quantile") is not None else None,
-        params=raw.get("params"),
-    )
-
-
-def _parse_origins(data: Any) -> OriginsConfig:
-    raw = _require_mapping(data, "origins")
-    start = pd.Timestamp(_require_key(raw, "start", "origins"))
-    end = pd.Timestamp(_require_key(raw, "end", "origins"))
-    if end < start:
-        raise ValueError("origins.end must be greater than or equal to origins.start")
-    return OriginsConfig(start=start, end=end, freq=str(_require_key(raw, "freq", "origins")))
-
-
-def _parse_output(data: Any) -> OutputConfig:
-    raw = _require_mapping(data or {}, "output")
-    return OutputConfig(
-        ledger_path=str(raw["ledger_path"]) if raw.get("ledger_path") is not None else None,
-        order_ledger_path=str(raw["order_ledger_path"])
-        if raw.get("order_ledger_path") is not None
-        else None,
-        streaming=bool(raw.get("streaming", False)),
-    )
-
-
-def _parse_execution(data: Any) -> ExecutionConfig:
-    raw = _require_mapping(data or {}, "execution")
-    allowed = {
-        "backend",
-        "seed",
-        "ray_address",
-        "staging_uri",
-        "ray_threshold",
-        "max_concurrency",
-        "cpu_per_task",
-    }
-    unknown = sorted(set(raw) - allowed)
-    if unknown:
-        raise ValueError(f"unknown execution key: {unknown[0]}")
-    backend = str(raw.get("backend", "auto"))
-    if backend not in {"local", "ray", "auto"}:
-        raise ValueError("execution.backend must be 'local', 'ray', or 'auto'")
-    ray_threshold = int(raw.get("ray_threshold", 10))
-    if ray_threshold < 1:
-        raise ValueError("execution.ray_threshold must be at least 1")
-    max_concurrency = (
-        int(raw["max_concurrency"]) if raw.get("max_concurrency") is not None else None
-    )
-    if max_concurrency is not None and max_concurrency < 1:
-        raise ValueError("execution.max_concurrency must be at least 1")
-    cpu_per_task = float(raw["cpu_per_task"]) if raw.get("cpu_per_task") is not None else None
-    if cpu_per_task is not None and cpu_per_task <= 0:
-        raise ValueError("execution.cpu_per_task must be positive")
-    ray_address = str(raw["ray_address"]) if raw.get("ray_address") is not None else None
-    staging_uri = str(raw["staging_uri"]) if raw.get("staging_uri") is not None else None
-    if ray_address is not None and staging_uri is None:
-        raise ValueError("execution.staging_uri is required when execution.ray_address is set")
-    return ExecutionConfig(
-        backend=backend,  # type: ignore[arg-type]
-        ray_address=ray_address,
-        staging_uri=staging_uri,
-        ray_threshold=ray_threshold,
-        max_concurrency=max_concurrency,
-        cpu_per_task=cpu_per_task,
-        seed=int(raw["seed"]) if raw.get("seed") is not None else None,
-    )
+    @model_validator(mode="after")
+    def _single_horizon(self) -> BackendConfig:
+        if len({task.horizon for task in self.tasks}) != 1:
+            raise ValueError("all tasks in a single CLI run must use the same horizon")
+        return self
 
 
 def load_config_from_mapping(
     data: dict[str, Any], *, source_path: str | Path | None = None
 ) -> BackendConfig:
-    raw = _require_mapping(data, "config")
-    schema = str(_require_key(raw, "config_schema", "config"))
-    if schema != CONFIG_SCHEMA:
-        raise ValueError(f"config_schema must be {CONFIG_SCHEMA!r}, got {schema!r}")
-    if "hpo" in raw:
-        raise ValueError("config.hpo is not supported until CLI tuning is wired")
-
-    tasks = _parse_tasks(_require_key(raw, "tasks", "config"))
-    horizons = {task.horizon for task in tasks}
-    if len(horizons) != 1:
-        raise ValueError("all tasks in a single CLI run must use the same horizon")
-
-    config = BackendConfig(
-        config_schema=schema,
-        dataset=_parse_dataset(_require_key(raw, "dataset", "config")),
-        tasks=tasks,
-        conformal=_parse_conformal(raw.get("conformal")),
-        ordering=_parse_ordering(raw.get("ordering")),
-        origins=_parse_origins(_require_key(raw, "origins", "config")),
-        output=_parse_output(raw.get("output")),
-        execution=_parse_execution(raw.get("execution")),
-        benchmark=str(raw["benchmark"]) if raw.get("benchmark") is not None else None,
-        source_path=str(source_path) if source_path is not None else None,
-    )
-    if config.output.streaming and config.output.ledger_path is None:
-        raise ValueError("output.ledger_path is required when output.streaming is true")
-    return config
+    if not isinstance(data, dict):
+        raise ValueError("config must be a mapping")
+    payload = dict(data)
+    if source_path is not None:
+        payload["source_path"] = str(source_path)
+    return BackendConfig.model_validate(payload)
 
 
 def load_config(path: str | Path) -> BackendConfig:
