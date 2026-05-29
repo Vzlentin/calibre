@@ -3,7 +3,6 @@
 from __future__ import annotations  # keeps pd.DataFrame annotation lazy at runtime
 
 import dataclasses
-import json
 import logging
 import os
 import platform
@@ -222,11 +221,6 @@ def stable_value(value: Any) -> Any:
             "state": stable_value(state),
         }
     return repr(value)
-
-
-def stable_config_key(config: dict[str, Any]) -> str:
-    """Return a deterministic JSON key for cacheable benchmark configs."""
-    return json.dumps(stable_value(config), sort_keys=True)
 
 
 def log_mlflow_params(params: Mapping[str, Any]) -> None:

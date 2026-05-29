@@ -221,6 +221,36 @@ def test_cumulative_decision_frame_keeps_only_terminal_base_forecast() -> None:
     assert cumulative[qcol].tolist() == [0.0, 0.0, 300.0]
 
 
+def test_cumulative_hpo_objective_scores_terminal_horizon_only() -> None:
+    """Cumulative-target HPO must collapse to the terminal horizon before scoring.
+
+    Without the collapse, CumulativePinball sums the cumulative prediction across
+    every horizon (3+6+9=18) and compares it to the realised cumulative demand
+    (9), inflating the loss; the terminal-only objective compares 9 vs 9.
+    """
+    qcol = quantile_column(0.5)
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A"] * 3,
+            FORECAST_ORIGIN: [pd.Timestamp("2024-01-01")] * 3,
+            DS: pd.date_range("2024-01-08", periods=3, freq="W-MON"),
+            Y_HAT: [3.0, 6.0, 9.0],
+            H: [1, 2, 3],
+            MODEL_NAME: ["M"] * 3,
+            qcol: [3.0, 6.0, 9.0],
+        }
+    )
+    actuals = pd.Series([2.0, 3.0, 4.0])  # cumulative demand over the window = 9.0
+
+    terminal = search_module._CumulativeTerminalPinball(
+        quantile=0.5, tau=0.833, protection_period=3
+    )
+    raw = CumulativePinball(quantile=0.5, tau=0.833)
+
+    assert terminal.evaluate(frame, actuals) == pytest.approx(0.0)
+    assert raw.evaluate(frame, actuals) > terminal.evaluate(frame, actuals)
+
+
 def test_run_benchmark_defaults_to_committed_best_config(monkeypatch) -> None:
     def _fail_hpo(*args, **kwargs):
         raise AssertionError("run_hpo should not be called when tune=False")

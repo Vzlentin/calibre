@@ -8,6 +8,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from benchmarks.vn2.config import (
     REVIEW_PERIOD,
 )
 from benchmarks.vn2.data import (
+    as_cumulative_decision_frame,
     build_model_config,
     load_instock,
     prepare_model_history,
@@ -104,6 +106,29 @@ def _hpo_search_space(trial: optuna.Trial) -> TuningCandidate:
     return _hpo_candidate_from_params(params)
 
 
+@dataclass(frozen=True, slots=True)
+class _CumulativeTerminalPinball:
+    """Cumulative-target HPO objective scored on the terminal horizon only.
+
+    With the direct cumulative target, MLForecast emits one cumulative-demand
+    prediction per horizon, but only the terminal horizon estimates the whole
+    protection period. Collapse non-terminal rows to zero (mirroring
+    ``as_cumulative_decision_frame``) before delegating to
+    :class:`CumulativePinball`, so the per-window prediction sum reduces to the
+    terminal cumulative prediction instead of over-counting every horizon. The
+    realised ``Y`` is left untouched so its window sum still recovers cumulative
+    demand from the raw weekly actuals.
+    """
+
+    quantile: float
+    tau: float
+    protection_period: int
+
+    def evaluate(self, frame: pd.DataFrame, actuals: pd.Series) -> float:
+        collapsed = as_cumulative_decision_frame(frame, self.protection_period)
+        return CumulativePinball(quantile=self.quantile, tau=self.tau).evaluate(collapsed, actuals)
+
+
 def run_hpo(
     data_dir: Path = DATA_DIR,
     horizon: int = HORIZON,
@@ -165,7 +190,13 @@ def run_hpo(
         search_space=_hpo_search_space,
         actuals=actuals,
         origins=origins,
-        objective=CumulativePinball(quantile=0.5, tau=cost_optimal_tau),
+        objective=(
+            _CumulativeTerminalPinball(
+                quantile=0.5, tau=cost_optimal_tau, protection_period=horizon
+            )
+            if cumulative_target
+            else CumulativePinball(quantile=0.5, tau=cost_optimal_tau)
+        ),
         study_config=StudyConfig(
             n_trials=n_trials,
             freq="W-MON",
