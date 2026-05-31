@@ -21,6 +21,7 @@ dependencies = [
     "prometheus-client",
     "statsforecast",
     "optuna",
+    "threadpoolctl",
     "uvicorn",
 ]
 

@@ -416,6 +416,7 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "statsforecast", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
     { name = "statsforecast", version = "2.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or sys_platform != 'win32'" },
+    { name = "threadpoolctl" },
     { name = "uvicorn" },
 ]
 
@@ -508,6 +509,7 @@ requires-dist = [
     { name = "s3fs", marker = "extra == 's3'" },
     { name = "sqlalchemy" },
     { name = "statsforecast" },
+    { name = "threadpoolctl" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'neural'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "(platform_machine != 'x86_64' and extra == 'neural') or (sys_platform != 'linux' and extra == 'neural')" },
     { name = "ty", marker = "extra == 'dev'" },
