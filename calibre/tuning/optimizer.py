@@ -274,8 +274,16 @@ def run_optuna_study(
     experiment_name: str | None = None,
     callbacks: list[Any] | None = None,
     trial_state: Any | None = None,
+    fail_fast: bool | str = False,
 ) -> StudyOutcome:
-    """Run a Ray Tune/Optuna study for any Tune-compatible trainable."""
+    """Run a Ray Tune/Optuna study for any Tune-compatible trainable.
+
+    ``fail_fast`` is forwarded to Ray's ``FailureConfig``. Pass ``"raise"`` when
+    the trainable reports recoverable failures as a finite/``inf`` objective and
+    only *raises* on genuine infrastructure errors: Tune then re-raises that
+    exception out of ``fit()`` instead of recording it as one errored trial among
+    many (which a successful trial would otherwise mask).
+    """
     if n_trials < 1:
         raise ValueError("n_trials must be at least 1")
     if max_t < 1:
@@ -327,6 +335,7 @@ def run_optuna_study(
         run_config_kwargs: dict[str, Any] = {
             "callbacks": callbacks or [],
             "storage_path": tune_storage_path,
+            "failure_config": tune.FailureConfig(fail_fast=fail_fast),
         }
         if experiment_name is not None:
             run_config_kwargs["name"] = experiment_name

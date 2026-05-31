@@ -541,6 +541,7 @@ def run_cost_search(
             mode="min",
             time_attr=TUNE_STEP_ATTR,
             experiment_name=ray_tune_experiment_name,
+            fail_fast="raise",
         )
         return _study_from_tune_results(outcome.results)
 

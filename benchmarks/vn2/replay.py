@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import tempfile
 from collections.abc import Callable, Mapping
@@ -63,8 +62,6 @@ from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
-
-logger = logging.getLogger(__name__)
 
 
 def build_rs_params(
@@ -401,16 +398,13 @@ def replay_cached_cost(
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_base_scale: float = 1.0,
     reorder_point_scale: float | None = None,
-    degraded_mode: bool = False,
     on_progress: Callable[[int, float], None] | None = None,
 ) -> ReplayResult:
     """Replay cached forecasts through the exact VN2 simulator.
 
-    By default a failure in ``apply_order_policy`` for a single round propagates:
-    a broken policy must surface as a hard error, never as a silently cheap
-    trajectory the HPO cost search can converge on. Pass ``degraded_mode=True``
-    only in a dedicated degraded-mode replay to substitute zero orders for the
-    failed round (logged at WARNING) and continue.
+    A failure in ``apply_order_policy`` for a single round propagates: a broken
+    policy must surface as a hard error, never as a silently cheap trajectory the
+    HPO cost search can converge on.
     """
     simulator = VN2Simulator(cache.initial_states)
     target_quantile_col = quantile_column(cache.quantile_alpha)
@@ -435,37 +429,27 @@ def replay_cached_cost(
     for rn in range(1, cache.decision_rounds + 1):
         cached_round = cache.rounds[rn]
         frame = _scale_base_forecasts(cached_round.frame, order_base_scale)
-        try:
-            if runtime is not None:
-                policy_frame = runtime.apply(frame)
-                pending.append(policy_frame.copy())
-                order_config = OrderPolicyConfig(
-                    policy="rs",
-                    params=build_rs_params(simulator, cache.lead_time, cache.review_period),
-                    coverage=runtime.config.coverage,
-                )
-            else:
-                policy_frame = frame
-                order_config = OrderPolicyConfig(
-                    policy="rs",
-                    params=build_rs_params(simulator, cache.lead_time, cache.review_period),
-                    quantile=cache.quantile_alpha,
-                )
-            order_result = apply_order_policy(policy_frame, order_config)
-            orders = orders_from_policy_result(
-                order_result,
-                cache.initial_states,
-                reorder_point_scale=reorder_point_scale,
+        if runtime is not None:
+            policy_frame = runtime.apply(frame)
+            pending.append(policy_frame.copy())
+            order_config = OrderPolicyConfig(
+                policy="rs",
+                params=build_rs_params(simulator, cache.lead_time, cache.review_period),
+                coverage=runtime.config.coverage,
             )
-        except (ValueError, KeyError) as exc:
-            if not degraded_mode:
-                raise
-            logger.warning(
-                "VN2 replay round %d order policy failed; using zero orders (degraded mode): %r",
-                rn,
-                exc,
+        else:
+            policy_frame = frame
+            order_config = OrderPolicyConfig(
+                policy="rs",
+                params=build_rs_params(simulator, cache.lead_time, cache.review_period),
+                quantile=cache.quantile_alpha,
             )
-            orders = dict.fromkeys(cache.initial_states, 0.0)
+        order_result = apply_order_policy(policy_frame, order_config)
+        orders = orders_from_policy_result(
+            order_result,
+            cache.initial_states,
+            reorder_point_scale=reorder_point_scale,
+        )
 
         actual_demand = cache.actuals_by_round.get(rn, dict.fromkeys(cache.initial_states, 0.0))
         simulator.step(rn, orders=orders, actual_demand=actual_demand)

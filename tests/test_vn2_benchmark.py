@@ -8,8 +8,6 @@ per-product cost dataframe shape.
 
 from __future__ import annotations
 
-import logging
-import math
 from pathlib import Path
 from typing import Any
 
@@ -335,18 +333,6 @@ def test_replay_policy_error_fails_fast(monkeypatch) -> None:
         replay_cached_cost(cache)
 
 
-def test_replay_degraded_mode_uses_zero_orders(monkeypatch, caplog) -> None:
-    """P0.4: the zero-order fallback survives only behind the explicit flag."""
-    cache = _small_replay_cache()
-    monkeypatch.setattr(replay_module, "apply_order_policy", _raise_policy_error)
-
-    with caplog.at_level(logging.WARNING, logger="benchmarks.vn2.replay"):
-        result = replay_cached_cost(cache, degraded_mode=True)
-
-    assert math.isfinite(result.total_cost)
-    assert any("zero orders" in record.getMessage() for record in caplog.records)
-
-
 def test_run_benchmark_with_cumulative_target_config_produces_finite_cost() -> None:
     """End-to-end smoke for the direct-cumulative target plumbing."""
     cumulative_config = {**_FAST_BEST_CONFIG, "_target_mode": "cumulative"}
@@ -463,6 +449,7 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
     assert captured["ray_local_mode"] is True
     assert captured["metric"] == "objective"
     assert captured["time_attr"] == "tune_step"
+    assert captured["fail_fast"] == "raise"
 
 
 def test_oracle_order_path_matches_simple_known_lead_time_case() -> None:
