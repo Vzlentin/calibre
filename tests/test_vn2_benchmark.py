@@ -129,7 +129,7 @@ class TestVN2BenchmarkIntegration:
 
 
 def test_run_hpo_returns_valid_config(monkeypatch) -> None:
-    """run_hpo builds a PanelTuningTask and returns an engine-ready model config."""
+    """run_hpo builds a GlobalTuningTask and returns an engine-ready model config."""
     series = _get_first_n_series(2)
 
     captured: dict[str, Any] = {}
@@ -138,7 +138,7 @@ def test_run_hpo_returns_valid_config(monkeypatch) -> None:
         captured["task"] = task
         return {k: v for k, v in _FAST_BEST_CONFIG.items() if k != "_quantile_alpha"}
 
-    monkeypatch.setattr(search_module, "optimize_panel_task", _fake_optimize_panel_task)
+    monkeypatch.setattr(search_module, "optimize_global_task", _fake_optimize_panel_task)
 
     config = run_hpo(
         data_dir=DATA_DIR,

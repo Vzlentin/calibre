@@ -54,7 +54,7 @@ CONFORMAL_ORDER_CONFIG = CumulativeConformalRiskConfig(
 # ``run_benchmark(tune=False)``.
 TOP1_CRC_CONFIG = CONFORMAL_ORDER_CONFIG
 
-# Tuning (legacy seasonal-naive smoke run; kept to exercise TuningTask wiring)
+# Tuning (legacy seasonal-naive smoke run; kept to exercise LocalTuningTask wiring)
 TUNE_BASE_CONFIG: dict = {
     "backend": "statsforecast",
     "model": "SeasonalNaive",

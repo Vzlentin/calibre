@@ -24,7 +24,7 @@ from calibre.storage.postgres import (
     make_session_factory,
     session_scope,
 )
-from calibre.tuning import Accuracy, TuningCandidate, TuningTask
+from calibre.tuning import Accuracy, LocalTuningTask, TuningCandidate
 
 SKU_SET = ["A", "B", "C", "D", "E"]
 
@@ -113,7 +113,7 @@ def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client) -> None:
 
     seen_uids: list[str] = []
 
-    def _fake_optimize(task: TuningTask) -> TuningCandidate:
+    def _fake_optimize(task: LocalTuningTask) -> TuningCandidate:
         seen_uids.append(task.unique_id)
         idx = SKU_SET.index(task.unique_id)
         return TuningCandidate(
@@ -126,7 +126,7 @@ def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client) -> None:
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_task_candidate", _fake_optimize)
+    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
 
     submit = client.post("/tune", json=_tune_payload(SKU_SET))
     assert submit.status_code == 202, submit.text
@@ -193,7 +193,7 @@ def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client) -> None
 
     tuned_uids: list[str] = []
 
-    def _fake_optimize(task: TuningTask) -> TuningCandidate:
+    def _fake_optimize(task: LocalTuningTask) -> TuningCandidate:
         tuned_uids.append(task.unique_id)
         return TuningCandidate(
             model_config={"season_length": 13},
@@ -201,7 +201,7 @@ def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client) -> None
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_task_candidate", _fake_optimize)
+    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
 
     submit = client.post("/tune", json=payload)
     study_id = submit.json()["study_id"]
@@ -222,7 +222,7 @@ def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client) ->
     sku_set = SKU_SET[:2]
     run_count = {"n": 0}
 
-    def _fake_optimize(task: TuningTask) -> TuningCandidate:
+    def _fake_optimize(task: LocalTuningTask) -> TuningCandidate:
         run_count["n"] += 1
         return TuningCandidate(
             model_config={"season_length": 13},
@@ -230,7 +230,7 @@ def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client) ->
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_task_candidate", _fake_optimize)
+    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
 
     payload = _tune_payload(sku_set)
     first = client.post("/tune", json=payload).json()
@@ -271,7 +271,7 @@ def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client) 
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_panel_task_candidate", _fake_panel)
+    monkeypatch.setattr(api_main, "optimize_global_task_candidate", _fake_panel)
 
     submit = client.post("/tune", json=_global_tune_payload(SKU_SET))
     assert submit.status_code == 202, submit.text
@@ -317,7 +317,7 @@ def test_global_hpo_resumes_from_cache(monkeypatch, tuning_db, client) -> None:
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_panel_task_candidate", _fake_panel)
+    monkeypatch.setattr(api_main, "optimize_global_task_candidate", _fake_panel)
 
     payload = _global_tune_payload(SKU_SET)
     first = client.post("/tune", json=payload).json()

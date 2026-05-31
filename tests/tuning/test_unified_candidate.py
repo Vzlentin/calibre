@@ -16,7 +16,7 @@ from calibre.tuning.optimizer import (
     _evaluate_candidate,
     _resolve_candidate,
 )
-from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
+from calibre.tuning.task import LocalTuningTask, StudyConfig, TuningCandidate
 
 
 class _ConstObjective:
@@ -82,7 +82,7 @@ def _resolved_frame(cost: float) -> pd.DataFrame:
     )
 
 
-def _task(objective: Any) -> TuningTask:
+def _task(objective: Any) -> LocalTuningTask:
     history = pd.DataFrame(
         {
             UNIQUE_ID: ["sku"],
@@ -96,7 +96,7 @@ def _task(objective: Any) -> TuningTask:
             model_config={"season_length": trial.suggest_categorical("season_length", [1, 2])}
         )
 
-    return TuningTask(
+    return LocalTuningTask(
         unique_id="sku",
         history=history,
         horizon=1,
@@ -149,7 +149,7 @@ def test_conformal_params_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
             conformal_config={"coverage": 0.8, "gamma": 0.1},
         )
 
-    task = TuningTask(
+    task = LocalTuningTask(
         unique_id="sku",
         history=history,
         horizon=1,
@@ -211,7 +211,7 @@ def test_ordering_params_propagate_to_objective(monkeypatch: pytest.MonkeyPatch)
             ordering_config={"weight": 4.0},
         )
 
-    task = TuningTask(
+    task = LocalTuningTask(
         unique_id="sku",
         history=history,
         horizon=1,

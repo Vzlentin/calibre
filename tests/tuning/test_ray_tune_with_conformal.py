@@ -9,7 +9,7 @@ import calibre.tuning.optimizer as optimizer
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.evaluation.point_metrics import smape
 from calibre.tuning.objectives import Accuracy
-from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
+from calibre.tuning.task import LocalTuningTask, StudyConfig, TuningCandidate
 
 
 def _space_season_length(trial: optuna.Trial) -> TuningCandidate:
@@ -43,7 +43,7 @@ def test_no_sequential_fallback_when_conformal_in_loop(monkeypatch, tmp_path) ->
             )
         )
 
-    task = TuningTask(
+    task = LocalTuningTask(
         unique_id="test_series",
         history=series,
         horizon=4,
@@ -67,7 +67,7 @@ def test_no_sequential_fallback_when_conformal_in_loop(monkeypatch, tmp_path) ->
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        result = optimizer.optimize_task(task)
+        result = optimizer.optimize_local_task(task)
 
     assert "season_length" in result
     assert not any(

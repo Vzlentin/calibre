@@ -14,7 +14,7 @@ from calibre.api.main import (
 )
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.evaluation.point_metrics import smape
-from calibre.tuning import Accuracy, TuningCandidate, TuningTask
+from calibre.tuning import Accuracy, LocalTuningTask, TuningCandidate
 
 
 def _seasonal_search_space(trial: optuna.Trial) -> TuningCandidate:
@@ -108,9 +108,9 @@ def test_tune_endpoint_persists_best_candidate(monkeypatch, client) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
-    captured: dict[str, TuningTask] = {}
+    captured: dict[str, LocalTuningTask] = {}
 
-    def _fake_optimize(task: TuningTask) -> TuningCandidate:
+    def _fake_optimize(task: LocalTuningTask) -> TuningCandidate:
         captured["task"] = task
         return TuningCandidate(
             model_config={"backend": "stub", "model": "stub_model", "season_length": 26},
@@ -118,7 +118,7 @@ def test_tune_endpoint_persists_best_candidate(monkeypatch, client) -> None:
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_task_candidate", _fake_optimize)
+    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
 
     submit = client.post("/tune", json=_tune_payload())
     assert submit.status_code == 202, submit.text
@@ -161,7 +161,7 @@ def test_tune_handle_returns_deterministic_session_id(monkeypatch, client) -> No
     register_tuning_objective("accuracy", Accuracy(metric=smape))
     monkeypatch.setattr(
         api_main,
-        "optimize_task_candidate",
+        "optimize_local_task_candidate",
         lambda task: TuningCandidate(model_config={}),
     )
 
@@ -175,10 +175,10 @@ def test_failed_study_records_error(monkeypatch, client) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
-    def _boom(task: TuningTask) -> TuningCandidate:
+    def _boom(task: LocalTuningTask) -> TuningCandidate:
         raise RuntimeError("optuna exploded")
 
-    monkeypatch.setattr(api_main, "optimize_task_candidate", _boom)
+    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _boom)
 
     submit = client.post("/tune", json=_tune_payload())
     study_id = submit.json()["study_id"]

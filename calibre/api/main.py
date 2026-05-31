@@ -63,13 +63,13 @@ from calibre.storage.postgres import (
 )
 from calibre.storage.session import derive_session_id
 from calibre.tuning import (
-    PanelTuningTask,
+    GlobalTuningTask,
+    LocalTuningTask,
     StudyConfig,
     TuningCandidate,
     TuningObjective,
-    TuningTask,
-    optimize_panel_task_candidate,
-    optimize_task_candidate,
+    optimize_global_task_candidate,
+    optimize_local_task_candidate,
 )
 
 app = FastAPI(title="Calibre", version="0.1.0")
@@ -700,7 +700,7 @@ def _run_local_hpo(
         if existing is not None:
             candidates[uid] = existing
             continue
-        task = TuningTask(
+        task = LocalTuningTask(
             unique_id=uid,
             history=_filter_uid(history, uid),
             horizon=int(req.horizon),
@@ -711,7 +711,7 @@ def _run_local_hpo(
             objective=_OBJECTIVES[req.objective_id],
             study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
         )
-        payload = _candidate_to_payload(optimize_task_candidate(task))
+        payload = _candidate_to_payload(optimize_local_task_candidate(task))
         _persist_tuning_run(factory, session_id, uid, signature, payload)
         candidates[uid] = payload
     return candidates
@@ -734,7 +734,7 @@ def _run_global_hpo(
     signature = _tuning_signature(req, origins)
     payload = _load_existing_global_tuning_run(factory, session_id, signature)
     if payload is None:
-        task = PanelTuningTask(
+        task = GlobalTuningTask(
             history=history,
             horizon=int(req.horizon),
             base_model_config=dict(req.base_model_config),
@@ -744,7 +744,7 @@ def _run_global_hpo(
             objective=_OBJECTIVES[req.objective_id],
             study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
         )
-        payload = _candidate_to_payload(optimize_panel_task_candidate(task))
+        payload = _candidate_to_payload(optimize_global_task_candidate(task))
         _persist_global_tuning_run(factory, session_id, signature, payload)
     return {uid: copy.deepcopy(payload) for uid in req.sku_set}
 
