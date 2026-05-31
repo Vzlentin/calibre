@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import tempfile
 from collections.abc import Callable, Mapping
@@ -62,6 +63,8 @@ from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+
+logger = logging.getLogger(__name__)
 
 
 def build_rs_params(
@@ -398,15 +401,16 @@ def replay_cached_cost(
     order_conformal_config: CumulativeConformalRiskConfig | None = CONFORMAL_ORDER_CONFIG,
     order_base_scale: float = 1.0,
     reorder_point_scale: float | None = None,
-    on_policy_error: Callable[[int, Exception], None] | None = None,
+    degraded_mode: bool = False,
     on_progress: Callable[[int, float], None] | None = None,
 ) -> ReplayResult:
     """Replay cached forecasts through the exact VN2 simulator.
 
-    A failure in ``apply_order_policy`` for a single round falls back to zero
-    orders so the cost trajectory remains comparable across rounds; pass
-    ``on_policy_error`` to surface the underlying exception (e.g. a print or
-    logger.warning), otherwise the failure is silent.
+    By default a failure in ``apply_order_policy`` for a single round propagates:
+    a broken policy must surface as a hard error, never as a silently cheap
+    trajectory the HPO cost search can converge on. Pass ``degraded_mode=True``
+    only in a dedicated degraded-mode replay to substitute zero orders for the
+    failed round (logged at WARNING) and continue.
     """
     simulator = VN2Simulator(cache.initial_states)
     target_quantile_col = quantile_column(cache.quantile_alpha)
@@ -454,8 +458,13 @@ def replay_cached_cost(
                 reorder_point_scale=reorder_point_scale,
             )
         except (ValueError, KeyError) as exc:
-            if on_policy_error is not None:
-                on_policy_error(rn, exc)
+            if not degraded_mode:
+                raise
+            logger.warning(
+                "VN2 replay round %d order policy failed; using zero orders (degraded mode): %r",
+                rn,
+                exc,
+            )
             orders = dict.fromkeys(cache.initial_states, 0.0)
 
         actual_demand = cache.actuals_by_round.get(rn, dict.fromkeys(cache.initial_states, 0.0))

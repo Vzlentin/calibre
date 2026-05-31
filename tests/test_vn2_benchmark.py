@@ -8,6 +8,8 @@ per-product cost dataframe shape.
 
 from __future__ import annotations
 
+import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ import pandas as pd
 import pytest
 from mlforecast.lag_transforms import RollingMean
 
+import benchmarks.vn2.replay as replay_module
 import benchmarks.vn2.run_benchmark as run_benchmark_module
 import benchmarks.vn2.search as search_module
 from benchmarks.vn2.config import BEST_CONFIG, CUMULATIVE_BEST_CONFIG, TOP1_CRC_CONFIG
@@ -305,6 +308,45 @@ def test_cached_replay_matches_run_benchmark_on_small_subset() -> None:
     assert actual.total_cost == pytest.approx(float(expected["total_cost"].sum()))
 
 
+def _small_replay_cache():
+    return build_replay_cache(
+        data_dir=DATA_DIR,
+        model_config=_FAST_BEST_CONFIG,
+        horizon=3,
+        lead_time=2,
+        review_period=1,
+        decision_rounds=1,
+        delivery_weeks=1,
+        series_filter=_get_first_n_series(2),
+        order_conformal_warmup_origins=1,
+    )
+
+
+def _raise_policy_error(*_args: Any, **_kwargs: Any) -> Any:
+    raise ValueError("synthetic policy failure")
+
+
+def test_replay_policy_error_fails_fast(monkeypatch) -> None:
+    """P0.4: a policy failure aborts the replay by default — never zero orders."""
+    cache = _small_replay_cache()
+    monkeypatch.setattr(replay_module, "apply_order_policy", _raise_policy_error)
+
+    with pytest.raises(ValueError, match="synthetic policy failure"):
+        replay_cached_cost(cache)
+
+
+def test_replay_degraded_mode_uses_zero_orders(monkeypatch, caplog) -> None:
+    """P0.4: the zero-order fallback survives only behind the explicit flag."""
+    cache = _small_replay_cache()
+    monkeypatch.setattr(replay_module, "apply_order_policy", _raise_policy_error)
+
+    with caplog.at_level(logging.WARNING, logger="benchmarks.vn2.replay"):
+        result = replay_cached_cost(cache, degraded_mode=True)
+
+    assert math.isfinite(result.total_cost)
+    assert any("zero orders" in record.getMessage() for record in caplog.records)
+
+
 def test_run_benchmark_with_cumulative_target_config_produces_finite_cost() -> None:
     """End-to-end smoke for the direct-cumulative target plumbing."""
     cumulative_config = {**_FAST_BEST_CONFIG, "_target_mode": "cumulative"}
@@ -344,6 +386,24 @@ def test_cost_search_smoke_runs_one_cached_trial() -> None:
 
     assert len(study.trials) == 1
     assert study.best_value >= 0.0
+
+
+def test_cost_trial_failure_report_classifies_failures() -> None:
+    """P1.3: bad trials report inf; infra failures re-raise, never become inf."""
+    pruned = search_module._cost_trial_failure_report(optuna.TrialPruned())
+    assert pruned[search_module.OBJECTIVE_METRIC] == float("inf")
+    assert pruned["pruned"] == 1
+
+    bad = search_module._cost_trial_failure_report(ValueError("bad params"))
+    assert bad[search_module.OBJECTIVE_METRIC] == float("inf")
+    assert "bad params" in bad["bad_trial"]
+
+    key = search_module._cost_trial_failure_report(KeyError("missing"))
+    assert key[search_module.OBJECTIVE_METRIC] == float("inf")
+    assert "bad_trial" in key
+
+    with pytest.raises(RuntimeError, match="infra boom"):
+        search_module._cost_trial_failure_report(RuntimeError("infra boom"))
 
 
 def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:

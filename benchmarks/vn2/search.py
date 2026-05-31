@@ -58,6 +58,22 @@ OBJECTIVE_METRIC = "objective"
 TUNE_STEP_ATTR = "tune_step"
 
 
+def _cost_trial_failure_report(exc: BaseException) -> dict[str, Any]:
+    """Tune-report payload for a recoverable trial failure; re-raise infra failures.
+
+    A pruned trial or a bad-hyperparameter error (``ValueError``/``KeyError``,
+    including a failed order policy now that replay fails fast) is a high-cost
+    trial the optimizer should avoid. Anything else is an infrastructure failure
+    (import error, Ray worker crash, misconfiguration) and must surface as a hard
+    error, not masquerade as ``inf`` cost.
+    """
+    if isinstance(exc, optuna.TrialPruned):
+        return {OBJECTIVE_METRIC: float("inf"), TUNE_STEP_ATTR: 1, "pruned": 1}
+    if isinstance(exc, ValueError | KeyError):
+        return {OBJECTIVE_METRIC: float("inf"), TUNE_STEP_ATTR: 1, "bad_trial": repr(exc)[:500]}
+    raise exc
+
+
 def _suggest_from_spec(trial: optuna.Trial, name: str, spec: dict[str, Any]) -> Any:
     """Sample a parameter from a declarative search-space spec."""
     kind = spec["type"]
@@ -473,14 +489,12 @@ def run_cost_search(
                     series_filter=series_filter,
                 )
             )
-            policy_errors: list[str] = []
 
             def _report_progress(step: int, total_cost: float) -> None:
                 tune.report(
                     {
                         OBJECTIVE_METRIC: float(total_cost),
                         TUNE_STEP_ATTR: step,
-                        "policy_error_count": len(policy_errors),
                     }
                 )
 
@@ -489,26 +503,10 @@ def run_cost_search(
                 order_conformal_config=crc_config,
                 order_base_scale=order_base_scale,
                 reorder_point_scale=reorder_point_scale,
-                on_policy_error=lambda rn, exc: policy_errors.append(f"round {rn}: {exc!r}"),
                 on_progress=_report_progress,
             )
-        except optuna.TrialPruned:
-            tune.report(
-                {
-                    OBJECTIVE_METRIC: float("inf"),
-                    TUNE_STEP_ATTR: 1,
-                    "pruned": 1,
-                }
-            )
-            return
         except Exception as exc:  # pragma: no cover - exercised by Tune on bad trials.
-            tune.report(
-                {
-                    OBJECTIVE_METRIC: float("inf"),
-                    TUNE_STEP_ATTR: 1,
-                    "error": repr(exc)[:500],
-                }
-            )
+            tune.report(_cost_trial_failure_report(exc))
             return
 
         if max_t == 1 and decision_rounds + delivery_weeks == 0:
