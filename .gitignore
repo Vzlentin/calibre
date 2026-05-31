@@ -219,3 +219,6 @@ lightning_logs/
 .worktrees/
 benchmarks/cp/aci/conformal-time-series
 results/
+
+# Codegraph index (generated)
+.codegraph/
