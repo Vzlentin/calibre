@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import warnings
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,7 +12,8 @@ import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.evaluation.point_metrics import mae, pinball_linear, smape
-from calibre.execution.threading import cap_threaded_config
+from calibre.execution.threading import cap_threaded_config, thread_budget
+from calibre.tuning import optimizer
 from calibre.tuning.objectives import Accuracy
 from calibre.tuning.optimizer import _resolve_tune_storage_path, optimize_task, run_optuna_study
 from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
@@ -189,6 +192,46 @@ def test_resource_budget_caps_threaded_model_configs():
 def test_resource_budget_does_not_add_threads_to_unthreaded_model():
     capped = cap_threaded_config({"model": "SeasonalNaive"}, cpu_budget=2.0)
     assert "n_jobs" not in capped
+
+
+def test_score_forecast_task_caps_native_threads_via_threadpoolctl(monkeypatch):
+    """Scoring caps BLAS/OpenMP pools to the CPU budget via ``threadpool_limits``
+    without mutating the process-global thread-count env vars (REVIEW #7)."""
+    recorded: list[int] = []
+
+    @contextmanager
+    def _spy_limits(*, limits):
+        recorded.append(limits)
+        yield
+
+    monkeypatch.setattr(optimizer, "threadpool_limits", _spy_limits)
+
+    class _EmptyEngine:
+        def iter_origins(self, tasks, actuals, origins):
+            return iter(())
+
+    thread_keys = (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "TORCH_NUM_THREADS",
+    )
+    before = {key: os.environ.get(key) for key in thread_keys}
+
+    cost = optimizer._score_forecast_task(
+        engine=_EmptyEngine(),
+        forecast_task=None,
+        objective=None,
+        actuals=None,
+        origins=[],
+        cpu_per_trial=2.0,
+    )
+
+    assert cost == 0.0
+    assert recorded == [thread_budget(2.0)]
+    assert {key: os.environ.get(key) for key in thread_keys} == before
 
 
 def test_default_tune_storage_path_stays_under_results_dir_when_home_unwritable(

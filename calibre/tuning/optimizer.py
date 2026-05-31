@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import optuna
 import pandas as pd
+from threadpoolctl import threadpool_limits
 
 from calibre.conformal.runtime import (
     SymmetricIntervalConfig,
@@ -102,30 +103,6 @@ def restore_cwd():
         yield
     finally:
         os.chdir(original)
-
-
-@contextmanager
-def _trial_thread_env(cpu_per_trial: float):
-    threads = str(thread_budget(cpu_per_trial))
-    keys = (
-        "OMP_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",
-        "TORCH_NUM_THREADS",
-    )
-    previous = {key: os.environ.get(key) for key in keys}
-    try:
-        for key in keys:
-            os.environ[key] = threads
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 @contextmanager
@@ -460,7 +437,7 @@ def _score_forecast_task(
 ) -> float:
     total_cost = 0.0
     seen_keys: set[tuple[Any, ...]] = set()
-    with _trial_thread_env(cpu_per_trial):
+    with threadpool_limits(limits=thread_budget(cpu_per_trial)):
         for origin_idx, result in enumerate(
             engine.iter_origins([forecast_task], actuals, origins),
             start=1,
