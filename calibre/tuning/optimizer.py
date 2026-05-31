@@ -1,4 +1,4 @@
-"""Tuning optimizer: runs Ray Tune studies for TuningTasks."""
+"""Tuning optimizer: runs Ray Tune studies for LocalTuningTasks."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from calibre.execution.backend import BackendEngine, ConformalOptions, Execution
 from calibre.execution.io import join_uri
 from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
 from calibre.execution.threading import cap_threaded_config, thread_budget
-from calibre.tuning.task import PanelTuningTask, StudyConfig, TuningCandidate, TuningTask
+from calibre.tuning.task import GlobalTuningTask, LocalTuningTask, StudyConfig, TuningCandidate
 
 _OBJECTIVE_METRIC = "objective"
 _ORIGIN_INDEX = "origin_index"
@@ -91,7 +91,7 @@ def _resolve_tune_storage_path_config(config: StudyConfig) -> str:
     return _resolve_tune_storage_path_values(config.tune_storage_path, config.results_dir)
 
 
-def _resolve_tune_storage_path(task: TuningTask) -> str:
+def _resolve_tune_storage_path(task: LocalTuningTask) -> str:
     return _resolve_tune_storage_path_config(task.study_config)
 
 
@@ -124,7 +124,7 @@ def _ray_tune_env():
             os.environ["TUNE_DISABLE_AUTO_CALLBACK_LOGGERS"] = previous_auto_loggers
 
 
-def _history_with_uid(task: TuningTask) -> pd.DataFrame:
+def _history_with_uid(task: LocalTuningTask) -> pd.DataFrame:
     history = task.history.copy()
     if UNIQUE_ID not in history.columns:
         history.insert(0, UNIQUE_ID, task.unique_id)
@@ -150,7 +150,7 @@ def _build_mlflow_callbacks(config: StudyConfig) -> list[Any]:
     ]
 
 
-def _snapshot_conformal_runtime(task: TuningTask) -> _ConformalRuntimeSnapshot | None:
+def _snapshot_conformal_runtime(task: LocalTuningTask) -> _ConformalRuntimeSnapshot | None:
     if task.conformal_runtime_factory is None:
         return None
     seed_runtime = task.conformal_runtime_factory()
@@ -342,21 +342,21 @@ def _validate_origins(origins: list[pd.Timestamp], *, label: str) -> list[pd.Tim
     return [pd.Timestamp(origin) for origin in origins]
 
 
-def _validate_task(task: TuningTask) -> list[pd.Timestamp]:
-    return _validate_origins(task.origins, label="TuningTask")
+def _validate_local_task(task: LocalTuningTask) -> list[pd.Timestamp]:
+    return _validate_origins(task.origins, label="LocalTuningTask")
 
 
-def _validate_panel_task(task: PanelTuningTask) -> list[pd.Timestamp]:
+def _validate_global_task(task: GlobalTuningTask) -> list[pd.Timestamp]:
     if task.base_model_config.get("scope") != "global":
-        raise ValueError("PanelTuningTask.base_model_config must set scope='global'")
-    return _validate_origins(task.origins, label="PanelTuningTask")
+        raise ValueError("GlobalTuningTask.base_model_config must set scope='global'")
+    return _validate_origins(task.origins, label="GlobalTuningTask")
 
 
 def _resolve_candidate(value: Any) -> TuningCandidate:
     if isinstance(value, TuningCandidate):
         return value
     raise TypeError(
-        f"TuningTask.search_space must return a TuningCandidate; got {type(value).__name__}"
+        f"LocalTuningTask.search_space must return a TuningCandidate; got {type(value).__name__}"
     )
 
 
@@ -459,7 +459,7 @@ def _score_forecast_task(
 
 
 def _evaluate_candidate(
-    task: TuningTask,
+    task: LocalTuningTask,
     candidate: TuningCandidate,
     origins: list[pd.Timestamp],
 ) -> float:
@@ -493,7 +493,7 @@ def _evaluate_candidate(
         )
 
 
-def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> dict[str, Any]:
+def _optimize_task_sequential(task: LocalTuningTask, origins: list[pd.Timestamp]) -> dict[str, Any]:
     config = task.study_config
     study = optuna.create_study(direction="minimize", sampler=create_tpe_sampler(config.seed))
 
@@ -509,14 +509,14 @@ def _optimize_task_sequential(task: TuningTask, origins: list[pd.Timestamp]) -> 
     return {**task.base_model_config, **dict(best_config)}
 
 
-def _candidate_from_params(task: TuningTask, params: dict[str, Any]) -> TuningCandidate:
+def _candidate_from_params(task: LocalTuningTask, params: dict[str, Any]) -> TuningCandidate:
     """Replay ``task.search_space`` against best Optuna params to rebuild the candidate."""
     return _resolve_candidate(
         task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(params))))
     )
 
 
-def _merge_with_base_model(task: TuningTask, candidate: TuningCandidate) -> TuningCandidate:
+def _merge_with_base_model(task: LocalTuningTask, candidate: TuningCandidate) -> TuningCandidate:
     return TuningCandidate(
         model_config={**task.base_model_config, **dict(candidate.model_config)},
         conformal_config=dict(candidate.conformal_config),
@@ -524,20 +524,20 @@ def _merge_with_base_model(task: TuningTask, candidate: TuningCandidate) -> Tuni
     )
 
 
-def optimize_task_candidate(task: TuningTask) -> TuningCandidate:
+def optimize_local_task_candidate(task: LocalTuningTask) -> TuningCandidate:
     """Run HPO and return the best :class:`TuningCandidate` (model + conformal + ordering)."""
     optuna_params = _run_optuna_study(task)
     return _merge_with_base_model(task, _candidate_from_params(task, optuna_params))
 
 
-def optimize_task(task: TuningTask) -> dict:
+def optimize_local_task(task: LocalTuningTask) -> dict:
     """Run HPO and return the best model_config dict."""
-    return dict(optimize_task_candidate(task).model_config)
+    return dict(optimize_local_task_candidate(task).model_config)
 
 
-def optimize_panel_task_candidate(task: PanelTuningTask) -> TuningCandidate:
-    """Run panel/global HPO and return the best :class:`TuningCandidate`."""
-    origins = _validate_panel_task(task)
+def optimize_global_task_candidate(task: GlobalTuningTask) -> TuningCandidate:
+    """Run global HPO and return the best :class:`TuningCandidate`."""
+    origins = _validate_global_task(task)
     history = task.history.copy()
     config = task.study_config
     max_t = len(origins)
@@ -596,14 +596,14 @@ def optimize_panel_task_candidate(task: PanelTuningTask) -> TuningCandidate:
     )
 
 
-def optimize_panel_task(task: PanelTuningTask) -> dict:
-    """Run panel/global HPO and return the best model_config dict."""
-    return dict(optimize_panel_task_candidate(task).model_config)
+def optimize_global_task(task: GlobalTuningTask) -> dict:
+    """Run global HPO and return the best model_config dict."""
+    return dict(optimize_global_task_candidate(task).model_config)
 
 
-def _run_optuna_study(task: TuningTask) -> dict[str, Any]:
+def _run_optuna_study(task: LocalTuningTask) -> dict[str, Any]:
     """Run Ray Tune for ``task`` and return the best trial's Optuna params dict."""
-    origins = _validate_task(task)
+    origins = _validate_local_task(task)
     runtime_snapshot = _snapshot_conformal_runtime(task)
     conformal_config = runtime_snapshot.config if runtime_snapshot is not None else None
     worker_task = replace(task, conformal_runtime_factory=None)

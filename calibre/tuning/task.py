@@ -29,7 +29,7 @@ class TuningCandidate:
 
 @dataclass(frozen=True, slots=True)
 class StudyConfig:
-    """Shared study/execution settings for per-series and panel tuning."""
+    """Shared study/execution settings for local (per-series) and global tuning."""
 
     n_trials: int = 50
     freq: str = "W"
@@ -49,7 +49,7 @@ class StudyConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class TuningTask:
+class LocalTuningTask:
     """Per-series hyperparameter optimization task."""
 
     unique_id: str
@@ -65,8 +65,8 @@ class TuningTask:
 
 
 @dataclass(frozen=True, slots=True)
-class PanelTuningTask:
-    """Panel/global hyperparameter optimization task."""
+class GlobalTuningTask:
+    """Global hyperparameter optimization task."""
 
     history: pd.DataFrame
     horizon: int

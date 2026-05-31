@@ -6,8 +6,8 @@ import pytest
 
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y, quantile_column
 from calibre.tuning.objectives import CumulativePinball
-from calibre.tuning.optimizer import optimize_panel_task
-from calibre.tuning.task import PanelTuningTask, StudyConfig, TuningCandidate
+from calibre.tuning.optimizer import optimize_global_task
+from calibre.tuning.task import GlobalTuningTask, StudyConfig, TuningCandidate
 
 
 def _constant_n_estimators_space(trial: optuna.Trial) -> TuningCandidate:
@@ -44,7 +44,7 @@ def test_cumulative_pinball_averages_cumulative_window_pinball() -> None:
     assert value == pytest.approx(1.6)
 
 
-def test_optimize_panel_task_returns_complete_global_model_config(tmp_path) -> None:
+def test_optimize_global_task_returns_complete_global_model_config(tmp_path) -> None:
     dates = pd.date_range("2024-01-07", periods=20, freq="W")
     history = pd.concat(
         [
@@ -66,8 +66,8 @@ def test_optimize_panel_task_returns_complete_global_model_config(tmp_path) -> N
         ignore_index=True,
     )
 
-    result = optimize_panel_task(
-        PanelTuningTask(
+    result = optimize_global_task(
+        GlobalTuningTask(
             history=history,
             horizon=2,
             base_model_config={

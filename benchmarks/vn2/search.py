@@ -45,10 +45,10 @@ from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.execution.data_loading import load_period
 from calibre.tuning import (
     CumulativePinball,
-    PanelTuningTask,
+    GlobalTuningTask,
     StudyConfig,
     TuningCandidate,
-    optimize_panel_task,
+    optimize_global_task,
     run_optuna_study,
 )
 
@@ -164,7 +164,7 @@ def run_hpo(
     tune_storage_path: str | Path | None = None,
     tune_experiment_name: str | None = "vn2_hpo",
 ) -> dict[str, Any]:
-    """Run panel-level HPO through Calibre's public PanelTuningTask API."""
+    """Run panel-level HPO through Calibre's public GlobalTuningTask API."""
     week0 = load_period(data_dir, 0)
     if series_filter is not None:
         week0 = week0[week0[UNIQUE_ID].isin(series_filter)]
@@ -199,7 +199,7 @@ def run_hpo(
 
     started = time.time()
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    task = PanelTuningTask(
+    task = GlobalTuningTask(
         history=history,
         horizon=horizon,
         base_model_config={"backend": "mlforecast", "scope": "global"},
@@ -226,7 +226,7 @@ def run_hpo(
             tune_experiment_name=tune_experiment_name,
         ),
     )
-    best_config = optimize_panel_task(task)
+    best_config = optimize_global_task(task)
     quantile_alpha = float(best_config["quantiles"][0])
     best_config["_quantile_alpha"] = quantile_alpha
     if cumulative_target:

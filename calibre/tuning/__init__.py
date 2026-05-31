@@ -1,28 +1,28 @@
 from calibre.tuning.objectives import Accuracy, Cost, CumulativePinball, Pareto, TuningObjective
 from calibre.tuning.optimizer import (
     StudyOutcome,
-    optimize_panel_task,
-    optimize_panel_task_candidate,
-    optimize_task,
-    optimize_task_candidate,
+    optimize_global_task,
+    optimize_global_task_candidate,
+    optimize_local_task,
+    optimize_local_task_candidate,
     run_optuna_study,
 )
-from calibre.tuning.task import PanelTuningTask, StudyConfig, TuningCandidate, TuningTask
+from calibre.tuning.task import GlobalTuningTask, LocalTuningTask, StudyConfig, TuningCandidate
 
 __all__ = [
     "Accuracy",
     "Cost",
     "CumulativePinball",
-    "PanelTuningTask",
+    "GlobalTuningTask",
+    "LocalTuningTask",
     "Pareto",
     "StudyConfig",
     "StudyOutcome",
     "TuningCandidate",
     "TuningObjective",
-    "TuningTask",
-    "optimize_panel_task",
-    "optimize_panel_task_candidate",
-    "optimize_task",
-    "optimize_task_candidate",
+    "optimize_global_task",
+    "optimize_global_task_candidate",
+    "optimize_local_task",
+    "optimize_local_task_candidate",
     "run_optuna_study",
 ]

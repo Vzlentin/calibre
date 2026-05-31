@@ -9,7 +9,7 @@ import pandas as pd
 import calibre.tuning.optimizer as optimizer
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.tuning.optimizer import _OBJECTIVE_METRIC, _ORIGIN_INDEX, _evaluate_candidate
-from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
+from calibre.tuning.task import LocalTuningTask, StudyConfig, TuningCandidate
 
 
 def _constant_space(trial: optuna.Trial) -> TuningCandidate:
@@ -54,7 +54,7 @@ class _FakeBackendEngine:
         pass
 
 
-def _task(origins: list[pd.Timestamp]) -> TuningTask:
+def _task(origins: list[pd.Timestamp]) -> LocalTuningTask:
     history = pd.DataFrame(
         {
             UNIQUE_ID: ["sku"],
@@ -62,7 +62,7 @@ def _task(origins: list[pd.Timestamp]) -> TuningTask:
             Y: [1.0],
         }
     )
-    return TuningTask(
+    return LocalTuningTask(
         unique_id="sku",
         history=history,
         horizon=1,
@@ -163,7 +163,7 @@ def test_intermediate_metric_matches_final(monkeypatch, tmp_path) -> None:
         study_config=replace(task.study_config, tune_storage_path=str(tmp_path / "ray-tune")),
     )
 
-    result = optimizer.optimize_task(task)
+    result = optimizer.optimize_local_task(task)
 
     assert result["season_length"] == 1
     assert [report[_OBJECTIVE_METRIC] for report in reports] == [5.0, 12.0]

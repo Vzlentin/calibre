@@ -15,8 +15,12 @@ from calibre.evaluation.point_metrics import mae, pinball_linear, smape
 from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.tuning import optimizer
 from calibre.tuning.objectives import Accuracy
-from calibre.tuning.optimizer import _resolve_tune_storage_path, optimize_task, run_optuna_study
-from calibre.tuning.task import StudyConfig, TuningCandidate, TuningTask
+from calibre.tuning.optimizer import (
+    _resolve_tune_storage_path,
+    optimize_local_task,
+    run_optuna_study,
+)
+from calibre.tuning.task import LocalTuningTask, StudyConfig, TuningCandidate
 
 
 def pinball_loss(actual, predicted):
@@ -61,7 +65,7 @@ def ray_local_runtime():
 
 @pytest.fixture
 def tuning_task(series_df, dates):
-    return TuningTask(
+    return LocalTuningTask(
         unique_id="test_series",
         history=series_df,
         horizon=4,
@@ -88,8 +92,8 @@ def tuned_best_config(request):
             "y": [10.0, 20.0, 30.0, 40.0] * 5,
         }
     )
-    return optimize_task(
-        TuningTask(
+    return optimize_local_task(
+        LocalTuningTask(
             unique_id="test_series",
             history=series,
             horizon=4,
@@ -132,7 +136,7 @@ def test_optimize_task_from_tmp_cwd_does_not_use_cwd_as_tune_uri(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("RAYTUNE_RESULTS_DIR", raising=False)
 
-    result = optimize_task(
+    result = optimize_local_task(
         replace(tuning_task, study_config=replace(tuning_task.study_config, results_dir="results"))
     )
 
@@ -159,7 +163,7 @@ def test_optimize_accepts_conformal_config(series_df, dates):
             )
         )
 
-    task = TuningTask(
+    task = LocalTuningTask(
         unique_id="test_series",
         history=series_df,
         horizon=4,
@@ -175,7 +179,7 @@ def test_optimize_accepts_conformal_config(series_df, dates):
         conformal_runtime_factory=_runtime_factory,
         study_config=StudyConfig(n_trials=1, freq="W", seed=3),
     )
-    result = optimize_task(task)
+    result = optimize_local_task(task)
     assert isinstance(result, dict)
     assert "season_length" in result
 

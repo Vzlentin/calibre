@@ -7,7 +7,7 @@ exercise for the parts of Calibre that the tuned pipeline bypasses:
 - MSCP cumulative mode,
 - `apply_rs_policy` default summed-conformal / cumulative path,
 - `VN2Simulator` end-to-end,
-- `TuningTask` wiring (kept under the optional ``tune=True`` flag — a
+- `LocalTuningTask` wiring (kept under the optional ``tune=True`` flag — a
   stale interface we keep alive so Phase 4's panel-level rework has a
   live caller; per-series season-length tuning is not useful in itself).
 
@@ -266,7 +266,7 @@ def run_seasonal(
         verbose: Print progress and cost summary.
         tune: If True, run per-series HPO and add the tuned model to the ensemble.
             Off by default — `season_length=52` is a given for VN2; the flag stays
-            so the `TuningTask` wiring keeps a live caller.
+            so the `LocalTuningTask` wiring keeps a live caller.
         tune_base_config: Base model config to tune (default: SeasonalNaive).
         tune_n_trials: Number of Optuna trials per series.
         tune_n_origins: Number of walk-forward origins per tuning trial.
