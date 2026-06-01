@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-import copy
-import hashlib
-import json
 import logging
 import os
-import traceback
-from collections.abc import Callable
 
-import optuna
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.orm import sessionmaker
 
+from calibre.api import tuning_service
+from calibre.api.errors import format_error
 from calibre.api.lifecycle import FitRecord, LifecycleStore, LifecycleStoreProtocol, TuneRecord
 from calibre.api.run_store import MemoryRunStore, RunStore, SqlRunStore
 from calibre.api.schemas import (
@@ -51,7 +47,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import SalesAdapter, SnapshotSalesAdapter
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
-from calibre.execution.fit_service import validate_fit_config
+from calibre.execution.fit_validation import validate_fit_config
 from calibre.execution.io import join_uri, read_parquet
 from calibre.forecasting import get_scope
 from calibre.forecasting.cache import ModelArtifactCache
@@ -59,24 +55,12 @@ from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.objstore import artifact_base_uri, signed_url
 from calibre.storage.postgres import (
-    GlobalTuningRunRepo,
-    TuningRunRepo,
     database_url,
     make_engine,
     make_session_factory,
-    session_scope,
 )
 from calibre.storage.sales_repo import SqlSalesAdapter
 from calibre.storage.session import derive_session_id
-from calibre.tuning import (
-    GlobalTuningTask,
-    LocalTuningTask,
-    StudyConfig,
-    TuningCandidate,
-    TuningObjective,
-    optimize_global_task_candidate,
-    optimize_local_task_candidate,
-)
 
 app = FastAPI(title="Calibre", version="0.1.0")
 
@@ -88,19 +72,6 @@ _DB_FACTORY: sessionmaker | None = None
 _SQL_STORE: SqlRunStore | None = None
 _LIFECYCLE_STORE = LifecycleStore()
 _SQL_LIFECYCLE_STORE: SqlLifecycleStore | None = None
-
-_SEARCH_SPACES: dict[str, Callable[[optuna.Trial], TuningCandidate]] = {}
-_OBJECTIVES: dict[str, TuningObjective] = {}
-
-
-def register_tuning_search_space(
-    name: str, search_space: Callable[[optuna.Trial], TuningCandidate]
-) -> None:
-    _SEARCH_SPACES[name] = search_space
-
-
-def register_tuning_objective(name: str, objective: TuningObjective) -> None:
-    _OBJECTIVES[name] = objective
 
 
 def _db_session_factory() -> sessionmaker | None:
@@ -252,10 +223,6 @@ def _merge_future_x_override(
     return merged.reset_index()
 
 
-def _format_error(exc: Exception) -> str:
-    return "".join(traceback.format_exception_only(type(exc), exc)).strip()
-
-
 def _conformal_config_from_dict(payload: dict) -> ConformalConfig:
     return ConformalConfig(
         method=payload["method"],
@@ -375,7 +342,7 @@ def _run_fit_job(fit_id: str) -> None:
             artifact_urls=artifact_urls,
         )
     except Exception as exc:
-        store.update_fit(fit_id, status=RunStatus.FAILED, error=_format_error(exc))
+        store.update_fit(fit_id, status=RunStatus.FAILED, error=format_error(exc))
 
 
 @app.get("/fits/{fit_id}", response_model=FitHandle)
@@ -423,7 +390,7 @@ def predict(req: PredictRequest) -> PredictResponse:
     try:
         preds, _ = fit_predict_task(task, cache=_model_artifact_cache())
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
+        raise HTTPException(status_code=500, detail=format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))
     _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
     return PredictResponse(rows=len(forecast_frame), forecast=json_safe_records(forecast_frame))
@@ -467,7 +434,7 @@ def order(req: OrderRequest) -> OrderResponse:
     try:
         orders_frame = apply_order_policy(frame, policy_config)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=_format_error(exc)) from exc
+        raise HTTPException(status_code=400, detail=format_error(exc)) from exc
     if req.session_id is not None:
         store = _lifecycle_store()
         record = store.first_fit_for_session(req.session_id)
@@ -561,11 +528,11 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
 def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
     if not req.sku_set:
         raise HTTPException(status_code=400, detail="sku_set must not be empty")
-    if req.search_space_id not in _SEARCH_SPACES:
+    if not tuning_service.has_search_space(req.search_space_id):
         raise HTTPException(
             status_code=400, detail=f"unknown search_space_id: {req.search_space_id}"
         )
-    if req.objective_id not in _OBJECTIVES:
+    if not tuning_service.has_objective(req.objective_id):
         raise HTTPException(status_code=400, detail=f"unknown objective_id: {req.objective_id}")
     try:
         model_scope = get_scope(req.base_model_config)
@@ -594,7 +561,8 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
         req.conformal_config or {},
     )
     study_id = LifecycleStore.new_study_id()
-    _lifecycle_store().put_study(
+    store = _lifecycle_store()
+    store.put_study(
         TuneRecord(
             study_id=study_id,
             session_id=session_id,
@@ -603,215 +571,18 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
             status=RunStatus.QUEUED,
         )
     )
-    bg.add_task(_run_tune_job, study_id, req, history, actuals, origins)
-    return TuneHandle(study_id=study_id, session_id=session_id, status=RunStatus.QUEUED)
-
-
-def _filter_uid(frame: pd.DataFrame, uid: str) -> pd.DataFrame:
-    if frame.empty or UNIQUE_ID not in frame.columns:
-        return frame
-    return frame[frame[UNIQUE_ID] == uid].reset_index(drop=True)
-
-
-def _candidate_to_payload(candidate: TuningCandidate) -> dict[str, dict]:
-    return {
-        "model_config": dict(candidate.model_config),
-        "conformal_config": dict(candidate.conformal_config),
-        "ordering_config": dict(candidate.ordering_config),
-    }
-
-
-def _stored_candidate_payload(candidate: dict) -> dict[str, dict]:
-    """Normalise a persisted ``candidate`` blob into the uniform payload shape."""
-    return {
-        "model_config": dict(candidate.get("model_config", {})),
-        "conformal_config": dict(candidate.get("conformal_config", {})),
-        "ordering_config": dict(candidate.get("ordering_config", {})),
-    }
-
-
-def _tuning_signature(req: TuneRequest, origins: list[pd.Timestamp]) -> str:
-    """Hash the tuning inputs not already encoded in ``session_id``.
-
-    ``session_id`` covers tenant/sku_set/base_model_config/conformal_config, so
-    a cached result is only reused when the remaining inputs (search space,
-    objective, n_trials, horizon, freq, origins) also match. Both local and
-    global scope share this signature so their resume semantics cannot diverge.
-    """
-    payload = json.dumps(
-        {
-            "search_space_id": req.search_space_id,
-            "objective_id": req.objective_id,
-            "n_trials": int(req.n_trials),
-            "horizon": int(req.horizon),
-            "freq": req.freq,
-            "origins": [pd.Timestamp(origin).isoformat() for origin in origins],
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def _load_existing_local_runs(
-    factory: sessionmaker | None, session_id: str, signature: str
-) -> dict[str, dict[str, dict]]:
-    """Return cached per-uid candidates for this session in a single query.
-
-    Rows tuned under a different signature (changed search space, n_trials,
-    objective, horizon, or origins) are skipped, so a stale candidate is never
-    resumed when the tuning inputs change.
-    """
-    if factory is None:
-        return {}
-    with session_scope(factory) as session:
-        return {
-            row.unique_id: _stored_candidate_payload(dict(row.candidate))
-            for row in TuningRunRepo(session).list_for_session(session_id)
-            if row.config_signature == signature
-        }
-
-
-def _persist_tuning_run(
-    factory: sessionmaker | None,
-    session_id: str,
-    unique_id: str,
-    signature: str,
-    payload: dict[str, dict],
-) -> None:
-    if factory is None:
-        return
-    with session_scope(factory) as session:
-        TuningRunRepo(session).upsert(
-            session_id,
-            unique_id,
-            config_signature=signature,
-            candidate=payload,
-            score=None,
-        )
-
-
-def _load_existing_global_tuning_run(
-    factory: sessionmaker | None, session_id: str, signature: str
-) -> dict[str, dict] | None:
-    if factory is None:
-        return None
-    with session_scope(factory) as session:
-        row = GlobalTuningRunRepo(session).get(session_id)
-        if row is None or row.config_signature != signature:
-            return None
-        return _stored_candidate_payload(dict(row.candidate))
-
-
-def _persist_global_tuning_run(
-    factory: sessionmaker | None,
-    session_id: str,
-    signature: str,
-    payload: dict[str, dict],
-) -> None:
-    if factory is None:
-        return
-    with session_scope(factory) as session:
-        GlobalTuningRunRepo(session).upsert(
-            session_id,
-            config_signature=signature,
-            candidate=payload,
-            score=None,
-        )
-
-
-def _run_local_hpo(
-    req: TuneRequest,
-    history: pd.DataFrame,
-    actuals: pd.DataFrame,
-    origins: list[pd.Timestamp],
-    factory: sessionmaker | None,
-    session_id: str,
-) -> dict[str, dict[str, dict]]:
-    """Per-series HPO: one candidate per uid, with signature-checked per-uid resume."""
-    signature = _tuning_signature(req, origins)
-    cached = _load_existing_local_runs(factory, session_id, signature)
-    candidates: dict[str, dict[str, dict]] = {}
-    for uid in req.sku_set:
-        existing = cached.get(uid)
-        if existing is not None:
-            candidates[uid] = existing
-            continue
-        task = LocalTuningTask(
-            unique_id=uid,
-            history=_filter_uid(history, uid),
-            horizon=int(req.horizon),
-            base_model_config=dict(req.base_model_config),
-            search_space=_SEARCH_SPACES[req.search_space_id],
-            actuals=_filter_uid(actuals, uid),
-            origins=origins,
-            objective=_OBJECTIVES[req.objective_id],
-            study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
-        )
-        payload = _candidate_to_payload(optimize_local_task_candidate(task))
-        _persist_tuning_run(factory, session_id, uid, signature, payload)
-        candidates[uid] = payload
-    return candidates
-
-
-def _run_global_hpo(
-    req: TuneRequest,
-    history: pd.DataFrame,
-    actuals: pd.DataFrame,
-    origins: list[pd.Timestamp],
-    factory: sessionmaker | None,
-    session_id: str,
-) -> dict[str, dict[str, dict]]:
-    """Panel/global HPO: one candidate shared across all uids, broadcast on return.
-
-    The single result is the authoritative row in ``global_tuning_runs`` (keyed
-    by session + config signature for cross-submission resume); the broadcast
-    keeps the study response a uniform ``dict[uid -> candidate]``.
-    """
-    signature = _tuning_signature(req, origins)
-    payload = _load_existing_global_tuning_run(factory, session_id, signature)
-    if payload is None:
-        task = GlobalTuningTask(
-            history=history,
-            horizon=int(req.horizon),
-            base_model_config=dict(req.base_model_config),
-            search_space=_SEARCH_SPACES[req.search_space_id],
-            actuals=actuals,
-            origins=origins,
-            objective=_OBJECTIVES[req.objective_id],
-            study_config=StudyConfig(n_trials=int(req.n_trials), freq=req.freq),
-        )
-        payload = _candidate_to_payload(optimize_global_task_candidate(task))
-        _persist_global_tuning_run(factory, session_id, signature, payload)
-    return {uid: copy.deepcopy(payload) for uid in req.sku_set}
-
-
-_HPO_RUNNERS = {"local": _run_local_hpo, "global": _run_global_hpo}
-
-
-def _run_tune_job(
-    study_id: str,
-    req: TuneRequest,
-    history: pd.DataFrame,
-    actuals: pd.DataFrame,
-    origins: list[pd.Timestamp],
-) -> None:
-    store = _lifecycle_store()
-    record = store.get_study(study_id)
-    if record is None:
-        return
-    store.update_study(study_id, status=RunStatus.RUNNING)
-    session_id = record.session_id
     factory = _db_session_factory()
-    runner = _HPO_RUNNERS[req.hpo_scope]
-    try:
-        candidates = runner(req, history, actuals, origins, factory, session_id)
-        store.update_study(
-            study_id,
-            status=RunStatus.SUCCEEDED,
-            best_candidates=candidates,
-        )
-    except Exception as exc:  # pragma: no cover - background task safety net
-        store.update_study(study_id, status=RunStatus.FAILED, error=_format_error(exc))
+    bg.add_task(
+        tuning_service.run_tune_job,
+        study_id,
+        req,
+        history,
+        actuals,
+        origins,
+        store=store,
+        factory=factory,
+    )
+    return TuneHandle(study_id=study_id, session_id=session_id, status=RunStatus.QUEUED)
 
 
 @app.get("/studies/{study_id}", response_model=TuneStudyResponse)
