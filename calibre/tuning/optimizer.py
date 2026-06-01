@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, is_dataclass, replace
 from math import isfinite
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import optuna
 import pandas as pd
@@ -28,6 +28,10 @@ from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_envir
 from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.tuning.task import GlobalTuningTask, LocalTuningTask, StudyConfig, TuningCandidate
 
+if TYPE_CHECKING:
+    from ray import ObjectRef
+    from ray.tune import Callback, Result, ResultGrid
+
 _OBJECTIVE_METRIC = "objective"
 _ORIGIN_INDEX = "origin_index"
 _DEFAULT_TUNE_RESULTS_SUBDIR = "ray_tune"
@@ -43,7 +47,7 @@ class _ConformalRuntimeSnapshot:
 @dataclass(frozen=True, slots=True)
 class StudyOutcome:
     best_config: dict[str, Any]
-    results: Any
+    results: ResultGrid
 
 
 def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
@@ -131,7 +135,7 @@ def _history_with_uid(task: LocalTuningTask) -> pd.DataFrame:
     return history
 
 
-def _build_mlflow_callbacks(config: StudyConfig) -> list[Any]:
+def _build_mlflow_callbacks(config: StudyConfig) -> list[Callback]:
     if config.mlflow_tracking_uri is None and config.mlflow_experiment_name is None:
         return []
     from ray.air.integrations.mlflow import MLflowLoggerCallback
@@ -165,9 +169,13 @@ def _snapshot_conformal_runtime(task: LocalTuningTask) -> _ConformalRuntimeSnaps
     )
 
 
-def _resolve_state_ref(state_ref: Any) -> dict[str, Any]:
+def _resolve_state_ref(
+    state_ref: ObjectRef[dict[str, Any]] | dict[str, Any] | None,
+) -> dict[str, Any]:
     import ray
 
+    if state_ref is None:
+        raise ValueError("state_ref is required to resolve conformal state")
     if isinstance(state_ref, ray.ObjectRef):
         return ray.get(state_ref)
     return dict(state_ref)
@@ -205,12 +213,12 @@ def _objective_contribution_with(
 
 
 def _best_result_config(
-    results: Any,
+    results: ResultGrid,
     *,
     metric: str = _OBJECTIVE_METRIC,
     mode: str = "min",
 ) -> dict[str, Any]:
-    valid_results = [
+    valid_results: list[Result] = [
         result
         for result in results
         if result.error is None
@@ -229,7 +237,10 @@ def _best_result_config(
         mode=mode,
         filter_nan_and_inf=True,
     )
-    return dict(best.config)
+    best_config = best.config
+    if best_config is None:
+        raise RuntimeError("Ray Tune best result has no config; cannot extract best parameters.")
+    return dict(best_config)
 
 
 def run_optuna_study(
@@ -249,8 +260,8 @@ def run_optuna_study(
     mode: str = "min",
     time_attr: str = _ORIGIN_INDEX,
     experiment_name: str | None = None,
-    callbacks: list[Any] | None = None,
-    trial_state: Any | None = None,
+    callbacks: list[Callback] | None = None,
+    trial_state: dict[str, Any] | None = None,
     fail_fast: bool | str = False,
 ) -> StudyOutcome:
     """Run a Ray Tune/Optuna study for any Tune-compatible trainable.
@@ -299,7 +310,9 @@ def run_optuna_study(
         local_mode=ray_local_mode,
     )
     try:
-        state_ref = ray_runtime.ray.put(trial_state) if trial_state is not None else None
+        import ray
+
+        state_ref = ray.put(trial_state) if trial_state is not None else None
         trainable_fn = (
             tune.with_parameters(trainable, state_ref=state_ref)
             if state_ref is not None

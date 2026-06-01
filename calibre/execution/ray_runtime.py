@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any
+from types import ModuleType
 
 _LOCK = threading.RLock()
 _LOCAL_REFCOUNT = 0
-_LOCAL_RAY: Any | None = None
+_LOCAL_RAY: ModuleType | None = None
 
 
 def prepare_ray_environment() -> None:
@@ -23,7 +23,6 @@ def prepare_ray_environment() -> None:
 
 @dataclass
 class RayRuntimeHandle:
-    ray: Any
     owns_local_runtime: bool = False
 
     def release(self) -> None:
@@ -46,15 +45,15 @@ def acquire_ray_runtime(
         if ray.is_initialized():
             if address is None and _LOCAL_RAY is ray:
                 _LOCAL_REFCOUNT += 1
-                return RayRuntimeHandle(ray=ray, owns_local_runtime=True)
-            return RayRuntimeHandle(ray=ray, owns_local_runtime=False)
+                return RayRuntimeHandle(owns_local_runtime=True)
+            return RayRuntimeHandle(owns_local_runtime=False)
 
         _LOCAL_RAY = None
         _LOCAL_REFCOUNT = 0
 
         if address is not None:
             ray.init(address=address, ignore_reinit_error=True)
-            return RayRuntimeHandle(ray=ray, owns_local_runtime=False)
+            return RayRuntimeHandle(owns_local_runtime=False)
 
         ray.init(
             include_dashboard=False,
@@ -64,7 +63,7 @@ def acquire_ray_runtime(
         )
         _LOCAL_RAY = ray
         _LOCAL_REFCOUNT = 1
-        return RayRuntimeHandle(ray=ray, owns_local_runtime=True)
+        return RayRuntimeHandle(owns_local_runtime=True)
 
 
 def release_ray_runtime(handle: RayRuntimeHandle | None) -> None:
@@ -78,6 +77,9 @@ def release_ray_runtime(handle: RayRuntimeHandle | None) -> None:
         _LOCAL_REFCOUNT = max(0, _LOCAL_REFCOUNT - 1)
         if _LOCAL_REFCOUNT > 0:
             return
-        if handle.ray.is_initialized():
-            handle.ray.shutdown()
+
+        import ray
+
+        if ray.is_initialized():
+            ray.shutdown()
         _LOCAL_RAY = None
