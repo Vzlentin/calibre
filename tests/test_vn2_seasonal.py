@@ -1,12 +1,17 @@
 """Integration test for the VN2 seasonal-naive smoke pipeline.
 
-Uses a small subset (3 products), 2 decision rounds, SeasonalNaive only,
-and skips warmup to keep runtime fast.
+Exercises ``run_seasonal`` — the legacy reference path that drives
+``SymmetricIntervalRuntime`` (ACI), the summed-conformal ``apply_rs_policy``,
+and ``VN2Simulator`` end-to-end — which the tuned ``run_benchmark`` pipeline
+(covered in ``test_vn2_benchmark.py``) bypasses. Uses a 3-product subset, 2
+decision rounds, SeasonalNaive only, and skips warmup to keep runtime fast.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import numpy as np
 
 from benchmarks.vn2.run_seasonal import run_seasonal
 from benchmarks.vn2.simulator import load_initial_states
@@ -27,7 +32,6 @@ _FAST_CONFORMAL_CONFIG = SymmetricIntervalConfig(
 
 
 def _get_first_n_series(n: int) -> list[str]:
-    """Return the first n unique_ids from week_0_initial_state.csv."""
     states = load_initial_states(DATA_DIR / "week_0_initial_state.csv")
     return sorted(states.keys())[:n]
 
@@ -49,38 +53,23 @@ def _run(series: list[str]):
     )
 
 
-class TestVN2SeasonalIntegration:
-    def test_full_loop_runs_without_error(self) -> None:
-        """Full benchmark loop completes without raising exceptions."""
-        result = _run(_get_first_n_series(3))
-        assert result is not None
-        assert not result.empty
+def test_seasonal_pipeline_produces_valid_per_product_costs() -> None:
+    """The seasonal-naive reference loop yields one finite, accounted cost row per series.
 
-    def test_costs_are_non_negative(self) -> None:
-        """All cost columns must be non-negative."""
-        result = _run(_get_first_n_series(3))
-        assert (result["holding_cost"] >= 0).all(), "Negative holding costs detected"
-        assert (result["shortage_cost"] >= 0).all(), "Negative shortage costs detected"
-        assert (result["total_cost"] >= 0).all(), "Negative total costs detected"
+    Structural/relational invariants only — never a literal ``total_cost`` (VN2
+    cost is cross-arch float-divergent).
+    """
+    series = _get_first_n_series(3)
+    result = _run(series)
 
-    def test_result_has_expected_columns(self) -> None:
-        """Result DataFrame has the required columns."""
-        result = _run(_get_first_n_series(3))
-        expected_cols = {"unique_id", "holding_cost", "shortage_cost", "total_cost"}
-        assert expected_cols.issubset(set(result.columns))
+    assert set(result["unique_id"]) == set(series)
+    assert len(result) == len(series)
+    assert {"unique_id", "holding_cost", "shortage_cost", "total_cost"}.issubset(result.columns)
 
-    def test_total_cost_equals_holding_plus_shortage(self) -> None:
-        """total_cost column must equal holding_cost + shortage_cost for every row."""
-        result = _run(_get_first_n_series(3))
-        computed = result["holding_cost"] + result["shortage_cost"]
-        for idx, (actual, expected) in enumerate(zip(result["total_cost"], computed, strict=False)):
-            assert abs(actual - expected) < 1e-9, (
-                f"Row {idx}: total_cost {actual} != holding + shortage {expected}"
-            )
-
-    def test_result_has_one_row_per_product(self) -> None:
-        """Result has exactly one row per series in series_filter."""
-        series = _get_first_n_series(3)
-        result = _run(series)
-        assert len(result) == len(series)
-        assert set(result["unique_id"]) == set(series)
+    costs = result[["holding_cost", "shortage_cost", "total_cost"]].to_numpy()
+    assert np.isfinite(costs).all()
+    assert costs.min() >= 0.0
+    np.testing.assert_allclose(
+        result["total_cost"].to_numpy(),
+        (result["holding_cost"] + result["shortage_cost"]).to_numpy(),
+    )

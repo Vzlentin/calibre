@@ -45,29 +45,28 @@ def _costs() -> CostStruct:
     return CostStruct(underage_cost=3.0, overage_cost=2.0)
 
 
-def test_regret_positive_excess_over_oracle() -> None:
+def test_regret_is_realized_cost_minus_independent_oracle() -> None:
     frame = _frame()
+    # Perhorizon cost is independently known: per-horizon over/underage is
+    # (12-10)*2 + (20-18)*3 + (35-30)*2 = 4 + 6 + 10 = 20.
     realized = Cost(_target_from_yhat, _order_from_target, _costs()).evaluate(frame, frame[Y])
+    assert realized == pytest.approx(20.0)
 
+    # Oracle is a fixed perfect-foresight benchmark, chosen independently of
+    # `realized` (not realized - delta), so a wrong realized cost would change
+    # the regret rather than cancel out.
+    objective = Regret(_target_from_yhat, _order_from_target, _costs(), oracle_cost=12.0)
+
+    assert objective.evaluate(frame, frame[Y]) == pytest.approx(8.0)
+
+
+def test_regret_clips_to_zero_when_realized_below_oracle() -> None:
+    frame = _frame()
     objective = Regret(
         _target_from_yhat,
         _order_from_target,
         _costs(),
-        oracle_cost=realized - 5.0,
-    )
-
-    assert objective.evaluate(frame, frame[Y]) == pytest.approx(5.0)
-
-
-def test_regret_zero_when_realized_below_oracle() -> None:
-    frame = _frame()
-    realized = Cost(_target_from_yhat, _order_from_target, _costs()).evaluate(frame, frame[Y])
-
-    objective = Regret(
-        _target_from_yhat,
-        _order_from_target,
-        _costs(),
-        oracle_cost=realized + 100.0,
+        oracle_cost=1000.0,
     )
 
     assert objective.evaluate(frame, frame[Y]) == 0.0
@@ -75,13 +74,10 @@ def test_regret_zero_when_realized_below_oracle() -> None:
 
 def test_regret_forwards_mode_to_cost() -> None:
     frame = _frame("cumulative")
-    realized = Cost(
-        _target_from_yhat,
-        _order_from_target,
-        _costs(),
-        mode="cumulative",
-    ).evaluate(frame, frame[Y])
-
+    # Single cumulative window: order sum(Y_HAT)=65 vs demand sum(Y)=60 ->
+    # overage (65-60)*2 = 10. With a zero oracle the regret is exactly that
+    # cumulative cost, which only matches if mode reached the wrapped Cost
+    # (a perhorizon Cost would instead raise on the cumulative frame).
     objective = Regret(
         _target_from_yhat,
         _order_from_target,
@@ -90,4 +86,4 @@ def test_regret_forwards_mode_to_cost() -> None:
         mode="cumulative",
     )
 
-    assert objective.evaluate(frame, frame[Y]) == pytest.approx(realized)
+    assert objective.evaluate(frame, frame[Y]) == pytest.approx(10.0)

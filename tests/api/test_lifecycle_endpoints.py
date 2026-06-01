@@ -55,12 +55,10 @@ class _StubAdapter(ModelAdapter):
 
 @pytest.fixture(autouse=True)
 def _reset_lifecycle_store(monkeypatch, tmp_path):
-    fresh = LifecycleStore()
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
+    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", LifecycleStore())
     monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
     _StubAdapter.fit_calls = 0
     _StubAdapter.load_calls = 0
-    return fresh
 
 
 @pytest.fixture
@@ -81,6 +79,12 @@ def _history_records(uid: str = "A") -> list[dict]:
         {UNIQUE_ID: uid, "ds": ds.strftime("%Y-%m-%d"), "y": float(idx)}
         for idx, ds in enumerate(dates)
     ]
+
+
+def _partition_scores(state: dict, partition: str) -> list[float]:
+    """Nonconformity scores the calibrator recorded for one partition."""
+    history = state[partition]["calibrator"]["score_history"][partition]
+    return [float(score) for score in history]
 
 
 @pytest.fixture
@@ -123,8 +127,11 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sal
     )
     assert predict_resp.status_code == 200, predict_resp.text
     forecast = predict_resp.json()["forecast"]
-    assert len(forecast) == 2
-    assert {row[UNIQUE_ID] for row in forecast} == {"A"}
+    # Origin 2024-02-04 leaves 4 history rows before it, so the stub fits
+    # level=4 and predicts level + h: a known 5.0, 6.0 over the two horizons.
+    assert [row[UNIQUE_ID] for row in forecast] == ["A", "A"]
+    assert [row[H] for row in forecast] == [1, 2]
+    assert [row[Y_HAT] for row in forecast] == [5.0, 6.0]
 
     calibrate_resp = client.post(
         "/calibrate",
@@ -133,7 +140,11 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sal
     assert calibrate_resp.status_code == 200, calibrate_resp.text
     calibrated = calibrate_resp.json()["calibrated"]
     lower_col, upper_col = interval_column_names(0.9)
-    assert all(lower_col in row and upper_col in row for row in calibrated)
+    # ACI cold-start (no observations yet) -> zero radius -> bounds collapse onto y_hat.
+    assert [row[Y_HAT] for row in calibrated] == [5.0, 6.0]
+    for row in calibrated:
+        assert row[lower_col] == row[Y_HAT]
+        assert row[upper_col] == row[Y_HAT]
 
     order_resp = client.post(
         "/order",
@@ -157,8 +168,12 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sal
     assert order_resp.status_code == 200, order_resp.text
     orders = order_resp.json()["orders"]
     assert len(orders) == 1
-    assert orders[0][UNIQUE_ID] == "A"
-    assert "order_qty" in orders[0]
+    order_row = orders[0]
+    assert order_row[UNIQUE_ID] == "A"
+    # R,S order-up-to over the protection window (lead 1 + review 1 = 2):
+    # target = sum of upper bounds = 5 + 6 = 11; order = max(target - inventory(5), 0) = 6.
+    assert order_row["target_stock_level"] == 11.0
+    assert order_row["order_qty"] == 6.0
 
     observe_resp = client.post(
         "/observe",
@@ -174,7 +189,12 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sal
     assert observe_resp.json()["session_id"] == session_id
 
     state = api_main._LIFECYCLE_STORE.get_conformal_state(session_id)
-    assert state, "observe should persist conformal state"
+    # observe records one calibrator partition per resolved (model, horizon),
+    # each carrying the absolute error of actual vs calibrated forecast:
+    # |9 - 5| = 4 at h1, |11 - 6| = 5 at h2.
+    assert set(state) == {"stub_model:h1:__global__", "stub_model:h2:__global__"}
+    assert _partition_scores(state, "stub_model:h1:__global__") == [4.0]
+    assert _partition_scores(state, "stub_model:h2:__global__") == [5.0]
 
 
 def test_session_state_get(client, stub_adapter, sales_uri):
@@ -213,8 +233,12 @@ def test_session_state_get(client, stub_adapter, sales_uri):
     assert body["session_id"] == session_id
     assert body["tenant"] == "acme"
     assert body["unique_id"] == "A"
-    assert body["last_forecast"] is not None and len(body["last_forecast"]) == 2
-    assert body["open_orders"] is not None and len(body["open_orders"]) == 1
+    # Session state surfaces the persisted forecast and the order it produced,
+    # with the same known values the round-trip computes (level=4 -> 5.0, 6.0;
+    # target 11 - inventory 5 -> order 6).
+    assert [row[Y_HAT] for row in body["last_forecast"]] == [5.0, 6.0]
+    assert len(body["open_orders"]) == 1
+    assert body["open_orders"][0]["order_qty"] == 6.0
 
 
 def test_session_state_404_when_missing(client):
@@ -244,5 +268,9 @@ def test_predict_reuses_fit_time_artifact_for_canonical_origin(client, stub_adap
     predict_resp = client.post("/predict", json={"fit_id": fit_id, "origin": "2024-03-03"})
 
     assert predict_resp.status_code == 200, predict_resp.text
+    # Canonical origin: the fit-time artifact is restored (no refit), so the
+    # forecast reflects the cached level=8 (all 8 history rows): 9.0, 10.0.
     assert _StubAdapter.fit_calls == 1
     assert _StubAdapter.load_calls == 1
+    forecast = predict_resp.json()["forecast"]
+    assert [row[Y_HAT] for row in forecast] == [9.0, 10.0]

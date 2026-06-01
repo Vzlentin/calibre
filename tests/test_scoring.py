@@ -126,10 +126,12 @@ def test_compute_metrics_groups_by_uid_and_h():
             Y_HAT: [11.0, 11.0, 21.0, 21.0],
         }
     )
-    result = compute_metrics(df, metrics=[mae], group_by=[UNIQUE_ID])
+    result = compute_metrics(df, metrics=[mae], group_by=[UNIQUE_ID]).set_index(UNIQUE_ID)
 
     assert len(result) == 2
-    assert "mae" in result.columns
+    # Both groups have absolute errors of exactly 1 at each row → MAE == 1.0.
+    assert result.loc["A", "mae"] == pytest.approx(1.0)
+    assert result.loc["B", "mae"] == pytest.approx(1.0)
 
 
 def test_compute_metrics_with_partial():
@@ -144,8 +146,11 @@ def test_compute_metrics_with_partial():
     mase_52 = partial(mase, seasonality=1)
     result = compute_metrics(df, metrics=[mae, mase_52], group_by=[UNIQUE_ID])
 
-    assert "mae" in result.columns
-    assert "mase" in result.columns
+    # Every forecast overshoots by 1, so MAE == 1.0. The seasonality=1 naive
+    # benchmark (consecutive differences of y = 0..9) also has MAE 1.0, so the
+    # scaled error MASE == 1.0.
+    assert result["mae"].iloc[0] == pytest.approx(1.0)
+    assert result["mase"].iloc[0] == pytest.approx(1.0)
 
 
 def test_compute_metrics_skips_unresolved():

@@ -13,13 +13,22 @@ from calibre.forecasting.adapter_base import ModelAdapter
 
 
 class _FutureXAdapter(ModelAdapter):
+    """Stub whose forecast bends with a ``promo_lift`` future_x column.
+
+    The point of these tests is the override-merge wiring, so the adapter
+    records the ``future_x`` frame it was actually handed; assertions inspect
+    that captured payload rather than re-deriving the toy ``10 + h + lift``.
+    """
+
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
+        self.received: list[pd.DataFrame | None] = []
 
     def fit(self, task: ForecastTask) -> None:
         self._task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
+        self.received.append(None if task.future_x is None else task.future_x.copy())
         origin = pd.Timestamp(task.forecast_origin)
         rows: list[dict] = []
         future_x = task.future_x if task.future_x is not None else pd.DataFrame()
@@ -47,15 +56,24 @@ class _FutureXAdapter(ModelAdapter):
         return None
 
 
+@pytest.fixture
+def received_future_x() -> list[pd.DataFrame | None]:
+    """Collects the future_x each adapter instance received in ``predict``."""
+    return []
+
+
 @pytest.fixture(autouse=True)
-def _reset_lifecycle_store(monkeypatch, tmp_path):
+def _reset_lifecycle_store(monkeypatch, tmp_path, received_future_x):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
     monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
-    monkeypatch.setattr(
-        "calibre.execution.backend.resolve_adapter",
-        lambda cfg: _FutureXAdapter(cfg),
-    )
+
+    def _make_adapter(cfg):
+        adapter = _FutureXAdapter(cfg)
+        adapter.received = received_future_x
+        return adapter
+
+    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", _make_adapter)
     return fresh
 
 
@@ -114,7 +132,17 @@ def _predict_yhat(client: TestClient, fit_id: str, **payload: object) -> list[fl
     return [row[Y_HAT] for row in response.json()["forecast"]]
 
 
-def test_future_x_override_changes_forecast(client, sales_uri, tmp_path) -> None:
+def _lift_at(frame: pd.DataFrame | None, uid: str, ds: str) -> float | None:
+    """The ``promo_lift`` the adapter saw for ``(uid, ds)``, or None if absent."""
+    if frame is None or "promo_lift" not in frame.columns:
+        return None
+    match = frame[(frame[UNIQUE_ID] == uid) & (frame[DS] == pd.Timestamp(ds))]
+    if match.empty or pd.isna(match.iloc[-1]["promo_lift"]):
+        return None
+    return float(match.iloc[-1]["promo_lift"])
+
+
+def test_future_x_override_changes_forecast(client, sales_uri, tmp_path, received_future_x) -> None:
     future_x_uri = _write_future_x(
         tmp_path,
         [
@@ -123,8 +151,12 @@ def test_future_x_override_changes_forecast(client, sales_uri, tmp_path) -> None
         ],
     )
     fit_id = _fit_id(client, _fit_payload(sales_uri, future_x_uri=future_x_uri))
+    # /fit eagerly validates by predicting once; drop that capture so only the
+    # two /predict calls below remain.
+    received_future_x.clear()
 
     baseline = _predict_yhat(client, fit_id)
+    baseline_x = received_future_x[-1]
     what_if = _predict_yhat(
         client,
         fit_id,
@@ -135,12 +167,21 @@ def test_future_x_override_changes_forecast(client, sales_uri, tmp_path) -> None
             ]
         },
     )
+    what_if_x = received_future_x[-1]
 
-    assert baseline == [11.0, 12.0]
-    assert what_if == [18.0, 15.0]
+    # The baseline request carries no override, so the adapter never sees promo_lift.
+    assert _lift_at(baseline_x, "A", "2024-02-11") is None
+    assert _lift_at(baseline_x, "A", "2024-02-18") is None
+    # The override payload is merged onto the right (uid, ds) and reaches the adapter.
+    assert _lift_at(what_if_x, "A", "2024-02-11") == 7.0
+    assert _lift_at(what_if_x, "A", "2024-02-18") == 3.0
+    # Having reached the model, the override actually moves the forecast.
+    assert what_if != baseline
 
 
-def test_override_does_not_persist_across_calls(client, sales_uri, tmp_path) -> None:
+def test_override_does_not_persist_across_calls(
+    client, sales_uri, tmp_path, received_future_x
+) -> None:
     future_x_uri = _write_future_x(
         tmp_path,
         [
@@ -149,6 +190,9 @@ def test_override_does_not_persist_across_calls(client, sales_uri, tmp_path) -> 
         ],
     )
     fit_id = _fit_id(client, _fit_payload(sales_uri, future_x_uri=future_x_uri))
+    # /fit eagerly validates by predicting once; drop that capture so only the
+    # two /predict calls below remain.
+    received_future_x.clear()
 
     what_if = _predict_yhat(
         client,
@@ -160,7 +204,16 @@ def test_override_does_not_persist_across_calls(client, sales_uri, tmp_path) -> 
             ]
         },
     )
+    what_if_x = received_future_x[-1]
     baseline_after = _predict_yhat(client, fit_id)
+    baseline_after_x = received_future_x[-1]
 
-    assert what_if == [16.0, 14.0]
-    assert baseline_after == [11.0, 12.0]
+    # The override reaches the adapter on the what-if call...
+    assert _lift_at(what_if_x, "A", "2024-02-11") == 5.0
+    assert _lift_at(what_if_x, "A", "2024-02-18") == 2.0
+    # ...but the next call sees only the persisted base future_x (lift 0.0): the
+    # override is request-scoped and does not mutate stored state.
+    assert _lift_at(baseline_after_x, "A", "2024-02-11") == 0.0
+    assert _lift_at(baseline_after_x, "A", "2024-02-18") == 0.0
+    # And the forecast reverts once the transient override is gone.
+    assert what_if != baseline_after

@@ -4,6 +4,15 @@ import pandas as pd
 import ray
 
 import calibre.execution.backend as backend
+from calibre.core.forecast_frame import (
+    DS,
+    FORECAST_ORIGIN,
+    MODEL_NAME,
+    UNIQUE_ID,
+    Y_HAT,
+    H,
+    Y,
+)
 from calibre.core.forecast_task import ForecastTaskRef
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 
@@ -53,12 +62,22 @@ def _patch_fake_ray(monkeypatch, engine: BackendEngine) -> None:
 
 
 def test_multiple_global_configs_run_in_parallel(monkeypatch) -> None:
-    calls: list[tuple[str, int]] = []
-
     def _fake_process_global_panel(refs, model_config, origin):
-        del origin
-        calls.append((str(model_config["name"]), len(refs)))
-        return backend._empty_forecast_frame()
+        # Each global config fits one panel; emit one forecast row per ref so
+        # the test can read the grouping back off the engine's combined frame.
+        # Y_HAT encodes the panel size this config's adapter actually received.
+        name = str(model_config["name"])
+        return pd.DataFrame(
+            {
+                UNIQUE_ID: [ref.unique_id for ref in refs],
+                DS: [origin + pd.Timedelta(weeks=1)] * len(refs),
+                Y: [float("nan")] * len(refs),
+                Y_HAT: [float(len(refs))] * len(refs),
+                H: [1] * len(refs),
+                FORECAST_ORIGIN: [origin] * len(refs),
+                MODEL_NAME: [name] * len(refs),
+            }
+        )
 
     monkeypatch.setattr(backend, "_process_global_panel", _fake_process_global_panel)
     engine = BackendEngine(execution=ExecutionOptions(backend="ray", max_concurrency=2))
@@ -66,12 +85,22 @@ def test_multiple_global_configs_run_in_parallel(monkeypatch) -> None:
 
     config_a = {"backend": "stub", "model": "stub", "scope": "global", "name": "a"}
     config_b = {"backend": "stub", "model": "stub", "scope": "global", "name": "b"}
-    engine._run_global_scope(
+    result = engine._run_global_scope(
         [_ref(config_a, 1), _ref(config_a, 2), _ref(config_b, 3)],
         pd.Timestamp("2024-01-01"),
     )
 
-    assert sorted(calls) == [("a", 2), ("b", 1)]
+    # Both configs ran and their per-config frames were concatenated into one
+    # combined ledger.
+    assert set(result[MODEL_NAME]) == {"a", "b"}
+    a_rows = result[result[MODEL_NAME] == "a"]
+    b_rows = result[result[MODEL_NAME] == "b"]
+
+    # Config "a" was fanned out over exactly its two refs, "b" over its one.
+    assert sorted(a_rows[UNIQUE_ID]) == ["sku_1", "sku_2"]
+    assert b_rows[UNIQUE_ID].tolist() == ["sku_3"]
+    assert set(a_rows[Y_HAT]) == {2.0}
+    assert set(b_rows[Y_HAT]) == {1.0}
 
 
 def test_global_fanout_applies_cpu_per_task_options(monkeypatch) -> None:

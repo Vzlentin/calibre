@@ -40,7 +40,8 @@ def test_append_and_to_df():
     ledger = Ledger()
     ledger.append(_make_frame(3))
     df = ledger.to_df()
-    assert len(df) == 3
+    assert df[Y_HAT].tolist() == [10.0, 20.0, 30.0]
+    assert df[H].tolist() == [1, 2, 3]
 
 
 def test_append_multiple():
@@ -48,7 +49,11 @@ def test_append_multiple():
     ledger.append(_make_frame(2, origin="2024-01-01"))
     ledger.append(_make_frame(2, origin="2024-02-01"))
     df = ledger.to_df()
-    assert len(df) == 4
+    assert df[Y_HAT].tolist() == [10.0, 20.0, 10.0, 20.0]
+    assert sorted(df[FORECAST_ORIGIN].dt.strftime("%Y-%m-%d").unique()) == [
+        "2024-01-01",
+        "2024-02-01",
+    ]
 
 
 def test_append_validates_schema():
@@ -77,5 +82,6 @@ def test_to_parquet(tmp_path):
     path = str(tmp_path / "test.parquet")
     ledger.to_parquet(path)
     loaded = pd.read_parquet(path)
-    assert len(loaded) == 3
     assert set(REQUIRED_COLUMNS).issubset(set(loaded.columns))
+    assert loaded[Y_HAT].tolist() == [10.0, 20.0, 30.0]
+    assert loaded[H].tolist() == [1, 2, 3]

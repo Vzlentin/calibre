@@ -4,6 +4,7 @@ import fsspec
 import numpy as np
 import pandas as pd
 import pytest
+from prometheus_client import REGISTRY
 
 from calibre.conformal import (
     CumulativeConformalRiskConfig,
@@ -179,9 +180,23 @@ def test_forecast_frame_columns_present(single_series_setup):
     engine = BackendEngine()
     result = engine.execute([task], actuals, origins)
 
-    df = result.ledger.to_df()
+    df = result.ledger.to_df().sort_values([FORECAST_ORIGIN, H]).reset_index(drop=True)
     for col in [UNIQUE_ID, DS, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]:
         assert col in df.columns
+
+    # SeasonalNaive (season_length=4) on the perfectly periodic [10,20,30,40]
+    # history repeats the last full season for every origin → [40, 10, 20, 30].
+    assert df[Y_HAT].tolist() == pytest.approx([40.0, 10.0, 20.0, 30.0] * 2)
+    assert (df[UNIQUE_ID] == "SKU_001").all()
+
+    first = df[df[FORECAST_ORIGIN] == origins[0]].sort_values(H)
+    second = df[df[FORECAST_ORIGIN] == origins[1]].sort_values(H)
+    # The first origin is fully in the past by the final origin, so all four
+    # horizons resolve to the actuals (which equal the forecasts here).
+    assert first[Y].tolist() == pytest.approx([40.0, 10.0, 20.0, 30.0])
+    # The final origin only resolves h=1 (ds == origin); later horizons stay NaN.
+    assert second[Y].iloc[0] == pytest.approx(40.0)
+    assert second[Y].iloc[1:].isna().all()
 
 
 def test_partial_resolution(single_series_setup):
@@ -311,10 +326,18 @@ def test_conformal_updates_before_next_origin():
 
     df = result.ledger.to_df()
     lower_col, upper_col = conformal_config.interval_columns
-    widths = df[upper_col] - df[lower_col]
-    second_origin_mask = df[FORECAST_ORIGIN] == dates[8]
+    second_origin_h1 = df[(df[FORECAST_ORIGIN] == dates[8]) & (df[H] == 1)].iloc[0]
 
-    assert widths.loc[second_origin_mask & (df[H] == 1)].iloc[0] > 0.0
+    # The first origin's h=1 residual (|41 - 40| = 1) is observed before the
+    # second origin is forecast, so the second-origin band is finite and wide.
+    lower = second_origin_h1[lower_col]
+    upper = second_origin_h1[upper_col]
+    point = second_origin_h1[Y_HAT]
+    assert pd.notna(lower) and pd.notna(upper)
+    assert upper - lower > 0.0
+    # SeasonalNaive forecasts y_hat=10 for this row; the band is symmetric about it.
+    assert point == pytest.approx(10.0)
+    assert (lower + upper) / 2 == pytest.approx(point)
 
 
 def test_multi_series():
@@ -360,7 +383,14 @@ def test_to_parquet_roundtrip(single_series_setup, tmp_path):
     path = str(tmp_path / "backtest.parquet")
     result.ledger.to_parquet(path)
     loaded = pd.read_parquet(path)
+
+    # The round-trip must preserve the ledger contents, not merely the row count.
+    original = result.ledger.to_df()
     assert len(loaded) == 8
+    assert set(loaded.columns) == set(original.columns)
+    loaded_sorted = loaded.sort_values([FORECAST_ORIGIN, H]).reset_index(drop=True)
+    assert loaded_sorted[Y_HAT].tolist() == pytest.approx([40.0, 10.0, 20.0, 30.0] * 2)
+    assert (loaded_sorted[MODEL_NAME] == "SeasonalNaive").all()
 
 
 def test_engine_without_order_config_returns_none_order_ledger(single_series_setup):
@@ -397,8 +427,11 @@ def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup)
 
     assert isinstance(result.order_ledger, OrderLedger)
     order_df = result.order_ledger.to_df()
-    assert not order_df.empty
-    assert "order_qty" in order_df.columns
+    # One R,S decision per origin for the single series.
+    assert len(order_df) == 2
+    # R,S arithmetic: order up to the target stock level, clipped at zero.
+    expected_qty = (order_df["target_stock_level"] - 50.0).clip(lower=0.0)
+    pd.testing.assert_series_equal(order_df["order_qty"], expected_qty, check_names=False)
 
 
 def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setup):
@@ -426,8 +459,13 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
 
     assert isinstance(result.order_ledger, OrderLedger)
     order_df = result.order_ledger.to_df()
-    assert not order_df.empty
-    assert "order_qty" in order_df.columns
+    # One newsvendor decision per origin for the single series.
+    assert len(order_df) == 2
+    # Critical ratio = underage / (underage + overage) = 3 / 4.
+    assert (order_df["critical_ratio"] == 0.75).all()
+    # Order up to the interpolated demand quantile, clipped at zero.
+    expected_qty = (order_df["demand_quantile"] - 50.0).clip(lower=0.0)
+    pd.testing.assert_series_equal(order_df["order_qty"], expected_qty, check_names=False)
 
 
 def test_engine_records_conformal_coverage_metric(single_series_setup):
@@ -449,10 +487,13 @@ def test_engine_records_conformal_coverage_metric(single_series_setup):
         for sample in conformal_coverage_ratio.collect()[0].samples
     }
     assert ("SeasonalNaive", "perhorizon") in labels
-    coverage = conformal_coverage_ratio.labels(
-        model="SeasonalNaive", mode="perhorizon"
-    )._value.get()
-    assert 0.0 <= coverage <= 1.0
+    coverage = REGISTRY.get_sample_value(
+        "calibre_conformal_coverage_ratio",
+        {"model": "SeasonalNaive", "mode": "perhorizon"},
+    )
+    # The fixture is perfectly periodic, so SeasonalNaive's resolved forecasts
+    # equal the actuals (error 0) and every finite band brackets the truth.
+    assert coverage == pytest.approx(1.0)
 
 
 def test_global_scope_produces_forecasts_for_all_series():
@@ -485,9 +526,12 @@ def test_global_scope_produces_forecasts_for_all_series():
     result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
 
     df = result.ledger.to_df()
-    assert not df.empty
-    assert set(df[UNIQUE_ID].unique()) == {"A", "B"}
+    # One global fit, single origin, horizon 4 → 4 rows per series for both.
+    assert len(df) == 8
+    assert df.groupby(UNIQUE_ID)[H].count().to_dict() == {"A": 4, "B": 4}
+    assert df[Y_HAT].notna().all()
     assert all(col in df.columns for col in [UNIQUE_ID, DS, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME])
+    assert sorted(df[H].unique().tolist()) == [1, 2, 3, 4]
 
 
 def test_global_quantile_columns_survive_engine():
@@ -523,6 +567,9 @@ def test_global_quantile_columns_survive_engine():
     result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
 
     df = result.ledger.to_df()
+    # Two series × horizon 3 from one global quantile fit.
+    assert len(df) == 6
+    assert df.groupby(UNIQUE_ID)[H].count().to_dict() == {"A": 3, "B": 3}
     assert "q_0p5" in df.columns
     assert "q_0p833" in df.columns
     assert df["q_0p5"].notna().all()

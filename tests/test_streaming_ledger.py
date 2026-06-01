@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
@@ -50,8 +51,9 @@ def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> Non
 
     actual = streaming_result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)
+    # No public surface exposes the in-memory buffer; assert directly that
+    # streaming never accumulated frames in memory (the whole point of streaming).
     assert streaming_result.ledger._frames == []
-    assert not hasattr(streaming_result.ledger, "_stream_current")
     assert path.exists()
     assert (tmp_path / "ledger.resolved.parquet").exists()
 
@@ -97,7 +99,9 @@ def test_streaming_resolution_keeps_only_pending_rows(monkeypatch, tmp_path) -> 
 
     actual = result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)
-    assert len(result.ledger._pending) <= 10
+    # resolution_frame() is the public view of the still-pending rows; bounded
+    # memory means it never grows to the full origins * horizon row count.
+    assert len(result.ledger.resolution_frame()) <= 10
     assert len(pd.read_parquet(path)) == len(origins) * task.horizon
 
 
@@ -153,7 +157,10 @@ def test_origin_iterator_matches_batch_conformal_and_ordering(monkeypatch) -> No
         yielded[-1].order_ledger.to_df().reset_index(drop=True),
         batch_result.order_ledger.to_df().reset_index(drop=True),
     )
-    assert stream_runtime._issued_count == batch_runtime._issued_count
+    assert (
+        stream_runtime.get_diagnostics()["issued_count"]
+        == batch_runtime.get_diagnostics()["issued_count"]
+    )
 
 
 def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:
@@ -184,6 +191,7 @@ def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:
     pd.testing.assert_frame_equal(written[expected.columns], expected, check_dtype=False)
     assert (path / "unique_id=A" / "part-0.parquet").exists()
     assert (path / "unique_id=B" / "part-0.parquet").exists()
+    # In-memory buffer stays empty: rows are streamed straight to the partitions.
     assert ledger._frames == []
 
 
@@ -203,10 +211,7 @@ def test_partitioned_streaming_requires_partition_columns(tmp_path) -> None:
     )
 
     try:
-        ledger.append(frame)
-    except ValueError as exc:
-        assert "Missing partition columns" in str(exc)
-    else:  # pragma: no cover - defensive assertion
-        raise AssertionError("Expected missing partition columns to fail")
+        with pytest.raises(ValueError, match="Missing partition columns"):
+            ledger.append(frame)
     finally:
         ledger.close()

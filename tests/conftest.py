@@ -107,3 +107,45 @@ def dates():
 def repeating_pattern():
     """Repeating [10, 20, 30, 40] for 20 periods."""
     return [10.0, 20.0, 30.0, 40.0] * 5
+
+
+@pytest.fixture
+def seasonal_search_space():
+    """Shared Optuna search space (seasonal period + ACI gamma) for the /tune tests.
+
+    Returns the search-space callable so a test can pass it straight to
+    ``register_tuning_search_space``. Deduped out of the API tune endpoint and
+    fan-out suites, which registered byte-identical copies.
+    """
+    from calibre.tuning import TuningCandidate
+
+    def _space(trial):
+        return TuningCandidate(
+            model_config={
+                "season_length": trial.suggest_categorical("season_length", [4, 13, 26, 52]),
+            },
+            conformal_config={"gamma": trial.suggest_float("gamma", 0.01, 0.1)},
+        )
+
+    return _space
+
+
+@pytest.fixture
+def tuning_history_records():
+    """Shared 8-week W-SUN sales-history builder for the /tune tests.
+
+    Returns a ``builder(uids) -> list[dict]`` producing eight weekly rows per
+    uid with ``y = 1..8``. Deduped out of the API tune endpoint and fan-out
+    suites (single-uid vs panel) into one list-taking generator.
+    """
+    from calibre.core.forecast_frame import UNIQUE_ID
+
+    def _build(uids: list[str]) -> list[dict]:
+        dates = pd.date_range("2024-01-07", periods=8, freq="W-SUN")
+        return [
+            {UNIQUE_ID: uid, "ds": ds.strftime("%Y-%m-%d"), "y": float(idx + 1)}
+            for uid in uids
+            for idx, ds in enumerate(dates)
+        ]
+
+    return _build

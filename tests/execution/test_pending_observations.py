@@ -82,6 +82,8 @@ def test_pending_persists_across_process_restart(tmp_path) -> None:
     with session_scope(factory) as session:
         runtime = MagicMock()
         runtime.apply.return_value = _conformal_frame(first_origin)
+        observed: list[pd.DataFrame] = []
+        runtime.observe.side_effect = lambda frame: observed.append(frame.reset_index(drop=True))
         _loop(
             repo=PendingObservationRepo(session),
             session_id=session_id,
@@ -90,13 +92,22 @@ def test_pending_persists_across_process_restart(tmp_path) -> None:
             actual=10.0,
         ).run()
 
-        assert runtime.observe.call_count == 1
+        # Only the h=1 forecast has resolved (its actual landed this round); it
+        # is the exact row handed to the runtime, carrying its resolved actual.
+        [first_observed] = observed
+        assert first_observed[H].tolist() == [1]
+        assert first_observed[Y].tolist() == [10.0]
+        assert first_observed[Y_HAT].tolist() == [10.0]
+
+        # The still-unresolved h=2 forecast must outlive the process restart.
         pending = PendingObservationRepo(session).list_for_session(session_id)
         assert [(row.uid, row.h, row.y_hat) for row in pending] == [("A", 2, 20.0)]
 
     with session_scope(factory) as session:
         runtime = MagicMock()
         runtime.apply.return_value = _conformal_frame(first_origin).iloc[0:0].copy()
+        observed = []
+        runtime.observe.side_effect = lambda frame: observed.append(frame.reset_index(drop=True))
         _loop(
             repo=PendingObservationRepo(session),
             session_id=session_id,
@@ -105,5 +116,10 @@ def test_pending_persists_across_process_restart(tmp_path) -> None:
             actual=20.0,
         ).run()
 
-        runtime.observe.assert_called_once()
+        # The persisted h=2 row is rehydrated and observed with its now-resolved
+        # actual, then cleared from the pending store.
+        [resumed_observed] = observed
+        assert resumed_observed[H].tolist() == [2]
+        assert resumed_observed[Y].tolist() == [20.0]
+        assert resumed_observed[Y_HAT].tolist() == [20.0]
         assert PendingObservationRepo(session).list_for_session(session_id) == []

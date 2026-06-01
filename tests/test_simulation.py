@@ -58,7 +58,6 @@ class TestPipelineDepth:
         assert result.arrivals == pytest.approx(10.0)
 
     def test_depth_zero_rejects_orders(self) -> None:
-        """With lead_time_depth=0, placing an order is invalid."""
         sim = _vn2_like_sim(end_inventory=5.0, depth=0)
 
         with pytest.raises(ValueError, match="lead_time_depth=0"):

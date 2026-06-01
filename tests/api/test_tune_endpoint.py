@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import optuna
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -13,18 +12,8 @@ from calibre.api.tuning_service import (
     register_tuning_objective,
     register_tuning_search_space,
 )
-from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.evaluation.point_metrics import smape
 from calibre.tuning import Accuracy, LocalTuningTask, TuningCandidate
-
-
-def _seasonal_search_space(trial: optuna.Trial) -> TuningCandidate:
-    return TuningCandidate(
-        model_config={
-            "season_length": trial.suggest_categorical("season_length", [4, 13, 26, 52]),
-        },
-        conformal_config={"gamma": trial.suggest_float("gamma", 0.01, 0.1)},
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -41,21 +30,13 @@ def client():
     return TestClient(app)
 
 
-def _history_records(uid: str = "A") -> list[dict]:
-    dates = pd.date_range("2024-01-07", periods=8, freq="W-SUN")
-    return [
-        {UNIQUE_ID: uid, "ds": ds.strftime("%Y-%m-%d"), "y": float(idx + 1)}
-        for idx, ds in enumerate(dates)
-    ]
-
-
 @pytest.fixture
-def tune_payload(tmp_path):
+def tune_payload(tmp_path, tuning_history_records):
     """Stage sales + actuals parquet once; return a payload builder (URI ingress)."""
     sales_path = tmp_path / "sales.parquet"
     actuals_path = tmp_path / "actuals.parquet"
-    pd.DataFrame(_history_records("A")).to_parquet(sales_path)
-    actuals = pd.DataFrame(_history_records("A"))
+    pd.DataFrame(tuning_history_records(["A"])).to_parquet(sales_path)
+    actuals = pd.DataFrame(tuning_history_records(["A"]))
     actuals["ds"] = pd.to_datetime(actuals["ds"])
     actuals.to_parquet(actuals_path)
 
@@ -92,15 +73,17 @@ def test_tune_rejects_unknown_search_space(client, tune_payload) -> None:
     assert "search_space_id" in response.json()["detail"]
 
 
-def test_tune_rejects_unknown_objective(client, tune_payload) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_tune_rejects_unknown_objective(client, tune_payload, seasonal_search_space) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     response = client.post("/tune", json=tune_payload())
     assert response.status_code == 400
     assert "objective_id" in response.json()["detail"]
 
 
-def test_tune_rejects_global_hpo_with_local_model(client, tune_payload) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_tune_rejects_global_hpo_with_local_model(
+    client, tune_payload, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
     payload = tune_payload(hpo_scope="global")
     response = client.post("/tune", json=payload)
@@ -108,8 +91,10 @@ def test_tune_rejects_global_hpo_with_local_model(client, tune_payload) -> None:
     assert "scope" in response.json()["detail"]
 
 
-def test_tune_rejects_local_hpo_with_global_model(client, tune_payload) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_tune_rejects_local_hpo_with_global_model(
+    client, tune_payload, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
     payload = tune_payload(
         base_model_config={"backend": "stub", "model": "stub_model", "scope": "global"}
@@ -119,19 +104,27 @@ def test_tune_rejects_local_hpo_with_global_model(client, tune_payload) -> None:
     assert "scope" in response.json()["detail"]
 
 
-def test_tune_endpoint_persists_best_candidate(monkeypatch, client, tune_payload) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_tune_endpoint_persists_best_candidate(
+    monkeypatch, client, tune_payload, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
-    captured: dict[str, LocalTuningTask] = {}
+    # Capture the task the optimizer was handed and the candidate it produced,
+    # then assert the *captured* candidate is what surfaces in the study — the
+    # request->persistence->response plumbing — rather than re-typing the literal
+    # season_length the fake happened to echo back.
+    captured: dict[str, object] = {}
 
     def _fake_optimize(task: LocalTuningTask) -> TuningCandidate:
         captured["task"] = task
-        return TuningCandidate(
+        candidate = TuningCandidate(
             model_config={"backend": "stub", "model": "stub_model", "season_length": 26},
             conformal_config={"gamma": 0.07},
             ordering_config={},
         )
+        captured["candidate"] = candidate
+        return candidate
 
     monkeypatch.setattr(tuning_service, "optimize_local_task_candidate", _fake_optimize)
 
@@ -146,14 +139,21 @@ def test_tune_endpoint_persists_best_candidate(monkeypatch, client, tune_payload
     assert detail.status_code == 200, detail.text
     body = detail.json()
     assert body["status"] == "succeeded"
-    assert body["best_candidates"]["A"]["model_config_values"]["season_length"] == 26
-    assert body["best_candidates"]["A"]["conformal_config"]["gamma"] == 0.07
-    assert body["best_candidates"]["A"]["ordering_config"] == {}
     assert body["sku_set"] == ["A"]
 
-    assert captured["task"].unique_id == "A"
-    assert captured["task"].horizon == 2
-    assert captured["task"].study_config.n_trials == 3
+    # The optimizer ran against the right per-uid task derived from the request.
+    task = captured["task"]
+    assert task.unique_id == "A"
+    assert task.horizon == 2
+    assert task.study_config.n_trials == 3
+    assert set(task.history["unique_id"].unique()) == {"A"}
+
+    # The candidate computed for uid "A" is the one persisted under uid "A".
+    produced = captured["candidate"]
+    stored = body["best_candidates"]["A"]
+    assert stored["model_config_values"] == produced.model_config
+    assert stored["conformal_config"] == produced.conformal_config
+    assert stored["ordering_config"] == produced.ordering_config
 
 
 def test_get_study_returns_404_for_unknown_id(client) -> None:
@@ -161,16 +161,18 @@ def test_get_study_returns_404_for_unknown_id(client) -> None:
     assert response.status_code == 404
 
 
-def test_tune_rejects_empty_origins(client, tune_payload) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_tune_rejects_empty_origins(client, tune_payload, seasonal_search_space) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
     response = client.post("/tune", json=tune_payload(origins=[]))
     assert response.status_code == 400
     assert "origins" in response.json()["detail"]
 
 
-def test_tune_handle_returns_deterministic_session_id(monkeypatch, client, tune_payload) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_tune_handle_returns_deterministic_session_id(
+    monkeypatch, client, tune_payload, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
     monkeypatch.setattr(
         tuning_service,
@@ -184,8 +186,10 @@ def test_tune_handle_returns_deterministic_session_id(monkeypatch, client, tune_
     assert first["study_id"] != second["study_id"]
 
 
-def test_failed_study_records_error(monkeypatch, client, tune_payload) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_failed_study_records_error(
+    monkeypatch, client, tune_payload, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
     def _boom(task: LocalTuningTask) -> TuningCandidate:

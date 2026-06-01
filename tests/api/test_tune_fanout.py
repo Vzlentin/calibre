@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import optuna
 import pandas as pd
 import pytest
 from alembic import command
@@ -30,31 +29,13 @@ from calibre.tuning import Accuracy, LocalTuningTask, TuningCandidate
 SKU_SET = ["A", "B", "C", "D", "E"]
 
 
-def _seasonal_search_space(trial: optuna.Trial) -> TuningCandidate:
-    return TuningCandidate(
-        model_config={
-            "season_length": trial.suggest_categorical("season_length", [4, 13, 26, 52]),
-        },
-        conformal_config={"gamma": trial.suggest_float("gamma", 0.01, 0.1)},
-    )
-
-
-def _history_records(uids: list[str]) -> list[dict]:
-    dates = pd.date_range("2024-01-07", periods=8, freq="W-SUN")
-    return [
-        {UNIQUE_ID: uid, "ds": ds.strftime("%Y-%m-%d"), "y": float(idx + 1)}
-        for uid in uids
-        for idx, ds in enumerate(dates)
-    ]
-
-
 @pytest.fixture
-def uris(tmp_path):
+def uris(tmp_path, tuning_history_records):
     """Stage sales + actuals parquet covering the whole SKU_SET (URI ingress)."""
     sales_path = tmp_path / "sales.parquet"
     actuals_path = tmp_path / "actuals.parquet"
-    pd.DataFrame(_history_records(SKU_SET)).to_parquet(sales_path)
-    actuals = pd.DataFrame(_history_records(SKU_SET))
+    pd.DataFrame(tuning_history_records(SKU_SET)).to_parquet(sales_path)
+    actuals = pd.DataFrame(tuning_history_records(SKU_SET))
     actuals["ds"] = pd.to_datetime(actuals["ds"])
     actuals.to_parquet(actuals_path)
     return str(sales_path), str(actuals_path)
@@ -120,16 +101,24 @@ def _factory_for(db_url: str):
     return make_session_factory(make_engine(db_url))
 
 
-def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client, uris) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_per_sku_best_configs_persisted(
+    monkeypatch, tuning_db, client, uris, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
-    seen_uids: list[str] = []
+    # Each uid must get ITS OWN candidate, routed to the right uid in both the
+    # API response and the per-uid table. Capture the candidate produced for
+    # each task (and the history slice it was handed) and assert the
+    # stored/returned values are those captured candidates — the
+    # request->per-uid-persistence plumbing — rather than re-deriving the fake's
+    # formula in lockstep with it.
+    produced: dict[str, TuningCandidate] = {}
+    seen_history: dict[str, set] = {}
 
     def _fake_optimize(task: LocalTuningTask) -> TuningCandidate:
-        seen_uids.append(task.unique_id)
         idx = SKU_SET.index(task.unique_id)
-        return TuningCandidate(
+        candidate = TuningCandidate(
             model_config={
                 "backend": "stub",
                 "model": "stub_model",
@@ -138,6 +127,9 @@ def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client, uris) ->
             conformal_config={"gamma": 0.01 + 0.01 * idx},
             ordering_config={},
         )
+        produced[task.unique_id] = candidate
+        seen_history[task.unique_id] = set(task.history[UNIQUE_ID].unique())
+        return candidate
 
     monkeypatch.setattr(tuning_service, "optimize_local_task_candidate", _fake_optimize)
 
@@ -150,25 +142,36 @@ def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client, uris) ->
     detail = client.get(f"/studies/{study_id}").json()
     assert detail["status"] == "succeeded"
     assert set(detail["best_candidates"]) == set(SKU_SET)
-    for idx, uid in enumerate(SKU_SET):
-        payload = detail["best_candidates"][uid]
-        assert payload["model_config_values"]["season_length"] == [4, 13, 26, 52][idx % 4]
-        assert payload["conformal_config"]["gamma"] == pytest.approx(0.01 + 0.01 * idx)
 
-    assert sorted(seen_uids) == sorted(SKU_SET)
+    # One optimizer call per uid, each handed only that uid's history slice.
+    assert set(produced) == set(SKU_SET)
+    for uid in SKU_SET:
+        assert seen_history[uid] == {uid}
 
+    # API response routes each uid's own computed candidate back under that uid.
+    for uid in SKU_SET:
+        stored = detail["best_candidates"][uid]
+        assert stored["model_config_values"] == produced[uid].model_config
+        assert stored["conformal_config"]["gamma"] == pytest.approx(
+            produced[uid].conformal_config["gamma"]
+        )
+
+    # The per-uid table persists the same candidate under the right uid + session.
     factory = _factory_for(tuning_db)
     with session_scope(factory) as session:
         rows = TuningRunRepo(session).list_for_session(session_id)
     assert {row.unique_id for row in rows} == set(SKU_SET)
     for row in rows:
-        idx = SKU_SET.index(row.unique_id)
-        assert row.candidate["model_config"]["season_length"] == [4, 13, 26, 52][idx % 4]
-        assert row.candidate["conformal_config"]["gamma"] == pytest.approx(0.01 + 0.01 * idx)
+        assert row.candidate["model_config"] == produced[row.unique_id].model_config
+        assert row.candidate["conformal_config"]["gamma"] == pytest.approx(
+            produced[row.unique_id].conformal_config["gamma"]
+        )
 
 
-def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client, uris) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_tune_resumes_partial_completion(
+    monkeypatch, tuning_db, client, uris, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
     payload = _tune_payload(SKU_SET[:3], *uris)
@@ -221,15 +224,20 @@ def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client, uris) -
     detail = client.get(f"/studies/{study_id}").json()
 
     assert detail["status"] == "succeeded"
+    # Only the un-cached uid is (re)tuned; A and B resume their seeded candidates.
     assert tuned_uids == ["C"]
     candidates = detail["best_candidates"]
     assert candidates["A"]["model_config_values"]["season_length"] == 99
+    assert candidates["A"]["conformal_config"]["gamma"] == pytest.approx(0.42)
     assert candidates["B"]["model_config_values"]["season_length"] == 88
+    assert candidates["B"]["conformal_config"]["gamma"] == pytest.approx(0.33)
     assert candidates["C"]["model_config_values"]["season_length"] == 13
 
 
-def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client, uris) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_local_hpo_reruns_when_config_changes(
+    monkeypatch, tuning_db, client, uris, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
     sku_set = SKU_SET[:2]
@@ -265,15 +273,18 @@ def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client, ur
     assert run_count["n"] == 2 * len(sku_set)
 
 
-def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client, uris) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_global_hpo_broadcasts_single_candidate(
+    monkeypatch, tuning_db, client, uris, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
     tasks: list = []
+    captured: dict[str, TuningCandidate] = {}
 
     def _fake_panel(task) -> TuningCandidate:
         tasks.append(task)
-        return TuningCandidate(
+        candidate = TuningCandidate(
             model_config={
                 "backend": "stub",
                 "model": "stub_model",
@@ -283,6 +294,8 @@ def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client, 
             conformal_config={"gamma": 0.09},
             ordering_config={},
         )
+        captured["candidate"] = candidate
+        return candidate
 
     monkeypatch.setattr(tuning_service, "optimize_global_task_candidate", _fake_panel)
 
@@ -295,16 +308,19 @@ def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client, 
     detail = client.get(f"/studies/{study_id}").json()
     assert detail["status"] == "succeeded"
 
-    # One panel study over the whole panel, not one per uid.
+    # One panel study over the whole panel (not one per uid), fed every uid.
     assert len(tasks) == 1
     assert set(tasks[0].history[UNIQUE_ID].unique()) == set(SKU_SET)
 
-    # The single candidate is broadcast across every uid.
+    # The single produced candidate is broadcast verbatim to every uid.
+    produced = captured["candidate"]
     assert set(detail["best_candidates"]) == set(SKU_SET)
     for uid in SKU_SET:
-        payload = detail["best_candidates"][uid]
-        assert payload["model_config_values"]["season_length"] == 52
-        assert payload["conformal_config"]["gamma"] == pytest.approx(0.09)
+        stored = detail["best_candidates"][uid]
+        assert stored["model_config_values"] == produced.model_config
+        assert stored["conformal_config"]["gamma"] == pytest.approx(
+            produced.conformal_config["gamma"]
+        )
 
     # Authoritative result lives in global_tuning_runs; nothing in the per-uid table.
     factory = _factory_for(tuning_db)
@@ -312,12 +328,14 @@ def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client, 
         global_row = GlobalTuningRunRepo(session).get(session_id)
         per_uid_rows = TuningRunRepo(session).list_for_session(session_id)
     assert global_row is not None
-    assert global_row.candidate["model_config"]["season_length"] == 52
+    assert global_row.candidate["model_config"] == produced.model_config
     assert per_uid_rows == []
 
 
-def test_global_hpo_resumes_from_cache(monkeypatch, tuning_db, client, uris) -> None:
-    register_tuning_search_space("seasonal", _seasonal_search_space)
+def test_global_hpo_resumes_from_cache(
+    monkeypatch, tuning_db, client, uris, seasonal_search_space
+) -> None:
+    register_tuning_search_space("seasonal", seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
     run_count = {"n": 0}

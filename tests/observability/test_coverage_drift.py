@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
+from prometheus_client import REGISTRY
 
-from calibre.conformal.controllers import AdaptiveAlphaController, FixedAlphaController
+from calibre.conformal.controllers import AdaptiveAlphaController
 from calibre.conformal.runtime import (
     SymmetricIntervalConfig,
     build_symmetric_interval_runtime,
@@ -22,7 +23,6 @@ from calibre.execution.backend import (
     BackendEngine,
     ConformalOptions,
     ExecutionOptions,
-    _adaptive_controller_drift,
 )
 
 
@@ -44,31 +44,17 @@ def _adaptive_controller_with_history(
     return controller
 
 
-def test_adaptive_controller_drift_matches_mean_minus_target() -> None:
-    runtime = _make_runtime()
-    runtime.controller = _adaptive_controller_with_history(target_alpha=0.1, errors=[1, 0, 0, 1])
-
-    drift = _adaptive_controller_drift(runtime)
-
-    assert drift is not None
-    assert drift == 0.5 - 0.1
-
-
-def test_adaptive_controller_drift_is_none_for_fixed_controller() -> None:
-    runtime = build_symmetric_interval_runtime(
-        SymmetricIntervalConfig(method="mscp", coverage=0.9, calibration_window=4)
+def _drift_gauge(model: str, partition: str) -> float | None:
+    return REGISTRY.get_sample_value(
+        "calibre_conformal_coverage_drift", {"model": model, "partition": partition}
     )
-    assert isinstance(runtime.controller, FixedAlphaController)
-
-    assert _adaptive_controller_drift(runtime) is None
 
 
-def test_adaptive_controller_drift_is_none_when_history_empty() -> None:
-    runtime = _make_runtime()
-    assert isinstance(runtime.controller, AdaptiveAlphaController)
-    assert runtime.controller.error_history == []
-
-    assert _adaptive_controller_drift(runtime) is None
+def _engine(runtime: object) -> BackendEngine:
+    return BackendEngine(
+        execution=ExecutionOptions(freq="W-SUN"),
+        conformal=ConformalOptions(runtime=runtime),
+    )
 
 
 def _resolved_frame(*, partitions: list[str], model: str = "stub") -> pd.DataFrame:
@@ -94,68 +80,51 @@ def _resolved_frame(*, partitions: list[str], model: str = "stub") -> pd.DataFra
     return pd.DataFrame(rows)
 
 
-def test_record_coverage_drift_emits_one_gauge_per_partition() -> None:
+def test_drift_gauge_is_empirical_miscoverage_minus_target_per_partition() -> None:
     runtime = _make_runtime()
-    runtime.controller = _adaptive_controller_with_history(target_alpha=0.1, errors=[1, 0, 1, 0])
-    engine = BackendEngine(
-        execution=ExecutionOptions(freq="W-SUN"),
-        conformal=ConformalOptions(runtime=runtime),
-    )
+    # 2 of 4 observations miss -> 0.5 empirical miscoverage; target alpha 0.1
+    # leaves a drift of 0.4, asserted as a literal independent of the formula.
+    runtime.controller = _adaptive_controller_with_history(target_alpha=0.1, errors=[1, 0, 0, 1])
     frame = _resolved_frame(partitions=["p1", "p2"], model="model_x")
-    expected_drift = 0.5 - 0.1
 
-    conformal_coverage_drift.labels(model="model_x", partition="p1").set(-999.0)
-    conformal_coverage_drift.labels(model="model_x", partition="p2").set(-999.0)
+    _engine(runtime)._record_coverage_drift(frame, runtime)
 
-    engine._record_coverage_drift(frame, runtime)
-
-    assert (
-        conformal_coverage_drift.labels(model="model_x", partition="p1")._value.get()
-        == expected_drift
-    )
-    assert (
-        conformal_coverage_drift.labels(model="model_x", partition="p2")._value.get()
-        == expected_drift
-    )
+    assert _drift_gauge("model_x", "p1") == 0.4
+    assert _drift_gauge("model_x", "p2") == 0.4
 
 
-def test_record_coverage_drift_falls_back_to_global_partition() -> None:
+def test_drift_falls_back_to_global_partition() -> None:
     runtime = _make_runtime()
     runtime.controller = _adaptive_controller_with_history(target_alpha=0.1, errors=[1, 1, 0, 0])
-    engine = BackendEngine(
-        execution=ExecutionOptions(freq="W-SUN"),
-        conformal=ConformalOptions(runtime=runtime),
-    )
     frame = _resolved_frame(partitions=["only"], model="model_y").drop(
         columns=[CONFORMAL_PARTITION]
     )
 
-    conformal_coverage_drift.labels(model="model_y", partition="__global__").set(-999.0)
+    _engine(runtime)._record_coverage_drift(frame, runtime)
 
-    engine._record_coverage_drift(frame, runtime)
-
-    assert (
-        conformal_coverage_drift.labels(model="model_y", partition="__global__")._value.get()
-        == 0.5 - 0.1
-    )
+    assert _drift_gauge("model_y", "__global__") == 0.4
 
 
-def test_record_coverage_drift_is_noop_for_fixed_controller() -> None:
+def test_fixed_controller_records_no_drift() -> None:
     runtime = build_symmetric_interval_runtime(
         SymmetricIntervalConfig(method="mscp", coverage=0.9, calibration_window=4)
     )
-    engine = BackendEngine(
-        execution=ExecutionOptions(freq="W-SUN"),
-        conformal=ConformalOptions(runtime=runtime),
-    )
     frame = _resolved_frame(partitions=["p1"], model="model_fixed")
-
     sentinel = -12345.0
     conformal_coverage_drift.labels(model="model_fixed", partition="p1").set(sentinel)
 
-    engine._record_coverage_drift(frame, runtime)
+    _engine(runtime)._record_coverage_drift(frame, runtime)
 
-    assert (
-        conformal_coverage_drift.labels(model="model_fixed", partition="p1")._value.get()
-        == sentinel
-    )
+    assert _drift_gauge("model_fixed", "p1") == sentinel
+
+
+def test_adaptive_controller_with_empty_history_records_no_drift() -> None:
+    runtime = _make_runtime()
+    assert runtime.controller.error_history == []
+    frame = _resolved_frame(partitions=["p1"], model="model_empty")
+    sentinel = -999.0
+    conformal_coverage_drift.labels(model="model_empty", partition="p1").set(sentinel)
+
+    _engine(runtime)._record_coverage_drift(frame, runtime)
+
+    assert _drift_gauge("model_empty", "p1") == sentinel

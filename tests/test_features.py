@@ -73,15 +73,27 @@ class TestStockoutFeatures:
         assert "in_stock" in result.columns
         assert "y_uncensored" in result.columns
         oos = result[~result["in_stock"]]
-        if not oos.empty:
-            assert (oos["y_uncensored"] >= oos["y"]).all()
+        # The fixture marks three ISO weeks out-of-stock for series 1_100.
+        assert len(oos) == 3
+        # Censored OOS demand must be lifted (never below) observed sales.
+        assert (oos["y_uncensored"] >= oos["y"]).all()
+        # In-stock rows are passed through unchanged.
+        in_stock = result[result["in_stock"]]
+        pd.testing.assert_series_equal(in_stock["y_uncensored"], in_stock["y"], check_names=False)
 
 
 class TestSeriesScaling:
-    def test_adds_scaling_columns(self, sample_sales: pd.DataFrame) -> None:
+    def test_expanding_mean_and_scaled_target_values(self, sample_sales: pd.DataFrame) -> None:
         df = add_stockout_features(sample_sales, instock=None)
         result = add_series_scaling(df)
         assert {"series_mean", "series_std", "y_scaled"} <= set(result.columns)
+
+        s1 = result[result["unique_id"] == "1_100"].sort_values("ds").reset_index(drop=True)
+        # y_uncensored for 1_100 is 10, 11, 12, ... so the expanding mean of the
+        # first observation is the value itself and the scaled value is 0.
+        assert s1["series_mean"].iloc[0] == pytest.approx(10.0)
+        assert s1["series_mean"].iloc[1] == pytest.approx(10.5)
+        assert s1["y_scaled"].iloc[0] == pytest.approx(0.0)
 
     def test_std_floored_at_one(self, sample_sales: pd.DataFrame) -> None:
         df = add_stockout_features(sample_sales, instock=None)
@@ -105,11 +117,18 @@ class TestLagFeatures:
 
 
 class TestRollingFeatures:
-    def test_creates_rolling_columns(self, sample_sales: pd.DataFrame) -> None:
+    def test_rolling_mean_is_causal_and_correct(self, sample_sales: pd.DataFrame) -> None:
         df = add_stockout_features(sample_sales, instock=None)
         result = add_rolling_features(df, windows=[4])
         assert "rolling_mean_4" in result.columns
         assert "rolling_std_4" in result.columns
+
+        s1 = result[result["unique_id"] == "1_100"].sort_values("ds").reset_index(drop=True)
+        # The window is shifted by one step, so row 0 has no history (NaN) and
+        # later rows average only strictly-past y_uncensored values (10, 11, ...).
+        assert np.isnan(s1["rolling_mean_4"].iloc[0])
+        assert s1["rolling_mean_4"].iloc[1] == pytest.approx(10.0)
+        assert s1["rolling_mean_4"].iloc[4] == pytest.approx(11.5)  # mean(10, 11, 12, 13)
 
 
 class TestCalendarFeatures:
@@ -153,13 +172,16 @@ class TestTimeWeights:
         assert (result["sample_weight"] > 0).all()
         assert (result["sample_weight"] <= 1.0).all()
 
-    def test_recent_observations_weighted_higher(
+    def test_most_recent_observation_has_unit_weight(
         self,
         sample_sales: pd.DataFrame,
     ) -> None:
         result = add_time_weights(sample_sales)
         s1 = result[result["unique_id"] == "1_100"].sort_values("ds")
-        assert s1["sample_weight"].iloc[-1] >= s1["sample_weight"].iloc[0]
+        # The latest observation is at zero weeks-ago, so exp(0) == 1.0, and
+        # strictly older observations decay below it.
+        assert s1["sample_weight"].iloc[-1] == pytest.approx(1.0)
+        assert s1["sample_weight"].iloc[0] < s1["sample_weight"].iloc[-1]
 
 
 class TestBuildTrainingFrame:
@@ -175,6 +197,14 @@ class TestBuildTrainingFrame:
         ):
             assert col in result.columns
         assert len(result) == len(sample_sales)
+
+        # Spot-check that the chained transforms produced the expected values
+        # for series 1_100 (y = 10, 11, 12, ... with no censoring).
+        s1 = result[result["unique_id"] == "1_100"].sort_values("ds").reset_index(drop=True)
+        assert np.isnan(s1["lag_1"].iloc[0])
+        assert s1["lag_1"].iloc[1] == pytest.approx(10.0)
+        assert s1["y_scaled"].iloc[0] == pytest.approx(0.0)
+        assert s1["sample_weight"].iloc[-1] == pytest.approx(1.0)
 
     def test_with_all_data(
         self,

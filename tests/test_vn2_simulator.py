@@ -60,7 +60,6 @@ class TestLeadTime:
         assert w3.end_inventory == pytest.approx(100.0)
 
     def test_order_not_available_in_week2(self) -> None:
-        """Order placed at end of week 1 must NOT be available in week 2."""
         sim = _single_product_sim(end_inventory=0.0)
 
         sim.step(1, orders={"1_1": 50.0}, actual_demand={"1_1": 0.0})
@@ -71,7 +70,6 @@ class TestLeadTime:
 
 class TestStockout:
     def test_demand_exceeds_inventory_caps_sales(self) -> None:
-        """Sales are capped at available inventory; missed_sales captures the shortfall."""
         sim = _single_product_sim(end_inventory=10.0)
         results = sim.step(1, orders={}, actual_demand={"1_1": 25.0})
         r = results[0]
@@ -81,7 +79,6 @@ class TestStockout:
         assert r.end_inventory == pytest.approx(0.0)
 
     def test_zero_inventory_all_missed(self) -> None:
-        """With zero inventory, all demand is missed."""
         sim = _single_product_sim(end_inventory=0.0)
         r = sim.step(1, orders={}, actual_demand={"1_1": 5.0})[0]
 
@@ -104,7 +101,6 @@ class TestCostAccumulation:
         assert r.shortage_cost == pytest.approx(7.0 * 1.0)
 
     def test_cumulative_across_three_weeks(self) -> None:
-        """Cumulative costs sum correctly over multiple weeks."""
         sim = _single_product_sim(end_inventory=10.0)
 
         # Week 1: sell 3, end=7, hold=1.4, short=0
@@ -122,7 +118,6 @@ class TestCostAccumulation:
         assert sim.total_cost() == pytest.approx(expected_holding + expected_shortage)
 
     def test_total_cost_multi_product(self) -> None:
-        """total_cost() sums costs across all products."""
         states = {
             "A": ProductState("A", end_inventory=10.0, in_transit_w1=0.0, in_transit_w2=0.0),
             "B": ProductState("B", end_inventory=20.0, in_transit_w1=0.0, in_transit_w2=0.0),
@@ -148,20 +143,16 @@ class TestInventoryAccountingInvariant:
 
 class TestLoadInitialStates:
     def test_loads_from_csv(self) -> None:
-        """load_initial_states returns a dict with entries for every CSV row."""
         states = load_initial_states(INITIAL_STATE_PATH)
         assert len(states) > 0
-        # Check a known entry format
         for uid, state in states.items():
             assert "_" in uid
             assert isinstance(state, ProductState)
             assert state.end_inventory >= 0
             assert state.in_transit_w1 >= 0
             assert state.in_transit_w2 >= 0
-            break  # just check the first one
 
     def test_unique_id_format(self) -> None:
-        """unique_id in loaded states follows Store_Product format."""
         states = load_initial_states(INITIAL_STATE_PATH)
         for uid in states:
             parts = uid.split("_")
@@ -170,7 +161,7 @@ class TestLoadInitialStates:
             assert parts[1].isdigit()
 
     def test_simulator_deep_copy(self) -> None:
-        """VN2Simulator deep-copies states so original dict is not mutated."""
+        """VN2Simulator deep-copies states so stepping never mutates the caller's dict."""
         states = load_initial_states(INITIAL_STATE_PATH)
         original_uid = next(iter(states))
         original_end_inv = states[original_uid].end_inventory
@@ -183,8 +174,7 @@ class TestLoadInitialStates:
 
 
 class TestToDataFrame:
-    def test_history_dataframe_columns(self) -> None:
-        """to_dataframe() returns expected columns after stepping."""
+    def test_history_dataframe_records_step_values(self) -> None:
         sim = _single_product_sim(end_inventory=5.0)
         sim.step(1, orders={}, actual_demand={"1_1": 2.0})
         df = sim.to_dataframe()
@@ -204,20 +194,30 @@ class TestToDataFrame:
         assert expected_cols.issubset(set(df.columns))
         assert len(df) == 1
 
+        # Start 5, no arrivals, demand 2 fully met → end 3, holding 3 * 0.2.
+        row = df.iloc[0]
+        assert row["unique_id"] == "1_1"
+        assert row["week"] == 1
+        assert row["start_inventory"] == pytest.approx(5.0)
+        assert row["arrivals"] == pytest.approx(0.0)
+        assert row["demand"] == pytest.approx(2.0)
+        assert row["sales"] == pytest.approx(2.0)
+        assert row["missed_sales"] == pytest.approx(0.0)
+        assert row["end_inventory"] == pytest.approx(3.0)
+        assert row["holding_cost"] == pytest.approx(0.6)
+        assert row["shortage_cost"] == pytest.approx(0.0)
+
 
 class TestExtractNewActuals:
     def test_extracts_week_1_actuals(self) -> None:
-        """extract_new_actuals returns non-empty dict for week 1."""
         actuals = extract_new_actuals(DATA_DIR, 1)
         assert len(actuals) > 0
         for uid, val in actuals.items():
             assert "_" in uid
             assert isinstance(val, float)
             assert val >= 0.0
-            break
 
     def test_unique_id_format(self) -> None:
-        """Returned unique_ids follow Store_Product format."""
         actuals = extract_new_actuals(DATA_DIR, 1)
         for uid in actuals:
             parts = uid.split("_")
