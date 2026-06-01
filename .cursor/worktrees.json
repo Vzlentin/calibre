@@ -1,0 +1,7 @@
+{
+  "setup-worktree-unix": [
+    "test -f \"$ROOT_WORKTREE_PATH/.env\" && cp \"$ROOT_WORKTREE_PATH/.env\" .env || true",
+    "test -d \"$ROOT_WORKTREE_PATH/data/vn2\" && mkdir -p data && cp -R \"$ROOT_WORKTREE_PATH/data/vn2\" data/vn2 || true",
+    "uv sync --extra dev --extra benchmarks"
+  ]
+}
