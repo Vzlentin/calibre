@@ -6,6 +6,7 @@ from typing import Protocol
 
 import pandas as pd
 
+from calibre.core.forecast_frame import DS, UNIQUE_ID
 from calibre.core.order_types import CostStruct
 from calibre.execution.io import read_parquet
 from calibre.ordering.simulation.state import ProductState, make_pipeline
@@ -116,6 +117,99 @@ class ErpInventoryAdapter:
 
     def load_lead_times(self) -> dict[str, int]:
         raise NotImplementedError("Implement ERP lead-time loading in client code")
+
+
+class SalesAdapter(Protocol):
+    """Sales-history ingestion seam, mirroring ``InventoryAdapter``.
+
+    ``load_sales`` returns the ``(unique_id, ds, y[, regressors])`` history frame
+    the forecaster consumes — the same shape the inline ``/fit`` JSON body used
+    to carry — so the API can swap inline history for a parquet/SQL URI without
+    touching the downstream fit/predict path.
+
+    Point-in-time contract: when the source carries an ``as_of`` revision marker,
+    every adapter collapses to the latest revision per ``(unique_id, ds)`` as of
+    the cutoff, and rows whose ``as_of`` is NULL/missing are ALWAYS visible —
+    treated as the latest revision regardless of the cutoff. Both the snapshot
+    and SQL adapters share ``_latest_revision`` so this NULL semantics never
+    diverges between backends."""
+
+    def load_sales(self, sku_set: list[str], as_of: pd.Timestamp | None) -> pd.DataFrame: ...
+
+
+def _filter_sku_set(frame: pd.DataFrame, sku_set: list[str]) -> pd.DataFrame:
+    wanted = {str(s) for s in sku_set}
+    return frame[frame[UNIQUE_ID].astype(str).isin(wanted)].copy()
+
+
+def _latest_revision(frame: pd.DataFrame, as_of: pd.Timestamp | None) -> pd.DataFrame:
+    """Collapse a revision-stamped sales frame to the latest revision per key.
+
+    When ``frame`` has no ``as_of`` column it is returned unchanged. Otherwise
+    ``as_of`` is coerced to datetime and, when a cutoff is supplied, rows are kept
+    where ``as_of`` is NULL/NaT OR ``as_of <= cutoff`` — NULL/missing ``as_of`` is
+    the canonical "always visible, latest revision" marker. The remaining rows are
+    sorted by ``as_of`` (NaT last, so NULL wins ties) and reduced to the last
+    revision per ``(unique_id, ds)``, then the marker column is dropped so it never
+    reaches the forecaster as a spurious regressor."""
+    if "as_of" not in frame.columns:
+        return frame
+    frame = frame.copy()
+    frame["as_of"] = pd.to_datetime(frame["as_of"])
+    if as_of is not None:
+        asof = frame["as_of"]
+        frame = frame[asof.isna() | (asof <= pd.Timestamp(as_of))]
+    return (
+        frame.sort_values("as_of")
+        .drop_duplicates([UNIQUE_ID, DS], keep="last")
+        .drop(columns="as_of")
+    )
+
+
+class SnapshotSalesAdapter:
+    """Parquet/fsspec-backed sales history with point-in-time ``as_of`` support.
+
+    When the snapshot carries an ``as_of`` column we treat it as a revision
+    marker via the shared ``_latest_revision`` helper: the latest revision per
+    ``(unique_id, ds)`` as of the cutoff is kept, NULL/missing ``as_of`` rows stay
+    visible as the latest revision, and the column is removed before the frame
+    reaches the forecaster (so it is never mistaken for an exogenous regressor)."""
+
+    def __init__(self, sales_uri: str | Path) -> None:
+        self.sales_uri = str(sales_uri)
+        self._snapshot: pd.DataFrame | None = None
+
+    def load_sales(self, sku_set: list[str], as_of: pd.Timestamp | None) -> pd.DataFrame:
+        frame = _filter_sku_set(self._load_snapshot(), sku_set)
+        frame = _latest_revision(frame, as_of)
+        if DS in frame.columns:
+            frame[DS] = pd.to_datetime(frame[DS])
+        return frame.reset_index(drop=True)
+
+    def _load_snapshot(self) -> pd.DataFrame:
+        if self._snapshot is None:
+            self._snapshot = read_parquet(self.sales_uri)
+        return self._snapshot
+
+
+class SyntheticSalesAdapter:
+    """In-memory sales history for tests, wrapping a frame or per-SKU dict."""
+
+    def __init__(self, frame_or_dict: pd.DataFrame | dict[str, pd.DataFrame]) -> None:
+        if isinstance(frame_or_dict, dict):
+            self._frame = (
+                pd.concat(frame_or_dict.values(), ignore_index=True)
+                if frame_or_dict
+                else pd.DataFrame()
+            )
+        else:
+            self._frame = frame_or_dict.copy()
+
+    def load_sales(self, sku_set: list[str], as_of: pd.Timestamp | None) -> pd.DataFrame:
+        del as_of
+        if self._frame.empty:
+            return self._frame.copy()
+        return _filter_sku_set(self._frame, sku_set).reset_index(drop=True)
 
 
 def _pipeline_values(row: pd.Series) -> list[float]:

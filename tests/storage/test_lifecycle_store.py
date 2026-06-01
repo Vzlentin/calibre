@@ -11,9 +11,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
+import pytest
 
-from calibre.api.lifecycle import FitRecord, TuneRecord
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, Y
+from calibre.api.lifecycle import FitRecord, LifecycleStore, OrderKey, TuneRecord, order_pk
+from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, Y
 from calibre.core.run_status import RunStatus
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.models import Base, LifecycleFitRecord
@@ -172,3 +173,71 @@ def test_first_fit_uses_creation_order_not_fit_id(tmp_path):
     first = store.first_fit_for_session("s")
     assert first is not None
     assert first.fit_id == "zzz", "first_fit should be the earliest created, not min fit_id"
+
+
+def _orders_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "A"],
+            FORECAST_ORIGIN: pd.to_datetime(["2024-02-04", "2024-02-11"]),
+            MODEL_NAME: ["Naive", "Naive"],
+            "order_qty": [5.0, 7.0],
+            "target_stock_level": [10.0, 12.0],
+        }
+    )
+
+
+def _assert_orders_round_trip(store) -> None:
+    store.put_orders("acme", "sess-1", _orders_frame())
+
+    loaded = store.orders_for_tenant_uid("acme", "A")
+    assert len(loaded) == 2
+    assert sorted(loaded["order_qty"].tolist()) == [5.0, 7.0]
+    assert loaded["target_stock_level"].tolist() == [10.0, 12.0]
+    assert pd.api.types.is_datetime64_any_dtype(loaded[FORECAST_ORIGIN])
+
+    # Tenant- and uid-scoped: a different tenant or unknown uid sees nothing.
+    assert store.orders_for_tenant_uid("acme", "ZZZ").empty
+    assert store.orders_for_tenant_uid("other", "A").empty
+
+    # Re-placing the same decision tuple upserts (no duplicate row).
+    revised = _orders_frame()
+    revised.loc[0, "order_qty"] = 9.0
+    store.put_orders("acme", "sess-1", revised)
+    reloaded = store.orders_for_tenant_uid("acme", "A")
+    assert len(reloaded) == 2
+    assert sorted(reloaded["order_qty"].tolist()) == [7.0, 9.0]
+
+
+def test_orders_round_trip_in_memory():
+    _assert_orders_round_trip(LifecycleStore())
+
+
+def test_orders_round_trip_sql(tmp_path):
+    make = _stores(tmp_path)
+    _assert_orders_round_trip(make())
+
+
+def test_order_pk_builds_typed_key():
+    key = order_pk(
+        "sess-1",
+        {UNIQUE_ID: "A", FORECAST_ORIGIN: "2024-02-04", MODEL_NAME: "Naive"},
+    )
+    assert key == OrderKey("sess-1", "A", "2024-02-04", "Naive")
+    # model_name stays optional, defaulting to "".
+    assert order_pk("sess-1", {UNIQUE_ID: "A", FORECAST_ORIGIN: "2024-02-04"}).model_name == ""
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {UNIQUE_ID: "A"},  # forecast_origin missing
+        {FORECAST_ORIGIN: "2024-02-04"},  # unique_id missing
+        {UNIQUE_ID: "A", FORECAST_ORIGIN: ""},  # forecast_origin empty
+    ],
+)
+def test_order_pk_rejects_missing_key_fields(record):
+    # Both stores must reject the same malformed input rather than silently
+    # keying a row on "" (m4 fail-fast).
+    with pytest.raises(ValueError, match="unique_id and forecast_origin"):
+        order_pk("sess-1", record)

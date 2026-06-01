@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -154,3 +154,44 @@ class LifecycleTuneRecord(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
     best_candidates: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
+
+
+class Sales(Base):
+    """Project-owned sales history, read by ``SqlSalesAdapter`` at fit/tune time.
+
+    One row per ``(unique_id, ds)``; ``as_of`` marks when the figure was
+    recorded so the adapter can answer point-in-time queries (``as_of <= origin``)
+    without leaking future revisions into a backtest."""
+
+    __tablename__ = "sales"
+
+    unique_id: Mapped[str] = mapped_column(String, primary_key=True)
+    ds: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    y: Mapped[float] = mapped_column(Float, nullable=False)
+    as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Order(Base):
+    """Persistent order ledger written by ``/order`` and read by ``/sessions``.
+
+    Natural key is the decision tuple ``(session_id, unique_id, forecast_origin,
+    model_name)``; ``detail`` carries the full JSON-safe order row, while
+    ``order_qty`` and the key columns are denormalized for querying."""
+
+    __tablename__ = "orders"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    unique_id: Mapped[str] = mapped_column(String, primary_key=True)
+    forecast_origin: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    model_name: Mapped[str] = mapped_column(String, primary_key=True, default="")
+    tenant: Mapped[str] = mapped_column(String, nullable=False)
+    order_qty: Mapped[float] = mapped_column(Float, nullable=False)
+    detail: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
+    placed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (Index("ix_orders_tenant_unique_id", "tenant", "unique_id"),)

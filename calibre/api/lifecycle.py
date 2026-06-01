@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import NamedTuple, Protocol
 from uuid import uuid4
 
 import pandas as pd
 
+from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID
 from calibre.core.run_status import RunStatus
+from calibre.core.serialization import frame_from_records, json_safe_records
 
 
 @dataclass
@@ -26,7 +28,36 @@ class FitRecord:
     artifact_urls: dict[str, str] = field(default_factory=dict)
     last_forecast: pd.DataFrame | None = None
     last_calibrated: pd.DataFrame | None = None
-    last_orders: pd.DataFrame | None = None
+
+
+class OrderKey(NamedTuple):
+    """Decision-tuple primary key for an order row, shared by both stores.
+
+    Mirrors the ``orders`` table PK ``(session_id, unique_id, forecast_origin,
+    model_name)``; ``model_name`` is optional (defaults to ``""``)."""
+
+    session_id: str
+    unique_id: str
+    forecast_origin: str
+    model_name: str
+
+
+def order_pk(session_id: str, record: dict) -> OrderKey:
+    """Build the ``OrderKey`` for a JSON order row.
+
+    Fails fast when ``unique_id`` or ``forecast_origin`` is missing/empty so the
+    in-memory and SQL stores reject the same malformed input identically rather
+    than silently keying a row on ``""``. ``model_name`` stays optional."""
+    unique_id = str(record.get(UNIQUE_ID, ""))
+    forecast_origin = str(record.get(FORECAST_ORIGIN, ""))
+    if not unique_id or not forecast_origin:
+        raise ValueError("order row must include unique_id and forecast_origin")
+    return OrderKey(
+        session_id=session_id,
+        unique_id=unique_id,
+        forecast_origin=forecast_origin,
+        model_name=str(record.get(MODEL_NAME, "") or ""),
+    )
 
 
 @dataclass
@@ -45,6 +76,10 @@ class LifecycleStore:
         self._fits: dict[str, FitRecord] = {}
         self._conformal_state: dict[str, dict[str, dict]] = {}
         self._studies: dict[str, TuneRecord] = {}
+        # Order rows keyed by the OrderKey decision tuple (session_id,
+        # unique_id, forecast_origin, model_name); value carries the owning
+        # tenant + the JSON-safe row.
+        self._orders: dict[OrderKey, dict] = {}
 
     @staticmethod
     def new_fit_id() -> str:
@@ -94,6 +129,18 @@ class LifecycleStore:
             if record.tenant == tenant and uid in record.sku_set
         ]
 
+    def put_orders(self, tenant: str, session_id: str, orders: pd.DataFrame) -> None:
+        for record in json_safe_records(orders):
+            self._orders[order_pk(session_id, record)] = {"tenant": tenant, "detail": record}
+
+    def orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame:
+        rows = [
+            entry["detail"]
+            for entry in self._orders.values()
+            if entry["tenant"] == tenant and str(entry["detail"].get(UNIQUE_ID, "")) == uid
+        ]
+        return frame_from_records(rows)
+
     def get_conformal_state(self, session_id: str) -> dict[str, dict]:
         return dict(self._conformal_state.get(session_id, {}))
 
@@ -124,6 +171,8 @@ class LifecycleStoreProtocol(Protocol):
     def fits_for_session(self, session_id: str) -> list[FitRecord]: ...
     def first_fit_for_session(self, session_id: str) -> FitRecord | None: ...
     def fits_for_tenant_uid(self, tenant: str, uid: str) -> list[FitRecord]: ...
+    def put_orders(self, tenant: str, session_id: str, orders: pd.DataFrame) -> None: ...
+    def orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame: ...
     def get_conformal_state(self, session_id: str) -> dict[str, dict]: ...
     def upsert_conformal_state(
         self, session_id: str, partition_states: dict[str, dict]

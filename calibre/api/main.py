@@ -43,14 +43,16 @@ from calibre.conformal.runtime import (
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.run_status import RunStatus
+from calibre.core.serialization import frame_from_records, json_safe_records
 from calibre.execution.backend import (
     _coerce_forecast_frame_dtypes,
     _finalize_preds,
     fit_predict_task,
 )
+from calibre.execution.dataset import SalesAdapter, SnapshotSalesAdapter
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.execution.fit_service import validate_fit_config
-from calibre.execution.io import join_uri
+from calibre.execution.io import join_uri, read_parquet
 from calibre.forecasting import get_scope
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
@@ -64,6 +66,7 @@ from calibre.storage.postgres import (
     make_session_factory,
     session_scope,
 )
+from calibre.storage.sales_repo import SqlSalesAdapter
 from calibre.storage.session import derive_session_id
 from calibre.tuning import (
     GlobalTuningTask,
@@ -145,25 +148,50 @@ def _model_artifact_cache() -> ModelArtifactCache:
     return ModelArtifactCache(join_uri(artifact_base_uri(), "model-artifacts"))
 
 
-def _json_records(frame: pd.DataFrame) -> list[dict]:
-    clean = frame.copy()
-    for col in clean.columns:
-        if pd.api.types.is_datetime64_any_dtype(clean[col]):
-            clean[col] = clean[col].dt.strftime("%Y-%m-%dT%H:%M:%S")
-    clean = clean.astype(object)
-    clean[pd.isna(clean)] = None
-    return clean.to_dict(orient="records")
+def _read_parquet_uri(uri: str, label: str) -> pd.DataFrame:
+    """Read a parquet URI, mapping a missing/unreadable file to a 400.
+
+    Keeps URI-ingress reads (``future_x``, ``actuals``) returning a client error
+    rather than a 500 when the URI doesn't resolve."""
+    try:
+        return read_parquet(uri)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=f"{label} not readable: {exc}") from exc
 
 
-def _frame_from_records(records: list[dict]) -> pd.DataFrame:
-    if not records:
-        return pd.DataFrame()
-    frame = pd.DataFrame(records)
-    if DS in frame.columns:
-        frame[DS] = pd.to_datetime(frame[DS])
-    if "forecast_origin" in frame.columns:
-        frame["forecast_origin"] = pd.to_datetime(frame["forecast_origin"])
-    return frame
+def _sales_adapter(uri: str) -> SalesAdapter:
+    """Resolve a ``sales_uri`` to a SalesAdapter by scheme.
+
+    ``sql://`` / ``db://`` reads the project's own Postgres ``sales`` table;
+    anything else is treated as a parquet/fsspec snapshot URI."""
+    if uri.startswith(("sql://", "db://")):
+        factory = _db_session_factory()
+        if factory is None:
+            raise HTTPException(
+                status_code=400,
+                detail="sql:// sales_uri requires CALIBRE_DATABASE_URL to be set",
+            )
+        return SqlSalesAdapter(factory)
+    return SnapshotSalesAdapter(uri)
+
+
+def _resolve_as_of(value: str | None) -> pd.Timestamp | None:
+    if value is None:
+        return None
+    try:
+        return pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid as_of: {exc}") from exc
+
+
+def _load_sales(sales_uri: str, sku_set: list[str], as_of: pd.Timestamp | None) -> pd.DataFrame:
+    try:
+        history = _sales_adapter(sales_uri).load_sales(sku_set, as_of)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=f"sales_uri not readable: {exc}") from exc
+    if UNIQUE_ID not in history.columns or DS not in history.columns:
+        raise HTTPException(status_code=400, detail="sales history must include unique_id and ds")
+    return history
 
 
 def _actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
@@ -287,10 +315,8 @@ def get_run_status(run_id: str) -> RunResponse:
 def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
     if not req.sku_set:
         raise HTTPException(status_code=400, detail="sku_set must not be empty")
-    history = _frame_from_records(req.history)
-    if UNIQUE_ID not in history.columns or DS not in history.columns:
-        raise HTTPException(status_code=400, detail="history must include unique_id and ds")
-    future_x = _frame_from_records(req.future_x) if req.future_x else None
+    history = _load_sales(req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of))
+    future_x = _read_parquet_uri(req.future_x_uri, "future_x_uri") if req.future_x_uri else None
     session_id = derive_session_id(
         req.tenant,
         req.sku_set,
@@ -400,7 +426,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))
     _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
-    return PredictResponse(rows=len(forecast_frame), forecast=_json_records(forecast_frame))
+    return PredictResponse(rows=len(forecast_frame), forecast=json_safe_records(forecast_frame))
 
 
 @app.post("/calibrate", response_model=CalibrateResponse)
@@ -411,7 +437,7 @@ def calibrate(req: CalibrateRequest) -> CalibrateResponse:
         raise HTTPException(status_code=404, detail="session not found")
     if record.conformal_config is None:
         raise HTTPException(status_code=400, detail="session has no conformal config")
-    forecast_frame = _coerce_forecast_frame_dtypes(_frame_from_records(req.forecast))
+    forecast_frame = _coerce_forecast_frame_dtypes(frame_from_records(req.forecast))
     runtime = _runtime_for_session(record)
     calibrated_frame = runtime.apply(forecast_frame)
     partition_states = runtime.get_partition_states()
@@ -419,13 +445,13 @@ def calibrate(req: CalibrateRequest) -> CalibrateResponse:
     store.update_fit(record.fit_id, last_calibrated=calibrated_frame)
     return CalibrateResponse(
         rows=len(calibrated_frame),
-        calibrated=_json_records(calibrated_frame),
+        calibrated=json_safe_records(calibrated_frame),
     )
 
 
 @app.post("/order", response_model=OrderResponse)
 def order(req: OrderRequest) -> OrderResponse:
-    frame = _coerce_forecast_frame_dtypes(_frame_from_records(req.calibrated))
+    frame = _coerce_forecast_frame_dtypes(frame_from_records(req.calibrated))
     try:
         params = req.ordering["params"]
         params_frame = params if isinstance(params, pd.DataFrame) else pd.DataFrame(params)
@@ -446,8 +472,8 @@ def order(req: OrderRequest) -> OrderResponse:
         store = _lifecycle_store()
         record = store.first_fit_for_session(req.session_id)
         if record is not None:
-            store.update_fit(record.fit_id, last_orders=orders_frame)
-    return OrderResponse(rows=len(orders_frame), orders=_json_records(orders_frame))
+            store.put_orders(record.tenant, req.session_id, orders_frame)
+    return OrderResponse(rows=len(orders_frame), orders=json_safe_records(orders_frame))
 
 
 @app.post("/observe", response_model=ObserveResponse, status_code=202)
@@ -481,7 +507,7 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
         )
         return
 
-    actuals = _frame_from_records(actual_records)
+    actuals = frame_from_records(actual_records)
     if (
         actuals.empty
         or UNIQUE_ID not in actuals.columns
@@ -553,10 +579,8 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
                 f"base_model_config scope={model_scope!r}"
             ),
         )
-    history = _frame_from_records(req.history)
-    if UNIQUE_ID not in history.columns or DS not in history.columns:
-        raise HTTPException(status_code=400, detail="history must include unique_id and ds")
-    actuals = _frame_from_records(req.actuals)
+    history = _load_sales(req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of))
+    actuals = _read_parquet_uri(req.actuals_uri, "actuals_uri")
     if not req.origins:
         raise HTTPException(status_code=400, detail="origins must not be empty")
     try:
@@ -817,7 +841,7 @@ def get_study(study_id: str) -> TuneStudyResponse:
 def _maybe_json_records(frame: pd.DataFrame | None) -> list[dict] | None:
     if frame is None or frame.empty:
         return None
-    return _json_records(frame)
+    return json_safe_records(frame)
 
 
 @app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
@@ -836,5 +860,5 @@ def session_state(tenant: str, uid: str) -> SessionStateResponse:
         unique_id=uid,
         state=store.get_conformal_state(record.session_id),
         last_forecast=_maybe_json_records(record.last_forecast),
-        open_orders=_maybe_json_records(record.last_orders),
+        open_orders=_maybe_json_records(store.orders_for_tenant_uid(tenant, uid)),
     )
