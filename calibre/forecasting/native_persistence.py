@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import io
 import shutil
+import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
 def pack_directory(path: Path) -> bytes:
@@ -30,3 +35,19 @@ def unpack_directory(blob: bytes, path: Path) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(member, "r") as src, target.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
+
+
+def save_dir_to_bytes(save: Callable[[Path], object]) -> bytes:
+    """Run ``save`` against a temp directory and pack the result to bytes."""
+    with tempfile.TemporaryDirectory(prefix="calibre-artifact-") as temp_dir:
+        path = Path(temp_dir)
+        save(path)
+        return pack_directory(path)
+
+
+def load_dir_from_bytes(blob: bytes, load: Callable[[Path], T]) -> T:
+    """Unpack ``blob`` into a temp directory and run ``load`` against it."""
+    with tempfile.TemporaryDirectory(prefix="calibre-artifact-") as temp_dir:
+        path = Path(temp_dir)
+        unpack_directory(blob, path)
+        return load(path)

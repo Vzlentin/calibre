@@ -395,7 +395,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         future_x=future_x,
     )
     try:
-        preds = fit_predict_task(task, cache=_model_artifact_cache())
+        preds, _ = fit_predict_task(task, cache=_model_artifact_cache())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))

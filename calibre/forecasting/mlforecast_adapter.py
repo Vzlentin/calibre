@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
-from calibre.forecasting.native_persistence import pack_directory, unpack_directory
+from calibre.forecasting.native_persistence import load_dir_from_bytes, save_dir_to_bytes
 
 _RESERVED_KEYS = frozenset(
     {
@@ -190,29 +189,33 @@ class MLForecastAdapter(ModelAdapter):
     def dump_state(self) -> bytes:
         if self._mlf is None:
             raise RuntimeError("Call fit() before dump_state()")
-        with tempfile.TemporaryDirectory(prefix="calibre-mlf-") as temp_dir:
-            path = Path(temp_dir)
-            self._mlf.save(path)
+        mlf = self._mlf
+
+        def save(path: Path) -> None:
+            mlf.save(str(path))
             (path / _METADATA_FILE).write_text(
                 json.dumps({"name_to_quantile": self._name_to_quantile}, sort_keys=True),
                 encoding="utf-8",
             )
-            return pack_directory(path)
+
+        return save_dir_to_bytes(save)
 
     def load_state(self, blob: bytes) -> None:
         mlforecast_cls = _load_mlforecast_cls()
-        with tempfile.TemporaryDirectory(prefix="calibre-mlf-") as temp_dir:
-            path = Path(temp_dir)
-            unpack_directory(blob, path)
-            self._mlf = mlforecast_cls.load(path)
+
+        def load(path: Path) -> tuple[Any, dict[str, float]]:
+            model = mlforecast_cls.load(str(path))
             metadata_path = path / _METADATA_FILE
             if metadata_path.exists():
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                self._name_to_quantile = {
+                name_to_quantile = {
                     str(name): float(q) for name, q in metadata.get("name_to_quantile", {}).items()
                 }
             else:
-                self._name_to_quantile = {}
+                name_to_quantile = {}
+            return model, name_to_quantile
+
+        self._mlf, self._name_to_quantile = load_dir_from_bytes(blob, load)
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._mlf is None:

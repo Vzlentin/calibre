@@ -70,7 +70,7 @@ def test_cache_miss_writes(tmp_path: Path) -> None:
     adapter = _CountingAdapter({"model": "Mean"})
     task = _task()
 
-    fitted = adapter.fit_with_cache(task, cache)
+    fitted, _ = adapter.fit_with_cache(task, cache)
 
     assert fitted is True
     assert _CountingAdapter.fit_calls == 1
@@ -98,7 +98,7 @@ def test_cache_hit_skips_fit(tmp_path: Path) -> None:
     assert _CountingAdapter.fit_calls == 1
 
     second = _CountingAdapter({"model": "Mean"})
-    fitted = second.fit_with_cache(task, cache)
+    fitted, _ = second.fit_with_cache(task, cache)
 
     assert fitted is False
     assert _CountingAdapter.fit_calls == 1
@@ -138,7 +138,7 @@ def test_cache_key_changes_with_horizon() -> None:
 
 def test_fit_with_cache_no_cache_runs_fit() -> None:
     adapter = _CountingAdapter({"model": "Mean"})
-    fitted = adapter.fit_with_cache(_task(), None)
+    fitted, _ = adapter.fit_with_cache(_task(), None)
 
     assert fitted is True
     assert _CountingAdapter.fit_calls == 1

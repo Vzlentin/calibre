@@ -67,10 +67,6 @@ def _reset_lifecycle_store(monkeypatch, tmp_path):
 def stub_adapter(monkeypatch):
     monkeypatch.setattr("calibre.api.main.resolve_adapter", lambda _: _StubAdapter(), raising=False)
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda cfg: _StubAdapter(cfg))
-    monkeypatch.setattr(
-        "calibre.execution.fit_service.resolve_adapter",
-        lambda cfg: _StubAdapter(cfg),
-    )
     yield
 
 

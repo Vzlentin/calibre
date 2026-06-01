@@ -42,15 +42,16 @@ class StatsForecastAdapter(ModelAdapter):
             raise RuntimeError("Call fit() before dump_state()")
         with tempfile.TemporaryDirectory(prefix="calibre-sf-") as temp_dir:
             path = Path(temp_dir) / "statsforecast.pkl"
+            # suppress StatsForecast's stdout save banner
             with contextlib.redirect_stdout(io.StringIO()):
-                self._sf.save(path)
+                self._sf.save(str(path))
             return path.read_bytes()
 
     def load_state(self, blob: bytes) -> None:
         with tempfile.TemporaryDirectory(prefix="calibre-sf-") as temp_dir:
             path = Path(temp_dir) / "statsforecast.pkl"
             path.write_bytes(blob)
-            self._sf = StatsForecast.load(path)
+            self._sf = StatsForecast.load(str(path))
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._sf is None:

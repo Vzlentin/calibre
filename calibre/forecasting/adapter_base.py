@@ -24,8 +24,8 @@ def _build_predict_frame(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 class ModelAdapter(ABC):
-    @abstractmethod
-    def __init__(self, model_config: dict) -> None: ...
+    def __init__(self, model_config: dict | None = None) -> None:
+        self.model_config = model_config or {}
 
     @abstractmethod
     def fit(self, task: ForecastTask) -> None: ...
@@ -73,20 +73,22 @@ class ModelAdapter(ABC):
         self,
         task: ForecastTask,
         cache: ModelArtifactCache | None,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         """Fit the adapter, consulting ``cache`` first when supplied.
 
-        Returns ``True`` when ``fit`` actually ran, ``False`` on a cache
-        hit (state restored from ``cache``).
+        Returns ``(fit_ran, key)`` where ``fit_ran`` is ``True`` when ``fit``
+        actually ran and ``False`` on a cache hit (state restored from
+        ``cache``), and ``key`` is the cache key used, or ``None`` when
+        ``cache`` is ``None``.
         """
         if cache is None:
             self.fit(task)
-            return True
+            return True, None
         key = self.cache_key(task)
         blob = cache.get(key)
         if blob is not None:
             self.load_state(blob)
-            return False
+            return False, key
         self.fit(task)
         cache.put(key, self.dump_state())
-        return True
+        return True, key

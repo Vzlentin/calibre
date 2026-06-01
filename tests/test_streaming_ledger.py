@@ -8,10 +8,11 @@ from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import NewsvendorPolicyParameters
 from calibre.execution.backend import BackendEngine, ConformalOptions, LedgerOutputOptions
 from calibre.execution.ledger import ForecastLedger
+from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import OrderPolicyConfig
 
 
-class _StubAdapter:
+class _StubAdapter(ModelAdapter):
     def fit(self, task: ForecastTask) -> None:
         self._task = task
 

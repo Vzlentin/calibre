@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,7 @@ except ImportError:  # pragma: no cover
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
-from calibre.forecasting.native_persistence import pack_directory, unpack_directory
+from calibre.forecasting.native_persistence import load_dir_from_bytes, save_dir_to_bytes
 
 _RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", "backend", "scope"})
 
@@ -62,17 +61,20 @@ class NeuralForecastAdapter(ModelAdapter):
     def dump_state(self) -> bytes:
         if self._nf is None:
             raise RuntimeError("Call fit() before dump_state()")
-        with tempfile.TemporaryDirectory(prefix="calibre-nf-") as temp_dir:
-            path = Path(temp_dir) / "neuralforecast"
-            self._nf.save(path)
-            return pack_directory(path)
+
+        def save(path: Path) -> None:
+            self._nf.save(str(path / "neuralforecast"))
+
+        return save_dir_to_bytes(save)
 
     def load_state(self, blob: bytes) -> None:
+        # narrow for type checker; constructor guarantees availability
         assert NeuralForecast is not None
-        with tempfile.TemporaryDirectory(prefix="calibre-nf-") as temp_dir:
-            path = Path(temp_dir) / "neuralforecast"
-            unpack_directory(blob, path)
-            self._nf = NeuralForecast.load(path)
+
+        def load(path: Path) -> NeuralForecast:
+            return NeuralForecast.load(str(path / "neuralforecast"))
+
+        self._nf = load_dir_from_bytes(blob, load)
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         """Forwards ``task.future_x`` as ``futr_df`` when non-empty.

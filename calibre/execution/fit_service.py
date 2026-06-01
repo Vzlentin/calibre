@@ -25,7 +25,7 @@ import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_registry import resolve_adapter
+from calibre.execution.backend import fit_predict_task
 from calibre.forecasting.cache import ModelArtifactCache
 
 
@@ -64,10 +64,7 @@ def validate_fit_config(
         forecast_origin=origin,
         future_x=future_x,
     )
-    adapter = resolve_adapter(task.model_config)
-    artifact_key = adapter.cache_key(task) if cache is not None else None
-    adapter.fit_with_cache(task, cache)
-    preds = adapter.predict(task)
+    preds, artifact_key = fit_predict_task(task, cache=cache)
     if preds is None or preds.empty:
         raise ValueError(
             "fit produced no forecast; config is incompatible with the supplied history"
