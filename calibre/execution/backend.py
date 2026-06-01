@@ -704,11 +704,11 @@ class BackendEngine:
 
         if self._ray_runtime is not None and ray.is_initialized():
             return
+        # Acquiring a fresh runtime invalidates any cached remote-function handles;
+        # drop them so the callers rebuild them against the new runtime.
         self._remote_process_task = None
         self._remote_process_global_panel = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
-        # Cache safety: ExecutionOptions is frozen, so cpu_per_task is immutable
-        # for this engine instance. Rebuilding _remote_process_task is safe.
 
     def _run_global_groups_on_ray(
         self,

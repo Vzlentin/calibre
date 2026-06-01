@@ -120,10 +120,7 @@ def test_intermediate_metric_matches_final(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         optimizer,
         "acquire_ray_runtime",
-        lambda **kwargs: SimpleNamespace(
-            ray=SimpleNamespace(put=lambda value: value),
-            release=lambda: None,
-        ),
+        lambda **kwargs: SimpleNamespace(release=lambda: None),
     )
 
     from ray import tune
