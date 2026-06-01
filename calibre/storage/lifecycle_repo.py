@@ -20,10 +20,10 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session, sessionmaker
 
-from calibre.api.lifecycle import FitRecord, TuneRecord, order_pk
-from calibre.api.serialization import frame_from_records, json_safe_records
+from calibre.api.lifecycle import FitRecord, OrderKey, TuneRecord, order_pk
 from calibre.conformal.runtime import to_json_safe_state
 from calibre.core.run_status import RunStatus
+from calibre.core.serialization import frame_from_records, json_safe_records
 from calibre.execution.io import join_uri, read_parquet, write_parquet
 from calibre.storage.models import (
     LifecycleConformalState,
@@ -38,63 +38,39 @@ from calibre.storage.postgres import session_scope
 _FRAME_ATTRS = ("history", "future_x", "last_forecast", "last_calibrated")
 _FIT_SCALAR_FIELDS = ("status", "error", "artifact_urls")
 _STUDY_SCALAR_FIELDS = ("status", "error", "best_candidates")
-_ORDER_PK = ("session_id", "unique_id", "forecast_origin", "model_name")
+_ORDER_PK = OrderKey._fields
 
 
-def _conformal_upsert(dialect: str, values: dict[str, Any]) -> Any:
-    """Dialect-aware INSERT ... ON CONFLICT DO UPDATE for conformal state.
+def _on_conflict_upsert(
+    model: type[Any],
+    dialect: str,
+    values: dict[str, Any],
+    *,
+    index_elements: list[str],
+    update_columns: list[str],
+    touch: str | None = None,
+) -> Any:
+    """Dialect-aware INSERT ... ON CONFLICT DO UPDATE.
 
-    Avoids the get-then-add race on the ``(session_id, partition)`` PK under
-    concurrent /observe. Only the engines this project runs on are supported.
-    """
+    One atomic upsert so concurrent writers on the same PK can't race
+    get-then-add into a PK error: ``index_elements`` is the conflict key,
+    ``update_columns`` are overwritten from the proposed row, and ``touch`` (if
+    given) is bumped to ``func.now()``. Only the engines this project runs on
+    (Postgres, SQLite) are supported."""
     if dialect == "postgresql":
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-        pg_stmt = pg_insert(LifecycleConformalState).values(**values)
-        return pg_stmt.on_conflict_do_update(
-            index_elements=["session_id", "partition"],
-            set_={"state": pg_stmt.excluded.state, "updated_at": func.now()},
-        )
-    if dialect == "sqlite":
+        stmt = pg_insert(model).values(**values)
+    elif dialect == "sqlite":
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-        lite_stmt = sqlite_insert(LifecycleConformalState).values(**values)
-        return lite_stmt.on_conflict_do_update(
-            index_elements=["session_id", "partition"],
-            set_={"state": lite_stmt.excluded.state, "updated_at": func.now()},
-        )
-    raise NotImplementedError(f"conformal upsert unsupported on dialect {dialect!r}")
-
-
-def _order_upsert(dialect: str, values: dict[str, Any]) -> Any:
-    """Dialect-aware INSERT ... ON CONFLICT DO UPDATE for an order row.
-
-    Re-placing an order for the same decision tuple overwrites the prior row
-    (qty/detail/placed_at) rather than racing get-then-add into a PK error."""
-    set_columns = ("tenant", "order_qty", "detail")
-    if dialect == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-        pg_stmt = pg_insert(Order).values(**values)
-        return pg_stmt.on_conflict_do_update(
-            index_elements=list(_ORDER_PK),
-            set_={
-                **{col: getattr(pg_stmt.excluded, col) for col in set_columns},
-                "placed_at": func.now(),
-            },
-        )
-    if dialect == "sqlite":
-        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
-        lite_stmt = sqlite_insert(Order).values(**values)
-        return lite_stmt.on_conflict_do_update(
-            index_elements=list(_ORDER_PK),
-            set_={
-                **{col: getattr(lite_stmt.excluded, col) for col in set_columns},
-                "placed_at": func.now(),
-            },
-        )
-    raise NotImplementedError(f"order upsert unsupported on dialect {dialect!r}")
+        stmt = sqlite_insert(model).values(**values)
+    else:
+        raise NotImplementedError(f"upsert unsupported on dialect {dialect!r}")
+    set_ = {c: getattr(stmt.excluded, c) for c in update_columns}
+    if touch:
+        set_[touch] = func.now()
+    return stmt.on_conflict_do_update(index_elements=index_elements, set_=set_)
 
 
 class SqlLifecycleStore:
@@ -267,19 +243,28 @@ class SqlLifecycleStore:
         with session_scope(self._factory) as session:
             dialect = session.get_bind().dialect.name
             for record in records:
-                _, unique_id, forecast_origin, model_name = order_pk(session_id, record)
+                key = order_pk(session_id, record)
                 values = {
                     "session_id": session_id,
-                    "unique_id": unique_id,
-                    "forecast_origin": pd.Timestamp(forecast_origin).to_pydatetime(),
-                    "model_name": model_name,
+                    "unique_id": key.unique_id,
+                    "forecast_origin": pd.Timestamp(key.forecast_origin).to_pydatetime(),
+                    "model_name": key.model_name,
                     "tenant": tenant,
                     "order_qty": float(record.get("order_qty") or 0.0),
                     "detail": record,
                 }
-                session.execute(_order_upsert(dialect, values))
+                session.execute(
+                    _on_conflict_upsert(
+                        Order,
+                        dialect,
+                        values,
+                        index_elements=list(_ORDER_PK),
+                        update_columns=["tenant", "order_qty", "detail"],
+                        touch="placed_at",
+                    )
+                )
 
-    def open_orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame:
+    def orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame:
         with session_scope(self._factory) as session:
             rows = session.scalars(
                 select(Order)
@@ -314,7 +299,14 @@ class SqlLifecycleStore:
                 }
                 # Atomic upsert so concurrent /observe jobs for the same
                 # (session, partition) don't race get-then-add into a PK error.
-                stmt = _conformal_upsert(dialect, values)
+                stmt = _on_conflict_upsert(
+                    LifecycleConformalState,
+                    dialect,
+                    values,
+                    index_elements=["session_id", "partition"],
+                    update_columns=["state"],
+                    touch="updated_at",
+                )
                 session.execute(stmt)
 
     # --- tune --------------------------------------------------------------

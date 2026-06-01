@@ -165,7 +165,7 @@ class Sales(Base):
 
     __tablename__ = "sales"
 
-    unique_id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    unique_id: Mapped[str] = mapped_column(String, primary_key=True)
     ds: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     y: Mapped[float] = mapped_column(Float, nullable=False)
     as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -184,7 +184,7 @@ class Order(Base):
     unique_id: Mapped[str] = mapped_column(String, primary_key=True)
     forecast_origin: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
     model_name: Mapped[str] = mapped_column(String, primary_key=True, default="")
-    tenant: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    tenant: Mapped[str] = mapped_column(String, nullable=False)
     order_qty: Mapped[float] = mapped_column(Float, nullable=False)
     detail: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
     placed_at: Mapped[datetime] = mapped_column(

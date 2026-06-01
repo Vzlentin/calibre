@@ -57,6 +57,33 @@ def test_snapshot_applies_as_of_point_in_time(tmp_path) -> None:
     }
 
 
+def test_snapshot_null_as_of_survives_cutoff(tmp_path) -> None:
+    # (A, 01-07) has a revision under the cutoff plus a later one above it;
+    # (B, 01-07) carries a NULL as_of that must stay visible regardless of the
+    # cutoff. This is the M1 regression: the old ``as_of <= cutoff`` filter
+    # silently dropped NULL rows because ``NaT <= cutoff`` is False.
+    frame = pd.DataFrame(
+        {
+            "unique_id": ["A", "A", "B"],
+            "ds": pd.to_datetime(["2024-01-07", "2024-01-07", "2024-01-07"]),
+            "y": [1.0, 9.0, 3.0],
+            "as_of": pd.to_datetime(["2024-01-01", "2024-01-20", None]),
+        }
+    )
+    path = tmp_path / "sales.parquet"
+    frame.to_parquet(path)
+    adapter = SnapshotSalesAdapter(path)
+
+    out = adapter.load_sales(["A", "B"], pd.Timestamp("2024-01-10"))
+
+    assert "as_of" not in out.columns  # revision marker never reaches the forecaster
+    by_uid = out.set_index("unique_id")["y"].to_dict()
+    # A: the 01-20 revision is above the cutoff, so the 01-01 revision wins.
+    assert by_uid["A"] == 1.0
+    # B: NULL as_of is always visible (treated as the latest revision).
+    assert by_uid["B"] == 3.0
+
+
 def test_synthetic_filters_to_sku_set() -> None:
     frame = pd.DataFrame(
         {

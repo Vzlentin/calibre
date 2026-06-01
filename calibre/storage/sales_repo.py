@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.execution.dataset import _latest_revision
 from calibre.storage.models import Sales
 from calibre.storage.postgres import session_scope
 
@@ -47,7 +48,9 @@ class SqlSalesAdapter:
             )
         if frame.empty:
             return empty
-        frame = frame.sort_values("as_of").drop_duplicates([UNIQUE_ID, DS], keep="last")
-        frame = frame.drop(columns="as_of")
+        # The SQL WHERE above is the optimization; _latest_revision is the shared
+        # in-pandas collapse so NULL-as_of semantics never diverge from the snapshot
+        # adapter (NULL/missing as_of rows are always visible, kept as latest).
+        frame = _latest_revision(frame, as_of)
         frame[DS] = pd.to_datetime(frame[DS])
         return frame.reset_index(drop=True)

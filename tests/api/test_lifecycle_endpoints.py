@@ -231,8 +231,8 @@ def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales
     assert predict_resp.status_code == 409
 
 
-def test_predict_reuses_fit_time_artifact_for_canonical_origin(client, stub_adapter):
-    fit_resp = client.post("/fit", json=_fit_payload())
+def test_predict_reuses_fit_time_artifact_for_canonical_origin(client, stub_adapter, sales_uri):
+    fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit_resp.status_code == 202, fit_resp.text
     fit_id = fit_resp.json()["fit_id"]
 

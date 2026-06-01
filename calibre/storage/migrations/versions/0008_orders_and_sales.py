@@ -23,7 +23,6 @@ def upgrade() -> None:
         sa.Column("as_of", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("unique_id", "ds"),
     )
-    op.create_index("ix_sales_unique_id", "sales", ["unique_id"])
     op.create_table(
         "orders",
         sa.Column("session_id", sa.String(length=64), nullable=False),
@@ -41,13 +40,10 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("session_id", "unique_id", "forecast_origin", "model_name"),
     )
-    op.create_index("ix_orders_tenant", "orders", ["tenant"])
     op.create_index("ix_orders_tenant_unique_id", "orders", ["tenant", "unique_id"])
 
 
 def downgrade() -> None:
     op.drop_index("ix_orders_tenant_unique_id", table_name="orders")
-    op.drop_index("ix_orders_tenant", table_name="orders")
     op.drop_table("orders")
-    op.drop_index("ix_sales_unique_id", table_name="sales")
     op.drop_table("sales")

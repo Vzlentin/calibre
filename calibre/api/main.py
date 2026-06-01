@@ -35,7 +35,6 @@ from calibre.api.schemas import (
     TuneRequest,
     TuneStudyResponse,
 )
-from calibre.api.serialization import frame_from_records, json_safe_records
 from calibre.cli.config import ConformalConfig
 from calibre.conformal.runtime import (
     SymmetricIntervalRuntime,
@@ -44,6 +43,7 @@ from calibre.conformal.runtime import (
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.run_status import RunStatus
+from calibre.core.serialization import frame_from_records, json_safe_records
 from calibre.execution.backend import (
     _coerce_forecast_frame_dtypes,
     _finalize_preds,
@@ -148,6 +148,17 @@ def _model_artifact_cache() -> ModelArtifactCache:
     return ModelArtifactCache(join_uri(artifact_base_uri(), "model-artifacts"))
 
 
+def _read_parquet_uri(uri: str, label: str) -> pd.DataFrame:
+    """Read a parquet URI, mapping a missing/unreadable file to a 400.
+
+    Keeps URI-ingress reads (``future_x``, ``actuals``) returning a client error
+    rather than a 500 when the URI doesn't resolve."""
+    try:
+        return read_parquet(uri)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=f"{label} not readable: {exc}") from exc
+
+
 def _sales_adapter(uri: str) -> SalesAdapter:
     """Resolve a ``sales_uri`` to a SalesAdapter by scheme.
 
@@ -156,7 +167,10 @@ def _sales_adapter(uri: str) -> SalesAdapter:
     if uri.startswith(("sql://", "db://")):
         factory = _db_session_factory()
         if factory is None:
-            raise RuntimeError("sql:// sales_uri requires CALIBRE_DATABASE_URL to be set")
+            raise HTTPException(
+                status_code=400,
+                detail="sql:// sales_uri requires CALIBRE_DATABASE_URL to be set",
+            )
         return SqlSalesAdapter(factory)
     return SnapshotSalesAdapter(uri)
 
@@ -302,7 +316,7 @@ def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
     if not req.sku_set:
         raise HTTPException(status_code=400, detail="sku_set must not be empty")
     history = _load_sales(req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of))
-    future_x = read_parquet(req.future_x_uri) if req.future_x_uri else None
+    future_x = _read_parquet_uri(req.future_x_uri, "future_x_uri") if req.future_x_uri else None
     session_id = derive_session_id(
         req.tenant,
         req.sku_set,
@@ -566,10 +580,7 @@ def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
             ),
         )
     history = _load_sales(req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of))
-    try:
-        actuals = read_parquet(req.actuals_uri)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=400, detail=f"actuals_uri not readable: {exc}") from exc
+    actuals = _read_parquet_uri(req.actuals_uri, "actuals_uri")
     if not req.origins:
         raise HTTPException(status_code=400, detail="origins must not be empty")
     try:
@@ -849,5 +860,5 @@ def session_state(tenant: str, uid: str) -> SessionStateResponse:
         unique_id=uid,
         state=store.get_conformal_state(record.session_id),
         last_forecast=_maybe_json_records(record.last_forecast),
-        open_orders=_maybe_json_records(store.open_orders_for_tenant_uid(tenant, uid)),
+        open_orders=_maybe_json_records(store.orders_for_tenant_uid(tenant, uid)),
     )
