@@ -37,6 +37,8 @@ _ORIGIN_INDEX = "origin_index"
 _DEFAULT_TUNE_RESULTS_SUBDIR = "ray_tune"
 _FORECAST_KEY_COLUMNS = [UNIQUE_ID, DS, FORECAST_ORIGIN, MODEL_NAME, H]
 
+TuningTask = LocalTuningTask | GlobalTuningTask
+
 
 @dataclass(frozen=True, slots=True)
 class _ConformalRuntimeSnapshot:
@@ -471,39 +473,77 @@ def _score_forecast_task(
     return total_cost
 
 
-def _evaluate_candidate(
-    task: LocalTuningTask,
+def _conformal_options(
+    config: SymmetricIntervalConfig | None,
     candidate: TuningCandidate,
+    state: dict[str, Any] | None,
+) -> ConformalOptions:
+    """Build conformal options for a trial from a config snapshot + resume state.
+
+    ``config is None`` means the task carries no conformal runtime, so scoring runs
+    without conformal calibration.
+    """
+    if config is None:
+        return ConformalOptions()
+    return ConformalOptions(
+        runtime=SymmetricIntervalRuntime.from_state(
+            _apply_conformal_overrides(config, candidate.conformal_config),
+            state,
+        )
+    )
+
+
+def _score_candidate(
+    *,
+    task: TuningTask,
+    candidate: TuningCandidate,
+    history: pd.DataFrame,
     origins: list[pd.Timestamp],
+    conformal_options: ConformalOptions,
+    report: Callable[[dict[str, float | int]], None] | None = None,
 ) -> float:
-    history = _history_with_uid(task)
-    config = task.study_config
-    runtime_snapshot = _snapshot_conformal_runtime(task)
+    """Build the trial's ForecastTask + objective and backtest it to an objective value.
+
+    Shared by sequential evaluation (:func:`_evaluate_candidate`) and the Ray Tune
+    trainable (:func:`_make_ray_trainable`).
+    """
+    study_config = task.study_config
     forecast_task = ForecastTask(
         history=history,
         horizon=task.horizon,
-        model_config=_candidate_model_config(task.base_model_config, candidate, config),
-    )
-    conformal_options = (
-        ConformalOptions(
-            runtime=SymmetricIntervalRuntime.from_state(
-                _apply_conformal_overrides(runtime_snapshot.config, candidate.conformal_config),
-                runtime_snapshot.state,
-            )
-        )
-        if runtime_snapshot is not None
-        else ConformalOptions()
+        model_config=_candidate_model_config(task.base_model_config, candidate, study_config),
     )
     objective = _apply_ordering_overrides(task.objective, candidate.ordering_config)
-    with _build_scoring_engine(config, conformal_options=conformal_options) as engine:
+    with _build_scoring_engine(study_config, conformal_options=conformal_options) as engine:
         return _score_forecast_task(
             engine=engine,
             forecast_task=forecast_task,
             objective=objective,
             actuals=task.actuals,
             origins=origins,
-            cpu_per_trial=config.cpu_per_trial,
+            cpu_per_trial=study_config.cpu_per_trial,
+            report=report,
         )
+
+
+def _evaluate_candidate(
+    task: LocalTuningTask,
+    candidate: TuningCandidate,
+    origins: list[pd.Timestamp],
+) -> float:
+    runtime_snapshot = _snapshot_conformal_runtime(task)
+    conformal_options = _conformal_options(
+        runtime_snapshot.config if runtime_snapshot is not None else None,
+        candidate,
+        runtime_snapshot.state if runtime_snapshot is not None else None,
+    )
+    return _score_candidate(
+        task=task,
+        candidate=candidate,
+        history=_history_with_uid(task),
+        origins=origins,
+        conformal_options=conformal_options,
+    )
 
 
 def _optimize_task_sequential(task: LocalTuningTask, origins: list[pd.Timestamp]) -> dict[str, Any]:
@@ -522,7 +562,7 @@ def _optimize_task_sequential(task: LocalTuningTask, origins: list[pd.Timestamp]
     return {**task.base_model_config, **dict(best_config)}
 
 
-def _candidate_from_params(task: LocalTuningTask, params: dict[str, Any]) -> TuningCandidate:
+def _candidate_from_params(task: TuningTask, params: dict[str, Any]) -> TuningCandidate:
     """Replay ``task.search_space`` against best Optuna params to rebuild the candidate."""
     return _resolve_candidate(
         task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(params))))
@@ -535,6 +575,38 @@ def _merge_with_base_model(task: LocalTuningTask, candidate: TuningCandidate) ->
         conformal_config=dict(candidate.conformal_config),
         ordering_config=dict(candidate.ordering_config),
     )
+
+
+def _make_ray_trainable(
+    *,
+    task: TuningTask,
+    history: pd.DataFrame,
+    origins: list[pd.Timestamp],
+    conformal_config: SymmetricIntervalConfig | None,
+) -> Callable[..., None]:
+    """Build the Ray Tune trainable for ``task``.
+
+    The returned closure is the only Ray-facing surface: it resolves the trial's
+    candidate, rehydrates conformal state from ``state_ref`` (when the task carries a
+    conformal runtime), and delegates the backtest to :func:`_score_candidate`. Pass
+    ``conformal_config=None`` for tasks scored without conformal calibration.
+    """
+
+    def _trainable(trial_config: dict[str, Any], *, state_ref: Any | None = None) -> None:
+        from ray import tune
+
+        candidate = _candidate_from_params(task, trial_config)
+        state = _resolve_state_ref(state_ref) if conformal_config is not None else None
+        _score_candidate(
+            task=task,
+            candidate=candidate,
+            history=history,
+            origins=origins,
+            conformal_options=_conformal_options(conformal_config, candidate, state),
+            report=tune.report,
+        )
+
+    return _trainable
 
 
 def optimize_local_task_candidate(task: LocalTuningTask) -> TuningCandidate:
@@ -559,34 +631,11 @@ def optimize_global_task_candidate(task: GlobalTuningTask) -> TuningCandidate:
         config.cpu_per_trial,
     )
 
-    def _trainable(trial_config: dict[str, Any], *, state_ref: Any | None = None) -> None:
-        del state_ref
-        from ray import tune
-
-        candidate = _resolve_candidate(
-            task.search_space(cast(optuna.Trial, optuna.trial.FixedTrial(dict(trial_config))))
-        )
-        study_config = task.study_config
-        forecast_task = ForecastTask(
-            history=history,
-            horizon=task.horizon,
-            model_config=_candidate_model_config(task.base_model_config, candidate, study_config),
-        )
-        objective = _apply_ordering_overrides(task.objective, candidate.ordering_config)
-        with _build_scoring_engine(study_config) as engine:
-            _score_forecast_task(
-                engine=engine,
-                forecast_task=forecast_task,
-                objective=objective,
-                actuals=task.actuals,
-                origins=origins,
-                cpu_per_trial=study_config.cpu_per_trial,
-                report=tune.report,
-            )
-
     outcome = run_optuna_study(
         space=_OptunaSearchSpaceAdapter(task.search_space),
-        trainable=_trainable,
+        trainable=_make_ray_trainable(
+            task=task, history=history, origins=origins, conformal_config=None
+        ),
         n_trials=config.n_trials,
         max_t=max_t,
         seed=config.seed,
@@ -629,54 +678,14 @@ def _run_optuna_study(task: LocalTuningTask) -> dict[str, Any]:
         config.cpu_per_trial,
     )
 
-    def _trainable(trial_config: dict[str, Any], *, state_ref: Any | None = None) -> None:
-        from ray import tune
-
-        candidate = _resolve_candidate(
-            worker_task.search_space(
-                cast(optuna.Trial, optuna.trial.FixedTrial(dict(trial_config)))
-            )
-        )
-        study_config = worker_task.study_config
-        forecast_task = ForecastTask(
-            history=history,
-            horizon=worker_task.horizon,
-            model_config=_candidate_model_config(
-                worker_task.base_model_config,
-                candidate,
-                study_config,
-            ),
-        )
-        runtime_config = (
-            _apply_conformal_overrides(conformal_config, candidate.conformal_config)
-            if conformal_config is not None
-            else None
-        )
-        conformal_options = (
-            ConformalOptions(
-                runtime=SymmetricIntervalRuntime.from_state(
-                    runtime_config,
-                    _resolve_state_ref(state_ref),
-                )
-            )
-            if runtime_config is not None
-            else ConformalOptions()
-        )
-        objective = _apply_ordering_overrides(worker_task.objective, candidate.ordering_config)
-        with _build_scoring_engine(study_config, conformal_options=conformal_options) as engine:
-            _score_forecast_task(
-                engine=engine,
-                forecast_task=forecast_task,
-                objective=objective,
-                actuals=worker_task.actuals,
-                origins=origins,
-                cpu_per_trial=study_config.cpu_per_trial,
-                report=tune.report,
-            )
-
     outcome = run_optuna_study(
         space=_OptunaSearchSpaceAdapter(worker_task.search_space),
-        trainable=_trainable,
+        trainable=_make_ray_trainable(
+            task=worker_task,
+            history=history,
+            origins=origins,
+            conformal_config=conformal_config,
+        ),
         n_trials=config.n_trials,
         max_t=max_t,
         seed=config.seed,

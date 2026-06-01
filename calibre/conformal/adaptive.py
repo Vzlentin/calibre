@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 
@@ -80,7 +80,7 @@ class AdaptiveConformalInference(OnlineConformalController):
             quantile_rule=self._quantile_rule,
         )
 
-    def predict_interval(self, point_forecast) -> IntervalPrediction:
+    def predict_interval(self, point_forecast: float) -> IntervalPrediction:
         radius = self.get_radius()
         self._radius_history.append(radius)
         return symmetric_interval(
@@ -134,12 +134,12 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
     def __init__(
         self,
         horizon: int,
-        alpha,
-        gamma,
-        initial_alpha=None,
+        alpha: float | Iterable[float],
+        gamma: float | Iterable[float],
+        initial_alpha: float | Iterable[float] | None = None,
         score: Score = absolute_error_score,
         initial_scores: Iterable[Iterable[float]] | None = None,
-        initial_radius=0.0,
+        initial_radius: float | Iterable[float] = 0.0,
         alpha_bounds: tuple[float, float] | None = (1e-6, 1.0 - 1e-6),
         quantile_rule: Literal["conformal", "higher"] = "conformal",
     ):
@@ -148,21 +148,17 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         self._horizon = int(horizon)
         self._bounds = _validate_bounds(alpha_bounds)
         self._quantile_rule = _validate_quantile_rule(quantile_rule)
-        self._target_alpha: np.ndarray = cast(
-            np.ndarray,
-            _clip_alpha(_as_1d_array(alpha, "alpha", self._horizon), self._bounds),
+        self._target_alpha: np.ndarray = _clip_alpha(
+            _as_1d_array(alpha, "alpha", self._horizon), self._bounds
         )
         self._gamma: np.ndarray = _as_1d_array(gamma, "gamma", self._horizon)
         if np.any(self._gamma < 0):
             raise ValueError("gamma must be non-negative")
-        self._alpha: np.ndarray = cast(
-            np.ndarray,
-            _clip_alpha(
-                self._target_alpha
-                if initial_alpha is None
-                else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
-                self._bounds,
-            ),
+        self._alpha: np.ndarray = _clip_alpha(
+            self._target_alpha
+            if initial_alpha is None
+            else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
+            self._bounds,
         )
         self._score = score
         self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
@@ -182,7 +178,9 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
     def current_alpha(self) -> np.ndarray:
         return self._alpha.copy()
 
-    def _normalize_score_histories(self, initial_scores) -> list[list[float]]:
+    def _normalize_score_histories(
+        self, initial_scores: Iterable[Iterable[float]] | None
+    ) -> list[list[float]]:
         if initial_scores is None:
             return [[] for _ in range(self._horizon)]
         histories = list(initial_scores)
@@ -190,7 +188,7 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
             raise ValueError("initial_scores must provide one iterable per horizon step")
         return [[float(score) for score in scores] for scores in histories]
 
-    def get_radius(self, alpha=None) -> np.ndarray:
+    def get_radius(self, alpha: float | Iterable[float] | None = None) -> np.ndarray:
         alpha = self._alpha if alpha is None else _as_1d_array(alpha, "alpha", self._horizon)
         return np.asarray(
             [
@@ -205,7 +203,9 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
             dtype=float,
         )
 
-    def predict_interval(self, point_forecast) -> MultiStepIntervalPrediction:
+    def predict_interval(
+        self, point_forecast: float | Iterable[float]
+    ) -> MultiStepIntervalPrediction:
         center = _as_1d_array(point_forecast, "point_forecast", self._horizon)
         radius = self.get_radius()
         self._radius_history.append(radius.copy())
@@ -219,10 +219,10 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         self._issued_count += 1
         return prediction
 
-    def update(self, error) -> np.ndarray:
-        error = _as_1d_array(error, "error", self._horizon)
+    def update(self, error: float | Iterable[float]) -> np.ndarray:
+        error_arr = _as_1d_array(error, "error", self._horizon)
         self._alpha = np.asarray(
-            _clip_alpha(self._alpha + self._gamma * (self._target_alpha - error), self._bounds),
+            _clip_alpha(self._alpha + self._gamma * (self._target_alpha - error_arr), self._bounds),
             dtype=float,
         )
         self._alpha_history.append(self._alpha.copy())
