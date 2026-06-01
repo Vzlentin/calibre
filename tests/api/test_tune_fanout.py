@@ -47,14 +47,26 @@ def _history_records(uids: list[str]) -> list[dict]:
     ]
 
 
-def _tune_payload(sku_set: list[str]) -> dict:
+@pytest.fixture
+def uris(tmp_path):
+    """Stage sales + actuals parquet covering the whole SKU_SET (URI ingress)."""
+    sales_path = tmp_path / "sales.parquet"
+    actuals_path = tmp_path / "actuals.parquet"
+    pd.DataFrame(_history_records(SKU_SET)).to_parquet(sales_path)
+    actuals = pd.DataFrame(_history_records(SKU_SET))
+    actuals["ds"] = pd.to_datetime(actuals["ds"])
+    actuals.to_parquet(actuals_path)
+    return str(sales_path), str(actuals_path)
+
+
+def _tune_payload(sku_set: list[str], sales_uri: str, actuals_uri: str) -> dict:
     return {
         "tenant": "acme",
         "sku_set": sku_set,
         "horizon": 2,
         "freq": "W-SUN",
-        "history": _history_records(sku_set),
-        "actuals": _history_records(sku_set),
+        "sales_uri": sales_uri,
+        "actuals_uri": actuals_uri,
         "origins": ["2024-02-04"],
         "base_model_config": {"backend": "stub", "model": "stub_model"},
         "search_space_id": "seasonal",
@@ -69,8 +81,8 @@ def _tune_payload(sku_set: list[str]) -> dict:
     }
 
 
-def _global_tune_payload(sku_set: list[str]) -> dict:
-    payload = _tune_payload(sku_set)
+def _global_tune_payload(sku_set: list[str], sales_uri: str, actuals_uri: str) -> dict:
+    payload = _tune_payload(sku_set, sales_uri, actuals_uri)
     payload["hpo_scope"] = "global"
     payload["base_model_config"] = {"backend": "stub", "model": "stub_model", "scope": "global"}
     return payload
@@ -107,7 +119,7 @@ def _factory_for(db_url: str):
     return make_session_factory(make_engine(db_url))
 
 
-def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client) -> None:
+def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client, uris) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
@@ -128,7 +140,7 @@ def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client) -> None:
 
     monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
 
-    submit = client.post("/tune", json=_tune_payload(SKU_SET))
+    submit = client.post("/tune", json=_tune_payload(SKU_SET, *uris))
     assert submit.status_code == 202, submit.text
     handle = submit.json()
     study_id = handle["study_id"]
@@ -154,11 +166,11 @@ def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client) -> None:
         assert row.candidate["conformal_config"]["gamma"] == pytest.approx(0.01 + 0.01 * idx)
 
 
-def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client) -> None:
+def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client, uris) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
-    payload = _tune_payload(SKU_SET[:3])
+    payload = _tune_payload(SKU_SET[:3], *uris)
     signature = api_main._tuning_signature(
         TuneRequest(**payload), [pd.Timestamp(o) for o in payload["origins"]]
     )
@@ -215,7 +227,7 @@ def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client) -> None
     assert candidates["C"]["model_config_values"]["season_length"] == 13
 
 
-def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client) -> None:
+def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client, uris) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
@@ -232,7 +244,7 @@ def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client) ->
 
     monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
 
-    payload = _tune_payload(sku_set)
+    payload = _tune_payload(sku_set, *uris)
     first = client.post("/tune", json=payload).json()
     assert client.get(f"/studies/{first['study_id']}").json()["status"] == "succeeded"
     assert run_count["n"] == len(sku_set)
@@ -245,14 +257,14 @@ def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client) ->
     # Same session (tenant/sku_set/model/conformal unchanged) but a different
     # tuning input (n_trials) must invalidate the per-uid cache and re-tune,
     # rather than silently returning the stale candidates.
-    changed = _tune_payload(sku_set)
+    changed = _tune_payload(sku_set, *uris)
     changed["n_trials"] = 99
     third = client.post("/tune", json=changed).json()
     assert client.get(f"/studies/{third['study_id']}").json()["status"] == "succeeded"
     assert run_count["n"] == 2 * len(sku_set)
 
 
-def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client) -> None:
+def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client, uris) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
@@ -273,7 +285,7 @@ def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client) 
 
     monkeypatch.setattr(api_main, "optimize_global_task_candidate", _fake_panel)
 
-    submit = client.post("/tune", json=_global_tune_payload(SKU_SET))
+    submit = client.post("/tune", json=_global_tune_payload(SKU_SET, *uris))
     assert submit.status_code == 202, submit.text
     handle = submit.json()
     study_id = handle["study_id"]
@@ -303,7 +315,7 @@ def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client) 
     assert per_uid_rows == []
 
 
-def test_global_hpo_resumes_from_cache(monkeypatch, tuning_db, client) -> None:
+def test_global_hpo_resumes_from_cache(monkeypatch, tuning_db, client, uris) -> None:
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
@@ -319,7 +331,7 @@ def test_global_hpo_resumes_from_cache(monkeypatch, tuning_db, client) -> None:
 
     monkeypatch.setattr(api_main, "optimize_global_task_candidate", _fake_panel)
 
-    payload = _global_tune_payload(SKU_SET)
+    payload = _global_tune_payload(SKU_SET, *uris)
     first = client.post("/tune", json=payload).json()
     assert client.get(f"/studies/{first['study_id']}").json()["status"] == "succeeded"
     assert run_count["n"] == 1
@@ -332,7 +344,7 @@ def test_global_hpo_resumes_from_cache(monkeypatch, tuning_db, client) -> None:
     assert detail["best_candidates"]["A"]["model_config_values"]["season_length"] == 13
 
     # A different tuning input (n_trials) changes the signature -> re-run.
-    changed = _global_tune_payload(SKU_SET)
+    changed = _global_tune_payload(SKU_SET, *uris)
     changed["n_trials"] = 99
     third = client.post("/tune", json=changed).json()
     assert client.get(f"/studies/{third['study_id']}").json()["status"] == "succeeded"

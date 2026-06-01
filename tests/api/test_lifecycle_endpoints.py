@@ -83,13 +83,20 @@ def _history_records(uid: str = "A") -> list[dict]:
     ]
 
 
-def _fit_payload() -> dict:
+@pytest.fixture
+def sales_uri(tmp_path):
+    path = tmp_path / "sales.parquet"
+    pd.DataFrame(_history_records("A")).to_parquet(path)
+    return str(path)
+
+
+def _fit_payload(sales_uri: str) -> dict:
     return {
         "tenant": "acme",
         "sku_set": ["A"],
         "horizon": 2,
         "freq": "W-SUN",
-        "history": _history_records("A"),
+        "sales_uri": sales_uri,
         "forecaster_config": {"backend": "stub", "model": "stub_model"},
         "conformal_config": {
             "method": "aci",
@@ -100,8 +107,8 @@ def _fit_payload() -> dict:
     }
 
 
-def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter):
-    fit_resp = client.post("/fit", json=_fit_payload())
+def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sales_uri):
+    fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit_resp.status_code == 202, fit_resp.text
     handle = fit_resp.json()
     fit_id = handle["fit_id"]
@@ -170,8 +177,8 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter):
     assert state, "observe should persist conformal state"
 
 
-def test_session_state_get(client, stub_adapter):
-    fit_resp = client.post("/fit", json=_fit_payload())
+def test_session_state_get(client, stub_adapter, sales_uri):
+    fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     fit_id = fit_resp.json()["fit_id"]
     session_id = fit_resp.json()["session_id"]
 
@@ -215,9 +222,9 @@ def test_session_state_404_when_missing(client):
     assert response.status_code == 404
 
 
-def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch):
+def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales_uri):
     monkeypatch.setattr(api_main, "_run_fit_job", lambda fit_id: None)
-    fit_resp = client.post("/fit", json=_fit_payload())
+    fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     fit_id = fit_resp.json()["fit_id"]
 
     predict_resp = client.post("/predict", json={"fit_id": fit_id, "origin": "2024-02-04"})

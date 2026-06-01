@@ -2,11 +2,11 @@
 
 Persists fit/tune records and session-owned conformal state so the API survives
 restarts and multi-worker deployments. Per FIX #1, data-plane frames
-(history, future_x, last_forecast/calibrated/orders) are written as parquet to
-the object store and referenced by URI — never stored inline on the fit row.
-Per FIX #2, all SQL row mapping lives here in the storage layer; the typed
-records and the store contract stay at the API boundary
-(``calibre.api.lifecycle``).
+(history, future_x, last_forecast/calibrated) are written as parquet to the
+object store and referenced by URI — never stored inline on the fit row. Orders
+are durable rows in the ``orders`` table (issue #61), not a parquet frame. Per
+FIX #2, all SQL row mapping lives here in the storage layer; the typed records
+and the store contract stay at the API boundary (``calibre.api.lifecycle``).
 """
 
 from __future__ import annotations
@@ -15,10 +15,13 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pandas as pd
+from sqlalchemy import cast as sa_cast
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session, sessionmaker
 
-from calibre.api.lifecycle import FitRecord, TuneRecord
+from calibre.api.lifecycle import FitRecord, TuneRecord, order_pk
+from calibre.api.serialization import frame_from_records, json_safe_records
 from calibre.conformal.runtime import to_json_safe_state
 from calibre.core.run_status import RunStatus
 from calibre.execution.io import join_uri, read_parquet, write_parquet
@@ -26,14 +29,16 @@ from calibre.storage.models import (
     LifecycleConformalState,
     LifecycleFitRecord,
     LifecycleTuneRecord,
+    Order,
 )
 from calibre.storage.objstore import artifact_base_uri
 from calibre.storage.postgres import session_scope
 
 # Frame-bearing attributes on FitRecord, persisted as parquet by reference.
-_FRAME_ATTRS = ("history", "future_x", "last_forecast", "last_calibrated", "last_orders")
+_FRAME_ATTRS = ("history", "future_x", "last_forecast", "last_calibrated")
 _FIT_SCALAR_FIELDS = ("status", "error", "artifact_urls")
 _STUDY_SCALAR_FIELDS = ("status", "error", "best_candidates")
+_ORDER_PK = ("session_id", "unique_id", "forecast_origin", "model_name")
 
 
 def _conformal_upsert(dialect: str, values: dict[str, Any]) -> Any:
@@ -59,6 +64,37 @@ def _conformal_upsert(dialect: str, values: dict[str, Any]) -> Any:
             set_={"state": lite_stmt.excluded.state, "updated_at": func.now()},
         )
     raise NotImplementedError(f"conformal upsert unsupported on dialect {dialect!r}")
+
+
+def _order_upsert(dialect: str, values: dict[str, Any]) -> Any:
+    """Dialect-aware INSERT ... ON CONFLICT DO UPDATE for an order row.
+
+    Re-placing an order for the same decision tuple overwrites the prior row
+    (qty/detail/placed_at) rather than racing get-then-add into a PK error."""
+    set_columns = ("tenant", "order_qty", "detail")
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        pg_stmt = pg_insert(Order).values(**values)
+        return pg_stmt.on_conflict_do_update(
+            index_elements=list(_ORDER_PK),
+            set_={
+                **{col: getattr(pg_stmt.excluded, col) for col in set_columns},
+                "placed_at": func.now(),
+            },
+        )
+    if dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        lite_stmt = sqlite_insert(Order).values(**values)
+        return lite_stmt.on_conflict_do_update(
+            index_elements=list(_ORDER_PK),
+            set_={
+                **{col: getattr(lite_stmt.excluded, col) for col in set_columns},
+                "placed_at": func.now(),
+            },
+        )
+    raise NotImplementedError(f"order upsert unsupported on dialect {dialect!r}")
 
 
 class SqlLifecycleStore:
@@ -184,14 +220,23 @@ class SqlLifecycleStore:
 
     def fits_for_tenant_uid(self, tenant: str, uid: str) -> list[FitRecord]:
         with session_scope(self._factory) as session:
-            rows = session.scalars(
+            stmt = (
                 select(LifecycleFitRecord)
                 .where(LifecycleFitRecord.tenant == tenant)
                 .order_by(LifecycleFitRecord.created_at, LifecycleFitRecord.fit_id)
-            ).all()
+            )
+            # REVIEW #14: push the sku-set membership into SQL on Postgres
+            # (``sku_set @> '["uid"]'``) so this is a predicate, not a full
+            # tenant scan filtered in Python. SQLite's JSON has no containment
+            # operator, so keep the post-query filter there.
+            if session.get_bind().dialect.name == "postgresql":
+                stmt = stmt.where(sa_cast(LifecycleFitRecord.sku_set, JSONB).contains([uid]))
+                rows = session.scalars(stmt).all()
+            else:
+                rows = [row for row in session.scalars(stmt).all() if uid in row.sku_set]
             # Metadata only: the caller picks one fit, then loads its frames via
             # get_fit — so we don't pull every matching fit's parquet here.
-            return [self._row_to_fit(row, load_frames=False) for row in rows if uid in row.sku_set]
+            return [self._row_to_fit(row, load_frames=False) for row in rows]
 
     def _row_to_fit(self, row: LifecycleFitRecord, *, load_frames: bool = True) -> FitRecord:
         frames = self._read_frames(dict(row.frame_uris)) if load_frames else {}
@@ -211,8 +256,37 @@ class SqlLifecycleStore:
             artifact_urls=dict(row.artifact_urls),
             last_forecast=frames.get("last_forecast"),
             last_calibrated=frames.get("last_calibrated"),
-            last_orders=frames.get("last_orders"),
         )
+
+    # --- orders (durable ledger) -------------------------------------------
+
+    def put_orders(self, tenant: str, session_id: str, orders: pd.DataFrame) -> None:
+        records = json_safe_records(orders)
+        if not records:
+            return
+        with session_scope(self._factory) as session:
+            dialect = session.get_bind().dialect.name
+            for record in records:
+                _, unique_id, forecast_origin, model_name = order_pk(session_id, record)
+                values = {
+                    "session_id": session_id,
+                    "unique_id": unique_id,
+                    "forecast_origin": pd.Timestamp(forecast_origin).to_pydatetime(),
+                    "model_name": model_name,
+                    "tenant": tenant,
+                    "order_qty": float(record.get("order_qty") or 0.0),
+                    "detail": record,
+                }
+                session.execute(_order_upsert(dialect, values))
+
+    def open_orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame:
+        with session_scope(self._factory) as session:
+            rows = session.scalars(
+                select(Order)
+                .where(Order.tenant == tenant, Order.unique_id == uid)
+                .order_by(Order.forecast_origin, Order.model_name)
+            ).all()
+            return frame_from_records([dict(row.detail) for row in rows])
 
     # --- conformal state (session-owned) -----------------------------------
 

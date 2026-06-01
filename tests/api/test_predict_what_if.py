@@ -72,14 +72,29 @@ def _history_records() -> list[dict]:
     ]
 
 
-def _fit_payload(*, future_x: list[dict] | None = None) -> dict:
+@pytest.fixture
+def sales_uri(tmp_path):
+    path = tmp_path / "sales.parquet"
+    pd.DataFrame(_history_records()).to_parquet(path)
+    return str(path)
+
+
+def _write_future_x(tmp_path, records: list[dict]) -> str:
+    path = tmp_path / "future_x.parquet"
+    frame = pd.DataFrame(records)
+    frame[DS] = pd.to_datetime(frame[DS])
+    frame.to_parquet(path)
+    return str(path)
+
+
+def _fit_payload(sales_uri: str, *, future_x_uri: str | None = None) -> dict:
     return {
         "tenant": "acme",
         "sku_set": ["A"],
         "horizon": 2,
         "freq": "W-SUN",
-        "history": _history_records(),
-        "future_x": future_x,
+        "sales_uri": sales_uri,
+        "future_x_uri": future_x_uri,
         "forecaster_config": {"backend": "stub", "model": "stub_model"},
     }
 
@@ -99,16 +114,15 @@ def _predict_yhat(client: TestClient, fit_id: str, **payload: object) -> list[fl
     return [row[Y_HAT] for row in response.json()["forecast"]]
 
 
-def test_future_x_override_changes_forecast(client) -> None:
-    fit_id = _fit_id(
-        client,
-        _fit_payload(
-            future_x=[
-                {UNIQUE_ID: "A", "ds": "2024-02-11", "price": 1.0},
-                {UNIQUE_ID: "A", "ds": "2024-02-18", "price": 1.0},
-            ]
-        ),
+def test_future_x_override_changes_forecast(client, sales_uri, tmp_path) -> None:
+    future_x_uri = _write_future_x(
+        tmp_path,
+        [
+            {UNIQUE_ID: "A", "ds": "2024-02-11", "price": 1.0},
+            {UNIQUE_ID: "A", "ds": "2024-02-18", "price": 1.0},
+        ],
     )
+    fit_id = _fit_id(client, _fit_payload(sales_uri, future_x_uri=future_x_uri))
 
     baseline = _predict_yhat(client, fit_id)
     what_if = _predict_yhat(
@@ -126,16 +140,15 @@ def test_future_x_override_changes_forecast(client) -> None:
     assert what_if == [18.0, 15.0]
 
 
-def test_override_does_not_persist_across_calls(client) -> None:
-    fit_id = _fit_id(
-        client,
-        _fit_payload(
-            future_x=[
-                {UNIQUE_ID: "A", "ds": "2024-02-11", "promo_lift": 0.0},
-                {UNIQUE_ID: "A", "ds": "2024-02-18", "promo_lift": 0.0},
-            ]
-        ),
+def test_override_does_not_persist_across_calls(client, sales_uri, tmp_path) -> None:
+    future_x_uri = _write_future_x(
+        tmp_path,
+        [
+            {UNIQUE_ID: "A", "ds": "2024-02-11", "promo_lift": 0.0},
+            {UNIQUE_ID: "A", "ds": "2024-02-18", "promo_lift": 0.0},
+        ],
     )
+    fit_id = _fit_id(client, _fit_payload(sales_uri, future_x_uri=future_x_uri))
 
     what_if = _predict_yhat(
         client,

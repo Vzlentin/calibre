@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import pandas as pd
 
+from calibre.api.serialization import frame_from_records, json_safe_records
+from calibre.core.forecast_frame import FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID
 from calibre.core.run_status import RunStatus
 
 
@@ -26,7 +28,19 @@ class FitRecord:
     artifact_urls: dict[str, str] = field(default_factory=dict)
     last_forecast: pd.DataFrame | None = None
     last_calibrated: pd.DataFrame | None = None
-    last_orders: pd.DataFrame | None = None
+
+
+def order_pk(session_id: str, record: dict) -> tuple[str, str, str, str]:
+    """``(session_id, unique_id, forecast_origin, model_name)`` from a JSON row.
+
+    ``model_name`` defaults to ``""`` when the order frame carries none, matching
+    the persistent ``orders`` table's PK."""
+    return (
+        session_id,
+        str(record.get(UNIQUE_ID, "")),
+        str(record.get(FORECAST_ORIGIN, "")),
+        str(record.get(MODEL_NAME, "") or ""),
+    )
 
 
 @dataclass
@@ -45,6 +59,9 @@ class LifecycleStore:
         self._fits: dict[str, FitRecord] = {}
         self._conformal_state: dict[str, dict[str, dict]] = {}
         self._studies: dict[str, TuneRecord] = {}
+        # Order rows keyed by (session_id, unique_id, forecast_origin,
+        # model_name); value carries the owning tenant + the JSON-safe row.
+        self._orders: dict[tuple[str, str, str, str], dict] = {}
 
     @staticmethod
     def new_fit_id() -> str:
@@ -94,6 +111,18 @@ class LifecycleStore:
             if record.tenant == tenant and uid in record.sku_set
         ]
 
+    def put_orders(self, tenant: str, session_id: str, orders: pd.DataFrame) -> None:
+        for record in json_safe_records(orders):
+            self._orders[order_pk(session_id, record)] = {"tenant": tenant, "detail": record}
+
+    def open_orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame:
+        rows = [
+            entry["detail"]
+            for entry in self._orders.values()
+            if entry["tenant"] == tenant and str(entry["detail"].get(UNIQUE_ID, "")) == uid
+        ]
+        return frame_from_records(rows)
+
     def get_conformal_state(self, session_id: str) -> dict[str, dict]:
         return dict(self._conformal_state.get(session_id, {}))
 
@@ -124,6 +153,8 @@ class LifecycleStoreProtocol(Protocol):
     def fits_for_session(self, session_id: str) -> list[FitRecord]: ...
     def first_fit_for_session(self, session_id: str) -> FitRecord | None: ...
     def fits_for_tenant_uid(self, tenant: str, uid: str) -> list[FitRecord]: ...
+    def put_orders(self, tenant: str, session_id: str, orders: pd.DataFrame) -> None: ...
+    def open_orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame: ...
     def get_conformal_state(self, session_id: str) -> dict[str, dict]: ...
     def upsert_conformal_state(
         self, session_id: str, partition_states: dict[str, dict]

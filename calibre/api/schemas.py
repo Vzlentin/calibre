@@ -26,11 +26,16 @@ class FitRequest(BaseModel):
     sku_set: list[str]
     horizon: int
     freq: str = "W"
-    history: list[dict[str, Any]]
+    sales_uri: str = Field(
+        ..., description="parquet/SQL URI resolved by the SalesAdapter into the history frame"
+    )
+    as_of: str | None = Field(
+        None, description="point-in-time cutoff for sales revisions (as_of <= origin)"
+    )
     forecaster_config: dict[str, Any] = Field(
         ..., description="model_config dict resolved by the forecasting adapter registry"
     )
-    future_x: list[dict[str, Any]] | None = None
+    future_x_uri: str | None = Field(None, description="parquet URI for the future regressor frame")
     conformal_config: dict[str, Any] | None = None
 
 
@@ -94,8 +99,13 @@ class TuneRequest(BaseModel):
     sku_set: list[str]
     horizon: int
     freq: str = "W"
-    history: list[dict[str, Any]]
-    actuals: list[dict[str, Any]]
+    sales_uri: str = Field(
+        ..., description="parquet/SQL URI resolved by the SalesAdapter into the history frame"
+    )
+    actuals_uri: str = Field(..., description="parquet URI for the realized-actuals frame")
+    as_of: str | None = Field(
+        None, description="point-in-time cutoff for sales revisions (as_of <= origin)"
+    )
     origins: list[str]
     base_model_config: dict[str, Any]
     search_space_id: str

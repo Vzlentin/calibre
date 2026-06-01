@@ -58,13 +58,20 @@ def _history_records(uid: str = "A") -> list[dict]:
     ]
 
 
-def _fit_payload() -> dict:
+@pytest.fixture
+def sales_uri(tmp_path):
+    path = tmp_path / "sales.parquet"
+    pd.DataFrame(_history_records("A")).to_parquet(path)
+    return str(path)
+
+
+def _fit_payload(sales_uri: str) -> dict:
     return {
         "tenant": "acme",
         "sku_set": ["A"],
         "horizon": 2,
         "freq": "W-SUN",
-        "history": _history_records("A"),
+        "sales_uri": sales_uri,
         "forecaster_config": {"backend": "statsforecast", "model": "Naive"},
         "conformal_config": {
             "method": "aci",
@@ -81,10 +88,10 @@ def test_app_wired_to_migrated_db(migrated_client) -> None:
     assert isinstance(api_main._run_store(), SqlRunStore)
 
 
-def test_lifecycle_roundtrip_on_migrated_db(migrated_client) -> None:
+def test_lifecycle_roundtrip_on_migrated_db(migrated_client, sales_uri) -> None:
     client = migrated_client
 
-    fit = client.post("/fit", json=_fit_payload())
+    fit = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit.status_code == 202, fit.text
     fit_id = fit.json()["fit_id"]
     session_id = fit.json()["session_id"]
@@ -121,6 +128,14 @@ def test_lifecycle_roundtrip_on_migrated_db(migrated_client) -> None:
         },
     )
     assert order.status_code == 200, order.text
+
+    # Orders are now durable rows; reading them back via /sessions exercises the
+    # migrated ``orders`` table write+read path (the SQL store for the sql param).
+    session_state = client.get("/sessions/acme/A")
+    assert session_state.status_code == 200, session_state.text
+    open_orders = session_state.json()["open_orders"]
+    assert open_orders is not None and len(open_orders) == 1
+    assert open_orders[0][UNIQUE_ID] == "A"
 
     observe = client.post(
         "/observe",

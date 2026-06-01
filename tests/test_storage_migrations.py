@@ -126,6 +126,8 @@ def test_storage_alembic_upgrade_creates_run_tables(fresh_db_url, monkeypatch) -
         "forecast_pointers",
         "pending_observations",
         "tuning_runs",
+        "orders",
+        "sales",
         "alembic_version",
     }.issubset(inspector.get_table_names())
     conformal_pk = inspector.get_pk_constraint("conformal_state")["constrained_columns"]
@@ -134,6 +136,10 @@ def test_storage_alembic_upgrade_creates_run_tables(fresh_db_url, monkeypatch) -
     assert pending_pk == ["session_id", "uid", "model_name", "origin", "h"]
     tuning_pk = inspector.get_pk_constraint("tuning_runs")["constrained_columns"]
     assert tuning_pk == ["session_id", "unique_id"]
+    orders_pk = inspector.get_pk_constraint("orders")["constrained_columns"]
+    assert orders_pk == ["session_id", "unique_id", "forecast_origin", "model_name"]
+    sales_pk = inspector.get_pk_constraint("sales")["constrained_columns"]
+    assert sales_pk == ["unique_id", "ds"]
     with engine.connect() as connection:
         revision = connection.execute(text("select version_num from alembic_version")).scalar_one()
     head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
