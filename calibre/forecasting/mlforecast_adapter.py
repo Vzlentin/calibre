@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import json
+import tempfile
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -17,6 +20,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
+from calibre.forecasting.native_persistence import pack_directory, unpack_directory
 
 _RESERVED_KEYS = frozenset(
     {
@@ -34,6 +38,7 @@ _RESERVED_KEYS = frozenset(
 )
 
 _VALID_STRATEGIES = frozenset({"recursive", "direct"})
+_METADATA_FILE = "calibre_adapter_state.json"
 _TRANSFORM_ALIASES = {
     "RollingMean": "mlforecast.lag_transforms.RollingMean",
     "RollingStd": "mlforecast.lag_transforms.RollingStd",
@@ -181,6 +186,33 @@ class MLForecastAdapter(ModelAdapter):
         if strategy == "direct":
             fit_kwargs["max_horizon"] = task.horizon
         self._mlf.fit(mlf_df, **fit_kwargs)
+
+    def dump_state(self) -> bytes:
+        if self._mlf is None:
+            raise RuntimeError("Call fit() before dump_state()")
+        with tempfile.TemporaryDirectory(prefix="calibre-mlf-") as temp_dir:
+            path = Path(temp_dir)
+            self._mlf.save(path)
+            (path / _METADATA_FILE).write_text(
+                json.dumps({"name_to_quantile": self._name_to_quantile}, sort_keys=True),
+                encoding="utf-8",
+            )
+            return pack_directory(path)
+
+    def load_state(self, blob: bytes) -> None:
+        mlforecast_cls = _load_mlforecast_cls()
+        with tempfile.TemporaryDirectory(prefix="calibre-mlf-") as temp_dir:
+            path = Path(temp_dir)
+            unpack_directory(blob, path)
+            self._mlf = mlforecast_cls.load(path)
+            metadata_path = path / _METADATA_FILE
+            if metadata_path.exists():
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                self._name_to_quantile = {
+                    str(name): float(q) for name, q in metadata.get("name_to_quantile", {}).items()
+                }
+            else:
+                self._name_to_quantile = {}
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._mlf is None:

@@ -34,13 +34,22 @@ class ModelAdapter(ABC):
     def predict(self, task: ForecastTask) -> pd.DataFrame: ...
 
     def cache_key(self, task: ForecastTask) -> str:
-        """Default identity-hash key over history + model_config.
+        """Default identity-hash key over history + horizon + model_config.
 
         Subclasses can override to incorporate additional adapter-specific
         state (e.g. registered exogenous columns).
         """
-        payload = task.history.to_csv() + json.dumps(task.model_config, sort_keys=True)
-        return hashlib.sha256(payload.encode()).hexdigest()
+        payload = {
+            "history": task.history.to_json(
+                orient="split",
+                date_format="iso",
+                double_precision=15,
+            ),
+            "horizon": int(task.horizon),
+            "model_config": task.model_config,
+        }
+        encoded = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
 
     def dump_state(self) -> bytes:
         """Serialize the fitted adapter state for caching.

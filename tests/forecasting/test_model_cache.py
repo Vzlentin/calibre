@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 import pytest
@@ -75,6 +76,17 @@ def test_cache_miss_writes(tmp_path: Path) -> None:
     assert _CountingAdapter.fit_calls == 1
     key = adapter.cache_key(task)
     assert cache.get(key) is not None
+    assert cache.uri_for_key(key).endswith(f"{key}.bin")
+
+
+def test_cache_reads_and_writes_memory_uri() -> None:
+    cache = ModelArtifactCache(f"memory://calibre-test-{uuid4().hex}")
+    adapter = _CountingAdapter({"model": "Mean"})
+    key = adapter.cache_key(_task())
+
+    cache.put(key, b"native-state")
+
+    assert cache.get(key) == b"native-state"
 
 
 def test_cache_hit_skips_fit(tmp_path: Path) -> None:
@@ -107,6 +119,18 @@ def test_cache_key_changes_with_history(tmp_path: Path) -> None:
     task_a = _task()
     history_b = task_a.history.assign(**{Y: [1.0, 2.0, 3.0, 99.0]})
     task_b = ForecastTask(history=history_b, horizon=2, model_config=task_a.model_config)
+
+    adapter = _CountingAdapter({"model": "Mean"})
+    assert adapter.cache_key(task_a) != adapter.cache_key(task_b)
+
+
+def test_cache_key_changes_with_horizon() -> None:
+    task_a = _task()
+    task_b = ForecastTask(
+        history=task_a.history,
+        horizon=3,
+        model_config=task_a.model_config,
+    )
 
     adapter = _CountingAdapter({"model": "Mean"})
     assert adapter.cache_key(task_a) != adapter.cache_key(task_b)

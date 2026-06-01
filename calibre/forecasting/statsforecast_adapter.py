@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -32,6 +36,21 @@ class StatsForecastAdapter(ModelAdapter):
 
         self._sf = StatsForecast(models=[model], freq=freq)
         self._sf.fit(sf_df)
+
+    def dump_state(self) -> bytes:
+        if self._sf is None:
+            raise RuntimeError("Call fit() before dump_state()")
+        with tempfile.TemporaryDirectory(prefix="calibre-sf-") as temp_dir:
+            path = Path(temp_dir) / "statsforecast.pkl"
+            with contextlib.redirect_stdout(io.StringIO()):
+                self._sf.save(path)
+            return path.read_bytes()
+
+    def load_state(self, blob: bytes) -> None:
+        with tempfile.TemporaryDirectory(prefix="calibre-sf-") as temp_dir:
+            path = Path(temp_dir) / "statsforecast.pkl"
+            path.write_bytes(blob)
+            self._sf = StatsForecast.load(path)
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         if self._sf is None:

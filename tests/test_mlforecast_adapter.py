@@ -160,6 +160,36 @@ def test_quantile_models_produce_quantile_columns(repeating_history):
     assert result["h"].tolist() == [1, 2, 3]
 
 
+def test_native_state_round_trip_preserves_quantile_mapping(repeating_history, monkeypatch):
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=3,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "freq": "W",
+            "objective": "quantile",
+            "quantiles": [0.5, 0.833],
+            "verbosity": -1,
+        },
+        forecast_origin=pd.Timestamp("2024-06-23"),
+    )
+    adapter = MLForecastAdapter(task.model_config)
+    adapter.fit(task)
+    expected = adapter.predict(task)
+
+    blob = adapter.dump_state()
+    restored = MLForecastAdapter(task.model_config)
+    restored.load_state(blob)
+
+    def fail_fit(_task):
+        raise AssertionError("restored adapter should not refit")
+
+    monkeypatch.setattr(restored, "fit", fail_fit)
+    assert restored._name_to_quantile == adapter._name_to_quantile
+    pd.testing.assert_frame_equal(restored.predict(task), expected)
+
+
 def test_direct_strategy_runs(repeating_history):
     task = ForecastTask(
         history=repeating_history,

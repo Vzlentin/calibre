@@ -9,9 +9,10 @@ from calibre.api.lifecycle import LifecycleStore
 from calibre.api.main import app
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H
 from calibre.core.forecast_task import ForecastTask
+from calibre.forecasting.adapter_base import ModelAdapter
 
 
-class _FutureXAdapter:
+class _FutureXAdapter(ModelAdapter):
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
 
@@ -39,13 +40,24 @@ class _FutureXAdapter:
             )
         return pd.DataFrame(rows)
 
+    def dump_state(self) -> bytes:
+        return b"{}"
+
+    def load_state(self, blob: bytes) -> None:
+        return None
+
 
 @pytest.fixture(autouse=True)
-def _reset_lifecycle_store(monkeypatch):
+def _reset_lifecycle_store(monkeypatch, tmp_path):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
+    monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
     monkeypatch.setattr(
         "calibre.execution.backend.resolve_adapter",
+        lambda cfg: _FutureXAdapter(cfg),
+    )
+    monkeypatch.setattr(
+        "calibre.execution.fit_service.resolve_adapter",
         lambda cfg: _FutureXAdapter(cfg),
     )
     return fresh

@@ -50,9 +50,12 @@ from calibre.execution.backend import (
 )
 from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
 from calibre.execution.fit_service import validate_fit_config
+from calibre.execution.io import join_uri
 from calibre.forecasting import get_scope
+from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
+from calibre.storage.objstore import artifact_base_uri, signed_url
 from calibre.storage.postgres import (
     GlobalTuningRunRepo,
     TuningRunRepo,
@@ -136,6 +139,10 @@ def _lifecycle_store() -> LifecycleStoreProtocol:
     if _SQL_LIFECYCLE_STORE is None:
         _SQL_LIFECYCLE_STORE = SqlLifecycleStore(factory)
     return _SQL_LIFECYCLE_STORE
+
+
+def _model_artifact_cache() -> ModelArtifactCache:
+    return ModelArtifactCache(join_uri(artifact_base_uri(), "model-artifacts"))
 
 
 def _json_records(frame: pd.DataFrame) -> list[dict]:
@@ -320,21 +327,26 @@ def _run_fit_job(fit_id: str) -> None:
         return
     store.update_fit(fit_id, status=RunStatus.RUNNING)
     try:
+        cache = _model_artifact_cache()
         # Eagerly fit to validate the config against the data, so an
         # incompatible config FAILS here rather than silently succeeding and
         # only blowing up at /predict.
-        validate_fit_config(
+        artifact_key = validate_fit_config(
             forecaster_config=record.forecaster_config,
             history=record.history,
             future_x=record.future_x,
             horizon=record.horizon,
             freq=record.freq,
             sku_set=record.sku_set,
+            cache=cache,
         )
+        artifact_urls = {"session_id": record.session_id}
+        if artifact_key is not None:
+            artifact_urls["model_artifact"] = signed_url(cache.uri_for_key(artifact_key))
         store.update_fit(
             fit_id,
             status=RunStatus.SUCCEEDED,
-            artifact_urls={"session_id": record.session_id},
+            artifact_urls=artifact_urls,
         )
     except Exception as exc:
         store.update_fit(fit_id, status=RunStatus.FAILED, error=_format_error(exc))
@@ -383,7 +395,7 @@ def predict(req: PredictRequest) -> PredictResponse:
         future_x=future_x,
     )
     try:
-        preds = fit_predict_task(task)
+        preds = fit_predict_task(task, cache=_model_artifact_cache())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=_format_error(exc)) from exc
     forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))

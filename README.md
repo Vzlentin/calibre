@@ -31,9 +31,10 @@ For a deployment that survives restarts and runs multiple workers, also set:
 - `LIFECYCLE_STORE=sql` — the `/fit` lifecycle store (fit/tune records,
   session-owned conformal state) defaults to **in-memory** and is otherwise
   lost on restart and invisible across workers.
-- `CALIBRE_ARTIFACT_URI` — base URI for fit-frame parquet artifacts. Multi-host
-  workers must point this at a **shared** object store (e.g.
-  `s3://bucket/prefix`); a local path is single-host only (and warns).
+- `CALIBRE_ARTIFACT_URI` — base URI for fit-frame parquet artifacts and
+  trusted server-owned model artifacts. Multi-host workers must point this at a
+  **shared** object store (e.g. `s3://bucket/prefix`); a local path is
+  single-host only (and warns).
 
 ## Commands
 
@@ -95,7 +96,7 @@ uv run uvicorn calibre.api.main:app --host 0.0.0.0 --port 8000
 | `/metrics` | `GET` | Prometheus metrics |
 | `/backtests` | `POST` | Asynchronous backtest job (returns `run_id`) |
 | `/runs/{run_id}` | `GET` | Poll run status and artifact pointers |
-| `/fit` | `POST` | Start a fit lifecycle (returns `fit_id` + deterministic `session_id`); eagerly fits to validate config — incompatible configs land `FAILED` rather than failing later at `/predict` |
+| `/fit` | `POST` | Start a fit lifecycle (returns `fit_id` + deterministic `session_id`); eagerly fits to validate config and persists a trusted server-owned model artifact when compatible |
 | `/fits/{fit_id}` | `GET` | Poll fit lifecycle status |
 | `/predict` | `POST` | Produce forecasts for a fit and origin, with optional `future_x_override` |
 | `/calibrate` | `POST` | Apply session-keyed conformal calibration to a forecast frame |
@@ -110,9 +111,12 @@ are persisted in Postgres. Conformal state is keyed by stable `session_id` and
 partition, unresolved observations are buffered in `pending_observations`, and
 multi-SKU HPO results are stored in `tuning_runs` for partial-completion resume.
 With `LIFECYCLE_STORE=sql`, the `/fit` and `/tune` lifecycle records and their
-session-owned conformal state also persist (fit-frame data planes are written as
-parquet under `CALIBRE_ARTIFACT_URI`, referenced by URI — not stored inline), so
-the API survives restarts and multi-worker deployments. See
+session-owned conformal state also persist. Fit-frame data planes are written as
+parquet under `CALIBRE_ARTIFACT_URI`, and fitted model artifacts are written
+under the same root using the native Nixtla persistence APIs. Model artifacts
+are trusted server-owned files: requests never provide model bytes or arbitrary
+artifact URIs, and `/predict` only loads artifacts addressed by server-computed
+cache keys. See
 [`docs/deployment.md`](docs/deployment.md) for Terraform, AWS Batch, Azure
 Container Instances, and Databricks setup.
 

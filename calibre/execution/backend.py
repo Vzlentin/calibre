@@ -55,6 +55,7 @@ from calibre.execution.ledger import ForecastLedger, OrderLedger
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
+from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
@@ -69,21 +70,22 @@ def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) 
     return preds[REQUIRED_COLUMNS + extras]
 
 
-def fit_predict_task(task: ForecastTask) -> pd.DataFrame:
+def fit_predict_task(task: ForecastTask, cache: ModelArtifactCache | None = None) -> pd.DataFrame:
     adapter = resolve_adapter(task.model_config)
     model_name = task.model_name
     uid = task.unique_id
     origin = task.forecast_origin
 
     fit_started = time.perf_counter()
-    adapter.fit(task)
+    fit_ran = adapter.fit_with_cache(task, cache)
     logger.info(
-        "completed adapter fit",
+        "completed adapter fit" if fit_ran else "restored adapter from cache",
         extra={
             "origin": origin,
             "model_name": model_name,
             "unique_id": uid,
             "phase": "fit",
+            "cache_hit": not fit_ran,
             "duration_ms": round((time.perf_counter() - fit_started) * 1000.0, 3),
         },
     )

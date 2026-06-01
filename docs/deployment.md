@@ -116,10 +116,15 @@ deployment, set:
 | Env var | Purpose |
 | --- | --- |
 | `LIFECYCLE_STORE=sql` | Persist fit/tune records + session-owned conformal state in Postgres (requires `CALIBRE_DATABASE_URL`). |
-| `CALIBRE_ARTIFACT_URI` | Base URI for fit-frame parquet artifacts (`history`, `future_x`, `last_*`). Must be a **shared** object store (`s3://…`, `abfs://…`) so every worker can read frames written by any other; a local path works single-host only and logs a warning. |
+| `CALIBRE_ARTIFACT_URI` | Base URI for fit-frame parquet artifacts (`history`, `future_x`, `last_*`) and trusted server-owned model artifacts. Must be a **shared** object store (`s3://…`, `abfs://…`) so every worker can read frames and fitted model artifacts written by any other; a local path works single-host only and logs a warning. |
 
 Both the in-memory and SQL stores serve the same API; only the SQL store
 survives restarts and shares state across workers.
+
+Model artifacts are loaded only from server-computed cache keys under
+`CALIBRE_ARTIFACT_URI`; no request body accepts model bytes, pickle blobs, or
+arbitrary artifact URIs. Treat this artifact root as trusted application
+storage and restrict write access to Calibre workers.
 
 ## Azure Container Instances
 
