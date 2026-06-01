@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import benchmarks.vn2.config as _vn2_config
 from benchmarks.common.tracking import (
+    load_dotenv,
     log_config_module,
     log_costs_dataframe,
     safe_log_metric,
@@ -282,6 +283,7 @@ def run_winning(
 
 
 if __name__ == "__main__":
+    load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     run_winning(
         results_dir=Path(__file__).parent / "results",

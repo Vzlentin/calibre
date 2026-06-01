@@ -65,8 +65,14 @@ def _tracking_disabled() -> bool:
     return _mlflow_disabled() or _mlflow_unavailable()
 
 
-def _load_dotenv() -> None:
+def load_dotenv() -> None:
     """Load key=value pairs from .env files into os.environ (if not already set).
+
+    Must be called explicitly by a benchmark entrypoint (the ``__main__`` block
+    of a runnable ``run_*`` script) and must never run at import time: importing
+    this module during, e.g., a test run would otherwise leak developer-local
+    ``.env`` settings (``CALIBRE_DATABASE_URL``, ``LIFECYCLE_STORE``, …) into the
+    process environment and silently reroute unrelated code.
 
     Searches: repo root .env, then the CWD .env. Values already set in the
     environment are NOT overridden. This avoids adding a python-dotenv dependency
@@ -83,9 +89,6 @@ def _load_dotenv() -> None:
                     key, value = key.strip(), value.strip()
                     if key and key not in os.environ:
                         os.environ[key] = value
-
-
-_load_dotenv()
 
 
 def resolve_tracking_uri() -> str:
