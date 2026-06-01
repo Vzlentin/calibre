@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import traceback
 from typing import Protocol
 from uuid import UUID, uuid4
 
 import pandas as pd
 from sqlalchemy.orm import sessionmaker
 
+from calibre.api.errors import format_error
 from calibre.api.schemas import RunResponse
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
@@ -38,10 +38,6 @@ def _pointer_kinds(config) -> list[tuple[str, str]]:
     if config.output.order_ledger_path is not None:
         pairs.append(("order_ledger", config.output.order_ledger_path))
     return pairs
-
-
-def _format_error(exc: Exception) -> str:
-    return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 
 def _result_rows(result) -> int:
@@ -104,7 +100,7 @@ class MemoryRunStore:
             self._record_artifact_urls(run_id, config)
             self.mark_succeeded(run_id, rows=_result_rows(result))
         except Exception as exc:
-            self.mark_failed(run_id, error=_format_error(exc))
+            self.mark_failed(run_id, error=format_error(exc))
 
 
 class SqlRunStore:
@@ -193,7 +189,7 @@ class SqlRunStore:
                     )
                 run_repo.set_status(parsed, RunStatus.SUCCEEDED)
         except Exception as exc:
-            self.mark_failed(run_id, error=_format_error(exc))
+            self.mark_failed(run_id, error=format_error(exc))
 
     @staticmethod
     def _response(run, pointer_repo: ForecastPointerRepo) -> RunResponse:

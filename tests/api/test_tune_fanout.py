@@ -8,13 +8,14 @@ from alembic.config import Config
 from fastapi.testclient import TestClient
 
 from calibre.api import main as api_main
+from calibre.api import tuning_service
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import (
-    app,
+from calibre.api.main import app
+from calibre.api.schemas import TuneRequest
+from calibre.api.tuning_service import (
     register_tuning_objective,
     register_tuning_search_space,
 )
-from calibre.api.schemas import TuneRequest
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.evaluation.point_metrics import smape
 from calibre.storage.postgres import (
@@ -105,8 +106,8 @@ def tuning_db(tmp_path, monkeypatch):
 def _reset_state(monkeypatch):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
-    monkeypatch.setattr(api_main, "_SEARCH_SPACES", {})
-    monkeypatch.setattr(api_main, "_OBJECTIVES", {})
+    monkeypatch.setattr(tuning_service, "_SEARCH_SPACES", {})
+    monkeypatch.setattr(tuning_service, "_OBJECTIVES", {})
     return fresh
 
 
@@ -138,7 +139,7 @@ def test_per_sku_best_configs_persisted(monkeypatch, tuning_db, client, uris) ->
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
+    monkeypatch.setattr(tuning_service, "optimize_local_task_candidate", _fake_optimize)
 
     submit = client.post("/tune", json=_tune_payload(SKU_SET, *uris))
     assert submit.status_code == 202, submit.text
@@ -171,7 +172,7 @@ def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client, uris) -
     register_tuning_objective("accuracy", Accuracy(metric=smape))
 
     payload = _tune_payload(SKU_SET[:3], *uris)
-    signature = api_main._tuning_signature(
+    signature = tuning_service._tuning_signature(
         TuneRequest(**payload), [pd.Timestamp(o) for o in payload["origins"]]
     )
 
@@ -213,7 +214,7 @@ def test_tune_resumes_partial_completion(monkeypatch, tuning_db, client, uris) -
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
+    monkeypatch.setattr(tuning_service, "optimize_local_task_candidate", _fake_optimize)
 
     submit = client.post("/tune", json=payload)
     study_id = submit.json()["study_id"]
@@ -242,7 +243,7 @@ def test_local_hpo_reruns_when_config_changes(monkeypatch, tuning_db, client, ur
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
+    monkeypatch.setattr(tuning_service, "optimize_local_task_candidate", _fake_optimize)
 
     payload = _tune_payload(sku_set, *uris)
     first = client.post("/tune", json=payload).json()
@@ -283,7 +284,7 @@ def test_global_hpo_broadcasts_single_candidate(monkeypatch, tuning_db, client, 
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_global_task_candidate", _fake_panel)
+    monkeypatch.setattr(tuning_service, "optimize_global_task_candidate", _fake_panel)
 
     submit = client.post("/tune", json=_global_tune_payload(SKU_SET, *uris))
     assert submit.status_code == 202, submit.text
@@ -329,7 +330,7 @@ def test_global_hpo_resumes_from_cache(monkeypatch, tuning_db, client, uris) -> 
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_global_task_candidate", _fake_panel)
+    monkeypatch.setattr(tuning_service, "optimize_global_task_candidate", _fake_panel)
 
     payload = _global_tune_payload(SKU_SET, *uris)
     first = client.post("/tune", json=payload).json()

@@ -6,9 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from calibre.api import main as api_main
+from calibre.api import tuning_service
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import (
-    app,
+from calibre.api.main import app
+from calibre.api.tuning_service import (
     register_tuning_objective,
     register_tuning_search_space,
 )
@@ -30,8 +31,8 @@ def _seasonal_search_space(trial: optuna.Trial) -> TuningCandidate:
 def _reset_state(monkeypatch):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
-    monkeypatch.setattr(api_main, "_SEARCH_SPACES", {})
-    monkeypatch.setattr(api_main, "_OBJECTIVES", {})
+    monkeypatch.setattr(tuning_service, "_SEARCH_SPACES", {})
+    monkeypatch.setattr(tuning_service, "_OBJECTIVES", {})
     return fresh
 
 
@@ -132,7 +133,7 @@ def test_tune_endpoint_persists_best_candidate(monkeypatch, client, tune_payload
             ordering_config={},
         )
 
-    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _fake_optimize)
+    monkeypatch.setattr(tuning_service, "optimize_local_task_candidate", _fake_optimize)
 
     submit = client.post("/tune", json=tune_payload())
     assert submit.status_code == 202, submit.text
@@ -172,7 +173,7 @@ def test_tune_handle_returns_deterministic_session_id(monkeypatch, client, tune_
     register_tuning_search_space("seasonal", _seasonal_search_space)
     register_tuning_objective("accuracy", Accuracy(metric=smape))
     monkeypatch.setattr(
-        api_main,
+        tuning_service,
         "optimize_local_task_candidate",
         lambda task: TuningCandidate(model_config={}),
     )
@@ -190,7 +191,7 @@ def test_failed_study_records_error(monkeypatch, client, tune_payload) -> None:
     def _boom(task: LocalTuningTask) -> TuningCandidate:
         raise RuntimeError("optuna exploded")
 
-    monkeypatch.setattr(api_main, "optimize_local_task_candidate", _boom)
+    monkeypatch.setattr(tuning_service, "optimize_local_task_candidate", _boom)
 
     submit = client.post("/tune", json=tune_payload())
     study_id = submit.json()["study_id"]
