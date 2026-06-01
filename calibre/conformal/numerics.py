@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal, cast
+from typing import Literal, cast, overload
 
 import numpy as np
 
+ArrayLike = float | Iterable[float] | np.ndarray
 
-def _as_scalar_score(score) -> float:
+
+def _as_scalar_score(score: ArrayLike) -> float:
     arr = np.asarray(score, dtype=float).reshape(-1)
     if arr.size != 1:
         raise ValueError("Expected Score to return a scalar score")
     return float(arr[0])
 
 
-def _as_1d_array(values, name: str, length: int | None = None) -> np.ndarray:
+def _as_1d_array(values: ArrayLike, name: str, length: int | None = None) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
     if arr.ndim == 0:
         if length is None:
@@ -28,7 +30,7 @@ def _as_1d_array(values, name: str, length: int | None = None) -> np.ndarray:
     return arr.astype(float, copy=True)
 
 
-def _validate_bounds(bounds) -> tuple[float, float] | None:
+def _validate_bounds(bounds: tuple[float, float] | None) -> tuple[float, float] | None:
     if bounds is None:
         return None
     lower, upper = bounds
@@ -37,7 +39,13 @@ def _validate_bounds(bounds) -> tuple[float, float] | None:
     return float(lower), float(upper)
 
 
-def _clip_alpha(alpha, bounds) -> np.ndarray | float:
+@overload
+def _clip_alpha(alpha: float, bounds: tuple[float, float] | None) -> float: ...
+@overload
+def _clip_alpha(alpha: np.ndarray, bounds: tuple[float, float] | None) -> np.ndarray: ...
+def _clip_alpha(
+    alpha: float | np.ndarray, bounds: tuple[float, float] | None
+) -> float | np.ndarray:
     if bounds is None:
         arr = np.asarray(alpha, dtype=float)
         if arr.ndim == 0:

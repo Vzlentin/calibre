@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from calibre.cli import commands
@@ -38,7 +39,7 @@ def app(argv: list[str] | None = None) -> int:
     elif args.command == "validate":
         commands.validate(args.config)
     elif args.command == "health":
-        commands.health()
+        print(json.dumps(commands.health(), sort_keys=True))
     elif args.command == "run-sweep":
         commands.run_sweep(args.configs)
     else:
