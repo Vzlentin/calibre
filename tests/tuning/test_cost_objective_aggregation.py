@@ -104,6 +104,8 @@ def test_total_cost_accumulates_across_origins(monkeypatch) -> None:
     ]
     monkeypatch.setattr(optimizer, "BackendEngine", _FakeBackendEngine)
 
+    # Focused unit on the across-origin cost accumulation; the public
+    # optimize_local_task path is exercised by test_intermediate_metric_matches_final.
     value = _evaluate_candidate(task, TuningCandidate(model_config={"season_length": 1}), origins)
 
     assert value == 30.0

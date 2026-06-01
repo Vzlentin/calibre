@@ -112,7 +112,11 @@ def tuned_best_config(request):
 
 
 def test_optimize_finds_correct_season_length(tuned_best_config):
-    """SeasonalNaive HPO should pick season_length=4 for a period-4 pattern."""
+    """SeasonalNaive HPO picks season_length=4 (not the rival 2) for a period-4 pattern.
+
+    The ``tuned_best_config`` fixture is parametrized over both objective metrics,
+    so a single assertion here also proves convergence is metric-agnostic.
+    """
     assert tuned_best_config["season_length"] == 4
 
 
@@ -121,13 +125,7 @@ def test_optimize_returns_complete_config(tuned_best_config):
     assert tuned_best_config["backend"] == "statsforecast"
     assert tuned_best_config["model"] == "SeasonalNaive"
     assert tuned_best_config["name"] == "sn_tuning"
-    assert "season_length" in tuned_best_config
-
-
-def test_optimize_single_trial(tuned_best_config):
-    """n_trials=1 should run without error."""
-    assert isinstance(tuned_best_config, dict)
-    assert "season_length" in tuned_best_config
+    assert tuned_best_config["season_length"] == 4
 
 
 def test_optimize_task_from_tmp_cwd_does_not_use_cwd_as_tune_uri(
@@ -141,11 +139,6 @@ def test_optimize_task_from_tmp_cwd_does_not_use_cwd_as_tune_uri(
     )
 
     assert "season_length" in result
-
-
-def test_optimize_converges_for_metric(tuned_best_config):
-    """Both configured metrics should run end-to-end and pick season_length=4."""
-    assert tuned_best_config["season_length"] == 4
 
 
 def test_optimize_accepts_conformal_config(series_df, dates):

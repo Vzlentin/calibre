@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import optuna
 import pandas as pd
 import pytest
@@ -96,36 +97,31 @@ def _run(series: list[str]):
     )
 
 
+@pytest.fixture(scope="module")
+def benchmark_costs() -> pd.DataFrame:
+    """Run the tuned benchmark once on a 3-series subset; shared across assertions."""
+    return _run(_get_first_n_series(3))
+
+
 class TestVN2BenchmarkIntegration:
-    def test_full_loop_runs_without_error(self) -> None:
-        result = _run(_get_first_n_series(3))
-        assert result is not None
-        assert not result.empty
-
-    def test_costs_are_non_negative(self) -> None:
-        result = _run(_get_first_n_series(3))
-        assert (result["holding_cost"] >= 0).all(), "Negative holding costs detected"
-        assert (result["shortage_cost"] >= 0).all(), "Negative shortage costs detected"
-        assert (result["total_cost"] >= 0).all(), "Negative total costs detected"
-
-    def test_result_has_expected_columns(self) -> None:
-        result = _run(_get_first_n_series(3))
-        expected_cols = {"unique_id", "holding_cost", "shortage_cost", "total_cost"}
-        assert expected_cols.issubset(set(result.columns))
-
-    def test_total_cost_equals_holding_plus_shortage(self) -> None:
-        result = _run(_get_first_n_series(3))
-        computed = result["holding_cost"] + result["shortage_cost"]
-        for idx, (actual, expected) in enumerate(zip(result["total_cost"], computed, strict=False)):
-            assert abs(actual - expected) < 1e-9, (
-                f"Row {idx}: total_cost {actual} != holding + shortage {expected}"
-            )
-
-    def test_result_has_one_row_per_product(self) -> None:
+    def test_one_row_per_product_with_cost_columns(self, benchmark_costs: pd.DataFrame) -> None:
         series = _get_first_n_series(3)
-        result = _run(series)
-        assert len(result) == len(series)
-        assert set(result["unique_id"]) == set(series)
+        assert set(benchmark_costs["unique_id"]) == set(series)
+        assert len(benchmark_costs) == len(series)
+        assert {"unique_id", "holding_cost", "shortage_cost", "total_cost"}.issubset(
+            benchmark_costs.columns
+        )
+
+    def test_costs_are_finite_non_negative_and_additive(
+        self, benchmark_costs: pd.DataFrame
+    ) -> None:
+        costs = benchmark_costs[["holding_cost", "shortage_cost", "total_cost"]].to_numpy()
+        assert np.isfinite(costs).all()
+        assert costs.min() >= 0.0
+        np.testing.assert_allclose(
+            benchmark_costs["total_cost"].to_numpy(),
+            (benchmark_costs["holding_cost"] + benchmark_costs["shortage_cost"]).to_numpy(),
+        )
 
 
 def test_run_hpo_returns_valid_config(monkeypatch) -> None:
@@ -404,17 +400,6 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
         def get_best_result(self, *args, **kwargs):
             return self[0]
 
-    study = optuna.create_study(direction="minimize")
-    study.add_trial(
-        optuna.create_trial(
-            value=123.0,
-            params={"crc_enabled": False},
-            distributions={
-                "crc_enabled": optuna.distributions.CategoricalDistribution([True, False])
-            },
-        )
-    )
-
     def _fake_run_optuna_study(**kwargs):
         captured.update(kwargs)
         return StudyOutcome(
@@ -441,7 +426,11 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
         ray_local_mode=True,
     )
 
+    # Scheduler-handoff effect: the Tune result's objective + config flow back
+    # out as the returned study's best trial (not just kwargs plumbing).
     assert result.best_value == pytest.approx(123.0)
+    assert result.best_params == {"crc_enabled": False}
+    # decision_rounds=2 + delivery_weeks=1 → max_t=3, grace_period stays below max_t.
     assert captured["n_trials"] == 2
     assert captured["max_t"] == 3
     assert captured["asha_grace_period"] == 1

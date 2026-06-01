@@ -106,7 +106,7 @@ def test_cache_hit_skips_fit(tmp_path: Path) -> None:
     assert pred[Y_HAT].iloc[0] == pytest.approx(2.5)
 
 
-def test_cache_key_changes_with_model_config(tmp_path: Path) -> None:
+def test_cache_key_changes_with_model_config() -> None:
     task_a = _task()
     history = task_a.history
     task_b = ForecastTask(history=history, horizon=2, model_config={"model": "Other"})
@@ -115,7 +115,7 @@ def test_cache_key_changes_with_model_config(tmp_path: Path) -> None:
     assert adapter.cache_key(task_a) != adapter.cache_key(task_b)
 
 
-def test_cache_key_changes_with_history(tmp_path: Path) -> None:
+def test_cache_key_changes_with_history() -> None:
     task_a = _task()
     history_b = task_a.history.assign(**{Y: [1.0, 2.0, 3.0, 99.0]})
     task_b = ForecastTask(history=history_b, horizon=2, model_config=task_a.model_config)

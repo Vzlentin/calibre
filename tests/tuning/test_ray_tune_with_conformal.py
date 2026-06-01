@@ -19,6 +19,9 @@ def _space_season_length(trial: optuna.Trial) -> TuningCandidate:
 
 
 def test_no_sequential_fallback_when_conformal_in_loop(monkeypatch, tmp_path) -> None:
+    # Patch the private fallback directly: whether it ran is not observable
+    # through any public surface, so spying on it is the only way to assert the
+    # Ray-Tune path handled conformal-in-loop without falling back.
     def _fail_sequential(*args, **kwargs):
         raise AssertionError("conformal tuning used the sequential fallback")
 
@@ -69,7 +72,7 @@ def test_no_sequential_fallback_when_conformal_in_loop(monkeypatch, tmp_path) ->
         warnings.simplefilter("always")
         result = optimizer.optimize_local_task(task)
 
-    assert "season_length" in result
+    assert result["season_length"] in {2, 4}
     assert not any(
         "falling back to sequential Optuna" in str(warning.message) for warning in caught
     )

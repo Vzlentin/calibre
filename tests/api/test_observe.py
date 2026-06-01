@@ -1,15 +1,12 @@
 """Behavioral tests for /observe conformal-mode dispatch (roadmap P0.1).
 
-The bug: ``_run_observe_job`` dropped rows with NaN interval bounds before
-calling ``runtime.observe``. In cumulative mode a window's intermediate
-horizons carry NaN bounds *by construction* (lessons.md §40), so that dropna
-discarded exactly the observations the cumulative runtime needs to complete a
-window — online recalibration was silently dead for cumulative deployments.
-
-These tests assert the production path through ``_run_observe_job`` routes
-observations by mode: cumulative keeps the whole completed window (incl. the
-NaN-bound intermediate rows); per-horizon still drops rows without resolved
-bounds + actuals.
+Regression guard for lessons.md §40: ``_run_observe_job`` used to drop rows with
+NaN interval bounds before calling ``runtime.observe``. Cumulative mode emits
+NaN bounds on a window's intermediate horizons *by construction*, so that dropna
+silently killed online recalibration for cumulative deployments. These assert
+the production path routes observations by mode: cumulative keeps the whole
+completed window (NaN-bound rows included); per-horizon still drops rows without
+resolved bounds + actuals.
 """
 
 from __future__ import annotations
@@ -141,7 +138,8 @@ def test_observe_cumulative_incomplete_window_observes_nothing(session):
     # Only the first two horizons have actuals; the window is incomplete.
     api_main._run_observe_job(session_id, _actual_records(WINDOW_DS[:2]))
 
-    assert runtime.observed == [] or all(df.empty for df in runtime.observed)
+    # An incomplete window is never handed to observe — not "empty or nothing".
+    assert runtime.observed == []
 
 
 def test_observe_perhorizon_drops_unresolved_rows(session):

@@ -348,9 +348,6 @@ def test_apply_rs_policy_rejects_duplicate_horizons_per_decision_group() -> None
         )
 
 
-# ── (R,s,S) policy tests ──────────────────────────────────────────────────────
-
-
 def _rss_params(
     *,
     unique_id: str = "SKU_001",

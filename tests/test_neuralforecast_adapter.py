@@ -39,59 +39,21 @@ def nhits_task(repeating_history):
     )
 
 
-@pytest.fixture
-def tide_task(repeating_history):
-    return ForecastTask(
+@pytest.mark.parametrize("model", ["NHITS", "TiDE", "PatchTST"])
+def test_fit_predict_columns(repeating_history, model):
+    task = ForecastTask(
         history=repeating_history,
         horizon=4,
-        model_config={"backend": "neuralforecast", "model": "TiDE", "freq": "W", "max_steps": 5},
+        model_config={"backend": "neuralforecast", "model": model, "freq": "W", "max_steps": 5},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
-
-
-@pytest.fixture
-def patchtst_task(repeating_history):
-    return ForecastTask(
-        history=repeating_history,
-        horizon=4,
-        model_config={
-            "backend": "neuralforecast",
-            "model": "PatchTST",
-            "freq": "W",
-            "max_steps": 5,
-        },
-        forecast_origin=pd.Timestamp("2024-06-23"),
-    )
-
-
-def test_nhits_fit_predict_columns(nhits_task):
-    adapter = NeuralForecastAdapter(nhits_task.model_config)
-    adapter.fit(nhits_task)
-    result = adapter.predict(nhits_task)
+    adapter = NeuralForecastAdapter(task.model_config)
+    adapter.fit(task)
+    result = adapter.predict(task)
 
     assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
-    assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
-
-
-def test_tide_fit_predict_columns(tide_task):
-    adapter = NeuralForecastAdapter(tide_task.model_config)
-    adapter.fit(tide_task)
-    result = adapter.predict(tide_task)
-
-    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
-    assert len(result) == 4
-    assert result["h"].tolist() == [1, 2, 3, 4]
-
-
-def test_patchtst_fit_predict_columns(patchtst_task):
-    adapter = NeuralForecastAdapter(patchtst_task.model_config)
-    adapter.fit(patchtst_task)
-    result = adapter.predict(patchtst_task)
-
-    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
-    assert len(result) == 4
-    assert result["h"].tolist() == [1, 2, 3, 4]
+    assert np.isfinite(result["y_hat"]).all()
 
 
 def test_predict_before_fit_raises(nhits_task):

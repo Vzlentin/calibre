@@ -49,7 +49,6 @@ def _initial_state_csv(uids: list[str]) -> pd.DataFrame:
 
 @pytest.fixture
 def synthetic_vn2_dir(tmp_path: Path) -> Path:
-    """Create a minimal VN2-shaped data directory (week_0 + week_1)."""
     uids = ["1_100", "2_200", "3_300"]
     weeks = 60
 
@@ -79,5 +78,12 @@ def test_run_winning_smoke(synthetic_vn2_dir: Path) -> None:
         "shortage_cost",
         "total_cost",
     }
-    assert len(summary) == 3
-    assert (summary["total_cost"] >= 0).all()
+    assert set(summary["unique_id"]) == {"1_100", "2_200", "3_300"}
+
+    costs = summary[["holding_cost", "shortage_cost", "total_cost"]].to_numpy()
+    assert np.isfinite(costs).all()
+    assert costs.min() >= 0.0
+    np.testing.assert_allclose(
+        summary["total_cost"].to_numpy(),
+        (summary["holding_cost"] + summary["shortage_cost"]).to_numpy(),
+    )

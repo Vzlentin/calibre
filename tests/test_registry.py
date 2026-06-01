@@ -11,8 +11,6 @@ def test_resolve_statsforecast_backend():
         {"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4}
     )
     assert type(adapter).__name__ == "StatsForecastAdapter"
-    assert hasattr(adapter, "fit")
-    assert hasattr(adapter, "predict")
 
 
 def test_resolve_statsforecast_backend_does_not_import_other_adapters(monkeypatch):
@@ -40,24 +38,15 @@ def test_resolve_neuralforecast_backend():
     pytest.importorskip("neuralforecast")
     adapter = resolve_adapter({"backend": "neuralforecast", "model": "NHITS"})
     assert type(adapter).__name__ == "NeuralForecastAdapter"
-    assert hasattr(adapter, "fit")
-    assert hasattr(adapter, "predict")
 
 
-def test_resolve_mlforecast_backend():
-    adapter = resolve_adapter({"backend": "mlforecast", "model": "lightgbm.LGBMRegressor"})
+@pytest.mark.parametrize("scope", [None, "global"])
+def test_resolve_mlforecast_backend(scope):
+    config = {"backend": "mlforecast", "model": "lightgbm.LGBMRegressor"}
+    if scope is not None:
+        config["scope"] = scope
+    adapter = resolve_adapter(config)
     assert type(adapter).__name__ == "MLForecastAdapter"
-    assert hasattr(adapter, "fit")
-    assert hasattr(adapter, "predict")
-
-
-def test_resolve_mlforecast_global_scope():
-    adapter = resolve_adapter(
-        {"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "scope": "global"}
-    )
-    assert type(adapter).__name__ == "MLForecastAdapter"
-    assert hasattr(adapter, "fit")
-    assert hasattr(adapter, "predict")
 
 
 def test_resolve_unknown_backend_raises():

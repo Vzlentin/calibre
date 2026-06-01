@@ -5,21 +5,18 @@ import json
 import logging
 
 import pandas as pd
-from prometheus_client import generate_latest
+import pytest
+from prometheus_client import REGISTRY, generate_latest
 
 from calibre.conformal.runtime import SymmetricIntervalConfig, build_symmetric_interval_runtime
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.logging import setup_logging
 from calibre.core.metrics import (
-    conformal_coverage_ratio,
-    forecast_duration_seconds,
     observe_forecast_duration,
-    order_cost,
     set_conformal_coverage,
     set_order_cost,
 )
-from calibre.core.tracing import span
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.forecasting.adapter_base import ModelAdapter
 
@@ -128,9 +125,20 @@ def test_metrics_helpers_populate_prometheus_series() -> None:
     set_conformal_coverage("stub", "cumulative", 0.9)
     set_order_cost("EUR", "unit", 3.5)
 
-    assert forecast_duration_seconds.labels(model="stub", phase="predict")._sum.get() > 0.0
-    assert conformal_coverage_ratio.labels(model="stub", mode="cumulative")._value.get() == 0.9
-    assert order_cost.labels(currency="EUR", dataset="unit")._value.get() == 3.5
+    duration_sum = REGISTRY.get_sample_value(
+        "calibre_forecast_duration_seconds_sum", {"model": "stub", "phase": "predict"}
+    )
+    assert duration_sum == pytest.approx(0.01)
+    assert (
+        REGISTRY.get_sample_value(
+            "calibre_conformal_coverage_ratio", {"model": "stub", "mode": "cumulative"}
+        )
+        == 0.9
+    )
+    assert (
+        REGISTRY.get_sample_value("calibre_order_cost", {"currency": "EUR", "dataset": "unit"})
+        == 3.5
+    )
 
 
 def test_prometheus_export_includes_required_series() -> None:
@@ -143,9 +151,3 @@ def test_prometheus_export_includes_required_series() -> None:
     assert "calibre_forecast_duration_seconds" in payload
     assert "calibre_conformal_coverage_ratio" in payload
     assert "calibre_order_cost" in payload
-
-
-def test_tracing_span_is_noop_context_manager() -> None:
-    with span("unit", origin="2024-01-01"):
-        value = 1
-    assert value == 1

@@ -6,26 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# ── Imports ──────────────────────────────────────────────────────────────────
-
-
-def test_conformal_module_importable():
-    from calibre.conformal import (  # noqa: F401
-        AdaptiveConformalInference,
-        ConformalRuntime,
-        IntervalPrediction,
-        MultiStepAdaptiveConformalInference,
-        MultiStepIntervalPrediction,
-        MultiStepSplitConformalInference,
-        OnlineConformalController,
-        SymmetricIntervalConfig,
-        SymmetricIntervalRuntime,
-        absolute_error,
-        scaled_absolute_error,
-        symmetric_interval,
-        symmetric_intervals,
-    )
-
 
 def test_conformal_policy_config_exposes_alpha_and_interval_columns():
     from calibre.conformal import SymmetricIntervalConfig
@@ -149,9 +129,6 @@ def test_conformal_runtime_masks_mscp_warmup_bounds():
     assert enriched[upper_col].isna().all()
 
 
-# ── MultiStepSplitConformalInference ──────────────────────────────────────────
-
-
 def test_mscp_predict_returns_correct_horizon():
     from calibre.conformal import MultiStepSplitConformalInference
 
@@ -200,9 +177,6 @@ def test_mscp_higher_rule_keeps_infinite_radius_during_warmup():
     assert radius[0] == np.inf
 
 
-# ── Score functions ───────────────────────────────────────────────────────────
-
-
 def test_absolute_error_scalar():
     from calibre.conformal import absolute_error
 
@@ -222,9 +196,6 @@ def test_scaled_absolute_error():
 
     score = functools.partial(scaled_absolute_error, scale=2.0)
     assert score(3.0, 1.0) == pytest.approx(1.0)  # |3-1|/2 = 1.0
-
-
-# ── IntervalPrediction ────────────────────────────────────────────────────────
 
 
 def test_interval_contains_center():
@@ -263,9 +234,6 @@ def test_multistep_interval_contains():
     assert result[0]  # center of interval 0
     assert not result[1]  # outside upper of interval 1 (2.6 > 2.5)
     assert result[2]  # center of interval 2
-
-
-# ── AdaptiveConformalInference ────────────────────────────────────────────────
 
 
 def test_aci_alpha_decreases_on_miss():
@@ -352,28 +320,30 @@ def test_aci_initial_scores_seed_radius():
     assert radius > 0.0
 
 
-def test_finite_sample_radius_higher_returns_inf_for_small_alpha():
-    """'higher' rule returns inf when alpha <= 1/(n+1)."""
-    from calibre.conformal.adaptive import _finite_sample_radius
+def test_higher_quantile_rule_returns_inf_for_small_alpha():
+    """'higher' rule yields an infinite radius when alpha <= 1/(n+1).
 
-    scores = [1.0, 2.0, 3.0]  # n=3
-    # alpha <= 1/4 should trigger inf
-    result = _finite_sample_radius(scores, alpha=0.2, default_radius=0.0, quantile_rule="higher")
-    assert result == np.inf
+    Driven through the public ``get_radius`` surface: with 3 seeded scores and
+    alpha=0.2 (<= 1/4) the finite-sample 'higher' quantile is unattainable.
+    """
+    from calibre.conformal import AdaptiveConformalInference
 
-
-def test_finite_sample_radius_conformal_never_returns_inf():
-    """'conformal' rule never returns inf (uses max score instead)."""
-    from calibre.conformal.adaptive import _finite_sample_radius
-
-    scores = [1.0, 2.0, 3.0]  # n=3
-    # same small alpha as above
-    result = _finite_sample_radius(scores, alpha=0.2, default_radius=0.0, quantile_rule="conformal")
-    assert np.isfinite(result)
-    assert result == pytest.approx(3.0)  # returns max score
+    aci = AdaptiveConformalInference(
+        alpha=0.2, gamma=0.05, initial_scores=[1.0, 2.0, 3.0], quantile_rule="higher"
+    )
+    assert aci.get_radius() == np.inf
 
 
-# ── MultiStepAdaptiveConformalInference ───────────────────────────────────────
+def test_conformal_quantile_rule_never_returns_inf():
+    """'conformal' rule caps the radius at the max score instead of inf."""
+    from calibre.conformal import AdaptiveConformalInference
+
+    aci = AdaptiveConformalInference(
+        alpha=0.2, gamma=0.05, initial_scores=[1.0, 2.0, 3.0], quantile_rule="conformal"
+    )
+    radius = aci.get_radius()
+    assert np.isfinite(radius)
+    assert radius == pytest.approx(3.0)  # max seeded score
 
 
 def test_multistep_predict_returns_correct_horizon():
@@ -480,9 +450,6 @@ def test_multistep_score_history_populated_per_horizon():
     assert h2_scores[0] == pytest.approx(2.0)
 
 
-# ── CumulativeSplitConformalInference (controller) ────────────────────────────
-
-
 def test_cumulative_controller_predicts_only_at_terminal_horizon():
     from calibre.conformal import CumulativeSplitConformalInference
 
@@ -541,9 +508,6 @@ def test_cumulative_controller_ready_mask_blocked_when_buffer_empty():
         protection_period=3, alpha=0.5, calibration_window=5
     )
     assert controller.ready_mask().tolist() == [False, False, False]
-
-
-# ── SymmetricIntervalRuntime cumulative mode ──────────────────────────────────
 
 
 def _build_cumulative_runtime(

@@ -22,12 +22,7 @@ from calibre.execution.decision_loop import (
     observe_per_horizon,
 )
 
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
 _ORIGIN = pd.Timestamp("2023-01-09")  # Monday
-_UIDS = ["A", "B"]
 
 
 def _make_frame(
@@ -61,16 +56,12 @@ def _actuals_lookup(uid_ds_pairs: list[tuple[str, pd.Timestamp, float]]) -> pd.S
     return pd.Series([v for _, _, v in uid_ds_pairs], index=idx, dtype=float)
 
 
-# --------------------------------------------------------------------------- #
-# DecisionLoop smoke test
-# --------------------------------------------------------------------------- #
-
-
 class TestDecisionLoopSmoke:
     def test_rounds_called_and_results_returned(self) -> None:
         """Loop calls each collaborator once per decision round."""
         n_rounds = 3
-        calls: dict[str, list[int]] = {"build": [], "policy": [], "actuals": [], "sim": []}
+        calls: dict[str, list[int]] = {"build": [], "policy": [], "actuals": []}
+        sim_calls: list[dict] = []
 
         ledger_df = pd.DataFrame()
         fake_result = MagicMock()
@@ -81,6 +72,9 @@ class TestDecisionLoopSmoke:
         fake_engine.execute.return_value = fake_result
 
         fake_sim = MagicMock()
+        fake_sim.step.side_effect = lambda period, orders, actual_demand: sim_calls.append(
+            {"period": period, "orders": orders, "actual_demand": actual_demand}
+        )
 
         def build(rn: int):
             calls["build"].append(rn)
@@ -109,9 +103,16 @@ class TestDecisionLoopSmoke:
         assert calls["build"] == list(range(1, n_rounds + 1))
         assert len(calls["policy"]) == n_rounds
         assert calls["actuals"] == list(range(1, n_rounds + 1))
-        assert fake_sim.step.call_count == n_rounds
-        for r in results:
-            assert isinstance(r, RoundResult)
+
+        # The loop must forward the policy's orders and realised demand into the
+        # simulator each round, and surface the same on each RoundResult.
+        assert [c["period"] for c in sim_calls] == list(range(1, n_rounds + 1))
+        assert all(c["orders"] == {"A": 5.0} for c in sim_calls)
+        assert all(c["actual_demand"] == {"A": 10.0} for c in sim_calls)
+        assert [r.round_num for r in results] == list(range(1, n_rounds + 1))
+        assert all(r.orders == {"A": 5.0} for r in results)
+        assert all(r.actual_demand == {"A": 10.0} for r in results)
+        assert all(isinstance(r, RoundResult) for r in results)
 
     def test_delivery_rounds_use_zero_orders(self) -> None:
         n_delivery = 2
@@ -164,11 +165,6 @@ class TestDecisionLoopSmoke:
 
         assert len(fired) == 3
         assert [r.round_num for r in fired] == [1, 2, 3]
-
-
-# --------------------------------------------------------------------------- #
-# observe_per_horizon
-# --------------------------------------------------------------------------- #
 
 
 class TestObservePerHorizon:
@@ -224,11 +220,6 @@ class TestObservePerHorizon:
 
         rt.observe.assert_not_called()
         assert len(remaining) == 1
-
-
-# --------------------------------------------------------------------------- #
-# observe_cumulative
-# --------------------------------------------------------------------------- #
 
 
 class TestObserveCumulative:

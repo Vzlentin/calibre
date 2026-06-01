@@ -10,7 +10,6 @@ from calibre.core.forecast_frame import (
     FORECAST_ORIGIN,
     MODEL_NAME,
     NONCONFORMITY_SCORE,
-    REQUIRED_COLUMNS,
     UNIQUE_ID,
     Y_HAT,
     H,
@@ -104,14 +103,3 @@ def test_bad_quantile_dtype_raises():
     df[quantile_column(0.5)] = ["bad", "bad", "bad"]
     with pytest.raises(ValueError, match="q_0p5"):
         validate_forecast_frame(df)
-
-
-def test_constants_are_strings():
-    assert UNIQUE_ID == "unique_id"
-    assert DS == "ds"
-    assert Y == "y"
-    assert Y_HAT == "y_hat"
-    assert H == "h"
-    assert FORECAST_ORIGIN == "forecast_origin"
-    assert MODEL_NAME == "model_name"
-    assert len(REQUIRED_COLUMNS) == 7

@@ -106,8 +106,14 @@ def test_auto_ets_fit_predict(repeating_history):
     result = adapter.predict(task)
 
     assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
-    assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
+
+    # AutoETS must learn the period-4 seasonality of [10,20,30,40]*6 rather than
+    # collapsing to a flat level (~25): the forecast must span a real range.
+    y_hat = result["y_hat"].to_numpy()
+    assert np.isfinite(y_hat).all()
+    assert y_hat.min() >= 0.0
+    assert y_hat.max() - y_hat.min() > 5.0
 
 
 def test_fit_preserves_exogenous_columns(monkeypatch, repeating_history):

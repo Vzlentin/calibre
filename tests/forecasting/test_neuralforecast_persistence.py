@@ -34,7 +34,12 @@ class _FakeNeuralForecast:
 
 
 def test_neuralforecast_native_state_round_trip_with_mock(monkeypatch) -> None:
+    # Construct through the real adapter (availability gate + constructor) and
+    # exercise the real dump_state/load_state/predict surface. Only the fitted
+    # model object is faked: a genuine fit would train a neuralforecast net, so
+    # the fake stands in for trained weights that the persistence layer ferries.
     monkeypatch.setattr(adapter_module, "NeuralForecast", _FakeNeuralForecast)
+    monkeypatch.setattr(adapter_module, "_NEURALFORECAST_AVAILABLE", True)
     task = ForecastTask(
         history=pd.DataFrame(
             {
@@ -47,14 +52,11 @@ def test_neuralforecast_native_state_round_trip_with_mock(monkeypatch) -> None:
         model_config={"backend": "neuralforecast", "model": "NHITS", "freq": "W"},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
-    adapter = adapter_module.NeuralForecastAdapter.__new__(adapter_module.NeuralForecastAdapter)
-    adapter._config = task.model_config
+    adapter = adapter_module.NeuralForecastAdapter(task.model_config)
     adapter._nf = _FakeNeuralForecast(12.0)
 
     blob = adapter.dump_state()
-    restored = adapter_module.NeuralForecastAdapter.__new__(adapter_module.NeuralForecastAdapter)
-    restored._config = task.model_config
-    restored._nf = None
+    restored = adapter_module.NeuralForecastAdapter(task.model_config)
     restored.load_state(blob)
 
     result = restored.predict(task)

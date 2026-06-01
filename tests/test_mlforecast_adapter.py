@@ -38,34 +38,23 @@ def lgbm_task(repeating_history):
     )
 
 
-@pytest.fixture
-def xgb_task(repeating_history):
-    return ForecastTask(
+@pytest.mark.parametrize("model", ["lightgbm.LGBMRegressor", "xgboost.XGBRegressor"])
+def test_fit_predict_columns(repeating_history, model):
+    task = ForecastTask(
         history=repeating_history,
         horizon=4,
-        model_config={"backend": "mlforecast", "model": "xgboost.XGBRegressor", "freq": "W"},
+        model_config={"backend": "mlforecast", "model": model, "freq": "W"},
         forecast_origin=pd.Timestamp("2024-06-23"),
     )
-
-
-def test_lightgbm_fit_predict_columns(lgbm_task):
-    adapter = MLForecastAdapter(lgbm_task.model_config)
-    adapter.fit(lgbm_task)
-    result = adapter.predict(lgbm_task)
+    adapter = MLForecastAdapter(task.model_config)
+    adapter.fit(task)
+    result = adapter.predict(task)
 
     assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
-    assert len(result) == 4
     assert result["h"].tolist() == [1, 2, 3, 4]
-
-
-def test_xgboost_fit_predict_columns(xgb_task):
-    adapter = MLForecastAdapter(xgb_task.model_config)
-    adapter.fit(xgb_task)
-    result = adapter.predict(xgb_task)
-
-    assert list(result.columns) == ["unique_id", "ds", "y_hat", "h"]
-    assert len(result) == 4
-    assert result["h"].tolist() == [1, 2, 3, 4]
+    # Tree ensembles predict averages of leaf targets, so forecasts stay within
+    # the observed target range [10, 40] of the repeating pattern (no extrapolation).
+    assert result["y_hat"].between(10.0 - 1e-9, 40.0 + 1e-9).all()
 
 
 def test_predict_before_fit_raises(lgbm_task):

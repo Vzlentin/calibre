@@ -7,6 +7,7 @@ from pathlib import Path
 import fsspec
 import pandas as pd
 import pytest
+from prometheus_client import REGISTRY
 
 from calibre.cli.commands import (
     _record_order_cost_metric,
@@ -19,7 +20,6 @@ from calibre.cli.commands import (
 from calibre.cli.config import load_config, load_config_from_mapping
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
-from calibre.core.metrics import order_cost
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
@@ -160,7 +160,10 @@ def test_order_cost_metric_uses_total_cost_column() -> None:
 
     _record_order_cost_metric(frame, dataset="unit", currency="EUR")
 
-    assert order_cost.labels(currency="EUR", dataset="unit")._value.get() == 4.0
+    assert (
+        REGISTRY.get_sample_value("calibre_order_cost", {"currency": "EUR", "dataset": "unit"})
+        == 4.0
+    )
 
 
 def test_load_config_accepts_ray_execution_options(tmp_path) -> None:
@@ -297,6 +300,10 @@ def test_run_command_executes_config(monkeypatch, tmp_path) -> None:
 
     frame = result.ledger.to_df()
     assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row[UNIQUE_ID] == "A"
+    assert int(row[H]) == 1
+    assert row[Y_HAT] == 10.0
     assert (tmp_path / "ledger.parquet").exists()
 
 
@@ -332,6 +339,7 @@ def test_run_command_writes_non_streaming_output_to_fsspec_uri(monkeypatch, tmp_
 
     frame = pd.read_parquet(uri)
     assert len(frame) == 1
+    assert frame.iloc[0][Y_HAT] == 10.0
 
 
 def test_run_sweep_reads_fsspec_config_dir(monkeypatch) -> None:
@@ -352,3 +360,4 @@ def test_run_sweep_reads_fsspec_config_dir(monkeypatch) -> None:
     assert len(results) == 1
     frame = pd.read_parquet(ledger_uri)
     assert len(frame) == 1
+    assert frame.iloc[0][Y_HAT] == 10.0

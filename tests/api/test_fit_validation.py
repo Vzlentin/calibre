@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from calibre.api import main as api_main
 from calibre.api.lifecycle import LifecycleStore
 from calibre.api.main import app
-from calibre.core.forecast_frame import UNIQUE_ID
+from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, H
 
 
 @pytest.fixture(autouse=True)
@@ -90,4 +90,7 @@ def test_predict_works_after_valid_fit(client, sales_uri):
     assert _status(client, fit_id)["status"] == "succeeded"
     predict = client.post("/predict", json={"fit_id": fit_id, "origin": "2024-02-04"})
     assert predict.status_code == 200, predict.text
-    assert len(predict.json()["forecast"]) == 2
+    forecast = predict.json()["forecast"]
+    # Naive carries the last observed value (y=4 at 2024-01-28) across both horizons.
+    assert [row[H] for row in forecast] == [1, 2]
+    assert [row[Y_HAT] for row in forecast] == [4.0, 4.0]
