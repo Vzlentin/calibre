@@ -24,8 +24,8 @@ def _build_predict_frame(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 class ModelAdapter(ABC):
-    @abstractmethod
-    def __init__(self, model_config: dict) -> None: ...
+    def __init__(self, model_config: dict | None = None) -> None:
+        self.model_config = model_config or {}
 
     @abstractmethod
     def fit(self, task: ForecastTask) -> None: ...
@@ -34,13 +34,22 @@ class ModelAdapter(ABC):
     def predict(self, task: ForecastTask) -> pd.DataFrame: ...
 
     def cache_key(self, task: ForecastTask) -> str:
-        """Default identity-hash key over history + model_config.
+        """Default identity-hash key over history + horizon + model_config.
 
         Subclasses can override to incorporate additional adapter-specific
         state (e.g. registered exogenous columns).
         """
-        payload = task.history.to_csv() + json.dumps(task.model_config, sort_keys=True)
-        return hashlib.sha256(payload.encode()).hexdigest()
+        payload = {
+            "history": task.history.to_json(
+                orient="split",
+                date_format="iso",
+                double_precision=15,
+            ),
+            "horizon": int(task.horizon),
+            "model_config": task.model_config,
+        }
+        encoded = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
 
     def dump_state(self) -> bytes:
         """Serialize the fitted adapter state for caching.
@@ -64,20 +73,22 @@ class ModelAdapter(ABC):
         self,
         task: ForecastTask,
         cache: ModelArtifactCache | None,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         """Fit the adapter, consulting ``cache`` first when supplied.
 
-        Returns ``True`` when ``fit`` actually ran, ``False`` on a cache
-        hit (state restored from ``cache``).
+        Returns ``(fit_ran, key)`` where ``fit_ran`` is ``True`` when ``fit``
+        actually ran and ``False`` on a cache hit (state restored from
+        ``cache``), and ``key`` is the cache key used, or ``None`` when
+        ``cache`` is ``None``.
         """
         if cache is None:
             self.fit(task)
-            return True
+            return True, None
         key = self.cache_key(task)
         blob = cache.get(key)
         if blob is not None:
             self.load_state(blob)
-            return False
+            return False, key
         self.fit(task)
         cache.put(key, self.dump_state())
-        return True
+        return True, key

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -15,14 +17,21 @@ from calibre.core.forecast_frame import (
     interval_column_names,
 )
 from calibre.core.forecast_task import ForecastTask
+from calibre.forecasting.adapter_base import ModelAdapter
 
 
-class _StubAdapter:
+class _StubAdapter(ModelAdapter):
+    fit_calls = 0
+    load_calls = 0
+
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
+        self._level = 10.0
 
     def fit(self, task: ForecastTask) -> None:
+        type(self).fit_calls += 1
         self._task = task
+        self._level = float(len(task.history))
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         horizon = int(task.horizon)
@@ -31,16 +40,26 @@ class _StubAdapter:
             {
                 UNIQUE_ID: [task.unique_id] * horizon,
                 DS: [origin + pd.Timedelta(weeks=h) for h in range(1, horizon + 1)],
-                Y_HAT: [10.0 + h for h in range(1, horizon + 1)],
+                Y_HAT: [self._level + h for h in range(1, horizon + 1)],
                 H: list(range(1, horizon + 1)),
             }
         )
 
+    def dump_state(self) -> bytes:
+        return json.dumps({"level": self._level}).encode()
+
+    def load_state(self, blob: bytes) -> None:
+        type(self).load_calls += 1
+        self._level = float(json.loads(blob.decode())["level"])
+
 
 @pytest.fixture(autouse=True)
-def _reset_lifecycle_store(monkeypatch):
+def _reset_lifecycle_store(monkeypatch, tmp_path):
     fresh = LifecycleStore()
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
+    monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
+    _StubAdapter.fit_calls = 0
+    _StubAdapter.load_calls = 0
     return fresh
 
 
@@ -203,3 +222,20 @@ def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch):
 
     predict_resp = client.post("/predict", json={"fit_id": fit_id, "origin": "2024-02-04"})
     assert predict_resp.status_code == 409
+
+
+def test_predict_reuses_fit_time_artifact_for_canonical_origin(client, stub_adapter):
+    fit_resp = client.post("/fit", json=_fit_payload())
+    assert fit_resp.status_code == 202, fit_resp.text
+    fit_id = fit_resp.json()["fit_id"]
+
+    status = client.get(f"/fits/{fit_id}").json()
+    assert status["status"] == "succeeded"
+    assert "model_artifact" in status["artifact_urls"]
+    assert _StubAdapter.fit_calls == 1
+
+    predict_resp = client.post("/predict", json={"fit_id": fit_id, "origin": "2024-03-03"})
+
+    assert predict_resp.status_code == 200, predict_resp.text
+    assert _StubAdapter.fit_calls == 1
+    assert _StubAdapter.load_calls == 1

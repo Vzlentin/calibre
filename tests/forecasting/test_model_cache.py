@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 import pytest
@@ -69,12 +70,23 @@ def test_cache_miss_writes(tmp_path: Path) -> None:
     adapter = _CountingAdapter({"model": "Mean"})
     task = _task()
 
-    fitted = adapter.fit_with_cache(task, cache)
+    fitted, _ = adapter.fit_with_cache(task, cache)
 
     assert fitted is True
     assert _CountingAdapter.fit_calls == 1
     key = adapter.cache_key(task)
     assert cache.get(key) is not None
+    assert cache.uri_for_key(key).endswith(f"{key}.bin")
+
+
+def test_cache_reads_and_writes_memory_uri() -> None:
+    cache = ModelArtifactCache(f"memory://calibre-test-{uuid4().hex}")
+    adapter = _CountingAdapter({"model": "Mean"})
+    key = adapter.cache_key(_task())
+
+    cache.put(key, b"native-state")
+
+    assert cache.get(key) == b"native-state"
 
 
 def test_cache_hit_skips_fit(tmp_path: Path) -> None:
@@ -86,7 +98,7 @@ def test_cache_hit_skips_fit(tmp_path: Path) -> None:
     assert _CountingAdapter.fit_calls == 1
 
     second = _CountingAdapter({"model": "Mean"})
-    fitted = second.fit_with_cache(task, cache)
+    fitted, _ = second.fit_with_cache(task, cache)
 
     assert fitted is False
     assert _CountingAdapter.fit_calls == 1
@@ -112,9 +124,21 @@ def test_cache_key_changes_with_history(tmp_path: Path) -> None:
     assert adapter.cache_key(task_a) != adapter.cache_key(task_b)
 
 
+def test_cache_key_changes_with_horizon() -> None:
+    task_a = _task()
+    task_b = ForecastTask(
+        history=task_a.history,
+        horizon=3,
+        model_config=task_a.model_config,
+    )
+
+    adapter = _CountingAdapter({"model": "Mean"})
+    assert adapter.cache_key(task_a) != adapter.cache_key(task_b)
+
+
 def test_fit_with_cache_no_cache_runs_fit() -> None:
     adapter = _CountingAdapter({"model": "Mean"})
-    fitted = adapter.fit_with_cache(_task(), None)
+    fitted, _ = adapter.fit_with_cache(_task(), None)
 
     assert fitted is True
     assert _CountingAdapter.fit_calls == 1

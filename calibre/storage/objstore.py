@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def artifact_base_uri() -> str:
-    """Base URI for lifecycle frame parquet artifacts.
+    """Base URI for lifecycle frame parquet and model artifacts.
 
     Reads ``CALIBRE_ARTIFACT_URI``. Falls back to a local directory, which is
     correct for single-host use only: multi-worker / multi-host deployments

@@ -19,8 +19,9 @@ from calibre.core.forecast_frame import UNIQUE_ID
 
 
 @pytest.fixture(autouse=True)
-def _reset_store(monkeypatch):
+def _reset_store(monkeypatch, tmp_path):
     monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", LifecycleStore())
+    monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
 
 
 @pytest.fixture

@@ -23,6 +23,7 @@ from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
 from calibre.execution.ledger import resolved_ledger_uri
+from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
     ForecastPointerRepo,
@@ -49,7 +50,7 @@ class _ApiDatasetAdapter:
         )
 
 
-class _StubAdapter:
+class _StubAdapter(ModelAdapter):
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
 

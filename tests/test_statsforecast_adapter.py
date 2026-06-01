@@ -60,6 +60,22 @@ def test_seasonal_naive_repeats_pattern(sn_task):
     np.testing.assert_array_almost_equal(result["y_hat"].values, [10.0, 20.0, 30.0, 40.0])
 
 
+def test_native_state_round_trip_predicts_without_refit(sn_task, monkeypatch):
+    adapter = StatsForecastAdapter(sn_task.model_config)
+    adapter.fit(sn_task)
+    expected = adapter.predict(sn_task)
+
+    blob = adapter.dump_state()
+    restored = StatsForecastAdapter(sn_task.model_config)
+    restored.load_state(blob)
+
+    def fail_fit(_task):
+        raise AssertionError("restored adapter should not refit")
+
+    monkeypatch.setattr(restored, "fit", fail_fit)
+    pd.testing.assert_frame_equal(restored.predict(sn_task), expected)
+
+
 def test_predict_before_fit_raises(sn_task):
     adapter = StatsForecastAdapter(sn_task.model_config)
     with pytest.raises(RuntimeError, match="fit"):

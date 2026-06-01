@@ -37,6 +37,7 @@ from calibre.execution.backend import (
     _process_task_ref,
 )
 from calibre.execution.ledger import OrderLedger
+from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import OrderPolicyConfig
 
 
@@ -102,7 +103,7 @@ def test_remote_ray_staging_uses_shared_uri_and_cleans_up(monkeypatch):
     if fs.exists("/calibre-backend-staging-test"):
         fs.rm("/calibre-backend-staging-test", recursive=True)
 
-    class _StubAdapter:
+    class _StubAdapter(ModelAdapter):
         def fit(self, task: ForecastTask) -> None:
             pass
 
@@ -149,7 +150,7 @@ def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
     )
     seen: dict[str, int] = {}
 
-    class _StubAdapter:
+    class _StubAdapter(ModelAdapter):
         def fit(self, task: ForecastTask) -> None:
             seen["n_jobs"] = int(task.model_config["n_jobs"])
             seen["num_threads"] = int(task.model_config["num_threads"])
@@ -563,7 +564,7 @@ def test_run_parallel_slices_future_x_per_uid(monkeypatch):
 
     received: dict[str, pd.DataFrame | None] = {}
 
-    class _StubAdapter:
+    class _StubAdapter(ModelAdapter):
         def fit(self, task: ForecastTask) -> None:
             received[task.unique_id] = task.future_x
 
@@ -613,7 +614,7 @@ def test_run_direct_passes_full_future_x(monkeypatch):
 
     received: list[pd.DataFrame | None] = []
 
-    class _StubAdapter:
+    class _StubAdapter(ModelAdapter):
         def fit(self, task: ForecastTask) -> None:
             received.append(task.future_x)
 

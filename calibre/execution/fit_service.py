@@ -5,17 +5,18 @@ anything, so a config incompatible with the data (unknown model/backend, bad
 freq, a SKU with no history) only blew up lazily at ``/predict``.
 
 ``validate_fit_config`` is a **compatibility gate**: it mirrors ``/predict``'s
-single multi-SKU panel fit (via ``fit_predict_task``) to prove the configured
-model can fit the supplied history, and cheaply checks every requested SKU has
-history. It lives in the execution layer (FIX #3) so the API route stays thin.
+single multi-SKU panel fit to prove the configured model can fit the supplied
+history, and cheaply checks every requested SKU has history. When supplied with
+a model artifact cache it also persists the fitted adapter for the canonical
+serving origin.
 
 Scope/contract notes:
 - It proves *fittability on the provided history*, NOT that an arbitrary future
   ``/predict`` origin will have enough rows after history is sliced to
   ``ds < origin`` — that is request-dependent and cannot be known at fit time.
-- It does not persist the fitted model; ``/predict`` still fits. Artifact
-  persistence + reuse is a separate follow-up (the adapters don't implement
-  state serialization yet).
+- The persisted artifact is keyed by the exact fit-time task. A ``/predict``
+  request with a different history slice will miss that artifact and fit/cache
+  its own state instead.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import pandas as pd
 from calibre.core.forecast_frame import DS, UNIQUE_ID
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import fit_predict_task
+from calibre.forecasting.cache import ModelArtifactCache
 
 
 def validate_fit_config(
@@ -35,11 +37,13 @@ def validate_fit_config(
     horizon: int,
     freq: str,
     sku_set: list[str],
-) -> None:
+    cache: ModelArtifactCache | None = None,
+) -> str | None:
     """Fit the config against ``history`` to confirm it yields a forecast.
 
     Raises a descriptive exception when a requested SKU has no history or the
-    model/config cannot be fit to the data. Does not persist any fitted state.
+    model/config cannot be fit to the data. Returns the artifact cache key when
+    a cache was supplied.
     """
     missing = sorted({uid for uid in sku_set if history[history[UNIQUE_ID] == uid].empty})
     if missing:
@@ -60,8 +64,9 @@ def validate_fit_config(
         forecast_origin=origin,
         future_x=future_x,
     )
-    preds = fit_predict_task(task)
+    preds, artifact_key = fit_predict_task(task, cache=cache)
     if preds is None or preds.empty:
         raise ValueError(
             "fit produced no forecast; config is incompatible with the supplied history"
         )
+    return artifact_key

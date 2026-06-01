@@ -21,9 +21,10 @@ from calibre.core.metrics import (
 )
 from calibre.core.tracing import span
 from calibre.execution.backend import BackendEngine, ExecutionOptions
+from calibre.forecasting.adapter_base import ModelAdapter
 
 
-class _ObservabilityAdapter:
+class _ObservabilityAdapter(ModelAdapter):
     def fit(self, task: ForecastTask) -> None:
         self.task = task
 
