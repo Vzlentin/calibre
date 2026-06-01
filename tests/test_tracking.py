@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
+import os
+
 import mlflow
 import pandas as pd
 import pytest
 
+import benchmarks.common.tracking as tracking
 from benchmarks.common.tracking import (
+    load_dotenv,
     log_costs_dataframe,
     resolve_tracking_uri,
     start_benchmark_run,
@@ -22,6 +27,36 @@ def _sample_costs() -> pd.DataFrame:
             "total_cost": [150.0, 275.0],
         }
     )
+
+
+def test_import_has_no_dotenv_side_effect(tmp_path, monkeypatch):
+    """Importing/reloading tracking must NOT merge a cwd .env into os.environ.
+
+    Regression for #71: a module-level loader leaked the developer-local .env
+    (CALIBRE_DATABASE_URL / LIFECYCLE_STORE=sql) into the test process, which
+    rerouted unrelated API/SQL tests at Postgres. .env loading is now explicit.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("CALIBRE_IMPORT_SENTINEL=leaked\n")
+    monkeypatch.delenv("CALIBRE_IMPORT_SENTINEL", raising=False)
+    importlib.reload(tracking)
+    assert "CALIBRE_IMPORT_SENTINEL" not in os.environ
+
+
+def test_load_dotenv_populates_environ_when_called(tmp_path, monkeypatch):
+    """load_dotenv() merges a .env into os.environ when invoked explicitly."""
+    # Point both search paths (repo root and cwd) at the temp .env so the test
+    # is hermetic and never leaks the developer-local repo .env into the suite.
+    monkeypatch.setattr(tracking, "_REPO_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("CALIBRE_IMPORT_SENTINEL=loaded\n")
+    monkeypatch.delenv("CALIBRE_IMPORT_SENTINEL", raising=False)
+    try:
+        load_dotenv()
+        # monkeypatch only restores vars it set; pop the one load_dotenv set.
+        assert os.environ.get("CALIBRE_IMPORT_SENTINEL") == "loaded"
+    finally:
+        os.environ.pop("CALIBRE_IMPORT_SENTINEL", None)
 
 
 def test_resolve_tracking_uri_uses_env(monkeypatch, tmp_path):
