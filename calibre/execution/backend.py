@@ -139,7 +139,6 @@ def _empty_forecast_frame() -> pd.DataFrame:
 def _process_task_ref(
     ref: ForecastTaskRef,
     origin: pd.Timestamp,
-    *,
     local_scope: bool,
 ) -> pd.DataFrame:
     """Materialize and execute one URI-backed task ref.
@@ -326,8 +325,9 @@ class BackendEngine:
         self.initial_ledger = (
             conformal.initial_ledger.copy() if conformal.initial_ledger is not None else None
         )
-        self._ray: Any | None = None
         self._ray_runtime: RayRuntimeHandle | None = None
+        # Handles stay Any: precise generics live in private ray._private.worker and
+        # would force positional-only .remote() calls; not worth it for this slice.
         self._remote_process_task: Any | None = None
         self._remote_process_global_panel: Any | None = None
 
@@ -443,7 +443,6 @@ class BackendEngine:
         if self._ray_runtime is not None:
             self._ray_runtime.release()
         self._ray_runtime = None
-        self._ray = None
         self._remote_process_task = None
         self._remote_process_global_panel = None
 
@@ -700,33 +699,30 @@ class BackendEngine:
             return True
         return task_count >= self.execution.ray_threshold
 
-    def _ensure_ray(self) -> Any:
-        if self._ray is not None and self._ray.is_initialized():
-            return self._ray
-        self._ray = None
+    def _ensure_ray(self) -> None:
+        import ray
+
+        if self._ray_runtime is not None and ray.is_initialized():
+            return
         self._remote_process_task = None
         self._remote_process_global_panel = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
-        self._ray = self._ray_runtime.ray
         # Cache safety: ExecutionOptions is frozen, so cpu_per_task is immutable
         # for this engine instance. Rebuilding _remote_process_task is safe.
-        return self._ray
 
     def _run_global_groups_on_ray(
         self,
         groups: list[tuple[dict, list[ForecastTaskRef]]],
         origin: pd.Timestamp,
     ) -> pd.DataFrame:
-        ray = self._ensure_ray()
+        self._ensure_ray()
+        import ray
+
         if self._remote_process_global_panel is None:
-            remote_kwargs: dict[str, float] = {}
+            remote_fn = ray.remote(_process_global_panel)
             if self.execution.cpu_per_task is not None:
-                remote_kwargs["num_cpus"] = float(self.execution.cpu_per_task)
-            self._remote_process_global_panel = (
-                ray.remote(**remote_kwargs)(_process_global_panel)
-                if remote_kwargs
-                else ray.remote(_process_global_panel)
-            )
+                remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
+            self._remote_process_global_panel = remote_fn
         remote_process = self._remote_process_global_panel
         concurrency = self.execution.max_concurrency or len(groups)
         frames: list[pd.DataFrame] = []
@@ -747,25 +743,21 @@ class BackendEngine:
         *,
         local_scope: bool,
     ) -> pd.DataFrame:
-        ray = self._ensure_ray()
+        self._ensure_ray()
+        import ray
+
         if self._remote_process_task is None:
-            remote_kwargs: dict[str, float] = {}
+            remote_fn = ray.remote(_process_task_ref)
             if self.execution.cpu_per_task is not None:
-                remote_kwargs["num_cpus"] = float(self.execution.cpu_per_task)
-            self._remote_process_task = (
-                ray.remote(**remote_kwargs)(_process_task_ref)
-                if remote_kwargs
-                else ray.remote(_process_task_ref)
-            )
+                remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
+            self._remote_process_task = remote_fn
         remote_process = self._remote_process_task
         concurrency = self.execution.max_concurrency or len(refs)
         frames: list[pd.DataFrame] = []
 
         for start in range(0, len(refs), concurrency):
             chunk = refs[start : start + concurrency]
-            object_refs = [
-                remote_process.remote(ref, origin, local_scope=local_scope) for ref in chunk
-            ]
+            object_refs = [remote_process.remote(ref, origin, local_scope) for ref in chunk]
             frames.extend(ray.get(object_refs))
 
         return _concat_prediction_frames(frames)

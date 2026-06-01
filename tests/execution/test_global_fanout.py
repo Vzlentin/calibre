@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import ray
 
 import calibre.execution.backend as backend
 from calibre.core.forecast_task import ForecastTaskRef
@@ -46,7 +47,11 @@ def test_multiple_global_configs_run_in_parallel(monkeypatch) -> None:
 
     monkeypatch.setattr(backend, "_process_global_panel", _fake_process_global_panel)
     engine = BackendEngine(execution=ExecutionOptions(backend="ray", max_concurrency=2))
-    monkeypatch.setattr(engine, "_ensure_ray", lambda: _FakeRay())
+    # The fanout methods now obtain ray via a local `import ray` after calling
+    # `_ensure_ray()` (which no longer returns a handle), so stub the module here.
+    monkeypatch.setattr(engine, "_ensure_ray", lambda: None)
+    monkeypatch.setattr(ray, "remote", _FakeRay.remote)
+    monkeypatch.setattr(ray, "get", _FakeRay.get)
 
     config_a = {"backend": "stub", "model": "stub", "scope": "global", "name": "a"}
     config_b = {"backend": "stub", "model": "stub", "scope": "global", "name": "b"}
