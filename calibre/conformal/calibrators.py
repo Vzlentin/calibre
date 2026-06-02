@@ -6,7 +6,7 @@ from typing import Literal
 
 import numpy as np
 
-from calibre.conformal.numerics import _finite_sample_radius, _validate_quantile_rule
+from calibre.conformal.numerics import finite_sample_radius, validate_quantile_rule
 
 
 class RollingQuantileCalibrator:
@@ -23,7 +23,7 @@ class RollingQuantileCalibrator:
             raise ValueError("calibration_window must be at least 1")
         self._calibration_window = int(calibration_window)
         self._initial_radius = float(initial_radius)
-        self._quantile_rule = _validate_quantile_rule(quantile_rule)
+        self._quantile_rule = validate_quantile_rule(quantile_rule)
         self._ready_on_empty = bool(ready_on_empty)
         self._scores: dict[str, deque[float]] = {}
         self.fit(
@@ -44,7 +44,7 @@ class RollingQuantileCalibrator:
 
     def predict(self, alpha: float, partition: str = "__global__") -> float:
         history = self._scores.get(str(partition), deque(maxlen=self._calibration_window))
-        return _finite_sample_radius(
+        return finite_sample_radius(
             list(history),
             float(alpha),
             self._initial_radius,
@@ -79,7 +79,7 @@ class RollingQuantileCalibrator:
     def set_state(self, state: dict) -> None:
         """Restore the fields emitted by get_state()."""
         self._calibration_window = int(state.get("calibration_window", self._calibration_window))
-        self._quantile_rule = _validate_quantile_rule(
+        self._quantile_rule = validate_quantile_rule(
             state.get("quantile_rule", self._quantile_rule)
         )
         self._ready_on_empty = bool(state.get("ready_on_empty", self._ready_on_empty))

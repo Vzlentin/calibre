@@ -11,7 +11,7 @@ from calibre.core.order_types import (
     NewsvendorPolicyParameters,
     normalize_newsvendor_policy_parameters,
 )
-from calibre.ordering.decision_frame import _decision_columns
+from calibre.ordering.decision_frame import decision_columns
 from calibre.ordering.decision_rules import QuantileInterpolationRule, RSArithmetic
 
 
@@ -25,7 +25,7 @@ def apply_newsvendor_policy(
     if frame.empty:
         return pd.DataFrame(
             columns=[
-                *_decision_columns(frame),
+                *decision_columns(frame),
                 INVENTORY_POSITION,
                 UNDERAGE_COST,
                 OVERAGE_COST,
@@ -47,10 +47,10 @@ def apply_newsvendor_policy(
 
     rule = QuantileInterpolationRule(coverage=coverage, period=period)
     arithmetic = RSArithmetic()
-    decision_columns = _decision_columns(merged)
+    grouping_columns = decision_columns(merged)
     outputs: list[dict[str, object]] = []
 
-    for _, group in merged.groupby(decision_columns, sort=False):
+    for _, group in merged.groupby(grouping_columns, sort=False):
         row = group.iloc[0]
         inventory_position = float(row[INVENTORY_POSITION])
         costs = CostStruct(
@@ -60,7 +60,7 @@ def apply_newsvendor_policy(
         demand_quantile = rule(group, costs)
         order_qty = arithmetic(demand_quantile, inventory_position)
 
-        result = {column: row[column] for column in decision_columns}
+        result = {column: row[column] for column in grouping_columns}
         result[INVENTORY_POSITION] = inventory_position
         result[UNDERAGE_COST] = costs.underage_cost
         result[OVERAGE_COST] = costs.overage_cost

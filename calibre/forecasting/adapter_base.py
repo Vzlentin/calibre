@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from calibre.forecasting.cache import ModelArtifactCache
 
 
-def _build_predict_frame(raw: pd.DataFrame) -> pd.DataFrame:
+def build_predict_frame(raw: pd.DataFrame) -> pd.DataFrame:
     """Normalize a Nixtla-format predict result to [unique_id, ds, y_hat, h]."""
     model_col = next(c for c in raw.columns if c not in (UNIQUE_ID, DS))
     out = raw[[UNIQUE_ID, DS]].reset_index(drop=True)

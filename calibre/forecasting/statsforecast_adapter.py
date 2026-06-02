@@ -12,7 +12,7 @@ from statsforecast import StatsForecast
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
+from calibre.forecasting.adapter_base import ModelAdapter, build_predict_frame
 
 _RESERVED_KEYS = frozenset({"model", "name", "freq", "backend", "scope"})
 
@@ -59,4 +59,4 @@ class StatsForecastAdapter(ModelAdapter):
         predict_kwargs: dict[str, Any] = {"h": task.horizon}
         if task.future_x is not None and not task.future_x.empty:
             predict_kwargs["X_df"] = task.future_x
-        return _build_predict_frame(self._sf.predict(**predict_kwargs))
+        return build_predict_frame(self._sf.predict(**predict_kwargs))

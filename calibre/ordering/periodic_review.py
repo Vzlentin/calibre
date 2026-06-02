@@ -11,7 +11,7 @@ from calibre.core.order_types import (
     RsPolicyParameters,
     normalize_rs_policy_parameters,
 )
-from calibre.ordering.decision_frame import _decision_columns
+from calibre.ordering.decision_frame import decision_columns
 from calibre.ordering.decision_rules import RSArithmetic, UpperBoundRule
 
 
@@ -25,7 +25,7 @@ def apply_rs_policy(
     if frame.empty:
         return pd.DataFrame(
             columns=[
-                *_decision_columns(frame),
+                *decision_columns(frame),
                 INVENTORY_POSITION,
                 LEAD_TIME,
                 REVIEW_PERIOD,
@@ -45,12 +45,12 @@ def apply_rs_policy(
     if not missing_uids.empty:
         raise ValueError(f"Missing policy parameters for unique_id values: {missing_uids.tolist()}")
 
-    decision_columns = _decision_columns(merged)
+    grouping_columns = decision_columns(merged)
     decision_rule = UpperBoundRule(coverage=coverage, quantile=quantile)
     arithmetic = RSArithmetic()
     outputs: list[dict[str, object]] = []
 
-    for _, group in merged.groupby(decision_columns, sort=False):
+    for _, group in merged.groupby(grouping_columns, sort=False):
         ordered = group.sort_values(H)
         inventory_position = float(ordered[INVENTORY_POSITION].iloc[0])
         lead_time = int(ordered[LEAD_TIME].iloc[0])
@@ -59,7 +59,7 @@ def apply_rs_policy(
         target_stock_level = decision_rule(ordered, CostStruct())
         order_qty = arithmetic(target_stock_level, inventory_position)
 
-        result = {column: ordered[column].iloc[0] for column in decision_columns}
+        result = {column: ordered[column].iloc[0] for column in grouping_columns}
         result[INVENTORY_POSITION] = inventory_position
         result[LEAD_TIME] = lead_time
         result[REVIEW_PERIOD] = review_period

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.core.forecast_frame import UNIQUE_ID
-from calibre.forecasting.features.panel import _sort_panel
+from calibre.forecasting.features.panel import sort_panel
 
 
 def add_lag_features(
@@ -21,7 +21,7 @@ def add_lag_features(
     if lags is None:
         lags = [1, 2, 3, 4, 13, 26, 52]
 
-    df = _sort_panel(df)
+    df = sort_panel(df)
     grouped = df.groupby(UNIQUE_ID, sort=False)[target_col]
 
     for lag in lags:
@@ -43,7 +43,7 @@ def add_rolling_features(
     if windows is None:
         windows = [4, 13, 26]
 
-    df = _sort_panel(df)
+    df = sort_panel(df)
     grouped = df.groupby(UNIQUE_ID, sort=False)[target_col]
 
     for w in windows:

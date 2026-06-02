@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 
-from calibre.conformal.numerics import _clip_alpha, _validate_bounds
+from calibre.conformal.numerics import clip_alpha, validate_bounds
 from calibre.conformal.types import IntervalPrediction
 
 
@@ -19,6 +19,9 @@ class FixedAlphaController:
 
     def get_alpha(self) -> float:
         return float(self._alpha)
+
+    def drift(self) -> float | None:
+        return None
 
     def get_state(self) -> dict:
         return {"type": "fixed", "alpha": float(self._alpha), "observations": self._observations}
@@ -43,9 +46,9 @@ class AdaptiveAlphaController:
             raise ValueError("gamma must be non-negative")
         self._target_alpha = float(alpha)
         self._gamma = float(gamma)
-        self._bounds = _validate_bounds(alpha_bounds)
+        self._bounds = validate_bounds(alpha_bounds)
         self._alpha = float(
-            _clip_alpha(
+            clip_alpha(
                 self._target_alpha if initial_alpha is None else float(initial_alpha),
                 self._bounds,
             )
@@ -77,7 +80,7 @@ class AdaptiveAlphaController:
         error = self._error(y_true, y_pred)
         self._error_history.append(error)
         self._alpha = float(
-            _clip_alpha(
+            clip_alpha(
                 self._alpha + self._gamma * (self._target_alpha - error),
                 self._bounds,
             )
@@ -86,6 +89,11 @@ class AdaptiveAlphaController:
 
     def get_alpha(self) -> float:
         return float(self._alpha)
+
+    def drift(self) -> float | None:
+        if not self._error_history:
+            return None
+        return sum(self._error_history) / len(self._error_history) - self._target_alpha
 
     def get_state(self) -> dict:
         return {
@@ -104,9 +112,9 @@ class AdaptiveAlphaController:
         self._target_alpha = float(state.get("target_alpha", self._target_alpha))
         self._gamma = float(state.get("gamma", self._gamma))
         raw_bounds = state.get("alpha_bounds", self._bounds)
-        self._bounds = _validate_bounds(tuple(raw_bounds) if raw_bounds is not None else None)
+        self._bounds = validate_bounds(tuple(raw_bounds) if raw_bounds is not None else None)
         self._alpha = float(
-            _clip_alpha(float(state.get("current_alpha", self._alpha)), self._bounds)
+            clip_alpha(float(state.get("current_alpha", self._alpha)), self._bounds)
         )
         self._alpha_history = [
             float(value) for value in state.get("alpha_history", [float(self._alpha)])

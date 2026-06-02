@@ -6,7 +6,7 @@ from calibre.core.order_types import (
     RsPolicyParameters,
     RssPolicyParameters,
 )
-from calibre.ordering.decision_frame import _decision_columns, _validate_interval_columns
+from calibre.ordering.decision_frame import decision_columns, validate_interval_columns
 from calibre.ordering.decision_rules import (
     CumulativeBoundRule,
     QuantileInterpolationRule,
@@ -50,6 +50,6 @@ __all__ = [
     "LinearCostModel",
     "InventoryRule",
     "LostSalesRule",
-    "_decision_columns",
-    "_validate_interval_columns",
+    "decision_columns",
+    "validate_interval_columns",
 ]

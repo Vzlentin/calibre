@@ -16,7 +16,7 @@ from calibre.core.order_types import (
     REVIEW_PERIOD,
     CostStruct,
 )
-from calibre.ordering.decision_frame import _validate_interval_columns
+from calibre.ordering.decision_frame import validate_interval_columns
 
 
 def _protection_period(frame: pd.DataFrame) -> int:
@@ -68,7 +68,7 @@ class UpperBoundRule:
                 )
             return float(ordered.loc[horizons <= protection_period, target_col].sum())
 
-        _, target_col = _validate_interval_columns(ordered, self.coverage)
+        _, target_col = validate_interval_columns(ordered, self.coverage)
         if cumulative_mode:
             cumulative_rows = ordered.loc[horizons == protection_period, target_col]
             if cumulative_rows.empty:
@@ -88,7 +88,7 @@ class CumulativeBoundRule:
         ordered = frame.sort_values(H)
         protection_period = _protection_period(ordered)
         horizons = _validate_protection_horizons(ordered, protection_period)
-        _, upper_col = _validate_interval_columns(ordered, self.coverage)
+        _, upper_col = validate_interval_columns(ordered, self.coverage)
         terminal = ordered.loc[horizons == protection_period, upper_col]
         if terminal.empty:
             raise ValueError(

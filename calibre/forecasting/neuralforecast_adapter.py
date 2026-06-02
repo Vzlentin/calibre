@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
+from calibre.forecasting.adapter_base import ModelAdapter, build_predict_frame
 from calibre.forecasting.native_persistence import load_dir_from_bytes, save_dir_to_bytes
 
 _RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", "backend", "scope"})
@@ -88,4 +88,4 @@ class NeuralForecastAdapter(ModelAdapter):
         predict_kwargs: dict[str, Any] = {}
         if task.future_x is not None and not task.future_x.empty:
             predict_kwargs["futr_df"] = task.future_x
-        return _build_predict_frame(self._nf.predict(**predict_kwargs))
+        return build_predict_frame(self._nf.predict(**predict_kwargs))

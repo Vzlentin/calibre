@@ -10,13 +10,13 @@ from calibre.core.forecast_frame import (
 )
 
 
-def _decision_columns(frame: pd.DataFrame) -> list[str]:
+def decision_columns(frame: pd.DataFrame) -> list[str]:
     return [
         column for column in (UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME) if column in frame.columns
     ]
 
 
-def _validate_interval_columns(frame: pd.DataFrame, coverage: float) -> tuple[str, str]:
+def validate_interval_columns(frame: pd.DataFrame, coverage: float) -> tuple[str, str]:
     lower_col, upper_col = interval_column_names(coverage)
     missing_columns = [column for column in (lower_col, upper_col) if column not in frame.columns]
     if missing_columns:

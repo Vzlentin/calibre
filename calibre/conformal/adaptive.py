@@ -7,12 +7,12 @@ import numpy as np
 
 from calibre.conformal.intervals import symmetric_interval, symmetric_intervals
 from calibre.conformal.numerics import (
-    _as_1d_array,
-    _as_scalar_score,
-    _clip_alpha,
-    _finite_sample_radius,
-    _validate_bounds,
-    _validate_quantile_rule,
+    as_1d_array,
+    as_scalar_score,
+    clip_alpha,
+    finite_sample_radius,
+    validate_bounds,
+    validate_quantile_rule,
 )
 from calibre.conformal.policies import OnlineConformalController
 from calibre.conformal.protocols import Score
@@ -36,12 +36,12 @@ class AdaptiveConformalInference(OnlineConformalController):
     ):
         if gamma < 0:
             raise ValueError("gamma must be non-negative")
-        self._bounds = _validate_bounds(alpha_bounds)
-        self._quantile_rule = _validate_quantile_rule(quantile_rule)
+        self._bounds = validate_bounds(alpha_bounds)
+        self._quantile_rule = validate_quantile_rule(quantile_rule)
         self._target_alpha = float(alpha)
         self._gamma = float(gamma)
         self._alpha: float = float(
-            _clip_alpha(
+            clip_alpha(
                 self._target_alpha if initial_alpha is None else float(initial_alpha),
                 self._bounds,
             )
@@ -73,7 +73,7 @@ class AdaptiveConformalInference(OnlineConformalController):
 
     def get_radius(self, alpha: float | None = None) -> float:
         alpha = self._alpha if alpha is None else float(alpha)
-        return _finite_sample_radius(
+        return finite_sample_radius(
             self._score_history,
             alpha,
             self._initial_radius,
@@ -92,7 +92,7 @@ class AdaptiveConformalInference(OnlineConformalController):
 
     def update(self, error: int) -> float:
         self._alpha = float(
-            _clip_alpha(
+            clip_alpha(
                 self._alpha + self._gamma * (self._target_alpha - int(error)),
                 self._bounds,
             )
@@ -102,7 +102,7 @@ class AdaptiveConformalInference(OnlineConformalController):
 
     def observe(self, y_true: float, prediction: IntervalPrediction) -> dict:
         error = int(not prediction.contains(float(y_true)))
-        score = _as_scalar_score(self._score(y_true, prediction.center))
+        score = as_scalar_score(self._score(y_true, prediction.center))
         self._score_history.append(score)
         self._error_history.append(error)
         alpha_before = float(self._alpha)
@@ -146,22 +146,22 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         if horizon < 1:
             raise ValueError("horizon must be at least 1")
         self._horizon = int(horizon)
-        self._bounds = _validate_bounds(alpha_bounds)
-        self._quantile_rule = _validate_quantile_rule(quantile_rule)
-        self._target_alpha: np.ndarray = _clip_alpha(
-            _as_1d_array(alpha, "alpha", self._horizon), self._bounds
+        self._bounds = validate_bounds(alpha_bounds)
+        self._quantile_rule = validate_quantile_rule(quantile_rule)
+        self._target_alpha: np.ndarray = clip_alpha(
+            as_1d_array(alpha, "alpha", self._horizon), self._bounds
         )
-        self._gamma: np.ndarray = _as_1d_array(gamma, "gamma", self._horizon)
+        self._gamma: np.ndarray = as_1d_array(gamma, "gamma", self._horizon)
         if np.any(self._gamma < 0):
             raise ValueError("gamma must be non-negative")
-        self._alpha: np.ndarray = _clip_alpha(
+        self._alpha: np.ndarray = clip_alpha(
             self._target_alpha
             if initial_alpha is None
-            else _as_1d_array(initial_alpha, "initial_alpha", self._horizon),
+            else as_1d_array(initial_alpha, "initial_alpha", self._horizon),
             self._bounds,
         )
         self._score = score
-        self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
+        self._initial_radius = as_1d_array(initial_radius, "initial_radius", self._horizon)
         self._score_history = self._normalize_score_histories(initial_scores)
         self._error_history: list[np.ndarray] = []
         self._alpha_history: list[np.ndarray] = [self._alpha.copy()]
@@ -189,10 +189,10 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         return [[float(score) for score in scores] for scores in histories]
 
     def get_radius(self, alpha: float | Iterable[float] | None = None) -> np.ndarray:
-        alpha = self._alpha if alpha is None else _as_1d_array(alpha, "alpha", self._horizon)
+        alpha = self._alpha if alpha is None else as_1d_array(alpha, "alpha", self._horizon)
         return np.asarray(
             [
-                _finite_sample_radius(
+                finite_sample_radius(
                     self._score_history[idx],
                     alpha[idx],
                     self._initial_radius[idx],
@@ -206,7 +206,7 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
     def predict_interval(
         self, point_forecast: float | Iterable[float]
     ) -> MultiStepIntervalPrediction:
-        center = _as_1d_array(point_forecast, "point_forecast", self._horizon)
+        center = as_1d_array(point_forecast, "point_forecast", self._horizon)
         radius = self.get_radius()
         self._radius_history.append(radius.copy())
         prediction = symmetric_intervals(
@@ -220,9 +220,9 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
         return prediction
 
     def update(self, error: float | Iterable[float]) -> np.ndarray:
-        error_arr = _as_1d_array(error, "error", self._horizon)
+        error_arr = as_1d_array(error, "error", self._horizon)
         self._alpha = np.asarray(
-            _clip_alpha(self._alpha + self._gamma * (self._target_alpha - error_arr), self._bounds),
+            clip_alpha(self._alpha + self._gamma * (self._target_alpha - error_arr), self._bounds),
             dtype=float,
         )
         self._alpha_history.append(self._alpha.copy())
@@ -244,7 +244,7 @@ class MultiStepAdaptiveConformalInference(OnlineConformalController):
                 continue
 
             point_forecast = prediction.center[horizon_idx - 1]
-            score = _as_scalar_score(self._score(y_true, point_forecast))
+            score = as_scalar_score(self._score(y_true, point_forecast))
             error = int(
                 not (
                     prediction.lower[horizon_idx - 1] <= y_true <= prediction.upper[horizon_idx - 1]

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, IN_STOCK, UNIQUE_ID, Y
-from calibre.forecasting.features.panel import _sort_panel
+from calibre.forecasting.features.panel import sort_panel
 
 
 def add_stockout_features(
@@ -32,7 +32,7 @@ def add_stockout_features(
     df[IN_STOCK] = df[IN_STOCK].fillna(True)
 
     df["y_uncensored"] = df[Y].copy()
-    df = _sort_panel(df)
+    df = sort_panel(df)
 
     for _uid, group in df.groupby(UNIQUE_ID, sort=False):
         in_stock_mask = group[IN_STOCK]
