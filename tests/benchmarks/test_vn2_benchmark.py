@@ -49,7 +49,7 @@ from calibre.core.forecast_frame import (
 from calibre.execution.data_loading import load_period
 from calibre.tuning import CumulativePinball, StudyOutcome
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
+DATA_DIR = Path(__file__).parents[2] / "data" / "vn2"
 
 # Cheap, deterministic global LGBM config with the marker the loop reads.
 _FAST_BEST_CONFIG = {

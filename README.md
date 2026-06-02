@@ -43,7 +43,7 @@ Always run Python tooling through `uv`.
 | Task | Command |
 |---|---|
 | Run all tests | `uv run pytest` |
-| Run a single test | `uv run pytest tests/test_conformal.py::test_name` |
+| Run a single test | `uv run pytest tests/conformal/test_conformal.py::test_name` |
 | Lint | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
 | Type check | `uv run ty check calibre/` |
