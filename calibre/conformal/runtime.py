@@ -245,9 +245,6 @@ class SymmetricIntervalRuntime:
             return f"{model_name}:cumulative:{base}"
         return f"{model_name}:h{int(row[H])}:{base}"
 
-    def _calibrator_ready(self, partition: str, alpha: float) -> bool:
-        return self.calibrator.ready(partition, alpha)
-
     def _snapshot(self, partition: str) -> dict[str, Any]:
         calibrator_state: dict[str, Any] = self.calibrator.get_state()
         return {
@@ -321,7 +318,7 @@ class SymmetricIntervalRuntime:
                 partitions.append(partition)
                 radius = self.calibrator.predict(alpha, partition)
                 alpha_values[pos] = alpha
-                if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
+                if self.calibrator.ready(partition, alpha) and np.isfinite(radius):
                     center = float(row[Y_HAT])
                     lower_values[pos] = center - float(radius)
                     upper_values[pos] = center + float(radius)
@@ -372,7 +369,7 @@ class SymmetricIntervalRuntime:
             alpha = self.controller.get_alpha()
             partition = self._partition_for_row(row, cumulative=True)
             radius = self.calibrator.predict(alpha, partition)
-            if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
+            if self.calibrator.ready(partition, alpha) and np.isfinite(radius):
                 center = float(window[Y_HAT].sum())
                 result.loc[terminal_idx, lower_col] = center - float(radius)
                 result.loc[terminal_idx, upper_col] = center + float(radius)

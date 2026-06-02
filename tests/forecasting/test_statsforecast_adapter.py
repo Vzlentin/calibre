@@ -9,7 +9,7 @@ from calibre.forecasting.statsforecast_adapter import StatsForecastAdapter
 
 
 def _sf_predict_return(uid: str, n: int) -> pd.DataFrame:
-    """Minimal Nixtla-format predict output accepted by _build_predict_frame."""
+    """Minimal Nixtla-format predict output accepted by build_predict_frame."""
     return pd.DataFrame(
         {
             "unique_id": [uid] * n,

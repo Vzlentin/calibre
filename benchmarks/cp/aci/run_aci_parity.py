@@ -191,7 +191,7 @@ def choose_diagnosis(
             return (
                 "The first divergence appears in the quantile trajectory at the first adaptive step, "
                 "before alpha diverges. This is consistent with the reference repo's `np.quantile(..., "
-                "method='higher')` rule differing from the local controller's `_finite_sample_radius` rank rule."
+                "method='higher')` rule differing from the local controller's `finite_sample_radius` rank rule."
             )
         return "The first divergence appears in the quantile trajectory before alpha diverges, which points to a quantile-selection mismatch."
     if first_alpha is not None:

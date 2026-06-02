@@ -10,7 +10,7 @@ from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
 
 
 def _mlf_predict_return(uid: str, n: int) -> pd.DataFrame:
-    """Minimal Nixtla-format predict output accepted by _build_predict_frame."""
+    """Minimal Nixtla-format predict output accepted by build_predict_frame."""
     return pd.DataFrame(
         {
             "unique_id": [uid] * n,
