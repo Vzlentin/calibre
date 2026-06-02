@@ -98,11 +98,11 @@ Long-lived project memory lives in an Obsidian vault and is governed by the
 Read it at the start of any non-trivial task.
 
 The vault location is read from the `OBSIDIAN_VAULT_PATH` environment
-variable. The project folder inside the vault is `Projects/calibre/`; durable
-engineering memory lives under `Projects/calibre/engineering/`
-(`architecture.md`, `lessons.md`, `vision.md`, `ROADMAP.md`, and per-task
-`plans/`). If the env var is unset, skip vault operations and proceed without
-persistent memory.
+variable. The project folder inside the vault is `Projects/Calibre/`; the canon
+files live at its root (`architecture.md`, `lessons.md`, `vision.md`,
+`ROADMAP.md`), alongside per-task `plans/`, an `archive/` for superseded notes,
+and a `phd/` research track. If the env var is unset, skip vault operations and
+proceed without persistent memory.
 
 ### Roadmap: GitHub for status, vault for rationale
 
@@ -115,7 +115,7 @@ into the other:
   free. At the start of any wave work, pull live state with
   `gh issue list --milestone "Improvement Wave 1 — Deployability"` (parked items
   carry `parked:phd` / `parked:saas` and are out of the milestone).
-- **Durable rationale = `engineering/ROADMAP.md`** (vault): mission, how-we-work
+- **Durable rationale = `ROADMAP.md`** (vault): mission, how-we-work
   cadence/gates, root-issue analysis (R1–R5), dependency ordering, and parked
   decisions. Read it for the *why*; it deliberately carries **no** issue-status
   checklist.
