@@ -14,7 +14,7 @@ from benchmarks.vn2.simulator import (
     load_initial_states,
 )
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "vn2"
+DATA_DIR = Path(__file__).parents[2] / "data" / "vn2"
 INITIAL_STATE_PATH = DATA_DIR / "week_0_initial_state.csv"
 
 
