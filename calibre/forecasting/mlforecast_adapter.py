@@ -18,7 +18,7 @@ from calibre.core.forecast_frame import (
     quantile_column,
 )
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, _build_predict_frame
+from calibre.forecasting.adapter_base import ModelAdapter, build_predict_frame
 from calibre.forecasting.native_persistence import load_dir_from_bytes, save_dir_to_bytes
 
 _RESERVED_KEYS = frozenset(
@@ -226,4 +226,4 @@ class MLForecastAdapter(ModelAdapter):
         raw = self._mlf.predict(**predict_kwargs)
         if self._name_to_quantile:
             return _build_quantile_predict_frame(raw, self._name_to_quantile)
-        return _build_predict_frame(raw)
+        return build_predict_frame(raw)

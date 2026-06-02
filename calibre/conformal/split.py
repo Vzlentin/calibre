@@ -8,10 +8,10 @@ import numpy as np
 
 from calibre.conformal.intervals import symmetric_intervals
 from calibre.conformal.numerics import (
-    _as_1d_array,
-    _as_scalar_score,
-    _finite_sample_radius,
-    _validate_quantile_rule,
+    as_1d_array,
+    as_scalar_score,
+    finite_sample_radius,
+    validate_quantile_rule,
 )
 from calibre.conformal.protocols import Score
 from calibre.conformal.scores import absolute_error_score
@@ -60,7 +60,7 @@ class CumulativeSplitConformalInference:
         self._calibration_window = int(calibration_window)
         self._score = score
         self._initial_radius = float(initial_radius)
-        self._quantile_rule = _validate_quantile_rule(quantile_rule)
+        self._quantile_rule = validate_quantile_rule(quantile_rule)
         self._score_history: deque[float] = deque(
             (float(s) for s in (initial_scores or ())),
             maxlen=self._calibration_window,
@@ -86,7 +86,7 @@ class CumulativeSplitConformalInference:
 
     def get_radius(self, alpha: float | None = None) -> float:
         alpha_value = self._alpha if alpha is None else float(np.asarray(alpha, dtype=float))
-        return _finite_sample_radius(
+        return finite_sample_radius(
             list(self._score_history),
             alpha_value,
             self._initial_radius,
@@ -101,7 +101,7 @@ class CumulativeSplitConformalInference:
         return mask
 
     def predict_interval(self, point_forecast) -> MultiStepIntervalPrediction:
-        center = _as_1d_array(point_forecast, "point_forecast", self._protection_period)
+        center = as_1d_array(point_forecast, "point_forecast", self._protection_period)
         radius = self.get_radius()
         self._radius_history.append(radius)
 
@@ -131,7 +131,7 @@ class CumulativeSplitConformalInference:
                 f"Cumulative observe expects windows of length {self._protection_period}; "
                 f"got y_actual={actual_arr.size}, y_hat={hat_arr.size}"
             )
-        score = _as_scalar_score(self._score(actual_arr.sum(), hat_arr.sum()))
+        score = as_scalar_score(self._score(actual_arr.sum(), hat_arr.sum()))
         self._score_history.append(score)
         return {
             "score": score,
@@ -177,8 +177,8 @@ class MultiStepSplitConformalInference:
         self._alpha = float(np.asarray(alpha, dtype=float))
         self._calibration_window = int(calibration_window)
         self._score = score
-        self._initial_radius = _as_1d_array(initial_radius, "initial_radius", self._horizon)
-        self._quantile_rule = _validate_quantile_rule(quantile_rule)
+        self._initial_radius = as_1d_array(initial_radius, "initial_radius", self._horizon)
+        self._quantile_rule = validate_quantile_rule(quantile_rule)
         self._score_history = self._normalize_score_histories(initial_scores)
         self._radius_history: list[np.ndarray] = []
         self._issued_count = 0
@@ -213,7 +213,7 @@ class MultiStepSplitConformalInference:
         alpha_value = self._alpha if alpha is None else float(np.asarray(alpha, dtype=float))
         return np.asarray(
             [
-                _finite_sample_radius(
+                finite_sample_radius(
                     list(self._score_history[idx]),
                     alpha_value,
                     self._initial_radius[idx],
@@ -235,7 +235,7 @@ class MultiStepSplitConformalInference:
         )
 
     def predict_interval(self, point_forecast) -> MultiStepIntervalPrediction:
-        center = _as_1d_array(point_forecast, "point_forecast", self._horizon)
+        center = as_1d_array(point_forecast, "point_forecast", self._horizon)
         radius = self.get_radius()
         self._radius_history.append(radius.copy())
         prediction = symmetric_intervals(
@@ -252,7 +252,7 @@ class MultiStepSplitConformalInference:
         if not 0 <= horizon_idx < self._horizon:
             raise ValueError(f"horizon must be in [1, {self._horizon}]")
 
-        score = _as_scalar_score(self._score(y_true, point_forecast))
+        score = as_scalar_score(self._score(y_true, point_forecast))
         self._score_history[horizon_idx].append(score)
         return {
             "horizon": int(horizon),

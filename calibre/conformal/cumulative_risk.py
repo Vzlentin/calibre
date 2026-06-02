@@ -293,6 +293,9 @@ class CumulativeRiskRuntime:
     def interval_columns(self) -> tuple[str, str]:
         return self.config.interval_columns
 
+    def adaptive_drift(self) -> float | None:
+        return None
+
     def _partition_for_row(self, row: pd.Series) -> Hashable:
         partition = self.config.partition_key(row)
         try:

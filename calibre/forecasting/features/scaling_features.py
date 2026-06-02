@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from calibre.core.forecast_frame import UNIQUE_ID
-from calibre.forecasting.features.panel import _sort_panel
+from calibre.forecasting.features.panel import sort_panel
 
 
 def add_series_scaling(
@@ -23,7 +23,7 @@ def add_series_scaling(
       - ``series_std``: expanding std of ``target_col`` (floored at 1.0)
       - ``y_scaled``: ``(target_col - series_mean) / series_std``
     """
-    df = _sort_panel(df)
+    df = sort_panel(df)
     grouped = df.groupby(UNIQUE_ID, sort=False)[target_col]
 
     df["series_mean"] = grouped.transform(lambda x: x.expanding(min_periods=1).mean())

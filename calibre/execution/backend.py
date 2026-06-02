@@ -227,17 +227,6 @@ def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return _coerce_forecast_frame_dtypes(pd.concat(non_empty, ignore_index=True))
 
 
-def _adaptive_controller_drift(conformal_runtime: ConformalRuntime) -> float | None:
-    """Return ``mean(error_history) - target_alpha`` when adaptive, else None."""
-    controller = getattr(conformal_runtime, "controller", None)
-    history = getattr(controller, "error_history", None)
-    target_alpha = getattr(controller, "target_alpha", None)
-    if history is None or target_alpha is None or len(history) == 0:
-        return None
-    running_mean = sum(int(x) for x in history) / len(history)
-    return float(running_mean) - float(target_alpha)
-
-
 @dataclass
 class BackendResult:
     """Result returned by BackendEngine.execute()."""
@@ -592,7 +581,7 @@ class BackendEngine:
         resolved: pd.DataFrame,
         conformal_runtime: ConformalRuntime,
     ) -> None:
-        drift = _adaptive_controller_drift(conformal_runtime)
+        drift = conformal_runtime.adaptive_drift()
         if drift is None:
             return
         partitions = (
@@ -626,9 +615,9 @@ class BackendEngine:
 
         if (
             isinstance(runtime, SymmetricIntervalRuntime)
-            and max_issued_count > runtime._issued_count
+            and max_issued_count > runtime.issued_count
         ):
-            runtime._issued_count = max_issued_count
+            runtime.restore_issued_count(max_issued_count)
 
     def _completed_initial_origins(self) -> set[pd.Timestamp]:
         if (

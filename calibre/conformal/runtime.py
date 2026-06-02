@@ -87,6 +87,8 @@ class ConformalRuntime(Protocol):
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
 
+    def adaptive_drift(self) -> float | None: ...
+
     def get_resume_state(self) -> dict[str, Any]: ...
 
 
@@ -205,7 +207,7 @@ class SymmetricIntervalRuntime:
         """Rehydrate a runtime from a calibration-state snapshot."""
         state = state or {}
         runtime = cls(config, method_name=state.get("method", config.method))
-        runtime._issued_count = int(state.get("issued_count", 0))
+        runtime.restore_issued_count(int(state.get("issued_count", 0)))
         if "calibrator" in state:
             runtime.calibrator.set_state(state["calibrator"])
         if "controller" in state:
@@ -220,6 +222,18 @@ class SymmetricIntervalRuntime:
     def mode(self) -> str:
         return self.config.mode
 
+    @property
+    def issued_count(self) -> int:
+        return self._issued_count
+
+    def restore_issued_count(self, count: int) -> None:
+        if count < 0:
+            raise ValueError("issued_count must be non-negative")
+        self._issued_count = count
+
+    def adaptive_drift(self) -> float | None:
+        return self.controller.drift()
+
     def _base_partition(self, row: pd.Series) -> str:
         value = _hashable(self.config.partition_key(row))
         return str(value)
@@ -231,14 +245,8 @@ class SymmetricIntervalRuntime:
             return f"{model_name}:cumulative:{base}"
         return f"{model_name}:h{int(row[H])}:{base}"
 
-    def _calibrator_ready(self, partition: str, alpha: float) -> bool:
-        ready = getattr(self.calibrator, "ready", None)
-        if ready is None:
-            return bool(np.isfinite(self.calibrator.predict(alpha, partition)))
-        return bool(ready(partition, alpha))
-
     def _snapshot(self, partition: str) -> dict[str, Any]:
-        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        calibrator_state: dict[str, Any] = self.calibrator.get_state()
         return {
             "method": self.method_name,
             "mode": self.config.mode,
@@ -310,7 +318,7 @@ class SymmetricIntervalRuntime:
                 partitions.append(partition)
                 radius = self.calibrator.predict(alpha, partition)
                 alpha_values[pos] = alpha
-                if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
+                if self.calibrator.ready(partition, alpha) and np.isfinite(radius):
                     center = float(row[Y_HAT])
                     lower_values[pos] = center - float(radius)
                     upper_values[pos] = center + float(radius)
@@ -361,7 +369,7 @@ class SymmetricIntervalRuntime:
             alpha = self.controller.get_alpha()
             partition = self._partition_for_row(row, cumulative=True)
             radius = self.calibrator.predict(alpha, partition)
-            if self._calibrator_ready(partition, alpha) and np.isfinite(radius):
+            if self.calibrator.ready(partition, alpha) and np.isfinite(radius):
                 center = float(window[Y_HAT].sum())
                 result.loc[terminal_idx, lower_col] = center - float(radius)
                 result.loc[terminal_idx, upper_col] = center + float(radius)
@@ -457,7 +465,7 @@ class SymmetricIntervalRuntime:
         return observed
 
     def get_diagnostics(self) -> dict[str, Any]:
-        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        calibrator_state: dict[str, Any] = self.calibrator.get_state()
         return {
             "method": self.method_name,
             "mode": self.config.mode,
@@ -477,7 +485,7 @@ class SymmetricIntervalRuntime:
         }
 
     def get_resume_state(self) -> dict[str, Any]:
-        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        calibrator_state: dict[str, Any] = self.calibrator.get_state()
         return {
             "method": self.method_name,
             "mode": self.config.mode,
@@ -493,7 +501,7 @@ class SymmetricIntervalRuntime:
 
     @property
     def partition_keys(self) -> tuple[str, ...]:
-        calibrator_state: dict[str, Any] = getattr(self.calibrator, "get_state", lambda: {})()
+        calibrator_state: dict[str, Any] = self.calibrator.get_state()
         score_history = calibrator_state.get("score_history", {})
         if not isinstance(score_history, dict):
             return ()

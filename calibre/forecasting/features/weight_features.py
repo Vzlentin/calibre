@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID
-from calibre.forecasting.features.panel import _sort_panel
+from calibre.forecasting.features.panel import sort_panel
 
 
 def add_time_weights(
@@ -18,7 +18,7 @@ def add_time_weights(
     More recent observations receive higher weight during training. Uses
     exponential decay with configurable half-life (default: 52 weeks).
     """
-    df = _sort_panel(df)
+    df = sort_panel(df)
 
     max_ds = df.groupby(UNIQUE_ID, sort=False)[DS].transform("max")
     weeks_ago = (max_ds - df[DS]).dt.days / 7.0
