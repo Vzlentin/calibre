@@ -25,7 +25,7 @@ path** — never by `grep` or `wc -l`. Specifically:
 - A test exercises the real behavior the change promises (the production code
   path, not a shape check).
 - **If the change touches the schema:** the migration is written; the
-  migration↔ORM parity test (`tests/test_storage_migrations.py`) is confirmed
+  migration↔ORM parity test (`tests/storage/test_storage_migrations.py`) is confirmed
   **red first**, then green; a repository round-trip runs against the
   migration-built database.
 - All four gates are green (below).
