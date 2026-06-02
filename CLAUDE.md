@@ -72,6 +72,24 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
   Accelerate-vs-OpenBLAS, **not** a regression and **not** threading (single- and
   multi-thread agree bit-for-bit). Don't chase the macOS delta or loosen 4992.20.
 
+## Worktrees
+
+New worktrees auto-run `setup-worktree-unix` from `.cursor/worktrees.json`
+(copies `.env` + `data/vn2`, then `uv sync --frozen`). For fast, correct setup:
+
+- **uv's package cache is global and shared across worktrees**, so a *warm*
+  `uv sync` rebuilds the full ~1.1G venv in a couple of seconds. The only heavy
+  cost is the one-time *cold* download (~0.5–1G of wheels; `ray` alone is 200M).
+  Don't copy/seed the main `.venv` — it's non-relocatable (absolute paths in
+  `pyvenv.cfg`/scripts + an editable `.pth` pinned to the main checkout).
+- **Don't set `UV_LINK_MODE`.** The default APFS clone is fastest (~1.5s);
+  `hardlink`/`copy` are ~5x slower (~8s) here.
+- **Don't run `pytest`/`--collect-only` during setup** — it's not needed to
+  provision the env and costs ~30s of first-run bytecode compilation.
+- **Use an explicit `cd <worktree> && …`** for shell commands targeting a
+  worktree; a `working_directory` arg may not change cwd, silently running setup
+  against the main repo and duplicating the work.
+
 ## Agent memory
 
 Long-lived project memory lives in an Obsidian vault and is governed by the
