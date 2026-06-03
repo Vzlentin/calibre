@@ -64,6 +64,21 @@ uv run calibre validate --config my-config.yaml
 uv run calibre run-sweep --configs benchmarks/vn2/config/
 ```
 
+### Dataset adapters
+
+Built-in adapters in `calibre.execution` (shipped in the wheel; no `benchmarks`
+import): `vn2` (weekly sales + optional master / in-stock) and `m5`
+(`sales_train_{phase}.csv` + `calendar.csv`). M5 `unique_id` is
+`f"{item_id}_{store_id}"`; `hierarchy` carries product/location taxonomy per
+series.
+
+```yaml
+dataset:
+  adapter: m5
+  path: tests/fixtures/m5
+  phase: evaluation   # optional; defaults to evaluation, falls back to validation
+```
+
 ### Benchmarks
 
 ```bash

@@ -14,7 +14,8 @@ from calibre.execution.backend import BackendResult
 from calibre.execution.data_loading import load_period
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.ledger import ForecastLedger as Ledger
-from calibre.execution.runner import PipelineResult, run_backtest, run_forecast
+from calibre.execution.runner import PipelineResult, _resolve_bundle, run_backtest, run_forecast
+from calibre.execution.vn2_adapter import VN2DatasetAdapter
 
 _MODEL_CONFIGS = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 52}]
 _SERIES_FILTER = ["0_126"]
@@ -24,9 +25,13 @@ _PERIOD = 0
 
 @pytest.fixture(scope="module")
 def dataset_bundle(data_dir: Path) -> DatasetBundle:
-    from benchmarks.vn2.dataset import VN2DatasetAdapter
-
     return VN2DatasetAdapter().load(data_dir, period=_PERIOD)
+
+
+def test_resolve_bundle_carries_vn2_hierarchy(data_dir: Path) -> None:
+    bundle = _resolve_bundle(data_dir, period=_PERIOD)
+    assert bundle.hierarchy is not None
+    assert not bundle.hierarchy.empty
 
 
 @pytest.fixture(scope="module")

@@ -16,6 +16,25 @@ def _validate_monotonic_per_series(df: pd.DataFrame, *, name: str) -> None:
             raise ValueError(f"{name} ds values must be monotonic for unique_id={uid!r}")
 
 
+def _validate_hierarchy(bundle: DatasetBundle, *, history_uids: set[str]) -> None:
+    hierarchy = bundle.hierarchy
+    if hierarchy is None:
+        return
+    if UNIQUE_ID not in hierarchy.columns:
+        raise ValueError("hierarchy missing required column: unique_id")
+    if hierarchy[UNIQUE_ID].isna().any():
+        raise ValueError("hierarchy has null unique_id values")
+    if hierarchy[UNIQUE_ID].duplicated().any():
+        duplicates = hierarchy.loc[hierarchy[UNIQUE_ID].duplicated(), UNIQUE_ID].astype(str)
+        raise ValueError(f"hierarchy has duplicate unique_id rows: {sorted(duplicates.unique())}")
+    hierarchy_uids = set(hierarchy[UNIQUE_ID].astype(str).unique())
+    missing = history_uids - hierarchy_uids
+    if missing:
+        raise ValueError(
+            f"hierarchy missing unique_id values from history: {sorted(missing)}"
+        )
+
+
 def _validate_key_frame(df: pd.DataFrame, *, name: str) -> None:
     missing = {UNIQUE_ID, DS} - set(df.columns)
     if missing:
@@ -34,6 +53,7 @@ def validate_dataset_bundle(bundle: DatasetBundle) -> None:
     _validate_monotonic_per_series(bundle.history, name="history")
 
     history_uids = set(bundle.history[UNIQUE_ID].astype(str).unique())
+    _validate_hierarchy(bundle, history_uids=history_uids)
 
     if bundle.future_x is not None:
         _validate_key_frame(bundle.future_x, name="future_x")
