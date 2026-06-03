@@ -12,9 +12,12 @@ def _benchmark_imports(path: Path) -> list[tuple[int, str]]:
             for alias in node.names:
                 if alias.name == "benchmarks" or alias.name.startswith("benchmarks."):
                     offenders.append((node.lineno, f"import {alias.name}"))
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            if node.module == "benchmarks" or node.module.startswith("benchmarks."):
-                offenders.append((node.lineno, f"from {node.module}"))
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and (node.module == "benchmarks" or node.module.startswith("benchmarks."))
+        ):
+            offenders.append((node.lineno, f"from {node.module}"))
     return offenders
 
 

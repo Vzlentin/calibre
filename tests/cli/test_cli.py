@@ -13,11 +13,10 @@ from calibre.cli.commands import (
     _record_order_cost_metric,
     health,
     run,
-    run_config,
     run_sweep,
     validate,
 )
-from calibre.cli.config import load_config, load_config_from_mapping
+from calibre.cli.config import load_config
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import CostStruct

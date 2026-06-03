@@ -50,6 +50,7 @@ from benchmarks.vn2.replay import (
 )
 from benchmarks.vn2.search import run_hpo
 from benchmarks.vn2.simulator import VN2Simulator, extract_new_actuals, load_initial_states
+from calibre.cli.config import BackendConfig
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
     CumulativeRiskRuntime,
@@ -68,7 +69,6 @@ from calibre.execution import (
     observe_cumulative,
     observe_per_horizon,
 )
-from calibre.cli.config import BackendConfig
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri, write_parquet

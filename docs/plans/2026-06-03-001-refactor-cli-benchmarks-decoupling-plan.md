@@ -1,7 +1,7 @@
 ---
 title: "refactor: Move benchmark run-mode out of the product CLI (closes #86)"
 type: refactor
-status: active
+status: completed
 date: 2026-06-03
 ---
 

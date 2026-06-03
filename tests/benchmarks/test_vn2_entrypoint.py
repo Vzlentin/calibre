@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
-import pytest
 
 from benchmarks.vn2 import __main__ as vn2_main
 from benchmarks.vn2.run_benchmark import run_from_config
