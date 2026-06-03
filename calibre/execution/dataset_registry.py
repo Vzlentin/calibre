@@ -24,12 +24,11 @@ def _ensure_builtins() -> None:
     global _BUILTINS_LOADED
     if _BUILTINS_LOADED:
         return
-    try:
-        from benchmarks.vn2.dataset import VN2DatasetAdapter
-    except ImportError:
-        pass
-    else:
-        _REGISTRY.setdefault("vn2", VN2DatasetAdapter)
+    from calibre.execution.m5_adapter import M5DatasetAdapter
+    from calibre.execution.vn2_adapter import VN2DatasetAdapter
+
+    _REGISTRY.setdefault("vn2", VN2DatasetAdapter)
+    _REGISTRY.setdefault("m5", M5DatasetAdapter)
     _BUILTINS_LOADED = True
 
 

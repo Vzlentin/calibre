@@ -19,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 from calibre.execution.io import join_uri
+from calibre.execution.vn2_adapter import HOLDING_COST_RATE, SHORTAGE_COST_RATE
 from calibre.ordering.simulation import (
     LinearCostModel,
     LostSalesRule,
@@ -29,8 +30,6 @@ from calibre.ordering.simulation import (
 from calibre.ordering.simulation import ProductState as GenericProductState
 
 LEAD_TIME_DEPTH: int = 2
-HOLDING_COST_RATE: float = 0.2
-SHORTAGE_COST_RATE: float = 1.0
 
 
 @dataclass

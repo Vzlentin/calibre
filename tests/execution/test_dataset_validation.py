@@ -7,6 +7,7 @@ from calibre.core.forecast_frame import DS, IN_STOCK, UNIQUE_ID, Y
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.validation import load_costs, validate_dataset_bundle
+from calibre.execution.vn2_adapter import VN2DatasetAdapter
 
 
 def _history() -> pd.DataFrame:
@@ -48,6 +49,85 @@ def test_validate_dataset_bundle_rejects_missing_per_sku_costs() -> None:
 
     with pytest.raises(ValueError, match="costs missing"):
         validate_dataset_bundle(bundle)
+
+
+def _hierarchy() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            "item_id": ["iA", "iB"],
+            "dept_id": ["dA", "dB"],
+            "cat_id": ["cA", "cB"],
+            "store_id": ["sA", "sB"],
+            "state_id": ["stA", "stB"],
+        }
+    )
+
+
+def test_validate_dataset_bundle_accepts_covering_hierarchy() -> None:
+    bundle = DatasetBundle(
+        history=_history(),
+        future_x=None,
+        costs=CostStruct(),
+        hierarchy=_hierarchy(),
+        censoring=None,
+    )
+    validate_dataset_bundle(bundle)
+
+
+def test_validate_dataset_bundle_accepts_none_hierarchy() -> None:
+    bundle = DatasetBundle(
+        history=_history(),
+        future_x=None,
+        costs=CostStruct(),
+        hierarchy=None,
+        censoring=None,
+    )
+    validate_dataset_bundle(bundle)
+
+
+def test_validate_dataset_bundle_rejects_missing_unique_id_column() -> None:
+    bad = _hierarchy().drop(columns=[UNIQUE_ID])
+    bundle = DatasetBundle(
+        history=_history(),
+        future_x=None,
+        costs=CostStruct(),
+        hierarchy=bad,
+        censoring=None,
+    )
+    with pytest.raises(ValueError, match="hierarchy missing required column"):
+        validate_dataset_bundle(bundle)
+
+
+def test_validate_dataset_bundle_rejects_duplicate_hierarchy_rows() -> None:
+    hierarchy = pd.concat([_hierarchy(), _hierarchy().iloc[[0]]], ignore_index=True)
+    bundle = DatasetBundle(
+        history=_history(),
+        future_x=None,
+        costs=CostStruct(),
+        hierarchy=hierarchy,
+        censoring=None,
+    )
+    with pytest.raises(ValueError, match="duplicate unique_id"):
+        validate_dataset_bundle(bundle)
+
+
+def test_validate_dataset_bundle_rejects_history_uid_not_in_hierarchy() -> None:
+    hierarchy = _hierarchy().iloc[[0]]
+    bundle = DatasetBundle(
+        history=_history(),
+        future_x=None,
+        costs=CostStruct(),
+        hierarchy=hierarchy,
+        censoring=None,
+    )
+    with pytest.raises(ValueError, match="hierarchy missing unique_id"):
+        validate_dataset_bundle(bundle)
+
+
+def test_vn2_adapter_bundle_passes_validation(data_dir) -> None:
+    bundle = VN2DatasetAdapter().load(data_dir, period=0)
+    validate_dataset_bundle(bundle)
 
 
 def test_load_costs_from_csv(tmp_path) -> None:
