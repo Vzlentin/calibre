@@ -246,49 +246,9 @@ def test_load_config_reads_fsspec_uri() -> None:
 def test_winning_config_uses_auto_backend() -> None:
     config = load_config("benchmarks/vn2/config/winning.yaml")
 
-    assert config.benchmark == "vn2_winning"
     assert config.execution.backend == "auto"
     assert config.tasks[0].config["scope"] == "global"
     assert config.execution.ray_threshold == 10
-
-
-def test_builtin_benchmark_preserves_fsspec_dataset_uri(monkeypatch) -> None:
-    seen: dict[str, object] = {}
-
-    def _fake_run_benchmark(**kwargs):
-        seen.update(kwargs)
-        return pd.DataFrame(
-            {
-                UNIQUE_ID: ["A"],
-                "holding_cost": [0.0],
-                "shortage_cost": [1.0],
-                "total_cost": [1.0],
-            }
-        )
-
-    monkeypatch.setattr("benchmarks.vn2.run_benchmark.run_benchmark", _fake_run_benchmark)
-    config = load_config_from_mapping(
-        {
-            "config_schema": "1.0",
-            "benchmark": "vn2_winning",
-            "dataset": {"adapter": "vn2", "path": "memory://calibre-vn2-benchmark/data"},
-            "tasks": [
-                {
-                    "model": "global_lgbm",
-                    "horizon": 3,
-                    "config": {"backend": "mlforecast"},
-                }
-            ],
-            "origins": {"start": "2024-01-01", "end": "2024-01-01", "freq": "W-MON"},
-            "output": {"streaming": False},
-            "execution": {"backend": "local", "seed": 42},
-        }
-    )
-
-    summary = run_config(config)
-
-    assert seen["data_dir"] == "memory://calibre-vn2-benchmark/data"
-    assert summary["total_cost"].sum() == 1.0
 
 
 def test_run_command_executes_config(monkeypatch, tmp_path) -> None:

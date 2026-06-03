@@ -167,7 +167,6 @@ class BackendConfig(BaseModel):
     conformal: ConformalConfig | None = None
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
-    benchmark: str | None = None
     source_path: str | None = None
 
     @model_validator(mode="before")
