@@ -30,9 +30,7 @@ def _validate_hierarchy(bundle: DatasetBundle, *, history_uids: set[str]) -> Non
     hierarchy_uids = set(hierarchy[UNIQUE_ID].astype(str).unique())
     missing = history_uids - hierarchy_uids
     if missing:
-        raise ValueError(
-            f"hierarchy missing unique_id values from history: {sorted(missing)}"
-        )
+        raise ValueError(f"hierarchy missing unique_id values from history: {sorted(missing)}")
 
 
 def _validate_key_frame(df: pd.DataFrame, *, name: str) -> None:

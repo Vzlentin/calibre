@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
@@ -20,16 +18,18 @@ def _day_columns(columns: list[str]) -> list[str]:
     )
 
 
-def melt_m5_sales(sales_path: str | Path, calendar_path: str | Path) -> pd.DataFrame:
-    """Read M5 wide sales, return long-format ``[unique_id, ds, y]``."""
-    raw = pd.read_csv(str(sales_path))
-    day_cols = _day_columns(list(raw.columns))
-    if not day_cols:
-        raise ValueError(f"No d_* columns found in {sales_path}")
+def melt_m5_sales(sales: pd.DataFrame, calendar: pd.DataFrame) -> pd.DataFrame:
+    """Reshape wide M5 sales into long-format ``[unique_id, ds, y]``.
 
-    calendar = pd.read_csv(str(calendar_path))
+    ``sales`` and ``calendar`` are already-read frames so the (large) sales file
+    is parsed once by the adapter and shared with :func:`build_m5_hierarchy`.
+    """
+    day_cols = _day_columns(list(sales.columns))
+    if not day_cols:
+        raise ValueError("M5 sales frame has no d_* day columns")
+
     if "d" not in calendar.columns or "date" not in calendar.columns:
-        raise ValueError(f"calendar missing d/date columns: {calendar_path}")
+        raise ValueError("M5 calendar frame missing required 'd'/'date' columns")
     day_to_date = dict(
         zip(
             calendar["d"].astype(str),
@@ -38,11 +38,8 @@ def melt_m5_sales(sales_path: str | Path, calendar_path: str | Path) -> pd.DataF
         )
     )
 
-    id_frame = raw[["item_id", "store_id"]].copy()
-    id_frame[UNIQUE_ID] = _m5_unique_id(raw)
-
-    melted = raw[day_cols].copy()
-    melted.insert(0, UNIQUE_ID, id_frame[UNIQUE_ID])
+    melted = sales[day_cols].copy()
+    melted.insert(0, UNIQUE_ID, _m5_unique_id(sales))
 
     long = melted.melt(id_vars=[UNIQUE_ID], var_name="d", value_name=Y)
     long["d"] = long["d"].astype(str)
@@ -50,20 +47,19 @@ def melt_m5_sales(sales_path: str | Path, calendar_path: str | Path) -> pd.DataF
     if long[DS].isna().any():
         missing = sorted(long.loc[long[DS].isna(), "d"].unique())
         raise ValueError(f"calendar missing dates for day columns: {missing}")
-    long[Y] = pd.to_numeric(long[Y], errors="coerce").astype("float64")
+    long[Y] = long[Y].astype("float64")
     long = long.drop(columns="d")
     return long[[UNIQUE_ID, DS, Y]].sort_values([UNIQUE_ID, DS]).reset_index(drop=True)
 
 
-def build_m5_hierarchy(sales_path: str | Path) -> pd.DataFrame:
-    """Return one attribute row per bottom-level M5 series."""
-    raw = pd.read_csv(str(sales_path))
+def build_m5_hierarchy(sales: pd.DataFrame) -> pd.DataFrame:
+    """Return one product/location attribute row per bottom-level M5 series."""
     attr_cols = ["item_id", "dept_id", "cat_id", "store_id", "state_id"]
-    missing = [col for col in attr_cols if col not in raw.columns]
+    missing = [col for col in attr_cols if col not in sales.columns]
     if missing:
-        raise ValueError(f"sales file missing hierarchy columns: {missing}")
+        raise ValueError(f"M5 sales frame missing hierarchy columns: {missing}")
 
-    frame = raw[attr_cols].copy()
-    frame[UNIQUE_ID] = _m5_unique_id(raw)
+    frame = sales[attr_cols].copy()
+    frame[UNIQUE_ID] = _m5_unique_id(sales)
     frame = frame.drop_duplicates(UNIQUE_ID).reset_index(drop=True)
     return frame[[UNIQUE_ID, *attr_cols]]

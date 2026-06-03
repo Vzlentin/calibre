@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetAdapter, DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
@@ -16,8 +18,7 @@ def _resolve_sales_path(data_dir: str, *, phase: str) -> str:
         if exists(path):
             return path
     raise FileNotFoundError(
-        f"No M5 sales file for phase={phase!r} under {data_dir} "
-        f"(tried sales_train_{phase}.csv)"
+        f"No M5 sales file for phase={phase!r} under {data_dir} (tried sales_train_{phase}.csv)"
     )
 
 
@@ -40,8 +41,10 @@ class M5DatasetAdapter(DatasetAdapter):
         if not exists(calendar_path):
             raise FileNotFoundError(f"M5 calendar.csv not found under {data_dir}")
 
-        history = melt_m5_sales(sales_path, calendar_path)
-        hierarchy = build_m5_hierarchy(sales_path)
+        sales = pd.read_csv(str(sales_path))
+        calendar = pd.read_csv(str(calendar_path))
+        history = melt_m5_sales(sales, calendar)
+        hierarchy = build_m5_hierarchy(sales)
         return DatasetBundle(
             history=history,
             future_x=None,

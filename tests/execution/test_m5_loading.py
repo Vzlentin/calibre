@@ -17,10 +17,9 @@ def fixture_dir() -> Path:
 
 
 def test_melt_m5_sales_shapes_and_values(fixture_dir: Path) -> None:
-    history = melt_m5_sales(
-        fixture_dir / "sales_train_evaluation.csv",
-        fixture_dir / "calendar.csv",
-    )
+    sales = pd.read_csv(fixture_dir / "sales_train_evaluation.csv")
+    calendar = pd.read_csv(fixture_dir / "calendar.csv")
+    history = melt_m5_sales(sales, calendar)
     assert list(history.columns) == [UNIQUE_ID, DS, Y]
     assert len(history) == 12
     assert history[Y].dtype == "float64"
@@ -35,14 +34,14 @@ def test_melt_m5_sales_shapes_and_values(fixture_dir: Path) -> None:
     assert set(history[UNIQUE_ID]) == expected_ids
 
     sample = history[
-        (history[UNIQUE_ID] == "HOBBIES_1_001_CA_1")
-        & (history[DS] == pd.Timestamp("2011-01-29"))
+        (history[UNIQUE_ID] == "HOBBIES_1_001_CA_1") & (history[DS] == pd.Timestamp("2011-01-29"))
     ]
     assert sample[Y].iloc[0] == pytest.approx(1.0)
 
 
 def test_build_m5_hierarchy_one_row_per_series(fixture_dir: Path) -> None:
-    hierarchy = build_m5_hierarchy(fixture_dir / "sales_train_evaluation.csv")
+    sales = pd.read_csv(fixture_dir / "sales_train_evaluation.csv")
+    hierarchy = build_m5_hierarchy(sales)
     assert len(hierarchy) == 4
     assert hierarchy[UNIQUE_ID].is_unique
     assert list(hierarchy.columns) == [
