@@ -187,3 +187,12 @@ infra/                   # Terraform modules
 scripts/                 # Databricks notebooks, jobs
 .github/workflows/       # CI: ruff, ty, pytest
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the one-PR-per-item workflow,
+and the four CI gates.
+
+## License
+
+Calibre is licensed under the [Apache License 2.0](LICENSE).
