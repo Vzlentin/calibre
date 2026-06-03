@@ -109,12 +109,18 @@ proceed without persistent memory.
 The roadmap is a hybrid with one source of truth per fact-type — don't mirror one
 into the other:
 
-- **Live status + work orders = GitHub.** The active backlog is the milestone
-  **`Improvement Wave 1 — Deployability`**; each item is an issue whose body holds
-  the full symptom/fix/files spec, and a merged `closes #N` PR updates status for
-  free. At the start of any wave work, pull live state with
-  `gh issue list --milestone "Improvement Wave 1 — Deployability"` (parked items
-  carry `parked:phd` / `parked:saas` and are out of the milestone).
+- **Live status + work orders = GitHub.** Each backlog item is an issue whose
+  body holds the full symptom/fix/files spec, and a merged `closes #N` PR updates
+  status for free. The current active milestone is named in `ROADMAP.md` (vault) —
+  don't hard-code it here; a renamed milestone is exactly the drift #89 fixed.
+  List open milestones and pull their issues with:
+
+  ```bash
+  gh api repos/Vzlentin/calibre/milestones --jq '.[] | select(.state=="open") | .title'
+  gh issue list --milestone "<title>"
+  ```
+
+  Parked items carry `parked:phd` / `parked:saas` and are out of any milestone.
 - **Durable rationale = `ROADMAP.md`** (vault): mission, how-we-work
   cadence/gates, root-issue analysis (R1–R5), dependency ordering, and parked
   decisions. Read it for the *why*; it deliberately carries **no** issue-status
