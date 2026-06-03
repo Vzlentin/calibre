@@ -28,6 +28,4 @@ def test_calibre_does_not_import_benchmarks() -> None:
         for lineno, stmt in _benchmark_imports(path):
             rel = path.relative_to(root.parent)
             violations.append(f"{rel}:{lineno}: {stmt}")
-    assert not violations, "shipped calibre/ must not import benchmarks:\n" + "\n".join(
-        violations
-    )
+    assert not violations, "shipped calibre/ must not import benchmarks:\n" + "\n".join(violations)
