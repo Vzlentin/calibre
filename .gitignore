@@ -6,6 +6,8 @@ mlruns/
 !.claude/skills/
 benchmarks/cp/aci/conformal-time-series/
 benchmarks/vn2/results/
+# Strategy is private (full version lives vault-side); repo root holds only a pointer stub.
+STRATEGY.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
