@@ -100,7 +100,11 @@ jobs:
             calibre:full \
             /app/benchmarks/vn2/download_vn2_data.py --target /app/data/vn2
       - name: Smoke test full VN2 benchmark
-        run: docker run --rm -v "$PWD/data/vn2:/app/data/vn2:ro" calibre:full run --config /app/benchmarks/vn2/config/winning.yaml
+        run: |
+          docker run --rm -v "$PWD/data/vn2:/app/data/vn2:ro" \
+            --entrypoint python \
+            calibre:full \
+            -m benchmarks.vn2 --config /app/benchmarks/vn2/config/winning.yaml
       - name: Build slim image
         run: docker build -f Dockerfile.slim -t calibre:slim .
       - name: Smoke test slim image
