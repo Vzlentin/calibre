@@ -70,7 +70,9 @@ explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = []
+markers = [
+    "regression: heavyweight end-to-end gates that pin numerical baselines (deselect locally with -m 'not regression')",
+]
 
 [tool.ruff]
 line-length = 100
