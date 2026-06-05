@@ -19,7 +19,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
-from calibre.execution.io import is_local_fs, open_fs, write_parquet
+from calibre.execution.io import is_local_fs, open_fs
 from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import OrderPolicyConfig, OrderPolicyType
@@ -110,33 +110,7 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
     set_order_cost(currency, dataset, total_cost)
 
 
-def _run_builtin_benchmark(config: BackendConfig) -> pd.DataFrame:
-    if config.benchmark not in {"vn2_winning", "vn2_tuned"}:
-        raise ValueError(f"Unknown benchmark runner: {config.benchmark!r}")
-
-    from benchmarks.vn2.run_benchmark import run_benchmark
-
-    summary = run_benchmark(
-        data_dir=config.dataset.path,
-        horizon=config.tasks[0].horizon,
-        tune=False,
-        results_dir=None,
-        verbose=True,
-        execution_backend=config.execution.backend,
-        ray_address=config.execution.ray_address,
-        staging_uri=config.execution.staging_uri,
-        ray_threshold=config.execution.ray_threshold,
-        max_concurrency=config.execution.max_concurrency,
-        cpu_per_task=config.execution.cpu_per_task,
-    )
-    if config.output.ledger_path is not None:
-        write_parquet(summary, config.output.ledger_path)
-    return summary
-
-
-def run(
-    config_path: str | Path, *, metrics_port: int | None = None
-) -> BackendResult | pd.DataFrame:
+def run(config_path: str | Path, *, metrics_port: int | None = None) -> BackendResult:
     if metrics_port is not None:
         from calibre.core.metrics import serve
 
@@ -152,25 +126,7 @@ def run_config(
     conformal_state_store: ConformalStateStore | None = None,
     initial_ledger: pd.DataFrame | None = None,
     max_unique_ids: int | None = None,
-) -> BackendResult | pd.DataFrame:
-    if config.benchmark is not None:
-        summary = _run_builtin_benchmark(config)
-        total_cost = float(summary["total_cost"].sum()) if "total_cost" in summary else float("nan")
-        _record_order_cost_metric(
-            summary,
-            dataset=config.benchmark,
-            currency=_metric_currency(config),
-        )
-        logger.info(
-            "benchmark complete",
-            extra={
-                "benchmark": config.benchmark,
-                "rows": len(summary),
-                "total_cost": total_cost,
-            },
-        )
-        return summary
-
+) -> BackendResult:
     bundle = _load_dataset(config)
     _enforce_unique_id_limit(bundle, max_unique_ids)
     model_configs = [task.resolved_model_config() for task in config.tasks]
@@ -257,7 +213,7 @@ def health() -> dict[str, Any]:
     return payload
 
 
-def run_sweep(configs_dir: str | Path) -> list[BackendResult | pd.DataFrame]:
+def run_sweep(configs_dir: str | Path) -> list[BackendResult]:
     fs, root = open_fs(configs_dir)
     if not fs.exists(root):
         raise FileNotFoundError(f"Config directory not found: {configs_dir}")

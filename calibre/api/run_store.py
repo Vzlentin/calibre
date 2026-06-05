@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID, uuid4
 
-import pandas as pd
 from sqlalchemy.orm import sessionmaker
 
 from calibre.api.errors import format_error
@@ -41,7 +40,7 @@ def _pointer_kinds(config) -> list[tuple[str, str]]:
 
 
 def _result_rows(result) -> int:
-    return len(result) if isinstance(result, pd.DataFrame) else len(result.ledger.to_df())
+    return len(result.ledger.to_df())
 
 
 class MemoryRunStore:

@@ -50,6 +50,7 @@ from benchmarks.vn2.replay import (
 )
 from benchmarks.vn2.search import run_hpo
 from benchmarks.vn2.simulator import VN2Simulator, extract_new_actuals, load_initial_states
+from calibre.cli.config import BackendConfig
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
     CumulativeRiskRuntime,
@@ -70,7 +71,7 @@ from calibre.execution import (
 )
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
-from calibre.execution.io import join_uri
+from calibre.execution.io import join_uri, write_parquet
 from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
 
 logger = logging.getLogger(__name__)
@@ -342,6 +343,28 @@ def run_benchmark(
                 logger.info("\nPer-product costs saved to: %s", out_path)
 
     return summary_df
+
+
+def run_from_config(config: BackendConfig) -> pd.DataFrame:
+    """Run the VN2 benchmark from a parsed BackendConfig (CLI mapping)."""
+    summary = run_benchmark(
+        data_dir=config.dataset.path,
+        horizon=config.tasks[0].horizon,
+        tune=False,
+        results_dir=None,
+        verbose=True,
+        execution_backend=config.execution.backend,
+        ray_address=config.execution.ray_address,
+        staging_uri=config.execution.staging_uri,
+        ray_threshold=config.execution.ray_threshold,
+        max_concurrency=config.execution.max_concurrency,
+        cpu_per_task=config.execution.cpu_per_task,
+    )
+    if config.output.ledger_path is not None:
+        write_parquet(summary, config.output.ledger_path)
+    total_cost = float(summary["total_cost"].sum()) if "total_cost" in summary else float("nan")
+    logger.info("benchmark complete", extra={"rows": len(summary), "total_cost": total_cost})
+    return summary
 
 
 if __name__ == "__main__":

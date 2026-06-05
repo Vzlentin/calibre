@@ -88,8 +88,8 @@ uv run python benchmarks/vn2/download_vn2_data.py
 # Run VN2 benchmark
 uv run python benchmarks/vn2/run_benchmark.py
 
-# Run VN2 winning config
-uv run calibre run --config benchmarks/vn2/config/winning.yaml
+# Run VN2 winning config (harness entrypoint)
+uv run python -m benchmarks.vn2 --config benchmarks/vn2/config/winning.yaml
 
 # Run ACI parity
 uv run python benchmarks/cp/aci/run_aci_parity.py
