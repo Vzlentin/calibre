@@ -20,12 +20,16 @@ docker run --rm calibre:full health
 docker run --rm calibre:slim run --config /app/benchmarks/vn2/config/smoke.yaml
 ```
 
-Full VN2 benchmark smoke with external data mounted:
+Full VN2 benchmark smoke with external data mounted. The benchmark is the harness
+module, not the product CLI, so this overrides the image's `calibre` entrypoint —
+the same invocation the CI gate uses:
 
 ```bash
 docker run --rm \
   -v "$PWD/data/vn2:/app/data/vn2:ro" \
-  calibre:full run --config /app/benchmarks/vn2/config/winning.yaml
+  --entrypoint python \
+  calibre:full \
+  -m benchmarks.vn2 --config /app/benchmarks/vn2/config/winning.yaml
 ```
 
 CI publishes same-repository PR and main-branch images to GHCR as
@@ -35,6 +39,12 @@ CI publishes same-repository PR and main-branch images to GHCR as
 The slim image is intended for statsforecast/local model configs and omits Ray,
 MLForecast/LightGBM, and NeuralForecast. Use the full image for remote Ray workers,
 the VN2 winning benchmark, and other global LightGBM or neural configs.
+
+The VN2 winning benchmark is reproduced only through the harness module
+(`python -m benchmarks.vn2`, as shown above and in the CI gate). The product
+`calibre run` command runs a single dataset backtest of whatever config you pass —
+it does **not** run the benchmark's multi-round replay, so the orchestrator
+examples below deploy product backtests, not the benchmark.
 
 ## Kubernetes Job
 
@@ -50,7 +60,7 @@ spec:
       containers:
         - name: calibre
           image: calibre:full
-          args: ["run", "--config", "s3://bucket/configs/winning.yaml"]
+          args: ["run", "--config", "s3://bucket/configs/backtest.yaml"]
           env:
             - name: AWS_REGION
               value: eu-west-1
@@ -63,7 +73,7 @@ No PVC is required when configs, inputs, and outputs use object-store URIs.
 Use the same image with command:
 
 ```bash
-calibre run --config s3://bucket/configs/winning.yaml
+calibre run --config s3://bucket/configs/backtest.yaml
 ```
 
 Grant the task role read access to input/config prefixes and write access to
@@ -131,7 +141,7 @@ storage and restrict write access to Calibre workers.
 Use command override:
 
 ```bash
-calibre run --config abfs://container/configs/winning.yaml
+calibre run --config abfs://container/configs/backtest.yaml
 ```
 
 Provide storage credentials via managed identity or environment variables
