@@ -17,7 +17,12 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import NewsvendorPolicyParameters
 from calibre.execution.backend import BackendEngine, ConformalOptions, LedgerOutputOptions
-from calibre.execution.ledger import InMemoryLedger, StreamingLedger, resolved_ledger_uri
+from calibre.execution.ledger import (
+    InMemoryLedger,
+    StreamingLedger,
+    StreamingOrderLedger,
+    resolved_ledger_uri,
+)
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import OrderPolicyConfig
 
@@ -309,3 +314,27 @@ def test_partitioned_streaming_requires_partition_columns(tmp_path) -> None:
             ledger.append(frame)
     finally:
         ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# Direct StreamingOrderLedger adapter tests — the forecast adapter got a direct
+# suite above; its append-only order-ledger sibling had none.
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_order_ledger_streams_nonempty_and_skips_empty(tmp_path) -> None:
+    path = tmp_path / "orders.parquet"
+    ledger = StreamingOrderLedger(path)
+    orders = pd.DataFrame({UNIQUE_ID: ["SKU_001", "SKU_002"], "order_qty": [3.0, 5.0]})
+    ledger.append(orders)
+    ledger.append(pd.DataFrame(columns=[UNIQUE_ID, "order_qty"]))  # empty -> skipped
+    ledger.close()
+
+    written = pd.read_parquet(path).reset_index(drop=True)
+    pd.testing.assert_frame_equal(written, orders, check_dtype=False)
+
+
+def test_streaming_order_ledger_empty_when_nothing_appended(tmp_path) -> None:
+    ledger = StreamingOrderLedger(tmp_path / "orders.parquet")
+    ledger.close()
+    assert ledger.to_df().empty
