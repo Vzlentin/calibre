@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote
 
 import fsspec
@@ -127,155 +127,150 @@ def _resolved_updates_uri(path: str | Path) -> str:
 _FORECAST_KEY_COLUMNS = [UNIQUE_ID, DS, FORECAST_ORIGIN, MODEL_NAME, H]
 
 
-class _BaseLedger:
-    _empty_columns: list[str] = []
+def _make_sink(path: str, partition_cols: list[str] | None) -> LedgerSink:
+    if partition_cols:
+        return _PartitionedParquetLedgerSink(path, partition_cols)
+    return _ParquetLedgerSink(path)
+
+
+@runtime_checkable
+class Ledger(Protocol):
+    """Forecast ledger interface. The construction site picks an adapter once;
+    no caller flips a mode after the fact."""
+
+    def append(self, df: pd.DataFrame) -> None: ...
+
+    def resolution_frame(self) -> pd.DataFrame: ...
+
+    def update_resolved(self, df: pd.DataFrame) -> None: ...
+
+    def to_df(self) -> pd.DataFrame: ...
+
+    def to_parquet(self, path: str | Path) -> None: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class OrderLedger(Protocol):
+    """Order ledger interface — append-only; no resolution merge."""
+
+    def append(self, df: pd.DataFrame) -> None: ...
+
+    def to_df(self) -> pd.DataFrame: ...
+
+    def to_parquet(self, path: str | Path) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class InMemoryLedger:
+    """Forecast ledger that accumulates frames in memory. ``update_resolved``
+    replaces the whole frame; there is no pending side buffer."""
 
     def __init__(self) -> None:
         self._frames: list[pd.DataFrame] = []
-        self._stream_sink: LedgerSink | None = None
-        self._stream_path: str | None = None
-        self._resolved_path: str | None = None
 
-    def stream_to(
-        self,
-        path: str | Path,
-        *,
-        partition_cols: list[str] | None = None,
-    ) -> None:
-        self._stream_path = str(path)
-        self._resolved_path = resolved_ledger_uri(path)
-        fs, fs_path = open_fs(self._resolved_path)
-        with contextlib.suppress(FileNotFoundError):
-            fs.rm(fs_path)
-        self._stream_sink = (
-            _PartitionedParquetLedgerSink(self._stream_path, partition_cols)
-            if partition_cols
-            else _ParquetLedgerSink(self._stream_path)
-        )
+    def append(self, df: pd.DataFrame) -> None:
+        validate_forecast_frame(df)
+        self._frames.append(df)
 
-    @property
-    def streaming(self) -> bool:
-        return self._stream_sink is not None
+    def resolution_frame(self) -> pd.DataFrame:
+        return self.to_df()
 
-    def append_streaming(self, df: pd.DataFrame) -> None:
-        if self._stream_sink is None:
-            raise RuntimeError("Call stream_to(path) before append_streaming(df)")
-        self._stream_sink.append(df)
-
-    def close(self) -> None:
-        if self._stream_sink is not None:
-            self._stream_sink.close()
+    def update_resolved(self, df: pd.DataFrame) -> None:
+        self._frames = [df]
 
     def to_df(self) -> pd.DataFrame:
-        if self.streaming and self._stream_path is not None and exists(self._stream_path):
-            return pd.read_parquet(self._stream_path)
         if not self._frames:
-            return pd.DataFrame(columns=self._empty_columns)
+            return pd.DataFrame(columns=REQUIRED_COLUMNS)
         return pd.concat(self._frames, ignore_index=True)
 
     def to_parquet(self, path: str | Path) -> None:
         write_parquet(self.to_df(), path)
 
+    def close(self) -> None:
+        return None
 
-class ForecastLedger(_BaseLedger):
-    _empty_columns = REQUIRED_COLUMNS
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._pending: pd.DataFrame | None = None
-        self._resolved_updates_path: str | None = None
-        self._resolved_update_sink: LedgerSink | None = None
+class StreamingLedger:
+    """Forecast ledger that streams every append to a parquet sink and keeps
+    only the still-pending (unresolved) rows in memory. Resolved updates land in
+    a side file and are merged into the finalized artifact on ``close``."""
 
-    def stream_to(
-        self,
-        path: str | Path,
-        *,
-        partition_cols: list[str] | None = None,
-    ) -> None:
-        super().stream_to(path, partition_cols=partition_cols)
+    def __init__(self, path: str | Path, *, partition_cols: list[str] | None = None) -> None:
+        self._stream_path = str(path)
+        self._resolved_path = resolved_ledger_uri(path)
         self._resolved_updates_path = _resolved_updates_uri(path)
-        fs, fs_path = open_fs(self._resolved_updates_path)
-        with contextlib.suppress(FileNotFoundError):
-            fs.rm(fs_path)
+        for stale in (self._resolved_path, self._resolved_updates_path):
+            fs, fs_path = open_fs(stale)
+            with contextlib.suppress(FileNotFoundError):
+                fs.rm(fs_path)
+        self._sink = _make_sink(self._stream_path, partition_cols)
+        self._pending: pd.DataFrame | None = None
+        self._resolved_update_sink: LedgerSink | None = None
 
     def append(self, df: pd.DataFrame) -> None:
         validate_forecast_frame(df)
-        if self.streaming:
-            self.append_streaming(df)
-            pending = df[df[Y].isna()].copy()
-            if not pending.empty:
-                self._pending = (
-                    pending
-                    if self._pending is None or self._pending.empty
-                    else pd.concat([self._pending, pending], ignore_index=True)
-                )
-            return
-        self._frames.append(df)
+        self._sink.append(df)
+        pending = df[df[Y].isna()].copy()
+        if not pending.empty:
+            self._pending = (
+                pending
+                if self._pending is None or self._pending.empty
+                else pd.concat([self._pending, pending], ignore_index=True)
+            )
 
     def resolution_frame(self) -> pd.DataFrame:
-        if self.streaming:
-            if self._pending is None:
-                return pd.DataFrame(columns=self._empty_columns)
-            return self._pending.copy()
-        return self.to_df()
+        if self._pending is None:
+            return pd.DataFrame(columns=REQUIRED_COLUMNS)
+        return self._pending.copy()
 
     def update_resolved(self, df: pd.DataFrame) -> None:
-        if self.streaming:
-            resolved = df[df[Y].notna()].copy()
-            if not resolved.empty:
-                self._append_resolved_updates(resolved)
-            pending = df[df[Y].isna()].copy()
-            self._pending = pending if not pending.empty else None
-            return
-        self._frames = [df]
+        resolved = df[df[Y].notna()].copy()
+        if not resolved.empty:
+            self._append_resolved_updates(resolved)
+        pending = df[df[Y].isna()].copy()
+        self._pending = pending if not pending.empty else None
+
+    def to_df(self) -> pd.DataFrame:
+        if exists(self._resolved_path):
+            return pd.read_parquet(self._resolved_path)
+        if exists(self._stream_path):
+            return self._materialize_streaming_frame()
+        if self._pending is not None:
+            return self._pending.copy()
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+    def to_parquet(self, path: str | Path) -> None:
+        write_parquet(self.to_df(), path)
 
     def close(self) -> None:
-        super().close()
+        self._sink.close()
         if self._resolved_update_sink is not None:
             self._resolved_update_sink.close()
             self._resolved_update_sink = None
         self._finalize_resolved_artifact()
 
-    def to_df(self) -> pd.DataFrame:
-        if self.streaming:
-            if self._resolved_path is not None and exists(self._resolved_path):
-                return pd.read_parquet(self._resolved_path)
-            if self._stream_path is not None and exists(self._stream_path):
-                return self._materialize_streaming_frame()
-            if self._pending is not None:
-                return self._pending.copy()
-            return pd.DataFrame(columns=self._empty_columns)
-        return super().to_df()
-
     def _append_resolved_updates(self, df: pd.DataFrame) -> None:
-        if self._resolved_updates_path is None:
-            return
         if self._resolved_update_sink is None:
             self._resolved_update_sink = _ParquetLedgerSink(self._resolved_updates_path)
         self._resolved_update_sink.append(df)
 
     def _finalize_resolved_artifact(self) -> None:
-        if (
-            self._stream_path is None
-            or self._resolved_path is None
-            or not exists(self._stream_path)
-        ):
+        if not exists(self._stream_path):
             return
         write_parquet(self._materialize_streaming_frame(), self._resolved_path)
-        if self._resolved_updates_path is not None and exists(self._resolved_updates_path):
+        if exists(self._resolved_updates_path):
             fs, fs_path = open_fs(self._resolved_updates_path)
             with contextlib.suppress(FileNotFoundError):
                 fs.rm(fs_path)
 
     def _materialize_streaming_frame(self) -> pd.DataFrame:
-        if self._stream_path is None or not exists(self._stream_path):
-            return pd.DataFrame(columns=self._empty_columns)
+        if not exists(self._stream_path):
+            return pd.DataFrame(columns=REQUIRED_COLUMNS)
         raw = pd.read_parquet(self._stream_path)
-        if (
-            self._resolved_updates_path is None
-            or not exists(self._resolved_updates_path)
-            or raw.empty
-        ):
+        if not exists(self._resolved_updates_path) or raw.empty:
             return raw
         updates = pd.read_parquet(self._resolved_updates_path)
         if updates.empty:
@@ -302,10 +297,47 @@ class ForecastLedger(_BaseLedger):
         return final
 
 
-class OrderLedger(_BaseLedger):
+class InMemoryOrderLedger:
+    """Order ledger that accumulates non-empty order frames in memory."""
+
+    def __init__(self) -> None:
+        self._frames: list[pd.DataFrame] = []
+
     def append(self, df: pd.DataFrame) -> None:
         if not df.empty:
-            if self.streaming:
-                self.append_streaming(df.copy())
-                return
             self._frames.append(df.copy())
+
+    def to_df(self) -> pd.DataFrame:
+        if not self._frames:
+            return pd.DataFrame(columns=[])
+        return pd.concat(self._frames, ignore_index=True)
+
+    def to_parquet(self, path: str | Path) -> None:
+        write_parquet(self.to_df(), path)
+
+    def close(self) -> None:
+        return None
+
+
+class StreamingOrderLedger:
+    """Order ledger that streams non-empty order frames straight to a parquet
+    sink; nothing accumulates in memory."""
+
+    def __init__(self, path: str | Path, *, partition_cols: list[str] | None = None) -> None:
+        self._stream_path = str(path)
+        self._sink = _make_sink(self._stream_path, partition_cols)
+
+    def append(self, df: pd.DataFrame) -> None:
+        if not df.empty:
+            self._sink.append(df.copy())
+
+    def to_df(self) -> pd.DataFrame:
+        if exists(self._stream_path):
+            return pd.read_parquet(self._stream_path)
+        return pd.DataFrame(columns=[])
+
+    def to_parquet(self, path: str | Path) -> None:
+        write_parquet(self.to_df(), path)
+
+    def close(self) -> None:
+        self._sink.close()

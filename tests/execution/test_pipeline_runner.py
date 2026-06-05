@@ -13,7 +13,7 @@ from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, H, Y
 from calibre.execution.backend import BackendResult
 from calibre.execution.data_loading import load_period
 from calibre.execution.dataset import DatasetBundle
-from calibre.execution.ledger import ForecastLedger as Ledger
+from calibre.execution.ledger import Ledger
 from calibre.execution.runner import PipelineResult, _resolve_bundle, run_backtest, run_forecast
 from calibre.execution.vn2_adapter import VN2DatasetAdapter
 
