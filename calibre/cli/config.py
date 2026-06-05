@@ -157,7 +157,7 @@ class ExecutionConfig(_Section):
 
 
 class BackendConfig(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     config_schema: str
     dataset: DatasetConfig

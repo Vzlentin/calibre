@@ -40,10 +40,47 @@ def test_run_from_config_maps_execution_kwargs(monkeypatch) -> None:
     assert captured["data_dir"] == "data/vn2"
     assert captured["horizon"] == 3
     assert captured["tune"] is False
+    assert captured["results_dir"] is None
+    assert captured["verbose"] is True
     assert captured["execution_backend"] == "auto"
+    assert captured["ray_address"] is None
+    assert captured["staging_uri"] is None
     assert captured["ray_threshold"] == 10
     assert captured["max_concurrency"] == 4
     assert captured["cpu_per_task"] == 0.5
+
+
+def test_run_from_config_forwards_ray_execution_kwargs(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_run_benchmark(**kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame({UNIQUE_ID: ["A"], "total_cost": [0.0]})
+
+    monkeypatch.setattr(
+        "benchmarks.vn2.run_benchmark.run_benchmark",
+        _fake_run_benchmark,
+    )
+    config = load_config_from_mapping(
+        {
+            "config_schema": "1.0",
+            "dataset": {"adapter": "vn2", "path": "data/vn2"},
+            "tasks": [{"model": "global_lgbm", "horizon": 3, "config": {"backend": "mlforecast"}}],
+            "origins": {"start": "2024-01-01", "end": "2024-01-01", "freq": "W-MON"},
+            "output": {"streaming": False},
+            "execution": {
+                "backend": "ray",
+                "ray_address": "ray://head:10001",
+                "staging_uri": "s3://bucket/staging",
+            },
+        }
+    )
+
+    run_from_config(config)
+
+    assert captured["execution_backend"] == "ray"
+    assert captured["ray_address"] == "ray://head:10001"
+    assert captured["staging_uri"] == "s3://bucket/staging"
 
 
 def test_run_from_config_preserves_fsspec_dataset_uri(monkeypatch) -> None:

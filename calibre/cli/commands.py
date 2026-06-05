@@ -110,9 +110,7 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
     set_order_cost(currency, dataset, total_cost)
 
 
-def run(
-    config_path: str | Path, *, metrics_port: int | None = None
-) -> BackendResult | pd.DataFrame:
+def run(config_path: str | Path, *, metrics_port: int | None = None) -> BackendResult:
     if metrics_port is not None:
         from calibre.core.metrics import serve
 
@@ -128,7 +126,7 @@ def run_config(
     conformal_state_store: ConformalStateStore | None = None,
     initial_ledger: pd.DataFrame | None = None,
     max_unique_ids: int | None = None,
-) -> BackendResult | pd.DataFrame:
+) -> BackendResult:
     bundle = _load_dataset(config)
     _enforce_unique_id_limit(bundle, max_unique_ids)
     model_configs = [task.resolved_model_config() for task in config.tasks]
@@ -215,7 +213,7 @@ def health() -> dict[str, Any]:
     return payload
 
 
-def run_sweep(configs_dir: str | Path) -> list[BackendResult | pd.DataFrame]:
+def run_sweep(configs_dir: str | Path) -> list[BackendResult]:
     fs, root = open_fs(configs_dir)
     if not fs.exists(root):
         raise FileNotFoundError(f"Config directory not found: {configs_dir}")
