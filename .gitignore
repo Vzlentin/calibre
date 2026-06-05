@@ -224,3 +224,7 @@ results/
 
 # Codegraph index (generated)
 .codegraph/
+
+# Compound Engineering machine-local config
+.compound-engineering/*.local.yaml
+.compound-engineering/
