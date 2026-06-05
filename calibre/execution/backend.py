@@ -51,7 +51,14 @@ from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
 from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
 from calibre.execution.io import join_uri, rm
-from calibre.execution.ledger import ForecastLedger, OrderLedger
+from calibre.execution.ledger import (
+    InMemoryLedger,
+    InMemoryOrderLedger,
+    Ledger,
+    OrderLedger,
+    StreamingLedger,
+    StreamingOrderLedger,
+)
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
@@ -231,7 +238,7 @@ def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
 class BackendResult:
     """Result returned by BackendEngine.execute()."""
 
-    ledger: ForecastLedger
+    ledger: Ledger
     order_ledger: OrderLedger | None = None
 
 
@@ -339,8 +346,8 @@ class BackendEngine:
         if result is not None:
             return result
         return BackendResult(
-            ledger=ForecastLedger(),
-            order_ledger=OrderLedger() if self.order_config is not None else None,
+            ledger=InMemoryLedger(),
+            order_ledger=InMemoryOrderLedger() if self.order_config is not None else None,
         )
 
     def iter_origins(
@@ -351,14 +358,20 @@ class BackendEngine:
     ) -> Iterator[BackendResult]:
         """Yield the cumulative backend result after each completed origin."""
         validate_actuals_frame(actuals)
-        ledger = ForecastLedger()
-        if self.streaming_output is not None:
-            ledger.stream_to(self.streaming_output)
+        ledger: Ledger = (
+            StreamingLedger(self.streaming_output)
+            if self.streaming_output is not None
+            else InMemoryLedger()
+        )
         if self.initial_ledger is not None and not self.initial_ledger.empty:
             ledger.append(_coerce_forecast_frame_dtypes(self.initial_ledger))
-        order_ledger = OrderLedger() if self.order_config is not None else None
-        if order_ledger is not None and self.streaming_order_output is not None:
-            order_ledger.stream_to(self.streaming_order_output)
+        order_ledger: OrderLedger | None = None
+        if self.order_config is not None:
+            order_ledger = (
+                StreamingOrderLedger(self.streaming_order_output)
+                if self.streaming_order_output is not None
+                else InMemoryOrderLedger()
+            )
         self._restore_conformal_state()
         self._advance_issued_count_from_initial_ledger()
         conformal_runtime = self.conformal_runtime
@@ -458,7 +471,7 @@ class BackendEngine:
     def _execute_origin(
         self,
         *,
-        ledger: ForecastLedger,
+        ledger: Ledger,
         order_ledger: OrderLedger | None,
         actuals: pd.DataFrame,
         origin: pd.Timestamp,
@@ -493,7 +506,7 @@ class BackendEngine:
 
     def _resolve_ledger(
         self,
-        ledger: ForecastLedger,
+        ledger: Ledger,
         actuals: pd.DataFrame,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,

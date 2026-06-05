@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
+from calibre.core.forecast_frame import (
+    DS,
+    FORECAST_ORIGIN,
+    MODEL_NAME,
+    UNIQUE_ID,
+    Y_HAT,
+    H,
+    Y,
+)
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import NewsvendorPolicyParameters
 from calibre.execution.backend import BackendEngine, ConformalOptions, LedgerOutputOptions
-from calibre.execution.ledger import ForecastLedger
+from calibre.execution.ledger import InMemoryLedger, StreamingLedger, resolved_ledger_uri
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import OrderPolicyConfig
 
@@ -31,6 +40,26 @@ class _StubAdapter(ModelAdapter):
         )
 
 
+def _pending_frame(n: int = 2, origin: str = "2024-01-01") -> pd.DataFrame:
+    """A forecast frame with all-unresolved (NaN ``y``) rows."""
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: ["SKU_001"] * n,
+            DS: pd.date_range("2024-01-07", periods=n, freq="W"),
+            Y: [np.nan] * n,
+            Y_HAT: [10.0 * (i + 1) for i in range(n)],
+            H: list(range(1, n + 1)),
+            FORECAST_ORIGIN: pd.Timestamp(origin),
+            MODEL_NAME: ["SeasonalNaive"] * n,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Engine-level characterization: streaming adapter == in-memory adapter.
+# ---------------------------------------------------------------------------
+
+
 def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> None:
     dates = pd.date_range("2024-01-07", periods=8, freq="W")
     actuals = pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [float(i) for i in range(8)]})
@@ -43,7 +72,8 @@ def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> Non
 
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
-    expected = BackendEngine().execute([task], actuals, origins).ledger.to_df()
+    in_memory_result = BackendEngine().execute([task], actuals, origins)
+    expected = in_memory_result.ledger.to_df()
     path = tmp_path / "ledger.parquet"
     streaming_result = BackendEngine(
         output=LedgerOutputOptions(forecast_path=str(path), streaming=True),
@@ -51,9 +81,10 @@ def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> Non
 
     actual = streaming_result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)
-    # No public surface exposes the in-memory buffer; assert directly that
-    # streaming never accumulated frames in memory (the whole point of streaming).
-    assert streaming_result.ledger._frames == []
+    # The mode is chosen once at construction: streaming_output unset → in-memory
+    # adapter; set → streaming adapter (no in-memory frame buffer to leak into).
+    assert isinstance(in_memory_result.ledger, InMemoryLedger)
+    assert isinstance(streaming_result.ledger, StreamingLedger)
     assert path.exists()
     assert (tmp_path / "ledger.resolved.parquet").exists()
 
@@ -163,9 +194,74 @@ def test_origin_iterator_matches_batch_conformal_and_ordering(monkeypatch) -> No
     )
 
 
+# ---------------------------------------------------------------------------
+# Direct StreamingLedger adapter tests — the merge is now reachable without a
+# full backtest (the deepening's new test surface).
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_append_keeps_only_pending_in_resolution_frame(tmp_path) -> None:
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_pending_frame(3))
+    pending = ledger.resolution_frame()
+    assert len(pending) == 3
+    assert pending[Y].isna().all()
+    ledger.close()
+
+
+def test_streaming_merge_prefers_resolved_on_key_collision(tmp_path) -> None:
+    path = tmp_path / "ledger.parquet"
+    ledger = StreamingLedger(path)
+    ledger.append(_pending_frame(2))
+
+    # Resolve only h=1; h=2 stays pending.
+    resolved = _pending_frame(2)
+    resolved.loc[resolved[H] == 1, Y] = 11.0
+    ledger.update_resolved(resolved)
+    # The streaming buffer now holds only the still-pending row.
+    assert len(ledger.resolution_frame()) == 1
+    ledger.close()
+
+    final = pd.read_parquet(resolved_ledger_uri(path)).sort_values(H).reset_index(drop=True)
+    assert final.loc[final[H] == 1, Y].iloc[0] == 11.0  # resolved value wins on collision
+    assert pd.isna(final.loc[final[H] == 2, Y].iloc[0])  # unresolved row stays NaN
+
+
+def test_streaming_close_finalizes_artifact_and_removes_updates_temp(tmp_path) -> None:
+    path = tmp_path / "ledger.parquet"
+    ledger = StreamingLedger(path)
+    ledger.append(_pending_frame(2))
+    resolved = _pending_frame(2)
+    resolved[Y] = [5.0, 6.0]
+    ledger.update_resolved(resolved)
+
+    # The resolved-updates side file exists while the ledger is open.
+    updates_path = tmp_path / "ledger.resolved-updates.parquet"
+    assert updates_path.exists()
+
+    ledger.close()
+
+    # close() finalizes the merged artifact and removes the temp side file.
+    assert (tmp_path / "ledger.resolved.parquet").exists()
+    assert not updates_path.exists()
+
+
+def test_streaming_merge_missing_key_columns_raises(tmp_path) -> None:
+    path = tmp_path / "ledger.parquet"
+    ledger = StreamingLedger(path)
+    raw = _pending_frame(2)
+    raw.to_parquet(ledger._stream_path)
+    # A resolved-updates artifact missing a key column cannot be merged.
+    updates = raw.iloc[[0]].drop(columns=[MODEL_NAME])
+    updates.to_parquet(ledger._resolved_updates_path)
+
+    with pytest.raises(ValueError, match="without key columns"):
+        ledger._materialize_streaming_frame()
+
+
 def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:
-    ledger = ForecastLedger()
     path = tmp_path / "partitioned-ledger"
+    ledger = StreamingLedger(path, partition_cols=[UNIQUE_ID])
     first = pd.DataFrame(
         {
             UNIQUE_ID: ["A", "B"],
@@ -173,15 +269,16 @@ def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:
             Y: [float("nan"), float("nan")],
             Y_HAT: [1.0, 2.0],
             H: [1, 1],
-            "forecast_origin": [pd.Timestamp("2024-01-01")] * 2,
-            "model_name": ["stub", "stub"],
+            FORECAST_ORIGIN: [pd.Timestamp("2024-01-01")] * 2,
+            MODEL_NAME: ["stub", "stub"],
         }
     )
     second = first.assign(**{Y_HAT: [3.0, 4.0]})
 
-    ledger.stream_to(path, partition_cols=[UNIQUE_ID])
     ledger.append(first)
     ledger.append(second)
+    # All rows are unresolved, so the streaming buffer carries them as pending.
+    assert len(ledger.resolution_frame()) == 4
     ledger.close()
 
     written = pd.read_parquet(path).sort_values([UNIQUE_ID, Y_HAT]).reset_index(drop=True)
@@ -191,13 +288,10 @@ def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:
     pd.testing.assert_frame_equal(written[expected.columns], expected, check_dtype=False)
     assert (path / "unique_id=A" / "part-0.parquet").exists()
     assert (path / "unique_id=B" / "part-0.parquet").exists()
-    # In-memory buffer stays empty: rows are streamed straight to the partitions.
-    assert ledger._frames == []
 
 
 def test_partitioned_streaming_requires_partition_columns(tmp_path) -> None:
-    ledger = ForecastLedger()
-    ledger.stream_to(tmp_path / "partitioned-ledger", partition_cols=["missing"])
+    ledger = StreamingLedger(tmp_path / "partitioned-ledger", partition_cols=["missing"])
     frame = pd.DataFrame(
         {
             UNIQUE_ID: ["A"],
@@ -205,8 +299,8 @@ def test_partitioned_streaming_requires_partition_columns(tmp_path) -> None:
             Y: [float("nan")],
             Y_HAT: [1.0],
             H: [1],
-            "forecast_origin": [pd.Timestamp("2024-01-01")],
-            "model_name": ["stub"],
+            FORECAST_ORIGIN: [pd.Timestamp("2024-01-01")],
+            MODEL_NAME: ["stub"],
         }
     )
 

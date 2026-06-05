@@ -21,7 +21,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
-from calibre.execution.ledger import ForecastLedger, OrderLedger
+from calibre.execution.ledger import Ledger, OrderLedger
 from calibre.execution.task_builder import build_tasks
 from calibre.ordering.policy_config import OrderPolicyConfig
 
@@ -30,7 +30,7 @@ _DEFAULT_METRICS: list[Callable] = [mae, rmse, smape, wape]
 
 @dataclass(frozen=True)
 class PipelineResult:
-    ledger: ForecastLedger
+    ledger: Ledger
     scores: pd.DataFrame
     sales: pd.DataFrame
     order_ledger: OrderLedger | None = None
