@@ -39,7 +39,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.ledger import OrderLedger
 from calibre.forecasting.adapter_base import ModelAdapter
-from calibre.ordering.policy_config import OrderPolicyConfig
+from calibre.ordering.policy_config import NewsvendorConfig, RsConfig
 
 
 @pytest.fixture
@@ -418,7 +418,7 @@ def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup)
             review_period=1,
         )
     ]
-    order_config = OrderPolicyConfig(policy="rs", params=params, coverage=0.9)
+    order_config = RsConfig(params=params, coverage=0.9)
     engine = BackendEngine(
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config)),
         order=order_config,
@@ -450,7 +450,7 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
             inventory_position=50.0,
         )
     ]
-    order_config = OrderPolicyConfig(policy="newsvendor", params=params, coverage=0.9)
+    order_config = NewsvendorConfig(params=params, coverage=0.9)
     engine = BackendEngine(
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config)),
         order=order_config,

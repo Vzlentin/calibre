@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 import pandas as pd
@@ -22,7 +22,12 @@ from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.io import is_local_fs, open_fs
 from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
-from calibre.ordering.policy_config import OrderPolicyConfig, OrderPolicyType
+from calibre.ordering.policy_config import (
+    NewsvendorConfig,
+    OrderPolicy,
+    RsConfig,
+    RssConfig,
+)
 from calibre.storage.state import ConformalStateStore
 
 logger = logging.getLogger(__name__)
@@ -72,7 +77,7 @@ def _enforce_unique_id_limit(bundle: DatasetBundle, max_unique_ids: int | None) 
         )
 
 
-def _build_order_config(config: BackendConfig) -> OrderPolicyConfig | None:
+def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
     if config.ordering is None:
         return None
     if config.ordering.params is None:
@@ -80,12 +85,23 @@ def _build_order_config(config: BackendConfig) -> OrderPolicyConfig | None:
     params = config.ordering.params
     if isinstance(params, dict):
         params = [params]
-    return OrderPolicyConfig(
-        policy=cast(OrderPolicyType, config.ordering.policy),
-        params=pd.DataFrame(params),
-        coverage=config.ordering.coverage,
-        quantile=config.ordering.quantile,
-    )
+    params_frame = pd.DataFrame(params)
+    ordering = config.ordering
+    if ordering.policy == "rs":
+        return RsConfig(
+            params=params_frame,
+            coverage=ordering.coverage,
+            quantile=ordering.quantile,
+        )
+    if ordering.policy == "rss":
+        if ordering.quantile is not None:
+            raise ValueError("ordering.quantile is not a valid knob for the rss policy")
+        return RssConfig(params=params_frame, coverage=ordering.coverage)
+    if ordering.policy == "newsvendor":
+        if ordering.quantile is not None:
+            raise ValueError("ordering.quantile is not a valid knob for the newsvendor policy")
+        return NewsvendorConfig(params=params_frame, coverage=ordering.coverage)
+    raise ValueError(f"unknown order policy: {ordering.policy!r}")
 
 
 def _metric_currency(config: BackendConfig) -> str:

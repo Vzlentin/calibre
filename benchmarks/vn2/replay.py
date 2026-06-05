@@ -61,7 +61,7 @@ from calibre.execution import observe_cumulative
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import RsConfig, apply_order_policy
 
 
 def build_rs_params(
@@ -432,15 +432,13 @@ def replay_cached_cost(
         if runtime is not None:
             policy_frame = runtime.apply(frame)
             pending.append(policy_frame.copy())
-            order_config = OrderPolicyConfig(
-                policy="rs",
+            order_config = RsConfig(
                 params=build_rs_params(simulator, cache.lead_time, cache.review_period),
                 coverage=runtime.config.coverage,
             )
         else:
             policy_frame = frame
-            order_config = OrderPolicyConfig(
-                policy="rs",
+            order_config = RsConfig(
                 params=build_rs_params(simulator, cache.lead_time, cache.review_period),
                 quantile=cache.quantile_alpha,
             )

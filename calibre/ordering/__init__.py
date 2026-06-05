@@ -16,7 +16,13 @@ from calibre.ordering.decision_rules import (
 )
 from calibre.ordering.newsvendor import apply_newsvendor_policy
 from calibre.ordering.periodic_review import apply_rs_policy
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import (
+    NewsvendorConfig,
+    OrderPolicy,
+    RsConfig,
+    RssConfig,
+    apply_order_policy,
+)
 from calibre.ordering.policy_protocols import DecisionRule, OrderingArithmetic
 from calibre.ordering.reorder_point import apply_rss_policy
 from calibre.ordering.simulation.costs import CostModel, LinearCostModel
@@ -32,7 +38,10 @@ __all__ = [
     "RssPolicyParameters",
     "DecisionRule",
     "OrderingArithmetic",
-    "OrderPolicyConfig",
+    "OrderPolicy",
+    "RsConfig",
+    "RssConfig",
+    "NewsvendorConfig",
     "apply_order_policy",
     "apply_newsvendor_policy",
     "apply_rs_policy",

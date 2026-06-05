@@ -54,7 +54,7 @@ from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period, melt_wide_instock
 from calibre.execution.io import exists, join_uri
 from calibre.forecasting.features import add_stockout_features
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import RsConfig, apply_order_policy
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +191,7 @@ def run_winning(
 
             actual_demand = _round_actuals(data_dir, round_num, initial_states)
 
-            order_config = OrderPolicyConfig(
-                policy="rs",
+            order_config = RsConfig(
                 params=_build_rs_params(simulator, lead_time, review_period),
                 quantile=QUANTILE_ALPHA,
             )

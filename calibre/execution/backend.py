@@ -63,7 +63,7 @@ from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config
 from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
 from calibre.forecasting.cache import ModelArtifactCache
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
 logger = logging.getLogger(__name__)
@@ -298,7 +298,7 @@ class BackendEngine:
         execution: ExecutionOptions = _DEFAULT_EXECUTION,
         output: LedgerOutputOptions = _DEFAULT_OUTPUT,
         conformal: ConformalOptions = _DEFAULT_CONFORMAL,
-        order: OrderPolicyConfig | None = None,
+        order: OrderPolicy | None = None,
     ) -> None:
         self.execution = execution
         self.output = output
