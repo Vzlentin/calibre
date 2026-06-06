@@ -94,14 +94,17 @@ def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
         raise ValueError("hierarchy missing required column: unique_id")
     if hierarchy[UNIQUE_ID].isna().any():
         raise ValueError("hierarchy has null unique_id values")
-    if hierarchy[UNIQUE_ID].duplicated().any():
-        duplicates = hierarchy.loc[hierarchy[UNIQUE_ID].duplicated(), UNIQUE_ID].astype(str)
-        raise ValueError(f"hierarchy has duplicate unique_id rows: {sorted(duplicates.unique())}")
-
     attr_cols = [col for col in hierarchy.columns if col != UNIQUE_ID]
     frame = hierarchy.copy()
     frame[UNIQUE_ID] = frame[UNIQUE_ID].astype(str)
     frame = frame.sort_values(UNIQUE_ID, kind="stable").reset_index(drop=True)
+
+    # Detect duplicates on the stringified ids: bottom_ids are derived from the
+    # stringified column, so values colliding only as strings (e.g. 1 and "1")
+    # must be rejected here too.
+    if frame[UNIQUE_ID].duplicated().any():
+        duplicates = frame.loc[frame[UNIQUE_ID].duplicated(), UNIQUE_ID]
+        raise ValueError(f"hierarchy has duplicate unique_id rows: {sorted(duplicates.unique())}")
 
     for col in attr_cols:
         if frame[col].isna().any():
