@@ -6,6 +6,7 @@ registry; concrete strategies (no-op, bottom-up, top-down, MinT) are resolved by
 name and default to a no-op pass-through.
 """
 
+from calibre.reconciliation.apply import NODE_LABEL, VectorReconciler
 from calibre.reconciliation.noop import NoOpReconciler
 from calibre.reconciliation.protocols import Reconciler
 from calibre.reconciliation.registry import (
@@ -23,10 +24,12 @@ from calibre.reconciliation.summing import (
 
 __all__ = [
     "DEFAULT_STRATEGY",
+    "NODE_LABEL",
     "TOTAL_LABEL",
     "NoOpReconciler",
     "Reconciler",
     "SummingMatrix",
+    "VectorReconciler",
     "available_reconcilers",
     "build_summing_matrix",
     "get_reconciler_builder",
