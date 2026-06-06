@@ -84,8 +84,7 @@ Get a plan in hand, by input kind:
     grep -rl "#<N>" docs/plans                                       # degraded store
     ```
 
-    If found, use it. Else invoke `/ce-plan` inline, seeded with the issue title
-    + body.
+    If found, use it. Else invoke `/ce-plan` inline, seeded with the issue title + body.
   - **Idea / brainstorm doc:** keyword/slug search the store's plan titles and
     filenames. On a *plausible* match, confirm with the user before reusing it (a
     wrong reuse is worse than a fresh plan). On no match, invoke `/ce-plan`
