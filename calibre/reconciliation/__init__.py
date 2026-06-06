@@ -7,6 +7,13 @@ name and default to a no-op pass-through.
 """
 
 from calibre.reconciliation.apply import NODE_LABEL, VectorReconciler
+from calibre.reconciliation.mint import (
+    MinTReconciler,
+    build_mint_reconciler,
+    mint_projection,
+    ols_projection,
+    schafer_strimmer_shrinkage,
+)
 from calibre.reconciliation.noop import NoOpReconciler
 from calibre.reconciliation.protocols import Reconciler
 from calibre.reconciliation.registry import (
@@ -28,14 +35,19 @@ __all__ = [
     "NODE_LABEL",
     "TOTAL_LABEL",
     "BottomUpReconciler",
+    "MinTReconciler",
     "NoOpReconciler",
     "Reconciler",
     "SummingMatrix",
     "TopDownReconciler",
     "VectorReconciler",
     "available_reconcilers",
+    "build_mint_reconciler",
     "build_summing_matrix",
     "get_reconciler_builder",
+    "mint_projection",
+    "ols_projection",
     "register_reconciler",
     "resolve_reconciler",
+    "schafer_strimmer_shrinkage",
 ]
