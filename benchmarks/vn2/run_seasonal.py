@@ -93,7 +93,7 @@ from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri
 from calibre.execution.task_builder import build_tasks
 from calibre.forecasting.ensemble import ensemble_median
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import RsConfig, apply_order_policy
 
 logger = logging.getLogger(__name__)
 
@@ -388,8 +388,7 @@ def run_seasonal(
             try:
                 order_result = apply_order_policy(
                     frame,
-                    OrderPolicyConfig(
-                        policy="rs",
+                    RsConfig(
                         params=_build_rs_params(
                             simulator, lead_time=lead_time, review_period=review_period
                         ),

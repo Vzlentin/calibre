@@ -10,19 +10,21 @@ import pytest
 from prometheus_client import REGISTRY
 
 from calibre.cli.commands import (
+    _build_order_config,
     _record_order_cost_metric,
     health,
     run,
     run_sweep,
     validate,
 )
-from calibre.cli.config import load_config
+from calibre.cli.config import load_config, load_config_from_mapping
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
 from calibre.forecasting.adapter_base import ModelAdapter
+from calibre.ordering.policy_config import NewsvendorConfig, RsConfig, RssConfig
 
 
 class _CliDatasetAdapter:
@@ -163,6 +165,127 @@ def test_order_cost_metric_uses_total_cost_column() -> None:
         REGISTRY.get_sample_value("calibre_order_cost", {"currency": "EUR", "dataset": "unit"})
         == 4.0
     )
+
+
+def _config_with_ordering(ordering: dict) -> dict:
+    return {
+        "config_schema": "1.0",
+        "dataset": {"adapter": "unit_cli", "path": "ignored"},
+        "tasks": [{"model": "stub_model", "horizon": 1, "config": {"backend": "stub"}}],
+        "ordering": ordering,
+        "origins": {"start": "2024-02-04", "end": "2024-02-04", "freq": "W-SUN"},
+        "output": {"ledger_path": "ignored.parquet", "streaming": False},
+        "execution": {"backend": "local", "seed": 123},
+    }
+
+
+def test_cli_yaml_rs_ordering_builds_rs_config() -> None:
+    config = load_config_from_mapping(
+        _config_with_ordering(
+            {
+                "policy": "rs",
+                "coverage": 0.95,
+                "params": [
+                    {
+                        "unique_id": "A",
+                        "inventory_position": 5.0,
+                        "lead_time": 1,
+                        "review_period": 1,
+                    }
+                ],
+            }
+        )
+    )
+    order_config = _build_order_config(config)
+    assert isinstance(order_config, RsConfig)
+    assert order_config.coverage == 0.95
+    assert order_config.quantile is None
+
+
+def test_cli_yaml_rs_ordering_with_quantile_builds_rs_config() -> None:
+    config = load_config_from_mapping(
+        _config_with_ordering(
+            {
+                "policy": "rs",
+                "quantile": 0.833,
+                "params": [
+                    {
+                        "unique_id": "A",
+                        "inventory_position": 5.0,
+                        "lead_time": 1,
+                        "review_period": 1,
+                    }
+                ],
+            }
+        )
+    )
+    order_config = _build_order_config(config)
+    assert isinstance(order_config, RsConfig)
+    assert order_config.quantile == pytest.approx(0.833)
+
+
+def test_cli_yaml_rss_ordering_builds_rss_config() -> None:
+    config = load_config_from_mapping(
+        _config_with_ordering(
+            {
+                "policy": "rss",
+                "params": [
+                    {
+                        "unique_id": "A",
+                        "inventory_position": 5.0,
+                        "reorder_point": 20.0,
+                        "lead_time": 1,
+                        "review_period": 1,
+                    }
+                ],
+            }
+        )
+    )
+    order_config = _build_order_config(config)
+    assert isinstance(order_config, RssConfig)
+
+
+def test_cli_yaml_newsvendor_ordering_builds_newsvendor_config() -> None:
+    config = load_config_from_mapping(
+        _config_with_ordering(
+            {
+                "policy": "newsvendor",
+                "params": [
+                    {
+                        "unique_id": "A",
+                        "underage_cost": 3.0,
+                        "overage_cost": 1.0,
+                        "inventory_position": 0.0,
+                    }
+                ],
+            }
+        )
+    )
+    order_config = _build_order_config(config)
+    assert isinstance(order_config, NewsvendorConfig)
+
+
+def test_cli_yaml_newsvendor_with_quantile_is_rejected() -> None:
+    config = load_config_from_mapping(
+        _config_with_ordering(
+            {
+                "policy": "newsvendor",
+                "quantile": 0.9,
+                "params": [
+                    {
+                        "unique_id": "A",
+                        "underage_cost": 3.0,
+                        "overage_cost": 1.0,
+                        "inventory_position": 0.0,
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(
+        ValueError, match="ordering.quantile is not a valid knob for the newsvendor"
+    ):
+        _build_order_config(config)
 
 
 def test_load_config_accepts_ray_execution_options(tmp_path) -> None:

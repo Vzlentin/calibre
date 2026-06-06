@@ -24,7 +24,7 @@ from calibre.execution.ledger import (
     resolved_ledger_uri,
 )
 from calibre.forecasting.adapter_base import ModelAdapter
-from calibre.ordering.policy_config import OrderPolicyConfig
+from calibre.ordering.policy_config import NewsvendorConfig
 
 
 class _StubAdapter(ModelAdapter):
@@ -156,8 +156,7 @@ def test_origin_iterator_matches_batch_conformal_and_ordering(monkeypatch) -> No
         calibration_window=4,
         gamma=0.05,
     )
-    order_config = OrderPolicyConfig(
-        policy="newsvendor",
+    order_config = NewsvendorConfig(
         params=[
             NewsvendorPolicyParameters(
                 unique_id="A",

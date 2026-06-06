@@ -23,7 +23,7 @@ from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.ledger import Ledger, OrderLedger
 from calibre.execution.task_builder import build_tasks
-from calibre.ordering.policy_config import OrderPolicyConfig
+from calibre.ordering.policy_config import OrderPolicy
 
 _DEFAULT_METRICS: list[Callable] = [mae, rmse, smape, wape]
 
@@ -81,7 +81,7 @@ def run_backtest(
     max_concurrency: int | None = None,
     cpu_per_task: float | None = None,
     conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None,
-    order_config: OrderPolicyConfig | None = None,
+    order_config: OrderPolicy | None = None,
 ) -> PipelineResult:
     """End-to-end backtest pipeline.
 
@@ -150,7 +150,7 @@ def run_forecast(
     max_concurrency: int | None = None,
     cpu_per_task: float | None = None,
     conformal_runtime_factory: Callable[[], ConformalRuntime] | None = None,
-    order_config: OrderPolicyConfig | None = None,
+    order_config: OrderPolicy | None = None,
 ) -> BackendResult:
     """Forward-looking forecast. Single origin = latest date in sales. No scoring."""
     bundle = _resolve_bundle(data_dir, period, dataset=dataset)

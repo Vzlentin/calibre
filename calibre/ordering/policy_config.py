@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 import pandas as pd
 
@@ -9,43 +8,79 @@ from calibre.ordering.newsvendor import apply_newsvendor_policy
 from calibre.ordering.periodic_review import apply_rs_policy
 from calibre.ordering.reorder_point import apply_rss_policy
 
-OrderPolicyType = Literal["rs", "rss", "newsvendor"]
+
+def _validate_coverage(coverage: float) -> None:
+    if coverage <= 0 or coverage >= 1:
+        raise ValueError(f"coverage must be in (0, 1), got {coverage}")
 
 
 @dataclass(frozen=True, slots=True)
-class OrderPolicyConfig:
-    """Configuration for an order policy.
+class RsConfig:
+    """Configuration for the periodic-review (R,S) order-up-to policy.
 
     Args:
-        policy: Policy type — "rs" (R,S), "rss" (R,s,S), or "newsvendor".
-        params: Policy parameters as a DataFrame or list of parameter dataclasses.
-        coverage: Conformal interval coverage level to use. Default 0.9.
-        period: Horizon step for newsvendor policy. Ignored for rs/rss. Default 1.
-        quantile: Optional direct quantile (in (0, 1)). When set on the "rs"
-            policy, the target stock level uses the per-horizon ``q_<p>``
-            forecast column instead of the conformal upper bound and
-            ``coverage`` is ignored.
+        params: Policy parameters as a DataFrame or list of ``RsPolicyParameters``.
+        coverage: Conformal interval coverage level. Default 0.9. Ignored when
+            ``quantile`` is set.
+        quantile: Optional direct quantile (in (0, 1)). When set, the target
+            stock level uses the per-horizon ``q_<p>`` forecast column instead
+            of the conformal upper bound and ``coverage`` is ignored.
     """
 
-    policy: OrderPolicyType
     params: pd.DataFrame | list
     coverage: float = 0.9
-    period: int = 1
     quantile: float | None = None
 
     def __post_init__(self) -> None:
-        if self.coverage <= 0 or self.coverage >= 1:
-            raise ValueError(f"coverage must be in (0, 1), got {self.coverage}")
+        _validate_coverage(self.coverage)
         if self.quantile is not None and not 0.0 < self.quantile < 1.0:
             raise ValueError(f"quantile must be in (0, 1), got {self.quantile}")
 
 
-def apply_order_policy(frame: pd.DataFrame, config: OrderPolicyConfig) -> pd.DataFrame:
-    """Dispatch to the appropriate order policy function based on config.policy."""
-    if config.policy == "rs":
+@dataclass(frozen=True, slots=True)
+class RssConfig:
+    """Configuration for the periodic-review (R,s,S) order-up-to policy.
+
+    Args:
+        params: Policy parameters as a DataFrame or list of ``RssPolicyParameters``.
+        coverage: Conformal interval coverage level. Default 0.9.
+    """
+
+    params: pd.DataFrame | list
+    coverage: float = 0.9
+
+    def __post_init__(self) -> None:
+        _validate_coverage(self.coverage)
+
+
+@dataclass(frozen=True, slots=True)
+class NewsvendorConfig:
+    """Configuration for the newsvendor critical-ratio policy.
+
+    Args:
+        params: Policy parameters as a DataFrame or list of
+            ``NewsvendorPolicyParameters``.
+        coverage: Conformal interval coverage level. Default 0.9.
+        period: Horizon step the demand quantile is drawn from. Default 1.
+    """
+
+    params: pd.DataFrame | list
+    coverage: float = 0.9
+    period: int = 1
+
+    def __post_init__(self) -> None:
+        _validate_coverage(self.coverage)
+
+
+OrderPolicy = RsConfig | RssConfig | NewsvendorConfig
+
+
+def apply_order_policy(frame: pd.DataFrame, config: OrderPolicy) -> pd.DataFrame:
+    """Dispatch to the appropriate order policy based on the config type."""
+    if isinstance(config, RsConfig):
         return apply_rs_policy(frame, config.params, config.coverage, quantile=config.quantile)
-    if config.policy == "rss":
+    if isinstance(config, RssConfig):
         return apply_rss_policy(frame, config.params, config.coverage)
-    if config.policy == "newsvendor":
+    if isinstance(config, NewsvendorConfig):
         return apply_newsvendor_policy(frame, config.params, config.coverage, config.period)
-    raise ValueError(f"Unknown order policy: {config.policy!r}")
+    raise TypeError(f"Unknown order policy config: {type(config).__name__}")

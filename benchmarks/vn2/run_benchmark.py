@@ -72,7 +72,7 @@ from calibre.execution import (
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri, write_parquet
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import RsConfig, apply_order_policy
 
 logger = logging.getLogger(__name__)
 
@@ -248,8 +248,7 @@ def run_benchmark(
                 return dict.fromkeys(initial_states, 0.0)
             try:
                 if order_conformal_runtime is not None:
-                    order_config = OrderPolicyConfig(
-                        policy="rs",
+                    order_config = RsConfig(
                         params=build_rs_params(simulator, lead_time, review_period),
                         coverage=order_conformal_runtime.config.coverage,
                     )
@@ -258,8 +257,7 @@ def run_benchmark(
                         logger.info("  Missing quantile column, using zero orders.")
                     return dict.fromkeys(initial_states, 0.0)
                 else:
-                    order_config = OrderPolicyConfig(
-                        policy="rs",
+                    order_config = RsConfig(
                         params=build_rs_params(simulator, lead_time, review_period),
                         quantile=quantile_alpha,
                     )

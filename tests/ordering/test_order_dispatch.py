@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import fields
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,13 +15,19 @@ from calibre.core.forecast_frame import (
     H,
     Y,
     interval_column_names,
+    quantile_column,
 )
 from calibre.core.order_types import (
     NewsvendorPolicyParameters,
     RsPolicyParameters,
     RssPolicyParameters,
 )
-from calibre.ordering.policy_config import OrderPolicyConfig, apply_order_policy
+from calibre.ordering.policy_config import (
+    NewsvendorConfig,
+    RsConfig,
+    RssConfig,
+    apply_order_policy,
+)
 
 
 def _forecast_frame(
@@ -51,25 +59,47 @@ def _forecast_frame(
 
 
 class TestConfigValidation:
-    def test_config_validates_coverage_bounds_rejects_zero(self) -> None:
+    def test_rs_config_rejects_coverage_zero(self) -> None:
         with pytest.raises(ValueError, match="coverage must be in \\(0, 1\\)"):
-            OrderPolicyConfig(policy="rs", params=pd.DataFrame(), coverage=0.0)
+            RsConfig(params=pd.DataFrame(), coverage=0.0)
 
-    def test_config_validates_coverage_bounds_rejects_one(self) -> None:
+    def test_rs_config_rejects_coverage_one(self) -> None:
         with pytest.raises(ValueError, match="coverage must be in \\(0, 1\\)"):
-            OrderPolicyConfig(policy="rs", params=pd.DataFrame(), coverage=1.0)
+            RsConfig(params=pd.DataFrame(), coverage=1.0)
 
-    def test_config_validates_coverage_bounds_accepts_valid_value(self) -> None:
-        config = OrderPolicyConfig(policy="rs", params=pd.DataFrame(), coverage=0.5)
+    def test_rss_config_rejects_coverage_out_of_range(self) -> None:
+        with pytest.raises(ValueError, match="coverage must be in \\(0, 1\\)"):
+            RssConfig(params=pd.DataFrame(), coverage=1.0)
+
+    def test_newsvendor_config_rejects_coverage_out_of_range(self) -> None:
+        with pytest.raises(ValueError, match="coverage must be in \\(0, 1\\)"):
+            NewsvendorConfig(params=pd.DataFrame(), coverage=0.0)
+
+    def test_rs_config_rejects_quantile_out_of_range(self) -> None:
+        with pytest.raises(ValueError, match="quantile must be in \\(0, 1\\)"):
+            RsConfig(params=pd.DataFrame(), quantile=1.5)
+
+    def test_rs_config_accepts_valid_coverage(self) -> None:
+        config = RsConfig(params=pd.DataFrame(), coverage=0.5)
         assert config.coverage == 0.5
 
-    def test_config_accepts_default_coverage(self) -> None:
-        config = OrderPolicyConfig(policy="rs", params=pd.DataFrame())
-        assert config.coverage == 0.9
+    def test_configs_accept_default_coverage(self) -> None:
+        assert RsConfig(params=pd.DataFrame()).coverage == 0.9
+        assert RssConfig(params=pd.DataFrame()).coverage == 0.9
+        assert NewsvendorConfig(params=pd.DataFrame()).coverage == 0.9
 
-    def test_config_accepts_default_period(self) -> None:
-        config = OrderPolicyConfig(policy="newsvendor", params=pd.DataFrame())
-        assert config.period == 1
+    def test_newsvendor_config_accepts_default_period(self) -> None:
+        assert NewsvendorConfig(params=pd.DataFrame()).period == 1
+
+    def test_newsvendor_config_has_no_quantile_field(self) -> None:
+        # The whole point of the deepening: a quantile knob is unrepresentable
+        # on the newsvendor config — it is not even a field.
+        field_names = {f.name for f in fields(NewsvendorConfig)}
+        assert "quantile" not in field_names
+
+    def test_rss_config_has_no_quantile_field(self) -> None:
+        field_names = {f.name for f in fields(RssConfig)}
+        assert "quantile" not in field_names
 
 
 class TestDispatchToRsPolicy:
@@ -83,7 +113,7 @@ class TestDispatchToRsPolicy:
                 review_period=2,
             )
         ]
-        config = OrderPolicyConfig(policy="rs", params=params, coverage=0.9)
+        config = RsConfig(params=params, coverage=0.9)
 
         result = apply_order_policy(frame, config)
 
@@ -111,12 +141,59 @@ class TestDispatchToRsPolicy:
                 review_period=2,
             )
         ]
-        config = OrderPolicyConfig(policy="rs", params=params, coverage=0.95)
+        config = RsConfig(params=params, coverage=0.95)
 
         result = apply_order_policy(frame, config)
 
         row = result.iloc[0]
         assert row["protection_period"] == 3
+        assert row["target_stock_level"] == 60.0
+        assert row["order_qty"] == 55.0
+
+    def test_dispatch_rs_with_quantile_uses_q_column_path(self) -> None:
+        # With a quantile set, the target is summed from the per-horizon
+        # ``q_<p>`` column, not the conformal upper bound. Drop the conformal
+        # band so only the q-column path can produce a result.
+        frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+        lower_col, upper_col = interval_column_names(0.9)
+        frame = frame.drop(columns=[lower_col, upper_col])
+        frame[quantile_column(0.833)] = [12.0, 22.0, 32.0]
+        params = [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ]
+        config = RsConfig(params=params, quantile=0.833)
+
+        result = apply_order_policy(frame, config)
+
+        row = result.iloc[0]
+        # protection_period = 3 → 12 + 22 + 32 = 66, order = 66 - 5 = 61
+        assert row["protection_period"] == 3
+        assert row["target_stock_level"] == 66.0
+        assert row["order_qty"] == 61.0
+
+    def test_dispatch_rs_without_quantile_uses_conformal_upper_bound(self) -> None:
+        # Without a quantile, the target is the conformal upper bound summed over
+        # the protection period and ``coverage`` selects the band.
+        frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+        params = [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ]
+        config = RsConfig(params=params, coverage=0.9)
+        assert config.quantile is None
+
+        result = apply_order_policy(frame, config)
+
+        row = result.iloc[0]
         assert row["target_stock_level"] == 60.0
         assert row["order_qty"] == 55.0
 
@@ -133,7 +210,7 @@ class TestDispatchToRssPolicy:
                 review_period=2,
             )
         ]
-        config = OrderPolicyConfig(policy="rss", params=params, coverage=0.9)
+        config = RssConfig(params=params, coverage=0.9)
 
         result = apply_order_policy(frame, config)
 
@@ -154,7 +231,7 @@ class TestDispatchToRssPolicy:
                 review_period=2,
             )
         ]
-        config = OrderPolicyConfig(policy="rss", params=params, coverage=0.9)
+        config = RssConfig(params=params, coverage=0.9)
 
         result = apply_order_policy(frame, config)
 
@@ -172,7 +249,7 @@ class TestDispatchToNewsvendorPolicy:
                 overage_cost=1.0,
             )
         ]
-        config = OrderPolicyConfig(policy="newsvendor", params=params, coverage=0.9, period=1)
+        config = NewsvendorConfig(params=params, coverage=0.9, period=1)
 
         result = apply_order_policy(frame, config)
 
@@ -197,12 +274,8 @@ class TestDispatchToNewsvendorPolicy:
             )
         ]
 
-        period1 = apply_order_policy(
-            frame, OrderPolicyConfig(policy="newsvendor", params=params, coverage=0.9, period=1)
-        )
-        period2 = apply_order_policy(
-            frame, OrderPolicyConfig(policy="newsvendor", params=params, coverage=0.9, period=2)
-        )
+        period1 = apply_order_policy(frame, NewsvendorConfig(params=params, coverage=0.9, period=1))
+        period2 = apply_order_policy(frame, NewsvendorConfig(params=params, coverage=0.9, period=2))
 
         dq1 = period1.iloc[0]["demand_quantile"]
         dq2 = period2.iloc[0]["demand_quantile"]
@@ -212,9 +285,8 @@ class TestDispatchToNewsvendorPolicy:
 
 
 class TestDispatchErrors:
-    def test_dispatch_rejects_unknown_policy(self) -> None:
+    def test_dispatch_rejects_unknown_config_type(self) -> None:
         frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0))
-        config = OrderPolicyConfig(policy="unknown", params=pd.DataFrame(), coverage=0.9)  # type: ignore
 
-        with pytest.raises(ValueError, match="Unknown order policy: 'unknown'"):
-            apply_order_policy(frame, config)
+        with pytest.raises(TypeError, match="Unknown order policy config: object"):
+            apply_order_policy(frame, object())  # type: ignore[arg-type]
