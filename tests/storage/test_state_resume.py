@@ -151,7 +151,7 @@ def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
     origins = [dates[7], dates[8], dates[9]]
 
     uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
-        [task],
+        partition_tasks([task]),
         actuals,
         origins=origins,
     )
@@ -195,7 +195,7 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
     origins = [dates[7], dates[8], dates[9]]
 
     uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
-        [task],
+        partition_tasks([task]),
         actuals,
         origins=origins,
     )

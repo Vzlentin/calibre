@@ -86,7 +86,7 @@ def test_same_session_id_hydrates_backend_state_across_runs(tmp_path) -> None:
     )
 
     uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
-        [task],
+        partition_tasks([task]),
         actuals,
         origins=origins,
     )
