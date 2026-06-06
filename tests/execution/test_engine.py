@@ -16,7 +16,9 @@ from calibre.conformal.runtime import to_json_safe_state
 from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
     CALIBRATION_STATE_REF,
+    CONFORMAL_ALPHA,
     CONFORMAL_METHOD,
+    CONFORMAL_MODE,
     CONFORMAL_PARTITION,
     DS,
     FORECAST_ORIGIN,
@@ -791,7 +793,7 @@ _LOCK_LOWER_COL = "lo_0p9"
 _LOCK_UPPER_COL = "hi_0p9"
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def characterization_lock_run():
     """Deterministic 3-origin run with conformal (ACI) + R,S ordering active.
 
@@ -851,8 +853,8 @@ def test_characterization_lock_forecast_ledger(characterization_lock_run):
         _LOCK_LOWER_COL,
         _LOCK_UPPER_COL,
         CONFORMAL_METHOD,
-        "conformal_mode",
-        "conformal_alpha",
+        CONFORMAL_MODE,
+        CONFORMAL_ALPHA,
         CALIBRATION_STATE_REF,
         CONFORMAL_PARTITION,
         NONCONFORMITY_SCORE,
