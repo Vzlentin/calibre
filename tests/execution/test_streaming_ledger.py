@@ -23,6 +23,7 @@ from calibre.execution.ledger import (
     StreamingOrderLedger,
     resolved_ledger_uri,
 )
+from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import NewsvendorConfig
 
@@ -77,12 +78,12 @@ def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> Non
 
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
-    in_memory_result = BackendEngine().execute([task], actuals, origins)
+    in_memory_result = BackendEngine().execute(partition_tasks([task]), actuals, origins)
     expected = in_memory_result.ledger.to_df()
     path = tmp_path / "ledger.parquet"
     streaming_result = BackendEngine(
         output=LedgerOutputOptions(forecast_path=str(path), streaming=True),
-    ).execute([task], actuals, origins)
+    ).execute(partition_tasks([task]), actuals, origins)
 
     actual = streaming_result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)
@@ -109,7 +110,7 @@ def test_streaming_output_accepts_fsspec_uri(monkeypatch) -> None:
             forecast_path="memory://calibre-tests/streaming/ledger.parquet",
             streaming=True,
         ),
-    ).execute([task], actuals, [dates[3]])
+    ).execute(partition_tasks([task]), actuals, [dates[3]])
 
     assert len(result.ledger.to_df()) == 1
     assert pd.read_parquet("memory://calibre-tests/streaming/ledger.parquet").shape[0] == 1
@@ -127,11 +128,11 @@ def test_streaming_resolution_keeps_only_pending_rows(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
-    expected = BackendEngine().execute([task], actuals, origins).ledger.to_df()
+    expected = BackendEngine().execute(partition_tasks([task]), actuals, origins).ledger.to_df()
     path = tmp_path / "bounded-ledger.parquet"
     result = BackendEngine(
         output=LedgerOutputOptions(forecast_path=str(path), streaming=True),
-    ).execute([task], actuals, origins)
+    ).execute(partition_tasks([task]), actuals, origins)
 
     actual = result.ledger.to_df()
     pd.testing.assert_frame_equal(actual, expected)
@@ -174,14 +175,14 @@ def test_origin_iterator_matches_batch_conformal_and_ordering(monkeypatch) -> No
     batch_result = BackendEngine(
         conformal=ConformalOptions(runtime=batch_runtime),
         order=order_config,
-    ).execute([task], actuals, origins)
+    ).execute(partition_tasks([task]), actuals, origins)
 
     stream_runtime = SymmetricIntervalRuntime(conformal_config)
     engine = BackendEngine(
         conformal=ConformalOptions(runtime=stream_runtime),
         order=order_config,
     )
-    yielded = list(engine.iter_origins([task], actuals, origins))
+    yielded = list(engine.iter_origins(partition_tasks([task]), actuals, origins))
 
     assert len(yielded) == len(origins)
     pd.testing.assert_frame_equal(

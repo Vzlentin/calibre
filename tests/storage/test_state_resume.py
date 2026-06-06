@@ -18,6 +18,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions
+from calibre.execution.task_builder import partition_tasks
 from calibre.storage.models import Base
 from calibre.storage.objstore import read_initial_ledger, write_ledger_shard
 from calibre.storage.postgres import (
@@ -115,7 +116,7 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
 
     BackendEngine(
         conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
-    ).execute([task], actuals, origins=[dates[7], dates[8]])
+    ).execute(partition_tasks([task]), actuals, origins=[dates[7], dates[8]])
 
     persisted = store.list_for_run(run_id)
     assert "SeasonalNaive:h1:__global__" in persisted
@@ -126,7 +127,7 @@ def test_backend_restores_conformal_runtime_from_state_store() -> None:
 
     resumed = BackendEngine(
         conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
-    ).execute([task], actuals, origins=[dates[9]])
+    ).execute(partition_tasks([task]), actuals, origins=[dates[9]])
 
     frame = resumed.ledger.to_df()
     lower_col, upper_col = config.interval_columns
@@ -159,7 +160,7 @@ def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
     store = _MemoryStateStore()
     interrupted = BackendEngine(
         conformal=ConformalOptions(config=config, run_id=run_id, state_store=store),
-    ).execute([task], actuals, origins=origins[:2])
+    ).execute(partition_tasks([task]), actuals, origins=origins[:2])
 
     resumed = BackendEngine(
         conformal=ConformalOptions(
@@ -168,7 +169,7 @@ def test_backend_replays_initial_ledger_for_byte_identical_resume() -> None:
             state_store=store,
             initial_ledger=interrupted.ledger.to_df(),
         ),
-    ).execute([task], actuals, origins=origins[2:])
+    ).execute(partition_tasks([task]), actuals, origins=origins[2:])
 
     sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
     expected = uninterrupted.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
@@ -213,7 +214,7 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
                 run_id=run_id,
                 state_store=SqlConformalStateStore(ConformalStateRepo(session)),
             ),
-        ).execute([task], actuals, origins=origins[:2])
+        ).execute(partition_tasks([task]), actuals, origins=origins[:2])
         pointer = write_ledger_shard(interrupted.ledger.to_df(), str(ledger_path))
         ForecastPointerRepo(session).upsert(
             run_id,
@@ -232,7 +233,7 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
                 state_store=SqlConformalStateStore(ConformalStateRepo(session)),
                 initial_ledger=initial_ledger,
             ),
-        ).execute([task], actuals, origins=origins[2:])
+        ).execute(partition_tasks([task]), actuals, origins=origins[2:])
 
     sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
     expected = uninterrupted.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)

@@ -25,6 +25,7 @@ from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
 from calibre.execution.io import join_uri
 from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
+from calibre.execution.task_builder import partition_tasks
 from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.tuning.task import GlobalTuningTask, LocalTuningTask, StudyConfig, TuningCandidate
 
@@ -454,7 +455,7 @@ def _score_forecast_task(
     seen_keys: set[tuple[Any, ...]] = set()
     with threadpool_limits(limits=thread_budget(cpu_per_trial)):
         for origin_idx, result in enumerate(
-            engine.iter_origins([forecast_task], actuals, origins),
+            engine.iter_origins(partition_tasks([forecast_task]), actuals, origins),
             start=1,
         ):
             contribution = _objective_contribution_with(

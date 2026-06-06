@@ -79,7 +79,7 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.core.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.core.order_types import RsPolicyParameters
 from calibre.execution import (
     DecisionLoop,
@@ -353,7 +353,7 @@ def run_seasonal(
         else:
             observe_fn = partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col)
 
-        def _build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
+        def _build_round(rn: int) -> tuple[TaskGroups, pd.Timestamp, pd.DataFrame]:
             if verbose:
                 logger.info("\n--- Decision round %s ---", rn)
             round_sales = load_period(data_dir, rn - 1)
@@ -361,9 +361,10 @@ def run_seasonal(
                 round_sales = round_sales[round_sales[UNIQUE_ID].isin(series_filter)]
             # +1 week so the engine's strict `<` filter keeps the latest observation.
             origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
-            tasks = build_tasks(
+            groups = build_tasks(
                 round_sales, model_configs, horizon=horizon, series_filter=list(states.keys())
             )
+            local_tasks = list(groups.local)
             if tuned_configs:
                 sorted_sales = round_sales.sort_values([UNIQUE_ID, DS])
                 for uid_key, series_data in sorted_sales.groupby(UNIQUE_ID, sort=False):
@@ -371,12 +372,12 @@ def run_seasonal(
                     if uid not in tuned_configs or series_data.empty:
                         continue
                     history = series_data[[UNIQUE_ID, DS, Y]].reset_index(drop=True)
-                    tasks.append(
+                    local_tasks.append(
                         ForecastTask(
                             history=history, horizon=horizon, model_config=tuned_configs[uid]
                         )
                     )
-            return tasks, origin, round_sales
+            return TaskGroups(local=local_tasks, global_=list(groups.global_)), origin, round_sales
 
         def _policy(frame: pd.DataFrame) -> dict[str, float]:
             if lower_col not in frame.columns or upper_col not in frame.columns:

@@ -22,7 +22,7 @@ from calibre.core.forecast_frame import (
     UNIQUE_ID,
     Y,
 )
-from calibre.core.forecast_task import ForecastTask
+from calibre.core.forecast_task import TaskGroups
 from calibre.execution.backend import BackendEngine
 from calibre.storage.postgres import PendingObservationRepo
 
@@ -120,7 +120,7 @@ class DecisionLoop:
 
     For each decision round:
 
-    1. Build ``ForecastTask`` objects via ``build_round_tasks(round_num)``,
+    1. Build a ``TaskGroups`` partition via ``build_round_tasks(round_num)``,
        which also returns the origin timestamp and the actuals DataFrame
        for the engine's ledger scoring.
     2. Execute the engine, optionally ensemble, optionally apply conformal.
@@ -137,7 +137,7 @@ class DecisionLoop:
         engine: Configured :class:`BackendEngine`.
         simulator: Simulator exposing
             ``step(period, orders, actual_demand) → Any``.
-        build_round_tasks: ``round_num → (tasks, origin, round_actuals_df)``.
+        build_round_tasks: ``round_num → (task_groups, origin, round_actuals_df)``.
             ``round_actuals_df`` is passed to ``engine.execute`` for ledger scoring.
         policy: ``forecast_frame → {uid: order_qty}``.
             Receives the conformal frame when ``runtime`` is set, otherwise the
@@ -165,7 +165,7 @@ class DecisionLoop:
         *,
         engine: BackendEngine,
         simulator: Any,
-        build_round_tasks: Callable[[int], tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]],
+        build_round_tasks: Callable[[int], tuple[TaskGroups, pd.Timestamp, pd.DataFrame]],
         policy: Callable[[pd.DataFrame], dict[str, float]],
         get_actuals: Callable[[int], dict[str, float]],
         config: DecisionLoopConfig,

@@ -8,8 +8,38 @@ from collections.abc import Mapping
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
-from calibre.core.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.forecasting.adapter_registry import get_adapter_cls, get_scope
+
+
+def partition_tasks(tasks: list[ForecastTask]) -> TaskGroups:
+    """Partition pre-built tasks into a :class:`TaskGroups` by resolved scope.
+
+    For callers that construct ``ForecastTask`` objects directly (benchmarks,
+    tests) rather than via :func:`build_tasks`. Scope is resolved exactly once,
+    here, through the forecasting registry — the engine never re-interprets it.
+    """
+    local: list[ForecastTask] = []
+    global_: list[ForecastTask] = []
+    for task in tasks:
+        if get_scope(task.model_config) == "local":
+            local.append(task)
+        else:
+            global_.append(task)
+    return TaskGroups(local=local, global_=global_)
+
+
+def _global_dedup_key(task: ForecastTask) -> tuple[str, str, int]:
+    """Stable content key for global-task dedup.
+
+    Keyed on the panel's unique-id set, the canonical config JSON, and the
+    horizon — not ``id(task.history)`` object identity. A defensive copy of the
+    history frame therefore dedups identically (the old identity key silently
+    failed on a cloned frame).
+    """
+    uids = ",".join(sorted(task.history[UNIQUE_ID].astype(str).unique()))
+    config = json.dumps(task.model_config, sort_keys=True, default=str)
+    return uids, config, task.horizon
 
 
 def build_tasks(
@@ -18,12 +48,13 @@ def build_tasks(
     horizon: int,
     series_filter: list[str] | None = None,
     overrides: Mapping[str, list[dict]] | None = None,
-) -> list[ForecastTask]:
+) -> TaskGroups:
     """Create ForecastTask objects from sales data and model configs.
 
-    For ``scope="local"`` (default), emits one task per (unique_id, config)
-    pair. For ``scope="global"``, emits one task per config with all series
-    in a single history DataFrame.
+    Scope is resolved exactly once here. For ``scope="local"`` (default),
+    emits one task per (unique_id, config) pair into ``TaskGroups.local``. For
+    ``scope="global"``, emits one task per config (deduplicated across series)
+    into ``TaskGroups.global_``.
 
     Args:
         sales: Long-format DataFrame with [unique_id, ds, y]
@@ -36,8 +67,9 @@ def build_tasks(
             raise ``ValueError``.
 
     Returns:
-        Flat list of ForecastTask objects.
-        The engine handles origin-based history truncation, so full history is passed.
+        A :class:`TaskGroups` partition. The engine consumes this directly and
+        never re-interprets ``get_scope``. The engine handles origin-based
+        history truncation, so full history is passed.
     """
     if series_filter is not None:
         data = sales[sales[UNIQUE_ID].isin(series_filter)].copy()
@@ -56,7 +88,9 @@ def build_tasks(
                 f"Available: {sorted(uids)}"
             )
 
-    tasks: list[ForecastTask] = []
+    local_tasks: list[ForecastTask] = []
+    global_tasks: list[ForecastTask] = []
+    seen_global: set[tuple[str, str, int]] = set()
 
     # Resolve per-series configs up-front so we don't re-validate inside loops.
     def _configs_for(uid: str) -> list[dict]:
@@ -72,7 +106,7 @@ def build_tasks(
             get_adapter_cls(model_config)  # validate backend early
 
             if get_scope(model_config) == "local":
-                tasks.append(
+                local_tasks.append(
                     ForecastTask(
                         history=series_data,
                         horizon=horizon,
@@ -80,27 +114,18 @@ def build_tasks(
                     )
                 )
             else:
-                # Global scope with per-series overrides: the global model still
-                # sees all series, so we emit one task per config (not per uid).
-                # To avoid duplicates when multiple uids share the same global
-                # override, we deduplicate by config id within this uid's pass.
-                tasks.append(
-                    ForecastTask(
-                        history=data,
-                        horizon=horizon,
-                        model_config=model_config,
-                    )
+                # Global scope still sees all series, so we emit one task per
+                # config (not per uid). Dedup on a stable content key so the
+                # same global config appearing in overrides for multiple uids
+                # collapses to a single task.
+                task = ForecastTask(
+                    history=data,
+                    horizon=horizon,
+                    model_config=model_config,
                 )
+                key = _global_dedup_key(task)
+                if key not in seen_global:
+                    seen_global.add(key)
+                    global_tasks.append(task)
 
-    # When global configs appeared in overrides for multiple uids, we
-    # duplicated the global tasks. Deduplicate by identity on the task tuple
-    # (history ref equality is fine since we used the same ``data`` object).
-    seen: set[tuple[int, str, int]] = set()
-    deduped: list[ForecastTask] = []
-    for task in tasks:
-        key = id(task.history), json.dumps(task.model_config, sort_keys=True), task.horizon
-        if key not in seen:
-            seen.add(key)
-            deduped.append(task)
-
-    return deduped
+    return TaskGroups(local=local_tasks, global_=global_tasks)

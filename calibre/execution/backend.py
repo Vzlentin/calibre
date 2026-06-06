@@ -41,7 +41,7 @@ from calibre.core.forecast_frame import (
     validate_actuals_frame,
     validate_forecast_frame,
 )
-from calibre.core.forecast_task import ForecastTask, ForecastTaskRef
+from calibre.core.forecast_task import ForecastTask, ForecastTaskRef, TaskGroups
 from calibre.core.metrics import (
     observe_forecast_duration,
     set_conformal_coverage,
@@ -61,7 +61,7 @@ from calibre.execution.ledger import (
 )
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config
-from calibre.forecasting.adapter_registry import get_scope, resolve_adapter
+from calibre.forecasting.adapter_registry import resolve_adapter
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
@@ -335,7 +335,7 @@ class BackendEngine:
 
     def execute(
         self,
-        tasks: list[ForecastTask],
+        tasks: TaskGroups,
         actuals: pd.DataFrame,
         origins: list[pd.Timestamp],
     ) -> BackendResult:
@@ -352,11 +352,15 @@ class BackendEngine:
 
     def iter_origins(
         self,
-        tasks: list[ForecastTask],
+        tasks: TaskGroups,
         actuals: pd.DataFrame,
         origins: list[pd.Timestamp],
     ) -> Iterator[BackendResult]:
-        """Yield the cumulative backend result after each completed origin."""
+        """Yield the cumulative backend result after each completed origin.
+
+        ``tasks`` is a pre-partitioned :class:`TaskGroups`; scope was resolved
+        once in ``build_tasks`` and is never re-interpreted here.
+        """
         validate_actuals_frame(actuals)
         ledger: Ledger = (
             StreamingLedger(self.streaming_output)
@@ -377,21 +381,8 @@ class BackendEngine:
         conformal_runtime = self.conformal_runtime
 
         try:
-            parallel_tasks: list[ForecastTask] = []
-            direct_tasks: list[ForecastTask] = []
-            for task in tasks:
-                grouped_task = ForecastTask(
-                    history=task.history,
-                    horizon=task.horizon,
-                    model_config=task.model_config,
-                    forecast_origin=task.forecast_origin,
-                    future_x=task.future_x,
-                    task_group=task.task_group or task.unique_id,
-                )
-                if get_scope(task.model_config) == "local":
-                    parallel_tasks.append(grouped_task)
-                else:
-                    direct_tasks.append(grouped_task)
+            parallel_tasks = [_with_group_tag(task) for task in tasks.local]
+            direct_tasks = [_with_group_tag(task) for task in tasks.global_]
 
             with self._task_staging_prefix() as staging_prefix:
                 parallel_refs = self._materialize_task_refs(
@@ -763,6 +754,18 @@ class BackendEngine:
             frames.extend(ray.get(object_refs))
 
         return _concat_prediction_frames(frames)
+
+
+def _with_group_tag(task: ForecastTask) -> ForecastTask:
+    """Default a task's ``task_group`` to its unique_id for staging/scheduling."""
+    return ForecastTask(
+        history=task.history,
+        horizon=task.horizon,
+        model_config=task.model_config,
+        forecast_origin=task.forecast_origin,
+        future_x=task.future_x,
+        task_group=task.task_group or task.unique_id,
+    )
 
 
 def _model_config_key(config: dict) -> str:

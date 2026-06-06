@@ -61,6 +61,7 @@ from calibre.execution import observe_cumulative
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri
+from calibre.execution.task_builder import partition_tasks
 from calibre.ordering.policy_config import RsConfig, apply_order_policy
 
 
@@ -186,7 +187,9 @@ def order_conformal_warmup_frames(
     task = ForecastTask(history=history, horizon=horizon, model_config=model_config)
     try:
         ledger_df = prepare_policy_forecast_frame(
-            engine.execute([task], actuals=sales, origins=origin_dates).ledger.to_df(),
+            engine.execute(
+                partition_tasks([task]), actuals=sales, origins=origin_dates
+            ).ledger.to_df(),
             protection_period=horizon,
             cumulative_target=cumulative_target,
         )
@@ -363,7 +366,9 @@ def build_replay_cache(
             origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
             task = ForecastTask(history=history, horizon=horizon, model_config=engine_config)
             frame = prepare_policy_forecast_frame(
-                engine.execute([task], actuals=round_sales, origins=[origin]).ledger.to_df(),
+                engine.execute(
+                    partition_tasks([task]), actuals=round_sales, origins=[origin]
+                ).ledger.to_df(),
                 protection_period=horizon,
                 cumulative_target=cumulative_target,
             )

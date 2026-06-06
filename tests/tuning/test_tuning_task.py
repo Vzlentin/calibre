@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+from calibre.core.forecast_task import ForecastTask
 from calibre.evaluation.point_metrics import mae, pinball_linear, smape
 from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.tuning import optimizer
@@ -217,9 +218,16 @@ def test_score_forecast_task_caps_native_threads_via_threadpoolctl(monkeypatch):
     )
     before = {key: os.environ.get(key) for key in thread_keys}
 
+    # A real task is required: the production path partitions it by scope before
+    # the (empty) engine is invoked. The engine yields nothing, so it is never used.
+    forecast_task = ForecastTask(
+        history=pd.DataFrame({"unique_id": ["A"], "ds": [pd.Timestamp("2024-01-01")], "y": [1.0]}),
+        horizon=1,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive"},
+    )
     cost = optimizer._score_forecast_task(
         engine=_EmptyEngine(),
-        forecast_task=None,
+        forecast_task=forecast_task,
         objective=None,
         actuals=None,
         origins=[],

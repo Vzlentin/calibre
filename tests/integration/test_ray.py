@@ -13,6 +13,7 @@ from calibre.cli.commands import run
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, BackendResult, ExecutionOptions
+from calibre.execution.task_builder import partition_tasks
 
 
 def _panel() -> pd.DataFrame:
@@ -115,12 +116,12 @@ def test_ray_backend_matches_local_backend() -> None:
     panel = _panel()
     tasks = _tasks(panel)
     origins = [pd.Timestamp("2024-03-17"), pd.Timestamp("2024-03-24")]
-    expected = BackendEngine().execute(tasks, panel, origins).ledger.to_df()
+    expected = BackendEngine().execute(partition_tasks(tasks), panel, origins).ledger.to_df()
     engine = BackendEngine(
         execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
     )
     try:
-        actual = engine.execute(tasks, panel, origins).ledger.to_df()
+        actual = engine.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
     finally:
         engine.close()
 
@@ -143,7 +144,7 @@ def test_ray_remote_handle_rebuilds_after_owned_runtime_shutdown() -> None:
                 execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
             )
             try:
-                result = engine.execute(tasks, panel, origins)
+                result = engine.execute(partition_tasks(tasks), panel, origins)
             finally:
                 engine.close()
             assert not result.ledger.to_df().empty
@@ -186,7 +187,7 @@ def test_ray_quantile_columns_survive() -> None:
         execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
     )
     try:
-        actual = engine.execute(tasks, all_series, origins).ledger.to_df()
+        actual = engine.execute(partition_tasks(tasks), all_series, origins).ledger.to_df()
     finally:
         engine.close()
         if owns_ray:

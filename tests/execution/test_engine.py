@@ -38,6 +38,7 @@ from calibre.execution.backend import (
     _process_task_ref,
 )
 from calibre.execution.ledger import OrderLedger
+from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import NewsvendorConfig, RsConfig
 
@@ -67,7 +68,7 @@ def single_series_setup(dates, repeating_pattern):
 def test_execute_returns_backend_result(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     assert isinstance(result, BackendResult)
     df = result.ledger.to_df()
@@ -81,7 +82,7 @@ def test_execute_accepts_grouped_constructor_options(single_series_setup, tmp_pa
         execution=ExecutionOptions(freq="W", seed=42),
         output=LedgerOutputOptions(forecast_path=path.as_posix(), streaming=True),
     )
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     assert path.exists()
     assert len(result.ledger.to_df()) == 8
@@ -127,7 +128,7 @@ def test_remote_ray_staging_uses_shared_uri_and_cleans_up(monkeypatch):
         )
     )
 
-    result = engine.execute([task], actuals, origins=[dates[-1]])
+    result = engine.execute(partition_tasks([task]), actuals, origins=[dates[-1]])
 
     assert not result.ledger.to_df().empty
     staged_parquet = [
@@ -169,7 +170,7 @@ def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
     BackendEngine(execution=ExecutionOptions(backend="local", cpu_per_task=2)).execute(
-        [task], actuals, origins=[dates[-1]]
+        partition_tasks([task]), actuals, origins=[dates[-1]]
     )
 
     assert seen == {"n_jobs": 2, "num_threads": 2}
@@ -178,7 +179,7 @@ def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
 def test_forecast_frame_columns_present(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     df = result.ledger.to_df().sort_values([FORECAST_ORIGIN, H]).reset_index(drop=True)
     for col in [UNIQUE_ID, DS, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]:
@@ -202,7 +203,7 @@ def test_forecast_frame_columns_present(single_series_setup):
 def test_partial_resolution(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     df = result.ledger.to_df()
 
@@ -215,7 +216,7 @@ def test_partial_resolution(single_series_setup):
 def test_error_columns_on_resolved(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     df = result.ledger.to_df()
     resolved = df[df[Y].notna()]
@@ -228,7 +229,7 @@ def test_error_columns_on_resolved(single_series_setup):
 def test_model_name_stamped(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     df = result.ledger.to_df()
     assert (df[MODEL_NAME] == "SeasonalNaive").all()
@@ -245,7 +246,7 @@ def test_execute_with_conformal_config_enriches_ledger(single_series_setup):
     engine = BackendEngine(
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
     )
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     df = result.ledger.to_df()
     lower_col, upper_col = conformal_config.interval_columns
@@ -270,7 +271,7 @@ def test_execute_with_mscp_config_enriches_ledger(single_series_setup):
     engine = BackendEngine(
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
     )
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     df = result.ledger.to_df()
     lower_col, upper_col = conformal_config.interval_columns
@@ -292,7 +293,7 @@ def test_execute_accepts_injected_cumulative_risk_runtime(single_series_setup):
         )
     )
     engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     df = result.ledger.to_df()
     lower_col, upper_col = runtime.interval_columns
@@ -322,7 +323,7 @@ def test_conformal_updates_before_next_origin():
     engine = BackendEngine(
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
     )
-    result = engine.execute([task], actuals, origins=[dates[7], dates[8]])
+    result = engine.execute(partition_tasks([task]), actuals, origins=[dates[7], dates[8]])
 
     df = result.ledger.to_df()
     lower_col, upper_col = conformal_config.interval_columns
@@ -368,7 +369,7 @@ def test_multi_series():
     ]
 
     engine = BackendEngine()
-    result = engine.execute(tasks, actuals, origins=[dates[11]])
+    result = engine.execute(partition_tasks(tasks), actuals, origins=[dates[11]])
 
     df = result.ledger.to_df()
     assert len(df) == 8
@@ -378,7 +379,7 @@ def test_multi_series():
 def test_to_parquet_roundtrip(single_series_setup, tmp_path):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     path = str(tmp_path / "backtest.parquet")
     result.ledger.to_parquet(path)
@@ -396,7 +397,7 @@ def test_to_parquet_roundtrip(single_series_setup, tmp_path):
 def test_engine_without_order_config_returns_none_order_ledger(single_series_setup):
     task, actuals, origins = single_series_setup
     engine = BackendEngine()
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     assert isinstance(result, BackendResult)
     assert result.order_ledger is None
@@ -423,7 +424,7 @@ def test_engine_with_rs_order_config_populates_order_ledger(single_series_setup)
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config)),
         order=order_config,
     )
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     assert isinstance(result.order_ledger, OrderLedger)
     order_df = result.order_ledger.to_df()
@@ -455,7 +456,7 @@ def test_engine_with_newsvendor_config_populates_order_ledger(single_series_setu
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config)),
         order=order_config,
     )
-    result = engine.execute([task], actuals, origins)
+    result = engine.execute(partition_tasks([task]), actuals, origins)
 
     assert isinstance(result.order_ledger, OrderLedger)
     order_df = result.order_ledger.to_df()
@@ -480,7 +481,7 @@ def test_engine_records_conformal_coverage_metric(single_series_setup):
         conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
     )
 
-    engine.execute([task], actuals, origins)
+    engine.execute(partition_tasks([task]), actuals, origins)
 
     labels = {
         (sample.labels["model"], sample.labels["mode"])
@@ -523,7 +524,9 @@ def test_global_scope_produces_forecasts_for_all_series():
     )
 
     engine = BackendEngine()
-    result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
+    result = engine.execute(
+        tasks=partition_tasks([global_task]), actuals=all_series, origins=[dates[11]]
+    )
 
     df = result.ledger.to_df()
     # One global fit, single origin, horizon 4 → 4 rows per series for both.
@@ -564,7 +567,9 @@ def test_global_quantile_columns_survive_engine():
     )
 
     engine = BackendEngine()
-    result = engine.execute(tasks=[global_task], actuals=all_series, origins=[dates[11]])
+    result = engine.execute(
+        tasks=partition_tasks([global_task]), actuals=all_series, origins=[dates[11]]
+    )
 
     df = result.ledger.to_df()
     # Two series × horizon 3 from one global quantile fit.
@@ -628,7 +633,7 @@ def test_run_parallel_slices_future_x_per_uid(monkeypatch):
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
     engine = BackendEngine()
-    engine.execute(tasks, actuals, origins=[dates[11]])
+    engine.execute(partition_tasks(tasks), actuals, origins=[dates[11]])
 
     assert set(received["A"][UNIQUE_ID].unique()) == {"A"}
     assert set(received["B"][UNIQUE_ID].unique()) == {"B"}
@@ -678,7 +683,7 @@ def test_run_direct_passes_full_future_x(monkeypatch):
     monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
 
     engine = BackendEngine()
-    engine.execute([task], all_series, origins=[dates[11]])
+    engine.execute(partition_tasks([task]), all_series, origins=[dates[11]])
 
     assert len(received) == 1
     assert received[0] is not None
@@ -719,7 +724,7 @@ def test_mixed_local_and_global_tasks():
 
     engine = BackendEngine()
     result = engine.execute(
-        tasks=[local_task, global_task], actuals=all_series, origins=[dates[11]]
+        tasks=partition_tasks([local_task, global_task]), actuals=all_series, origins=[dates[11]]
     )
 
     df = result.ledger.to_df()
@@ -758,7 +763,7 @@ def test_auto_backend_uses_ray_at_threshold():
         execution=ExecutionOptions(backend="auto", ray_threshold=2, max_concurrency=1)
     )
     try:
-        result = engine.execute(tasks, actuals, origins=[dates[-1]])
+        result = engine.execute(partition_tasks(tasks), actuals, origins=[dates[-1]])
     finally:
         engine.close()
 

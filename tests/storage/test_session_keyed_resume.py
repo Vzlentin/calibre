@@ -8,6 +8,7 @@ from calibre.conformal import SymmetricIntervalConfig
 from calibre.core.forecast_frame import FORECAST_ORIGIN, UNIQUE_ID, H
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import BackendEngine, ConformalOptions
+from calibre.execution.task_builder import partition_tasks
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
     ConformalStateRepo,
@@ -105,7 +106,7 @@ def test_same_session_id_hydrates_backend_state_across_runs(tmp_path) -> None:
                     session_id=session_id,
                 ),
             ),
-        ).execute([task], actuals, origins=origins[:2])
+        ).execute(partition_tasks([task]), actuals, origins=origins[:2])
 
     with session_scope(factory) as session:
         second_run = RunRepo(session).create(config={"run": 2})
@@ -118,7 +119,7 @@ def test_same_session_id_hydrates_backend_state_across_runs(tmp_path) -> None:
                     session_id=session_id,
                 ),
             ),
-        ).execute([task], actuals, origins=origins[2:])
+        ).execute(partition_tasks([task]), actuals, origins=origins[2:])
 
     sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
     expected = uninterrupted.ledger.to_df()
