@@ -6,7 +6,7 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -758,14 +758,7 @@ class BackendEngine:
 
 def _with_group_tag(task: ForecastTask) -> ForecastTask:
     """Default a task's ``task_group`` to its unique_id for staging/scheduling."""
-    return ForecastTask(
-        history=task.history,
-        horizon=task.horizon,
-        model_config=task.model_config,
-        forecast_origin=task.forecast_origin,
-        future_x=task.future_x,
-        task_group=task.task_group or task.unique_id,
-    )
+    return replace(task, task_group=task.task_group or task.unique_id)
 
 
 def _model_config_key(config: dict) -> str:
