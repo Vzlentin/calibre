@@ -406,7 +406,7 @@ class BackendEngine:
                         continue
                     origin_started = time.perf_counter()
                     with span("backtest", origin=str(origin)):
-                        self._execute_origin(
+                        self.run_origin(
                             ledger=ledger,
                             order_ledger=order_ledger,
                             actuals=actuals,
@@ -459,7 +459,7 @@ class BackendEngine:
         with tempfile.TemporaryDirectory(prefix="calibre-backend-") as temp_dir:
             yield temp_dir
 
-    def _execute_origin(
+    def run_origin(
         self,
         *,
         ledger: Ledger,
@@ -470,38 +470,144 @@ class BackendEngine:
         parallel_refs: list[ForecastTaskRef],
         direct_refs: list[ForecastTaskRef],
     ) -> None:
-        if conformal_runtime is not None:
-            self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
+        """Run one origin through the ordered per-origin phases.
 
-        local_preds = self._run_local_scope(parallel_refs, origin)
-        global_preds = self._run_global_scope(direct_refs, origin)
+        The phases run in a fixed order and thread explicit state between them:
+        ``ResolveOpen`` (carry-forward prior origins) → ``Predict`` →
+        ``Calibrate`` → ``Order`` → ``Commit`` (append + final resolve +
+        persist). Each phase is a small method that takes/returns the next
+        phase's input so it can be driven independently in a test. This is a
+        plain method-call sequence, not a dispatch framework (KTD6). A failure
+        in any phase is re-raised naming the phase and origin so the fragile
+        sequencing the seam exposes is debuggable.
+        """
+        with self._phase("ResolveOpen", origin):
+            self._resolve_open(ledger, actuals, origin, conformal_runtime)
+        with self._phase("Predict", origin):
+            origin_preds = self._predict(parallel_refs, direct_refs, origin)
+        with self._phase("Calibrate", origin):
+            origin_preds = self._calibrate(origin_preds, conformal_runtime)
+        with self._phase("Order", origin):
+            self._order(origin_preds, order_ledger)
+        with self._phase("Commit", origin):
+            self._commit(ledger, origin_preds, actuals, origin, conformal_runtime)
 
-        origin_preds = _concat_prediction_frames([local_preds, global_preds])
+    @contextmanager
+    def _phase(self, name: str, origin: pd.Timestamp) -> Iterator[None]:
+        """Re-raise any phase failure naming the phase and origin.
 
-        if conformal_runtime is not None and not origin_preds.empty:
-            origin_preds = conformal_runtime.apply(origin_preds)
-
-        if self.order_config is not None and not origin_preds.empty:
-            assert order_ledger is not None  # guaranteed when order_config is set
-            order_result = apply_order_policy(origin_preds, self.order_config)
-            order_ledger.append(order_result)
-
-        if not origin_preds.empty:
+        The original exception type is preserved so existing handlers (e.g. the
+        API's ``except ValueError``) still match. If the type cannot be rebuilt
+        from a single message, fall back to ``RuntimeError`` rather than masking
+        the failure with a reconstruction error.
+        """
+        try:
+            yield
+        except Exception as exc:
+            message = f"{name} phase failed at origin {origin}: {exc}"
             try:
-                validate_forecast_frame(origin_preds)
-            except ValueError as exc:
-                raise ValueError(f"Invalid forecast frame at origin {origin}: {exc}") from exc
-            ledger.append(origin_preds)
+                rewrapped: Exception = type(exc)(message)
+            except Exception:
+                rewrapped = RuntimeError(message)
+            raise rewrapped from exc
 
-        self._resolve_ledger(ledger, actuals, origin, conformal_runtime)
-
-    def _resolve_ledger(
+    def _resolve_open(
         self,
         ledger: Ledger,
         actuals: pd.DataFrame,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
+        """ResolveOpen phase — carry-forward resolution of prior origins.
+
+        Resolve pending ledger rows from PRIOR origins that are now due as of
+        this origin (observe + score the conformal runtime, update the ledger).
+        This runs BEFORE Predict so the calibrator is updated before this
+        origin's intervals are produced. No-op when there is no conformal
+        runtime (nothing carries forward to feed back into calibration).
+        """
+        if conformal_runtime is None:
+            return
+        self._resolve_due(ledger, actuals, origin, conformal_runtime)
+
+    def _predict(
+        self,
+        parallel_refs: list[ForecastTaskRef],
+        direct_refs: list[ForecastTaskRef],
+        origin: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Predict phase — local + global scopes concatenated for this origin.
+
+        Returns an empty forecast frame when there are no tasks.
+        """
+        local_preds = self._run_local_scope(parallel_refs, origin)
+        global_preds = self._run_global_scope(direct_refs, origin)
+        return _concat_prediction_frames([local_preds, global_preds])
+
+    def _calibrate(
+        self,
+        origin_preds: pd.DataFrame,
+        conformal_runtime: ConformalRuntime | None,
+    ) -> pd.DataFrame:
+        """Calibrate phase — apply conformal intervals to this origin's preds.
+
+        No-op (returns the input unchanged) when the runtime is None or the
+        predictions are empty.
+        """
+        if conformal_runtime is None or origin_preds.empty:
+            return origin_preds
+        return conformal_runtime.apply(origin_preds)
+
+    def _order(
+        self,
+        origin_preds: pd.DataFrame,
+        order_ledger: OrderLedger | None,
+    ) -> None:
+        """Order phase — derive order decisions and append to the order ledger.
+
+        Skipped when no order policy is configured or the predictions are empty.
+        """
+        if self.order_config is None or origin_preds.empty:
+            return
+        assert order_ledger is not None  # guaranteed when order_config is set
+        order_result = apply_order_policy(origin_preds, self.order_config)
+        order_ledger.append(order_result)
+
+    def _commit(
+        self,
+        ledger: Ledger,
+        origin_preds: pd.DataFrame,
+        actuals: pd.DataFrame,
+        origin: pd.Timestamp,
+        conformal_runtime: ConformalRuntime | None,
+    ) -> None:
+        """Commit phase — validate + append, final resolve, persist once.
+
+        Validate this origin's predictions and append them to the ledger, then
+        resolve anything now due (observe + score the conformal runtime) and
+        persist the conformal state. The mutate-and-persist lives ONLY here, and
+        persist is called exactly once per origin.
+        """
+        if not origin_preds.empty:
+            validate_forecast_frame(origin_preds)
+            ledger.append(origin_preds)
+
+        self._resolve_due(ledger, actuals, origin, conformal_runtime)
+        self._persist_conformal_state(conformal_runtime)
+
+    def _resolve_due(
+        self,
+        ledger: Ledger,
+        actuals: pd.DataFrame,
+        origin: pd.Timestamp,
+        conformal_runtime: ConformalRuntime | None,
+    ) -> None:
+        """Resolve ledger rows now due as of ``origin``: observe + score + update.
+
+        Mutate-only: updates the conformal runtime and the ledger but does NOT
+        persist conformal state — persistence is consolidated into Commit so it
+        fires exactly once per origin.
+        """
         current = ledger.resolution_frame()
         if current.empty:
             return
@@ -526,7 +632,6 @@ class BackendEngine:
             updated.loc[scored.index, col] = scored[col]
 
         ledger.update_resolved(updated)
-        self._persist_conformal_state(conformal_runtime)
 
     def _restore_conformal_state(self) -> None:
         if (
