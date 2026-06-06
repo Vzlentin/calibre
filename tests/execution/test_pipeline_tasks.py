@@ -225,10 +225,18 @@ class TestGlobalDedupContentKey:
     """The content key (uid-set + config JSON + horizon), not ``id(history)``,
     drives global dedup. These lock the de-fragilized behaviour."""
 
-    def test_dedup_survives_defensive_copy_of_history(self, sample_sales, global_configs):
-        """A defensive copy of the history frame (distinct object identity, same
-        content) must still dedup to one task. Under the old ``id(history)`` key
-        this silently failed and emitted a duplicate global task."""
+    def test_key_is_stable_across_defensive_copy_of_history(self, sample_sales, global_configs):
+        """``_global_dedup_key`` is keyed on content, not object identity: a
+        defensive ``.copy()`` of the history frame (distinct ``id()``, identical
+        content) yields the same key, so the two tasks dedup. Under the old
+        ``id(history)`` key the clone produced a different key and slipped
+        through as a duplicate global task.
+
+        Scope: this is a unit test of the key function. It does not assert a
+        ``build_tasks`` end-to-end path — within one ``build_tasks`` call every
+        global task shares the same ``data`` object, so a copied frame never
+        reaches the dedup there.
+        """
         from calibre.execution.task_builder import _global_dedup_key
 
         groups = build_tasks(sample_sales, global_configs, horizon=4)
@@ -242,16 +250,9 @@ class TestGlobalDedupContentKey:
         )
         assert id(cloned.history) != id(base.history)
 
-        # The content key — not object identity — collapses the clone.
+        # The content key — not object identity — collapses the clone: equal
+        # keys mean a `set`-based dedup keeps exactly one of the two tasks.
         assert _global_dedup_key(base) == _global_dedup_key(cloned)
-        seen: set = set()
-        deduped = []
-        for task in (base, cloned):
-            key = _global_dedup_key(task)
-            if key not in seen:
-                seen.add(key)
-                deduped.append(task)
-        assert len(deduped) == 1
 
     def test_content_key_distinguishes_horizon_and_config(self, sample_sales, global_configs):
         groups = build_tasks(sample_sales, global_configs, horizon=4)

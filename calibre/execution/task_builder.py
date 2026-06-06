@@ -29,15 +29,19 @@ def partition_tasks(tasks: list[ForecastTask]) -> TaskGroups:
     return TaskGroups(local=local, global_=global_)
 
 
-def _global_dedup_key(task: ForecastTask) -> tuple[str, str, int]:
+def _global_dedup_key(task: ForecastTask) -> tuple[tuple[str, ...], str, int]:
     """Stable content key for global-task dedup.
 
     Keyed on the panel's unique-id set, the canonical config JSON, and the
     horizon — not ``id(task.history)`` object identity. A defensive copy of the
     history frame therefore dedups identically (the old identity key silently
     failed on a cloned frame).
+
+    The uid set is a sorted tuple rather than a joined string so that
+    comma-bearing unique_ids cannot alias (``{"a,b", "c"}`` and
+    ``{"a", "b,c"}`` are distinct keys, not both ``"a,b,c"``).
     """
-    uids = ",".join(sorted(task.history[UNIQUE_ID].astype(str).unique()))
+    uids = tuple(sorted(task.history[UNIQUE_ID].astype(str).unique()))
     config = json.dumps(task.model_config, sort_keys=True, default=str)
     return uids, config, task.horizon
 
@@ -90,7 +94,7 @@ def build_tasks(
 
     local_tasks: list[ForecastTask] = []
     global_tasks: list[ForecastTask] = []
-    seen_global: set[tuple[str, str, int]] = set()
+    seen_global: set[tuple[tuple[str, ...], str, int]] = set()
 
     # Resolve per-series configs up-front so we don't re-validate inside loops.
     def _configs_for(uid: str) -> list[dict]:
