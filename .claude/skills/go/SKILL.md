@@ -85,10 +85,16 @@ Get a plan in hand, by input kind:
     ```
 
     If found, use it. Else invoke `/ce-plan` inline, seeded with the issue title + body.
-  - **Idea / brainstorm doc:** keyword/slug search the store's plan titles and
-    filenames. On a *plausible* match, confirm with the user before reusing it (a
-    wrong reuse is worse than a fresh plan). On no match, invoke `/ce-plan`
-    inline, seeded with the idea text (or the brainstorm doc's contents).
+  - **Idea:** keyword/slug search the store's plan titles and filenames. On a
+    *plausible* match, confirm with the user before reusing it (a wrong reuse is
+    worse than a fresh plan). On no match, invoke `/ce-plan` inline, seeded with
+    the idea text.
+  - **Brainstorm / ideation doc:** a brainstorm is **never** executable on its
+    own — it must be turned into a plan via `/ce-plan`. Keyword/slug search the
+    store for a plan already derived from it; on a *plausible* match, confirm with
+    the user before reusing it (a wrong reuse is worse than a fresh plan). On no
+    match, invoke `/ce-plan` inline, seeded with the brainstorm doc's full
+    contents. Never feed the brainstorm itself to Stage 1 as the spec.
 
 **Invoking `/ce-plan`.** Run it **inline** (not as a spawned agent) — planning is
 interactive and its scoping/clarifying gates need the user; Stage 1's `ce-work`
