@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
@@ -58,6 +59,31 @@ class ForecastTask:
             future_x_uri=future_x_uri,
             task_group=self.task_group,
         )
+
+
+@dataclass(frozen=True)
+class TaskGroups:
+    """Pre-partitioned forecast tasks split by dispatch scope.
+
+    Scope is resolved exactly once, in ``build_tasks``. The engine consumes
+    this partition directly and never re-interprets ``get_scope``. ``local``
+    holds one task per ``(unique_id, config)``; ``global_`` holds one task per
+    global config (deduplicated across series).
+    """
+
+    local: list[ForecastTask] = field(default_factory=list)
+    global_: list[ForecastTask] = field(default_factory=list)
+
+    @property
+    def tasks(self) -> list[ForecastTask]:
+        """Flat view of every task, local first then global."""
+        return [*self.local, *self.global_]
+
+    def __len__(self) -> int:
+        return len(self.local) + len(self.global_)
+
+    def __iter__(self) -> Iterator[ForecastTask]:
+        return iter(self.tasks)
 
 
 @dataclass(frozen=True)

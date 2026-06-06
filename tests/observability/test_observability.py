@@ -18,6 +18,7 @@ from calibre.core.metrics import (
     set_order_cost,
 )
 from calibre.execution.backend import BackendEngine, ExecutionOptions
+from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 
 
@@ -78,7 +79,7 @@ def test_backend_logs_adapter_fit_predict_phases(monkeypatch) -> None:
     )
 
     BackendEngine(execution=ExecutionOptions(freq="W-SUN")).execute(
-        [task], history, [pd.Timestamp("2024-01-28")]
+        partition_tasks([task]), history, [pd.Timestamp("2024-01-28")]
     )
 
     records = _json_lines(stream)

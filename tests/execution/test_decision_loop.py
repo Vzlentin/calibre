@@ -14,6 +14,7 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
+from calibre.core.forecast_task import TaskGroups
 from calibre.execution.decision_loop import (
     DecisionLoop,
     DecisionLoopConfig,
@@ -78,7 +79,7 @@ class TestDecisionLoopSmoke:
 
         def build(rn: int):
             calls["build"].append(rn)
-            return ([], _ORIGIN + pd.Timedelta(weeks=rn), pd.DataFrame())
+            return (TaskGroups(), _ORIGIN + pd.Timedelta(weeks=rn), pd.DataFrame())
 
         def policy(frame: pd.DataFrame) -> dict[str, float]:
             calls["policy"].append(1)
@@ -131,7 +132,7 @@ class TestDecisionLoopSmoke:
         loop = DecisionLoop(
             engine=fake_engine,
             simulator=fake_sim,
-            build_round_tasks=lambda rn: ([], _ORIGIN, pd.DataFrame()),
+            build_round_tasks=lambda rn: (TaskGroups(), _ORIGIN, pd.DataFrame()),
             policy=lambda f: {"A": 1.0},
             get_actuals=lambda rn: {"A": 5.0},
             config=DecisionLoopConfig(n_rounds=1, n_delivery_rounds=n_delivery),
@@ -156,7 +157,7 @@ class TestDecisionLoopSmoke:
         loop = DecisionLoop(
             engine=fake_engine,
             simulator=MagicMock(),
-            build_round_tasks=lambda rn: ([], _ORIGIN, pd.DataFrame()),
+            build_round_tasks=lambda rn: (TaskGroups(), _ORIGIN, pd.DataFrame()),
             policy=lambda f: {},
             get_actuals=lambda rn: {},
             config=DecisionLoopConfig(n_rounds=3, on_round=fired.append),

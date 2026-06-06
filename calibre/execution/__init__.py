@@ -1,5 +1,6 @@
 """Execution layer: backend engine, ledgers, pipeline runners, decision loops."""
 
+from calibre.core.forecast_task import TaskGroups
 from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
@@ -75,6 +76,7 @@ __all__ = [
     "run_backtest",
     "run_forecast",
     "build_tasks",
+    "TaskGroups",
     "load_costs",
     "validate_dataset_bundle",
 ]

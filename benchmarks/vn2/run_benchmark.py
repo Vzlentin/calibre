@@ -61,7 +61,7 @@ from calibre.conformal.runtime import (
     build_symmetric_interval_runtime,
 )
 from calibre.core.forecast_frame import DS, UNIQUE_ID, quantile_column
-from calibre.core.forecast_task import ForecastTask
+from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
@@ -72,6 +72,7 @@ from calibre.execution import (
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.io import join_uri, write_parquet
+from calibre.execution.task_builder import partition_tasks
 from calibre.ordering.policy_config import RsConfig, apply_order_policy
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,7 @@ def run_benchmark(
             )
         )
 
-        def build_round(rn: int) -> tuple[list[ForecastTask], pd.Timestamp, pd.DataFrame]:
+        def build_round(rn: int) -> tuple[TaskGroups, pd.Timestamp, pd.DataFrame]:
             if verbose:
                 logger.info("\n--- Decision round %s ---", rn)
             round_sales = load_period(data_dir, rn - 1)
@@ -236,7 +237,9 @@ def run_benchmark(
             )
             origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
             return (
-                [ForecastTask(history=history, horizon=horizon, model_config=engine_config)],
+                partition_tasks(
+                    [ForecastTask(history=history, horizon=horizon, model_config=engine_config)]
+                ),
                 origin,
                 round_sales,
             )

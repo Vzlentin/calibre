@@ -53,6 +53,7 @@ from calibre.core.order_types import RsPolicyParameters
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period, melt_wide_instock
 from calibre.execution.io import exists, join_uri
+from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.features import add_stockout_features
 from calibre.ordering.policy_config import RsConfig, apply_order_policy
 
@@ -186,7 +187,7 @@ def run_winning(
             origin = pd.Timestamp(round_sales[DS].max()) + pd.Timedelta(weeks=1)
 
             task = ForecastTask(history=history, horizon=horizon, model_config=MODEL_CONFIG)
-            result = engine.execute([task], actuals=round_sales, origins=[origin])
+            result = engine.execute(partition_tasks([task]), actuals=round_sales, origins=[origin])
             forecast_df = result.ledger.to_df()
 
             actual_demand = _round_actuals(data_dir, round_num, initial_states)

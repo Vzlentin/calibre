@@ -15,6 +15,7 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
+from calibre.core.forecast_task import TaskGroups
 from calibre.execution.decision_loop import DecisionLoop, DecisionLoopConfig, observe_per_horizon
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
@@ -61,7 +62,7 @@ def _loop(
     return DecisionLoop(
         engine=engine,
         simulator=MagicMock(),
-        build_round_tasks=lambda round_num: ([], origin, pd.DataFrame()),
+        build_round_tasks=lambda round_num: (TaskGroups(), origin, pd.DataFrame()),
         policy=lambda frame: {},
         get_actuals=lambda round_num: {"A": actual},
         config=DecisionLoopConfig(n_rounds=1),
