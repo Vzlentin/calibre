@@ -205,11 +205,6 @@ class WeightedResidualCalibrator:
             self._records_by_partition.setdefault(record.partition, []).append(record)
         self._buffer_cache.clear()
 
-    def records_for_partition(self, partition: Hashable) -> list[_ResidualRecord]:
-        if partition == GLOBAL_PARTITION:
-            return self._records
-        return self._records_by_partition.get(partition, [])
-
     def partition_records_and_cache_key(
         self, partition: Hashable
     ) -> tuple[list[_ResidualRecord], str]:
@@ -267,14 +262,6 @@ class WeightedResidualCalibrator:
             "scoped_buffer": float(scoped),
             "global_buffer": float(global_buffer),
             "buffer": float(buffer),
-        }
-
-    def snapshot(self, partition: Hashable) -> dict[str, Any]:
-        records = self.records_for_partition(partition)
-        return {
-            "partition": str(partition),
-            "n_scores": len(records),
-            **self.buffer_components(partition),
         }
 
     def get_state(self) -> dict[str, Any]:
