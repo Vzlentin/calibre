@@ -16,6 +16,7 @@ from calibre.reconciliation.registry import (
     register_reconciler,
     resolve_reconciler,
 )
+from calibre.reconciliation.strategies import BottomUpReconciler, TopDownReconciler
 from calibre.reconciliation.summing import (
     TOTAL_LABEL,
     SummingMatrix,
@@ -26,9 +27,11 @@ __all__ = [
     "DEFAULT_STRATEGY",
     "NODE_LABEL",
     "TOTAL_LABEL",
+    "BottomUpReconciler",
     "NoOpReconciler",
     "Reconciler",
     "SummingMatrix",
+    "TopDownReconciler",
     "VectorReconciler",
     "available_reconcilers",
     "build_summing_matrix",

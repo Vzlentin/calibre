@@ -31,8 +31,11 @@ def _ensure_builtins() -> None:
     if _BUILTINS_LOADED:
         return
     from calibre.reconciliation.noop import NoOpReconciler
+    from calibre.reconciliation.strategies import BottomUpReconciler, TopDownReconciler
 
     _REGISTRY.setdefault("none", NoOpReconciler)
+    _REGISTRY.setdefault("bottom_up", BottomUpReconciler)
+    _REGISTRY.setdefault("top_down", TopDownReconciler)
     _BUILTINS_LOADED = True
 
 
