@@ -12,6 +12,7 @@ from calibre.conformal import (
     SymmetricIntervalConfig,
     SymmetricIntervalRuntime,
 )
+from calibre.conformal.runtime import to_json_safe_state
 from calibre.core.forecast_frame import (
     CALIBRATION_STATE,
     CALIBRATION_STATE_REF,
@@ -768,3 +769,253 @@ def test_auto_backend_uses_ray_at_threshold():
         engine.close()
 
     assert not result.ledger.to_df().empty
+
+
+# ---------------------------------------------------------------------------
+# Characterization lock for the per-origin pipeline (U4 #114, part U4a).
+#
+# These tests pin the CURRENT, unrefactored end-to-end outputs of
+# ``BackendEngine``'s per-origin pipeline (the ``_execute_origin`` /
+# ``_resolve_ledger`` path) over a multi-origin run with conformal calibration
+# AND an order policy both active. They are a tripwire: the follow-up phase
+# extraction (U4b) must keep every value below byte/value-identical. Any
+# reordering of the resolve / observe / score / persist steps changes one of the
+# pinned values and fails the lock.
+#
+# The setup perturbs one history point (index 7, 40 -> 41) so the conformal
+# nonconformity scores and error columns are non-zero and therefore sensitive to
+# step ordering, rather than the all-zero residuals of the periodic fixtures.
+# ---------------------------------------------------------------------------
+
+_LOCK_LOWER_COL = "lo_0p9"
+_LOCK_UPPER_COL = "hi_0p9"
+
+
+@pytest.fixture
+def characterization_lock_run():
+    """Deterministic 3-origin run with conformal (ACI) + R,S ordering active.
+
+    Returns ``(result, runtime, origins)`` so the lock tests can pin the forecast
+    ledger, the conformal resume/partition state, and the order ledger from a
+    single run.
+    """
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 5
+    # Perturb one observed point so residuals (and thus scores) are non-zero.
+    pattern[7] = 41.0
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
+    task = ForecastTask(
+        history=pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern}),
+        horizon=2,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    runtime = SymmetricIntervalRuntime(
+        SymmetricIntervalConfig(method="aci", coverage=0.9, calibration_window=4, gamma=0.05)
+    )
+    order_config = RsConfig(
+        params=[
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=50.0,
+                lead_time=1,
+                review_period=1,
+            )
+        ],
+        coverage=0.9,
+    )
+    engine = BackendEngine(
+        conformal=ConformalOptions(runtime=runtime),
+        order=order_config,
+    )
+    origins = [dates[7], dates[8], dates[9]]
+    result = engine.execute(partition_tasks([task]), actuals, origins)
+    return result, runtime, origins
+
+
+def test_characterization_lock_forecast_ledger(characterization_lock_run):
+    """Pin the resolved/scored forecast ledger over the full multi-origin run."""
+    result, _runtime, origins = characterization_lock_run
+
+    df = result.ledger.to_df().sort_values([FORECAST_ORIGIN, H]).reset_index(drop=True)
+
+    # Shape and schema are part of the lock: U4b must not add/drop columns.
+    assert len(df) == 6
+    assert list(df.columns) == [
+        UNIQUE_ID,
+        DS,
+        Y,
+        Y_HAT,
+        H,
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        _LOCK_LOWER_COL,
+        _LOCK_UPPER_COL,
+        CONFORMAL_METHOD,
+        "conformal_mode",
+        "conformal_alpha",
+        CALIBRATION_STATE_REF,
+        CONFORMAL_PARTITION,
+        NONCONFORMITY_SCORE,
+        "error",
+        "abs_error",
+        "pct_error",
+    ]
+
+    # Key identity columns.
+    assert (df[UNIQUE_ID] == "SKU_001").all()
+    assert (df[MODEL_NAME] == "SeasonalNaive").all()
+    assert df[FORECAST_ORIGIN].tolist() == [
+        origins[0],
+        origins[0],
+        origins[1],
+        origins[1],
+        origins[2],
+        origins[2],
+    ]
+    assert df[H].tolist() == [1, 2, 1, 2, 1, 2]
+
+    # Point forecasts (SeasonalNaive, season_length=4) per (origin, h).
+    np.testing.assert_array_equal(
+        df[Y_HAT].to_numpy(), np.array([40.0, 10.0, 10.0, 20.0, 20.0, 30.0])
+    )
+
+    # Resolved actuals: the perturbed point (41.0) and the periodic values; the
+    # final origin's h=2 forecast is still unresolved (NaN).
+    np.testing.assert_array_equal(
+        df[Y].to_numpy(),
+        np.array([41.0, 10.0, 10.0, 20.0, 20.0, np.nan]),
+    )
+
+    # Resolved error / abs_error / pct_error columns — these are written in the
+    # Commit/resolve step; their exact values lock the resolve sequencing.
+    np.testing.assert_array_equal(
+        df["error"].to_numpy(), np.array([1.0, 0.0, 0.0, 0.0, 0.0, np.nan])
+    )
+    np.testing.assert_array_equal(
+        df["abs_error"].to_numpy(), np.array([1.0, 0.0, 0.0, 0.0, 0.0, np.nan])
+    )
+    np.testing.assert_allclose(
+        df["pct_error"].to_numpy(),
+        np.array([1.0 / 41.0, 0.0, 0.0, 0.0, 0.0, np.nan]),
+        equal_nan=True,
+    )
+
+    # Nonconformity scores written by conformal observe() during resolve.
+    np.testing.assert_array_equal(
+        df[NONCONFORMITY_SCORE].to_numpy(),
+        np.array([1.0, 0.0, 0.0, 0.0, 0.0, np.nan]),
+    )
+
+    # Conformal interval columns: the bands tighten/widen as observed residuals
+    # feed back in before each subsequent origin. Pinning both endpoints locks
+    # the observe-before-predict ordering across origins.
+    np.testing.assert_array_equal(
+        df[_LOCK_LOWER_COL].to_numpy(),
+        np.array([40.0, 10.0, 9.0, 20.0, 19.0, 30.0]),
+    )
+    np.testing.assert_array_equal(
+        df[_LOCK_UPPER_COL].to_numpy(),
+        np.array([40.0, 10.0, 11.0, 20.0, 21.0, 30.0]),
+    )
+
+    # Every resolved row carries a conformal score; the one unresolved row does not.
+    assert df.loc[df[Y].notna(), NONCONFORMITY_SCORE].notna().all()
+    assert df.loc[df[Y].isna(), NONCONFORMITY_SCORE].isna().all()
+
+
+def test_characterization_lock_conformal_state(characterization_lock_run):
+    """Pin the conformal runtime's resume + partition state after the run.
+
+    The spec invariant: conformal-state snapshots over a multi-origin run are
+    byte-equal pre/post the U4b refactor. We compare the JSON-safe state (exactly
+    what ``_persist_conformal_state`` writes) field-by-field.
+    """
+    _result, runtime, _origins = characterization_lock_run
+
+    resume_state = to_json_safe_state(runtime.get_resume_state())
+    assert resume_state == {
+        "method": "aci",
+        "mode": "perhorizon",
+        "coverage": 0.9,
+        "calibration_window": 4,
+        "gamma": 0.05,
+        "quantile_rule": "conformal",
+        "protection_period": None,
+        "issued_count": 3,
+        "controller": {
+            "type": "adaptive",
+            "target_alpha": 0.09999999999999998,
+            "gamma": 0.05,
+            "current_alpha": 0.07499999999999998,
+            "alpha_bounds": [1e-06, 0.999999],
+        },
+        "calibrator": {
+            "calibration_window": 4,
+            "quantile_rule": "conformal",
+            "ready_on_empty": True,
+            "score_history": {
+                "SeasonalNaive:h1:__global__": [1.0, 0.0, 0.0],
+                "SeasonalNaive:h2:__global__": [0.0, 0.0],
+            },
+        },
+    }
+
+    # Per-partition snapshots are persisted one row per partition; pin both.
+    partition_states = {
+        partition: to_json_safe_state(state)
+        for partition, state in runtime.get_partition_states().items()
+    }
+    assert set(partition_states) == {
+        "SeasonalNaive:h1:__global__",
+        "SeasonalNaive:h2:__global__",
+    }
+    assert partition_states["SeasonalNaive:h1:__global__"]["calibrator"]["score_history"] == {
+        "SeasonalNaive:h1:__global__": [1.0, 0.0, 0.0],
+    }
+    assert partition_states["SeasonalNaive:h2:__global__"]["calibrator"]["score_history"] == {
+        "SeasonalNaive:h2:__global__": [0.0, 0.0],
+    }
+    # Issued-origin accounting is shared across partitions and counts every
+    # issued origin exactly once — the tripwire for a double-observe regression.
+    for state in partition_states.values():
+        assert state["issued_count"] == 3
+        assert state["partition"] in partition_states
+
+
+def test_characterization_lock_order_ledger(characterization_lock_run):
+    """Pin the order ledger produced alongside the multi-origin forecast run."""
+    result, _runtime, origins = characterization_lock_run
+
+    assert isinstance(result.order_ledger, OrderLedger)
+    order_df = result.order_ledger.to_df().reset_index(drop=True)
+
+    assert len(order_df) == 3
+    assert list(order_df.columns) == [
+        UNIQUE_ID,
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        "inventory_position",
+        "lead_time",
+        "review_period",
+        "protection_period",
+        "target_stock_level",
+        "order_qty",
+    ]
+
+    assert (order_df[UNIQUE_ID] == "SKU_001").all()
+    assert (order_df[MODEL_NAME] == "SeasonalNaive").all()
+    assert order_df[FORECAST_ORIGIN].tolist() == list(origins)
+    np.testing.assert_array_equal(
+        order_df["inventory_position"].to_numpy(), np.array([50.0, 50.0, 50.0])
+    )
+    assert order_df["lead_time"].tolist() == [1, 1, 1]
+    assert order_df["review_period"].tolist() == [1, 1, 1]
+    assert order_df["protection_period"].tolist() == [2, 2, 2]
+    # One R,S decision per origin; the target stock level tracks the per-origin
+    # forecast band and order_qty = max(target - inventory_position, 0).
+    np.testing.assert_array_equal(
+        order_df["target_stock_level"].to_numpy(), np.array([50.0, 31.0, 51.0])
+    )
+    np.testing.assert_array_equal(order_df["order_qty"].to_numpy(), np.array([0.0, 0.0, 1.0]))
+    expected_qty = (order_df["target_stock_level"] - 50.0).clip(lower=0.0)
+    pd.testing.assert_series_equal(order_df["order_qty"], expected_qty, check_names=False)
