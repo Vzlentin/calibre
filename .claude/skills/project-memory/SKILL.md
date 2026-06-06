@@ -75,13 +75,18 @@ markdown files are the only durable ones.
 - **`plans/<slug>.md`** — create at the start of any multi-step task,
   update through the task, leave behind as the record when complete.
 
-## Vault operations
+## CLI usage
+
+The vault is a directory of Markdown files. Use standard filesystem tools
+(replace `<project>` with the repo name):
 
 ```bash
 cat "$OBSIDIAN_VAULT_PATH/Projects/<project>/architecture.md"
-printf '...' >> "$OBSIDIAN_VAULT_PATH/Projects/<project>/lessons.md"
+printf '\n## <pattern>\n- rule\n' >> "$OBSIDIAN_VAULT_PATH/Projects/<project>/lessons.md"
 cat > "$OBSIDIAN_VAULT_PATH/Projects/<project>/plans/<slug>.md" << 'EOF'
 ...
 EOF
 grep -r "<term>" "$OBSIDIAN_VAULT_PATH/Projects/<project>/" --include="*.md" -l
 ```
+
+If `OBSIDIAN_VAULT_PATH` is unset, skip all vault operations.
