@@ -780,15 +780,25 @@ def test_auto_backend_uses_ray_at_threshold():
 # ``BackendEngine``'s per-origin pipeline (the ``_execute_origin`` /
 # ``_resolve_ledger`` path) over a multi-origin run with conformal calibration
 # AND an order policy both active. They are a tripwire: the follow-up phase
-# extraction (U4b) must keep every value below byte/value-identical. Any
-# reordering of the resolve / observe / score / persist steps changes one of the
-# pinned values and fails the lock.
+# extraction (U4b) must keep every value below byte/value-identical. The pins
+# cover the ordering-sensitive surfaces a U4b reorder would disturb: the
+# cross-origin conformal feedback (interval bounds plus the per-row
+# CONFORMAL_ALPHA trajectory and CALIBRATION_STATE_REF), the resolved
+# error/score columns, the persisted conformal-state *content* (resume + per-
+# partition snapshots), and the order ledger. Dropping or reordering the
+# pre-predict ResolveOpen leaves the integer interval bounds unmoved but shifts
+# the ACI alpha trajectory, so the CONFORMAL_ALPHA pin is what makes that phase
+# boundary load-bearing. (That persist is *called* exactly once is asserted in
+# U4b, where the Commit phase consolidates it.)
 #
 # The setup perturbs one history point (index 7, 40 -> 41) so the conformal
 # nonconformity scores and error columns are non-zero and therefore sensitive to
 # step ordering, rather than the all-zero residuals of the periodic fixtures.
 # ---------------------------------------------------------------------------
 
+# Pinned as literals on purpose: the lock must catch a rename of the interval
+# columns, so it must not derive them from the same production helper
+# (interval_column_names) that would rename in lockstep and hide the drift.
 _LOCK_LOWER_COL = "lo_0p9"
 _LOCK_UPPER_COL = "hi_0p9"
 
@@ -920,6 +930,30 @@ def test_characterization_lock_forecast_ledger(characterization_lock_run):
         np.array([40.0, 10.0, 11.0, 20.0, 21.0, 30.0]),
     )
 
+    # ACI per-row alpha trajectory: the adaptive controller advances as observed
+    # residuals feed back. The integer interval bounds above do NOT move when the
+    # pre-predict ResolveOpen is dropped, but this alpha trajectory does — so
+    # pinning it is the load-bearing assertion for the ResolveOpen phase boundary
+    # U4b extracts. atol tolerates last-bit cross-arch float noise while still
+    # catching the ~5e-3 shift a reorder produces.
+    np.testing.assert_allclose(
+        df[CONFORMAL_ALPHA].to_numpy(),
+        np.array([0.10, 0.10, 0.06, 0.06, 0.07, 0.07]),
+        rtol=0.0,
+        atol=1e-9,
+    )
+
+    # State-ref per row encodes the issued-origin count at apply() time; pinning
+    # it locks the issued-count accounting relative to the per-origin sequence.
+    assert df[CALIBRATION_STATE_REF].tolist() == [
+        "aci:perhorizon:0:SeasonalNaive:h1:__global__",
+        "aci:perhorizon:0:SeasonalNaive:h2:__global__",
+        "aci:perhorizon:1:SeasonalNaive:h1:__global__",
+        "aci:perhorizon:1:SeasonalNaive:h2:__global__",
+        "aci:perhorizon:2:SeasonalNaive:h1:__global__",
+        "aci:perhorizon:2:SeasonalNaive:h2:__global__",
+    ]
+
     # Every resolved row carries a conformal score; the one unresolved row does not.
     assert df.loc[df[Y].notna(), NONCONFORMITY_SCORE].notna().all()
     assert df.loc[df[Y].isna(), NONCONFORMITY_SCORE].isna().all()
@@ -981,7 +1015,6 @@ def test_characterization_lock_conformal_state(characterization_lock_run):
     # issued origin exactly once — the tripwire for a double-observe regression.
     for state in partition_states.values():
         assert state["issued_count"] == 3
-        assert state["partition"] in partition_states
 
 
 def test_characterization_lock_order_ledger(characterization_lock_run):
