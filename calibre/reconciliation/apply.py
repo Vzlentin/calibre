@@ -95,11 +95,9 @@ class VectorReconciler:
     def _coherent_vector(
         self, group: pd.DataFrame, summing: SummingMatrix
     ) -> tuple[SummingMatrix, np.ndarray]:
-        present_ids = group[UNIQUE_ID].astype(str).tolist()
-        subset = summing.subset(present_ids)
-        yhat_by_id = dict(
-            zip(group[UNIQUE_ID].astype(str), group[Y_HAT].astype(np.float64), strict=True)
-        )
+        uid_str = group[UNIQUE_ID].astype(str)
+        subset = summing.subset(uid_str.tolist())
+        yhat_by_id = dict(zip(uid_str, group[Y_HAT].astype(np.float64), strict=True))
         bottom = np.array([yhat_by_id[uid] for uid in subset.bottom_ids], dtype=np.float64)
         base = subset.S @ bottom
         return subset, self.reconcile_vector(base, subset)
