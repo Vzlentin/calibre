@@ -77,33 +77,16 @@ markdown files are the only durable ones.
 
 ## CLI usage
 
-There is no `obsidian` CLI binary. The vault is a directory of Markdown files —
-operate on it with standard filesystem tools. The project folder resolves to
-`$OBSIDIAN_VAULT_PATH/Projects/<project>/` (replace `<project>` with the repo
-name, e.g. `calibre`).
+The vault is a directory of Markdown files. Use standard filesystem tools
+(replace `<project>` with the repo name):
 
 ```bash
-# Read
 cat "$OBSIDIAN_VAULT_PATH/Projects/<project>/architecture.md"
-cat "$OBSIDIAN_VAULT_PATH/Projects/<project>/lessons.md"
-
-# Append to lessons.md (append-only file)
 printf '\n## <pattern>\n- rule\n' >> "$OBSIDIAN_VAULT_PATH/Projects/<project>/lessons.md"
-
-# Write a plan (overwrite if exists)
 cat > "$OBSIDIAN_VAULT_PATH/Projects/<project>/plans/<slug>.md" << 'EOF'
-# Plan: <title>
 ...
 EOF
-
-# Search
 grep -r "<term>" "$OBSIDIAN_VAULT_PATH/Projects/<project>/" --include="*.md" -l
 ```
 
-On Hermes agents, prefer `read_file`, `write_file`, `search_files`, and
-`patch` over raw shell commands — they're faster and avoid quoting issues.
-
-PowerShell uses `$env:OBSIDIAN_VAULT_PATH` in place of `$OBSIDIAN_VAULT_PATH`.
-
-If `OBSIDIAN_VAULT_PATH` is unset, skip these commands entirely and tell
-the user once that persistent memory is disabled for this session.
+If `OBSIDIAN_VAULT_PATH` is unset, skip all vault operations.

@@ -92,40 +92,14 @@ New worktrees auto-run `setup-worktree-unix` from `.cursor/worktrees.json`
 
 ## Agent memory
 
-Long-lived project memory lives in the Obsidian vault. The vault root is read
-from `$OBSIDIAN_VAULT_PATH` (currently `/home/vzl/obsidian-vault/vault/Val`).
-The project folder is `Projects/Calibre/`.
+Long-lived project memory lives in an Obsidian vault and is governed by
+`.claude/skills/project-memory/SKILL.md`. Read it at the start of any
+non-trivial task. Hermes agents: use the `obsidian` skill instead.
 
-**Canon files** (at `$OBSIDIAN_VAULT_PATH/Projects/Calibre/`):
-- `architecture.md` — durable system design, module boundaries, invariants, trade-offs
-- `vision.md` — product intent, goals, non-goals, scope
-- `lessons.md` — append-only log of corrections, pitfalls, rules-for-self
-- `ROADMAP.md` — mission, cadence, root-issue analysis, dependency ordering, parked decisions
-- `plans/<slug>.md` — per-task working memory (create at start, update through, leave as record)
-
-**Read at the start of any non-trivial task.** Operations use standard filesystem
-commands — there is no `obsidian` CLI binary:
-
-```bash
-cat "$OBSIDIAN_VAULT_PATH/Projects/Calibre/architecture.md"
-cat "$OBSIDIAN_VAULT_PATH/Projects/Calibre/lessons.md"
-printf '\n## <pattern>\n- rule\n' >> "$OBSIDIAN_VAULT_PATH/Projects/Calibre/lessons.md"
-cat > "$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/<slug>.md" << 'EOF'
-# Plan: <title>
-...
-EOF
-grep -r "<term>" "$OBSIDIAN_VAULT_PATH/Projects/Calibre/" --include="*.md" -l
-```
-
-Hermes agents: use `read_file`, `write_file`, `search_files`, and `patch` tools
-instead of raw shell commands. The `obsidian` skill in your available skills
-already knows the vault layout, sync workflow, and conventions.
-
-Claude Code agents: see `.claude/skills/project-memory/SKILL.md` for the full
-protocol (when to read/write each file, degrade-gracefully rules).
-
-If `$OBSIDIAN_VAULT_PATH` is unset, skip vault operations and proceed without
-persistent memory.
+The vault root is `$OBSIDIAN_VAULT_PATH`. The project folder is
+`Projects/Calibre/`; canon files: `architecture.md`, `lessons.md`,
+`vision.md`, `ROADMAP.md`, plus `plans/` and `archive/`. Skip vault
+operations if the env var is unset.
 
 ### Roadmap: GitHub for status, vault for rationale
 
