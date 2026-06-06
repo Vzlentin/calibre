@@ -15,12 +15,20 @@ from calibre.reconciliation.registry import (
     register_reconciler,
     resolve_reconciler,
 )
+from calibre.reconciliation.summing import (
+    TOTAL_LABEL,
+    SummingMatrix,
+    build_summing_matrix,
+)
 
 __all__ = [
     "DEFAULT_STRATEGY",
+    "TOTAL_LABEL",
     "NoOpReconciler",
     "Reconciler",
+    "SummingMatrix",
     "available_reconcilers",
+    "build_summing_matrix",
     "get_reconciler_builder",
     "register_reconciler",
     "resolve_reconciler",
