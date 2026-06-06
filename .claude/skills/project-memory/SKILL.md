@@ -77,16 +77,31 @@ markdown files are the only durable ones.
 
 ## CLI usage
 
-The `obsidian` CLI is parameterized on the resolved vault path. Examples
-(replace `<project>` with the repo name):
+There is no `obsidian` CLI binary. The vault is a directory of Markdown files —
+operate on it with standard filesystem tools. The project folder resolves to
+`$OBSIDIAN_VAULT_PATH/Projects/<project>/` (replace `<project>` with the repo
+name, e.g. `calibre`).
 
 ```bash
-obsidian vault="$OBSIDIAN_VAULT_PATH" read    path="<project>/architecture.md"
-obsidian vault="$OBSIDIAN_VAULT_PATH" read    path="<project>/lessons.md"
-obsidian vault="$OBSIDIAN_VAULT_PATH" append  path="<project>/lessons.md" content="## <pattern>\n- rule"
-obsidian vault="$OBSIDIAN_VAULT_PATH" write   path="<project>/plans/<slug>.md" content="..."
-obsidian vault="$OBSIDIAN_VAULT_PATH" search  query="<term>" limit=20
+# Read
+cat "$OBSIDIAN_VAULT_PATH/Projects/<project>/architecture.md"
+cat "$OBSIDIAN_VAULT_PATH/Projects/<project>/lessons.md"
+
+# Append to lessons.md (append-only file)
+printf '\n## <pattern>\n- rule\n' >> "$OBSIDIAN_VAULT_PATH/Projects/<project>/lessons.md"
+
+# Write a plan (overwrite if exists)
+cat > "$OBSIDIAN_VAULT_PATH/Projects/<project>/plans/<slug>.md" << 'EOF'
+# Plan: <title>
+...
+EOF
+
+# Search
+grep -r "<term>" "$OBSIDIAN_VAULT_PATH/Projects/<project>/" --include="*.md" -l
 ```
+
+On Hermes agents, prefer `read_file`, `write_file`, `search_files`, and
+`patch` over raw shell commands — they're faster and avoid quoting issues.
 
 PowerShell uses `$env:OBSIDIAN_VAULT_PATH` in place of `$OBSIDIAN_VAULT_PATH`.
 
