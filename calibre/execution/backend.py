@@ -589,10 +589,7 @@ class BackendEngine:
         persist is called exactly once per origin.
         """
         if not origin_preds.empty:
-            try:
-                validate_forecast_frame(origin_preds)
-            except ValueError as exc:
-                raise ValueError(f"Invalid forecast frame at origin {origin}: {exc}") from exc
+            validate_forecast_frame(origin_preds)
             ledger.append(origin_preds)
 
         self._resolve_due(ledger, actuals, origin, conformal_runtime)

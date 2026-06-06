@@ -777,11 +777,10 @@ def test_auto_backend_uses_ray_at_threshold():
 # ---------------------------------------------------------------------------
 # Characterization lock for the per-origin pipeline (U4 #114, part U4a).
 #
-# These tests pin the CURRENT, unrefactored end-to-end outputs of
-# ``BackendEngine``'s per-origin pipeline (the ``_execute_origin`` /
-# ``_resolve_ledger`` path) over a multi-origin run with conformal calibration
-# AND an order policy both active. They are a tripwire: the follow-up phase
-# extraction (U4b) must keep every value below byte/value-identical. The pins
+# These tests pin the end-to-end outputs of ``BackendEngine``'s per-origin
+# pipeline (the ``run_origin`` phase path) over a multi-origin run with
+# conformal calibration AND an order policy both active. They are a tripwire:
+# the phase extraction (U4b) keeps every value below byte/value-identical. The pins
 # cover the ordering-sensitive surfaces a U4b reorder would disturb: the
 # cross-origin conformal feedback (interval bounds plus the per-row
 # CONFORMAL_ALPHA trajectory and CALIBRATION_STATE_REF), the resolved
@@ -1322,8 +1321,8 @@ def test_persist_fires_exactly_once_per_origin_over_full_run():
     """Across a real multi-origin run, persist fires exactly once per origin.
 
     This is the consolidation U4b performs: the pre-refactor path persisted
-    inside each of two ``_resolve_ledger`` calls (up to twice per origin); the
-    Commit phase now owns the only persist. We drive ``engine.execute`` with a
+    inside each of its two per-origin resolve calls (up to twice per origin);
+    the Commit phase now owns the only persist. We drive ``engine.execute`` with a
     counting state store and a ``_persist_conformal_state`` spy and assert the
     call count equals the number of executed origins — never double.
     """
