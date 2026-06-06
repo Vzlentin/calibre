@@ -64,6 +64,7 @@ from calibre.execution.threading import cap_threaded_config
 from calibre.forecasting.adapter_registry import resolve_adapter
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
+from calibre.reconciliation.protocols import Reconciler
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
 logger = logging.getLogger(__name__)
@@ -286,9 +287,23 @@ class ConformalOptions:
             raise ValueError("Pass either conformal runtime or config, not both")
 
 
+@dataclass(frozen=True)
+class ReconciliationOptions:
+    """Reconciler + hierarchy threaded into the engine (mirrors ConformalOptions).
+
+    A ``None`` reconciler or ``None`` hierarchy makes the Reconcile phase a no-op
+    by construction — the path VN2 (``hierarchy=None``) takes, keeping the
+    baseline byte-identical (R11).
+    """
+
+    reconciler: Reconciler | None = None
+    hierarchy: pd.DataFrame | None = None
+
+
 _DEFAULT_EXECUTION = ExecutionOptions()
 _DEFAULT_OUTPUT = LedgerOutputOptions()
 _DEFAULT_CONFORMAL = ConformalOptions()
+_DEFAULT_RECONCILIATION = ReconciliationOptions()
 
 
 class BackendEngine:
@@ -298,11 +313,14 @@ class BackendEngine:
         execution: ExecutionOptions = _DEFAULT_EXECUTION,
         output: LedgerOutputOptions = _DEFAULT_OUTPUT,
         conformal: ConformalOptions = _DEFAULT_CONFORMAL,
+        reconciliation: ReconciliationOptions = _DEFAULT_RECONCILIATION,
         order: OrderPolicy | None = None,
     ) -> None:
         self.execution = execution
         self.output = output
         self.conformal = conformal
+        self.reconciler = reconciliation.reconciler
+        self.hierarchy = reconciliation.hierarchy
         self.order_config = order
         self.freq = execution.freq
         self.seed: Seed | None = set_seed(execution.seed) if execution.seed is not None else None
@@ -474,8 +492,9 @@ class BackendEngine:
 
         The phases run in a fixed order and thread explicit state between them:
         ``ResolveOpen`` (carry-forward prior origins) → ``Predict`` →
-        ``Calibrate`` → ``Order`` → ``Commit`` (append + final resolve +
-        persist). Each phase is a small method that takes/returns the next
+        ``Reconcile`` (point → coherent point) → ``Calibrate`` → ``Order`` →
+        ``Commit`` (append + final resolve + persist). Each phase is a small
+        method that takes/returns the next
         phase's input so it can be driven independently in a test. This is a
         plain method-call sequence, not a dispatch framework (KTD6). A failure
         in any phase is re-raised naming the phase and origin so the fragile
@@ -485,6 +504,8 @@ class BackendEngine:
             self._resolve_open(ledger, actuals, origin, conformal_runtime)
         with self._phase("Predict", origin):
             origin_preds = self._predict(parallel_refs, direct_refs, origin)
+        with self._phase("Reconcile", origin):
+            origin_preds = self._reconcile(origin_preds)
         with self._phase("Calibrate", origin):
             origin_preds = self._calibrate(origin_preds, conformal_runtime)
         with self._phase("Order", origin):
@@ -543,6 +564,20 @@ class BackendEngine:
         local_preds = self._run_local_scope(parallel_refs, origin)
         global_preds = self._run_global_scope(direct_refs, origin)
         return _concat_prediction_frames([local_preds, global_preds])
+
+    def _reconcile(self, origin_preds: pd.DataFrame) -> pd.DataFrame:
+        """Reconcile phase — make point forecasts coherent across the hierarchy.
+
+        Runs BETWEEN Predict and Calibrate (R8): the reconciler rewrites point
+        ``y_hat`` in place, then conformal calibrates per node so intervals stay
+        per-node marginal around the reconciled point (R9). No-op (returns the
+        input unchanged) when no reconciler is configured, the hierarchy is None,
+        or the predictions are empty (R3, R11) — the VN2 path, byte-identical by
+        construction. This phase is blind to conformal/order state.
+        """
+        if self.reconciler is None or self.hierarchy is None or origin_preds.empty:
+            return origin_preds
+        return self.reconciler(origin_preds, self.hierarchy)
 
     def _calibrate(
         self,

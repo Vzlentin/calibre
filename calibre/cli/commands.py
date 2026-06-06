@@ -7,7 +7,12 @@ from uuid import UUID
 
 import pandas as pd
 
-from calibre.cli.config import BackendConfig, load_config, load_config_from_mapping
+from calibre.cli.config import (
+    BackendConfig,
+    ReconciliationConfig,
+    load_config,
+    load_config_from_mapping,
+)
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.metrics import set_order_cost
@@ -16,6 +21,7 @@ from calibre.execution.backend import (
     BackendResult,
     ConformalOptions,
     LedgerOutputOptions,
+    ReconciliationOptions,
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
@@ -155,6 +161,7 @@ def run_config(
     conformal_config: SymmetricIntervalConfig | None = (
         config.conformal.to_runtime_config() if config.conformal is not None else None
     )
+    reconciliation_config = config.reconciliation or ReconciliationConfig()
     streaming_output = config.output.ledger_path if config.output.streaming else None
     streaming_order_output = config.output.order_ledger_path if config.output.streaming else None
 
@@ -170,6 +177,10 @@ def run_config(
             run_id=run_id,
             state_store=conformal_state_store,
             initial_ledger=initial_ledger,
+        ),
+        reconciliation=ReconciliationOptions(
+            reconciler=reconciliation_config.to_reconciler(),
+            hierarchy=bundle.hierarchy,
         ),
         order=_build_order_config(config),
     )

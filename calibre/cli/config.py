@@ -9,6 +9,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from calibre.conformal.runtime import SymmetricIntervalConfig
+from calibre.reconciliation import Reconciler, resolve_reconciler
 
 CONFIG_SCHEMA = "1.0"
 
@@ -71,6 +72,23 @@ class ConformalConfig(_Section):
             mode=self.mode,
             protection_period=self.protection_period,
         )
+
+
+class ReconciliationConfig(_Section):
+    """Point-forecast reconciliation strategy knob (defaults to a no-op).
+
+    ``weighting`` is consumed only by the MinT strategy; other strategies ignore
+    it. An absent ``reconciliation`` section is equivalent to ``strategy: none``,
+    so existing flat-panel runs are unaffected (R10).
+    """
+
+    strategy: Literal["none", "bottom_up", "top_down", "mint"] = "none"
+    weighting: Literal["ols", "shrinkage"] = "ols"
+
+    def to_reconciler(self) -> Reconciler:
+        if self.strategy == "mint":
+            return resolve_reconciler("mint", weighting=self.weighting)
+        return resolve_reconciler(self.strategy)
 
 
 class OrderingConfig(_Section):
@@ -165,6 +183,7 @@ class BackendConfig(BaseModel):
     origins: OriginsConfig
     output: OutputConfig = Field(default_factory=OutputConfig)
     conformal: ConformalConfig | None = None
+    reconciliation: ReconciliationConfig | None = None
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     source_path: str | None = None
