@@ -145,6 +145,62 @@ failed, stop and report.
 
 ---
 
+## Stage 0.7 — Choose execution location and provision
+
+Stages 1–5 run against a working directory `WORKDIR`. Pick it with the
+smart-worktree gate so the user's current checkout — their branch *and* any
+uncommitted work — is never disturbed. Read git state in the main checkout:
+
+```bash
+MAIN=$(git rev-parse --show-toplevel)   # main checkout path; capture before any cd
+git branch --show-current               # empty ⇒ detached HEAD
+git status --porcelain                  # empty ⇒ clean tree
+```
+
+Decide the mode:
+
+- **On `main` AND clean** (current branch is `main` *and* `git status --porcelain`
+  is empty) → **DIRECT mode**: `WORKTREE_MODE=false`, `WORKDIR="$MAIN"`. No
+  provisioning — `ce-work` branches inside this checkout as it does today.
+- **Any other branch, detached HEAD, OR uncommitted/untracked work** →
+  **WORKTREE mode**: `WORKTREE_MODE=true`. Provision an isolated worktree on a
+  fresh branch cut from `origin/main`, so neither the user's branch nor their
+  dirty tree moves.
+
+**Provision (worktree mode only).** `<type>` is the kind `ce-work` would choose
+(`feat|fix|refactor|chore`); `<slug>` is the Stage 0 slug. Run from the main
+checkout and spell the source path explicitly — `$ROOT_WORKTREE_PATH` (the
+Cursor-injected var `setup-worktree-unix` relies on) is absent when `/go` runs
+the steps itself:
+
+```bash
+git fetch origin
+git worktree add .worktrees/<slug> -b <type>/<slug> origin/main
+cd .worktrees/<slug>
+# canonical setup-worktree-unix steps, sourced from the main checkout ($MAIN):
+test -f "$MAIN/.env" && cp "$MAIN/.env" .env || true
+test -d "$MAIN/data/vn2" && mkdir -p data && cp -R "$MAIN/data/vn2" data/vn2 || true
+uv sync --frozen --extra dev --extra benchmarks
+WORKDIR=$(pwd)                          # absolute worktree path
+```
+
+Per CLAUDE.md "Worktrees": a *warm* `uv sync` takes seconds; **never** copy the
+main `.venv` (it is non-relocatable), and **never** set `UV_LINK_MODE`.
+
+`WORKDIR` is where Stages 1–5 operate. From here on, every shell command for
+those stages uses an explicit `cd "$WORKDIR" && …` in worktree mode (a
+`working_directory` arg can silently target the main repo); in direct mode
+`WORKDIR` is the main checkout and the `cd` is a harmless no-op. Stage 6 is the
+exception — it always runs from the main checkout (`$MAIN`).
+
+**GATE (worktree mode):** the worktree exists (`git worktree list` shows
+`.worktrees/<slug>`) and its venv is usable
+(`cd "$WORKDIR" && uv run python -c "import calibre"`). If provisioning failed,
+stop and report — do **not** fall back to mutating the user's dirty checkout. In
+direct mode this gate is automatically satisfied.
+
+---
+
 ## Stage 1 — Implement + open the PR (`ce-work` as a spawned agent)
 
 Spawn **one** agent (foreground, `subagent_type: general-purpose`, no model
@@ -155,9 +211,14 @@ window keeps the heavy implementation stage clean. Give it this brief:
 > Treat the pasted plan as the complete spec — do not re-plan, do not ask to
 > narrow scope.
 >
-> Setup, non-interactively (do not stop to ask which branch): from an up-to-date
-> `main`, create a feature branch named `feat/<slug>` (or `fix/<slug>`). Do not
-> commit to `main`.
+> Setup, non-interactively (do not stop to ask which branch) — use the clause for
+> this run's mode (from Stage 0.7):
+> - **Direct mode:** from an up-to-date `main`, create the feature branch
+>   `<type>/<slug>` in this checkout. Do not commit to `main`.
+> - **Worktree mode:** the branch and worktree already exist. `cd` into
+>   `<WORKDIR>` (the absolute worktree path) and implement on the existing
+>   `<type>/<slug>` branch — do **not** create a branch, do **not** touch the
+>   main checkout.
 >
 > Follow repo conventions (AGENTS.md / CLAUDE.md). Run quality gates with the
 > `uv run` prefix only: `uv run pytest`, `uv run ruff check .`,
@@ -178,30 +239,43 @@ window keeps the heavy implementation stage clean. Give it this brief:
 > <paste the full plan contents from the active store — paste the text, do not
 > pass a path; an isolated worktree may not have the vault mounted>
 
-When the agent returns, sync the main checkout onto the PR branch (works whether
-the agent ran in this checkout or an isolated one):
+When the agent returns, sync by mode — never move the main checkout onto the PR
+branch in worktree mode:
+
+- **Direct mode:** the agent branched in this checkout, so check out the PR
+  branch here and fast-forward:
 
 ```bash
 gh pr checkout <PR>
 git pull --ff-only
 ```
 
+- **Worktree mode:** leave the main checkout exactly where the user left it
+  (still on their branch / dirty tree). The worktree is already on
+  `<type>/<slug>`; just fast-forward it to the pushed state:
+
+```bash
+cd "$WORKDIR" && git pull --ff-only
+```
+
 **GATE:** a PR exists for this branch (`gh pr view --json number,url,state`) and
-real code changed (`git diff main...HEAD --stat` is non-empty). If either is
-missing, stop and report — do not hand-write the implementation yourself.
+real code changed (`cd "$WORKDIR" && git diff main...HEAD --stat` is non-empty).
+If either is missing, stop and report — do not hand-write the implementation
+yourself.
 
 ---
 
 ## Stage 2 — Simplify the diff (`/ce-simplify-code`, inline)
 
-Invoke the `ce-simplify-code` skill (inline — it spawns its own three reviewers).
-Scope is the branch diff vs `main`, which is correct here.
+Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — it spawns its own
+three reviewers; explicit `cd "$WORKDIR" && …` in worktree mode, no-op in direct
+mode). Scope is the branch diff vs `main`, which is correct here.
 
 If it changes anything, it re-runs typecheck/lint/scoped tests itself. Commit and
 push any resulting changes before moving on:
 
 ```bash
-git add -A && git commit -m "refactor: simplify <slug>" && git push
+cd "$WORKDIR" && git add -A && git commit -m "refactor: simplify <slug>" && git push
 ```
 
 **GATE:** working tree clean (committed + pushed) before Stage 3.
@@ -210,14 +284,14 @@ git add -A && git commit -m "refactor: simplify <slug>" && git push
 
 ## Stage 3 — Review the PR (`/ce-code-review`, inline)
 
-Invoke the `ce-code-review` skill (inline — it spawns its persona tiers) against
-this PR. Ensure its **actionable findings land as inline PR review comments**
-(resolvable threads) so Stage 4 has something to resolve — pass the PR and have
-it post comments rather than only printing a report. If it applies any safe fixes
-inline and commits them, push those:
+Invoke the `ce-code-review` skill from `WORKDIR` (inline — it spawns its persona
+tiers) against this PR. Ensure its **actionable findings land as inline PR review
+comments** (resolvable threads) so Stage 4 has something to resolve — pass the PR
+and have it post comments rather than only printing a report. If it applies any
+safe fixes inline and commits them, push those:
 
 ```bash
-git push
+cd "$WORKDIR" && git push
 ```
 
 Findings that become PR review threads are handed to Stage 4. Zero findings is a
@@ -229,10 +303,10 @@ valid outcome — Stage 4 then no-ops.
 
 ## Stage 4 — Resolve review feedback (`/ce-resolve-pr-feedback`, inline)
 
-Invoke the `ce-resolve-pr-feedback` skill (inline — it spawns per-thread agents)
-for this PR. It evaluates every unresolved thread (Stage 3's findings plus any
-human/bot comments that arrived), fixes the valid ones, commits + pushes, then
-replies and resolves each thread.
+Invoke the `ce-resolve-pr-feedback` skill from `WORKDIR` (inline — it spawns
+per-thread agents) for this PR. It evaluates every unresolved thread (Stage 3's
+findings plus any human/bot comments that arrived), fixes the valid ones in
+`WORKDIR`, commits + pushes, then replies and resolves each thread.
 
 **GATE:** no unresolved review threads remain except ones it explicitly tagged
 `needs-human`. If `needs-human` threads exist, surface them in the final report;
@@ -252,29 +326,71 @@ If checks fail:
 
 1. Enumerate failures: `gh pr checks --json name,state,conclusion,link`.
 2. Pull logs: `gh run view <run-id> --log-failed`.
-3. Fix the **root cause** in the working tree. Never weaken an assertion, skip a
+3. Fix the **root cause** in `WORKDIR`. Never weaken an assertion, skip a
    test, or touch the VN2 `4992.20` baseline to turn CI green. If the failure is
    a genuinely flaky test with no code fix, record it rather than retrying blindly.
-4. `git add <changed> && git commit -m "fix(ci): <what broke>" && git push`.
+4. `cd "$WORKDIR" && git add <changed> && git commit -m "fix(ci): <what broke>" && git push`.
 5. Re-watch.
 
 After **3** failed cycles, stop looping: append a `## CI Failures Unresolved`
-section to the PR body (`gh pr edit <PR> --body-file <tmp>`) and report. Do not merge red.
+section to the PR body (`gh pr edit <PR> --body-file <tmp>`) and report. Do not
+merge red — take the **preserve path** below, leaving the branch (and worktree,
+if any) in place.
 
 **On green** (and Stage 4 gate satisfied), confirm the PR body carries `closes #N`
 — Stage 0.6 guarantees the issue exists, so verify only that the agent actually
-included the line — then merge:
+included the line — then squash-merge (this also deletes the remote branch):
 
 ```bash
 gh pr merge <PR> --squash --delete-branch
-git checkout main && git pull --ff-only
 ```
 
-**GATE:** PR merged and `main` synced, OR a clear report of why it stopped short.
+**Cleanup is merge-gated** — run it only after that command confirms the
+squash-merge. A squash-merged branch never shows up as "merged" to git, so the
+local branch must be force-deleted with `git branch -D` (not `-d`). Clean up by
+mode:
+
+- **Direct mode** (the main checkout is on the PR branch from Stage 1): return to
+  `main`, fast-forward, then drop the local branch:
+
+```bash
+git checkout main && git pull --ff-only
+git branch -D <type>/<slug>
+```
+
+- **Worktree mode** (the main checkout never left the user's branch/dirty tree):
+  from the main checkout, remove the worktree and drop the branch without
+  touching the user's working tree:
+
+```bash
+cd "$MAIN"
+git worktree remove .worktrees/<slug>    # add --force if the tree is dirty
+git branch -D <type>/<slug>              # squash-merge ⇒ force-delete
+git worktree prune
+git fetch origin main:main               # fast-forward local main; skip if the user is sitting on main
+```
+
+  Do **not** `git checkout main` or `git pull` in the main checkout here —
+  preserving the user's branch and dirty tree is the whole point of worktree mode.
+
+**Preserve path (failure / any short-stop).** If CI is still red after 3 cycles,
+or any stage stopped short of a confirmed merge, do **not** clean up: leave the
+local `<type>/<slug>` branch and — in worktree mode — the `.worktrees/<slug>`
+working tree intact so the user can resume/debug, and surface the worktree path +
+branch in the final report.
+
+**GATE:** either the PR is squash-merged **and** cleanup ran (local branch deleted
+in both modes; worktree removed in worktree mode) with `main` fast-forwarded; OR a
+clear report of why it stopped short, naming the preserved branch (and worktree
+path, if any).
 
 ---
 
 ## Stage 6 — Persist outcome
+
+Stage 6 always runs from the main checkout (`$MAIN`), never from `WORKDIR` — by
+now the worktree may already be removed by Stage 5 cleanup, and persistence is
+independent of execution mode.
 
 **Flip the plan to shipped (always).** In the active store (vault if set, else
 `docs/plans/`), update the plan file for this work item: set
@@ -290,9 +406,12 @@ key decisions.
   Do not touch `vision.md` unless product scope actually moved. The vault is a git
   repo — commit and push the vault edits (the plan status flip plus any memory
   updates).
-- **Vault unset (degraded):** the plan lives in `docs/plans/` in this repo.
-  Commit the `status: shipped` flip (a docs-only change) and push. There is no
-  vault, so skip `architecture.md` / `lessons.md` / `project-memory`.
+- **Vault unset (degraded):** the plan lives in `docs/plans/` in the main
+  checkout — Stage 0.5 wrote it there before any worktree existed, and the
+  Stage 1 brief pasted the plan *text*, so the worktree never needed the file on
+  disk. From the main checkout, commit the `status: shipped` flip (a docs-only
+  change) to `main` and push. There is no vault, so skip
+  `architecture.md` / `lessons.md` / `project-memory`.
 
 **GATE:** the work item's plan in the active store reads `status: shipped` with
 the PR/SHA recorded.
@@ -302,6 +421,9 @@ the PR/SHA recorded.
 ## Done
 
 Report, in order: the resolved **input kind** (idea / issue / plan-file) and the
-**plan path** in the active store; issue #N; PR URL; merged (yes + SHA / no +
-reason); CI result; any `needs-human` review threads; and memory updates (plan
-status flip, plus architecture/lessons or "skipped — no vault").
+**plan path** in the active store; the **execution mode** (direct / worktree, and
+on the preserve path the retained branch and — in worktree mode — the worktree
+path); issue #N; PR URL;
+merged (yes + SHA / no + reason); CI result; any `needs-human` review threads; and
+memory updates (plan status flip, plus architecture/lessons or "skipped — no
+vault").
