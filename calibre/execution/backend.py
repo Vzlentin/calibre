@@ -477,13 +477,39 @@ class BackendEngine:
         ``Calibrate`` → ``Order`` → ``Commit`` (append + final resolve +
         persist). Each phase is a small method that takes/returns the next
         phase's input so it can be driven independently in a test. This is a
-        plain method-call sequence, not a dispatch framework (KTD6).
+        plain method-call sequence, not a dispatch framework (KTD6). A failure
+        in any phase is re-raised naming the phase and origin so the fragile
+        sequencing the seam exposes is debuggable.
         """
-        self._resolve_open(ledger, actuals, origin, conformal_runtime)
-        origin_preds = self._predict(parallel_refs, direct_refs, origin)
-        origin_preds = self._calibrate(origin_preds, conformal_runtime)
-        self._order(origin_preds, order_ledger)
-        self._commit(ledger, origin_preds, actuals, origin, conformal_runtime)
+        with self._phase("ResolveOpen", origin):
+            self._resolve_open(ledger, actuals, origin, conformal_runtime)
+        with self._phase("Predict", origin):
+            origin_preds = self._predict(parallel_refs, direct_refs, origin)
+        with self._phase("Calibrate", origin):
+            origin_preds = self._calibrate(origin_preds, conformal_runtime)
+        with self._phase("Order", origin):
+            self._order(origin_preds, order_ledger)
+        with self._phase("Commit", origin):
+            self._commit(ledger, origin_preds, actuals, origin, conformal_runtime)
+
+    @contextmanager
+    def _phase(self, name: str, origin: pd.Timestamp) -> Iterator[None]:
+        """Re-raise any phase failure naming the phase and origin.
+
+        The original exception type is preserved so existing handlers (e.g. the
+        API's ``except ValueError``) still match. If the type cannot be rebuilt
+        from a single message, fall back to ``RuntimeError`` rather than masking
+        the failure with a reconstruction error.
+        """
+        try:
+            yield
+        except Exception as exc:
+            message = f"{name} phase failed at origin {origin}: {exc}"
+            try:
+                rewrapped: Exception = type(exc)(message)
+            except Exception:
+                rewrapped = RuntimeError(message)
+            raise rewrapped from exc
 
     def _resolve_open(
         self,
