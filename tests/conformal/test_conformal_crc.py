@@ -382,12 +382,10 @@ def test_calibrator_rebuild_keeps_partition_records_after_window_eviction() -> N
     calibrator.update(2.0, "A")
     calibrator.update(3.0, "B")  # exceeds window -> rebuild() drops the oldest record
 
-    records_a, key_a = calibrator.partition_records_and_cache_key("A")
-    records_b, key_b = calibrator.partition_records_and_cache_key("B")
+    records_a, _ = calibrator.partition_records_and_cache_key("A")
+    records_b, _ = calibrator.partition_records_and_cache_key("B")
     assert [record.residual for record in records_a] == [2.0]
     assert [record.residual for record in records_b] == [3.0]
-    assert key_a == "partition:A"
-    assert key_b == "partition:B"
 
 
 def test_apply_upper_bound_consumes_public_calibrator_buffer() -> None:

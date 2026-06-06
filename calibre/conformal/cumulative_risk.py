@@ -164,10 +164,6 @@ class WeightedResidualCalibrator:
             for value in values:
                 self.update(float(value), partition)
 
-    def predict(self, alpha: float, partition: Hashable = GLOBAL_PARTITION) -> float:
-        del alpha
-        return self.buffer(partition)
-
     def update(self, new_score: float, partition: Hashable = GLOBAL_PARTITION) -> None:
         self._sequence += 1
         self.update_record(
