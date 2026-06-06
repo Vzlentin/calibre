@@ -7,8 +7,9 @@ import pytest
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
     CumulativeRiskRuntime,
+    WeightedResidualCalibrator,
 )
-from calibre.conformal.partitions import series_partition
+from calibre.conformal.partitions import GLOBAL_PARTITION, series_partition
 from calibre.core.forecast_frame import (
     CONFORMAL_METHOD,
     CONFORMAL_MODE,
@@ -319,3 +320,87 @@ def test_cumulative_crc_partition_key_combined_with_weight_decay() -> None:
     # Upper = base 60 + buffer 50 = 110. The 250 residual under parent "2"
     # is correctly excluded.
     assert fresh[upper_col].iloc[2] == pytest.approx(110.0)
+
+
+# --- Calibrator public buffer interface (U5/C5) ----------------------------
+# These exercise the buffer surface the runtime now depends on directly,
+# instead of reaching into the calibrator's former private path.
+
+
+def test_calibrator_buffer_matches_buffer_components() -> None:
+    calibrator = WeightedResidualCalibrator(
+        CumulativeConformalRiskConfig(coverage=0.5, weight_decay=None)
+    )
+    for residual in (6.0, 4.0, 8.0):
+        calibrator.update(residual)
+
+    assert calibrator.buffer() == pytest.approx(
+        calibrator.buffer_components(GLOBAL_PARTITION)["buffer"]
+    )
+    # Split-conformal quantile of [4, 6, 8] at coverage 0.5 clips to rank 2 -> 6.
+    assert calibrator.buffer() == pytest.approx(6.0)
+
+
+def test_calibrator_buffer_weighted_vs_unweighted() -> None:
+    residuals = (10.0, 20.0, 30.0)
+    unweighted = WeightedResidualCalibrator(
+        CumulativeConformalRiskConfig(coverage=0.5, weight_decay=None)
+    )
+    weighted = WeightedResidualCalibrator(
+        CumulativeConformalRiskConfig(coverage=0.5, weight_decay=0.5)
+    )
+    for residual in residuals:
+        unweighted.update(residual)
+        weighted.update(residual)
+
+    # Unweighted clipped quantile -> 20; recency weights push the weighted
+    # buffer up to the most recent residual -> 30.
+    assert unweighted.buffer() == pytest.approx(20.0)
+    assert weighted.buffer() == pytest.approx(30.0)
+
+
+def test_calibrator_buffer_components_blends_scoped_and_global_under_shrinkage() -> None:
+    calibrator = WeightedResidualCalibrator(
+        CumulativeConformalRiskConfig(coverage=0.9, weight_decay=None, shrinkage_strength=0.5)
+    )
+    calibrator.update(10.0, "A")
+    calibrator.update(100.0, "B")
+
+    components = calibrator.buffer_components("A")
+    assert components["scoped_buffer"] == pytest.approx(10.0)
+    assert components["global_buffer"] == pytest.approx(100.0)
+    # 0.5 * 10 + 0.5 * 100 = 55.
+    assert components["buffer"] == pytest.approx(55.0)
+    assert calibrator.buffer("A") == pytest.approx(55.0)
+
+
+def test_calibrator_rebuild_keeps_partition_records_after_window_eviction() -> None:
+    calibrator = WeightedResidualCalibrator(
+        CumulativeConformalRiskConfig(coverage=0.5, weight_decay=None, calibration_window=2)
+    )
+    calibrator.update(1.0, "A")
+    calibrator.update(2.0, "A")
+    calibrator.update(3.0, "B")  # exceeds window -> rebuild() drops the oldest record
+
+    records_a, key_a = calibrator.partition_records_and_cache_key("A")
+    records_b, key_b = calibrator.partition_records_and_cache_key("B")
+    assert [record.residual for record in records_a] == [2.0]
+    assert [record.residual for record in records_b] == [3.0]
+    assert key_a == "partition:A"
+    assert key_b == "partition:B"
+
+
+def test_apply_upper_bound_consumes_public_calibrator_buffer() -> None:
+    # R6: the production apply() path emits base_sum + calibrator.buffer(partition),
+    # proving the runtime depends on the public buffer interface, not a private path.
+    runtime = _runtime()
+    runtime.observe(runtime.apply(_frame(actual_values=[11.0, 22.0, 33.0])))
+
+    fresh = _frame(origin=pd.Timestamp("2024-02-01"))
+    partition = runtime._partition_for_row(fresh.iloc[0])
+    public_buffer = runtime._calibrator.buffer(partition)
+
+    enriched = runtime.apply(fresh)
+    _, upper_col = interval_column_names(0.5)
+    assert public_buffer == pytest.approx(6.0)
+    assert enriched[upper_col].iloc[2] == pytest.approx(60.0 + public_buffer)

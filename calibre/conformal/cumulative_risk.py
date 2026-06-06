@@ -166,7 +166,7 @@ class WeightedResidualCalibrator:
 
     def predict(self, alpha: float, partition: Hashable = GLOBAL_PARTITION) -> float:
         del alpha
-        return self._buffer_components_for(partition)["buffer"]
+        return self.buffer(partition)
 
     def update(self, new_score: float, partition: Hashable = GLOBAL_PARTITION) -> None:
         self._sequence += 1
@@ -197,9 +197,9 @@ class WeightedResidualCalibrator:
         self._buffer_cache.clear()
         if len(self._records) > self.config.calibration_window:
             self._records = self._records[-self.config.calibration_window :]
-            self._rebuild_indexes()
+            self.rebuild()
 
-    def _rebuild_indexes(self) -> None:
+    def rebuild(self) -> None:
         self._records_by_partition = {}
         for record in self._records:
             self._records_by_partition.setdefault(record.partition, []).append(record)
@@ -210,7 +210,7 @@ class WeightedResidualCalibrator:
             return self._records
         return self._records_by_partition.get(partition, [])
 
-    def _partition_records_and_cache_key(
+    def partition_records_and_cache_key(
         self, partition: Hashable
     ) -> tuple[list[_ResidualRecord], str]:
         if partition == GLOBAL_PARTITION:
@@ -240,8 +240,12 @@ class WeightedResidualCalibrator:
         self._buffer_cache[cache_key] = buffer
         return buffer
 
-    def _buffer_components_for(self, partition: Hashable) -> dict[str, float]:
-        scoped_records, scoped_key = self._partition_records_and_cache_key(partition)
+    def buffer(self, partition: Hashable = GLOBAL_PARTITION) -> float:
+        """Public buffer for ``partition`` — the value order policies consume."""
+        return self.buffer_components(partition)["buffer"]
+
+    def buffer_components(self, partition: Hashable) -> dict[str, float]:
+        scoped_records, scoped_key = self.partition_records_and_cache_key(partition)
         scoped = self._raw_buffer_cached(scoped_key, scoped_records)
         shrinkage = float(self.config.shrinkage_strength)
         if partition == GLOBAL_PARTITION or shrinkage == 0.0:
@@ -270,7 +274,7 @@ class WeightedResidualCalibrator:
         return {
             "partition": str(partition),
             "n_scores": len(records),
-            **self._buffer_components_for(partition),
+            **self.buffer_components(partition),
         }
 
     def get_state(self) -> dict[str, Any]:
@@ -312,64 +316,6 @@ class CumulativeRiskRuntime:
             residual=record.residual,
         )
 
-    def _rebuild_indexes(self) -> None:
-        self._calibrator._rebuild_indexes()
-
-    def _records_for_partition(self, partition: Hashable) -> list[_ResidualRecord]:
-        return self._calibrator.records_for_partition(partition)
-
-    def _partition_records_and_cache_key(
-        self, partition: Hashable
-    ) -> tuple[list[_ResidualRecord], str]:
-        return self._calibrator._partition_records_and_cache_key(partition)
-
-    def _raw_buffer(self, records: list[_ResidualRecord]) -> float:
-        if self.config.weight_decay is None:
-            return _conformal_quantile(
-                (record.residual for record in records),
-                self.config.coverage,
-                fallback=self.config.fallback_buffer,
-            )
-        return _weighted_quantile(
-            records,
-            self.config.coverage,
-            decay=float(self.config.weight_decay),
-            fallback=self.config.fallback_buffer,
-            mode=self.config.weighted_quantile_mode,
-        )
-
-    def _raw_buffer_cached(self, cache_key: str, records: list[_ResidualRecord]) -> float:
-        return self._calibrator._raw_buffer_cached(cache_key, records)
-
-    def _buffer_components_for(self, partition: Hashable) -> dict[str, float]:
-        return self._calibrator._buffer_components_for(partition)
-
-    def _buffer_for(self, partition: Hashable) -> float:
-        return self._calibrator.predict(self.config.alpha, partition)
-
-    def _snapshot(self, partition: Hashable) -> dict[str, Any]:
-        records = self._records_for_partition(partition)
-        buffer_components = self._buffer_components_for(partition)
-        return {
-            "method": self.config.method_name,
-            "coverage": self.config.coverage,
-            "protection_period": self.config.protection_period,
-            "partition": str(partition),
-            "partition_key": getattr(
-                self.config.partition_key,
-                "__name__",
-                repr(self.config.partition_key),
-            ),
-            "weight_decay": self.config.weight_decay,
-            "weighted_quantile_mode": self.config.weighted_quantile_mode,
-            "base_column": self.config.resolved_base_column,
-            "buffer_min": self.config.buffer_min,
-            "buffer_max": self.config.buffer_max,
-            "shrinkage_strength": self.config.shrinkage_strength,
-            "n_scores": len(records),
-            **buffer_components,
-        }
-
     def _state_ref(self, partition: Hashable) -> str:
         return f"{self.config.method_name}:cumulative:{self._sequence}:{partition}"
 
@@ -409,7 +355,7 @@ class CumulativeRiskRuntime:
 
             partition = self._partition_for_row(ordered.iloc[0])
             base_sum = float(window[base_column].sum())
-            buffer = self._buffer_for(partition)
+            buffer = self._calibrator.buffer(partition)
             upper = base_sum + buffer
             terminal_idx = terminal.index[-1]
 
