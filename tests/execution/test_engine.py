@@ -1460,3 +1460,33 @@ def test_phase_failure_names_phase_and_origin():
             parallel_refs=refs[0],
             direct_refs=refs[1],
         )
+
+
+def test_commit_phase_failure_preserves_valueerror_type():
+    """A validation failure in Commit stays a ``ValueError`` through ``_phase``.
+
+    ``_commit`` no longer wraps ``validate_forecast_frame`` itself; the phase
+    seam re-raises with the phase + origin context while preserving the original
+    type, so a caller's ``except ValueError`` (e.g. the API run store) still
+    matches. This locks both the type preservation and the inner-wrap removal.
+    """
+    task, dates, _pattern = _periodic_task()
+    engine = BackendEngine()
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
+    origin = dates[11]
+
+    # Non-empty but missing the required forecast columns: validate_forecast_frame
+    # raises ValueError inside Commit.
+    bad_frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], "garbage": [1.0]})
+    engine._predict = lambda *_a, **_k: bad_frame
+
+    with pytest.raises(ValueError, match=rf"Commit phase failed at origin {origin}"):
+        engine.run_origin(
+            ledger=InMemoryLedger(),
+            order_ledger=None,
+            actuals=actuals,
+            origin=origin,
+            conformal_runtime=None,
+            parallel_refs=[],
+            direct_refs=[],
+        )
