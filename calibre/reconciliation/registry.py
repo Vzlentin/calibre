@@ -7,8 +7,6 @@ from calibre.reconciliation.protocols import Reconciler
 
 ReconcilerBuilder = Callable[..., Reconciler]
 
-DEFAULT_STRATEGY = "none"
-
 _REGISTRY: dict[str, ReconcilerBuilder] = {}
 _BUILTINS_LOADED = False
 

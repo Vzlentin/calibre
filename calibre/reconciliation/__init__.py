@@ -17,7 +17,6 @@ from calibre.reconciliation.mint import (
 from calibre.reconciliation.noop import NoOpReconciler
 from calibre.reconciliation.protocols import Reconciler
 from calibre.reconciliation.registry import (
-    DEFAULT_STRATEGY,
     available_reconcilers,
     get_reconciler_builder,
     register_reconciler,
@@ -31,7 +30,6 @@ from calibre.reconciliation.summing import (
 )
 
 __all__ = [
-    "DEFAULT_STRATEGY",
     "NODE_LABEL",
     "TOTAL_LABEL",
     "BottomUpReconciler",
