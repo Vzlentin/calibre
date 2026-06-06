@@ -33,6 +33,22 @@ then implements. The plan is the work order; the issue is the close-handle.
 
 ---
 
+## Invocation model
+
+Each stage delegates to a skill-primitive; how it's invoked depends on who owns
+the fan-out:
+
+- **Subagent (fresh context window):** `ce-plan` (headless) and `ce-work` —
+  heavy, self-contained stages whose context should stay out of the orchestrator.
+- **Inline (the `/go` agent runs it directly):** `ce-simplify-code`,
+  `ce-code-review`, `ce-resolve-pr-feedback`. Each fans out its own subagents, so
+  `/go` runs them itself to own that fan-out rather than nest it inside another
+  subagent.
+- **Exception — `ce-plan` runs inline when the seed is ambiguous**, so its
+  clarifying gates can reach you (a subagent can't ask questions).
+
+---
+
 ## Stage 0 — Classify the input
 
 `$ARGUMENTS` is one of three kinds. Classify it in this order — first match wins:
@@ -84,25 +100,39 @@ Get a plan in hand, by input kind:
     grep -rl "#<N>" docs/plans                                       # degraded store
     ```
 
-    If found, use it. Else invoke `/ce-plan` inline, seeded with the issue title + body.
+    If found, use it. Else invoke `/ce-plan` (smart gate below), seeded with the
+    issue title + body.
   - **Idea:** keyword/slug search the store's plan titles and filenames. On a
     *plausible* match, confirm with the user before reusing it (a wrong reuse is
-    worse than a fresh plan). On no match, invoke `/ce-plan` inline, seeded with
-    the idea text.
+    worse than a fresh plan). On no match, invoke `/ce-plan` (smart gate below),
+    seeded with the idea text.
   - **Brainstorm / ideation doc:** a brainstorm is **never** executable on its
     own — it must be turned into a plan via `/ce-plan`. Keyword/slug search the
     store for a plan already derived from it; on a *plausible* match, confirm with
     the user before reusing it (a wrong reuse is worse than a fresh plan). On no
-    match, invoke `/ce-plan` inline, seeded with the brainstorm doc's full
-    contents. Never feed the brainstorm itself to Stage 1 as the spec.
+    match, invoke `/ce-plan` (smart gate below), seeded with the brainstorm doc's
+    full contents. Never feed the brainstorm itself to Stage 1 as the spec.
 
-**Invoking `/ce-plan`.** Run it **inline** (not as a spawned agent) — planning is
-interactive and its scoping/clarifying gates need the user; Stage 1's `ce-work`
-stays spawned, but planning must reach the user. `/ce-plan` writes natively to
-`docs/plans/YYYY-MM-DD-NNN-<type>-<name>-plan.md` (it takes no output-path arg).
-When its post-generation menu appears, select **"Done for now"** so `/go` keeps
-control of issue creation and implementation — do **not** let `/ce-plan` start
-`ce-work` or create the issue itself.
+**Invoking `/ce-plan` — smart gate.** A spawned subagent can't ask questions, so
+headless planning is only safe when the seed already settles scope and approach.
+You (the interactive orchestrator) judge the seed you already hold — issue body,
+idea text, or brainstorm doc — and route:
+
+- **Seed pins down scope and approach, no material design fork → headless
+  subagent.** Spawn `/ce-plan` as a **foreground** subagent (`subagent_type:
+  general-purpose`): run in headless/pipeline mode, assume and record any open
+  decision rather than asking, auto-proceed every `ce-plan` gate, write the plan,
+  and do **not** start `ce-work` or create the issue — return the plan path.
+- **Seed is thin or ambiguous → inline (interactive).** Run `/ce-plan` inline
+  (not spawned) so its scoping/clarifying gates reach the user. When its
+  post-generation menu appears, select **"Done for now"** so `/go` keeps control
+  of issue creation and implementation — do **not** let `/ce-plan` start
+  `ce-work` or create the issue itself.
+
+Per-kind hint: a thin/one-line issue or vague idea → inline; a spec-complete
+issue, a detailed idea, or a scope-settled brainstorm → headless subagent.
+`/ce-plan` writes natively to `docs/plans/YYYY-MM-DD-NNN-<type>-<name>-plan.md`
+(it takes no output-path arg).
 
 **Relocate into the vault (only when the vault is set).** After `/ce-plan`
 returns, if the vault is the active store, move its `docs/plans/` output into the
@@ -204,8 +234,8 @@ direct mode this gate is automatically satisfied.
 ## Stage 1 — Implement + open the PR (`ce-work` as a spawned agent)
 
 Spawn **one** agent (foreground, `subagent_type: general-purpose`, no model
-override — inherit) to implement the plan and open the PR. A fresh context
-window keeps the heavy implementation stage clean. Give it this brief:
+override — inherit) to implement the plan and open the PR — a subagent per the
+Invocation model. Give it this brief:
 
 > Invoke the `ce-work` skill to implement the plan below for GitHub issue #N.
 > Treat the pasted plan as the complete spec — do not re-plan, do not ask to
@@ -267,9 +297,8 @@ yourself.
 
 ## Stage 2 — Simplify the diff (`/ce-simplify-code`, inline)
 
-Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — it spawns its own
-three reviewers; explicit `cd "$WORKDIR" && …` in worktree mode, no-op in direct
-mode). Scope is the branch diff vs `main`, which is correct here.
+Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — see Invocation
+model). Scope is the branch diff vs `main`, which is correct here.
 
 If it changes anything, it re-runs typecheck/lint/scoped tests itself. Commit and
 push any resulting changes before moving on:
@@ -284,8 +313,8 @@ cd "$WORKDIR" && git add -A && git commit -m "refactor: simplify <slug>" && git 
 
 ## Stage 3 — Review the PR (`/ce-code-review`, inline)
 
-Invoke the `ce-code-review` skill from `WORKDIR` (inline — it spawns its persona
-tiers) against this PR. Ensure its **actionable findings land as inline PR review
+Invoke the `ce-code-review` skill from `WORKDIR` (inline — see Invocation model)
+against this PR. Ensure its **actionable findings land as inline PR review
 comments** (resolvable threads) so Stage 4 has something to resolve — pass the PR
 and have it post comments rather than only printing a report. If it applies any
 safe fixes inline and commits them, push those:
@@ -303,8 +332,8 @@ valid outcome — Stage 4 then no-ops.
 
 ## Stage 4 — Resolve review feedback (`/ce-resolve-pr-feedback`, inline)
 
-Invoke the `ce-resolve-pr-feedback` skill from `WORKDIR` (inline — it spawns
-per-thread agents) for this PR. It evaluates every unresolved thread (Stage 3's
+Invoke the `ce-resolve-pr-feedback` skill from `WORKDIR` (inline — see Invocation
+model) for this PR. It evaluates every unresolved thread (Stage 3's
 findings plus any human/bot comments that arrived), fixes the valid ones in
 `WORKDIR`, commits + pushes, then replies and resolves each thread.
 
