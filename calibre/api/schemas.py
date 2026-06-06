@@ -71,7 +71,11 @@ class CalibrateResponse(BaseModel):
 class OrderRequest(BaseModel):
     calibrated: list[dict[str, Any]]
     ordering: dict[str, Any] = Field(
-        ..., description="Ordering policy spec with policy/params/coverage/quantile"
+        ...,
+        description=(
+            "Ordering spec: policy (rs|rss|newsvendor), params, coverage; "
+            "quantile applies only to rs; period applies only to newsvendor."
+        ),
     )
     inventory: list[dict[str, Any]] | None = None
     session_id: str | None = None

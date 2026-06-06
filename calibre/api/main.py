@@ -427,8 +427,8 @@ def calibrate(req: CalibrateRequest) -> CalibrateResponse:
 def _build_order_policy(ordering: dict) -> OrderPolicy:
     """Map an ``/order`` ordering spec to the per-policy config.
 
-    Rejects knobs that do not apply to the chosen policy (e.g. ``quantile`` or
-    ``period`` for newsvendor) so invalid combinations are caught at the edge.
+    Rejects ``quantile`` for the rss and newsvendor policies (where it does not
+    apply); unrecognized knobs are otherwise ignored.
     """
     policy = ordering["policy"]
     params = ordering["params"]
