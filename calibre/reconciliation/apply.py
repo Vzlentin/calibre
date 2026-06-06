@@ -13,9 +13,8 @@ aggregates), aligned to ``summing.node_labels``. On a bottom-only frame the
 aggregate entries are the exact sums of their members, so the base vector is
 already coherent and every strategy is an exact no-op on the bottom block —
 strategy *divergence* requires independent aggregate base forecasts (a documented
-follow-up). The full coherent all-levels vector is available via
-:meth:`reconciled_all_levels` for tests and the Wave 4 UI, but is never injected
-into the forecast frame.
+follow-up). Only the reconciled **bottom** forecasts are written back into the
+frame; the coherent aggregate levels are computed but never injected (KTD1).
 """
 
 from __future__ import annotations
@@ -32,7 +31,6 @@ from calibre.core.forecast_frame import (
 )
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
 
-NODE_LABEL = "node_label"
 _GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
 
 
@@ -61,36 +59,6 @@ class VectorReconciler:
         aligned to ``summing.node_labels`` (bottom identity block first).
         """
         raise NotImplementedError
-
-    def reconciled_all_levels(
-        self, frame: pd.DataFrame, hierarchy: pd.DataFrame | None
-    ) -> pd.DataFrame:
-        """Return the full coherent all-levels vector per cross-section.
-
-        Long frame with columns ``[model_name, forecast_origin, h, node_label,
-        y_hat]`` covering bottom **and** aggregate nodes. This is the Wave 4
-        level-propagation surface; it is intentionally *not* written back into the
-        forecast frame (KTD1).
-        """
-        if hierarchy is None or frame.empty:
-            return pd.DataFrame(columns=[*_GROUP_KEYS, NODE_LABEL, Y_HAT])
-        summing = build_summing_matrix(hierarchy)
-        records: list[pd.DataFrame] = []
-        for keys, group in frame.groupby(_GROUP_KEYS, sort=False):
-            subset, coherent = self._coherent_vector(group, summing)
-            model_name, origin, horizon = keys
-            records.append(
-                pd.DataFrame(
-                    {
-                        MODEL_NAME: model_name,
-                        FORECAST_ORIGIN: origin,
-                        H: horizon,
-                        NODE_LABEL: list(subset.node_labels),
-                        Y_HAT: coherent,
-                    }
-                )
-            )
-        return pd.concat(records, ignore_index=True)
 
     def _coherent_vector(
         self, group: pd.DataFrame, summing: SummingMatrix

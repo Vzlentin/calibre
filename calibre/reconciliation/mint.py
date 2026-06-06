@@ -26,14 +26,6 @@ from calibre.reconciliation.summing import SummingMatrix
 Weighting = Literal["ols", "shrinkage"]
 
 
-def ols_projection(summing_matrix: np.ndarray) -> np.ndarray:
-    """Literature OLS projection ``S (SᵀS)⁻¹ Sᵀ`` (the R7 reference form)."""
-    S = np.asarray(summing_matrix, dtype=np.float64)
-    gram = S.T @ S
-    bottom_map = np.linalg.solve(gram, S.T)  # (SᵀS)⁻¹ Sᵀ
-    return S @ bottom_map
-
-
 def mint_projection(summing_matrix: np.ndarray, weight: np.ndarray) -> np.ndarray:
     """General MinT projection ``P = S (Sᵀ W⁻¹ S)⁻¹ Sᵀ W⁻¹`` (pinv for stability)."""
     S = np.asarray(summing_matrix, dtype=np.float64)

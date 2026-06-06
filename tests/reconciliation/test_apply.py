@@ -11,8 +11,8 @@ from calibre.core.forecast_frame import (
     H,
     validate_forecast_frame,
 )
-from calibre.reconciliation.apply import NODE_LABEL, VectorReconciler
-from calibre.reconciliation.summing import TOTAL_LABEL, SummingMatrix
+from calibre.reconciliation.apply import VectorReconciler
+from calibre.reconciliation.summing import SummingMatrix
 
 
 class _DoubleBottom(VectorReconciler):
@@ -166,16 +166,3 @@ def test_cross_section_missing_some_bottom_ids_aligns_to_subset() -> None:
     out = _DoubleBottom()(frame, _hierarchy(["a", "b", "c"]))
     np.testing.assert_array_equal(out[Y_HAT].to_numpy(), [6.0, 10.0])
     validate_forecast_frame(out)
-
-
-def test_reconciled_all_levels_exposes_aggregate_nodes() -> None:
-    frame = _single_section(["a", "b"], [1.0, 2.0])
-    all_levels = _DoubleBottom().reconciled_all_levels(frame, _hierarchy(["a", "b"]))
-
-    by_node = dict(zip(all_levels[NODE_LABEL], all_levels[Y_HAT], strict=True))
-    # Doubling stub: bottom doubled, aggregates re-summed from doubled bottom.
-    assert by_node["a"] == 2.0
-    assert by_node["b"] == 4.0
-    assert by_node[TOTAL_LABEL] == 6.0
-    # The frame itself keeps only its original bottom node row-set (KTD1).
-    assert set(frame[UNIQUE_ID]) == {"a", "b"}

@@ -9,11 +9,23 @@ from calibre.reconciliation.mint import (
     MinTReconciler,
     build_mint_reconciler,
     mint_projection,
-    ols_projection,
     schafer_strimmer_shrinkage,
 )
 from calibre.reconciliation.registry import resolve_reconciler
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
+
+
+def ols_projection(summing_matrix: np.ndarray) -> np.ndarray:
+    """Literature OLS projection ``S (SᵀS)⁻¹ Sᵀ`` (the R7 reference form).
+
+    Local reference implementation: ``MinTReconciler`` always uses
+    ``mint_projection``; this closed form exists only to prove that
+    ``mint_projection(S, I)`` reduces to the OLS projection.
+    """
+    S = np.asarray(summing_matrix, dtype=np.float64)
+    gram = S.T @ S
+    bottom_map = np.linalg.solve(gram, S.T)  # (SᵀS)⁻¹ Sᵀ
+    return S @ bottom_map
 
 
 def _two_group_summing() -> SummingMatrix:
