@@ -10,7 +10,7 @@ import pandas as pd
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.forecasting.adapter_registry import get_adapter_cls, get_scope
-from calibre.reconciliation.summing import build_summing_matrix
+from calibre.reconciliation.summing import TOTAL_LABEL, build_hierarchy_index
 
 
 def partition_tasks(tasks: list[ForecastTask]) -> TaskGroups:
@@ -52,7 +52,7 @@ def build_node_history(sales: pd.DataFrame, hierarchy: pd.DataFrame | None) -> p
 
     ``hierarchy=None`` preserves the flat-panel input contract. With a hierarchy,
     aggregate rows are real time series whose labels and ordering come directly
-    from :func:`build_summing_matrix`.
+    from the hierarchy's canonical node index.
     """
     if hierarchy is None:
         return sales.copy()
@@ -62,43 +62,46 @@ def build_node_history(sales: pd.DataFrame, hierarchy: pd.DataFrame | None) -> p
     data[DS] = pd.to_datetime(data[DS]).astype("datetime64[ns]")
     data[Y] = data[Y].astype("float64")
 
-    summing = build_summing_matrix(hierarchy)
-    unknown = set(data[UNIQUE_ID].unique()) - set(summing.bottom_ids)
+    hierarchy_index = build_hierarchy_index(hierarchy)
+    unknown = set(data[UNIQUE_ID].unique()) - set(hierarchy_index.bottom_ids)
     if unknown:
         raise ValueError(
             f"history contains unique_id values not present in hierarchy: {sorted(unknown)}"
         )
 
-    node_order = {label: i for i, label in enumerate(summing.node_labels)}
+    node_order = {label: i for i, label in enumerate(hierarchy_index.node_labels)}
     bottom = data.sort_values([UNIQUE_ID, DS], kind="stable").reset_index(drop=True)
     bottom["_node_order"] = bottom[UNIQUE_ID].map(node_order).astype("int64")
 
-    memberships: list[dict[str, object]] = []
-    for row_index, node_label in enumerate(
-        summing.node_labels[summing.n_bottom :], start=summing.n_bottom
-    ):
-        memberships.extend(
-            {
-                UNIQUE_ID: bottom_id,
-                "_node_label": node_label,
-                "_node_order": row_index,
-            }
-            for bottom_id, member in zip(summing.bottom_ids, summing.S[row_index], strict=True)
-            if member > 0
-        )
-
-    if not memberships:
-        return bottom.drop(columns="_node_order")
-
-    aggregate = data.merge(pd.DataFrame(memberships), on=UNIQUE_ID, how="inner")
-    aggregate = (
-        aggregate.groupby(["_node_order", "_node_label", DS], sort=True)[Y]
-        .sum(min_count=1)
-        .reset_index()
-        .rename(columns={"_node_label": UNIQUE_ID})
+    joined = data.merge(
+        hierarchy_index.frame[[UNIQUE_ID, *hierarchy_index.attr_cols]],
+        on=UNIQUE_ID,
+        how="inner",
     )
+    aggregate_rows: list[pd.DataFrame] = []
+    for col in hierarchy_index.attr_cols:
+        expected_members = hierarchy_index.frame.groupby(col, sort=False)[UNIQUE_ID].nunique()
+        grouped = (
+            joined.groupby([col, DS], sort=True)
+            .agg(**{Y: (Y, "sum"), "_member_count": (UNIQUE_ID, "nunique")})
+            .reset_index()
+        )
+        complete = grouped[grouped["_member_count"] == grouped[col].map(expected_members)].copy()
+        complete[UNIQUE_ID] = col + "=" + complete[col].astype(str)
+        complete["_node_order"] = complete[UNIQUE_ID].map(node_order).astype("int64")
+        aggregate_rows.append(complete[[UNIQUE_ID, DS, Y, "_node_order"]])
 
-    nodes = pd.concat([bottom, aggregate[[UNIQUE_ID, DS, Y, "_node_order"]]], ignore_index=True)
+    total = (
+        data.groupby(DS, sort=True)
+        .agg(**{Y: (Y, "sum"), "_member_count": (UNIQUE_ID, "nunique")})
+        .reset_index()
+    )
+    total = total[total["_member_count"] == len(hierarchy_index.bottom_ids)].copy()
+    total[UNIQUE_ID] = TOTAL_LABEL
+    total["_node_order"] = node_order[TOTAL_LABEL]
+    aggregate_rows.append(total[[UNIQUE_ID, DS, Y, "_node_order"]])
+
+    nodes = pd.concat([bottom, *aggregate_rows], ignore_index=True)
     return (
         nodes.sort_values(["_node_order", DS], kind="stable")
         .drop(columns="_node_order")
@@ -167,6 +170,7 @@ def build_tasks(
 
     local_tasks: list[ForecastTask] = []
     global_tasks: list[ForecastTask] = []
+    panel_uids = tuple(sorted(uids))
     seen_global: set[tuple[tuple[str, ...], str, int]] = set()
 
     # Resolve per-series configs up-front so we don't re-validate inside loops.
@@ -195,14 +199,17 @@ def build_tasks(
                 # config (not per uid). Dedup on a stable content key so the
                 # same global config appearing in overrides for multiple uids
                 # collapses to a single task.
-                task = ForecastTask(
-                    history=data,
-                    horizon=horizon,
-                    model_config=model_config,
+                config_key = json.dumps(model_config, sort_keys=True, default=str)
+                key = (panel_uids, config_key, horizon)
+                if key in seen_global:
+                    continue
+                seen_global.add(key)
+                global_tasks.append(
+                    ForecastTask(
+                        history=data,
+                        horizon=horizon,
+                        model_config=model_config,
+                    )
                 )
-                key = _global_dedup_key(task)
-                if key not in seen_global:
-                    seen_global.add(key)
-                    global_tasks.append(task)
 
     return TaskGroups(local=local_tasks, global_=global_tasks)

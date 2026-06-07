@@ -170,6 +170,18 @@ def test_write_back_preserves_order_index_dtypes_and_contract() -> None:
     }
 
 
+def test_write_back_preserves_duplicate_index_labels_without_expanding_rows() -> None:
+    frame = _node_section(["a", "b"], [1.0, 2.0])
+    frame.index = [0, 0, 1, 1, 2]
+
+    out = _DoubleBottom()(frame, _hierarchy(["a", "b"]))
+
+    assert len(out) == len(frame)
+    pd.testing.assert_index_equal(out.index, frame.index)
+    assert out[UNIQUE_ID].tolist() == frame[UNIQUE_ID].tolist()
+    np.testing.assert_array_equal(out[Y_HAT].to_numpy(), [2.0, 4.0, 2.0, 4.0, 6.0])
+
+
 def test_cross_section_missing_some_bottom_ids_aligns_to_subset() -> None:
     # Hierarchy has a, b, c but this cross-section only forecasts a and c.
     hierarchy = _hierarchy(["a", "b", "c"])

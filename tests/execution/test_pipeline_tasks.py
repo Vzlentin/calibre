@@ -85,7 +85,7 @@ class TestBuildNodeHistory:
         assert d1 == pytest.approx(20.0)
         assert total == pytest.approx(30.0)
 
-    def test_partial_history_dates_sum_available_members(self, sample_sales, sample_hierarchy):
+    def test_partial_history_dates_omit_incomplete_aggregates(self, sample_sales, sample_hierarchy):
         partial = sample_sales[
             ~(
                 (sample_sales["unique_id"] == "series_b")
@@ -94,10 +94,11 @@ class TestBuildNodeHistory:
         ]
         out = build_node_history(partial, sample_hierarchy)
 
-        d1 = out[(out["unique_id"] == "dept_id=D1") & (out["ds"] == pd.Timestamp("2024-01-01"))][
-            "y"
-        ].iloc[0]
-        assert d1 == pytest.approx(10.0)
+        first_day = pd.Timestamp("2024-01-01")
+        d1 = out[(out["unique_id"] == "dept_id=D1") & (out["ds"] == first_day)]
+        total = out[(out["unique_id"] == TOTAL_LABEL) & (out["ds"] == first_day)]
+        assert d1.empty
+        assert total.empty
 
     def test_unknown_bottom_id_raises_clear_error(self, sample_sales, sample_hierarchy):
         bad = pd.concat(

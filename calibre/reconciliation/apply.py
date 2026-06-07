@@ -3,10 +3,10 @@
 :class:`VectorReconciler` implements the frame-to-frame mechanics the
 ``Reconciler`` Protocol requires once, so each concrete strategy only supplies a
 pure ``reconcile_vector`` hook. The harness groups a forecast frame into
-``(model_name, forecast_origin, h)`` cross-sections (KTD2), aligns each supplied
-node vector to a subset summing matrix, delegates to the strategy, and writes
-the reconciled node forecasts back **in place** — preserving the frame's node
-row-set, order, and dtypes (KTD1).
+``(model_name, forecast_origin, h)`` cross-sections, aligns each supplied node
+vector to a subset summing matrix, delegates to the strategy, and writes the
+reconciled node forecasts back **in place** while preserving the frame's node
+row-set, order, and dtypes.
 
 The base vector handed to ``reconcile_vector`` spans **all supplied required
 nodes** (bottom + aggregates), aligned to the applicable
@@ -29,6 +29,7 @@ from calibre.core.forecast_frame import (
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
 
 _GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
+_ORDER_COL = "__calibre_reconcile_order__"
 
 
 class VectorReconciler:
@@ -43,11 +44,16 @@ class VectorReconciler:
         if hierarchy is None or frame.empty:
             return frame
         summing = build_summing_matrix(hierarchy)
+        order_col = _ORDER_COL
+        while order_col in frame.columns:
+            order_col = f"_{order_col}"
+        ordered = frame.copy()
+        ordered[order_col] = np.arange(len(ordered), dtype=np.int64)
         parts = [
             self._reconcile_group(group, summing)
-            for _, group in frame.groupby(_GROUP_KEYS, sort=False)
+            for _, group in ordered.groupby(_GROUP_KEYS, sort=False)
         ]
-        return pd.concat(parts).loc[frame.index]
+        return pd.concat(parts).sort_values(order_col, kind="stable").drop(columns=order_col)
 
     def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:
         """Map a node-level base vector to a coherent node-level vector.
