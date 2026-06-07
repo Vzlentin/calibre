@@ -152,7 +152,7 @@ the provisioning bash, and the worktree caveats:
   `origin/main`, so neither the user's branch nor their dirty tree moves. The
   setup steps are read dynamically from `.cursor/worktrees.json` (per the
   reference) so config changes are picked up; `<type>` is the kind `ce-work`
-  would choose, `<slug>` is the Stage 0aslug.
+  would choose, `<slug>` is the Stage 0a slug.
 
 `WORKDIR` is where Stages 1–5 operate. From here on, every shell command for those
 stages uses an explicit `cd "$WORKDIR" && …` in worktree mode (a
