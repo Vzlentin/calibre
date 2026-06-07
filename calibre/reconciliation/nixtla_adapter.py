@@ -15,6 +15,7 @@ import pandas as pd
 from calibre.core.forecast_frame import (
     DS,
     FITTED_Y_HAT,
+    FORECAST_ORIGIN,
     MODEL_NAME,
     UNIQUE_ID,
     Y_HAT,
@@ -42,7 +43,7 @@ _RESIDUAL_STRATEGIES = frozenset({"mint_shrink", "wls_var", "mint_cov", "erm"})
 _COHERENCE_RTOL = 1e-6
 _COHERENCE_ATOL = 1e-6
 _DEFAULT_MAX_CACHE_SIZE = 128
-_GROUP_KEYS = [MODEL_NAME, "forecast_origin", H]
+_GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
 _ORDER_COL = "__calibre_reconcile_order__"
 
 
@@ -69,6 +70,7 @@ class _NixtlaLayout:
 
 
 _CacheKey = tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...], bytes]
+_InsampleCacheKey = tuple[str, _CacheKey]
 
 
 def _load_method_classes() -> tuple[type[Any], type[Any], type[Any]]:
@@ -166,8 +168,9 @@ class NixtlaReconciler(VectorReconciler):
             order_col = f"_{order_col}"
         ordered = frame.copy()
         ordered[order_col] = np.arange(len(ordered), dtype=np.int64)
+        insample_cache: dict[_InsampleCacheKey, _InsampleLayout] = {}
         parts = [
-            self._reconcile_residual_group(group, summing, fitted)
+            self._reconcile_residual_group(group, summing, fitted, insample_cache)
             for _, group in ordered.groupby(_GROUP_KEYS, sort=False)
         ]
         return pd.concat(parts).sort_values(order_col, kind="stable").drop(columns=order_col)
@@ -197,16 +200,21 @@ class NixtlaReconciler(VectorReconciler):
         group: pd.DataFrame,
         summing: SummingMatrix,
         fitted_values: pd.DataFrame,
+        insample_cache: dict[_InsampleCacheKey, _InsampleLayout],
     ) -> pd.DataFrame:
         subset, base = self._base_vector(group, summing)
         model_name = str(group[MODEL_NAME].iloc[0])
-        y_insample, y_hat_insample = _insample_arrays(fitted_values, subset, model_name)
         layout = _to_nixtla_layout(base, subset)
-        residual_layout = _to_nixtla_insample_layout(
-            y_insample=y_insample,
-            y_hat_insample=y_hat_insample,
-            inverse_permutation=layout.inverse_permutation,
-        )
+        cache_key = (model_name, _cache_key(subset))
+        residual_layout = insample_cache.get(cache_key)
+        if residual_layout is None:
+            y_insample, y_hat_insample = _insample_arrays(fitted_values, subset, model_name)
+            residual_layout = _to_nixtla_insample_layout(
+                y_insample=y_insample,
+                y_hat_insample=y_hat_insample,
+                inverse_permutation=layout.inverse_permutation,
+            )
+            insample_cache[cache_key] = residual_layout
         reconciler = self._method_factory()
         reconciler.fit(
             S=layout.S,
@@ -251,21 +259,14 @@ def _insample_arrays(
     subset = fitted_values[fitted_values[MODEL_NAME].astype(str) == model_name].copy()
     if subset.empty:
         raise ValueError(f"Missing fitted values for model_name={model_name!r}")
+    subset[UNIQUE_ID] = subset[UNIQUE_ID].astype(str)
     node_ids = set(summing.node_labels)
-    unknown = set(subset[UNIQUE_ID].astype(str)) - node_ids
+    unknown = set(subset[UNIQUE_ID]) - node_ids
     if unknown:
-        subset = subset[~subset[UNIQUE_ID].astype(str).isin(unknown)].copy()
-    keys = [UNIQUE_ID, DS, MODEL_NAME]
-    duplicates = subset[subset.duplicated(keys, keep=False)]
-    if not duplicates.empty:
-        duplicate_keys = duplicates[keys].drop_duplicates().sort_values(keys, kind="stable")
-        values = [tuple(row) for row in duplicate_keys.itertuples(index=False, name=None)]
-        raise ValueError(f"Duplicate fitted-value rows for keys: {values}")
+        subset = subset[~subset[UNIQUE_ID].isin(unknown)].copy()
 
-    ds_by_node = {
-        label: set(subset.loc[subset[UNIQUE_ID].astype(str) == label, DS])
-        for label in summing.node_labels
-    }
+    grouped_ds = subset.groupby(UNIQUE_ID, sort=False)[DS].agg(lambda values: set(values))
+    ds_by_node = {label: grouped_ds.get(label, set()) for label in summing.node_labels}
     missing_nodes = sorted(label for label, ds_values in ds_by_node.items() if not ds_values)
     if missing_nodes:
         raise ValueError(
