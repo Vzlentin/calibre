@@ -1,0 +1,46 @@
+# Stage 5 — CI log-pull and cleanup-by-mode bash
+
+SKILL.md keeps the autofix-loop shape, the max-3-iterations rule, the PR #38
+repeated-failure stop, the on-green merge decision, the merge-gated cleanup
+decision, and the GATE. This file holds the bash.
+
+Poll CI status with the canonical `gh api` check-runs/status recipes in
+`.claude/skills/go/references/environment.md` (the single home for that recipe).
+In Stage 5 the SHA is `HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`.
+
+## Pull logs for failed runs
+
+```bash
+gh api repos/Vzlentin/calibre/commits/$HEAD_SHA/check-runs \
+  --jq '.check_runs[] | select(.conclusion=="failure") | .details_url'
+# For each failed run, get the workflow run ID from the URL, then:
+gh run view <run-id> --log-failed
+```
+
+## Cleanup-by-mode (merge-gated — run only after `gh pr merge --squash` confirms)
+
+A squash-merged branch never shows up as "merged" to git, so the local branch
+must be force-deleted with `git branch -D` (not `-d`).
+
+- **Direct mode** (the main checkout is on the PR branch from Stage 1): return to
+  `main`, fast-forward, then drop the local branch:
+
+```bash
+git checkout main && git pull --ff-only
+git branch -D <type>/<slug>
+```
+
+- **Worktree mode** (the main checkout never left the user's branch/dirty tree):
+  from the main checkout, remove the worktree and drop the branch without
+  touching the user's working tree:
+
+```bash
+cd "$MAIN"
+git worktree remove .worktrees/<slug>    # add --force if the tree is dirty
+git branch -D <type>/<slug>              # squash-merge => force-delete
+git worktree prune
+git fetch origin main:main               # fast-forward local main; skip if the user is sitting on main
+```
+
+  Do **not** `git checkout main` or `git pull` in the main checkout in worktree
+  mode — preserving the user's branch and dirty tree is the whole point.
