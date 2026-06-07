@@ -5,9 +5,14 @@ argument-hint: "[idea text, issue (#N / code), or path to a plan file]"
 ---
 
 You are running the Calibre implementation-orchestration pipeline for the work
-item in `$ARGUMENTS`. Execute the stages **in order**. Each stage ends in a
-**GATE**: if the stage did not do its job, stop and report — do not paper over a
-failed stage to reach the next one.
+item in `$ARGUMENTS`. Execute the stages **in order**. Every run ends in exactly
+one **terminal outcome** — `shipped` (PR squash-merged) or `failed` (a stage
+stopped short) — persisted to the plan store by Stage 6.
+
+Each stage ends in a **GATE**: if the stage did not do its job, stop — do not
+paper over a failed stage to reach the next one. A short-stopping GATE **is** the
+`failed` outcome: it routes to Stage 6 to persist `failed` (when a plan already
+exists), then reports.
 
 `/go` accepts three input kinds — a **plain idea**, a **GitHub issue** (`#N`,
 number, or roadmap code like `U3`), or a **path to a plan file**. It resolves the
@@ -286,7 +291,8 @@ preserving the user's branch and dirty tree is the whole point.
 or any stage stopped short of a confirmed merge, do **not** clean up: leave the
 local `<type>/<slug>` branch and — in worktree mode — the `.worktrees/<slug>`
 working tree intact so the user can resume/debug, and surface the worktree path +
-branch in the final report.
+branch in the final report. This short-stop **is** the `failed` terminal outcome
+— proceed to Stage 6 to persist `failed` before reporting.
 
 **GATE:** either the PR is squash-merged **and** cleanup ran (local branch deleted
 in both modes; worktree removed in worktree mode) with `main` fast-forwarded; OR a
@@ -295,26 +301,34 @@ path, if any).
 
 ---
 
-## Stage 6 — Persist outcome
+## Stage 6 — Persist terminal outcome
 
 Stage 6 always runs from the main checkout (`$MAIN`), never from `WORKDIR` — by now
 the worktree may be removed by Stage 5 cleanup, and persistence is independent of
-execution mode.
+execution mode. **Delegate persistence to `/project-memory`** and flip the plan to
+exactly one terminal status:
 
-**Delegate persistence to `/project-memory`.** Flip the plan's
-`status: active → shipped` in the resolved store and append the outcome — PR URL,
-merged SHA, key decisions.
+- **shipped** — the PR squash-merged: flip the plan's `status: active → shipped` in
+  the resolved store and append the outcome — PR URL, merged SHA, key decisions.
+- **failed** — a GATE stopped short: flip the plan's `status: active → failed` in
+  the resolved store and append the failing stage, the reason, and the preserved
+  branch / worktree path.
+- **Edge case — failure before a plan exists.** A short-stop in Stage 0a/0b has no
+  plan to flip — just report `failed`.
 
-**GATE:** the work item's plan reads `status: shipped` in the resolved store with
-the PR/SHA recorded.
+**GATE:** the work item's plan reads exactly one of `status: shipped` (with the
+PR/SHA recorded) or `status: failed` (with the failing stage + reason) in the
+resolved store — or, when the run failed before a plan existed, the report states
+`failed`.
 
 ---
 
 ## Done
 
-Report, in order: the resolved **input kind** (idea / issue / plan-file) and the
-**plan path** in the resolved store; the **execution mode** (direct / worktree, and on the
-preserve path the retained branch and — in worktree mode — the worktree path);
-issue #N; PR URL; merged (yes + SHA / no + reason); CI result; any `needs-human`
-review threads; and memory updates (plan status flip, plus architecture/lessons
-or "skipped").
+Lead with the **terminal outcome** — `shipped` or `failed`; on `failed`, name the
+failing stage + reason. Then report, in order: the resolved **input kind** (idea /
+issue / plan-file) and the **plan path** in the resolved store; the **execution
+mode** (direct / worktree, and on the preserve path the retained branch and — in
+worktree mode — the worktree path); issue #N; PR URL; merged (yes + SHA / no +
+reason); CI result; any `needs-human` review threads; and memory updates (plan
+status flip, plus architecture/lessons or "skipped").

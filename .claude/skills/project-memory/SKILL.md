@@ -81,7 +81,8 @@ store:
 
 ### Plan-status persistence
 
-When a task ships, flip the plan's `status` in the resolved store:
+When a task reaches a terminal outcome, flip the plan's `status` in the resolved
+store to `shipped` (merged) or `failed` (the run stopped short):
 
 - **Vault mode:** set `status` on the vault plan, update `architecture.md` /
   `lessons.md` where a durable decision or lesson warrants it, and commit +
