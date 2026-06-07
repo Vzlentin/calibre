@@ -49,7 +49,7 @@ the fan-out:
 
 ---
 
-## Stage 0 — Classify the input
+## Stage 0a— Classify the input
 
 Classify `$ARGUMENTS` into one of three kinds, in this order — first match
 wins:
@@ -59,7 +59,7 @@ wins:
    *executable plan* — it has implementation units / phases (`### U1`,
    `## Implementation units`, etc.). A brainstorm/ideation doc with no
    implementation units is **not** executable: carry it as a planning seed for
-   Stage 0.5 to turn into a plan via `/ce-plan`.
+   Stage 0b to turn into a plan via `/ce-plan`.
 2. **Issue** — else if `$ARGUMENTS` matches `^#?\d+$` (number or `#N`) or a
    roadmap code `^[A-Za-z]+\d+$` (e.g. `U3`), resolve it to a GitHub issue:
 
@@ -80,9 +80,9 @@ no issue — stop and ask.
 
 ---
 
-## Stage 0.5 — Ensure a plan exists
+## Stage 0b — Ensure a plan exists
 
-- **Plan-file (executable):** that file is the plan — skip to Stage 0.6.
+- **Plan-file (executable):** that file is the plan — skip to Stage 0c.
 - **Issue / Idea / brainstorm (or non-executable plan-file):** find an existing
   plan in the resolved store, else create one via `/ce-plan`:
   - **Issue:** search the plan store for a plan whose `origin:` or body
@@ -110,7 +110,7 @@ rather than moving files here.
 
 ---
 
-## Stage 0.6 — Ensure a backing GitHub issue
+## Stage 0c — Ensure a backing GitHub issue
 
 Every run merges with `closes #N`, so guarantee an issue exists:
 
@@ -132,7 +132,7 @@ failed, stop and report.
 
 ---
 
-## Stage 0.7 — Choose execution location and provision
+## Stage 0d — Choose execution location and provision
 
 Stages 1–5 run against a working directory `WORKDIR`, picked with a smart-worktree
 gate so the user's current checkout — their branch *and* any uncommitted work —
@@ -147,7 +147,7 @@ the provisioning bash, and the worktree caveats:
   `origin/main`, so neither the user's branch nor their dirty tree moves. The
   setup steps are read dynamically from `.cursor/worktrees.json` (per the
   reference) so config changes are picked up; `<type>` is the kind `ce-work`
-  would choose, `<slug>` is the Stage 0 slug.
+  would choose, `<slug>` is the Stage 0aslug.
 
 `WORKDIR` is where Stages 1–5 operate. From here on, every shell command for those
 stages uses an explicit `cd "$WORKDIR" && …` in worktree mode (a
@@ -267,7 +267,7 @@ section to the PR body (`gh pr edit <PR> --body-file <tmp>`) and report. Do not
 merge red — take the **preserve path** below.
 
 **On green** (and Stage 4 gate satisfied), confirm the PR body carries `closes #N`
-— Stage 0.6 guarantees the issue exists, so verify only that the line is present
+— Stage 0c guarantees the issue exists, so verify only that the line is present
 — then squash-merge (this also deletes the remote branch):
 
 ```bash
