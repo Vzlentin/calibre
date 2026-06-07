@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from calibre.execution.io import join_uri
+from calibre.core.io import join_uri
 from calibre.execution.vn2_adapter import HOLDING_COST_RATE, SHORTAGE_COST_RATE
 from calibre.ordering.simulation import (
     LinearCostModel,

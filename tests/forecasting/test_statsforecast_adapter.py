@@ -209,8 +209,7 @@ def test_fitted_values_normalize_to_sidecar_contract(sn_task):
     adapter.fit(task, collect_fitted_values=True)
     fitted = adapter.fitted_values(task)
 
-    assert list(fitted.columns) == ["unique_id", "ds", "y", "h", "model_name", "fitted_y_hat"]
-    assert fitted["h"].tolist() == [1] * len(fitted)
+    assert list(fitted.columns) == ["unique_id", "ds", "y", "model_name", "fitted_y_hat"]
     assert set(fitted[MODEL_NAME]) == {"seasonal"}
     assert fitted[FITTED_Y_HAT].dtype == np.float64
     assert fitted[Y].dtype == np.float64

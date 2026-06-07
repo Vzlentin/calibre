@@ -43,18 +43,17 @@ def build_fitted_values_frame(raw: pd.DataFrame, *, model_name: str) -> pd.DataF
             f"got {model_cols} in columns {list(raw.columns)}"
         )
     model_col = model_cols[0]
-    source_cols = [UNIQUE_ID, DS, Y]
     if H in raw.columns:
-        source_cols.append(H)
-    source_cols.append(model_col)
+        raw = raw.sort_values([UNIQUE_ID, DS, H], kind="stable").drop_duplicates(
+            [UNIQUE_ID, DS],
+            keep="first",
+        )
+    source_cols = [UNIQUE_ID, DS, Y, model_col]
     out = raw[source_cols].copy()
-    if H not in out.columns:
-        out[H] = 1
     out = out.rename(columns={model_col: FITTED_Y_HAT})
     out[UNIQUE_ID] = out[UNIQUE_ID].astype("object")
     out[DS] = pd.to_datetime(out[DS]).astype("datetime64[ns]")
     out[Y] = out[Y].astype("float64")
-    out[H] = out[H].astype("int64")
     out[FITTED_Y_HAT] = out[FITTED_Y_HAT].astype("float64")
     out[MODEL_NAME] = str(model_name)
     out[MODEL_NAME] = out[MODEL_NAME].astype("object")
@@ -142,6 +141,8 @@ class ModelAdapter(ABC):
         ``cache`` is ``None``.
         """
         if collect_fitted_values:
+            # Cached adapter state does not include fitted-value sidecars, so
+            # residual reconciliation must run a fresh fit that collects them.
             self.fit(task, collect_fitted_values=True)
             return True, None
         if cache is None:

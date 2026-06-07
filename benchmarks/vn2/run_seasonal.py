@@ -80,6 +80,7 @@ from calibre.core.forecast_frame import (
     interval_column_names,
 )
 from calibre.core.forecast_task import ForecastTask, TaskGroups
+from calibre.core.io import join_uri
 from calibre.core.order_types import RsPolicyParameters
 from calibre.execution import (
     DecisionLoop,
@@ -90,7 +91,6 @@ from calibre.execution import (
 )
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
-from calibre.execution.io import join_uri
 from calibre.execution.task_builder import build_tasks
 from calibre.forecasting.ensemble import ensemble_median
 from calibre.ordering.policy_config import RsConfig, apply_order_policy

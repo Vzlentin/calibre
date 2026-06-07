@@ -74,7 +74,7 @@ def _reset_lifecycle_store(monkeypatch, tmp_path, received_future_x):
         adapter.received = received_future_x
         return adapter
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", _make_adapter)
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", _make_adapter)
     return fresh
 
 

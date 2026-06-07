@@ -157,7 +157,7 @@ def test_reconcile_noop_when_hierarchy_none_without_calling_reconciler() -> None
 def test_no_hierarchy_path_does_not_request_fitted_values(monkeypatch) -> None:
     task, dates, pattern = _periodic_task(horizon=1)
     monkeypatch.setattr(
-        "calibre.execution.backend.resolve_adapter",
+        "calibre.execution.prediction.resolve_adapter",
         lambda model_config: _NoFittedRequestAdapter(model_config),
     )
     engine = BackendEngine(

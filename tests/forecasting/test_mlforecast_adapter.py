@@ -348,8 +348,7 @@ def test_fitted_values_normalize_to_sidecar_contract(repeating_history):
     adapter.fit(task, collect_fitted_values=True)
     fitted = adapter.fitted_values(task)
 
-    assert list(fitted.columns) == ["unique_id", "ds", "y", "h", "model_name", "fitted_y_hat"]
-    assert fitted[H].tolist() == [1] * len(fitted)
+    assert list(fitted.columns) == ["unique_id", "ds", "y", "model_name", "fitted_y_hat"]
     assert set(fitted[MODEL_NAME]) == {"global_lgbm"}
     assert fitted[FITTED_Y_HAT].dtype == np.float64
     assert fitted[Y].dtype == np.float64
@@ -382,7 +381,7 @@ def test_quantile_fitted_values_use_point_quantile(repeating_history):
     assert fitted[FITTED_Y_HAT].notna().all()
 
 
-def test_direct_fitted_values_preserve_horizon_specific_rows(repeating_history):
+def test_direct_fitted_values_drop_backend_horizon_metadata(repeating_history):
     task = ForecastTask(
         history=repeating_history,
         horizon=2,
@@ -410,6 +409,7 @@ def test_direct_fitted_values_preserve_horizon_specific_rows(repeating_history):
 
     fitted = adapter.fitted_values(task)
 
-    assert fitted[H].tolist() == [1, 2, 1, 2]
-    assert fitted.duplicated([UNIQUE_ID, DS, H, MODEL_NAME]).sum() == 0
+    assert H not in fitted.columns
+    assert fitted.duplicated([UNIQUE_ID, DS, MODEL_NAME]).sum() == 0
+    assert fitted[FITTED_Y_HAT].tolist() == [19.0, 31.0]
     assert set(fitted[MODEL_NAME]) == {"direct_lgbm"}

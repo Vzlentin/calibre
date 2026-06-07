@@ -62,6 +62,7 @@ from calibre.conformal.runtime import (
 )
 from calibre.core.forecast_frame import DS, UNIQUE_ID, quantile_column
 from calibre.core.forecast_task import ForecastTask, TaskGroups
+from calibre.core.io import join_uri, write_parquet
 from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
@@ -71,7 +72,6 @@ from calibre.execution import (
 )
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
-from calibre.execution.io import join_uri, write_parquet
 from calibre.execution.task_builder import partition_tasks
 from calibre.ordering.policy_config import RsConfig, apply_order_policy
 

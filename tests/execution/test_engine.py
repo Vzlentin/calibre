@@ -38,9 +38,9 @@ from calibre.execution.backend import (
     ConformalOptions,
     ExecutionOptions,
     LedgerOutputOptions,
-    _process_task_ref,
 )
 from calibre.execution.ledger import OrderLedger
+from calibre.execution.prediction import _process_task_ref
 from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import NewsvendorConfig, RsConfig
@@ -122,7 +122,7 @@ def test_remote_ray_staging_uses_shared_uri_and_cleans_up(monkeypatch):
                 }
             )
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
     engine = BackendEngine(
         execution=ExecutionOptions(
             backend="local",
@@ -171,7 +171,7 @@ def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
                 }
             )
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     BackendEngine(execution=ExecutionOptions(backend="local", cpu_per_task=2)).execute(
         partition_tasks([task]), actuals, origins=[dates[-1]]
@@ -635,7 +635,7 @@ def test_run_parallel_slices_future_x_per_uid(monkeypatch):
                 }
             )
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     engine = BackendEngine()
     engine.execute(partition_tasks(tasks), actuals, origins=[dates[11]])
@@ -686,7 +686,7 @@ def test_run_direct_passes_full_future_x(monkeypatch):
                 }
             )
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     engine = BackendEngine()
     engine.execute(partition_tasks([task]), all_series, origins=[dates[11]])

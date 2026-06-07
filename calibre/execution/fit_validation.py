@@ -25,7 +25,7 @@ import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID
 from calibre.core.forecast_task import ForecastTask
-from calibre.execution.backend import fit_predict_task
+from calibre.execution.prediction import fit_predict_task
 from calibre.forecasting.cache import ModelArtifactCache
 
 

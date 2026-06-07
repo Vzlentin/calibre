@@ -63,7 +63,7 @@ def test_backend_logs_adapter_fit_predict_phases(monkeypatch) -> None:
     stream = io.StringIO()
     setup_logging(stream=stream)
     monkeypatch.setattr(
-        "calibre.execution.backend.resolve_adapter",
+        "calibre.execution.prediction.resolve_adapter",
         lambda _: _ObservabilityAdapter(),
     )
     history = pd.DataFrame(

@@ -7,8 +7,8 @@ from typing import Protocol
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID
+from calibre.core.io import read_parquet
 from calibre.core.order_types import CostStruct
-from calibre.execution.io import read_parquet
 from calibre.ordering.simulation.state import ProductState, make_pipeline
 
 

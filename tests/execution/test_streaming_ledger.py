@@ -77,7 +77,7 @@ def test_streaming_output_matches_in_memory_ledger(monkeypatch, tmp_path) -> Non
     )
     origins = [dates[3], dates[4]]
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     in_memory_result = BackendEngine().execute(partition_tasks([task]), actuals, origins)
     expected = in_memory_result.ledger.to_df()
@@ -104,7 +104,7 @@ def test_streaming_output_accepts_fsspec_uri(monkeypatch) -> None:
         horizon=1,
         model_config={"backend": "stub", "model": "stub_model"},
     )
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     result = BackendEngine(
         output=LedgerOutputOptions(
@@ -127,7 +127,7 @@ def test_streaming_resolution_keeps_only_pending_rows(monkeypatch, tmp_path) -> 
     )
     origins = list(dates[5:17])
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     expected = BackendEngine().execute(partition_tasks([task]), actuals, origins).ledger.to_df()
     path = tmp_path / "bounded-ledger.parquet"
@@ -170,7 +170,7 @@ def test_origin_iterator_matches_batch_conformal_and_ordering(monkeypatch) -> No
         coverage=0.9,
     )
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     batch_runtime = SymmetricIntervalRuntime(conformal_config)
     batch_result = BackendEngine(

@@ -12,8 +12,8 @@ class ReconciliationContext:
 
     ``fitted_values`` is the in-sample residual source for strategies such as
     MinT residual covariance. Rows are keyed by
-    ``(unique_id, ds, h, model_name)`` so horizon-specific fitted values remain
-    distinct from the future forecast ledger.
+    ``(unique_id, ds, model_name)`` because fitted values are historical
+    in-sample predictions, not horizon-specific future forecast rows.
     """
 
     fitted_values: pd.DataFrame | None = None

@@ -6,7 +6,6 @@ from calibre.core.forecast_frame import (
     FITTED_Y_HAT,
     MODEL_NAME,
     UNIQUE_ID,
-    H,
     Y,
     validate_fitted_values_frame,
 )
@@ -18,7 +17,6 @@ def _fitted_frame() -> pd.DataFrame:
             UNIQUE_ID: pd.Series(["A", "A"], dtype="object"),
             DS: pd.to_datetime(["2024-01-01", "2024-01-02"]),
             Y: [1.0, 2.0],
-            H: pd.Series([1, 1], dtype="int64"),
             MODEL_NAME: pd.Series(["m", "m"], dtype="object"),
             FITTED_Y_HAT: [1.1, 1.9],
         }

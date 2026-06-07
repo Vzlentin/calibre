@@ -24,7 +24,7 @@ from calibre.core.forecast_frame import (
     is_quantile_column,
     validate_fitted_values_frame,
 )
-from calibre.reconciliation.apply import VectorReconciler
+from calibre.reconciliation.apply import ReconciliationCrossSection, VectorReconciler
 from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import SummingMatrix
 
@@ -49,8 +49,6 @@ _UNSUPPORTED_STRATEGY_MESSAGES = {
 _COHERENCE_RTOL = 1e-6
 _COHERENCE_ATOL = 1e-6
 _DEFAULT_MAX_CACHE_SIZE = 128
-_GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
-_ORDER_COL = "__calibre_reconcile_order__"
 
 
 class _NixtlaMethod(Protocol):
@@ -76,7 +74,7 @@ class _NixtlaLayout:
 
 
 _CacheKey = tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...], bytes]
-_InsampleCacheKey = tuple[str, int, _CacheKey]
+_InsampleCacheKey = tuple[str, _CacheKey]
 
 
 def _load_method_classes() -> tuple[type[Any], type[Any], type[Any]]:
@@ -176,25 +174,20 @@ class NixtlaReconciler(VectorReconciler):
     ) -> pd.DataFrame:
         if hierarchy is not None and not frame.empty:
             _reject_quantile_columns(frame)
-        if not self.requires_fitted_values:
-            return super().__call__(frame, hierarchy, context)
-        if hierarchy is None or frame.empty:
-            return frame
-        fitted = _validated_fitted_context(context)
-        from calibre.reconciliation.summing import build_summing_matrix
+        return super().__call__(frame, hierarchy, context)
 
-        summing = build_summing_matrix(hierarchy)
-        order_col = _ORDER_COL
-        while order_col in frame.columns:
-            order_col = f"_{order_col}"
-        ordered = frame.copy()
-        ordered[order_col] = np.arange(len(ordered), dtype=np.int64)
-        insample_cache: dict[_InsampleCacheKey, _InsampleLayout] = {}
-        parts = [
-            self._reconcile_residual_group(group, summing, fitted, insample_cache)
-            for _, group in ordered.groupby(_GROUP_KEYS, sort=False)
-        ]
-        return pd.concat(parts).sort_values(order_col, kind="stable").drop(columns=order_col)
+    def prepare_reconcile(
+        self,
+        summing: SummingMatrix,
+        context: ReconciliationContext,
+    ) -> _ResidualReconcileState | None:
+        del summing
+        if not self.requires_fitted_values:
+            return None
+        return _ResidualReconcileState(
+            fitted_values=_validated_fitted_context(context),
+            insample_cache={},
+        )
 
     def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:
         layout = _to_nixtla_layout(base, summing)
@@ -216,33 +209,38 @@ class NixtlaReconciler(VectorReconciler):
             raise ValueError("Nixtla reconciliation produced an incoherent forecast vector")
         return reconciled
 
-    def _reconcile_residual_group(
+    def reconcile_cross_section(self, cross_section: ReconciliationCrossSection) -> np.ndarray:
+        if not self.requires_fitted_values:
+            return super().reconcile_cross_section(cross_section)
+        if not isinstance(cross_section.state, _ResidualReconcileState):
+            raise TypeError("Residual reconciliation state was not prepared")
+        return self._reconcile_residual_cross_section(cross_section, cross_section.state)
+
+    def _reconcile_residual_cross_section(
         self,
-        group: pd.DataFrame,
-        summing: SummingMatrix,
-        fitted_values: pd.DataFrame,
-        insample_cache: dict[_InsampleCacheKey, _InsampleLayout],
-    ) -> pd.DataFrame:
-        subset, base = self._base_vector(group, summing)
+        cross_section: ReconciliationCrossSection,
+        state: _ResidualReconcileState,
+    ) -> np.ndarray:
+        group = cross_section.group
+        subset = cross_section.subset
         model_name = str(group[MODEL_NAME].iloc[0])
         forecast_origin = group[FORECAST_ORIGIN].iloc[0]
         horizon = int(group[H].iloc[0])
-        layout = _to_nixtla_layout(base, subset)
-        cache_key = (model_name, horizon, _cache_key(subset))
-        residual_layout = insample_cache.get(cache_key)
+        layout = _to_nixtla_layout(cross_section.base, subset)
+        cache_key = (model_name, _cache_key(subset))
+        residual_layout = state.insample_cache.get(cache_key)
         if residual_layout is None:
             y_insample, y_hat_insample = _insample_arrays(
-                fitted_values,
+                state.fitted_values,
                 subset,
                 model_name,
-                horizon,
             )
             residual_layout = _to_nixtla_insample_layout(
                 y_insample=y_insample,
                 y_hat_insample=y_hat_insample,
                 inverse_permutation=layout.inverse_permutation,
             )
-            insample_cache[cache_key] = residual_layout
+            state.insample_cache[cache_key] = residual_layout
         reconciler = self._method_factory()
         try:
             reconciler.fit(
@@ -270,10 +268,7 @@ class NixtlaReconciler(VectorReconciler):
         coherent = subset.S @ reconciled[: subset.n_bottom]
         if not np.allclose(reconciled, coherent, rtol=_COHERENCE_RTOL, atol=_COHERENCE_ATOL):
             raise ValueError("Nixtla reconciliation produced an incoherent forecast vector")
-        reconciled_by_node = dict(zip(subset.node_labels, reconciled, strict=True))
-        result = group.copy()
-        result[Y_HAT] = result[UNIQUE_ID].astype(str).map(reconciled_by_node).astype(np.float64)
-        return result
+        return reconciled
 
 
 def _predict_residual_mean(
@@ -316,6 +311,12 @@ class _InsampleLayout:
     y_hat_insample: np.ndarray
 
 
+@dataclass(slots=True)
+class _ResidualReconcileState:
+    fitted_values: pd.DataFrame
+    insample_cache: dict[_InsampleCacheKey, _InsampleLayout]
+
+
 def _validated_fitted_context(context: ReconciliationContext) -> pd.DataFrame:
     fitted = context.fitted_values
     if fitted is None or fitted.empty:
@@ -331,14 +332,10 @@ def _insample_arrays(
     fitted_values: pd.DataFrame,
     summing: SummingMatrix,
     model_name: str,
-    horizon: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    subset = fitted_values[
-        (fitted_values[MODEL_NAME].astype(str) == model_name)
-        & (fitted_values[H].astype(np.int64) == horizon)
-    ].copy()
+    subset = fitted_values[fitted_values[MODEL_NAME].astype(str) == model_name].copy()
     if subset.empty:
-        raise ValueError(f"Missing fitted values for model_name={model_name!r}, h={horizon}")
+        raise ValueError(f"Missing fitted values for model_name={model_name!r}")
     subset[UNIQUE_ID] = subset[UNIQUE_ID].astype(str)
     node_ids = set(summing.node_labels)
     unknown = set(subset[UNIQUE_ID]) - node_ids
@@ -351,13 +348,13 @@ def _insample_arrays(
     if missing_nodes:
         raise ValueError(
             "Missing fitted values for hierarchy node(s): "
-            f"{missing_nodes} and model_name={model_name!r}, h={horizon}"
+            f"{missing_nodes} and model_name={model_name!r}"
         )
     common_ds = set.intersection(*ds_by_node.values())
     if not common_ds:
         raise ValueError(
             "Fitted-value timestamps do not overlap across hierarchy nodes "
-            f"for model_name={model_name!r}, h={horizon}"
+            f"for model_name={model_name!r}"
         )
     mismatched = {
         label: sorted(str(value) for value in ds_values.symmetric_difference(common_ds))
@@ -367,7 +364,7 @@ def _insample_arrays(
     if mismatched:
         raise ValueError(
             "Fitted-value timestamps are misaligned across hierarchy nodes "
-            f"for model_name={model_name!r}, h={horizon}: {mismatched}"
+            f"for model_name={model_name!r}: {mismatched}"
         )
 
     ordered_ds = sorted(common_ds)
@@ -383,7 +380,7 @@ def _insample_arrays(
     if y_wide.isna().any().any() or fitted_wide.isna().any().any():
         raise ValueError(
             "Fitted-value sidecar cannot be widened without missing "
-            f"(unique_id, ds, h, model_name) keys for model_name={model_name!r}, h={horizon}"
+            f"(unique_id, ds, model_name) keys for model_name={model_name!r}"
         )
     return y_wide.to_numpy(dtype=np.float64).T, fitted_wide.to_numpy(dtype=np.float64).T
 

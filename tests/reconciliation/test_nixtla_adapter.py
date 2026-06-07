@@ -379,7 +379,6 @@ def _tiny_fitted_values() -> pd.DataFrame:
                     UNIQUE_ID: uid,
                     DS: pd.Timestamp(ds),
                     Y: values[uid],
-                    H: 1,
                     MODEL_NAME: "m",
                     FITTED_Y_HAT: fitted,
                 }
@@ -457,12 +456,8 @@ def test_reconciliation_rejects_quantile_columns_under_active_hierarchy() -> Non
         )
 
 
-def test_residual_sidecar_lookup_is_horizon_specific() -> None:
-    h1 = _tiny_fitted_values()
-    h2 = h1.copy()
-    h2[H] = 2
-    h2[FITTED_Y_HAT] = h2[FITTED_Y_HAT] + 100.0
-    fitted = pd.concat([h1, h2], ignore_index=True)
+def test_residual_sidecar_lookup_is_not_horizon_specific() -> None:
+    fitted = _tiny_fitted_values()
     frame_h1 = _tiny_forecast_frame()
     frame_h2 = _tiny_forecast_frame()
     frame_h2[H] = 2
@@ -478,7 +473,7 @@ def test_residual_sidecar_lookup_is_horizon_specific() -> None:
     assert len(methods) == 2
     assert methods[0].y_hat_insample is not None
     assert methods[1].y_hat_insample is not None
-    np.testing.assert_allclose(methods[1].y_hat_insample - methods[0].y_hat_insample, 100.0)
+    np.testing.assert_allclose(methods[1].y_hat_insample, methods[0].y_hat_insample)
 
 
 class _ResidualFitFailure(_ResidualMethod):

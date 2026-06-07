@@ -1,6 +1,7 @@
 """Execution layer: backend engine, ledgers, pipeline runners, decision loops."""
 
 from calibre.core.forecast_task import TaskGroups
+from calibre.core.io import exists, join_uri, open_fs, resolve_path
 from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
@@ -28,7 +29,6 @@ from calibre.execution.decision_loop import (
     observe_cumulative,
     observe_per_horizon,
 )
-from calibre.execution.io import exists, join_uri, open_fs, resolve_path
 from calibre.execution.ledger import (
     InMemoryLedger,
     InMemoryOrderLedger,

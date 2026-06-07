@@ -38,17 +38,17 @@ from calibre.conformal.runtime import (
 )
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask
+from calibre.core.io import join_uri, read_parquet
 from calibre.core.run_status import RunStatus
 from calibre.core.serialization import frame_from_records, json_safe_records
-from calibre.execution.backend import (
+from calibre.execution.dataset import SalesAdapter, SnapshotSalesAdapter
+from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
+from calibre.execution.fit_validation import validate_fit_config
+from calibre.execution.prediction import (
     _coerce_forecast_frame_dtypes,
     _finalize_preds,
     fit_predict_task,
 )
-from calibre.execution.dataset import SalesAdapter, SnapshotSalesAdapter
-from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
-from calibre.execution.fit_validation import validate_fit_config
-from calibre.execution.io import join_uri, read_parquet
 from calibre.forecasting import get_scope
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import (

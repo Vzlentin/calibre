@@ -141,13 +141,18 @@ class _ResidualAdapter(ModelAdapter):
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         uid = str(task.history[UNIQUE_ID].iloc[0])
         node_offset = float(sum(ord(char) for char in uid) % 17)
+        last_ds = task.history[DS].max()
+        base = float(task.history[Y].mean() + 0.3 * node_offset)
         return pd.DataFrame(
-            {
-                UNIQUE_ID: [uid],
-                DS: [task.history[DS].max() + pd.Timedelta(days=1)],
-                Y_HAT: [float(task.history[Y].mean() + 0.3 * node_offset)],
-                H: [1],
-            }
+            [
+                {
+                    UNIQUE_ID: uid,
+                    DS: last_ds + pd.Timedelta(days=h),
+                    Y_HAT: base + 0.1 * h,
+                    H: h,
+                }
+                for h in range(1, task.horizon + 1)
+            ]
         )
 
     def fitted_values(self, task: ForecastTask) -> pd.DataFrame:
@@ -179,7 +184,7 @@ def _synthetic_m5_node_history(hierarchy: pd.DataFrame) -> pd.DataFrame:
     return build_node_history(pd.DataFrame(rows), hierarchy)
 
 
-def _synthetic_residual_tasks(node_history: pd.DataFrame):
+def _synthetic_residual_tasks(node_history: pd.DataFrame, *, horizon: int = 1):
     return build_tasks(
         node_history,
         [
@@ -190,7 +195,7 @@ def _synthetic_residual_tasks(node_history: pd.DataFrame):
                 "season_length": 7,
             }
         ],
-        1,
+        horizon,
     )
 
 
@@ -252,7 +257,7 @@ def test_m5_min_trace_moves_bottom_forecasts_from_divergent_node_bases(
     monkeypatch, strategy: str
 ) -> None:
     monkeypatch.setattr(
-        "calibre.execution.backend.resolve_adapter",
+        "calibre.execution.prediction.resolve_adapter",
         lambda model_config: _NonAdditiveAdapter(model_config),
     )
     bundle, actuals, tasks, origins = _m5_bundle_tasks_origins()
@@ -284,19 +289,22 @@ def test_m5_min_trace_moves_bottom_forecasts_from_divergent_node_bases(
 
 
 @pytest.mark.parametrize("strategy", ["mint_shrink", "wls_var", "erm"])
-def test_m5_residual_strategies_return_coherent_point_forecasts(monkeypatch, strategy: str) -> None:
+def test_m5_residual_strategies_return_coherent_multi_horizon_forecasts(
+    monkeypatch, strategy: str
+) -> None:
     monkeypatch.setattr(
-        "calibre.execution.backend.resolve_adapter",
+        "calibre.execution.prediction.resolve_adapter",
         lambda model_config: _ResidualAdapter(model_config),
     )
     bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
     node_history = _synthetic_m5_node_history(bundle.hierarchy)
-    tasks = _synthetic_residual_tasks(node_history)
+    tasks = _synthetic_residual_tasks(node_history, horizon=2)
     origins = [pd.Timestamp("2011-03-15")]
 
     ledger = _run_m5(bundle, node_history, tasks, origins, NixtlaReconciler(strategy))
 
     assert not ledger.empty
+    assert set(ledger[H]) == {1, 2}
     _assert_node_rows_coherent(ledger, bundle.hierarchy)
 
 

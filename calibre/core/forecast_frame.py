@@ -20,7 +20,7 @@ CONFORMAL_MODE = "conformal_mode"
 IN_STOCK = "in_stock"
 
 REQUIRED_COLUMNS = [UNIQUE_ID, DS, Y, Y_HAT, H, FORECAST_ORIGIN, MODEL_NAME]
-FITTED_VALUE_COLUMNS = [UNIQUE_ID, DS, Y, H, MODEL_NAME, FITTED_Y_HAT]
+FITTED_VALUE_COLUMNS = [UNIQUE_ID, DS, Y, MODEL_NAME, FITTED_Y_HAT]
 
 _RESERVED_HISTORY_COLS = frozenset({UNIQUE_ID, DS, Y})
 
@@ -138,7 +138,11 @@ def validate_actuals_frame(df: pd.DataFrame) -> None:
 
 
 def validate_fitted_values_frame(df: pd.DataFrame) -> None:
-    """Validate the in-sample fitted-value sidecar contract."""
+    """Validate the in-sample fitted-value sidecar contract.
+
+    Fitted values are historical, in-sample predictions keyed by
+    ``(unique_id, ds, model_name)``. They are not horizon-specific forecast rows.
+    """
     missing = set(FITTED_VALUE_COLUMNS) - set(df.columns)
     if missing:
         raise ValueError(f"Missing fitted-value columns: {missing}")
@@ -146,20 +150,18 @@ def validate_fitted_values_frame(df: pd.DataFrame) -> None:
         raise ValueError(f"Column '{DS}' expected datetime64, got {df[DS].dtype}")
     if not pd.api.types.is_numeric_dtype(df[Y]):
         raise ValueError(f"Column '{Y}' expected numeric, got {df[Y].dtype}")
-    if not pd.api.types.is_integer_dtype(df[H]):
-        raise ValueError(f"Column '{H}' expected integer, got {df[H].dtype}")
     if not pd.api.types.is_numeric_dtype(df[FITTED_Y_HAT]):
         raise ValueError(f"Column '{FITTED_Y_HAT}' expected numeric, got {df[FITTED_Y_HAT].dtype}")
-    if df[[UNIQUE_ID, DS, H, MODEL_NAME]].isna().any().any():
+    if df[[UNIQUE_ID, DS, MODEL_NAME]].isna().any().any():
         raise ValueError("Fitted-value frame has null values in key columns")
     if df[[Y, FITTED_Y_HAT]].isna().any().any():
         raise ValueError("Fitted-value frame has null values in y/fitted_y_hat")
-    duplicates = df[df.duplicated([UNIQUE_ID, DS, H, MODEL_NAME], keep=False)]
+    duplicates = df[df.duplicated([UNIQUE_ID, DS, MODEL_NAME], keep=False)]
     if not duplicates.empty:
         keys = (
-            duplicates[[UNIQUE_ID, DS, H, MODEL_NAME]]
+            duplicates[[UNIQUE_ID, DS, MODEL_NAME]]
             .drop_duplicates()
-            .sort_values([UNIQUE_ID, DS, H, MODEL_NAME], kind="stable")
+            .sort_values([UNIQUE_ID, DS, MODEL_NAME], kind="stable")
         )
         values = [tuple(row) for row in keys.itertuples(index=False, name=None)]
         raise ValueError(f"Duplicate fitted-value rows for keys: {values}")
