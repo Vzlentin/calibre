@@ -161,13 +161,13 @@ direct mode this gate is automatically satisfied.
 
 ---
 
-## Stage 1 — Implement + open the PR (`ce-work` as a spawned agent)
+## Stage 1 — Implement + open the PR
 
 Spawn **one** agent (foreground, no model override — inherit) to implement the
 plan and open the PR — a subagent per the Invocation model. Give it the brief in
 `.claude/skills/go/references/ce-work-brief.md` (mode-specific setup clauses,
 `uv run` quality gates, the private-context guard, the `closes #N` PR finish),
-filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan text.
+filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan path.
 
 When the agent returns, sync by mode — never move the main checkout onto the PR
 branch in worktree mode:

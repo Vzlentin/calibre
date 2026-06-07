@@ -1,4 +1,4 @@
-# Stage 1 — `ce-work` subagent brief
+# Stage 1 — implementation subagent brief
 
 Spawn **one** foreground agent (no model override — inherit) with the brief
 below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
@@ -6,7 +6,7 @@ below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
 ---
 
 > Invoke the `ce-work` skill to implement the plan below for GitHub issue #N.
-> Treat the pasted plan as the complete spec — do not re-plan, do not ask to
+> Treat the provided plan as the complete spec — do not re-plan, do not ask to
 > narrow scope.
 >
 > Setup, non-interactively (do not stop to ask which branch) — use the clause for
@@ -24,4 +24,4 @@ below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
 > Report back: PR number, PR URL, and the branch name.
 >
 > --- PLAN (complete spec) ---
-> <paste the full plan contents from the resolved /project-memory store>
+> <paste the full path to the plan from the resolved /project-memory store>
