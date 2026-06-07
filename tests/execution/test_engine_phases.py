@@ -34,6 +34,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
 from calibre.execution.task_builder import partition_tasks
+from calibre.forecasting.adapter_base import PredictionResult
 from calibre.ordering.policy_config import RsConfig
 
 
@@ -453,7 +454,7 @@ def test_commit_phase_failure_preserves_valueerror_type():
     # Non-empty but missing the required forecast columns: validate_forecast_frame
     # raises ValueError inside Commit.
     bad_frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], "garbage": [1.0]})
-    engine._predict = lambda *_a, **_k: bad_frame
+    engine._predict = lambda *_a, **_k: PredictionResult(forecast=bad_frame)
 
     with pytest.raises(ValueError, match=rf"Commit phase failed at origin {origin}"):
         engine.run_origin(
