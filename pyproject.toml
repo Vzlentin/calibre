@@ -111,10 +111,3 @@ unresolved-import = "ignore"
 unresolved-attribute = "ignore"
 call-non-callable = "ignore"
 
-# hierarchicalforecast is an optional dependency (the `hierarchy` extra) that is
-# not installed in the base type-checking environment.
-[[tool.ty.overrides]]
-include = ["calibre/reconciliation/nixtla_adapter.py"]
-
-[tool.ty.overrides.rules]
-unresolved-import = "ignore"

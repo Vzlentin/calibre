@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,33 @@ from calibre.reconciliation.nixtla_adapter import (
     _to_nixtla_layout,
 )
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
+
+
+class _CountingMethod:
+    def __init__(self) -> None:
+        self.fit_calls = 0
+
+    def fit(
+        self, *, S: np.ndarray, y_hat: np.ndarray, tags: dict[str, np.ndarray]
+    ) -> _CountingMethod:
+        del S, y_hat, tags
+        self.fit_calls += 1
+        return self
+
+    def predict(self, *, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
+        del S
+        return {"mean": y_hat}
+
+
+def _counting_factory() -> tuple[list[_CountingMethod], Callable[[], _CountingMethod]]:
+    methods: list[_CountingMethod] = []
+
+    def _factory() -> _CountingMethod:
+        method = _CountingMethod()
+        methods.append(method)
+        return method
+
+    return methods, _factory
 
 
 def _hierarchy() -> pd.DataFrame:
@@ -70,32 +98,11 @@ def test_s_layout_conversion_round_trips_to_identity_first_order() -> None:
 
 
 def test_projection_cache_reuses_fit_per_bottom_signature() -> None:
-    class _CountingMethod:
-        def __init__(self) -> None:
-            self.fit_calls = 0
-
-        def fit(
-            self, S: np.ndarray, y_hat: np.ndarray, tags: dict[str, np.ndarray]
-        ) -> _CountingMethod:
-            del S, y_hat, tags
-            self.fit_calls += 1
-            return self
-
-        def predict(self, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
-            del S
-            return {"mean": y_hat}
-
-    methods: list[_CountingMethod] = []
-
-    def _factory() -> _CountingMethod:
-        method = _CountingMethod()
-        methods.append(method)
-        return method
-
     full = build_summing_matrix(_hierarchy())
     first = full.subset(["a", "b"])
     second = full.subset(["a", "c"])
-    reconciler = NixtlaReconciler("ols", method_factory=_factory)
+    methods, factory = _counting_factory()
+    reconciler = NixtlaReconciler("ols", method_factory=factory)
 
     reconciler.reconcile_vector(_coherent_base(first, [1.0, 2.0]), first)
     reconciler.reconcile_vector(_coherent_base(first, [3.0, 4.0]), first)
@@ -105,30 +112,33 @@ def test_projection_cache_reuses_fit_per_bottom_signature() -> None:
     assert sum(method.fit_calls for method in methods) == 2
 
 
-def test_projection_cache_separates_same_bottom_ids_with_different_layouts() -> None:
-    class _CountingMethod:
-        def fit(
-            self, S: np.ndarray, y_hat: np.ndarray, tags: dict[str, np.ndarray]
-        ) -> _CountingMethod:
-            del S, y_hat, tags
-            return self
-
-        def predict(self, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
-            del S
-            return {"mean": y_hat}
-
-    methods: list[_CountingMethod] = []
-
-    def _factory() -> _CountingMethod:
-        method = _CountingMethod()
-        methods.append(method)
-        return method
-
-    first = build_summing_matrix(pd.DataFrame({"unique_id": ["a", "b"], "dept": ["D", "D"]}))
-    second = build_summing_matrix(
-        pd.DataFrame({"unique_id": ["a", "b"], "dept": ["D", "D"], "store": ["S1", "S2"]})
+def test_projection_cache_separates_same_labels_with_different_s_matrices() -> None:
+    first = SummingMatrix(
+        S=np.array(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [1.0, 0.0],
+            ]
+        ),
+        bottom_ids=("a", "b"),
+        node_labels=("a", "b", "__total__", "group=G"),
     )
-    reconciler = NixtlaReconciler("ols", method_factory=_factory)
+    second = SummingMatrix(
+        S=np.array(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ]
+        ),
+        bottom_ids=first.bottom_ids,
+        node_labels=first.node_labels,
+    )
+    methods, factory = _counting_factory()
+    reconciler = NixtlaReconciler("ols", method_factory=factory)
 
     reconciler.reconcile_vector(_coherent_base(first, [1.0, 2.0]), first)
     reconciler.reconcile_vector(_coherent_base(second, [3.0, 4.0]), second)
@@ -137,28 +147,11 @@ def test_projection_cache_separates_same_bottom_ids_with_different_layouts() -> 
 
 
 def test_projection_cache_evicts_oldest_signature_when_bounded() -> None:
-    class _CountingMethod:
-        def fit(
-            self, S: np.ndarray, y_hat: np.ndarray, tags: dict[str, np.ndarray]
-        ) -> _CountingMethod:
-            del S, y_hat, tags
-            return self
-
-        def predict(self, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
-            del S
-            return {"mean": y_hat}
-
-    methods: list[_CountingMethod] = []
-
-    def _factory() -> _CountingMethod:
-        method = _CountingMethod()
-        methods.append(method)
-        return method
-
     full = build_summing_matrix(_hierarchy())
     first = full.subset(["a", "b"])
     second = full.subset(["a", "c"])
-    reconciler = NixtlaReconciler("ols", method_factory=_factory, max_cache_size=1)
+    methods, factory = _counting_factory()
+    reconciler = NixtlaReconciler("ols", method_factory=factory, max_cache_size=1)
 
     reconciler.reconcile_vector(_coherent_base(first, [1.0, 2.0]), first)
     reconciler.reconcile_vector(_coherent_base(second, [3.0, 4.0]), second)

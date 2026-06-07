@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from calibre.reconciliation.nixtla_adapter import NixtlaReconciler, NixtlaStrategy
+from calibre.reconciliation.nixtla_adapter import (
+    NIXTLA_STRATEGIES,
+    NixtlaReconciler,
+    NixtlaStrategy,
+)
 from calibre.reconciliation.noop import NoOpReconciler
 from calibre.reconciliation.protocols import Reconciler
 
@@ -15,9 +19,7 @@ def _nixtla_builder(strategy: NixtlaStrategy) -> ReconcilerBuilder:
 
 _REGISTRY: dict[str, ReconcilerBuilder] = {
     "none": NoOpReconciler,
-    "bottom_up": _nixtla_builder("bottom_up"),
-    "ols": _nixtla_builder("ols"),
-    "wls_struct": _nixtla_builder("wls_struct"),
+    **{strategy: _nixtla_builder(strategy) for strategy in NIXTLA_STRATEGIES},
 }
 
 

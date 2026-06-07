@@ -6,7 +6,7 @@ import importlib
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast, get_args
 
 import numpy as np
 
@@ -15,7 +15,8 @@ from calibre.reconciliation.summing import SummingMatrix
 
 NixtlaStrategy = Literal["bottom_up", "ols", "wls_struct"]
 
-_SUPPORTED_STRATEGIES = frozenset({"bottom_up", "ols", "wls_struct"})
+NIXTLA_STRATEGIES = cast(tuple[NixtlaStrategy, ...], get_args(NixtlaStrategy))
+_SUPPORTED_STRATEGIES = frozenset(NIXTLA_STRATEGIES)
 _COHERENCE_RTOL = 1e-6
 _COHERENCE_ATOL = 1e-6
 _DEFAULT_MAX_CACHE_SIZE = 128
@@ -41,7 +42,7 @@ class _NixtlaLayout:
     inverse_permutation: np.ndarray
 
 
-_CacheKey = tuple[tuple[str, ...], tuple[str, ...]]
+_CacheKey = tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...], bytes]
 
 
 def _load_method_classes() -> tuple[type[Any], type[Any]]:
@@ -87,7 +88,8 @@ def _from_nixtla_layout(y_hat: np.ndarray, layout: _NixtlaLayout) -> np.ndarray:
 
 
 def _cache_key(summing: SummingMatrix) -> _CacheKey:
-    return (tuple(summing.bottom_ids), tuple(summing.node_labels))
+    S = np.ascontiguousarray(summing.S, dtype=np.float64)
+    return (tuple(summing.bottom_ids), tuple(summing.node_labels), S.shape, S.tobytes())
 
 
 class NixtlaReconciler(VectorReconciler):
