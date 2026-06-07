@@ -128,6 +128,18 @@ def test_duplicate_unique_id_raises() -> None:
         build_summing_matrix(frame)
 
 
+@pytest.mark.parametrize("colliding_id", ["cat=X", TOTAL_LABEL])
+def test_generated_node_label_collision_raises(colliding_id: str) -> None:
+    frame = pd.DataFrame(
+        {
+            "unique_id": [colliding_id, "b"],
+            "cat": ["X", "Y"],
+        }
+    )
+    with pytest.raises(ValueError, match="node labels must be unique"):
+        build_summing_matrix(frame)
+
+
 def test_null_attribute_value_raises() -> None:
     frame = pd.DataFrame({"unique_id": ["a", "b"], "store": ["S1", None]})
     with pytest.raises(ValueError, match="has null values"):

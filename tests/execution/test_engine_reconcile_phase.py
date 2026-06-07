@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
-from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT
+from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.execution.backend import (
     BackendEngine,
@@ -20,8 +20,9 @@ from calibre.execution.backend import (
     ReconciliationOptions,
     _with_group_tag,
 )
-from calibre.execution.ledger import InMemoryLedger
-from calibre.execution.task_builder import partition_tasks
+from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
+from calibre.execution.task_builder import build_node_history, partition_tasks
+from calibre.ordering.policy_config import RsConfig
 from calibre.reconciliation import BottomUpReconciler, NoOpReconciler
 
 
@@ -164,3 +165,66 @@ def test_reconcile_phase_failure_names_phase_and_origin() -> None:
             parallel_refs=parallel_refs,
             direct_refs=direct_refs,
         )
+
+
+def test_resolve_due_fills_aggregate_actuals_from_node_history() -> None:
+    hierarchy = pd.DataFrame({UNIQUE_ID: ["A", "B"], "dept_id": ["D", "D"]})
+    bottom_actuals = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            DS: pd.to_datetime(["2024-01-08", "2024-01-08"]),
+            Y: [2.0, 3.0],
+        }
+    )
+    actuals = build_node_history(bottom_actuals, hierarchy)
+    ledger = InMemoryLedger()
+    ledger.append(
+        pd.DataFrame(
+            {
+                UNIQUE_ID: pd.Series(["A", "B", "dept_id=D", "__total__"], dtype="object"),
+                DS: pd.to_datetime(["2024-01-08"] * 4),
+                Y: [float("nan")] * 4,
+                Y_HAT: [2.0, 3.0, 6.0, 6.0],
+                H: [1] * 4,
+                FORECAST_ORIGIN: pd.to_datetime(["2024-01-07"] * 4),
+                MODEL_NAME: pd.Series(["m"] * 4, dtype="object"),
+            }
+        )
+    )
+
+    BackendEngine()._resolve_due(ledger, actuals, pd.Timestamp("2024-01-08"), None)
+    resolved = ledger.to_df().set_index(UNIQUE_ID)
+
+    assert resolved.loc["dept_id=D", Y] == pytest.approx(5.0)
+    assert resolved.loc["__total__", Y] == pytest.approx(5.0)
+
+
+def test_order_phase_filters_aggregate_rows_when_hierarchy_present(monkeypatch) -> None:
+    hierarchy = pd.DataFrame({UNIQUE_ID: ["A", "B"], "dept_id": ["D", "D"]})
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: pd.Series(["A", "B", "dept_id=D", "__total__"], dtype="object"),
+            DS: pd.to_datetime(["2024-01-08"] * 4),
+            Y: [float("nan")] * 4,
+            Y_HAT: [2.0, 3.0, 5.0, 5.0],
+            H: [1] * 4,
+            FORECAST_ORIGIN: pd.to_datetime(["2024-01-07"] * 4),
+            MODEL_NAME: pd.Series(["m"] * 4, dtype="object"),
+        }
+    )
+    seen: dict[str, list[str]] = {}
+
+    def _fake_apply_order_policy(order_frame, config):
+        del config
+        seen["uids"] = order_frame[UNIQUE_ID].astype(str).tolist()
+        return pd.DataFrame({UNIQUE_ID: seen["uids"], "order_qty": [0.0] * len(order_frame)})
+
+    monkeypatch.setattr("calibre.execution.backend.apply_order_policy", _fake_apply_order_policy)
+    engine = BackendEngine(
+        reconciliation=ReconciliationOptions(reconciler=BottomUpReconciler(), hierarchy=hierarchy),
+        order=RsConfig(params=pd.DataFrame()),
+    )
+
+    engine._order(frame, InMemoryOrderLedger())
+
+    assert seen["uids"] == ["A", "B"]

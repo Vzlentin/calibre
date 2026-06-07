@@ -3,8 +3,8 @@
 The summing matrix maps a bottom-level forecast vector to the full set of nodes
 in a cross-sectional hierarchy. It is derived **generically** from the attribute
 columns of the hierarchy frame (any cross-sectional level set) — never hard-coded
-to a single parent tree (KTD3). Each attribute column is one grouping dimension;
-the distinct values within a column are marginal aggregate nodes, so overlapping
+to a single parent tree. Each attribute column is one grouping dimension; the
+distinct values within a column are marginal aggregate nodes, so overlapping
 memberships produce a *lattice*, not a single tree, per architecture §9.
 
 Node layout (rows of S), in order:
@@ -29,6 +29,16 @@ import pandas as pd
 from calibre.core.forecast_frame import UNIQUE_ID
 
 TOTAL_LABEL = "__total__"
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchyIndex:
+    """Canonical labels and normalized attributes for a hierarchy frame."""
+
+    frame: pd.DataFrame
+    attr_cols: tuple[str, ...]
+    bottom_ids: tuple[str, ...]
+    node_labels: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,8 +75,8 @@ class SummingMatrix:
         Columns are sliced to the present bottom ids (preserving canonical
         order) and any aggregate/identity row left with no present member is
         dropped, so a cross-section that forecasts only some series still aligns
-        to a coherent summing matrix (KTD2). The bottom identity block stays the
-        leading rows, so the reconciled bottom vector remains ``S[:n_bottom]``.
+        to a coherent summing matrix. The bottom identity block stays the leading
+        rows, so the reconciled bottom vector remains ``S[:n_bottom]``.
         """
         wanted = {str(uid) for uid in present_ids}
         unknown = wanted - set(self.bottom_ids)
@@ -83,18 +93,13 @@ class SummingMatrix:
         )
 
 
-def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
-    """Build a :class:`SummingMatrix` from a hierarchy attribute frame.
-
-    ``hierarchy`` must carry a ``unique_id`` column; every other column is
-    treated as a cross-sectional grouping dimension (discovered generically). The
-    bottom ids are sorted for deterministic node labels.
-    """
+def build_hierarchy_index(hierarchy: pd.DataFrame) -> HierarchyIndex:
+    """Validate a hierarchy frame and derive its canonical node labels."""
     if UNIQUE_ID not in hierarchy.columns:
         raise ValueError("hierarchy missing required column: unique_id")
     if hierarchy[UNIQUE_ID].isna().any():
         raise ValueError("hierarchy has null unique_id values")
-    attr_cols = [col for col in hierarchy.columns if col != UNIQUE_ID]
+    attr_cols = tuple(col for col in hierarchy.columns if col != UNIQUE_ID)
     frame = hierarchy.copy()
     frame[UNIQUE_ID] = frame[UNIQUE_ID].astype(str)
     frame = frame.sort_values(UNIQUE_ID, kind="stable").reset_index(drop=True)
@@ -111,24 +116,55 @@ def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
             raise ValueError(f"hierarchy attribute column {col!r} has null values")
 
     bottom_ids = tuple(frame[UNIQUE_ID].tolist())
-    n_bottom = len(bottom_ids)
-    if n_bottom == 0:
+    if not bottom_ids:
         raise ValueError("hierarchy has no rows")
 
-    rows: list[np.ndarray] = list(np.eye(n_bottom, dtype=np.float64))
     labels: list[str] = list(bottom_ids)
+    for col in attr_cols:
+        values = frame[col].astype(str)
+        labels.extend(f"{col}={value}" for value in sorted(values.unique()))
+    labels.append(TOTAL_LABEL)
+
+    label_index = pd.Index(labels)
+    if label_index.has_duplicates:
+        duplicates = sorted(label_index[label_index.duplicated()].unique())
+        raise ValueError(
+            "hierarchy node labels must be unique; aggregate labels collide with "
+            f"bottom unique_id values: {duplicates}"
+        )
+
+    return HierarchyIndex(
+        frame=frame,
+        attr_cols=attr_cols,
+        bottom_ids=bottom_ids,
+        node_labels=tuple(labels),
+    )
+
+
+def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
+    """Build a :class:`SummingMatrix` from a hierarchy attribute frame.
+
+    ``hierarchy`` must carry a ``unique_id`` column; every other column is
+    treated as a cross-sectional grouping dimension (discovered generically). The
+    bottom ids are sorted for deterministic node labels.
+    """
+    hierarchy_index = build_hierarchy_index(hierarchy)
+    frame = hierarchy_index.frame
+    attr_cols = hierarchy_index.attr_cols
+    bottom_ids = hierarchy_index.bottom_ids
+    n_bottom = len(bottom_ids)
+
+    rows: list[np.ndarray] = list(np.eye(n_bottom, dtype=np.float64))
 
     for col in attr_cols:
         values = frame[col].astype(str)
         for value in sorted(values.unique()):
             rows.append((values == value).to_numpy(dtype=np.float64))
-            labels.append(f"{col}={value}")
 
     rows.append(np.ones(n_bottom, dtype=np.float64))
-    labels.append(TOTAL_LABEL)
 
     return SummingMatrix(
         S=np.vstack(rows),
         bottom_ids=bottom_ids,
-        node_labels=tuple(labels),
+        node_labels=hierarchy_index.node_labels,
     )

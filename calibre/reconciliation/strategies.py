@@ -1,11 +1,10 @@
 """Proportion-based reconciliation strategies: bottom-up and top-down.
 
 Both implement the :class:`~calibre.reconciliation.apply.VectorReconciler` hook
-``reconcile_vector`` and are registered with the strategy registry. On a
-bottom-only forecast frame the harness hands them an already-coherent base
-vector, so both reduce to identity on the bottom block (Scope Boundaries);
-divergence requires independent aggregate base forecasts (a documented
-follow-up).
+``reconcile_vector`` and are registered with the strategy registry. When a
+hierarchy is supplied, the shared harness expects a node-level forecast frame:
+bottom rows plus the aggregate rows required by the active summing-matrix
+subset.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ class BottomUpReconciler(VectorReconciler):
 
     The reconciled vector is ``S @ b`` over the bottom base entries, so each
     aggregate node equals the sum of its member bottom series and the grand total
-    equals the bottom sum — coherent across all levels by construction (R5).
+    equals the bottom sum.
     """
 
     def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:
@@ -35,8 +34,8 @@ class TopDownReconciler(VectorReconciler):
     The grand-total (root) base forecast is split across bottom series by each
     series' share of the summed bottom base forecasts (forecast proportions);
     aggregates are then re-summed, so the result is coherent and the reconciled
-    bottom sums to the root (R6). A zero-total cross-section degrades gracefully
-    to an equal split.
+    bottom sums to the root. A zero-total cross-section degrades gracefully to an
+    equal split.
     """
 
     def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:

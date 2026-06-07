@@ -95,27 +95,31 @@ def test_top_down_zero_total_degrades_to_equal_split() -> None:
     _assert_coherent(summing, out)
 
 
-def _bottom_only_frame() -> pd.DataFrame:
+def _node_frame() -> pd.DataFrame:
     frame = pd.DataFrame(
         {
-            UNIQUE_ID: pd.Series(["a", "b", "c"], dtype="object"),
-            "ds": pd.to_datetime(["2024-01-14"] * 3),
-            "y": np.array([np.nan] * 3, dtype="float64"),
-            Y_HAT: np.array([2.0, 3.0, 5.0], dtype="float64"),
-            H: np.array([1, 1, 1], dtype="int64"),
-            FORECAST_ORIGIN: pd.to_datetime(["2024-01-07"] * 3),
-            MODEL_NAME: pd.Series(["m"] * 3, dtype="object"),
+            UNIQUE_ID: pd.Series(["a", "b", "c", "grp=G1", "grp=G2", "__total__"], dtype="object"),
+            "ds": pd.to_datetime(["2024-01-14"] * 6),
+            "y": np.array([np.nan] * 6, dtype="float64"),
+            Y_HAT: np.array([2.0, 3.0, 5.0, 999.0, -1.0, 20.0], dtype="float64"),
+            H: np.array([1] * 6, dtype="int64"),
+            FORECAST_ORIGIN: pd.to_datetime(["2024-01-07"] * 6),
+            MODEL_NAME: pd.Series(["m"] * 6, dtype="object"),
         }
     )
     return frame
 
 
-def test_both_strategies_are_identity_on_bottom_only_frame() -> None:
+def test_bottom_up_frame_keeps_bottom_and_overwrites_aggregates() -> None:
     hierarchy = pd.DataFrame({UNIQUE_ID: ["a", "b", "c"], "grp": ["G1", "G1", "G2"]})
-    frame = _bottom_only_frame()
-    for reconciler in (BottomUpReconciler(), TopDownReconciler()):
-        out = reconciler(frame, hierarchy)
-        np.testing.assert_array_equal(out[Y_HAT].to_numpy(), [2.0, 3.0, 5.0])
+    out = BottomUpReconciler()(_node_frame(), hierarchy)
+    np.testing.assert_array_equal(out[Y_HAT].to_numpy(), [2.0, 3.0, 5.0, 5.0, 5.0, 10.0])
+
+
+def test_top_down_frame_uses_supplied_total_to_move_bottom() -> None:
+    hierarchy = pd.DataFrame({UNIQUE_ID: ["a", "b", "c"], "grp": ["G1", "G1", "G2"]})
+    out = TopDownReconciler()(_node_frame(), hierarchy)
+    np.testing.assert_allclose(out[Y_HAT].to_numpy(), [4.0, 6.0, 10.0, 10.0, 10.0, 20.0])
 
 
 def test_registry_resolves_bottom_up_and_top_down() -> None:
