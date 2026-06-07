@@ -38,8 +38,9 @@ work order; the issue is the close-handle.
 Each stage delegates to a skill-primitive; how it's invoked depends on who owns
 the fan-out:
 
-- **Subagent (fresh context window):** `ce-work` — a heavy, self-contained
-  stage whose context should stay out of the orchestrator.
+- **Subagent (fresh context window):** invoke the `ce-work` skill inside a normal
+  implementation-capable subagent — `ce-work` is a skill, not a required
+  `subagent_type` / tool name.
 - **Inline (the `/go` agent runs it directly):** `ce-plan`, `ce-simplify-code`,
   `ce-code-review`, `ce-resolve-pr-feedback`. `ce-plan` runs inline so its
   clarifying gates can reach you (a subagent can't ask questions); the others
@@ -163,8 +164,9 @@ direct mode this gate is automatically satisfied.
 
 ## Stage 1 — Implement + open the PR
 
-Spawn **one** agent (foreground, no model override — inherit) to implement the
-plan and open the PR — a subagent per the Invocation model. Give it the brief in
+Spawn **one** implementation-capable agent (foreground, no model override —
+inherit) to implement the plan and open the PR — a subagent per the Invocation
+model, instructed to follow `ce-work`. Give it the brief in
 `.claude/skills/go/references/ce-work-brief.md` (mode-specific setup clauses,
 `uv run` quality gates, the private-context guard, the `closes #N` PR finish),
 filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan path.
