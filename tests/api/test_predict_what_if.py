@@ -24,7 +24,8 @@ class _FutureXAdapter(ModelAdapter):
         self.model_config = model_config or {}
         self.received: list[pd.DataFrame | None] = []
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self._task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:

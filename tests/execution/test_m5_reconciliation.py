@@ -20,6 +20,7 @@ from calibre.cli.config import load_config_from_mapping
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import (
     DS,
+    FITTED_Y_HAT,
     FORECAST_ORIGIN,
     MODEL_NAME,
     UNIQUE_ID,
@@ -36,8 +37,8 @@ from calibre.execution.backend import (
     ReconciliationOptions,
 )
 from calibre.execution.task_builder import build_node_history, build_tasks
-from calibre.forecasting.adapter_base import ModelAdapter
-from calibre.reconciliation import NixtlaReconciler, NoOpReconciler
+from calibre.forecasting.adapter_base import ModelAdapter, build_fitted_values_frame
+from calibre.reconciliation import NixtlaReconciler, NoOpReconciler, ReconciliationContext
 from calibre.reconciliation.summing import build_summing_matrix
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
@@ -50,9 +51,14 @@ class _CountingReconciler:
         self.inner = inner
         self.calls = 0
 
-    def __call__(self, frame: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame:
+    def __call__(
+        self,
+        frame: pd.DataFrame,
+        hierarchy: pd.DataFrame | None,
+        context: ReconciliationContext,
+    ) -> pd.DataFrame:
         self.calls += 1
-        return self.inner(frame, hierarchy)
+        return self.inner(frame, hierarchy, context)
 
 
 def _m5_bundle_tasks_origins():
@@ -108,7 +114,8 @@ def _assert_node_rows_coherent(frame: pd.DataFrame, hierarchy: pd.DataFrame) -> 
 class _NonAdditiveAdapter(ModelAdapter):
     """Deterministic test adapter whose aggregate forecasts are not additive."""
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         pass
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
@@ -122,6 +129,68 @@ class _NonAdditiveAdapter(ModelAdapter):
                 H: [1],
             }
         )
+
+
+class _ResidualAdapter(ModelAdapter):
+    """Deterministic adapter with non-additive in-sample residuals per node."""
+
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del task, collect_fitted_values
+
+    def predict(self, task: ForecastTask) -> pd.DataFrame:
+        uid = str(task.history[UNIQUE_ID].iloc[0])
+        node_offset = float(sum(ord(char) for char in uid) % 17)
+        return pd.DataFrame(
+            {
+                UNIQUE_ID: [uid],
+                DS: [task.history[DS].max() + pd.Timedelta(days=1)],
+                Y_HAT: [float(task.history[Y].mean() + 0.3 * node_offset)],
+                H: [1],
+            }
+        )
+
+    def fitted_values(self, task: ForecastTask) -> pd.DataFrame:
+        uid = str(task.history[UNIQUE_ID].iloc[0])
+        node_offset = float(sum(ord(char) for char in uid) % 17)
+        raw = task.history[[UNIQUE_ID, DS, Y]].copy()
+        t = np.arange(len(raw), dtype=np.float64)
+        residual = (
+            np.sin(t * (0.13 + node_offset * 0.01))
+            + np.cos(t * (0.07 + node_offset * 0.02))
+            + node_offset * 0.05
+        )
+        raw[FITTED_Y_HAT] = raw[Y].to_numpy(dtype=np.float64) - residual
+        return build_fitted_values_frame(raw, model_name=task.model_name)
+
+
+def _synthetic_m5_node_history(hierarchy: pd.DataFrame) -> pd.DataFrame:
+    bottom_ids = hierarchy[UNIQUE_ID].astype(str).tolist()
+    dates = pd.date_range("2011-01-01", periods=80, freq="D")
+    rows = [
+        {
+            UNIQUE_ID: uid,
+            DS: ds,
+            Y: float((idx + 1) * 2 + (step % 7) + 0.1 * step),
+        }
+        for idx, uid in enumerate(bottom_ids)
+        for step, ds in enumerate(dates)
+    ]
+    return build_node_history(pd.DataFrame(rows), hierarchy)
+
+
+def _synthetic_residual_tasks(node_history: pd.DataFrame):
+    return build_tasks(
+        node_history,
+        [
+            {
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "name": "residual_stub",
+                "season_length": 7,
+            }
+        ],
+        1,
+    )
 
 
 def test_summing_matrix_built_from_real_m5_attributes() -> None:
@@ -211,6 +280,45 @@ def test_m5_min_trace_moves_bottom_forecasts_from_divergent_node_bases(
     bottom_up_bottom = bottom_up_values.reindex(summing.bottom_ids).to_numpy(dtype=np.float64)
     np.testing.assert_allclose(bottom_up_bottom, bottom_base, rtol=1e-10, atol=1e-10)
     _assert_node_rows_coherent(bottom_up, bundle.hierarchy)
+
+
+@pytest.mark.parametrize("strategy", ["mint_shrink", "wls_var", "erm"])
+def test_m5_residual_strategies_return_coherent_point_forecasts(monkeypatch, strategy: str) -> None:
+    monkeypatch.setattr(
+        "calibre.execution.backend.resolve_adapter",
+        lambda model_config: _ResidualAdapter(model_config),
+    )
+    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
+    node_history = _synthetic_m5_node_history(bundle.hierarchy)
+    tasks = _synthetic_residual_tasks(node_history)
+    origins = [pd.Timestamp("2011-03-15")]
+
+    ledger = _run_m5(bundle, node_history, tasks, origins, NixtlaReconciler(strategy))
+
+    assert not ledger.empty
+    _assert_node_rows_coherent(ledger, bundle.hierarchy)
+
+
+def test_m5_mint_cov_runs_on_well_conditioned_hierarchy_slice(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "calibre.execution.backend.resolve_adapter",
+        lambda model_config: _ResidualAdapter(model_config),
+    )
+    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
+    hierarchy = bundle.hierarchy[[UNIQUE_ID, "dept_id"]].drop_duplicates().head(2).copy()
+    node_history = _synthetic_m5_node_history(hierarchy)
+    tasks = _synthetic_residual_tasks(node_history)
+    origins = [pd.Timestamp("2011-03-15")]
+
+    class _Bundle:
+        pass
+
+    reduced_bundle = _Bundle()
+    reduced_bundle.hierarchy = hierarchy
+    ledger = _run_m5(reduced_bundle, node_history, tasks, origins, NixtlaReconciler("mint_cov"))
+
+    assert not ledger.empty
+    _assert_node_rows_coherent(ledger, hierarchy)
 
 
 def test_reconcile_byte_identical_when_hierarchy_none() -> None:

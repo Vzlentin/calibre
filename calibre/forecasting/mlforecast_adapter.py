@@ -18,7 +18,11 @@ from calibre.core.forecast_frame import (
     quantile_column,
 )
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, build_predict_frame
+from calibre.forecasting.adapter_base import (
+    ModelAdapter,
+    build_fitted_values_frame,
+    build_predict_frame,
+)
 from calibre.forecasting.native_persistence import load_dir_from_bytes, save_dir_to_bytes
 
 _RESERVED_KEYS = frozenset(
@@ -136,13 +140,19 @@ def _build_quantile_predict_frame(
     return out
 
 
+def _point_quantile_name(name_to_quantile: dict[str, float]) -> str:
+    quantiles = list(name_to_quantile.values())
+    point_q = 0.5 if 0.5 in quantiles else min(quantiles, key=lambda q: abs(q - 0.5))
+    return next(name for name, q in name_to_quantile.items() if q == point_q)
+
+
 class MLForecastAdapter(ModelAdapter):
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._mlf: Any | None = None
         self._name_to_quantile: dict[str, float] = {}
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
         mlforecast_cls = _load_mlforecast_cls()
         model_cls = _resolve_model_cls(self._config["model"])
         params = {k: v for k, v in self._config.items() if k not in _RESERVED_KEYS}
@@ -184,6 +194,8 @@ class MLForecastAdapter(ModelAdapter):
         fit_kwargs: dict[str, Any] = {}
         if strategy == "direct":
             fit_kwargs["max_horizon"] = task.horizon
+        if collect_fitted_values:
+            fit_kwargs["fitted"] = True
         self._mlf.fit(mlf_df, **fit_kwargs)
 
     def dump_state(self) -> bytes:
@@ -227,3 +239,16 @@ class MLForecastAdapter(ModelAdapter):
         if self._name_to_quantile:
             return _build_quantile_predict_frame(raw, self._name_to_quantile)
         return build_predict_frame(raw)
+
+    def fitted_values(self, task: ForecastTask) -> pd.DataFrame:
+        if self._mlf is None:
+            raise RuntimeError("Call fit() before fitted_values()")
+        raw = self._mlf.forecast_fitted_values()
+        if H in raw.columns:
+            raw = raw[raw[H] == 1].drop(columns=H).reset_index(drop=True)
+            if raw.empty:
+                raise ValueError("MLForecast fitted values did not include horizon h=1 rows")
+        if self._name_to_quantile:
+            point_name = _point_quantile_name(self._name_to_quantile)
+            raw = raw[[UNIQUE_ID, DS, Y, point_name]]
+        return build_fitted_values_frame(raw, model_name=task.model_name)

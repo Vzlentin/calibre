@@ -54,7 +54,8 @@ class _StubAdapter(ModelAdapter):
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self.task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:

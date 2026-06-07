@@ -109,8 +109,8 @@ def test_remote_ray_staging_uses_shared_uri_and_cleans_up(monkeypatch):
         fs.rm("/calibre-backend-staging-test", recursive=True)
 
     class _StubAdapter(ModelAdapter):
-        def fit(self, task: ForecastTask) -> None:
-            pass
+        def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+            del task, collect_fitted_values
 
         def predict(self, task: ForecastTask) -> pd.DataFrame:
             return pd.DataFrame(
@@ -156,7 +156,8 @@ def test_cpu_per_task_caps_threaded_model_configs(monkeypatch):
     seen: dict[str, int] = {}
 
     class _StubAdapter(ModelAdapter):
-        def fit(self, task: ForecastTask) -> None:
+        def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+            del collect_fitted_values
             seen["n_jobs"] = int(task.model_config["n_jobs"])
             seen["num_threads"] = int(task.model_config["num_threads"])
 
@@ -620,7 +621,8 @@ def test_run_parallel_slices_future_x_per_uid(monkeypatch):
     received: dict[str, pd.DataFrame | None] = {}
 
     class _StubAdapter(ModelAdapter):
-        def fit(self, task: ForecastTask) -> None:
+        def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+            del collect_fitted_values
             received[task.unique_id] = task.future_x
 
         def predict(self, task: ForecastTask) -> pd.DataFrame:
@@ -670,7 +672,8 @@ def test_run_direct_passes_full_future_x(monkeypatch):
     received: list[pd.DataFrame | None] = []
 
     class _StubAdapter(ModelAdapter):
-        def fit(self, task: ForecastTask) -> None:
+        def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+            del collect_fitted_values
             received.append(task.future_x)
 
         def predict(self, task: ForecastTask) -> pd.DataFrame:

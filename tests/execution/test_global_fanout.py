@@ -15,6 +15,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTaskRef
 from calibre.execution.backend import BackendEngine, ExecutionOptions
+from calibre.forecasting.adapter_base import PredictionResult
 
 
 def _ref(config: dict, idx: int) -> ForecastTaskRef:
@@ -62,21 +63,24 @@ def _patch_fake_ray(monkeypatch, engine: BackendEngine) -> None:
 
 
 def test_multiple_global_configs_run_in_parallel(monkeypatch) -> None:
-    def _fake_process_global_panel(refs, model_config, origin):
+    def _fake_process_global_panel(refs, model_config, origin, collect_fitted_values):
+        del collect_fitted_values
         # Each global config fits one panel; emit one forecast row per ref so
         # the test can read the grouping back off the engine's combined frame.
         # Y_HAT encodes the panel size this config's adapter actually received.
         name = str(model_config["name"])
-        return pd.DataFrame(
-            {
-                UNIQUE_ID: [ref.unique_id for ref in refs],
-                DS: [origin + pd.Timedelta(weeks=1)] * len(refs),
-                Y: [float("nan")] * len(refs),
-                Y_HAT: [float(len(refs))] * len(refs),
-                H: [1] * len(refs),
-                FORECAST_ORIGIN: [origin] * len(refs),
-                MODEL_NAME: [name] * len(refs),
-            }
+        return PredictionResult(
+            forecast=pd.DataFrame(
+                {
+                    UNIQUE_ID: [ref.unique_id for ref in refs],
+                    DS: [origin + pd.Timedelta(weeks=1)] * len(refs),
+                    Y: [float("nan")] * len(refs),
+                    Y_HAT: [float(len(refs))] * len(refs),
+                    H: [1] * len(refs),
+                    FORECAST_ORIGIN: [origin] * len(refs),
+                    MODEL_NAME: [name] * len(refs),
+                }
+            )
         )
 
     monkeypatch.setattr(backend, "_process_global_panel", _fake_process_global_panel)
@@ -88,7 +92,7 @@ def test_multiple_global_configs_run_in_parallel(monkeypatch) -> None:
     result = engine._run_global_scope(
         [_ref(config_a, 1), _ref(config_a, 2), _ref(config_b, 3)],
         pd.Timestamp("2024-01-01"),
-    )
+    ).forecast
 
     # Both configs ran and their per-config frames were concatenated into one
     # combined ledger.
@@ -104,9 +108,11 @@ def test_multiple_global_configs_run_in_parallel(monkeypatch) -> None:
 
 
 def test_global_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
-    def _fake_process_global_panel(refs, model_config, origin):
-        del origin
-        return pd.DataFrame({"name": [str(model_config["name"])], "count": [len(refs)]})
+    def _fake_process_global_panel(refs, model_config, origin, collect_fitted_values):
+        del origin, collect_fitted_values
+        return PredictionResult(
+            forecast=pd.DataFrame({"name": [str(model_config["name"])], "count": [len(refs)]})
+        )
 
     monkeypatch.setattr(backend, "_process_global_panel", _fake_process_global_panel)
     engine = BackendEngine(
@@ -119,16 +125,16 @@ def test_global_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
     result = engine._run_global_scope(
         [_ref(config_a, 1), _ref(config_a, 2), _ref(config_b, 3)],
         pd.Timestamp("2024-01-01"),
-    )
+    ).forecast
 
     assert sorted(zip(result["name"], result["count"], strict=True)) == [("a", 2), ("b", 1)]
     assert engine._remote_process_global_panel.options_kwargs == {"num_cpus": 1.0}
 
 
 def test_local_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
-    def _fake_process_task_ref(ref, origin, local_scope):
-        del origin, local_scope
-        return pd.DataFrame({"name": [ref.unique_id]})
+    def _fake_process_task_ref(ref, origin, local_scope, collect_fitted_values):
+        del origin, local_scope, collect_fitted_values
+        return PredictionResult(forecast=pd.DataFrame({"name": [ref.unique_id]}))
 
     monkeypatch.setattr(backend, "_process_task_ref", _fake_process_task_ref)
     engine = BackendEngine(
@@ -140,7 +146,7 @@ def test_local_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
     result = engine._run_local_scope(
         [_ref(config, 1), _ref(config, 2)],
         pd.Timestamp("2024-01-01"),
-    )
+    ).forecast
 
     assert sorted(result["name"]) == ["sku_1", "sku_2"]
     assert engine._remote_process_task.options_kwargs == {"num_cpus": 2.0}

@@ -29,7 +29,8 @@ from calibre.ordering.policy_config import NewsvendorConfig
 
 
 class _StubAdapter(ModelAdapter):
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self._task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:

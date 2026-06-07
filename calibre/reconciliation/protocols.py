@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 import pandas as pd
+
+
+@dataclass(frozen=True)
+class ReconciliationContext:
+    """Sidecar data required by strategy-specific reconciliation methods."""
+
+    fitted_values: pd.DataFrame | None = None
 
 
 class Reconciler(Protocol):
@@ -14,9 +22,16 @@ class Reconciler(Protocol):
     a forecast frame (same node row-set, reconciled ``y_hat``) out. A ``None``
     hierarchy is a no-op pass-through.
 
-    Strategy-specific inputs (MinT's residual covariance, top-down's proportion
-    source) live on the concrete instance, built by the registry from config, so
-    the seam signature stays identical to §9 (KTD5).
+    Strategy-specific inputs such as MinT residual covariance are threaded
+    through ``ReconciliationContext`` so the forecast-frame ledger stays a future
+    forecast ledger.
     """
 
-    def __call__(self, frame: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame: ...
+    requires_fitted_values: bool
+
+    def __call__(
+        self,
+        frame: pd.DataFrame,
+        hierarchy: pd.DataFrame | None,
+        context: ReconciliationContext,
+    ) -> pd.DataFrame: ...

@@ -61,10 +61,11 @@ from calibre.execution.ledger import (
 )
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config
+from calibre.forecasting.adapter_base import PredictionResult
 from calibre.forecasting.adapter_registry import resolve_adapter
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
-from calibre.reconciliation.protocols import Reconciler
+from calibre.reconciliation.protocols import Reconciler, ReconciliationContext
 from calibre.reconciliation.summing import build_summing_matrix
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
@@ -80,15 +81,22 @@ def _finalize_preds(preds: pd.DataFrame, origin: pd.Timestamp, model_name: str) 
 
 
 def fit_predict_task(
-    task: ForecastTask, cache: ModelArtifactCache | None = None
-) -> tuple[pd.DataFrame, str | None]:
+    task: ForecastTask,
+    cache: ModelArtifactCache | None = None,
+    *,
+    collect_fitted_values: bool = False,
+) -> PredictionResult:
     adapter = resolve_adapter(task.model_config)
     model_name = task.model_name
     uid = task.unique_id
     origin = task.forecast_origin
 
     fit_started = time.perf_counter()
-    fit_ran, artifact_key = adapter.fit_with_cache(task, cache)
+    fit_ran, artifact_key = adapter.fit_with_cache(
+        task,
+        cache,
+        collect_fitted_values=collect_fitted_values,
+    )
     logger.info(
         "completed adapter fit" if fit_ran else "restored adapter from cache",
         extra={
@@ -113,7 +121,12 @@ def fit_predict_task(
             "duration_ms": round((time.perf_counter() - predict_started) * 1000.0, 3),
         },
     )
-    return preds, artifact_key
+    fitted_values = adapter.fitted_values(task) if collect_fitted_values else None
+    return PredictionResult(
+        forecast=preds,
+        fitted_values=fitted_values,
+        artifact_key=artifact_key,
+    )
 
 
 def _coerce_forecast_frame_dtypes(frame: pd.DataFrame) -> pd.DataFrame:
@@ -145,11 +158,16 @@ def _empty_forecast_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
 
+def _empty_prediction_result() -> PredictionResult:
+    return PredictionResult(forecast=_empty_forecast_frame())
+
+
 def _process_task_ref(
     ref: ForecastTaskRef,
     origin: pd.Timestamp,
     local_scope: bool,
-) -> pd.DataFrame:
+    collect_fitted_values: bool,
+) -> PredictionResult:
     """Materialize and execute one URI-backed task ref.
 
     This function is intentionally conformal- and order-blind so all mutable
@@ -167,7 +185,7 @@ def _process_task_ref(
 
     history = task.history[task.history[DS] < origin]
     if history.empty:
-        return _empty_forecast_frame()
+        return _empty_prediction_result()
 
     future_x = task.future_x
     if local_scope and future_x is not None and not future_x.empty:
@@ -181,15 +199,20 @@ def _process_task_ref(
         future_x=future_x,
         task_group=task.task_group,
     )
-    preds, _ = fit_predict_task(origin_task)
-    return _finalize_preds(preds, origin, origin_task.model_name)
+    result = fit_predict_task(origin_task, collect_fitted_values=collect_fitted_values)
+    return PredictionResult(
+        forecast=_finalize_preds(result.forecast, origin, origin_task.model_name),
+        fitted_values=result.fitted_values,
+        artifact_key=result.artifact_key,
+    )
 
 
 def _process_global_panel(
     refs: list[ForecastTaskRef],
     model_config: dict,
     origin: pd.Timestamp,
-) -> pd.DataFrame:
+    collect_fitted_values: bool,
+) -> PredictionResult:
     """Fit one global adapter for a config over the full multi-SKU panel."""
     histories: list[pd.DataFrame] = []
     future_frames: list[pd.DataFrame] = []
@@ -209,7 +232,7 @@ def _process_global_panel(
             task_group = task.task_group
 
     if not histories or horizon is None:
-        return _empty_forecast_frame()
+        return _empty_prediction_result()
 
     panel = pd.concat(histories, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
     future_x = (
@@ -225,8 +248,12 @@ def _process_global_panel(
         future_x=future_x,
         task_group=task_group,
     )
-    preds, _ = fit_predict_task(origin_task)
-    return _finalize_preds(preds, origin, origin_task.model_name)
+    result = fit_predict_task(origin_task, collect_fitted_values=collect_fitted_values)
+    return PredictionResult(
+        forecast=_finalize_preds(result.forecast, origin, origin_task.model_name),
+        fitted_values=result.fitted_values,
+        artifact_key=result.artifact_key,
+    )
 
 
 def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -234,6 +261,19 @@ def _concat_prediction_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     if not non_empty:
         return _empty_forecast_frame()
     return _coerce_forecast_frame_dtypes(pd.concat(non_empty, ignore_index=True))
+
+
+def _concat_prediction_results(results: list[PredictionResult]) -> PredictionResult:
+    if not results:
+        return _empty_prediction_result()
+    forecasts = _concat_prediction_frames([result.forecast for result in results])
+    fitted_parts = [
+        result.fitted_values
+        for result in results
+        if result.fitted_values is not None and not result.fitted_values.empty
+    ]
+    fitted = pd.concat(fitted_parts, ignore_index=True) if fitted_parts else None
+    return PredictionResult(forecast=forecasts, fitted_values=fitted)
 
 
 @dataclass
@@ -322,6 +362,11 @@ class BackendEngine:
         self.conformal = conformal
         self.reconciler = reconciliation.reconciler
         self.hierarchy = reconciliation.hierarchy
+        self._requires_fitted_values = bool(
+            reconciliation.reconciler is not None
+            and getattr(reconciliation.reconciler, "requires_fitted_values", False)
+            and reconciliation.hierarchy is not None
+        )
         self._order_bottom_ids = (
             frozenset(build_summing_matrix(self.hierarchy).bottom_ids)
             if self.hierarchy is not None
@@ -509,9 +554,13 @@ class BackendEngine:
         with self._phase("ResolveOpen", origin):
             self._resolve_open(ledger, actuals, origin, conformal_runtime)
         with self._phase("Predict", origin):
-            origin_preds = self._predict(parallel_refs, direct_refs, origin)
+            prediction = self._predict(parallel_refs, direct_refs, origin)
+            origin_preds = prediction.forecast
         with self._phase("Reconcile", origin):
-            origin_preds = self._reconcile(origin_preds)
+            origin_preds = self._reconcile(
+                origin_preds,
+                ReconciliationContext(fitted_values=prediction.fitted_values),
+            )
         with self._phase("Calibrate", origin):
             origin_preds = self._calibrate(origin_preds, conformal_runtime)
         with self._phase("Order", origin):
@@ -562,16 +611,20 @@ class BackendEngine:
         parallel_refs: list[ForecastTaskRef],
         direct_refs: list[ForecastTaskRef],
         origin: pd.Timestamp,
-    ) -> pd.DataFrame:
+    ) -> PredictionResult:
         """Predict phase — local + global scopes concatenated for this origin.
 
         Returns an empty forecast frame when there are no tasks.
         """
         local_preds = self._run_local_scope(parallel_refs, origin)
         global_preds = self._run_global_scope(direct_refs, origin)
-        return _concat_prediction_frames([local_preds, global_preds])
+        return _concat_prediction_results([local_preds, global_preds])
 
-    def _reconcile(self, origin_preds: pd.DataFrame) -> pd.DataFrame:
+    def _reconcile(
+        self,
+        origin_preds: pd.DataFrame,
+        context: ReconciliationContext | None = None,
+    ) -> pd.DataFrame:
         """Reconcile phase — make point forecasts coherent across the hierarchy.
 
         Runs BETWEEN Predict and Calibrate (R8): the reconciler rewrites point
@@ -583,7 +636,11 @@ class BackendEngine:
         """
         if self.reconciler is None or self.hierarchy is None or origin_preds.empty:
             return origin_preds
-        return self.reconciler(origin_preds, self.hierarchy)
+        return self.reconciler(
+            origin_preds,
+            self.hierarchy,
+            context or ReconciliationContext(),
+        )
 
     def _calibrate(
         self,
@@ -815,28 +872,44 @@ class BackendEngine:
         self,
         refs: list[ForecastTaskRef],
         origin: pd.Timestamp,
-    ) -> pd.DataFrame:
+    ) -> PredictionResult:
         if not refs:
-            return _empty_forecast_frame()
+            return _empty_prediction_result()
         if self._should_use_ray(len(refs)):
             return self._run_refs_on_ray(refs, origin, local_scope=True)
-        return _concat_prediction_frames(
-            [_process_task_ref(ref, origin, local_scope=True) for ref in refs]
+        return _concat_prediction_results(
+            [
+                _process_task_ref(
+                    ref,
+                    origin,
+                    local_scope=True,
+                    collect_fitted_values=self._requires_fitted_values,
+                )
+                for ref in refs
+            ]
         )
 
     def _run_global_scope(
         self,
         refs: list[ForecastTaskRef],
         origin: pd.Timestamp,
-    ) -> pd.DataFrame:
+    ) -> PredictionResult:
         """Run one global multi-series adapter per distinct model config."""
         if not refs:
-            return _empty_forecast_frame()
+            return _empty_prediction_result()
         groups = _group_global_refs_by_config(refs)
         if self._should_use_ray(len(groups)):
             return self._run_global_groups_on_ray(groups, origin)
-        return _concat_prediction_frames(
-            [_process_global_panel(group_refs, config, origin) for config, group_refs in groups]
+        return _concat_prediction_results(
+            [
+                _process_global_panel(
+                    group_refs,
+                    config,
+                    origin,
+                    collect_fitted_values=self._requires_fitted_values,
+                )
+                for config, group_refs in groups
+            ]
         )
 
     def _should_use_ray(self, task_count: int) -> bool:
@@ -861,7 +934,7 @@ class BackendEngine:
         self,
         groups: list[tuple[dict, list[ForecastTaskRef]]],
         origin: pd.Timestamp,
-    ) -> pd.DataFrame:
+    ) -> PredictionResult:
         self._ensure_ray()
         import ray
 
@@ -872,16 +945,22 @@ class BackendEngine:
             self._remote_process_global_panel = remote_fn
         remote_process = self._remote_process_global_panel
         concurrency = self.execution.max_concurrency or len(groups)
-        frames: list[pd.DataFrame] = []
+        results: list[PredictionResult] = []
 
         for start in range(0, len(groups), concurrency):
             chunk = groups[start : start + concurrency]
             object_refs = [
-                remote_process.remote(group_refs, config, origin) for config, group_refs in chunk
+                remote_process.remote(
+                    group_refs,
+                    config,
+                    origin,
+                    self._requires_fitted_values,
+                )
+                for config, group_refs in chunk
             ]
-            frames.extend(ray.get(object_refs))
+            results.extend(ray.get(object_refs))
 
-        return _concat_prediction_frames(frames)
+        return _concat_prediction_results(results)
 
     def _run_refs_on_ray(
         self,
@@ -889,7 +968,7 @@ class BackendEngine:
         origin: pd.Timestamp,
         *,
         local_scope: bool,
-    ) -> pd.DataFrame:
+    ) -> PredictionResult:
         self._ensure_ray()
         import ray
 
@@ -900,14 +979,22 @@ class BackendEngine:
             self._remote_process_task = remote_fn
         remote_process = self._remote_process_task
         concurrency = self.execution.max_concurrency or len(refs)
-        frames: list[pd.DataFrame] = []
+        results: list[PredictionResult] = []
 
         for start in range(0, len(refs), concurrency):
             chunk = refs[start : start + concurrency]
-            object_refs = [remote_process.remote(ref, origin, local_scope) for ref in chunk]
-            frames.extend(ray.get(object_refs))
+            object_refs = [
+                remote_process.remote(
+                    ref,
+                    origin,
+                    local_scope,
+                    self._requires_fitted_values,
+                )
+                for ref in chunk
+            ]
+            results.extend(ray.get(object_refs))
 
-        return _concat_prediction_frames(frames)
+        return _concat_prediction_results(results)
 
 
 def _with_group_tag(task: ForecastTask) -> ForecastTask:

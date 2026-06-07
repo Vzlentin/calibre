@@ -10,17 +10,40 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast, get_args
 
 import numpy as np
+import pandas as pd
 
+from calibre.core.forecast_frame import (
+    DS,
+    FITTED_Y_HAT,
+    MODEL_NAME,
+    UNIQUE_ID,
+    Y_HAT,
+    H,
+    Y,
+    validate_fitted_values_frame,
+)
 from calibre.reconciliation.apply import VectorReconciler
+from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import SummingMatrix
 
-NixtlaStrategy = Literal["bottom_up", "ols", "wls_struct"]
+NixtlaStrategy = Literal[
+    "bottom_up",
+    "ols",
+    "wls_struct",
+    "mint_shrink",
+    "wls_var",
+    "mint_cov",
+    "erm",
+]
 
 NIXTLA_STRATEGIES = cast(tuple[NixtlaStrategy, ...], get_args(NixtlaStrategy))
 _SUPPORTED_STRATEGIES = frozenset(NIXTLA_STRATEGIES)
+_RESIDUAL_STRATEGIES = frozenset({"mint_shrink", "wls_var", "mint_cov", "erm"})
 _COHERENCE_RTOL = 1e-6
 _COHERENCE_ATOL = 1e-6
 _DEFAULT_MAX_CACHE_SIZE = 128
+_GROUP_KEYS = [MODEL_NAME, "forecast_origin", H]
+_ORDER_COL = "__calibre_reconcile_order__"
 
 
 class _NixtlaMethod(Protocol):
@@ -30,6 +53,8 @@ class _NixtlaMethod(Protocol):
         S: np.ndarray,
         y_hat: np.ndarray,
         tags: dict[str, np.ndarray],
+        y_insample: np.ndarray | None = None,
+        y_hat_insample: np.ndarray | None = None,
     ) -> _NixtlaMethod: ...
 
     def predict(self, *, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]: ...
@@ -46,7 +71,7 @@ class _NixtlaLayout:
 _CacheKey = tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...], bytes]
 
 
-def _load_method_classes() -> tuple[type[Any], type[Any]]:
+def _load_method_classes() -> tuple[type[Any], type[Any], type[Any]]:
     try:
         methods = importlib.import_module("hierarchicalforecast.methods")
     except ImportError as exc:  # pragma: no cover - covered with import monkeypatch
@@ -54,14 +79,16 @@ def _load_method_classes() -> tuple[type[Any], type[Any]]:
             "hierarchicalforecast is not installed. Install calibre with the "
             "'hierarchy' extra: pip install calibre[hierarchy]"
         ) from exc
-    return methods.BottomUp, methods.MinTrace
+    return methods.BottomUp, methods.MinTrace, methods.ERM
 
 
 def _default_method_factory(strategy: NixtlaStrategy) -> Callable[[], _NixtlaMethod]:
     def _make_method() -> _NixtlaMethod:
-        bottom_up_cls, min_trace_cls = _load_method_classes()
+        bottom_up_cls, min_trace_cls, erm_cls = _load_method_classes()
         if strategy == "bottom_up":
             return cast(_NixtlaMethod, bottom_up_cls())
+        if strategy == "erm":
+            return cast(_NixtlaMethod, erm_cls(method="closed"))
         return cast(_NixtlaMethod, min_trace_cls(method=strategy, num_threads=1))
 
     return _make_method
@@ -115,9 +142,35 @@ class NixtlaReconciler(VectorReconciler):
         if max_cache_size < 1:
             raise ValueError("max_cache_size must be at least 1")
         self.strategy = strategy
+        self.requires_fitted_values = strategy in _RESIDUAL_STRATEGIES
         self._method_factory = method_factory or _default_method_factory(strategy)
         self._max_cache_size = max_cache_size
         self._cache: OrderedDict[_CacheKey, _NixtlaMethod] = OrderedDict()
+
+    def __call__(
+        self,
+        frame: pd.DataFrame,
+        hierarchy: pd.DataFrame | None,
+        context: ReconciliationContext,
+    ) -> pd.DataFrame:
+        if not self.requires_fitted_values:
+            return super().__call__(frame, hierarchy, context)
+        if hierarchy is None or frame.empty:
+            return frame
+        fitted = _validated_fitted_context(context)
+        from calibre.reconciliation.summing import build_summing_matrix
+
+        summing = build_summing_matrix(hierarchy)
+        order_col = _ORDER_COL
+        while order_col in frame.columns:
+            order_col = f"_{order_col}"
+        ordered = frame.copy()
+        ordered[order_col] = np.arange(len(ordered), dtype=np.int64)
+        parts = [
+            self._reconcile_residual_group(group, summing, fitted)
+            for _, group in ordered.groupby(_GROUP_KEYS, sort=False)
+        ]
+        return pd.concat(parts).sort_values(order_col, kind="stable").drop(columns=order_col)
 
     def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:
         layout = _to_nixtla_layout(base, summing)
@@ -138,3 +191,131 @@ class NixtlaReconciler(VectorReconciler):
         if not np.allclose(reconciled, coherent, rtol=_COHERENCE_RTOL, atol=_COHERENCE_ATOL):
             raise ValueError("Nixtla reconciliation produced an incoherent forecast vector")
         return reconciled
+
+    def _reconcile_residual_group(
+        self,
+        group: pd.DataFrame,
+        summing: SummingMatrix,
+        fitted_values: pd.DataFrame,
+    ) -> pd.DataFrame:
+        subset, base = self._base_vector(group, summing)
+        model_name = str(group[MODEL_NAME].iloc[0])
+        y_insample, y_hat_insample = _insample_arrays(fitted_values, subset, model_name)
+        layout = _to_nixtla_layout(base, subset)
+        residual_layout = _to_nixtla_insample_layout(
+            y_insample=y_insample,
+            y_hat_insample=y_hat_insample,
+            inverse_permutation=layout.inverse_permutation,
+        )
+        reconciler = self._method_factory()
+        reconciler.fit(
+            S=layout.S,
+            y_hat=layout.y_hat,
+            y_insample=residual_layout.y_insample,
+            y_hat_insample=residual_layout.y_hat_insample,
+            tags=layout.tags,
+        )
+        predicted = reconciler.predict(S=layout.S, y_hat=layout.y_hat)["mean"]
+        reconciled = _from_nixtla_layout(predicted, layout)
+        coherent = subset.S @ reconciled[: subset.n_bottom]
+        if not np.allclose(reconciled, coherent, rtol=_COHERENCE_RTOL, atol=_COHERENCE_ATOL):
+            raise ValueError("Nixtla reconciliation produced an incoherent forecast vector")
+        reconciled_by_node = dict(zip(subset.node_labels, reconciled, strict=True))
+        result = group.copy()
+        result[Y_HAT] = result[UNIQUE_ID].astype(str).map(reconciled_by_node).astype(np.float64)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class _InsampleLayout:
+    y_insample: np.ndarray
+    y_hat_insample: np.ndarray
+
+
+def _validated_fitted_context(context: ReconciliationContext) -> pd.DataFrame:
+    fitted = context.fitted_values
+    if fitted is None or fitted.empty:
+        raise ValueError(
+            "Residual reconciliation strategy requires in-sample fitted values; "
+            "no fitted-value sidecar was provided"
+        )
+    validate_fitted_values_frame(fitted)
+    return fitted
+
+
+def _insample_arrays(
+    fitted_values: pd.DataFrame,
+    summing: SummingMatrix,
+    model_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    subset = fitted_values[fitted_values[MODEL_NAME].astype(str) == model_name].copy()
+    if subset.empty:
+        raise ValueError(f"Missing fitted values for model_name={model_name!r}")
+    node_ids = set(summing.node_labels)
+    unknown = set(subset[UNIQUE_ID].astype(str)) - node_ids
+    if unknown:
+        subset = subset[~subset[UNIQUE_ID].astype(str).isin(unknown)].copy()
+    keys = [UNIQUE_ID, DS, MODEL_NAME]
+    duplicates = subset[subset.duplicated(keys, keep=False)]
+    if not duplicates.empty:
+        duplicate_keys = duplicates[keys].drop_duplicates().sort_values(keys, kind="stable")
+        values = [tuple(row) for row in duplicate_keys.itertuples(index=False, name=None)]
+        raise ValueError(f"Duplicate fitted-value rows for keys: {values}")
+
+    ds_by_node = {
+        label: set(subset.loc[subset[UNIQUE_ID].astype(str) == label, DS])
+        for label in summing.node_labels
+    }
+    missing_nodes = sorted(label for label, ds_values in ds_by_node.items() if not ds_values)
+    if missing_nodes:
+        raise ValueError(
+            "Missing fitted values for hierarchy node(s): "
+            f"{missing_nodes} and model_name={model_name!r}"
+        )
+    common_ds = set.intersection(*ds_by_node.values())
+    if not common_ds:
+        raise ValueError(
+            "Fitted-value timestamps do not overlap across hierarchy nodes "
+            f"for model_name={model_name!r}"
+        )
+    mismatched = {
+        label: sorted(str(value) for value in ds_values.symmetric_difference(common_ds))
+        for label, ds_values in ds_by_node.items()
+        if ds_values != common_ds
+    }
+    if mismatched:
+        raise ValueError(
+            "Fitted-value timestamps are misaligned across hierarchy nodes "
+            f"for model_name={model_name!r}: {mismatched}"
+        )
+
+    ordered_ds = sorted(common_ds)
+    rows = subset[subset[DS].isin(ordered_ds)].copy()
+    y_wide = rows.pivot(index=DS, columns=UNIQUE_ID, values=Y).reindex(
+        index=ordered_ds,
+        columns=summing.node_labels,
+    )
+    fitted_wide = rows.pivot(index=DS, columns=UNIQUE_ID, values=FITTED_Y_HAT).reindex(
+        index=ordered_ds,
+        columns=summing.node_labels,
+    )
+    if y_wide.isna().any().any() or fitted_wide.isna().any().any():
+        raise ValueError(
+            "Fitted-value sidecar cannot be widened without missing "
+            f"(unique_id, ds, model_name) keys for model_name={model_name!r}"
+        )
+    return y_wide.to_numpy(dtype=np.float64).T, fitted_wide.to_numpy(dtype=np.float64).T
+
+
+def _to_nixtla_insample_layout(
+    *,
+    y_insample: np.ndarray,
+    y_hat_insample: np.ndarray,
+    inverse_permutation: np.ndarray,
+) -> _InsampleLayout:
+    permutation = np.empty_like(inverse_permutation)
+    permutation[inverse_permutation] = np.arange(inverse_permutation.size, dtype=np.int64)
+    return _InsampleLayout(
+        y_insample=np.asarray(y_insample[permutation], dtype=np.float64),
+        y_hat_insample=np.asarray(y_hat_insample[permutation], dtype=np.float64),
+    )

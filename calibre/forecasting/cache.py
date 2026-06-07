@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from calibre.execution.io import ensure_parent_dir, exists, join_uri, open_fs
-
 
 class ModelArtifactCache:
     """fsspec-backed blob store keyed by ``ModelAdapter.cache_key(task)``.
@@ -20,6 +18,8 @@ class ModelArtifactCache:
             raise ValueError("ModelArtifactCache uri must not be empty")
 
     def get(self, key: str) -> bytes | None:
+        from calibre.execution.io import exists, open_fs
+
         uri = self.uri_for_key(key)
         if not exists(uri):
             return None
@@ -28,6 +28,8 @@ class ModelArtifactCache:
             return handle.read()
 
     def put(self, key: str, blob: bytes) -> None:
+        from calibre.execution.io import ensure_parent_dir, open_fs
+
         uri = self.uri_for_key(key)
         ensure_parent_dir(uri)
         fs, path = open_fs(uri)
@@ -35,6 +37,8 @@ class ModelArtifactCache:
             handle.write(blob)
 
     def uri_for_key(self, key: str) -> str:
+        from calibre.execution.io import join_uri
+
         self._validate_key(key)
         return join_uri(self._root, f"{key}.bin")
 

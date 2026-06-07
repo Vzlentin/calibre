@@ -45,7 +45,10 @@ def test_strategy_none_round_trips_to_noop() -> None:
     assert isinstance(config.reconciliation.to_reconciler(), NoOpReconciler)
 
 
-@pytest.mark.parametrize("strategy", ["bottom_up", "ols", "wls_struct"])
+@pytest.mark.parametrize(
+    "strategy",
+    ["bottom_up", "ols", "wls_struct", "mint_shrink", "wls_var", "mint_cov", "erm"],
+)
 def test_nixtla_strategy_resolves(strategy: str) -> None:
     config = load_config_from_mapping(_config(reconciliation={"strategy": strategy}))
     reconciler = config.reconciliation.to_reconciler()
@@ -53,7 +56,7 @@ def test_nixtla_strategy_resolves(strategy: str) -> None:
     assert reconciler.strategy == strategy
 
 
-@pytest.mark.parametrize("strategy", ["mint", "mint_shrink", "top_down", "bogus"])
+@pytest.mark.parametrize("strategy", ["mint", "top_down", "bogus"])
 def test_unknown_strategy_value_raises_listing_valid_choices(strategy: str) -> None:
     with pytest.raises(ValidationError, match="strategy"):
         load_config_from_mapping(_config(reconciliation={"strategy": strategy}))

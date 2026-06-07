@@ -23,7 +23,8 @@ from calibre.forecasting.adapter_base import ModelAdapter
 
 
 class _ObservabilityAdapter(ModelAdapter):
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self.task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:

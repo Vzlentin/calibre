@@ -28,7 +28,8 @@ class _StubAdapter(ModelAdapter):
         self.model_config = model_config or {}
         self._level = 10.0
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         type(self).fit_calls += 1
         self._task = task
         self._level = float(len(task.history))

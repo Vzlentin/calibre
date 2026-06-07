@@ -395,11 +395,13 @@ def predict(req: PredictRequest) -> PredictResponse:
         future_x=future_x,
     )
     try:
-        preds, _ = fit_predict_task(task, cache=_model_artifact_cache())
+        prediction = fit_predict_task(task, cache=_model_artifact_cache())
     except Exception as exc:
         logger.exception("predict failed", extra={"fit_id": req.fit_id})
         raise HTTPException(status_code=500, detail=format_error(exc)) from exc
-    forecast_frame = _coerce_forecast_frame_dtypes(_finalize_preds(preds, origin, task.model_name))
+    forecast_frame = _coerce_forecast_frame_dtypes(
+        _finalize_preds(prediction.forecast, origin, task.model_name)
+    )
     _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
     return PredictResponse(rows=len(forecast_frame), forecast=json_safe_records(forecast_frame))
 

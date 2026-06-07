@@ -26,6 +26,7 @@ from calibre.core.forecast_frame import (
     Y_HAT,
     H,
 )
+from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
 
 _GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
@@ -40,7 +41,15 @@ class VectorReconciler:
     of the same length.
     """
 
-    def __call__(self, frame: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame:
+    requires_fitted_values = False
+
+    def __call__(
+        self,
+        frame: pd.DataFrame,
+        hierarchy: pd.DataFrame | None,
+        context: ReconciliationContext,
+    ) -> pd.DataFrame:
+        del context
         if hierarchy is None or frame.empty:
             return frame
         summing = build_summing_matrix(hierarchy)
@@ -63,8 +72,10 @@ class VectorReconciler:
         """
         raise NotImplementedError
 
-    def _coherent_vector(
-        self, group: pd.DataFrame, summing: SummingMatrix
+    def _base_vector(
+        self,
+        group: pd.DataFrame,
+        summing: SummingMatrix,
     ) -> tuple[SummingMatrix, np.ndarray]:
         uid_str = group[UNIQUE_ID].astype(str)
         duplicates = uid_str[uid_str.duplicated()].unique()
@@ -110,6 +121,12 @@ class VectorReconciler:
 
         yhat_by_id = dict(zip(uid_str, group[Y_HAT].astype(np.float64), strict=True))
         base = np.array([yhat_by_id[label] for label in subset.node_labels], dtype=np.float64)
+        return subset, base
+
+    def _coherent_vector(
+        self, group: pd.DataFrame, summing: SummingMatrix
+    ) -> tuple[SummingMatrix, np.ndarray]:
+        subset, base = self._base_vector(group, summing)
         return subset, self.reconcile_vector(base, subset)
 
     def _reconcile_group(self, group: pd.DataFrame, summing: SummingMatrix) -> pd.DataFrame:
