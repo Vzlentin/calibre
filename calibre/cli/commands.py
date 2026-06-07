@@ -26,7 +26,7 @@ from calibre.execution.backend import (
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.io import is_local_fs, open_fs
-from calibre.execution.task_builder import build_tasks
+from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import (
     NewsvendorConfig,
@@ -110,6 +110,14 @@ def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
     raise ValueError(f"unknown order policy: {ordering.policy!r}")
 
 
+def _hierarchy_for_reconciliation(
+    config: BackendConfig, bundle: DatasetBundle
+) -> pd.DataFrame | None:
+    if config.reconciliation is None or config.reconciliation.strategy == "none":
+        return None
+    return bundle.hierarchy
+
+
 def _metric_currency(config: BackendConfig) -> str:
     currency = config.dataset.options.get("currency")
     return str(currency) if currency is not None else "EUR"
@@ -153,7 +161,9 @@ def run_config(
     _enforce_unique_id_limit(bundle, max_unique_ids)
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
-    tasks = build_tasks(bundle.history, model_configs, horizon)
+    reconciliation_hierarchy = _hierarchy_for_reconciliation(config, bundle)
+    actuals = build_node_history(bundle.history, reconciliation_hierarchy)
+    tasks = build_tasks(actuals, model_configs, horizon)
     origins = config.origins.to_list()
     if not origins:
         raise ValueError("origins resolved to an empty list")
@@ -180,12 +190,12 @@ def run_config(
         ),
         reconciliation=ReconciliationOptions(
             reconciler=reconciliation_config.to_reconciler(),
-            hierarchy=bundle.hierarchy,
+            hierarchy=reconciliation_hierarchy,
         ),
         order=_build_order_config(config),
     )
     try:
-        result = engine.execute(tasks, bundle.history, origins)
+        result = engine.execute(tasks, actuals, origins)
     finally:
         engine.close()
 

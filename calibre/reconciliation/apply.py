@@ -3,18 +3,15 @@
 :class:`VectorReconciler` implements the frame-to-frame mechanics the
 ``Reconciler`` Protocol requires once, so each concrete strategy only supplies a
 pure ``reconcile_vector`` hook. The harness groups a forecast frame into
-``(model_name, forecast_origin, h)`` cross-sections (KTD2), aligns each present
-bottom vector to a subset summing matrix, lifts it to a coherent node-level base
-vector, delegates to the strategy, and writes the reconciled bottom forecasts
-back **in place** — preserving the frame's node row-set, order, and dtypes (KTD1).
+``(model_name, forecast_origin, h)`` cross-sections (KTD2), aligns each supplied
+node vector to a subset summing matrix, delegates to the strategy, and writes
+the reconciled node forecasts back **in place** — preserving the frame's node
+row-set, order, and dtypes (KTD1).
 
-The base vector handed to ``reconcile_vector`` spans **all** nodes (bottom +
-aggregates), aligned to ``summing.node_labels``. On a bottom-only frame the
-aggregate entries are the exact sums of their members, so the base vector is
-already coherent and every strategy is an exact no-op on the bottom block —
-strategy *divergence* requires independent aggregate base forecasts (a documented
-follow-up). Only the reconciled **bottom** forecasts are written back into the
-frame; the coherent aggregate levels are computed but never injected (KTD1).
+The base vector handed to ``reconcile_vector`` spans **all supplied required
+nodes** (bottom + aggregates), aligned to the applicable
+``summing.node_labels`` subset. Aggregate entries come from forecast-frame rows,
+not from ``S @ bottom``; missing required nodes fail loudly.
 """
 
 from __future__ import annotations
@@ -50,7 +47,7 @@ class VectorReconciler:
             self._reconcile_group(group, summing)
             for _, group in frame.groupby(_GROUP_KEYS, sort=False)
         ]
-        return pd.concat(parts).sort_index()
+        return pd.concat(parts).loc[frame.index]
 
     def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:
         """Map a node-level base vector to a coherent node-level vector.
@@ -64,15 +61,54 @@ class VectorReconciler:
         self, group: pd.DataFrame, summing: SummingMatrix
     ) -> tuple[SummingMatrix, np.ndarray]:
         uid_str = group[UNIQUE_ID].astype(str)
-        subset = summing.subset(uid_str.tolist())
+        duplicates = uid_str[uid_str.duplicated()].unique()
+        if len(duplicates) > 0:
+            raise ValueError(
+                "forecast cross-section contains duplicate hierarchy node rows: "
+                f"{sorted(duplicates)}"
+            )
+
+        supplied = set(uid_str)
+        known = set(summing.node_labels)
+        unknown = supplied - known
+        if unknown:
+            raise ValueError(
+                "forecast contains hierarchy node(s) not present in the summing matrix: "
+                f"{sorted(unknown)}"
+            )
+
+        bottom_ids = set(summing.bottom_ids)
+        supplied_bottom = [uid for uid in uid_str if uid in bottom_ids]
+        if not supplied_bottom:
+            raise ValueError("forecast cross-section contains no bottom-level hierarchy rows")
+
+        subset = summing.subset(supplied_bottom)
+        required = set(subset.node_labels)
+        missing = required - supplied
+        if missing:
+            context = {
+                key: group[key].iloc[0]
+                for key in _GROUP_KEYS
+                if key in group.columns and not group.empty
+            }
+            raise ValueError(
+                "forecast cross-section missing required hierarchy node forecast(s): "
+                f"{sorted(missing)} for {context}"
+            )
+        extra = supplied - required
+        if extra:
+            raise ValueError(
+                "forecast contains aggregate node row(s) outside the present bottom subset: "
+                f"{sorted(extra)}"
+            )
+
         yhat_by_id = dict(zip(uid_str, group[Y_HAT].astype(np.float64), strict=True))
-        bottom = np.array([yhat_by_id[uid] for uid in subset.bottom_ids], dtype=np.float64)
-        base = subset.S @ bottom
+        base = np.array([yhat_by_id[label] for label in subset.node_labels], dtype=np.float64)
         return subset, self.reconcile_vector(base, subset)
 
     def _reconcile_group(self, group: pd.DataFrame, summing: SummingMatrix) -> pd.DataFrame:
         subset, coherent = self._coherent_vector(group, summing)
-        reconciled_bottom = dict(zip(subset.bottom_ids, coherent[: subset.n_bottom], strict=True))
+        reconciled_by_node = dict(zip(subset.node_labels, coherent, strict=True))
         result = group.copy()
-        result[Y_HAT] = result[UNIQUE_ID].astype(str).map(reconciled_bottom).astype(np.float64)
+        result[Y_HAT] = result[UNIQUE_ID].astype(str).map(reconciled_by_node).astype(np.float64)
         return result

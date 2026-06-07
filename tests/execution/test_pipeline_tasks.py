@@ -12,7 +12,8 @@ import pandas as pd
 import pytest
 
 from calibre.core.forecast_task import ForecastTask, TaskGroups
-from calibre.execution.task_builder import build_tasks, partition_tasks
+from calibre.execution.task_builder import build_node_history, build_tasks, partition_tasks
+from calibre.reconciliation.summing import TOTAL_LABEL, build_summing_matrix
 
 
 @pytest.fixture
@@ -51,6 +52,66 @@ def statsforecast_global_config():
             "scope": "global",
         },
     ]
+
+
+@pytest.fixture
+def sample_hierarchy():
+    return pd.DataFrame(
+        {
+            "unique_id": ["series_a", "series_b", "series_c"],
+            "dept_id": ["D1", "D1", "D2"],
+            "store_id": ["S1", "S2", "S1"],
+        }
+    )
+
+
+class TestBuildNodeHistory:
+    def test_hierarchy_none_leaves_history_unchanged(self, sample_sales):
+        out = build_node_history(sample_sales, None)
+        pd.testing.assert_frame_equal(out, sample_sales)
+
+    def test_builds_aggregate_rows_aligned_to_summing_labels(self, sample_sales, sample_hierarchy):
+        out = build_node_history(sample_sales, sample_hierarchy)
+        summing = build_summing_matrix(sample_hierarchy)
+
+        assert out["unique_id"].unique().tolist() == list(summing.node_labels)
+        assert "dept_id=D1" in out["unique_id"].unique()
+        assert "store_id=S1" in out["unique_id"].unique()
+        assert TOTAL_LABEL in out["unique_id"].unique()
+
+        first_day = pd.Timestamp("2024-01-01")
+        d1 = out[(out["unique_id"] == "dept_id=D1") & (out["ds"] == first_day)]["y"].iloc[0]
+        total = out[(out["unique_id"] == TOTAL_LABEL) & (out["ds"] == first_day)]["y"].iloc[0]
+        assert d1 == pytest.approx(20.0)
+        assert total == pytest.approx(30.0)
+
+    def test_partial_history_dates_sum_available_members(self, sample_sales, sample_hierarchy):
+        partial = sample_sales[
+            ~(
+                (sample_sales["unique_id"] == "series_b")
+                & (sample_sales["ds"] == pd.Timestamp("2024-01-01"))
+            )
+        ]
+        out = build_node_history(partial, sample_hierarchy)
+
+        d1 = out[(out["unique_id"] == "dept_id=D1") & (out["ds"] == pd.Timestamp("2024-01-01"))][
+            "y"
+        ].iloc[0]
+        assert d1 == pytest.approx(10.0)
+
+    def test_unknown_bottom_id_raises_clear_error(self, sample_sales, sample_hierarchy):
+        bad = pd.concat(
+            [
+                sample_sales,
+                pd.DataFrame(
+                    [{"unique_id": "series_z", "ds": pd.Timestamp("2024-01-01"), "y": 1.0}]
+                ),
+            ],
+            ignore_index=True,
+        )
+
+        with pytest.raises(ValueError, match="not present in hierarchy"):
+            build_node_history(bad, sample_hierarchy)
 
 
 class TestBuildTasksLocal:
@@ -105,6 +166,16 @@ class TestBuildTasksLocal:
         assert groups.global_ == []
         assert len(groups) == 0
 
+    def test_hierarchy_creates_one_local_task_per_node(self, sample_sales, sample_hierarchy):
+        groups = build_tasks(
+            sample_sales,
+            [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2}],
+            horizon=2,
+            hierarchy=sample_hierarchy,
+        )
+        summing = build_summing_matrix(sample_hierarchy)
+        assert [task.unique_id for task in groups.local] == list(summing.node_labels)
+
 
 class TestBuildTasksGlobal:
     def test_global_yields_one_task_covering_all_series(self, sample_sales, global_configs):
@@ -141,6 +212,21 @@ class TestBuildTasksGlobal:
             "series_c",
         }
 
+    def test_hierarchy_global_scope_deduplicates_node_panel(
+        self, sample_sales, sample_hierarchy, statsforecast_global_config
+    ):
+        groups = build_tasks(
+            sample_sales,
+            statsforecast_global_config,
+            horizon=4,
+            hierarchy=sample_hierarchy,
+        )
+        assert groups.local == []
+        assert len(groups.global_) == 1
+        assert set(groups.global_[0].history["unique_id"].unique()) == set(
+            build_summing_matrix(sample_hierarchy).node_labels
+        )
+
 
 class TestBuildTasksOverrides:
     def test_override_swaps_model_list_for_one_series(self, sample_sales, local_configs):
@@ -175,6 +261,20 @@ class TestBuildTasksOverrides:
         overrides = {"series_z": [{"backend": "statsforecast", "model": "SeasonalNaive"}]}
         with pytest.raises(ValueError, match="overrides contains unknown unique_id"):
             build_tasks(sample_sales, local_configs, horizon=5, overrides=overrides)
+
+    def test_hierarchy_override_accepts_known_aggregate_label(self, sample_sales, sample_hierarchy):
+        override_cfg = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2}]
+        groups = build_tasks(
+            sample_sales,
+            [{"backend": "statsforecast", "model": "Naive"}],
+            horizon=2,
+            overrides={"dept_id=D1": override_cfg},
+            hierarchy=sample_hierarchy,
+        )
+
+        aggregate_tasks = [task for task in groups.local if task.unique_id == "dept_id=D1"]
+        assert len(aggregate_tasks) == 1
+        assert aggregate_tasks[0].model_config == override_cfg[0]
 
     def test_global_override_deduplicates(self, sample_sales):
         global_cfg = [

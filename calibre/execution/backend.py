@@ -65,6 +65,7 @@ from calibre.forecasting.adapter_registry import resolve_adapter
 from calibre.forecasting.cache import ModelArtifactCache
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
 from calibre.reconciliation.protocols import Reconciler
+from calibre.reconciliation.summing import build_summing_matrix
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
 logger = logging.getLogger(__name__)
@@ -605,8 +606,17 @@ class BackendEngine:
         if self.order_config is None or origin_preds.empty:
             return
         assert order_ledger is not None  # guaranteed when order_config is set
-        order_result = apply_order_policy(origin_preds, self.order_config)
+        order_frame = self._order_frame(origin_preds)
+        if order_frame.empty:
+            return
+        order_result = apply_order_policy(order_frame, self.order_config)
         order_ledger.append(order_result)
+
+    def _order_frame(self, origin_preds: pd.DataFrame) -> pd.DataFrame:
+        if self.hierarchy is None:
+            return origin_preds
+        bottom_ids = set(build_summing_matrix(self.hierarchy).bottom_ids)
+        return origin_preds[origin_preds[UNIQUE_ID].astype(str).isin(bottom_ids)].copy()
 
     def _commit(
         self,

@@ -10,6 +10,7 @@ import pandas as pd
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.forecasting.adapter_registry import get_adapter_cls, get_scope
+from calibre.reconciliation.summing import build_summing_matrix
 
 
 def partition_tasks(tasks: list[ForecastTask]) -> TaskGroups:
@@ -46,12 +47,67 @@ def _global_dedup_key(task: ForecastTask) -> tuple[tuple[str, ...], str, int]:
     return uids, config, task.horizon
 
 
+def build_node_history(sales: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame:
+    """Expand bottom-level history to the hierarchy's full node set.
+
+    ``hierarchy=None`` preserves the flat-panel input contract. With a hierarchy,
+    aggregate rows are real time series whose labels and ordering come directly
+    from :func:`build_summing_matrix`.
+    """
+    if hierarchy is None:
+        return sales.copy()
+
+    data = sales[[UNIQUE_ID, DS, Y]].copy()
+    data[UNIQUE_ID] = data[UNIQUE_ID].astype(str)
+    data[DS] = pd.to_datetime(data[DS]).astype("datetime64[ns]")
+    data[Y] = data[Y].astype("float64")
+
+    summing = build_summing_matrix(hierarchy)
+    unknown = set(data[UNIQUE_ID].unique()) - set(summing.bottom_ids)
+    if unknown:
+        raise ValueError(
+            f"history contains unique_id values not present in hierarchy: {sorted(unknown)}"
+        )
+
+    bottom = data.sort_values([UNIQUE_ID, DS], kind="stable").reset_index(drop=True)
+    aggregate_rows: list[pd.DataFrame] = []
+    for row_index, node_label in enumerate(
+        summing.node_labels[summing.n_bottom :], start=summing.n_bottom
+    ):
+        member_ids = [
+            bottom_id
+            for bottom_id, member in zip(summing.bottom_ids, summing.S[row_index], strict=True)
+            if member > 0
+        ]
+        node = (
+            data[data[UNIQUE_ID].isin(member_ids)]
+            .groupby(DS, sort=True)[Y]
+            .sum(min_count=1)
+            .reset_index(name=Y)
+        )
+        node[UNIQUE_ID] = node_label
+        aggregate_rows.append(node[[UNIQUE_ID, DS, Y]])
+
+    if not aggregate_rows:
+        return bottom
+
+    nodes = pd.concat([bottom, *aggregate_rows], ignore_index=True)
+    node_order = {label: i for i, label in enumerate(summing.node_labels)}
+    nodes["_node_order"] = nodes[UNIQUE_ID].map(node_order).astype("int64")
+    return (
+        nodes.sort_values(["_node_order", DS], kind="stable")
+        .drop(columns="_node_order")
+        .reset_index(drop=True)
+    )
+
+
 def build_tasks(
     sales: pd.DataFrame,
     model_configs: list[dict],
     horizon: int,
     series_filter: list[str] | None = None,
     overrides: Mapping[str, list[dict]] | None = None,
+    hierarchy: pd.DataFrame | None = None,
 ) -> TaskGroups:
     """Create ForecastTask objects from sales data and model configs.
 
@@ -69,18 +125,32 @@ def build_tasks(
             model configs. When present for a series, that list replaces
             ``model_configs`` for that series only. Unknown ``unique_id`` keys
             raise ``ValueError``.
+        hierarchy: Optional bottom-level hierarchy attributes. When present,
+            bottom history is expanded to node-level history before task
+            construction so aggregate nodes are forecast independently.
 
     Returns:
         A :class:`TaskGroups` partition. The engine consumes this directly and
         never re-interprets ``get_scope``. The engine handles origin-based
         history truncation, so full history is passed.
     """
-    if series_filter is not None:
-        data = sales[sales[UNIQUE_ID].isin(series_filter)].copy()
-    else:
-        data = sales.copy()
+    history = build_node_history(sales, hierarchy)
 
-    data = data[[UNIQUE_ID, DS, Y]].sort_values([UNIQUE_ID, DS]).reset_index(drop=True)
+    if series_filter is not None:
+        data = history[history[UNIQUE_ID].isin(series_filter)].copy()
+    else:
+        data = history.copy()
+
+    uid_order = {
+        uid: index for index, uid in enumerate(data[UNIQUE_ID].astype(str).drop_duplicates())
+    }
+    data = data[[UNIQUE_ID, DS, Y]].copy()
+    data["_uid_order"] = data[UNIQUE_ID].astype(str).map(uid_order)
+    data = (
+        data.sort_values(["_uid_order", DS], kind="stable")
+        .drop(columns="_uid_order")
+        .reset_index(drop=True)
+    )
 
     uids = data[UNIQUE_ID].unique().tolist()
 
