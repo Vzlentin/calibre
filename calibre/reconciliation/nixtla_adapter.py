@@ -225,6 +225,7 @@ class NixtlaReconciler(VectorReconciler):
     ) -> pd.DataFrame:
         subset, base = self._base_vector(group, summing)
         model_name = str(group[MODEL_NAME].iloc[0])
+        forecast_origin = group[FORECAST_ORIGIN].iloc[0]
         horizon = int(group[H].iloc[0])
         layout = _to_nixtla_layout(base, subset)
         cache_key = (model_name, horizon, _cache_key(subset))
@@ -254,13 +255,15 @@ class NixtlaReconciler(VectorReconciler):
         except Exception as exc:
             raise RuntimeError(
                 "Nixtla residual reconciliation fit failed "
-                f"for strategy={self.strategy!r}, model_name={model_name!r}, h={horizon}"
+                f"for strategy={self.strategy!r}, model_name={model_name!r}, "
+                f"forecast_origin={forecast_origin!r}, h={horizon}"
             ) from exc
         predicted = _predict_residual_mean(
             reconciler,
             layout,
             strategy=self.strategy,
             model_name=model_name,
+            forecast_origin=forecast_origin,
             horizon=horizon,
         )
         reconciled = _from_nixtla_layout(predicted, layout)
@@ -279,6 +282,7 @@ def _predict_residual_mean(
     *,
     strategy: str,
     model_name: str,
+    forecast_origin: object,
     horizon: int,
 ) -> np.ndarray:
     try:
@@ -286,19 +290,22 @@ def _predict_residual_mean(
     except Exception as exc:
         raise RuntimeError(
             "Nixtla residual reconciliation predict failed "
-            f"for strategy={strategy!r}, model_name={model_name!r}, h={horizon}"
+            f"for strategy={strategy!r}, model_name={model_name!r}, "
+            f"forecast_origin={forecast_origin!r}, h={horizon}"
         ) from exc
     if "mean" not in predicted:
         raise ValueError(
             "Nixtla residual reconciliation predict result missing 'mean' "
-            f"for strategy={strategy!r}, model_name={model_name!r}, h={horizon}"
+            f"for strategy={strategy!r}, model_name={model_name!r}, "
+            f"forecast_origin={forecast_origin!r}, h={horizon}"
         )
     mean = np.asarray(predicted["mean"], dtype=np.float64)
     if mean.shape != layout.y_hat.shape:
         raise ValueError(
             "Nixtla residual reconciliation predict returned 'mean' with shape "
             f"{mean.shape}; expected {layout.y_hat.shape} "
-            f"for strategy={strategy!r}, model_name={model_name!r}, h={horizon}"
+            f"for strategy={strategy!r}, model_name={model_name!r}, "
+            f"forecast_origin={forecast_origin!r}, h={horizon}"
         )
     return mean
 

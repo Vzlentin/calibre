@@ -516,7 +516,7 @@ class _ResidualWrongShape(_ResidualMethod):
 def test_residual_fit_failure_is_wrapped_with_context() -> None:
     with pytest.raises(
         RuntimeError,
-        match="fit failed .*strategy='mint_shrink'.*model_name='m'.*h=1",
+        match="fit failed .*strategy='mint_shrink'.*model_name='m'.*forecast_origin=.*h=1",
     ):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualFitFailure)(
             _tiny_forecast_frame(),
@@ -528,7 +528,7 @@ def test_residual_fit_failure_is_wrapped_with_context() -> None:
 def test_residual_predict_failure_is_wrapped_with_context() -> None:
     with pytest.raises(
         RuntimeError,
-        match="predict failed .*strategy='mint_shrink'.*model_name='m'.*h=1",
+        match="predict failed .*strategy='mint_shrink'.*model_name='m'.*forecast_origin=.*h=1",
     ):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualPredictFailure)(
             _tiny_forecast_frame(),
@@ -538,7 +538,7 @@ def test_residual_predict_failure_is_wrapped_with_context() -> None:
 
 
 def test_residual_predict_requires_mean_key() -> None:
-    with pytest.raises(ValueError, match="missing 'mean'.*model_name='m'.*h=1"):
+    with pytest.raises(ValueError, match="missing 'mean'.*model_name='m'.*forecast_origin=.*h=1"):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualMissingMean)(
             _tiny_forecast_frame(),
             _tiny_hierarchy(),
