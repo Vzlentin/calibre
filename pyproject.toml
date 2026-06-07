@@ -32,6 +32,7 @@ calibre = "calibre.cli.main:app"
 
 [project.optional-dependencies]
 dev = [
+    "datasetsforecast",
     "httpx",
     "pre-commit",
     "pytest",
@@ -56,6 +57,7 @@ s3 = ["s3fs"]
 azure = ["adlfs"]
 gcs = ["gcsfs"]
 cloud = ["s3fs", "adlfs", "gcsfs"]
+hierarchy = ["hierarchicalforecast~=1.5"]
 ml = ["mlforecast", "lightgbm"]
 neural = ["neuralforecast", "torch"]
 xgboost = ["xgboost<2"]
@@ -108,3 +110,4 @@ include = ["calibre/forecasting/neuralforecast_adapter.py"]
 unresolved-import = "ignore"
 unresolved-attribute = "ignore"
 call-non-callable = "ignore"
+

@@ -23,7 +23,7 @@ from calibre.execution.backend import (
 from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
 from calibre.execution.task_builder import build_node_history, partition_tasks
 from calibre.ordering.policy_config import RsConfig
-from calibre.reconciliation import BottomUpReconciler, NoOpReconciler
+from calibre.reconciliation import NixtlaReconciler, NoOpReconciler
 
 
 @contextmanager
@@ -70,6 +70,11 @@ class _SpyReconciler:
         return frame
 
 
+def _boom_if_called(frame: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame:
+    del frame, hierarchy
+    raise AssertionError("reconciler should not be called")
+
+
 def test_reconcile_noop_without_reconciler() -> None:
     """No reconciler configured -> identity (mirrors calibrate-no-runtime)."""
     engine = BackendEngine()
@@ -88,10 +93,10 @@ def test_reconcile_noop_with_noop_reconciler_and_hierarchy() -> None:
     pd.testing.assert_frame_equal(out, frame)
 
 
-def test_reconcile_noop_when_hierarchy_none_even_with_real_strategy() -> None:
-    """hierarchy=None short-circuits a real strategy to identity (R3, R11)."""
+def test_reconcile_noop_when_hierarchy_none_without_calling_reconciler() -> None:
+    """hierarchy=None short-circuits before delegating (R3, R11)."""
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=BottomUpReconciler(), hierarchy=None)
+        reconciliation=ReconciliationOptions(reconciler=_boom_if_called, hierarchy=None)
     )
     frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], Y_HAT: [3.0]})
     out = engine._reconcile(frame)
@@ -100,9 +105,7 @@ def test_reconcile_noop_when_hierarchy_none_even_with_real_strategy() -> None:
 
 def test_reconcile_noop_on_empty_predictions() -> None:
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(
-            reconciler=BottomUpReconciler(), hierarchy=_hierarchy()
-        )
+        reconciliation=ReconciliationOptions(reconciler=_boom_if_called, hierarchy=_hierarchy())
     )
     empty = pd.DataFrame(columns=[UNIQUE_ID, Y_HAT])
     out = engine._reconcile(empty)
@@ -221,7 +224,9 @@ def test_order_phase_filters_aggregate_rows_when_hierarchy_present(monkeypatch) 
 
     monkeypatch.setattr("calibre.execution.backend.apply_order_policy", _fake_apply_order_policy)
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=BottomUpReconciler(), hierarchy=hierarchy),
+        reconciliation=ReconciliationOptions(
+            reconciler=NixtlaReconciler("bottom_up"), hierarchy=hierarchy
+        ),
         order=RsConfig(params=pd.DataFrame()),
     )
 

@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from calibre.reconciliation import (
+    NixtlaReconciler,
     NoOpReconciler,
     available_reconcilers,
     resolve_reconciler,
@@ -42,6 +43,13 @@ def test_resolved_noop_is_a_reconciler_instance() -> None:
     assert isinstance(reconciler, NoOpReconciler)
 
 
+@pytest.mark.parametrize("name", ["bottom_up", "ols", "wls_struct"])
+def test_nixtla_strategies_resolve_to_adapter(name: str) -> None:
+    reconciler = resolve_reconciler(name)
+    assert isinstance(reconciler, NixtlaReconciler)
+    assert reconciler.strategy == name
+
+
 def test_unknown_strategy_lists_available_names() -> None:
     with pytest.raises(ValueError, match=r"Unknown reconciliation strategy: 'bogus'") as excinfo:
         resolve_reconciler("bogus")
@@ -57,3 +65,7 @@ def test_resolution_is_case_insensitive_and_trimmed() -> None:
 
 def test_none_is_registered_and_available() -> None:
     assert "none" in available_reconcilers()
+
+
+def test_available_reconcilers_contains_only_runnable_set() -> None:
+    assert available_reconcilers() == ["bottom_up", "none", "ols", "wls_struct"]

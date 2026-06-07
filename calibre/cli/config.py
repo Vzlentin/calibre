@@ -77,17 +77,13 @@ class ConformalConfig(_Section):
 class ReconciliationConfig(_Section):
     """Point-forecast reconciliation strategy knob (defaults to a no-op).
 
-    ``weighting`` is consumed only by the MinT strategy; other strategies ignore
-    it. An absent ``reconciliation`` section is equivalent to ``strategy: none``,
-    so existing flat-panel runs are unaffected (R10).
+    An absent ``reconciliation`` section is equivalent to ``strategy: none``, so
+    existing flat-panel runs are unaffected.
     """
 
-    strategy: Literal["none", "bottom_up", "top_down", "mint"] = "none"
-    weighting: Literal["ols", "shrinkage"] = "ols"
+    strategy: Literal["none", "bottom_up", "ols", "wls_struct"] = "none"
 
     def to_reconciler(self) -> Reconciler:
-        if self.strategy == "mint":
-            return resolve_reconciler("mint", weighting=self.weighting)
         return resolve_reconciler(self.strategy)
 
 
