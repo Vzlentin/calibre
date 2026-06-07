@@ -11,18 +11,16 @@ failed stage to reach the next one.
 
 `/go` accepts three input kinds — a **plain idea**, a **GitHub issue** (`#N`,
 number, or roadmap code like `U3`), or a **path to a plan file**. It resolves the
-input to a concrete plan in the Obsidian vault (invoking `/ce-plan` when none
-exists), guarantees a backing issue so `closes #N` keeps working, then
-implements. The plan is the work order; the issue is the close-handle.
+input to a concrete plan in the store resolved by `/project-memory` (the vault,
+or the `docs/plans/` fallback; invoking `/ce-plan` when none exists), guarantees
+a backing issue so `closes #N` keeps working, then implements. The plan is the
+work order; the issue is the close-handle.
 
 ## Project rules that bind every stage
 
-- **`uv run` prefix.** All Python tooling runs as `uv run pytest`,
-  `uv run ruff check .`, `uv run ruff format .`, `uv run ty check calibre/`.
-  Never invoke `python`/`pytest`/`ruff`/`ty` bare — here or inside spawned agents.
-- **Never loosen the VN2 gate.** The winning-config baseline is `total_cost=4992.20`
-  (x86_64/Linux CI). If CI goes red here, fix the root cause — never edit the
-  baseline, weaken an assertion, or skip the test to make CI pass.
+- **Build/quality invariants live in `CLAUDE.md`.** The `uv run` prefix and the
+  VN2 gate are project-wide rules (`CLAUDE.md` Commands + Gotchas) — they bind
+  every stage here and inside spawned agents.
 - **Public repo, private context stays out.** This repo is public. No client
   names, partners, or private commercial context in commit messages, the PR
   title/body, or issue comments.
@@ -42,31 +40,24 @@ implements. The plan is the work order; the issue is the close-handle.
 Each stage delegates to a skill-primitive; how it's invoked depends on who owns
 the fan-out:
 
-- **Subagent (fresh context window):** `ce-plan` (headless) and `ce-work` —
-  heavy, self-contained stages whose context should stay out of the orchestrator.
-- **Inline (the `/go` agent runs it directly):** `ce-simplify-code`,
-  `ce-code-review`, `ce-resolve-pr-feedback`. Each fans out its own subagents, so
-  `/go` runs them itself to own that fan-out rather than nest it inside another
-  subagent.
-- **Exception — `ce-plan` runs inline when the seed is ambiguous**, so its
-  clarifying gates can reach you (a subagent can't ask questions).
+- **Subagent (fresh context window):** `ce-work` — a heavy, self-contained
+  stage whose context should stay out of the orchestrator.
+- **Inline (the `/go` agent runs it directly):** `ce-plan`, `ce-simplify-code`,
+  `ce-code-review`, `ce-resolve-pr-feedback`. `ce-plan` runs inline so its
+  clarifying gates can reach you (a subagent can't ask questions); the others
+  each fan out their own subagents, so `/go` runs them itself to own that
+  fan-out rather than nest it inside another subagent.
 
 ---
 
 ## Stage 0 — Classify the input
 
-**Vault precondition.** Every plan and all durable memory live in the Obsidian
-vault, and the cutover is unconditional (Stage 0.5 writes there, Stage 6 updates
-it). Before anything else, assert the vault is reachable — if not, stop with
-**"vault required"** rather than silently falling back to a broken `docs/plans/`
-path:
+**Storage is delegated.** The plan store and outcome persistence are resolved by
+`/project-memory` (the vault, or the `docs/plans/` fallback when no vault is
+reachable), so `/go` carries no path or fallback logic of its own — there is no
+hard vault precondition.
 
-```bash
-[ -n "$OBSIDIAN_VAULT_PATH" ] && [ -d "$OBSIDIAN_VAULT_PATH/Projects/Calibre" ] \
-  || { echo "vault required: set OBSIDIAN_VAULT_PATH to a checkout containing Projects/Calibre"; exit 1; }
-```
-
-Then classify `$ARGUMENTS` into one of three kinds, in this order — first match
+Classify `$ARGUMENTS` into one of three kinds, in this order — first match
 wins:
 
 1. **Plan-file** — `$ARGUMENTS` resolves to an existing `.md` file (e.g.
@@ -95,48 +86,36 @@ no issue — stop and ask.
 
 ---
 
-## Stage 0.5 — Ensure a plan exists in the vault
+## Stage 0.5 — Ensure a plan exists
 
-The plan store is always `$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/`. Get a
-plan in hand, by input kind:
+Plans live in the store resolved by `/project-memory` (the vault, or the
+`docs/plans/` fallback). Get a plan in hand, by input kind:
 
 - **Plan-file (executable):** that file is the plan — skip to Stage 0.6.
 - **Issue / Idea / brainstorm (or non-executable plan-file):** find an existing
-  vault plan, else create one via `/ce-plan` (smart gate below):
-  - **Issue:** `grep -rl "#<N>" "$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans"`
-    (matches a plan whose `origin:` or body references `#N`). If found, use it;
-    else seed `/ce-plan` with the issue title + body.
+  plan in the resolved store, else create one via `/ce-plan`:
+  - **Issue:** search the plan store for a plan whose `origin:` or body
+    references `#N`. If found, use it; else seed `/ce-plan` with the issue title
+    + body.
   - **Idea / brainstorm:** keyword/slug search plan titles + filenames. On a
     *plausible* match, **confirm with the user before reusing** (a wrong reuse is
     worse than a fresh plan); on no match, seed `/ce-plan` with the idea text /
     the brainstorm's full contents. A brainstorm is **never** executable on its
     own and is **never** fed to Stage 1 as the spec — it must become a plan first.
 
-**Invoking `/ce-plan` — smart gate.** A spawned subagent can't ask questions, so
-headless planning is safe only when the seed already settles scope + approach.
-Judge the seed you hold (issue body / idea / brainstorm) and route:
+**Invoking `/ce-plan`.** Always run `/ce-plan` **inline** so its
+scoping/clarifying gates reach you (a spawned subagent can't ask questions). At
+its post-generation menu pick **"Done for now"** so `/go` keeps control of issue
+creation + implementation — do **not** let it start `ce-work` or create the
+issue itself.
 
-- **Scope + approach pinned, no material design fork → headless subagent.** Spawn
-  `/ce-plan` as a **foreground** subagent in headless/pipeline mode: assume +
-  record any open decision rather than asking, auto-proceed every gate, write the
-  plan, and do **not** start `ce-work` or create the issue — return the plan path.
-- **Thin or ambiguous seed → inline (interactive).** Run `/ce-plan` inline so its
-  scoping/clarifying gates reach the user; at its post-generation menu pick
-  **"Done for now"** so `/go` keeps control of issue creation + implementation —
-  do **not** let it start `ce-work` or create the issue itself. (Per-kind hint:
-  thin/one-line issue or vague idea → inline; spec-complete issue, detailed idea,
-  or scope-settled brainstorm → headless subagent.)
+`/ce-plan` writes to `docs/plans/YYYY-MM-DD-NNN-<type>-<name>-plan.md`;
+**`/project-memory` places it at the resolved store** — relocated into the vault
+in vault mode, left in `docs/plans/` in fallback mode. Delegate placement there
+rather than moving files here.
 
-`/ce-plan` writes to `docs/plans/YYYY-MM-DD-NNN-<type>-<name>-plan.md`.
-**Relocate into the vault:** rewrite its frontmatter to the vault convention
-(`title`, `type` (`feat|fix|refactor|chore`), `status: active`, `date`, and
-`origin` once Stage 0.6 sets it), write to
-`$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/<YYYY-MM-DD-slug>.md`, verify, then
-delete the `docs/plans/` copy — one source of truth, no private context in the
-public repo.
-
-**GATE:** a plan file for this work item exists in the vault. If `/ce-plan`
-produced nothing, stop and report.
+**GATE:** a plan file for this work item exists in the resolved store. If
+`/ce-plan` produced nothing, stop and report.
 
 ---
 
@@ -148,8 +127,8 @@ Every run merges with `closes #N`, so guarantee an issue exists:
   plan carrying `origin: "GitHub issue #N — …"`. Do not create a duplicate.
 - **Create** otherwise. Open an issue with a ≤70-char title and a **public-safe**
   body summarizing the plan — no client names, partners, or private commercial
-  context (the full plan stays in the vault; only the public-safe summary becomes
-  the issue body). Capture the new number `N`:
+  context (the full plan stays in the plan store; only the public-safe summary
+  becomes the issue body). Capture the new number `N`:
 
   ```bash
   gh issue create --title "<≤70-char title>" --body-file <public-safe summary>
@@ -200,7 +179,7 @@ plan and open the PR — a subagent per the Invocation model. Give it the brief 
 `uv run` quality gates, the private-context guard, the `closes #N` PR finish),
 filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan text —
 paste the full contents, do not pass a path; an isolated worktree has no vault
-mounted.
+mounted, and a freshly written `docs/plans/` plan may be uncommitted.
 
 When the agent returns, sync by mode — never move the main checkout onto the PR
 branch in worktree mode:
@@ -333,30 +312,24 @@ Stage 6 always runs from the main checkout (`$MAIN`), never from `WORKDIR` — b
 the worktree may be removed by Stage 5 cleanup, and persistence is independent of
 execution mode.
 
-**Flip the plan to shipped.** In the vault plan file
-(`$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/<plan-file>`) set
-`status: active → shipped` and append the outcome — PR URL, merged SHA, key
-decisions.
+**Delegate persistence to `/project-memory`.** Flip the plan's
+`status: active → shipped` in the resolved store and append the outcome — PR URL,
+merged SHA, key decisions. Per `/project-memory`'s plan-status persistence: in
+vault mode also update `architecture.md` (only for a durable design decision,
+module boundary, or invariant change — terse, cite the PR) and `lessons.md`
+(any rule-for-self from a correction or pitfall hit), then commit + push the
+vault; in fallback mode the `docs/plans/` plan is the record and no vault memory
+is touched. Do not touch `vision.md` unless product scope actually moved.
 
-**Update vault memory** where warranted:
-- **`architecture.md`** — only for a durable design decision, module boundary, or
-  invariant change. Terse; cite the PR.
-- **`lessons.md`** — append any rule-for-self from a correction or pitfall hit.
-
-Do not touch `vision.md` unless product scope actually moved.
-
-The vault is a git repo — commit and push the vault edits (the plan status flip
-plus any memory updates).
-
-**GATE:** the work item's plan in the vault reads `status: shipped` with the
-PR/SHA recorded.
+**GATE:** the work item's plan reads `status: shipped` in the resolved store with
+the PR/SHA recorded.
 
 ---
 
 ## Done
 
 Report, in order: the resolved **input kind** (idea / issue / plan-file) and the
-**plan path** in the vault; the **execution mode** (direct / worktree, and on the
+**plan path** in the resolved store; the **execution mode** (direct / worktree, and on the
 preserve path the retained branch and — in worktree mode — the worktree path);
 issue #N; PR URL; merged (yes + SHA / no + reason); CI result; any `needs-human`
 review threads; and memory updates (plan status flip, plus architecture/lessons
