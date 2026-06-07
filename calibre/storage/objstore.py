@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pandas as pd
 
-from calibre.execution.io import exists, open_fs, write_parquet
+from calibre.core.io import exists, open_fs, write_parquet
 from calibre.execution.ledger import resolved_ledger_uri
 
 logger = logging.getLogger(__name__)

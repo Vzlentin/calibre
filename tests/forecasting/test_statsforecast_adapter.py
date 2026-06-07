@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from calibre.core.forecast_frame import FITTED_Y_HAT, MODEL_NAME, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.statsforecast_adapter import StatsForecastAdapter
 
@@ -194,3 +195,23 @@ def test_predict_without_future_x_omits_X_df(monkeypatch, sn_task):
 
     _, predict_kwargs = mock_instance.predict.call_args
     assert "X_df" not in predict_kwargs
+
+
+def test_fitted_values_normalize_to_sidecar_contract(sn_task):
+    adapter = StatsForecastAdapter({**sn_task.model_config, "name": "seasonal"})
+    task = ForecastTask(
+        history=sn_task.history,
+        horizon=sn_task.horizon,
+        model_config={**sn_task.model_config, "name": "seasonal"},
+        forecast_origin=sn_task.forecast_origin,
+    )
+
+    adapter.fit(task, collect_fitted_values=True)
+    fitted = adapter.fitted_values(task)
+
+    assert list(fitted.columns) == ["unique_id", "ds", "y", "model_name", "fitted_y_hat"]
+    assert set(fitted[MODEL_NAME]) == {"seasonal"}
+    assert fitted[FITTED_Y_HAT].dtype == np.float64
+    assert fitted[Y].dtype == np.float64
+    assert "index" not in fitted.columns
+    assert fitted[FITTED_Y_HAT].notna().all()

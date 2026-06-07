@@ -5,10 +5,10 @@ from typing import Any
 
 import pandas as pd
 
+from calibre.core.io import exists, join_uri
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetAdapter, DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
-from calibre.execution.io import exists, join_uri
 from calibre.execution.m5_loading import build_m5_hierarchy, melt_m5_sales
 
 

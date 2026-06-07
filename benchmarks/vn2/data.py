@@ -20,8 +20,8 @@ from calibre.core.forecast_frame import (
     is_quantile_column,
     quantile_column,
 )
+from calibre.core.io import exists, join_uri
 from calibre.execution.data_loading import melt_wide_instock
-from calibre.execution.io import exists, join_uri
 from calibre.forecasting.features import add_stockout_features
 
 # Default rolling-mean / rolling-std windows applied at lag 1; these carry the

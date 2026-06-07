@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 from mlforecast.lag_transforms import RollingMean, RollingStd
 
+from calibre.core.forecast_frame import DS, FITTED_Y_HAT, MODEL_NAME, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
 
@@ -325,3 +326,90 @@ def test_predict_without_future_x_omits_X_df(monkeypatch, lgbm_task):
 
     _, predict_kwargs = mock_instance.predict.call_args
     assert "X_df" not in predict_kwargs
+
+
+def test_fitted_values_normalize_to_sidecar_contract(repeating_history):
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=3,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "name": "global_lgbm",
+            "freq": "W",
+            "lags": [1, 2],
+            "verbosity": -1,
+            "n_estimators": 5,
+        },
+        forecast_origin=pd.Timestamp("2024-06-23"),
+    )
+    adapter = MLForecastAdapter(task.model_config)
+
+    adapter.fit(task, collect_fitted_values=True)
+    fitted = adapter.fitted_values(task)
+
+    assert list(fitted.columns) == ["unique_id", "ds", "y", "model_name", "fitted_y_hat"]
+    assert set(fitted[MODEL_NAME]) == {"global_lgbm"}
+    assert fitted[FITTED_Y_HAT].dtype == np.float64
+    assert fitted[Y].dtype == np.float64
+    assert fitted[FITTED_Y_HAT].notna().all()
+
+
+def test_quantile_fitted_values_use_point_quantile(repeating_history):
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=3,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "name": "quantile_lgbm",
+            "freq": "W",
+            "objective": "quantile",
+            "quantiles": [0.52],
+            "strategy": "direct",
+            "verbosity": -1,
+            "n_estimators": 5,
+        },
+        forecast_origin=pd.Timestamp("2024-06-23"),
+    )
+    adapter = MLForecastAdapter(task.model_config)
+
+    adapter.fit(task, collect_fitted_values=True)
+    fitted = adapter.fitted_values(task)
+
+    assert set(fitted[MODEL_NAME]) == {"quantile_lgbm"}
+    assert fitted[FITTED_Y_HAT].notna().all()
+
+
+def test_direct_fitted_values_drop_backend_horizon_metadata(repeating_history):
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=2,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "name": "direct_lgbm",
+            "freq": "W",
+            "strategy": "direct",
+        },
+        forecast_origin=pd.Timestamp("2024-06-23"),
+    )
+    raw = pd.DataFrame(
+        {
+            UNIQUE_ID: pd.Series(["SKU_001"] * 4, dtype="object"),
+            DS: pd.to_datetime(["2024-01-14", "2024-01-14", "2024-01-21", "2024-01-21"]),
+            Y: np.array([20.0, 20.0, 30.0, 30.0], dtype=np.float64),
+            H: np.array([1, 2, 1, 2], dtype=np.int64),
+            "LGBMRegressor": np.array([19.0, 18.0, 31.0, 29.0], dtype=np.float64),
+        }
+    )
+    adapter = MLForecastAdapter(task.model_config)
+    adapter._mlf = MagicMock()
+    adapter._mlf.forecast_fitted_values.return_value = raw
+
+    fitted = adapter.fitted_values(task)
+
+    assert H not in fitted.columns
+    assert fitted.duplicated([UNIQUE_ID, DS, MODEL_NAME]).sum() == 0
+    assert fitted[FITTED_Y_HAT].tolist() == [19.0, 31.0]
+    assert set(fitted[MODEL_NAME]) == {"direct_lgbm"}

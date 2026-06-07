@@ -81,7 +81,15 @@ class ReconciliationConfig(_Section):
     existing flat-panel runs are unaffected.
     """
 
-    strategy: Literal["none", "bottom_up", "ols", "wls_struct"] = "none"
+    strategy: Literal[
+        "none",
+        "bottom_up",
+        "ols",
+        "wls_struct",
+        "mint_shrink",
+        "wls_var",
+        "erm",
+    ] = "none"
 
     def to_reconciler(self) -> Reconciler:
         return resolve_reconciler(self.strategy)

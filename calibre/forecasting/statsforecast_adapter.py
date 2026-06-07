@@ -12,7 +12,11 @@ from statsforecast import StatsForecast
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, exogenous_columns
 from calibre.core.forecast_task import ForecastTask
-from calibre.forecasting.adapter_base import ModelAdapter, build_predict_frame
+from calibre.forecasting.adapter_base import (
+    ModelAdapter,
+    build_fitted_values_frame,
+    build_predict_frame,
+)
 
 _RESERVED_KEYS = frozenset({"model", "name", "freq", "backend", "scope"})
 
@@ -21,8 +25,10 @@ class StatsForecastAdapter(ModelAdapter):
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._sf: StatsForecast | None = None
+        self._forecast_raw: pd.DataFrame | None = None
+        self._fitted_raw: pd.DataFrame | None = None
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
         model_name = self._config["model"]
         model_cls = getattr(statsforecast.models, model_name, None)
         if model_cls is None:
@@ -35,6 +41,19 @@ class StatsForecastAdapter(ModelAdapter):
         sf_df[Y] = sf_df[Y].astype("float32")
 
         self._sf = StatsForecast(models=[model], freq=freq)
+        self._forecast_raw = None
+        self._fitted_raw = None
+        if collect_fitted_values:
+            forecast_kwargs: dict[str, Any] = {
+                "df": sf_df,
+                "h": task.horizon,
+                "fitted": True,
+            }
+            if task.future_x is not None and not task.future_x.empty:
+                forecast_kwargs["X_df"] = task.future_x
+            self._forecast_raw = self._sf.forecast(**forecast_kwargs)
+            self._fitted_raw = self._sf.forecast_fitted_values()
+            return
         self._sf.fit(sf_df)
 
     def dump_state(self) -> bytes:
@@ -54,9 +73,16 @@ class StatsForecastAdapter(ModelAdapter):
             self._sf = StatsForecast.load(str(path))
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
+        if self._forecast_raw is not None:
+            return build_predict_frame(self._forecast_raw)
         if self._sf is None:
             raise RuntimeError("Call fit() before predict()")
         predict_kwargs: dict[str, Any] = {"h": task.horizon}
         if task.future_x is not None and not task.future_x.empty:
             predict_kwargs["X_df"] = task.future_x
         return build_predict_frame(self._sf.predict(**predict_kwargs))
+
+    def fitted_values(self, task: ForecastTask) -> pd.DataFrame:
+        if self._fitted_raw is None:
+            raise RuntimeError("Call fit(..., collect_fitted_values=True) before fitted_values()")
+        return build_fitted_values_frame(self._fitted_raw, model_name=task.model_name)

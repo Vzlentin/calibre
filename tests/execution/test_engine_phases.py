@@ -34,6 +34,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
 from calibre.execution.task_builder import partition_tasks
+from calibre.forecasting.adapter_base import PredictionResult
 from calibre.ordering.policy_config import RsConfig
 
 
@@ -52,6 +53,10 @@ def _materialize_refs_for(engine, tasks):
         parallel_refs = engine._materialize_task_refs(parallel_tasks, f"{staging_prefix}/local")
         direct_refs = engine._materialize_task_refs(direct_tasks, f"{staging_prefix}/global")
         yield parallel_refs, direct_refs
+
+
+def _predict_frame(engine, parallel_refs, direct_refs, origin):
+    return engine._predict(parallel_refs, direct_refs, origin).forecast
 
 
 def _periodic_task(horizon=2):
@@ -107,7 +112,7 @@ def test_predict_phase_concatenates_local_and_global():
     )
     engine = BackendEngine()
     with _materialize_refs_for(engine, [local_task, global_task]) as (parallel_refs, direct_refs):
-        preds = engine._predict(parallel_refs, direct_refs, dates[11])
+        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
 
     assert not preds.empty
     models = set(preds[MODEL_NAME].unique())
@@ -119,7 +124,7 @@ def test_predict_phase_concatenates_local_and_global():
 def test_predict_phase_empty_when_no_tasks():
     """Predict returns an empty forecast frame when there are no refs."""
     engine = BackendEngine()
-    preds = engine._predict([], [], pd.Timestamp("2024-03-31"))
+    preds = _predict_frame(engine, [], [], pd.Timestamp("2024-03-31"))
     assert preds.empty
 
 
@@ -134,7 +139,7 @@ def test_calibrate_phase_applies_intervals():
     )
     engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        raw = engine._predict(parallel_refs, direct_refs, dates[11])
+        raw = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
 
     lower_col, upper_col = runtime.interval_columns
     assert lower_col not in raw.columns
@@ -193,7 +198,7 @@ def test_order_phase_appends_to_order_ledger():
     task, dates, _pattern = _periodic_task()
     engine = _rs_engine()
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = engine._predict(parallel_refs, direct_refs, dates[11])
+        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
     preds = engine._calibrate(preds, engine.conformal_runtime)
 
     order_ledger = InMemoryOrderLedger()
@@ -209,7 +214,7 @@ def test_order_phase_skipped_without_order_config():
     task, dates, _pattern = _periodic_task()
     engine = BackendEngine()  # no order config
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = engine._predict(parallel_refs, direct_refs, dates[11])
+        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
 
     order_ledger = InMemoryOrderLedger()
     engine._order(preds, order_ledger)
@@ -268,7 +273,7 @@ def test_commit_phase_validates_appends_and_persists_once_per_call():
     task, dates, _pattern = _periodic_task()
     engine, store = _engine_with_state_store()
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = engine._predict(parallel_refs, direct_refs, dates[11])
+        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
     preds = engine._calibrate(preds, engine.conformal_runtime)
 
     persist_calls = {"n": 0}
@@ -323,7 +328,7 @@ def test_commit_phase_appends_without_runtime_and_does_not_persist():
     task, dates, _pattern = _periodic_task()
     engine = BackendEngine()
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = engine._predict(parallel_refs, direct_refs, dates[11])
+        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
 
     ledger = InMemoryLedger()
     engine._commit(ledger, preds, task.history, dates[11], None)
@@ -349,7 +354,7 @@ def test_resolve_open_carries_forward_prior_origin_before_predict():
     # Seed the ledger with a prior origin's (unresolved) predictions.
     ledger = InMemoryLedger()
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        prior = engine._predict(parallel_refs, direct_refs, dates[7])
+        prior = _predict_frame(engine, parallel_refs, direct_refs, dates[7])
     prior = engine._calibrate(prior, runtime)
     ledger.append(prior)
     assert ledger.to_df()[Y].isna().all()  # unresolved before carry-forward
@@ -370,7 +375,7 @@ def test_resolve_open_noop_without_runtime():
     engine = BackendEngine()
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        prior = engine._predict(parallel_refs, direct_refs, dates[7])
+        prior = _predict_frame(engine, parallel_refs, direct_refs, dates[7])
 
     ledger = InMemoryLedger()
     ledger.append(prior)
@@ -394,7 +399,7 @@ def test_commit_appends_then_resolves_after_origin():
 
     ledger = InMemoryLedger()
     with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = engine._predict(parallel_refs, direct_refs, dates[7])
+        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[7])
     preds = engine._calibrate(preds, runtime)
 
     engine._commit(ledger, preds, actuals, dates[7], runtime)
@@ -449,7 +454,7 @@ def test_commit_phase_failure_preserves_valueerror_type():
     # Non-empty but missing the required forecast columns: validate_forecast_frame
     # raises ValueError inside Commit.
     bad_frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], "garbage": [1.0]})
-    engine._predict = lambda *_a, **_k: bad_frame
+    engine._predict = lambda *_a, **_k: PredictionResult(forecast=bad_frame)
 
     with pytest.raises(ValueError, match=rf"Commit phase failed at origin {origin}"):
         engine.run_origin(

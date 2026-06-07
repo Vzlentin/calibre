@@ -79,6 +79,19 @@ dataset:
   phase: evaluation   # optional; defaults to evaluation, falls back to validation
 ```
 
+### Hierarchical Reconciliation
+
+When a dataset supplies `hierarchy`, configure point reconciliation with:
+`none`, `bottom_up`, `ols`, `wls_struct`, `mint_shrink`, `wls_var`, or `erm`.
+Residual-backed strategies (`mint_shrink`, `wls_var`, `erm`) request
+horizonless in-sample fitted values from the model adapter, keyed by
+`(unique_id, ds, model_name)`, and pass them as explicit reconciliation context;
+fitted values are not written as historical rows in the forecast-frame ledger.
+`mint_cov` is not exposed because the full M5
+lattice produces ill-conditioned covariance estimates. Reconciliation still
+applies only to point forecasts before conformal calibration; coherent interval
+or quantile reconciliation remains out of scope for this path.
+
 ### Benchmarks
 
 ```bash

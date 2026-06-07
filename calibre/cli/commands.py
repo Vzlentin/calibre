@@ -15,6 +15,7 @@ from calibre.cli.config import (
 )
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
+from calibre.core.io import is_local_fs, open_fs
 from calibre.core.metrics import set_order_cost
 from calibre.execution.backend import (
     BackendEngine,
@@ -25,7 +26,6 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
-from calibre.execution.io import is_local_fs, open_fs
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import (

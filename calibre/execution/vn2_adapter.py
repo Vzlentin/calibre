@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from calibre.core.io import exists, join_uri
 from calibre.core.order_types import CostStruct
 from calibre.execution.data_loading import load_master, load_period, melt_wide_instock
 from calibre.execution.dataset import DatasetAdapter, DatasetBundle
 from calibre.execution.dataset_registry import register_dataset_adapter
-from calibre.execution.io import exists, join_uri
 
 HOLDING_COST_RATE: float = 0.2
 SHORTAGE_COST_RATE: float = 1.0

@@ -7,6 +7,7 @@ import pytest
 pytest.importorskip("neuralforecast")
 
 from calibre.core.forecast_task import ForecastTask
+from calibre.forecasting.adapter_base import AdapterCapabilityError
 from calibre.forecasting.neuralforecast_adapter import NeuralForecastAdapter
 
 
@@ -152,3 +153,9 @@ def test_predict_without_future_x_omits_futr_df(monkeypatch, nhits_task):
 
     _, predict_kwargs = mock_instance.predict.call_args
     assert "futr_df" not in predict_kwargs
+
+
+def test_collect_fitted_values_raises_capability_error(nhits_task):
+    adapter = NeuralForecastAdapter(nhits_task.model_config)
+    with pytest.raises(AdapterCapabilityError, match="in-sample fitted values"):
+        adapter.fit(nhits_task, collect_fitted_values=True)

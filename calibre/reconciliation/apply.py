@@ -16,6 +16,9 @@ not from ``S @ bottom``; missing required nodes fail loudly.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -26,10 +29,23 @@ from calibre.core.forecast_frame import (
     Y_HAT,
     H,
 )
+from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
 
 _GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
 _ORDER_COL = "__calibre_reconcile_order__"
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationCrossSection:
+    """One forecast cross-section aligned to a summing-matrix subset."""
+
+    group: pd.DataFrame
+    summing: SummingMatrix
+    subset: SummingMatrix
+    base: np.ndarray
+    context: ReconciliationContext
+    state: Any = None
 
 
 class VectorReconciler:
@@ -40,20 +56,37 @@ class VectorReconciler:
     of the same length.
     """
 
-    def __call__(self, frame: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame:
+    requires_fitted_values = False
+
+    def __call__(
+        self,
+        frame: pd.DataFrame,
+        hierarchy: pd.DataFrame | None,
+        context: ReconciliationContext,
+    ) -> pd.DataFrame:
         if hierarchy is None or frame.empty:
             return frame
         summing = build_summing_matrix(hierarchy)
+        state = self.prepare_reconcile(summing, context)
         order_col = _ORDER_COL
         while order_col in frame.columns:
             order_col = f"_{order_col}"
         ordered = frame.copy()
         ordered[order_col] = np.arange(len(ordered), dtype=np.int64)
         parts = [
-            self._reconcile_group(group, summing)
+            self._reconcile_group(group, summing, context=context, state=state)
             for _, group in ordered.groupby(_GROUP_KEYS, sort=False)
         ]
         return pd.concat(parts).sort_values(order_col, kind="stable").drop(columns=order_col)
+
+    def prepare_reconcile(
+        self,
+        summing: SummingMatrix,
+        context: ReconciliationContext,
+    ) -> Any:
+        """Prepare state shared across cross-sections for one frame apply."""
+        del summing, context
+        return None
 
     def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:
         """Map a node-level base vector to a coherent node-level vector.
@@ -63,8 +96,18 @@ class VectorReconciler:
         """
         raise NotImplementedError
 
-    def _coherent_vector(
-        self, group: pd.DataFrame, summing: SummingMatrix
+    def reconcile_cross_section(self, cross_section: ReconciliationCrossSection) -> np.ndarray:
+        """Map one aligned cross-section to a coherent vector.
+
+        The default preserves the simple vector strategy surface. Subclasses
+        that need sidecar/context data can override this richer hook.
+        """
+        return self.reconcile_vector(cross_section.base, cross_section.subset)
+
+    def _base_vector(
+        self,
+        group: pd.DataFrame,
+        summing: SummingMatrix,
     ) -> tuple[SummingMatrix, np.ndarray]:
         uid_str = group[UNIQUE_ID].astype(str)
         duplicates = uid_str[uid_str.duplicated()].unique()
@@ -110,10 +153,41 @@ class VectorReconciler:
 
         yhat_by_id = dict(zip(uid_str, group[Y_HAT].astype(np.float64), strict=True))
         base = np.array([yhat_by_id[label] for label in subset.node_labels], dtype=np.float64)
-        return subset, self.reconcile_vector(base, subset)
+        return subset, base
 
-    def _reconcile_group(self, group: pd.DataFrame, summing: SummingMatrix) -> pd.DataFrame:
-        subset, coherent = self._coherent_vector(group, summing)
+    def _coherent_vector(
+        self,
+        group: pd.DataFrame,
+        summing: SummingMatrix,
+        *,
+        context: ReconciliationContext,
+        state: Any,
+    ) -> tuple[SummingMatrix, np.ndarray]:
+        subset, base = self._base_vector(group, summing)
+        cross_section = ReconciliationCrossSection(
+            group=group,
+            summing=summing,
+            subset=subset,
+            base=base,
+            context=context,
+            state=state,
+        )
+        return subset, self.reconcile_cross_section(cross_section)
+
+    def _reconcile_group(
+        self,
+        group: pd.DataFrame,
+        summing: SummingMatrix,
+        *,
+        context: ReconciliationContext,
+        state: Any,
+    ) -> pd.DataFrame:
+        subset, coherent = self._coherent_vector(
+            group,
+            summing,
+            context=context,
+            state=state,
+        )
         reconciled_by_node = dict(zip(subset.node_labels, coherent, strict=True))
         result = group.copy()
         result[Y_HAT] = result[UNIQUE_ID].astype(str).map(reconciled_by_node).astype(np.float64)

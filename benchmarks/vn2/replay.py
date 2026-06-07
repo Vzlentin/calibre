@@ -56,11 +56,11 @@ from calibre.core.forecast_frame import (
     quantile_column,
 )
 from calibre.core.forecast_task import ForecastTask
+from calibre.core.io import join_uri
 from calibre.core.order_types import RsPolicyParameters
 from calibre.execution import observe_cumulative
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
-from calibre.execution.io import join_uri
 from calibre.execution.task_builder import partition_tasks
 from calibre.ordering.policy_config import RsConfig, apply_order_policy
 

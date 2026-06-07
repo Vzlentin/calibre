@@ -12,7 +12,7 @@ from calibre.core.forecast_frame import UNIQUE_ID
 
 @lru_cache(maxsize=1024)
 def _read_parquet_cached(uri: str) -> pd.DataFrame:
-    from calibre.execution.io import read_parquet
+    from calibre.core.io import read_parquet
 
     return read_parquet(uri)
 
@@ -42,7 +42,7 @@ class ForecastTask:
         return self.model_config.get("name", self.model_config["model"])
 
     def to_uri(self, base_uri: str) -> ForecastTaskRef:
-        from calibre.execution.io import join_uri, write_parquet
+        from calibre.core.io import join_uri, write_parquet
 
         history_uri = join_uri(base_uri, f"{self.unique_id}.parquet")
         write_parquet(self.history, history_uri)

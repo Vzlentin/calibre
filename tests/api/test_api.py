@@ -54,7 +54,8 @@ class _StubAdapter(ModelAdapter):
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self.task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
@@ -109,7 +110,7 @@ def test_forecasts_route_is_removed() -> None:
 
 def test_backtests_endpoint_records_status(monkeypatch) -> None:
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
     client = TestClient(app)
 
     response = client.post("/backtests", json=_payload(), headers={"Idempotency-Key": "abc"})
@@ -123,7 +124,7 @@ def test_backtests_endpoint_records_status(monkeypatch) -> None:
 
 def test_backtests_endpoint_persists_runs_and_pointers(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     db_url = f"sqlite+pysqlite:///{(tmp_path / 'runs.db').as_posix()}"
     db = make_engine(db_url)
@@ -181,7 +182,9 @@ def test_backtests_endpoint_retries_failed_db_run_from_streaming_pointer(
         "calibre.execution.task_builder.get_adapter_cls",
         lambda _: _FlakyStubAdapter,
     )
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _FlakyStubAdapter())
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter", lambda _: _FlakyStubAdapter()
+    )
 
     db_url = f"sqlite+pysqlite:///{(tmp_path / 'retry.db').as_posix()}"
     db = make_engine(db_url)

@@ -23,7 +23,8 @@ from calibre.forecasting.adapter_base import ModelAdapter
 
 
 class _ObservabilityAdapter(ModelAdapter):
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self.task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
@@ -62,7 +63,7 @@ def test_backend_logs_adapter_fit_predict_phases(monkeypatch) -> None:
     stream = io.StringIO()
     setup_logging(stream=stream)
     monkeypatch.setattr(
-        "calibre.execution.backend.resolve_adapter",
+        "calibre.execution.prediction.resolve_adapter",
         lambda _: _ObservabilityAdapter(),
     )
     history = pd.DataFrame(

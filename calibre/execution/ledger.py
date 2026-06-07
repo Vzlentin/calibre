@@ -20,7 +20,7 @@ from calibre.core.forecast_frame import (
     Y,
     validate_forecast_frame,
 )
-from calibre.execution.io import exists, join_uri, open_fs, write_parquet
+from calibre.core.io import exists, join_uri, open_fs, write_parquet
 
 
 class LedgerSink(Protocol):

@@ -47,7 +47,8 @@ class _StubAdapter(ModelAdapter):
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self.task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
@@ -376,7 +377,7 @@ def test_winning_config_uses_auto_backend() -> None:
 def test_run_command_executes_config(monkeypatch, tmp_path) -> None:
     path = _write_config(tmp_path)
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     result = run(path)
 
@@ -397,7 +398,7 @@ def test_run_command_metrics_port_exposes_required_series(monkeypatch, tmp_path)
     )
     port = _free_port()
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     run(path, metrics_port=port)
 
@@ -415,7 +416,7 @@ def test_run_command_writes_non_streaming_output_to_fsspec_uri(monkeypatch, tmp_
         fs.rm("calibre-cli-test", recursive=True)
     path = _write_config(tmp_path, ledger_path=uri)
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     run(path)
 
@@ -435,7 +436,7 @@ def test_run_sweep_reads_fsspec_config_dir(monkeypatch) -> None:
     with fsspec.open(config_uri, "wt", encoding="utf-8") as fh:
         fh.write(_config_text(ledger_uri))
     monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda _: _StubAdapter())
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
     results = run_sweep(root_uri)
 

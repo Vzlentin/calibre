@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from calibre.execution.io import ensure_parent_dir, exists, join_uri, open_fs
+from calibre.core.io import ensure_parent_dir, exists, join_uri, open_fs
 
 
 class ModelArtifactCache:

@@ -22,7 +22,8 @@ class _CountingAdapter(ModelAdapter):
         self._config = model_config
         self._mean: float | None = None
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         type(self).fit_calls += 1
         self._mean = float(task.history[Y].mean())
 
@@ -144,12 +145,27 @@ def test_fit_with_cache_no_cache_runs_fit() -> None:
     assert _CountingAdapter.fit_calls == 1
 
 
+def test_fit_with_cache_bypasses_cache_when_fitted_values_requested(tmp_path: Path) -> None:
+    cache = ModelArtifactCache(str(tmp_path / "cache"))
+    task = _task()
+    first = _CountingAdapter({"model": "Mean"})
+    first.fit_with_cache(task, cache)
+
+    second = _CountingAdapter({"model": "Mean"})
+    fitted, key = second.fit_with_cache(task, cache, collect_fitted_values=True)
+
+    assert fitted is True
+    assert key is None
+    assert _CountingAdapter.fit_calls == 2
+
+
 def test_default_dump_state_raises_without_subclass_override() -> None:
     class _NoStateAdapter(ModelAdapter):
         def __init__(self, model_config: dict) -> None:
             self._config = model_config
 
-        def fit(self, task: ForecastTask) -> None:
+        def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+            del task, collect_fitted_values
             return None
 
         def predict(self, task: ForecastTask) -> pd.DataFrame:

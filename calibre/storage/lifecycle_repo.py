@@ -22,9 +22,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from calibre.api.lifecycle import FitRecord, OrderKey, TuneRecord, order_pk
 from calibre.conformal.runtime import to_json_safe_state
+from calibre.core.io import join_uri, read_parquet, write_parquet
 from calibre.core.run_status import RunStatus
 from calibre.core.serialization import frame_from_records, json_safe_records
-from calibre.execution.io import join_uri, read_parquet, write_parquet
 from calibre.storage.models import (
     LifecycleConformalState,
     LifecycleFitRecord,

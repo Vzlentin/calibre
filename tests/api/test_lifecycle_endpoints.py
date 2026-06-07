@@ -28,7 +28,8 @@ class _StubAdapter(ModelAdapter):
         self.model_config = model_config or {}
         self._level = 10.0
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         type(self).fit_calls += 1
         self._task = task
         self._level = float(len(task.history))
@@ -64,7 +65,9 @@ def _reset_lifecycle_store(monkeypatch, tmp_path):
 @pytest.fixture
 def stub_adapter(monkeypatch):
     monkeypatch.setattr("calibre.api.main.resolve_adapter", lambda _: _StubAdapter(), raising=False)
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", lambda cfg: _StubAdapter(cfg))
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter", lambda cfg: _StubAdapter(cfg)
+    )
     yield
 
 

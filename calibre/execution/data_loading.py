@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, IN_STOCK, UNIQUE_ID, Y
-from calibre.execution.io import exists, join_uri
+from calibre.core.io import exists, join_uri
 
 
 def _detect_date_columns(columns: list[str]) -> list[str]:

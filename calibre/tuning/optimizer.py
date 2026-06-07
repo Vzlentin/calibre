@@ -22,8 +22,8 @@ from calibre.conformal.runtime import (
 )
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
+from calibre.core.io import join_uri
 from calibre.execution.backend import BackendEngine, ConformalOptions, ExecutionOptions
-from calibre.execution.io import join_uri
 from calibre.execution.ray_runtime import acquire_ray_runtime, prepare_ray_environment
 from calibre.execution.task_builder import partition_tasks
 from calibre.execution.threading import cap_threaded_config, thread_budget

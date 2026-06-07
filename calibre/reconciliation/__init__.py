@@ -9,7 +9,7 @@ pass-through.
 from calibre.reconciliation.apply import VectorReconciler
 from calibre.reconciliation.nixtla_adapter import NixtlaReconciler
 from calibre.reconciliation.noop import NoOpReconciler
-from calibre.reconciliation.protocols import Reconciler
+from calibre.reconciliation.protocols import Reconciler, ReconciliationContext
 from calibre.reconciliation.registry import (
     available_reconcilers,
     resolve_reconciler,
@@ -24,6 +24,7 @@ __all__ = [
     "TOTAL_LABEL",
     "NixtlaReconciler",
     "NoOpReconciler",
+    "ReconciliationContext",
     "Reconciler",
     "SummingMatrix",
     "VectorReconciler",

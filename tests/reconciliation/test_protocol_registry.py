@@ -6,6 +6,7 @@ import pytest
 from calibre.reconciliation import (
     NixtlaReconciler,
     NoOpReconciler,
+    ReconciliationContext,
     available_reconcilers,
     resolve_reconciler,
 )
@@ -25,7 +26,7 @@ def _frame() -> pd.DataFrame:
 def test_none_resolves_to_identity_passthrough() -> None:
     reconciler = resolve_reconciler("none")
     frame = _frame()
-    out = reconciler(frame, None)
+    out = reconciler(frame, None, ReconciliationContext())
     pd.testing.assert_frame_equal(out, frame)
 
 
@@ -34,7 +35,7 @@ def test_none_is_identity_even_with_non_none_hierarchy() -> None:
     reconciler = resolve_reconciler("none")
     frame = _frame()
     hierarchy = pd.DataFrame({"unique_id": ["A", "B"], "store_id": ["S1", "S2"]})
-    out = reconciler(frame, hierarchy)
+    out = reconciler(frame, hierarchy, ReconciliationContext())
     pd.testing.assert_frame_equal(out, frame)
 
 
@@ -43,7 +44,10 @@ def test_resolved_noop_is_a_reconciler_instance() -> None:
     assert isinstance(reconciler, NoOpReconciler)
 
 
-@pytest.mark.parametrize("name", ["bottom_up", "ols", "wls_struct"])
+@pytest.mark.parametrize(
+    "name",
+    ["bottom_up", "ols", "wls_struct", "mint_shrink", "wls_var", "erm"],
+)
 def test_nixtla_strategies_resolve_to_adapter(name: str) -> None:
     reconciler = resolve_reconciler(name)
     assert isinstance(reconciler, NixtlaReconciler)
@@ -68,4 +72,17 @@ def test_none_is_registered_and_available() -> None:
 
 
 def test_available_reconcilers_contains_only_runnable_set() -> None:
-    assert available_reconcilers() == ["bottom_up", "none", "ols", "wls_struct"]
+    assert available_reconcilers() == [
+        "bottom_up",
+        "erm",
+        "mint_shrink",
+        "none",
+        "ols",
+        "wls_struct",
+        "wls_var",
+    ]
+
+
+def test_mint_cov_is_not_on_generic_runnable_surface() -> None:
+    with pytest.raises(ValueError, match="Unknown reconciliation strategy"):
+        resolve_reconciler("mint_cov")

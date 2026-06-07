@@ -24,7 +24,8 @@ class _FutureXAdapter(ModelAdapter):
         self.model_config = model_config or {}
         self.received: list[pd.DataFrame | None] = []
 
-    def fit(self, task: ForecastTask) -> None:
+    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+        del collect_fitted_values
         self._task = task
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
@@ -73,7 +74,7 @@ def _reset_lifecycle_store(monkeypatch, tmp_path, received_future_x):
         adapter.received = received_future_x
         return adapter
 
-    monkeypatch.setattr("calibre.execution.backend.resolve_adapter", _make_adapter)
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", _make_adapter)
     return fresh
 
 

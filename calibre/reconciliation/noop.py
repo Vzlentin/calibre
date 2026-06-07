@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from calibre.reconciliation.protocols import ReconciliationContext
+
 
 class NoOpReconciler:
     """Identity reconciler — returns the forecast frame unchanged.
@@ -12,6 +14,13 @@ class NoOpReconciler:
     construction.
     """
 
-    def __call__(self, frame: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame:
-        del hierarchy
+    requires_fitted_values = False
+
+    def __call__(
+        self,
+        frame: pd.DataFrame,
+        hierarchy: pd.DataFrame | None,
+        context: ReconciliationContext,
+    ) -> pd.DataFrame:
+        del hierarchy, context
         return frame
