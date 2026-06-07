@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev --extra benchmarks
+      - run: uv sync --extra dev --extra benchmarks --extra hierarchy
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run ty check calibre/
@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev --extra benchmarks
+      - run: uv sync --extra dev --extra benchmarks --extra hierarchy
       - name: Cache VN2 data
         uses: actions/cache@v4
         id: vn2-cache

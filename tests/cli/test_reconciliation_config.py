@@ -11,7 +11,7 @@ from calibre.cli.commands import run_config
 from calibre.cli.config import ReconciliationConfig, load_config_from_mapping
 from calibre.execution.backend import BackendResult
 from calibre.execution.ledger import InMemoryLedger
-from calibre.reconciliation import BottomUpReconciler, MinTReconciler, NoOpReconciler
+from calibre.reconciliation import NixtlaReconciler, NoOpReconciler
 
 _M5_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
 
@@ -45,28 +45,28 @@ def test_strategy_none_round_trips_to_noop() -> None:
     assert isinstance(config.reconciliation.to_reconciler(), NoOpReconciler)
 
 
-def test_strategy_bottom_up_resolves() -> None:
-    config = load_config_from_mapping(_config(reconciliation={"strategy": "bottom_up"}))
-    assert isinstance(config.reconciliation.to_reconciler(), BottomUpReconciler)
-
-
-def test_strategy_mint_shrinkage_resolves_with_weighting() -> None:
-    config = load_config_from_mapping(
-        _config(reconciliation={"strategy": "mint", "weighting": "shrinkage"})
-    )
+@pytest.mark.parametrize("strategy", ["bottom_up", "ols", "wls_struct"])
+def test_nixtla_strategy_resolves(strategy: str) -> None:
+    config = load_config_from_mapping(_config(reconciliation={"strategy": strategy}))
     reconciler = config.reconciliation.to_reconciler()
-    assert isinstance(reconciler, MinTReconciler)
-    assert reconciler.weighting == "shrinkage"
+    assert isinstance(reconciler, NixtlaReconciler)
+    assert reconciler.strategy == strategy
 
 
-def test_unknown_strategy_value_raises_listing_valid_choices() -> None:
+@pytest.mark.parametrize("strategy", ["mint", "mint_shrink", "top_down", "bogus"])
+def test_unknown_strategy_value_raises_listing_valid_choices(strategy: str) -> None:
     with pytest.raises(ValidationError, match="strategy"):
-        load_config_from_mapping(_config(reconciliation={"strategy": "bogus"}))
+        load_config_from_mapping(_config(reconciliation={"strategy": strategy}))
 
 
 def test_unknown_key_under_reconciliation_is_forbidden() -> None:
     with pytest.raises(ValidationError, match="bogus_knob"):
         load_config_from_mapping(_config(reconciliation={"strategy": "none", "bogus_knob": 1}))
+
+
+def test_weighting_key_under_reconciliation_is_forbidden() -> None:
+    with pytest.raises(ValidationError, match="weighting"):
+        load_config_from_mapping(_config(reconciliation={"strategy": "ols", "weighting": "ols"}))
 
 
 def test_run_config_passes_bundle_hierarchy_into_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,13 +97,14 @@ def test_run_config_passes_bundle_hierarchy_into_engine(monkeypatch: pytest.Monk
                 }
             ],
             "origins": {"start": "2011-01-30", "end": "2011-01-30", "freq": "D"},
-            "reconciliation": {"strategy": "bottom_up"},
+            "reconciliation": {"strategy": "ols"},
             "execution": {"backend": "local", "seed": 42},
         }
     )
     run_config(config)
 
     options = captured["reconciliation"]
-    assert isinstance(options.reconciler, BottomUpReconciler)
+    assert isinstance(options.reconciler, NixtlaReconciler)
+    assert options.reconciler.strategy == "ols"
     assert options.hierarchy is not None
     assert "unique_id" in options.hierarchy.columns

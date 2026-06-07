@@ -36,8 +36,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
-from calibre.reconciliation import BottomUpReconciler, NoOpReconciler
-from calibre.reconciliation.mint import MinTReconciler
+from calibre.reconciliation import NixtlaReconciler, NoOpReconciler
 from calibre.reconciliation.summing import build_summing_matrix
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
@@ -134,13 +133,14 @@ def test_summing_matrix_built_from_real_m5_attributes() -> None:
     assert summing.n_bottom == int(bundle.hierarchy[UNIQUE_ID].nunique())
 
 
-def test_m5_bottom_up_run_completes_and_reconcile_executes() -> None:
+def test_m5_ols_run_completes_and_reconcile_executes() -> None:
     bundle, actuals, tasks, origins = _m5_bundle_tasks_origins()
-    spy = _CountingReconciler(BottomUpReconciler())
+    spy = _CountingReconciler(NixtlaReconciler("ols"))
     ledger = _run_m5(bundle, actuals, tasks, origins, spy)
     # The reconcile phase actually ran on M5 (not silently skipped).
     assert spy.calls >= 1
     assert not ledger.empty
+    _assert_node_rows_coherent(ledger, bundle.hierarchy)
 
 
 def test_m5_bottom_yhat_identical_to_noop_run() -> None:
@@ -150,7 +150,9 @@ def test_m5_bottom_yhat_identical_to_noop_run() -> None:
     bottom_ids = set(build_summing_matrix(bundle.hierarchy).bottom_ids)
 
     none_run = _run_m5(bundle, actuals, tasks, origins, NoOpReconciler()).sort_values(keys)
-    bottom_up_run = _run_m5(bundle, actuals, tasks, origins, BottomUpReconciler()).sort_values(keys)
+    bottom_up_run = _run_m5(
+        bundle, actuals, tasks, origins, NixtlaReconciler("bottom_up")
+    ).sort_values(keys)
     none_bottom = none_run[none_run[UNIQUE_ID].isin(bottom_ids)]
     bottom_up_bottom = bottom_up_run[bottom_up_run[UNIQUE_ID].isin(bottom_ids)]
 
@@ -164,7 +166,7 @@ def test_m5_bottom_yhat_identical_to_noop_run() -> None:
 def test_m5_conformal_interval_columns_present_after_reconcile() -> None:
     """Conformal still emits per-node marginal interval columns (R9)."""
     bundle, actuals, tasks, origins = _m5_bundle_tasks_origins()
-    ledger = _run_m5(bundle, actuals, tasks, origins, BottomUpReconciler())
+    ledger = _run_m5(bundle, actuals, tasks, origins, NixtlaReconciler("ols"))
     lower_col, upper_col = interval_column_names(0.9)
     assert lower_col in ledger.columns
     assert upper_col in ledger.columns
@@ -190,15 +192,15 @@ def test_m5_ols_moves_bottom_forecasts_from_divergent_node_bases(monkeypatch) ->
 
     assert not np.allclose(summing.S @ bottom_base, node_base)
 
-    ols = _run_m5(bundle, actuals, tasks, origins, MinTReconciler(weighting="ols")).sort_values(
-        keys
-    )
+    ols = _run_m5(bundle, actuals, tasks, origins, NixtlaReconciler("ols")).sort_values(keys)
     ols_values = ols.set_index(UNIQUE_ID)[Y_HAT]
     ols_bottom = ols_values.reindex(summing.bottom_ids).to_numpy(dtype=np.float64)
     assert not np.allclose(ols_bottom, bottom_base)
     _assert_node_rows_coherent(ols, bundle.hierarchy)
 
-    bottom_up = _run_m5(bundle, actuals, tasks, origins, BottomUpReconciler()).sort_values(keys)
+    bottom_up = _run_m5(bundle, actuals, tasks, origins, NixtlaReconciler("bottom_up")).sort_values(
+        keys
+    )
     bottom_up_values = bottom_up.set_index(UNIQUE_ID)[Y_HAT]
     bottom_up_bottom = bottom_up_values.reindex(summing.bottom_ids).to_numpy(dtype=np.float64)
     np.testing.assert_allclose(bottom_up_bottom, bottom_base, rtol=1e-10, atol=1e-10)
@@ -219,7 +221,7 @@ def test_reconcile_byte_identical_when_hierarchy_none() -> None:
         }
     )
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=BottomUpReconciler(), hierarchy=None)
+        reconciliation=ReconciliationOptions(reconciler=NixtlaReconciler("ols"), hierarchy=None)
     )
     out = engine._reconcile(preds)
     pd.testing.assert_frame_equal(out, preds)

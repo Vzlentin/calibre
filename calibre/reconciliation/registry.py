@@ -1,24 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
-from calibre.reconciliation.mint import build_mint_reconciler
+from calibre.reconciliation.nixtla_adapter import NixtlaReconciler, NixtlaStrategy
 from calibre.reconciliation.noop import NoOpReconciler
 from calibre.reconciliation.protocols import Reconciler
-from calibre.reconciliation.strategies import BottomUpReconciler, TopDownReconciler
 
-ReconcilerBuilder = Callable[..., Reconciler]
+ReconcilerBuilder = Callable[[], Reconciler]
+
+
+def _nixtla_builder(strategy: NixtlaStrategy) -> ReconcilerBuilder:
+    return lambda: NixtlaReconciler(strategy)
+
 
 _REGISTRY: dict[str, ReconcilerBuilder] = {
     "none": NoOpReconciler,
-    "bottom_up": BottomUpReconciler,
-    "top_down": TopDownReconciler,
-    "mint": build_mint_reconciler,
+    "bottom_up": _nixtla_builder("bottom_up"),
+    "ols": _nixtla_builder("ols"),
+    "wls_struct": _nixtla_builder("wls_struct"),
 }
 
 
-def resolve_reconciler(name: str, **kwargs: Any) -> Reconciler:
+def resolve_reconciler(name: str) -> Reconciler:
     """Build a reconciler instance from a registered strategy name."""
     key = str(name).strip().lower()
     try:
@@ -27,7 +30,7 @@ def resolve_reconciler(name: str, **kwargs: Any) -> Reconciler:
         raise ValueError(
             f"Unknown reconciliation strategy: {name!r}. Available: {sorted(_REGISTRY)}"
         ) from exc
-    return builder(**kwargs)
+    return builder()
 
 
 def available_reconcilers() -> list[str]:
