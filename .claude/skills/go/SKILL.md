@@ -11,11 +11,11 @@ failed stage to reach the next one.
 
 `/go` accepts three input kinds: a **plain idea**, a **GitHub issue** (`#N`, a
 number, or a roadmap code like `U3`), or a **path to a plan file**. Before
-implementing, it resolves the input to a concrete plan in the active plan store
-(the Obsidian vault when `OBSIDIAN_VAULT_PATH` is set, else `docs/plans/`),
-invoking `/ce-plan` on demand when no plan exists yet. It then guarantees a
-backing GitHub issue so the `closes #N` merge convention keeps working, and only
-then implements. The plan is the work order; the issue is the close-handle.
+implementing, it resolves the input to a concrete plan in the Obsidian vault
+(`$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/`), invoking `/ce-plan` on demand
+when no plan exists yet. It then guarantees a backing GitHub issue so the
+`closes #N` merge convention keeps working, and only then implements. The plan
+is the work order; the issue is the close-handle.
 
 ## Project rules that bind every stage
 
@@ -30,6 +30,14 @@ then implements. The plan is the work order; the issue is the close-handle.
   title/body, or issue comments.
 - **Squash + `closes #N`.** Merge is squash-only; the PR body must carry
   `closes #N` so the issue closes and roadmap status updates for free.
+- **Don't trust `git status --porcelain` emptiness.** This environment wraps
+  `git`: on a clean tree `--porcelain` may emit `ok` instead of empty. For
+  authoritative dirty/clean detection, parse the full `git status` text
+  (`nothing to commit` / `clean` → clean; anything else → dirty).
+- **Don't use `gh pr checks --json`.** The local `gh` wrapper breaks `--json`
+  with `unknown flag`. Query the GitHub API directly instead:
+  `gh api repos/Vzlentin/calibre/commits/<sha>/check-runs` for check status,
+  `gh api repos/Vzlentin/calibre/commits/<sha>/status` for combined status.
 
 ---
 
@@ -80,38 +88,34 @@ no issue — stop and ask.
 
 ---
 
-## Stage 0.5 — Ensure a plan exists in the active store
+## Stage 0.5 — Ensure a plan exists in the vault
 
-**Resolve the plan store first.** When `OBSIDIAN_VAULT_PATH` is set, the store is
-the vault: `$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/`. When it is unset, the
-store is repo `docs/plans/` — there is no private store, so nothing private can
-enter the plan, the public repo is the canonical store, and the pipeline still
-runs end-to-end. Every search and write below targets the active store.
+The plan store is always the Obsidian vault:
+`$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/`.
 
 Get a plan in hand, by input kind:
 
 - **Plan-file (executable):** that file is the plan. Skip to Stage 0.6.
 - **Plan-file (brainstorm) / Issue / Idea:** find an existing plan, else create one.
-  - **Issue:** search the active store for a plan whose frontmatter `origin:` or
+  - **Issue:** search the vault for a plan whose frontmatter `origin:` or
     body references `#N`:
 
     ```bash
-    grep -rl "#<N>" "$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans"   # vault store
-    grep -rl "#<N>" docs/plans                                       # degraded store
+    grep -rl "#<N>" "$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans"
     ```
 
     If found, use it. Else invoke `/ce-plan` (smart gate below), seeded with the
     issue title + body.
-  - **Idea:** keyword/slug search the store's plan titles and filenames. On a
+  - **Idea:** keyword/slug search the vault's plan titles and filenames. On a
     *plausible* match, confirm with the user before reusing it (a wrong reuse is
     worse than a fresh plan). On no match, invoke `/ce-plan` (smart gate below),
     seeded with the idea text.
   - **Brainstorm / ideation doc:** a brainstorm is **never** executable on its
     own — it must be turned into a plan via `/ce-plan`. Keyword/slug search the
-    store for a plan already derived from it; on a *plausible* match, confirm with
-    the user before reusing it (a wrong reuse is worse than a fresh plan). On no
-    match, invoke `/ce-plan` (smart gate below), seeded with the brainstorm doc's
-    full contents. Never feed the brainstorm itself to Stage 1 as the spec.
+    vault for a plan already derived from it; on a *plausible* match, confirm with
+    the user before reusing it. On no match, invoke `/ce-plan` (smart gate below),
+    seeded with the brainstorm doc's full contents. Never feed the brainstorm
+    itself to Stage 1 as the spec.
 
 **Invoking `/ce-plan` — smart gate.** A spawned subagent can't ask questions, so
 headless planning is only safe when the seed already settles scope and approach.
@@ -119,10 +123,10 @@ You (the interactive orchestrator) judge the seed you already hold — issue bod
 idea text, or brainstorm doc — and route:
 
 - **Seed pins down scope and approach, no material design fork → headless
-  subagent.** Spawn `/ce-plan` as a **foreground** subagent (`subagent_type:
-  general-purpose`): run in headless/pipeline mode, assume and record any open
-  decision rather than asking, auto-proceed every `ce-plan` gate, write the plan,
-  and do **not** start `ce-work` or create the issue — return the plan path.
+  subagent.** Spawn `/ce-plan` as a **foreground** subagent: run in
+  headless/pipeline mode, assume and record any open decision rather than asking,
+  auto-proceed every `ce-plan` gate, write the plan, and do **not** start
+  `ce-work` or create the issue — return the plan path.
 - **Seed is thin or ambiguous → inline (interactive).** Run `/ce-plan` inline
   (not spawned) so its scoping/clarifying gates reach the user. When its
   post-generation menu appears, select **"Done for now"** so `/go` keeps control
@@ -131,21 +135,17 @@ idea text, or brainstorm doc — and route:
 
 Per-kind hint: a thin/one-line issue or vague idea → inline; a spec-complete
 issue, a detailed idea, or a scope-settled brainstorm → headless subagent.
-`/ce-plan` writes natively to `docs/plans/YYYY-MM-DD-NNN-<type>-<name>-plan.md`
-(it takes no output-path arg).
 
-**Relocate into the vault (only when the vault is set).** After `/ce-plan`
-returns, if the vault is the active store, move its `docs/plans/` output into the
-vault: read the file, rewrite the frontmatter to the vault convention (`title`,
-`type` (`feat|fix|refactor|chore`), `status: active`, `date`, and `origin` once
-Stage 0.6 sets it), write it to
+`/ce-plan` writes to `docs/plans/YYYY-MM-DD-NNN-<type>-<name>-plan.md` by
+default. **Relocate it into the vault:** read the file, rewrite the frontmatter
+to the vault convention (`title`, `type` (`feat|fix|refactor|chore`),
+`status: active`, `date`, and `origin` once Stage 0.6 sets it), write it to
 `$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/<YYYY-MM-DD-slug>.md`, verify the
-write, then delete the `docs/plans/` copy — one source of truth, and no private
-context in the public repo. When the vault is unset, **skip relocation**: the
-plan stays in `docs/plans/`.
+write, then delete the `docs/plans/` copy — one source of truth, no private
+context in the public repo.
 
-**GATE:** a plan file for this work item exists in the active store (vault if
-set, else `docs/plans/`). If `/ce-plan` produced nothing, stop and report.
+**GATE:** a plan file for this work item exists in the vault. If `/ce-plan`
+produced nothing, stop and report.
 
 ---
 
@@ -157,18 +157,14 @@ Every run merges with `closes #N`, so guarantee an issue exists:
   plan carrying `origin: "GitHub issue #N — …"`. Do not create a duplicate.
 - **Create** otherwise. Open a GitHub issue with a ≤70-char title and a
   **public-safe** body that summarizes the plan — no client names, partners, or
-  private commercial context. Vault plans may carry private/commercial context;
-  the full plan stays in the vault and only the public-safe summary becomes the
-  issue body. In degraded mode (vault unset) the plan is already fully public, so
-  the body may be derived from it directly without stripping. Capture the new
-  number `N`:
+  private commercial context. The full plan stays in the vault; only the
+  public-safe summary becomes the issue body. Capture the new number `N`:
 
   ```bash
   gh issue create --title "<≤70-char title>" --body-file <public-safe summary>
   ```
 
-Record `origin: "GitHub issue #N — <short>"` in the plan's frontmatter (in the
-active store). Milestone/label triage is left to the user (out of scope here).
+Record `origin: "GitHub issue #N — <short>"` in the plan's frontmatter.
 
 **GATE:** a usable `#N` exists and is recorded on the plan. If issue creation
 failed, stop and report.
@@ -183,34 +179,51 @@ uncommitted work — is never disturbed. Read git state in the main checkout:
 
 ```bash
 MAIN=$(git rev-parse --show-toplevel)   # main checkout path; capture before any cd
-git branch --show-current               # empty ⇒ detached HEAD
-git status --porcelain                  # empty ⇒ clean tree
+CURRENT_BRANCH=$(git branch --show-current)  # empty ⇒ detached HEAD
+# Check tree cleanliness via full status text (NOT --porcelain emptiness — the
+# local git wrapper may emit "ok" on a clean tree instead of empty output):
+git status 2>&1 | grep -qE '(nothing to commit|clean)'
+DIRTY=$?   # 0 = clean, 1 = dirty
 ```
 
 Decide the mode:
 
-- **On `main` AND clean** (current branch is `main` *and* `git status --porcelain`
-  is empty) → **DIRECT mode**: `WORKTREE_MODE=false`, `WORKDIR="$MAIN"`. No
+- **On `main` AND clean** (current branch is `main` *and* tree is clean) →
+  **DIRECT mode**: `WORKTREE_MODE=false`, `WORKDIR="$MAIN"`. No
   provisioning — `ce-work` branches inside this checkout as it does today.
-- **Any other branch, detached HEAD, OR uncommitted/untracked work** →
+- **Any other branch, detached HEAD, OR dirty tree** →
   **WORKTREE mode**: `WORKTREE_MODE=true`. Provision an isolated worktree on a
   fresh branch cut from `origin/main`, so neither the user's branch nor their
   dirty tree moves.
 
 **Provision (worktree mode only).** `<type>` is the kind `ce-work` would choose
 (`feat|fix|refactor|chore`); `<slug>` is the Stage 0 slug. Run from the main
-checkout and spell the source path explicitly — `$ROOT_WORKTREE_PATH` (the
-Cursor-injected var `setup-worktree-unix` relies on) is absent when `/go` runs
-the steps itself:
+checkout.
+
+The worktree setup steps are **defined in `.cursor/worktrees.json`** under
+`setup-worktree-unix`. Read that file from `$MAIN/.cursor/worktrees.json` and
+execute each step verbatim, with one substitution: replace every occurrence of
+`$ROOT_WORKTREE_PATH` with `$MAIN` (Cursor injects `$ROOT_WORKTREE_PATH` so it
+resolves to the main checkout; `/go` runs the steps itself so it must supply
+that value explicitly). Do NOT hardcode the steps — always read the JSON so a
+change to the worktree config is picked up automatically:
 
 ```bash
 git fetch origin
 git worktree add .worktrees/<slug> -b <type>/<slug> origin/main
 cd .worktrees/<slug>
-# canonical setup-worktree-unix steps, sourced from the main checkout ($MAIN):
-test -f "$MAIN/.env" && cp "$MAIN/.env" .env || true
-test -d "$MAIN/data/vn2" && mkdir -p data && cp -R "$MAIN/data/vn2" data/vn2 || true
-uv sync --frozen --extra dev --extra benchmarks
+# Read setup-worktree-unix from .cursor/worktrees.json, replace
+# $ROOT_WORKTREE_PATH → $MAIN, then execute each step:
+STEPS=$(python3 -c "
+import json, sys
+with open('$MAIN/.cursor/worktrees.json') as f:
+    for step in json.load(f)['setup-worktree-unix']:
+        print(step.replace('\$ROOT_WORKTREE_PATH', '$MAIN'))
+")
+echo "$STEPS" | while read -r step; do
+    echo "  → $step"
+    eval "$step" || { echo "FAILED: $step"; exit 1; }
+done
 WORKDIR=$(pwd)                          # absolute worktree path
 ```
 
@@ -233,9 +246,8 @@ direct mode this gate is automatically satisfied.
 
 ## Stage 1 — Implement + open the PR (`ce-work` as a spawned agent)
 
-Spawn **one** agent (foreground, `subagent_type: general-purpose`, no model
-override — inherit) to implement the plan and open the PR — a subagent per the
-Invocation model. Give it this brief:
+Spawn **one** agent (foreground, no model override — inherit) to implement the
+plan and open the PR — a subagent per the Invocation model. Give it this brief:
 
 > Invoke the `ce-work` skill to implement the plan below for GitHub issue #N.
 > Treat the pasted plan as the complete spec — do not re-plan, do not ask to
@@ -266,8 +278,8 @@ Invocation model. Give it this brief:
 > Report back: PR number, PR URL, and the branch name.
 >
 > --- PLAN (complete spec) ---
-> <paste the full plan contents from the active store — paste the text, do not
-> pass a path; an isolated worktree may not have the vault mounted>
+> <paste the full plan contents from the vault — paste the text, do not pass a
+> path; an isolated worktree does not have the vault mounted>
 
 When the agent returns, sync by mode — never move the main checkout onto the PR
 branch in worktree mode:
@@ -295,10 +307,10 @@ yourself.
 
 ---
 
-## Stage 2 — Simplify the diff (`/ce-simplify-code`, inline)
+## Stage 2 — Simplify the diff (`ce-simplify-code`, inline)
 
 Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — see Invocation
-model). Scope is the branch diff vs `main`, which is correct here.
+model; it spawns its own subagents). Scope is the branch diff vs `main`.
 
 If it changes anything, it re-runs typecheck/lint/scoped tests itself. Commit and
 push any resulting changes before moving on:
@@ -311,13 +323,13 @@ cd "$WORKDIR" && git add -A && git commit -m "refactor: simplify <slug>" && git 
 
 ---
 
-## Stage 3 — Review the PR (`/ce-code-review`, inline)
+## Stage 3 — Review the PR (`ce-code-review`, inline)
 
-Invoke the `ce-code-review` skill from `WORKDIR` (inline — see Invocation model)
-against this PR. Ensure its **actionable findings land as inline PR review
-comments** (resolvable threads) so Stage 4 has something to resolve — pass the PR
-and have it post comments rather than only printing a report. If it applies any
-safe fixes inline and commits them, push those:
+Invoke the `ce-code-review` skill from `WORKDIR` (inline — see Invocation model;
+it spawns its own subagents) against this PR. Ensure its **actionable findings
+land as inline PR review comments** (resolvable threads) so Stage 4 has something
+to resolve — pass the PR and have it post comments rather than only printing a
+report. If it applies any safe fixes inline and commits them, push those:
 
 ```bash
 cd "$WORKDIR" && git push
@@ -330,12 +342,12 @@ valid outcome — Stage 4 then no-ops.
 
 ---
 
-## Stage 4 — Resolve review feedback (`/ce-resolve-pr-feedback`, inline)
+## Stage 4 — Resolve review feedback (`ce-resolve-pr-feedback`, inline)
 
 Invoke the `ce-resolve-pr-feedback` skill from `WORKDIR` (inline — see Invocation
-model) for this PR. It evaluates every unresolved thread (Stage 3's
-findings plus any human/bot comments that arrived), fixes the valid ones in
-`WORKDIR`, commits + pushes, then replies and resolves each thread.
+model; it spawns its own subagents) for this PR. It evaluates every unresolved
+thread (Stage 3's findings plus any human/bot comments that arrived), fixes the
+valid ones in `WORKDIR`, commits + pushes, then replies and resolves each thread.
 
 **GATE:** no unresolved review threads remain except ones it explicitly tagged
 `needs-human`. If `needs-human` threads exist, surface them in the final report;
@@ -345,21 +357,37 @@ they do not block the merge unless they flag a correctness risk — use judgment
 
 ## Stage 5 — Babysit CI, then squash-merge on green
 
-Wait for CI, then enter an autofix loop (max **3** iterations):
+Wait for CI, then enter an autofix loop (max **3** iterations).
+
+**Don't use `gh pr checks --json`** — the local `gh` wrapper breaks `--json`.
+Instead, get the PR's head SHA and query the GitHub API directly:
 
 ```bash
-gh pr checks --watch    # exit 0 = all green → break and merge
+HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)
+# Combined status (overall green/red):
+gh api repos/Vzlentin/calibre/commits/$HEAD_SHA/status --jq '.state'
+# Individual check runs:
+gh api repos/Vzlentin/calibre/commits/$HEAD_SHA/check-runs --jq '.check_runs[] | {name, status, conclusion}'
 ```
 
 If checks fail:
 
-1. Enumerate failures: `gh pr checks --json name,state,conclusion,link`.
-2. Pull logs: `gh run view <run-id> --log-failed`.
+1. Enumerate failures from the check-runs output above.
+2. Pull logs for failed runs:
+   ```bash
+   gh api repos/Vzlentin/calibre/commits/$HEAD_SHA/check-runs \
+     --jq '.check_runs[] | select(.conclusion=="failure") | .details_url'
+   # For each failed run, get the workflow run ID from the URL, then:
+   gh run view <run-id> --log-failed
+   ```
 3. Fix the **root cause** in `WORKDIR`. Never weaken an assertion, skip a
    test, or touch the VN2 `4992.20` baseline to turn CI green. If the failure is
-   a genuinely flaky test with no code fix, record it rather than retrying blindly.
+   a genuinely flaky test with no code fix, record it rather than retrying
+   blindly. **If the same failure signature appears across 2+ iterations, stop**
+   — the fix round is introducing its own failures (the PR #38 pattern); don't
+   burn the last cycle.
 4. `cd "$WORKDIR" && git add <changed> && git commit -m "fix(ci): <what broke>" && git push`.
-5. Re-watch.
+5. Re-check.
 
 After **3** failed cycles, stop looping: append a `## CI Failures Unresolved`
 section to the PR body (`gh pr edit <PR> --body-file <tmp>`) and report. Do not
@@ -421,38 +449,31 @@ Stage 6 always runs from the main checkout (`$MAIN`), never from `WORKDIR` — b
 now the worktree may already be removed by Stage 5 cleanup, and persistence is
 independent of execution mode.
 
-**Flip the plan to shipped (always).** In the active store (vault if set, else
-`docs/plans/`), update the plan file for this work item: set
+**Flip the plan to shipped.** Update the plan file in the vault
+(`$OBSIDIAN_VAULT_PATH/Projects/Calibre/plans/<plan-file>`): set
 `status: active → shipped` and append the outcome — PR URL, merged SHA, and any
 key decisions.
 
-- **Vault set:** this is a vault edit. Also invoke the `project-memory` skill for
-  the `calibre` project where warranted:
-  - **`architecture.md`** — only if this introduced a durable design decision,
-    module boundary, or invariant change. Terse; cite the PR.
-  - **`lessons.md`** — append any rule-for-self from a correction or pitfall hit.
+**Update vault memory** where warranted:
+- **`architecture.md`** — only if this introduced a durable design decision,
+  module boundary, or invariant change. Terse; cite the PR.
+- **`lessons.md`** — append any rule-for-self from a correction or pitfall hit.
 
-  Do not touch `vision.md` unless product scope actually moved. The vault is a git
-  repo — commit and push the vault edits (the plan status flip plus any memory
-  updates).
-- **Vault unset (degraded):** the plan lives in `docs/plans/` in the main
-  checkout — Stage 0.5 wrote it there before any worktree existed, and the
-  Stage 1 brief pasted the plan *text*, so the worktree never needed the file on
-  disk. From the main checkout, commit the `status: shipped` flip (a docs-only
-  change) to `main` and push. There is no vault, so skip
-  `architecture.md` / `lessons.md` / `project-memory`.
+Do not touch `vision.md` unless product scope actually moved.
 
-**GATE:** the work item's plan in the active store reads `status: shipped` with
-the PR/SHA recorded.
+The vault is a git repo — commit and push the vault edits (the plan status flip
+plus any memory updates).
+
+**GATE:** the work item's plan in the vault reads `status: shipped` with the
+PR/SHA recorded.
 
 ---
 
 ## Done
 
 Report, in order: the resolved **input kind** (idea / issue / plan-file) and the
-**plan path** in the active store; the **execution mode** (direct / worktree, and
-on the preserve path the retained branch and — in worktree mode — the worktree
-path); issue #N; PR URL;
-merged (yes + SHA / no + reason); CI result; any `needs-human` review threads; and
-memory updates (plan status flip, plus architecture/lessons or "skipped — no
-vault").
+**plan path** in the vault; the **execution mode** (direct / worktree, and on the
+preserve path the retained branch and — in worktree mode — the worktree path);
+issue #N; PR URL; merged (yes + SHA / no + reason); CI result; any
+`needs-human` review threads; and memory updates (plan status flip, plus
+architecture/lessons or "skipped").
