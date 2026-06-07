@@ -10,7 +10,7 @@ below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
 > narrow scope.
 >
 > Setup, non-interactively (do not stop to ask which branch) — use the clause for
-> this run's mode (from Stage 0.7):
+> this run's mode (from Stage 0d):
 > - **Direct mode:** from an up-to-date `main`, create the feature branch
 >   `<type>/<slug>` in this checkout. Do not commit to `main`.
 > - **Worktree mode:** the branch and worktree already exist. `cd` into
