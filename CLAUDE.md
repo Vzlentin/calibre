@@ -98,8 +98,9 @@ non-trivial task. Hermes agents: use the `obsidian` skill instead.
 
 The vault root is `$OBSIDIAN_VAULT_PATH`. The project folder is
 `Projects/Calibre/`; canon files: `architecture.md`, `lessons.md`,
-`vision.md`, `ROADMAP.md`, plus `plans/` and `archive/`. Skip vault
-operations if the env var is unset.
+`vision.md`, `ROADMAP.md`, plus `plans/` and `archive/`. If the env var is
+unset, plans fall back to repo-local `docs/plans/` while durable memory is
+skipped (per the skill).
 
 ### Roadmap: GitHub for status, vault for rationale
 
