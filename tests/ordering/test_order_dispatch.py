@@ -288,5 +288,5 @@ class TestDispatchErrors:
     def test_dispatch_rejects_unknown_config_type(self) -> None:
         frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0))
 
-        with pytest.raises(TypeError, match="Unknown order policy config: object"):
+        with pytest.raises(AssertionError, match="Expected code to be unreachable"):
             apply_order_policy(frame, object())  # type: ignore[arg-type]
