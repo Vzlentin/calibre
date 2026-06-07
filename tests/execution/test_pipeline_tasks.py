@@ -167,11 +167,11 @@ class TestBuildTasksLocal:
         assert len(groups) == 0
 
     def test_hierarchy_creates_one_local_task_per_node(self, sample_sales, sample_hierarchy):
+        node_history = build_node_history(sample_sales, sample_hierarchy)
         groups = build_tasks(
-            sample_sales,
+            node_history,
             [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2}],
             horizon=2,
-            hierarchy=sample_hierarchy,
         )
         summing = build_summing_matrix(sample_hierarchy)
         assert [task.unique_id for task in groups.local] == list(summing.node_labels)
@@ -215,11 +215,11 @@ class TestBuildTasksGlobal:
     def test_hierarchy_global_scope_deduplicates_node_panel(
         self, sample_sales, sample_hierarchy, statsforecast_global_config
     ):
+        node_history = build_node_history(sample_sales, sample_hierarchy)
         groups = build_tasks(
-            sample_sales,
+            node_history,
             statsforecast_global_config,
             horizon=4,
-            hierarchy=sample_hierarchy,
         )
         assert groups.local == []
         assert len(groups.global_) == 1
@@ -264,12 +264,12 @@ class TestBuildTasksOverrides:
 
     def test_hierarchy_override_accepts_known_aggregate_label(self, sample_sales, sample_hierarchy):
         override_cfg = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2}]
+        node_history = build_node_history(sample_sales, sample_hierarchy)
         groups = build_tasks(
-            sample_sales,
+            node_history,
             [{"backend": "statsforecast", "model": "Naive"}],
             horizon=2,
             overrides={"dept_id=D1": override_cfg},
-            hierarchy=sample_hierarchy,
         )
 
         aggregate_tasks = [task for task in groups.local if task.unique_id == "dept_id=D1"]

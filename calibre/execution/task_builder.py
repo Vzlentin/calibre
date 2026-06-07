@@ -69,31 +69,36 @@ def build_node_history(sales: pd.DataFrame, hierarchy: pd.DataFrame | None) -> p
             f"history contains unique_id values not present in hierarchy: {sorted(unknown)}"
         )
 
+    node_order = {label: i for i, label in enumerate(summing.node_labels)}
     bottom = data.sort_values([UNIQUE_ID, DS], kind="stable").reset_index(drop=True)
-    aggregate_rows: list[pd.DataFrame] = []
+    bottom["_node_order"] = bottom[UNIQUE_ID].map(node_order).astype("int64")
+
+    memberships: list[dict[str, object]] = []
     for row_index, node_label in enumerate(
         summing.node_labels[summing.n_bottom :], start=summing.n_bottom
     ):
-        member_ids = [
-            bottom_id
+        memberships.extend(
+            {
+                UNIQUE_ID: bottom_id,
+                "_node_label": node_label,
+                "_node_order": row_index,
+            }
             for bottom_id, member in zip(summing.bottom_ids, summing.S[row_index], strict=True)
             if member > 0
-        ]
-        node = (
-            data[data[UNIQUE_ID].isin(member_ids)]
-            .groupby(DS, sort=True)[Y]
-            .sum(min_count=1)
-            .reset_index(name=Y)
         )
-        node[UNIQUE_ID] = node_label
-        aggregate_rows.append(node[[UNIQUE_ID, DS, Y]])
 
-    if not aggregate_rows:
-        return bottom
+    if not memberships:
+        return bottom.drop(columns="_node_order")
 
-    nodes = pd.concat([bottom, *aggregate_rows], ignore_index=True)
-    node_order = {label: i for i, label in enumerate(summing.node_labels)}
-    nodes["_node_order"] = nodes[UNIQUE_ID].map(node_order).astype("int64")
+    aggregate = data.merge(pd.DataFrame(memberships), on=UNIQUE_ID, how="inner")
+    aggregate = (
+        aggregate.groupby(["_node_order", "_node_label", DS], sort=True)[Y]
+        .sum(min_count=1)
+        .reset_index()
+        .rename(columns={"_node_label": UNIQUE_ID})
+    )
+
+    nodes = pd.concat([bottom, aggregate[[UNIQUE_ID, DS, Y, "_node_order"]]], ignore_index=True)
     return (
         nodes.sort_values(["_node_order", DS], kind="stable")
         .drop(columns="_node_order")
@@ -107,7 +112,6 @@ def build_tasks(
     horizon: int,
     series_filter: list[str] | None = None,
     overrides: Mapping[str, list[dict]] | None = None,
-    hierarchy: pd.DataFrame | None = None,
 ) -> TaskGroups:
     """Create ForecastTask objects from sales data and model configs.
 
@@ -125,26 +129,22 @@ def build_tasks(
             model configs. When present for a series, that list replaces
             ``model_configs`` for that series only. Unknown ``unique_id`` keys
             raise ``ValueError``.
-        hierarchy: Optional bottom-level hierarchy attributes. When present,
-            bottom history is expanded to node-level history before task
-            construction so aggregate nodes are forecast independently.
 
     Returns:
         A :class:`TaskGroups` partition. The engine consumes this directly and
         never re-interprets ``get_scope``. The engine handles origin-based
         history truncation, so full history is passed.
     """
-    history = build_node_history(sales, hierarchy)
-
     if series_filter is not None:
-        data = history[history[UNIQUE_ID].isin(series_filter)].copy()
+        data = sales[sales[UNIQUE_ID].isin(series_filter)].copy()
     else:
-        data = history.copy()
+        data = sales.copy()
 
     uid_order = {
         uid: index for index, uid in enumerate(data[UNIQUE_ID].astype(str).drop_duplicates())
     }
     data = data[[UNIQUE_ID, DS, Y]].copy()
+    data[UNIQUE_ID] = data[UNIQUE_ID].astype(str)
     data["_uid_order"] = data[UNIQUE_ID].astype(str).map(uid_order)
     data = (
         data.sort_values(["_uid_order", DS], kind="stable")
@@ -152,7 +152,10 @@ def build_tasks(
         .reset_index(drop=True)
     )
 
-    uids = data[UNIQUE_ID].unique().tolist()
+    series_by_uid = {
+        str(uid): group.reset_index(drop=True) for uid, group in data.groupby(UNIQUE_ID, sort=False)
+    }
+    uids = list(series_by_uid)
 
     if overrides is not None:
         unknown = set(overrides) - set(uids)
@@ -174,7 +177,7 @@ def build_tasks(
 
     for uid in uids:
         uid_configs = _configs_for(uid)
-        series_data = data[data[UNIQUE_ID] == uid].sort_values(DS).reset_index(drop=True)
+        series_data = series_by_uid[uid]
 
         for model_config in uid_configs:
             get_adapter_cls(model_config)  # validate backend early

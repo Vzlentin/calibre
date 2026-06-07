@@ -322,6 +322,11 @@ class BackendEngine:
         self.conformal = conformal
         self.reconciler = reconciliation.reconciler
         self.hierarchy = reconciliation.hierarchy
+        self._order_bottom_ids = (
+            frozenset(build_summing_matrix(self.hierarchy).bottom_ids)
+            if self.hierarchy is not None
+            else None
+        )
         self.order_config = order
         self.freq = execution.freq
         self.seed: Seed | None = set_seed(execution.seed) if execution.seed is not None else None
@@ -613,10 +618,9 @@ class BackendEngine:
         order_ledger.append(order_result)
 
     def _order_frame(self, origin_preds: pd.DataFrame) -> pd.DataFrame:
-        if self.hierarchy is None:
+        if self._order_bottom_ids is None:
             return origin_preds
-        bottom_ids = set(build_summing_matrix(self.hierarchy).bottom_ids)
-        return origin_preds[origin_preds[UNIQUE_ID].astype(str).isin(bottom_ids)].copy()
+        return origin_preds[origin_preds[UNIQUE_ID].astype(str).isin(self._order_bottom_ids)].copy()
 
     def _commit(
         self,
