@@ -176,7 +176,7 @@ def _validated_fitted_values(context: HierarchicalIntervalContext) -> pd.DataFra
             "no fitted-value sidecar was provided"
         )
     validate_fitted_values_frame(fitted)
-    return fitted.copy()
+    return fitted
 
 
 def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMatrix:
@@ -209,8 +209,7 @@ def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMat
         for ds, ds_group in keyed.groupby(DS, sort=False)
         if required - set(ds_group[UNIQUE_ID].astype(str))
     }
-    missing = set().union(*map(set, missing_by_ds.values())) if missing_by_ds else set()
-    if missing:
+    if missing_by_ds:
         context = {
             key: group[key].iloc[0]
             for key in _GROUP_KEYS
@@ -225,8 +224,7 @@ def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMat
         for ds, ds_group in keyed.groupby(DS, sort=False)
         if set(ds_group[UNIQUE_ID].astype(str)) - required
     }
-    extra = set().union(*map(set, extra_by_ds.values())) if extra_by_ds else set()
-    if extra:
+    if extra_by_ds:
         raise ValueError(
             "forecast contains aggregate node row(s) outside the present bottom subset: "
             f"{extra_by_ds}"
