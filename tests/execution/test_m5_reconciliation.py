@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from calibre.cli.commands import _load_dataset
 from calibre.cli.config import load_config_from_mapping
@@ -176,7 +177,10 @@ def test_m5_conformal_interval_columns_present_after_reconcile() -> None:
     assert not ledger[ledger[UNIQUE_ID].isin(aggregate_ids)].empty
 
 
-def test_m5_ols_moves_bottom_forecasts_from_divergent_node_bases(monkeypatch) -> None:
+@pytest.mark.parametrize("strategy", ["ols", "wls_struct"])
+def test_m5_min_trace_moves_bottom_forecasts_from_divergent_node_bases(
+    monkeypatch, strategy: str
+) -> None:
     monkeypatch.setattr(
         "calibre.execution.backend.resolve_adapter",
         lambda model_config: _NonAdditiveAdapter(model_config),
@@ -192,11 +196,13 @@ def test_m5_ols_moves_bottom_forecasts_from_divergent_node_bases(monkeypatch) ->
 
     assert not np.allclose(summing.S @ bottom_base, node_base)
 
-    ols = _run_m5(bundle, actuals, tasks, origins, NixtlaReconciler("ols")).sort_values(keys)
-    ols_values = ols.set_index(UNIQUE_ID)[Y_HAT]
-    ols_bottom = ols_values.reindex(summing.bottom_ids).to_numpy(dtype=np.float64)
-    assert not np.allclose(ols_bottom, bottom_base)
-    _assert_node_rows_coherent(ols, bundle.hierarchy)
+    reconciled = _run_m5(bundle, actuals, tasks, origins, NixtlaReconciler(strategy)).sort_values(
+        keys
+    )
+    reconciled_values = reconciled.set_index(UNIQUE_ID)[Y_HAT]
+    reconciled_bottom = reconciled_values.reindex(summing.bottom_ids).to_numpy(dtype=np.float64)
+    assert not np.allclose(reconciled_bottom, bottom_base)
+    _assert_node_rows_coherent(reconciled, bundle.hierarchy)
 
     bottom_up = _run_m5(bundle, actuals, tasks, origins, NixtlaReconciler("bottom_up")).sort_values(
         keys

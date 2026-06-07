@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 from collections import OrderedDict
 from collections.abc import Callable
@@ -57,10 +58,13 @@ def _load_method_classes() -> tuple[type[Any], type[Any]]:
 
 
 def _default_method_factory(strategy: NixtlaStrategy) -> Callable[[], _NixtlaMethod]:
-    bottom_up_cls, min_trace_cls = _load_method_classes()
-    if strategy == "bottom_up":
-        return lambda: cast(_NixtlaMethod, bottom_up_cls())
-    return lambda: cast(_NixtlaMethod, min_trace_cls(method=strategy, num_threads=1))
+    def _make_method() -> _NixtlaMethod:
+        bottom_up_cls, min_trace_cls = _load_method_classes()
+        if strategy == "bottom_up":
+            return cast(_NixtlaMethod, bottom_up_cls())
+        return cast(_NixtlaMethod, min_trace_cls(method=strategy, num_threads=1))
+
+    return _make_method
 
 
 def _to_nixtla_layout(base: np.ndarray, summing: SummingMatrix) -> _NixtlaLayout:
@@ -89,7 +93,8 @@ def _from_nixtla_layout(y_hat: np.ndarray, layout: _NixtlaLayout) -> np.ndarray:
 
 def _cache_key(summing: SummingMatrix) -> _CacheKey:
     S = np.ascontiguousarray(summing.S, dtype=np.float64)
-    return (tuple(summing.bottom_ids), tuple(summing.node_labels), S.shape, S.tobytes())
+    digest = hashlib.blake2b(S.tobytes(), digest_size=16).digest()
+    return (tuple(summing.bottom_ids), tuple(summing.node_labels), S.shape, digest)
 
 
 class NixtlaReconciler(VectorReconciler):
