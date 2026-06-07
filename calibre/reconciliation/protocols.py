@@ -8,7 +8,13 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class ReconciliationContext:
-    """Sidecar data required by strategy-specific reconciliation methods."""
+    """Per-origin sidecars required by strategy-specific reconciliation methods.
+
+    ``fitted_values`` is the in-sample residual source for strategies such as
+    MinT residual covariance. Rows are keyed by
+    ``(unique_id, ds, h, model_name)`` so horizon-specific fitted values remain
+    distinct from the future forecast ledger.
+    """
 
     fitted_values: pd.DataFrame | None = None
 
@@ -24,7 +30,8 @@ class Reconciler(Protocol):
 
     Strategy-specific inputs such as MinT residual covariance are threaded
     through ``ReconciliationContext`` so the forecast-frame ledger stays a future
-    forecast ledger.
+    forecast ledger. Reconciliation callers must pass the context explicitly,
+    even when the current strategy ignores it.
     """
 
     requires_fitted_values: bool

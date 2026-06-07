@@ -363,9 +363,9 @@ class BackendEngine:
         self.reconciler = reconciliation.reconciler
         self.hierarchy = reconciliation.hierarchy
         self._requires_fitted_values = bool(
-            reconciliation.reconciler is not None
-            and getattr(reconciliation.reconciler, "requires_fitted_values", False)
-            and reconciliation.hierarchy is not None
+            reconciliation.hierarchy is not None
+            and reconciliation.reconciler is not None
+            and reconciliation.reconciler.requires_fitted_values
         )
         self._order_bottom_ids = (
             frozenset(build_summing_matrix(self.hierarchy).bottom_ids)
@@ -623,7 +623,7 @@ class BackendEngine:
     def _reconcile(
         self,
         origin_preds: pd.DataFrame,
-        context: ReconciliationContext | None = None,
+        context: ReconciliationContext,
     ) -> pd.DataFrame:
         """Reconcile phase — make point forecasts coherent across the hierarchy.
 
@@ -639,7 +639,7 @@ class BackendEngine:
         return self.reconciler(
             origin_preds,
             self.hierarchy,
-            context or ReconciliationContext(),
+            context,
         )
 
     def _calibrate(

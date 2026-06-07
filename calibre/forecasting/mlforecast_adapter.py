@@ -244,11 +244,10 @@ class MLForecastAdapter(ModelAdapter):
         if self._mlf is None:
             raise RuntimeError("Call fit() before fitted_values()")
         raw = self._mlf.forecast_fitted_values()
-        if H in raw.columns:
-            raw = raw[raw[H] == 1].drop(columns=H).reset_index(drop=True)
-            if raw.empty:
-                raise ValueError("MLForecast fitted values did not include horizon h=1 rows")
         if self._name_to_quantile:
             point_name = _point_quantile_name(self._name_to_quantile)
-            raw = raw[[UNIQUE_ID, DS, Y, point_name]]
+            columns = [UNIQUE_ID, DS, Y]
+            if H in raw.columns:
+                columns.append(H)
+            raw = raw[[*columns, point_name]]
         return build_fitted_values_frame(raw, model_name=task.model_name)

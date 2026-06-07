@@ -50,6 +50,7 @@ class _CountingReconciler:
     def __init__(self, inner) -> None:
         self.inner = inner
         self.calls = 0
+        self.requires_fitted_values = inner.requires_fitted_values
 
     def __call__(
         self,
@@ -299,28 +300,6 @@ def test_m5_residual_strategies_return_coherent_point_forecasts(monkeypatch, str
     _assert_node_rows_coherent(ledger, bundle.hierarchy)
 
 
-def test_m5_mint_cov_runs_on_well_conditioned_hierarchy_slice(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "calibre.execution.backend.resolve_adapter",
-        lambda model_config: _ResidualAdapter(model_config),
-    )
-    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
-    hierarchy = bundle.hierarchy[[UNIQUE_ID, "dept_id"]].drop_duplicates().head(2).copy()
-    node_history = _synthetic_m5_node_history(hierarchy)
-    tasks = _synthetic_residual_tasks(node_history)
-    origins = [pd.Timestamp("2011-03-15")]
-
-    class _Bundle:
-        pass
-
-    reduced_bundle = _Bundle()
-    reduced_bundle.hierarchy = hierarchy
-    ledger = _run_m5(reduced_bundle, node_history, tasks, origins, NixtlaReconciler("mint_cov"))
-
-    assert not ledger.empty
-    _assert_node_rows_coherent(ledger, hierarchy)
-
-
 def test_reconcile_byte_identical_when_hierarchy_none() -> None:
     """VN2 path: hierarchy=None makes the reconcile phase byte-identical (R11)."""
     preds = pd.DataFrame(
@@ -337,5 +316,5 @@ def test_reconcile_byte_identical_when_hierarchy_none() -> None:
     engine = BackendEngine(
         reconciliation=ReconciliationOptions(reconciler=NixtlaReconciler("ols"), hierarchy=None)
     )
-    out = engine._reconcile(preds)
+    out = engine._reconcile(preds, ReconciliationContext())
     pd.testing.assert_frame_equal(out, preds)

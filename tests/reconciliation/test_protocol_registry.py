@@ -46,7 +46,7 @@ def test_resolved_noop_is_a_reconciler_instance() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["bottom_up", "ols", "wls_struct", "mint_shrink", "wls_var", "mint_cov", "erm"],
+    ["bottom_up", "ols", "wls_struct", "mint_shrink", "wls_var", "erm"],
 )
 def test_nixtla_strategies_resolve_to_adapter(name: str) -> None:
     reconciler = resolve_reconciler(name)
@@ -75,10 +75,14 @@ def test_available_reconcilers_contains_only_runnable_set() -> None:
     assert available_reconcilers() == [
         "bottom_up",
         "erm",
-        "mint_cov",
         "mint_shrink",
         "none",
         "ols",
         "wls_struct",
         "wls_var",
     ]
+
+
+def test_mint_cov_is_not_on_generic_runnable_surface() -> None:
+    with pytest.raises(ValueError, match="Unknown reconciliation strategy"):
+        resolve_reconciler("mint_cov")

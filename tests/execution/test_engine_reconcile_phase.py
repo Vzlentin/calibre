@@ -113,20 +113,24 @@ class _NeedsFittedSpy:
         return frame
 
 
-def _boom_if_called(
-    frame: pd.DataFrame,
-    hierarchy: pd.DataFrame | None,
-    context: ReconciliationContext,
-) -> pd.DataFrame:
-    del frame, hierarchy, context
-    raise AssertionError("reconciler should not be called")
+class _BoomReconciler:
+    requires_fitted_values = False
+
+    def __call__(
+        self,
+        frame: pd.DataFrame,
+        hierarchy: pd.DataFrame | None,
+        context: ReconciliationContext,
+    ) -> pd.DataFrame:
+        del frame, hierarchy, context
+        raise AssertionError("reconciler should not be called")
 
 
 def test_reconcile_noop_without_reconciler() -> None:
     """No reconciler configured -> identity (mirrors calibrate-no-runtime)."""
     engine = BackendEngine()
     frame = pd.DataFrame({UNIQUE_ID: ["A"], Y_HAT: [1.0]})
-    out = engine._reconcile(frame)
+    out = engine._reconcile(frame, ReconciliationContext())
     pd.testing.assert_frame_equal(out, frame)
 
 
@@ -136,17 +140,17 @@ def test_reconcile_noop_with_noop_reconciler_and_hierarchy() -> None:
         reconciliation=ReconciliationOptions(reconciler=NoOpReconciler(), hierarchy=_hierarchy())
     )
     frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], Y_HAT: [3.0]})
-    out = engine._reconcile(frame)
+    out = engine._reconcile(frame, ReconciliationContext())
     pd.testing.assert_frame_equal(out, frame)
 
 
 def test_reconcile_noop_when_hierarchy_none_without_calling_reconciler() -> None:
     """hierarchy=None short-circuits before delegating (R3, R11)."""
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=_boom_if_called, hierarchy=None)
+        reconciliation=ReconciliationOptions(reconciler=_BoomReconciler(), hierarchy=None)
     )
     frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], Y_HAT: [3.0]})
-    out = engine._reconcile(frame)
+    out = engine._reconcile(frame, ReconciliationContext())
     pd.testing.assert_frame_equal(out, frame)
 
 
@@ -202,10 +206,10 @@ def test_residual_reconcile_receives_fitted_context() -> None:
 
 def test_reconcile_noop_on_empty_predictions() -> None:
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=_boom_if_called, hierarchy=_hierarchy())
+        reconciliation=ReconciliationOptions(reconciler=_BoomReconciler(), hierarchy=_hierarchy())
     )
     empty = pd.DataFrame(columns=[UNIQUE_ID, Y_HAT])
-    out = engine._reconcile(empty)
+    out = engine._reconcile(empty, ReconciliationContext())
     assert out.empty
 
 
@@ -243,12 +247,23 @@ def test_reconcile_runs_before_calibrate_on_raw_yhat() -> None:
 def test_reconcile_phase_failure_names_phase_and_origin() -> None:
     task, dates, _pattern = _periodic_task()
 
-    def _boom(frame, hierarchy, context):
-        del frame, hierarchy, context
-        raise RuntimeError("reconcile exploded")
+    class _ExplodingReconciler:
+        requires_fitted_values = False
+
+        def __call__(
+            self,
+            frame: pd.DataFrame,
+            hierarchy: pd.DataFrame | None,
+            context: ReconciliationContext,
+        ) -> pd.DataFrame:
+            del frame, hierarchy, context
+            raise RuntimeError("reconcile exploded")
 
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=_boom, hierarchy=_hierarchy())
+        reconciliation=ReconciliationOptions(
+            reconciler=_ExplodingReconciler(),
+            hierarchy=_hierarchy(),
+        )
     )
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
     origin = dates[11]

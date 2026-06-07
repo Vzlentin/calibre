@@ -82,13 +82,14 @@ dataset:
 ### Hierarchical Reconciliation
 
 When a dataset supplies `hierarchy`, configure point reconciliation with:
-`none`, `bottom_up`, `ols`, `wls_struct`, `mint_shrink`, `wls_var`,
-`mint_cov`, or `erm`. Residual-backed strategies (`mint_shrink`, `wls_var`,
-`mint_cov`, `erm`) request in-sample fitted values from the model adapter and
-pass them as reconciliation context; fitted values are not written as historical
-rows in the forecast-frame ledger. Reconciliation still applies only to point
-forecasts before conformal calibration; coherent interval reconciliation remains
-out of scope for this path.
+`none`, `bottom_up`, `ols`, `wls_struct`, `mint_shrink`, `wls_var`, or `erm`.
+Residual-backed strategies (`mint_shrink`, `wls_var`, `erm`) request
+horizon-keyed in-sample fitted values from the model adapter and pass them as
+explicit reconciliation context; fitted values are not written as historical rows
+in the forecast-frame ledger. `mint_cov` is not exposed because the full M5
+lattice produces ill-conditioned covariance estimates. Reconciliation still
+applies only to point forecasts before conformal calibration; coherent interval
+or quantile reconciliation remains out of scope for this path.
 
 ### Benchmarks
 

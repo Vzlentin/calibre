@@ -151,7 +151,7 @@ def test_min_trace_factory_passes_strategy_and_single_thread(
 
 @pytest.mark.parametrize(
     ("strategy", "expected_method"),
-    [("mint_shrink", "mint_shrink"), ("wls_var", "wls_var"), ("mint_cov", "mint_cov")],
+    [("mint_shrink", "mint_shrink"), ("wls_var", "wls_var")],
 )
 def test_residual_min_trace_factory_passes_strategy_and_single_thread(
     monkeypatch: pytest.MonkeyPatch, strategy: str, expected_method: str
@@ -379,6 +379,7 @@ def _tiny_fitted_values() -> pd.DataFrame:
                     UNIQUE_ID: uid,
                     DS: pd.Timestamp(ds),
                     Y: values[uid],
+                    H: 1,
                     MODEL_NAME: "m",
                     FITTED_Y_HAT: fitted,
                 }
@@ -386,7 +387,7 @@ def _tiny_fitted_values() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@pytest.mark.parametrize("strategy", ["mint_shrink", "wls_var", "mint_cov", "erm"])
+@pytest.mark.parametrize("strategy", ["mint_shrink", "wls_var", "erm"])
 def test_residual_strategies_use_fitted_context_and_return_coherent_frame(strategy: str) -> None:
     methods, factory = _residual_factory()
     frame = _tiny_forecast_frame()
@@ -420,7 +421,7 @@ def test_residual_strategy_names_missing_fitted_node() -> None:
     fitted = fitted[fitted[UNIQUE_ID] != "dept=D"]
 
     with pytest.raises(ValueError, match="dept=D"):
-        NixtlaReconciler("mint_cov", method_factory=_ResidualMethod)(
+        NixtlaReconciler("mint_shrink", method_factory=_ResidualMethod)(
             _tiny_forecast_frame(),
             _tiny_hierarchy(),
             ReconciliationContext(fitted_values=fitted),
@@ -432,8 +433,123 @@ def test_residual_strategy_rejects_misaligned_fitted_timestamps() -> None:
     fitted = fitted[~((fitted[UNIQUE_ID] == "a") & (fitted[DS] == pd.Timestamp("2024-01-02")))]
 
     with pytest.raises(ValueError, match="misaligned"):
-        NixtlaReconciler("mint_cov", method_factory=_ResidualMethod)(
+        NixtlaReconciler("mint_shrink", method_factory=_ResidualMethod)(
             _tiny_forecast_frame(),
             _tiny_hierarchy(),
             ReconciliationContext(fitted_values=fitted),
+        )
+
+
+def test_mint_cov_is_rejected_before_runtime() -> None:
+    with pytest.raises(ValueError, match="ill-conditioned covariance"):
+        NixtlaReconciler("mint_cov")
+
+
+def test_reconciliation_rejects_quantile_columns_under_active_hierarchy() -> None:
+    frame = _tiny_forecast_frame()
+    frame["q_0p5"] = np.array([2.0, 3.0, 5.0, 5.0], dtype=np.float64)
+
+    with pytest.raises(ValueError, match="quantile columns remain unreconciled"):
+        NixtlaReconciler("ols", method_factory=_CountingMethod)(
+            frame,
+            _tiny_hierarchy(),
+            ReconciliationContext(),
+        )
+
+
+def test_residual_sidecar_lookup_is_horizon_specific() -> None:
+    h1 = _tiny_fitted_values()
+    h2 = h1.copy()
+    h2[H] = 2
+    h2[FITTED_Y_HAT] = h2[FITTED_Y_HAT] + 100.0
+    fitted = pd.concat([h1, h2], ignore_index=True)
+    frame_h1 = _tiny_forecast_frame()
+    frame_h2 = _tiny_forecast_frame()
+    frame_h2[H] = 2
+    frame = pd.concat([frame_h1, frame_h2], ignore_index=True)
+    methods, factory = _residual_factory()
+
+    NixtlaReconciler("mint_shrink", method_factory=factory)(
+        frame,
+        _tiny_hierarchy(),
+        ReconciliationContext(fitted_values=fitted),
+    )
+
+    assert len(methods) == 2
+    assert methods[0].y_hat_insample is not None
+    assert methods[1].y_hat_insample is not None
+    np.testing.assert_allclose(methods[1].y_hat_insample - methods[0].y_hat_insample, 100.0)
+
+
+class _ResidualFitFailure(_ResidualMethod):
+    def fit(
+        self,
+        *,
+        S: np.ndarray,
+        y_hat: np.ndarray,
+        tags: dict[str, np.ndarray],
+        y_insample: np.ndarray | None = None,
+        y_hat_insample: np.ndarray | None = None,
+    ) -> _ResidualMethod:
+        del S, y_hat, tags, y_insample, y_hat_insample
+        raise ValueError("library fit failed")
+
+
+class _ResidualPredictFailure(_ResidualMethod):
+    def predict(self, *, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
+        del S, y_hat
+        raise ValueError("library predict failed")
+
+
+class _ResidualMissingMean(_ResidualMethod):
+    def predict(self, *, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
+        del S, y_hat
+        return {"median": np.zeros((4, 1), dtype=np.float64)}
+
+
+class _ResidualWrongShape(_ResidualMethod):
+    def predict(self, *, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
+        del S, y_hat
+        return {"mean": np.zeros((3, 1), dtype=np.float64)}
+
+
+def test_residual_fit_failure_is_wrapped_with_context() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match="fit failed .*strategy='mint_shrink'.*model_name='m'.*h=1",
+    ):
+        NixtlaReconciler("mint_shrink", method_factory=_ResidualFitFailure)(
+            _tiny_forecast_frame(),
+            _tiny_hierarchy(),
+            ReconciliationContext(fitted_values=_tiny_fitted_values()),
+        )
+
+
+def test_residual_predict_failure_is_wrapped_with_context() -> None:
+    with pytest.raises(
+        RuntimeError,
+        match="predict failed .*strategy='mint_shrink'.*model_name='m'.*h=1",
+    ):
+        NixtlaReconciler("mint_shrink", method_factory=_ResidualPredictFailure)(
+            _tiny_forecast_frame(),
+            _tiny_hierarchy(),
+            ReconciliationContext(fitted_values=_tiny_fitted_values()),
+        )
+
+
+def test_residual_predict_requires_mean_key() -> None:
+    with pytest.raises(ValueError, match="missing 'mean'.*model_name='m'.*h=1"):
+        NixtlaReconciler("mint_shrink", method_factory=_ResidualMissingMean)(
+            _tiny_forecast_frame(),
+            _tiny_hierarchy(),
+            ReconciliationContext(fitted_values=_tiny_fitted_values()),
+        )
+
+
+def test_residual_predict_requires_expected_mean_shape() -> None:
+    with pytest.raises(ValueError, match=r"shape \(3, 1\); expected \(4, 1\)"):
+        NixtlaReconciler("mint_shrink", method_factory=_ResidualWrongShape)(
+            _tiny_forecast_frame(),
+            _tiny_hierarchy(),
+            ReconciliationContext(fitted_values=_tiny_fitted_values()),
         )

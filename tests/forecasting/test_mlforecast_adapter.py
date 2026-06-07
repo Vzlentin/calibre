@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from mlforecast.lag_transforms import RollingMean, RollingStd
 
-from calibre.core.forecast_frame import FITTED_Y_HAT, MODEL_NAME, Y
+from calibre.core.forecast_frame import DS, FITTED_Y_HAT, MODEL_NAME, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
 
@@ -348,7 +348,8 @@ def test_fitted_values_normalize_to_sidecar_contract(repeating_history):
     adapter.fit(task, collect_fitted_values=True)
     fitted = adapter.fitted_values(task)
 
-    assert list(fitted.columns) == ["unique_id", "ds", "y", "model_name", "fitted_y_hat"]
+    assert list(fitted.columns) == ["unique_id", "ds", "y", "h", "model_name", "fitted_y_hat"]
+    assert fitted[H].tolist() == [1] * len(fitted)
     assert set(fitted[MODEL_NAME]) == {"global_lgbm"}
     assert fitted[FITTED_Y_HAT].dtype == np.float64
     assert fitted[Y].dtype == np.float64
@@ -379,3 +380,36 @@ def test_quantile_fitted_values_use_point_quantile(repeating_history):
 
     assert set(fitted[MODEL_NAME]) == {"quantile_lgbm"}
     assert fitted[FITTED_Y_HAT].notna().all()
+
+
+def test_direct_fitted_values_preserve_horizon_specific_rows(repeating_history):
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=2,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "name": "direct_lgbm",
+            "freq": "W",
+            "strategy": "direct",
+        },
+        forecast_origin=pd.Timestamp("2024-06-23"),
+    )
+    raw = pd.DataFrame(
+        {
+            UNIQUE_ID: pd.Series(["SKU_001"] * 4, dtype="object"),
+            DS: pd.to_datetime(["2024-01-14", "2024-01-14", "2024-01-21", "2024-01-21"]),
+            Y: np.array([20.0, 20.0, 30.0, 30.0], dtype=np.float64),
+            H: np.array([1, 2, 1, 2], dtype=np.int64),
+            "LGBMRegressor": np.array([19.0, 18.0, 31.0, 29.0], dtype=np.float64),
+        }
+    )
+    adapter = MLForecastAdapter(task.model_config)
+    adapter._mlf = MagicMock()
+    adapter._mlf.forecast_fitted_values.return_value = raw
+
+    fitted = adapter.fitted_values(task)
+
+    assert fitted[H].tolist() == [1, 2, 1, 2]
+    assert fitted.duplicated([UNIQUE_ID, DS, H, MODEL_NAME]).sum() == 0
+    assert set(fitted[MODEL_NAME]) == {"direct_lgbm"}

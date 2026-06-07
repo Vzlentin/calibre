@@ -88,7 +88,6 @@ class ReconciliationConfig(_Section):
         "wls_struct",
         "mint_shrink",
         "wls_var",
-        "mint_cov",
         "erm",
     ] = "none"
 

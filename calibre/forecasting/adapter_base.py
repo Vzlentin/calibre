@@ -36,18 +36,25 @@ def build_predict_frame(raw: pd.DataFrame) -> pd.DataFrame:
 
 def build_fitted_values_frame(raw: pd.DataFrame, *, model_name: str) -> pd.DataFrame:
     """Normalize a fitted-values result to Calibre's long sidecar contract."""
-    model_cols = [c for c in raw.columns if c not in (UNIQUE_ID, DS, Y)]
+    model_cols = [c for c in raw.columns if c not in (UNIQUE_ID, DS, Y, H)]
     if len(model_cols) != 1:
         raise ValueError(
             "Expected exactly one fitted-value model column, "
             f"got {model_cols} in columns {list(raw.columns)}"
         )
     model_col = model_cols[0]
-    out = raw[[UNIQUE_ID, DS, Y, model_col]].copy()
+    source_cols = [UNIQUE_ID, DS, Y]
+    if H in raw.columns:
+        source_cols.append(H)
+    source_cols.append(model_col)
+    out = raw[source_cols].copy()
+    if H not in out.columns:
+        out[H] = 1
     out = out.rename(columns={model_col: FITTED_Y_HAT})
     out[UNIQUE_ID] = out[UNIQUE_ID].astype("object")
     out[DS] = pd.to_datetime(out[DS]).astype("datetime64[ns]")
     out[Y] = out[Y].astype("float64")
+    out[H] = out[H].astype("int64")
     out[FITTED_Y_HAT] = out[FITTED_Y_HAT].astype("float64")
     out[MODEL_NAME] = str(model_name)
     out[MODEL_NAME] = out[MODEL_NAME].astype("object")

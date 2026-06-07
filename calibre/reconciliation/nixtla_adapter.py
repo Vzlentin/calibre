@@ -21,6 +21,7 @@ from calibre.core.forecast_frame import (
     Y_HAT,
     H,
     Y,
+    is_quantile_column,
     validate_fitted_values_frame,
 )
 from calibre.reconciliation.apply import VectorReconciler
@@ -33,13 +34,18 @@ NixtlaStrategy = Literal[
     "wls_struct",
     "mint_shrink",
     "wls_var",
-    "mint_cov",
     "erm",
 ]
 
 NIXTLA_STRATEGIES = cast(tuple[NixtlaStrategy, ...], get_args(NixtlaStrategy))
 _SUPPORTED_STRATEGIES = frozenset(NIXTLA_STRATEGIES)
-_RESIDUAL_STRATEGIES = frozenset({"mint_shrink", "wls_var", "mint_cov", "erm"})
+_RESIDUAL_STRATEGIES = frozenset({"mint_shrink", "wls_var", "erm"})
+_UNSUPPORTED_STRATEGY_MESSAGES = {
+    "mint_cov": (
+        "mint_cov is not exposed by Calibre because the full M5 lattice produces "
+        "ill-conditioned covariance estimates; use mint_shrink, wls_var, or erm"
+    ),
+}
 _COHERENCE_RTOL = 1e-6
 _COHERENCE_ATOL = 1e-6
 _DEFAULT_MAX_CACHE_SIZE = 128
@@ -70,7 +76,7 @@ class _NixtlaLayout:
 
 
 _CacheKey = tuple[tuple[str, ...], tuple[str, ...], tuple[int, ...], bytes]
-_InsampleCacheKey = tuple[str, _CacheKey]
+_InsampleCacheKey = tuple[str, int, _CacheKey]
 
 
 def _load_method_classes() -> tuple[type[Any], type[Any], type[Any]]:
@@ -120,6 +126,16 @@ def _from_nixtla_layout(y_hat: np.ndarray, layout: _NixtlaLayout) -> np.ndarray:
     return np.asarray(y_hat, dtype=np.float64).reshape(-1)[layout.inverse_permutation]
 
 
+def _reject_quantile_columns(frame: pd.DataFrame) -> None:
+    quantile_cols = [str(column) for column in frame.columns if is_quantile_column(str(column))]
+    if quantile_cols:
+        raise ValueError(
+            "Nixtla hierarchy reconciliation only reconciles the point forecast column "
+            f"{Y_HAT!r}; quantile columns remain unreconciled and are not supported: "
+            f"{quantile_cols}"
+        )
+
+
 def _cache_key(summing: SummingMatrix) -> _CacheKey:
     S = np.ascontiguousarray(summing.S, dtype=np.float64)
     digest = hashlib.blake2b(S.tobytes(), digest_size=16).digest()
@@ -131,21 +147,24 @@ class NixtlaReconciler(VectorReconciler):
 
     def __init__(
         self,
-        strategy: NixtlaStrategy,
+        strategy: str,
         *,
         method_factory: Callable[[], _NixtlaMethod] | None = None,
         max_cache_size: int = _DEFAULT_MAX_CACHE_SIZE,
     ) -> None:
-        if strategy not in _SUPPORTED_STRATEGIES:
+        strategy_key = str(strategy).strip().lower()
+        if strategy_key in _UNSUPPORTED_STRATEGY_MESSAGES:
+            raise ValueError(_UNSUPPORTED_STRATEGY_MESSAGES[strategy_key])
+        if strategy_key not in _SUPPORTED_STRATEGIES:
             raise ValueError(
                 f"unsupported Nixtla reconciliation strategy: {strategy!r}. "
                 f"Available: {sorted(_SUPPORTED_STRATEGIES)}"
             )
         if max_cache_size < 1:
             raise ValueError("max_cache_size must be at least 1")
-        self.strategy = strategy
-        self.requires_fitted_values = strategy in _RESIDUAL_STRATEGIES
-        self._method_factory = method_factory or _default_method_factory(strategy)
+        self.strategy = cast(NixtlaStrategy, strategy_key)
+        self.requires_fitted_values = strategy_key in _RESIDUAL_STRATEGIES
+        self._method_factory = method_factory or _default_method_factory(self.strategy)
         self._max_cache_size = max_cache_size
         self._cache: OrderedDict[_CacheKey, _NixtlaMethod] = OrderedDict()
 
@@ -155,6 +174,8 @@ class NixtlaReconciler(VectorReconciler):
         hierarchy: pd.DataFrame | None,
         context: ReconciliationContext,
     ) -> pd.DataFrame:
+        if hierarchy is not None and not frame.empty:
+            _reject_quantile_columns(frame)
         if not self.requires_fitted_values:
             return super().__call__(frame, hierarchy, context)
         if hierarchy is None or frame.empty:
@@ -204,11 +225,17 @@ class NixtlaReconciler(VectorReconciler):
     ) -> pd.DataFrame:
         subset, base = self._base_vector(group, summing)
         model_name = str(group[MODEL_NAME].iloc[0])
+        horizon = int(group[H].iloc[0])
         layout = _to_nixtla_layout(base, subset)
-        cache_key = (model_name, _cache_key(subset))
+        cache_key = (model_name, horizon, _cache_key(subset))
         residual_layout = insample_cache.get(cache_key)
         if residual_layout is None:
-            y_insample, y_hat_insample = _insample_arrays(fitted_values, subset, model_name)
+            y_insample, y_hat_insample = _insample_arrays(
+                fitted_values,
+                subset,
+                model_name,
+                horizon,
+            )
             residual_layout = _to_nixtla_insample_layout(
                 y_insample=y_insample,
                 y_hat_insample=y_hat_insample,
@@ -216,14 +243,26 @@ class NixtlaReconciler(VectorReconciler):
             )
             insample_cache[cache_key] = residual_layout
         reconciler = self._method_factory()
-        reconciler.fit(
-            S=layout.S,
-            y_hat=layout.y_hat,
-            y_insample=residual_layout.y_insample,
-            y_hat_insample=residual_layout.y_hat_insample,
-            tags=layout.tags,
+        try:
+            reconciler.fit(
+                S=layout.S,
+                y_hat=layout.y_hat,
+                y_insample=residual_layout.y_insample,
+                y_hat_insample=residual_layout.y_hat_insample,
+                tags=layout.tags,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Nixtla residual reconciliation fit failed "
+                f"for strategy={self.strategy!r}, model_name={model_name!r}, h={horizon}"
+            ) from exc
+        predicted = _predict_residual_mean(
+            reconciler,
+            layout,
+            strategy=self.strategy,
+            model_name=model_name,
+            horizon=horizon,
         )
-        predicted = reconciler.predict(S=layout.S, y_hat=layout.y_hat)["mean"]
         reconciled = _from_nixtla_layout(predicted, layout)
         coherent = subset.S @ reconciled[: subset.n_bottom]
         if not np.allclose(reconciled, coherent, rtol=_COHERENCE_RTOL, atol=_COHERENCE_ATOL):
@@ -232,6 +271,36 @@ class NixtlaReconciler(VectorReconciler):
         result = group.copy()
         result[Y_HAT] = result[UNIQUE_ID].astype(str).map(reconciled_by_node).astype(np.float64)
         return result
+
+
+def _predict_residual_mean(
+    reconciler: _NixtlaMethod,
+    layout: _NixtlaLayout,
+    *,
+    strategy: str,
+    model_name: str,
+    horizon: int,
+) -> np.ndarray:
+    try:
+        predicted = reconciler.predict(S=layout.S, y_hat=layout.y_hat)
+    except Exception as exc:
+        raise RuntimeError(
+            "Nixtla residual reconciliation predict failed "
+            f"for strategy={strategy!r}, model_name={model_name!r}, h={horizon}"
+        ) from exc
+    if "mean" not in predicted:
+        raise ValueError(
+            "Nixtla residual reconciliation predict result missing 'mean' "
+            f"for strategy={strategy!r}, model_name={model_name!r}, h={horizon}"
+        )
+    mean = np.asarray(predicted["mean"], dtype=np.float64)
+    if mean.shape != layout.y_hat.shape:
+        raise ValueError(
+            "Nixtla residual reconciliation predict returned 'mean' with shape "
+            f"{mean.shape}; expected {layout.y_hat.shape} "
+            f"for strategy={strategy!r}, model_name={model_name!r}, h={horizon}"
+        )
+    return mean
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,10 +324,14 @@ def _insample_arrays(
     fitted_values: pd.DataFrame,
     summing: SummingMatrix,
     model_name: str,
+    horizon: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    subset = fitted_values[fitted_values[MODEL_NAME].astype(str) == model_name].copy()
+    subset = fitted_values[
+        (fitted_values[MODEL_NAME].astype(str) == model_name)
+        & (fitted_values[H].astype(np.int64) == horizon)
+    ].copy()
     if subset.empty:
-        raise ValueError(f"Missing fitted values for model_name={model_name!r}")
+        raise ValueError(f"Missing fitted values for model_name={model_name!r}, h={horizon}")
     subset[UNIQUE_ID] = subset[UNIQUE_ID].astype(str)
     node_ids = set(summing.node_labels)
     unknown = set(subset[UNIQUE_ID]) - node_ids
@@ -271,13 +344,13 @@ def _insample_arrays(
     if missing_nodes:
         raise ValueError(
             "Missing fitted values for hierarchy node(s): "
-            f"{missing_nodes} and model_name={model_name!r}"
+            f"{missing_nodes} and model_name={model_name!r}, h={horizon}"
         )
     common_ds = set.intersection(*ds_by_node.values())
     if not common_ds:
         raise ValueError(
             "Fitted-value timestamps do not overlap across hierarchy nodes "
-            f"for model_name={model_name!r}"
+            f"for model_name={model_name!r}, h={horizon}"
         )
     mismatched = {
         label: sorted(str(value) for value in ds_values.symmetric_difference(common_ds))
@@ -287,7 +360,7 @@ def _insample_arrays(
     if mismatched:
         raise ValueError(
             "Fitted-value timestamps are misaligned across hierarchy nodes "
-            f"for model_name={model_name!r}: {mismatched}"
+            f"for model_name={model_name!r}, h={horizon}: {mismatched}"
         )
 
     ordered_ds = sorted(common_ds)
@@ -303,7 +376,7 @@ def _insample_arrays(
     if y_wide.isna().any().any() or fitted_wide.isna().any().any():
         raise ValueError(
             "Fitted-value sidecar cannot be widened without missing "
-            f"(unique_id, ds, model_name) keys for model_name={model_name!r}"
+            f"(unique_id, ds, h, model_name) keys for model_name={model_name!r}, h={horizon}"
         )
     return y_wide.to_numpy(dtype=np.float64).T, fitted_wide.to_numpy(dtype=np.float64).T
 
