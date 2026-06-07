@@ -9,6 +9,7 @@ and interval normalization in one operation.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Literal, Protocol, cast
@@ -30,7 +31,11 @@ from calibre.core.forecast_frame import (
     interval_column_names,
     validate_fitted_values_frame,
 )
-from calibre.reconciliation.nixtla_adapter import NIXTLA_STRATEGIES, NixtlaStrategy
+from calibre.reconciliation.nixtla_adapter import (
+    NIXTLA_STRATEGIES,
+    NixtlaStrategy,
+    make_nixtla_method,
+)
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
 
 HierarchicalIntervalMethod = Literal["nixtla_conformal"]
@@ -85,30 +90,19 @@ class HierarchicalIntervalPhase(Protocol):
 
 
 @lru_cache(maxsize=1)
-def _load_nixtla_classes() -> tuple[type[Any], type[Any], type[Any], type[Any]]:
+def _load_reconciliation_class() -> type[Any]:
     try:
         core = importlib.import_module("hierarchicalforecast.core")
-        methods = importlib.import_module("hierarchicalforecast.methods")
     except ImportError as exc:  # pragma: no cover - covered with import monkeypatch
         raise RuntimeError(
             "hierarchicalforecast is not installed. Install calibre with the "
             "'hierarchy' extra: pip install calibre[hierarchy]"
         ) from exc
-    return core.HierarchicalReconciliation, methods.BottomUp, methods.MinTrace, methods.ERM
-
-
-def _make_nixtla_method(strategy: NixtlaStrategy) -> Any:
-    _reconciliation_cls, bottom_up_cls, min_trace_cls, erm_cls = _load_nixtla_classes()
-    if strategy == "bottom_up":
-        return bottom_up_cls()
-    if strategy == "erm":
-        return erm_cls(method="closed")
-    return min_trace_cls(method=strategy, num_threads=1)
+    return core.HierarchicalReconciliation
 
 
 def _make_reconciliation(method: Any) -> Any:
-    reconciliation_cls, _bottom_up_cls, _min_trace_cls, _erm_cls = _load_nixtla_classes()
-    return reconciliation_cls([method])
+    return _load_reconciliation_class()([method])
 
 
 def _level_value(coverage: float) -> float:
@@ -132,9 +126,10 @@ class NixtlaHierarchicalIntervalPhase:
         if frame.empty:
             return frame
         fitted = _validated_fitted_values(context)
+        fitted_by_model = _fitted_values_by_model(fitted)
         summing = build_summing_matrix(hierarchy)
         parts = [
-            self._apply_model_group(group, summing, fitted)
+            self._apply_model_group(group, summing, fitted_by_model)
             for _, group in frame.groupby(_GROUP_KEYS, sort=False)
         ]
         return pd.concat(parts, ignore_index=True)
@@ -143,13 +138,13 @@ class NixtlaHierarchicalIntervalPhase:
         self,
         group: pd.DataFrame,
         summing: SummingMatrix,
-        fitted_values: pd.DataFrame,
+        fitted_by_model: Mapping[str, pd.DataFrame],
     ) -> pd.DataFrame:
         model_name = str(group[MODEL_NAME].iloc[0])
         subset = _subset_for_group(group, summing)
         y_hat_df = _to_nixtla_forecast_df(group, subset)
-        y_df = _to_nixtla_fitted_df(fitted_values, subset, model_name)
-        method = _make_nixtla_method(self.options.strategy)
+        y_df = _to_nixtla_fitted_df(fitted_by_model, subset, model_name)
+        method = make_nixtla_method(self.options.strategy)
         reconciliation = _make_reconciliation(method)
         reconciled = reconciliation.reconcile(
             Y_hat_df=y_hat_df,
@@ -179,6 +174,13 @@ def _validated_fitted_values(context: HierarchicalIntervalContext) -> pd.DataFra
     return fitted
 
 
+def _fitted_values_by_model(fitted_values: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    return {
+        str(model_name): group.copy()
+        for model_name, group in fitted_values.groupby(MODEL_NAME, sort=False)
+    }
+
+
 def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMatrix:
     keyed = group[[UNIQUE_ID, DS]].copy()
     keyed[UNIQUE_ID] = keyed[UNIQUE_ID].astype(str)
@@ -204,10 +206,11 @@ def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMat
         raise ValueError("forecast cross-section contains no bottom-level hierarchy rows")
     subset = summing.subset(supplied_bottom)
     required = set(subset.node_labels)
+    ids_by_ds = {
+        ds: set(ds_group[UNIQUE_ID].astype(str)) for ds, ds_group in keyed.groupby(DS, sort=False)
+    }
     missing_by_ds = {
-        str(ds): sorted(required - set(ds_group[UNIQUE_ID].astype(str)))
-        for ds, ds_group in keyed.groupby(DS, sort=False)
-        if required - set(ds_group[UNIQUE_ID].astype(str))
+        str(ds): sorted(required - ids) for ds, ids in ids_by_ds.items() if required - ids
     }
     if missing_by_ds:
         context = {
@@ -220,9 +223,7 @@ def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMat
             f"{missing_by_ds} for {context}"
         )
     extra_by_ds = {
-        str(ds): sorted(set(ds_group[UNIQUE_ID].astype(str)) - required)
-        for ds, ds_group in keyed.groupby(DS, sort=False)
-        if set(ds_group[UNIQUE_ID].astype(str)) - required
+        str(ds): sorted(ids - required) for ds, ids in ids_by_ds.items() if ids - required
     }
     if extra_by_ds:
         raise ValueError(
@@ -267,13 +268,14 @@ def _to_nixtla_forecast_df(group: pd.DataFrame, summing: SummingMatrix) -> pd.Da
 
 
 def _to_nixtla_fitted_df(
-    fitted_values: pd.DataFrame,
+    fitted_by_model: Mapping[str, pd.DataFrame],
     summing: SummingMatrix,
     model_name: str,
 ) -> pd.DataFrame:
-    subset = fitted_values[fitted_values[MODEL_NAME].astype(str) == model_name].copy()
-    if subset.empty:
+    subset = fitted_by_model.get(model_name)
+    if subset is None or subset.empty:
         raise ValueError(f"Missing fitted values for model_name={model_name!r}")
+    subset = subset.copy()
     subset[UNIQUE_ID] = subset[UNIQUE_ID].astype(str)
     unknown = set(subset[UNIQUE_ID]) - set(summing.node_labels)
     if unknown:

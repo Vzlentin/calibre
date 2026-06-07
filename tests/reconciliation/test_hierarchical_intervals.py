@@ -82,7 +82,7 @@ class _FakeReconciliation:
 
 def _patch_fake_nixtla(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeReconciliation.calls = []
-    monkeypatch.setattr(hi, "_make_nixtla_method", lambda strategy: object())
+    monkeypatch.setattr(hi, "make_nixtla_method", lambda strategy: object())
     monkeypatch.setattr(hi, "_make_reconciliation", _FakeReconciliation)
 
 

@@ -186,7 +186,7 @@ class BackendEngine:
         )
         self._order_bottom_ids = (
             frozenset(build_summing_matrix(self.hierarchy).bottom_ids)
-            if self.hierarchy is not None
+            if self.hierarchy is not None and order is not None
             else None
         )
         self.order_config = order

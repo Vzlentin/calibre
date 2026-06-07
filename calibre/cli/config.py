@@ -15,6 +15,7 @@ from calibre.reconciliation import (
     Reconciler,
     resolve_reconciler,
 )
+from calibre.reconciliation.nixtla_adapter import NixtlaStrategy
 
 CONFIG_SCHEMA = "1.0"
 
@@ -105,14 +106,7 @@ class HierarchicalIntervalConfig(_Section):
 
     method: Literal["nixtla_conformal"]
     coverage: float = Field(default=0.9, gt=0.0, lt=1.0)
-    strategy: Literal[
-        "bottom_up",
-        "ols",
-        "wls_struct",
-        "mint_shrink",
-        "wls_var",
-        "erm",
-    ] = "bottom_up"
+    strategy: NixtlaStrategy = "bottom_up"
     seed: int = 0
 
     def to_phase(self) -> NixtlaHierarchicalIntervalPhase:

@@ -100,6 +100,12 @@ def _default_method_factory(strategy: NixtlaStrategy) -> Callable[[], _NixtlaMet
     return _make_method
 
 
+def make_nixtla_method(strategy: NixtlaStrategy) -> _NixtlaMethod:
+    """Build the Nixtla method object for Calibre's supported strategy names."""
+
+    return _default_method_factory(strategy)()
+
+
 def _to_nixtla_layout(base: np.ndarray, summing: SummingMatrix) -> _NixtlaLayout:
     """Convert Calibre's identity-first S layout to Nixtla's identity-last layout."""
     bottom_idx = np.arange(summing.n_bottom, dtype=np.int64)
