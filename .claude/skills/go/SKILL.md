@@ -18,9 +18,8 @@ work order; the issue is the close-handle.
 
 ## Project rules that bind every stage
 
-- **Build/quality invariants live in `CLAUDE.md`.** The `uv run` prefix and the
-  VN2 gate are project-wide rules (`CLAUDE.md` Commands + Gotchas) — they bind
-  every stage here and inside spawned agents.
+- **Storage is delegated.** The plan store and outcome persistence are resolved by
+`/project-memory`.
 - **Public repo, private context stays out.** This repo is public. No client
   names, partners, or private commercial context in commit messages, the PR
   title/body, or issue comments.
@@ -52,16 +51,11 @@ the fan-out:
 
 ## Stage 0 — Classify the input
 
-**Storage is delegated.** The plan store and outcome persistence are resolved by
-`/project-memory` (the vault, or the `docs/plans/` fallback when no vault is
-reachable), so `/go` carries no path or fallback logic of its own — there is no
-hard vault precondition.
-
 Classify `$ARGUMENTS` into one of three kinds, in this order — first match
 wins:
 
 1. **Plan-file** — `$ARGUMENTS` resolves to an existing `.md` file (e.g.
-   `docs/plans/2026-06-06-001-feat-foo-plan.md`). Open it and check it is an
+   `2026-06-06-001-feat-foo-plan.md`). Open it and check it is an
    *executable plan* — it has implementation units / phases (`### U1`,
    `## Implementation units`, etc.). A brainstorm/ideation doc with no
    implementation units is **not** executable: carry it as a planning seed for
@@ -87,9 +81,6 @@ no issue — stop and ask.
 ---
 
 ## Stage 0.5 — Ensure a plan exists
-
-Plans live in the store resolved by `/project-memory` (the vault, or the
-`docs/plans/` fallback). Get a plan in hand, by input kind:
 
 - **Plan-file (executable):** that file is the plan — skip to Stage 0.6.
 - **Issue / Idea / brainstorm (or non-executable plan-file):** find an existing
@@ -177,9 +168,7 @@ Spawn **one** agent (foreground, no model override — inherit) to implement the
 plan and open the PR — a subagent per the Invocation model. Give it the brief in
 `.claude/skills/go/references/ce-work-brief.md` (mode-specific setup clauses,
 `uv run` quality gates, the private-context guard, the `closes #N` PR finish),
-filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan text —
-paste the full contents, do not pass a path; an isolated worktree has no vault
-mounted, and a freshly written `docs/plans/` plan may be uncommitted.
+filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan text.
 
 When the agent returns, sync by mode — never move the main checkout onto the PR
 branch in worktree mode:
@@ -314,12 +303,7 @@ execution mode.
 
 **Delegate persistence to `/project-memory`.** Flip the plan's
 `status: active → shipped` in the resolved store and append the outcome — PR URL,
-merged SHA, key decisions. Per `/project-memory`'s plan-status persistence: in
-vault mode also update `architecture.md` (only for a durable design decision,
-module boundary, or invariant change — terse, cite the PR) and `lessons.md`
-(any rule-for-self from a correction or pitfall hit), then commit + push the
-vault; in fallback mode the `docs/plans/` plan is the record and no vault memory
-is touched. Do not touch `vision.md` unless product scope actually moved.
+merged SHA, key decisions.
 
 **GATE:** the work item's plan reads `status: shipped` in the resolved store with
 the PR/SHA recorded.
