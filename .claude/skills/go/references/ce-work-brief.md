@@ -24,5 +24,4 @@ below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
 > Report back: PR number, PR URL, and the branch name.
 >
 > --- PLAN (complete spec) ---
-> <paste the full plan contents from the vault — paste the text, do not pass a
-> path; an isolated worktree does not have the vault mounted>
+> <paste the full plan contents from the resolved /project-memory store>
