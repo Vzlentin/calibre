@@ -30,12 +30,6 @@ work order; the issue is the close-handle.
   title/body, or issue comments.
 - **Squash + `closes #N`.** Merge is squash-only; the PR body must carry
   `closes #N` so the issue closes and roadmap status updates for free.
-- **Two local-tooling traps.** Don't trust `git status --porcelain` emptiness
-  (the local `git` wrapper may emit `ok` on a clean tree) and don't use
-  `gh pr checks --json` (the `gh` wrapper breaks `--json`). Parse the full
-  `git status` text for clean/dirty, and read CI via the GitHub API. See
-  `.claude/skills/go/references/environment.md` for both traps in full and the
-  canonical `gh api` check-runs/status recipes — its single home.
 
 ---
 
@@ -247,29 +241,19 @@ block the merge unless they flag a correctness risk — use judgment.
 
 ---
 
-## Stage 5 — Babysit CI, then squash-merge on green
+## Stage 5 — Loop on CI, then squash-merge on green
 
-Wait for CI, then enter an autofix loop (max **3** iterations). Poll the PR's head
-SHA with the canonical `gh api` check-runs/status recipes in
-`.claude/skills/go/references/environment.md`; the CI log-pull and the
-cleanup-by-mode bash live in `.claude/skills/go/references/ci-and-merge.md`.
+Invoke `/loop-on-ci` from `WORKDIR` for this PR. It owns the CI loop: resolving
+the active PR, using `gh pr checks` as the source of truth, watching pending
+checks, pulling failed GitHub Actions logs when needed, applying scoped CI fixes,
+pushing, and re-checking until the PR check set is green.
 
-If checks fail:
-
-1. Enumerate failures from the check-runs output.
-2. Pull logs for the failed runs (recipe in `ci-and-merge.md`).
-3. Fix the **root cause** in `WORKDIR`. Never weaken an assertion, skip a test,
-   or touch the VN2 `4992.20` baseline to turn CI green. If a failure is a
-   genuinely flaky test with no code fix, record it rather than retrying blindly.
-   **If the same failure signature appears across 2+ iterations, stop** — the fix
-   round is introducing its own failures (the PR #38 pattern); don't burn the last
-   cycle.
-4. `cd "$WORKDIR" && git add <changed> && git commit -m "fix(ci): <what broke>" && git push`.
-5. Re-check.
-
-After **3** failed cycles, stop looping: append a `## CI Failures Unresolved`
-section to the PR body (`gh pr edit <PR> --body-file <tmp>`) and report. Do not
-merge red — take the **preserve path** below.
+`/go` still owns the outer guardrails: never weaken assertions, skip tests, touch
+the VN2 `4992.20` baseline, or make unrelated workflow changes to turn CI green.
+If `/loop-on-ci` reports unresolved failures, repeated failures, or a
+merge-blocking issue it cannot safely fix, append a `## CI Failures Unresolved`
+section to the PR body (`gh pr edit <PR> --body-file <tmp>`), do not merge red,
+and take the **preserve path** below.
 
 **On green** (and Stage 4 gate satisfied), confirm the PR body carries `closes #N`
 — Stage 0c guarantees the issue exists, so verify only that the line is present
@@ -287,12 +271,13 @@ fast-forward, drop the branch; in **worktree mode** remove the worktree and drop
 the branch **without** `git checkout main`/`git pull` in the main checkout —
 preserving the user's branch and dirty tree is the whole point.
 
-**Preserve path (failure / any short-stop).** If CI is still red after 3 cycles,
-or any stage stopped short of a confirmed merge, do **not** clean up: leave the
-local `<type>/<slug>` branch and — in worktree mode — the `.worktrees/<slug>`
-working tree intact so the user can resume/debug, and surface the worktree path +
-branch in the final report. This short-stop **is** the `failed` terminal outcome
-— proceed to Stage 6 to persist `failed` before reporting.
+**Preserve path (failure / any short-stop).** If `/loop-on-ci` cannot get the PR
+green, or any stage stopped short of a confirmed merge, do **not** clean up:
+leave the local `<type>/<slug>` branch and — in worktree mode — the
+`.worktrees/<slug>` working tree intact so the user can resume/debug, and surface
+the worktree path + branch in the final report. This short-stop **is** the
+`failed` terminal outcome — proceed to Stage 6 to persist `failed` before
+reporting.
 
 **GATE:** either the PR is squash-merged **and** cleanup ran (local branch deleted
 in both modes; worktree removed in worktree mode) with `main` fast-forwarded; OR a
