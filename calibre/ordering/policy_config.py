@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import assert_never
 
 import pandas as pd
 
@@ -83,4 +84,4 @@ def apply_order_policy(frame: pd.DataFrame, config: OrderPolicy) -> pd.DataFrame
         return apply_rss_policy(frame, config.params, config.coverage)
     if isinstance(config, NewsvendorConfig):
         return apply_newsvendor_policy(frame, config.params, config.coverage, config.period)
-    raise TypeError(f"Unknown order policy config: {type(config).__name__}")
+    assert_never(config)
