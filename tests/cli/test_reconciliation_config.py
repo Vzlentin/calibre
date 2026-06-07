@@ -11,7 +11,7 @@ from calibre.cli.commands import run_config
 from calibre.cli.config import ReconciliationConfig, load_config_from_mapping
 from calibre.execution.backend import BackendResult
 from calibre.execution.ledger import InMemoryLedger
-from calibre.reconciliation import NixtlaReconciler, NoOpReconciler
+from calibre.reconciliation import NixtlaHierarchicalIntervalPhase, NixtlaReconciler, NoOpReconciler
 
 _M5_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
 
@@ -111,3 +111,101 @@ def test_run_config_passes_bundle_hierarchy_into_engine(monkeypatch: pytest.Monk
     assert options.reconciler.strategy == "ols"
     assert options.hierarchy is not None
     assert "unique_id" in options.hierarchy.columns
+
+
+def test_hierarchical_intervals_section_resolves_to_fused_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeEngine:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["reconciliation"] = kwargs["reconciliation"]
+            captured["hierarchical_intervals"] = kwargs["hierarchical_intervals"]
+
+        def execute(self, tasks: Any, actuals: Any, origins: Any) -> BackendResult:
+            captured["tasks"] = tasks
+            return BackendResult(ledger=InMemoryLedger())
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("calibre.cli.commands.BackendEngine", _FakeEngine)
+
+    config = load_config_from_mapping(
+        {
+            "config_schema": "1.0",
+            "dataset": {"adapter": "m5", "path": str(_M5_FIXTURE)},
+            "tasks": [
+                {
+                    "model": "SeasonalNaive",
+                    "horizon": 1,
+                    "config": {"backend": "statsforecast", "season_length": 7},
+                }
+            ],
+            "origins": {"start": "2011-01-30", "end": "2011-01-30", "freq": "D"},
+            "hierarchical_intervals": {
+                "method": "nixtla_conformal",
+                "coverage": 0.9,
+                "strategy": "ols",
+            },
+            "execution": {"backend": "local", "seed": 42},
+        }
+    )
+    run_config(config)
+
+    reconciliation = captured["reconciliation"]
+    fused = captured["hierarchical_intervals"]
+    assert isinstance(fused.phase, NixtlaHierarchicalIntervalPhase)
+    assert fused.phase.options.strategy == "ols"
+    assert reconciliation.hierarchy is not None
+    assert isinstance(reconciliation.reconciler, NoOpReconciler)
+    assert len(captured["tasks"].local) > 2
+
+
+def test_hierarchical_intervals_unknown_key_is_forbidden() -> None:
+    with pytest.raises(ValidationError, match="bogus_knob"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                hierarchical_intervals={
+                    "method": "nixtla_conformal",
+                    "strategy": "bottom_up",
+                    "bogus_knob": True,
+                },
+            )
+        )
+
+
+def test_hierarchical_intervals_rejects_conformal_double_calibration() -> None:
+    with pytest.raises(ValidationError, match="cannot be combined with conformal"):
+        load_config_from_mapping(
+            _config(
+                conformal={"method": "aci", "coverage": 0.9},
+                hierarchical_intervals={"method": "nixtla_conformal"},
+            )
+        )
+
+
+def test_hierarchical_intervals_rejects_point_reconciliation() -> None:
+    with pytest.raises(ValidationError, match="non-none reconciliation"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                reconciliation={"strategy": "ols"},
+                hierarchical_intervals={"method": "nixtla_conformal"},
+            )
+        )
+
+
+def test_hierarchical_intervals_requires_dataset_hierarchy() -> None:
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            dataset={"adapter": "vn2", "path": "benchmarks/vn2/fixture", "period": 0},
+            hierarchical_intervals={"method": "nixtla_conformal"},
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires a dataset hierarchy"):
+        run_config(config)

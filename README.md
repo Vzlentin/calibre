@@ -92,6 +92,26 @@ lattice produces ill-conditioned covariance estimates. Reconciliation still
 applies only to point forecasts before conformal calibration; coherent interval
 or quantile reconciliation remains out of scope for this path.
 
+For interim hierarchy-aware intervals, use the separate fused phase:
+
+```yaml
+hierarchical_intervals:
+  method: nixtla_conformal
+  coverage: 0.9
+  strategy: bottom_up  # bottom_up, ols, wls_struct, mint_shrink, wls_var, erm
+```
+
+This path requires a dataset `hierarchy`, requests horizonless fitted values
+keyed by `(unique_id, ds, model_name)`, and runs as
+`Predict -> HierarchicalIntervals -> Order -> Commit`. It is mutually exclusive
+with `conformal` and non-`none` point `reconciliation`, because Nixtla owns both
+the coherent point output and the marginal conformal interval columns for that
+run. The emitted bounds use Calibre's normal `lo_<coverage>` / `hi_<coverage>`
+column contract for bottom and aggregate node rows. These are marginal
+hierarchical conformal intervals: point forecasts are coherent, but published
+per-node interval boxes are not additive bands and should not be described as
+conditional coverage at a chosen hierarchy level.
+
 ### Benchmarks
 
 ```bash

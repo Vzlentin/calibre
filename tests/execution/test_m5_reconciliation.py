@@ -30,15 +30,25 @@ from calibre.core.forecast_frame import (
     interval_column_names,
 )
 from calibre.core.forecast_task import ForecastTask
+from calibre.evaluation.forecast_metrics import compute_metrics, resolve_actuals
+from calibre.evaluation.point_metrics import mae
 from calibre.execution.backend import (
     BackendEngine,
     ConformalOptions,
     ExecutionOptions,
+    HierarchicalIntervalEngineOptions,
     ReconciliationOptions,
 )
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.forecasting.adapter_base import ModelAdapter, build_fitted_values_frame
-from calibre.reconciliation import NixtlaReconciler, NoOpReconciler, ReconciliationContext
+from calibre.ordering.policy_config import RsConfig
+from calibre.reconciliation import (
+    HierarchicalIntervalOptions,
+    NixtlaHierarchicalIntervalPhase,
+    NixtlaReconciler,
+    NoOpReconciler,
+    ReconciliationContext,
+)
 from calibre.reconciliation.summing import build_summing_matrix
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
@@ -95,6 +105,34 @@ def _run_m5(bundle, actuals, tasks, origins, reconciler) -> pd.DataFrame:
             )
         ),
         reconciliation=ReconciliationOptions(reconciler=reconciler, hierarchy=bundle.hierarchy),
+    )
+    try:
+        result = engine.execute(tasks, actuals, origins)
+    finally:
+        engine.close()
+    return result.ledger.to_df()
+
+
+def _run_m5_hierarchical_intervals(
+    bundle,
+    actuals,
+    tasks,
+    origins,
+    *,
+    strategy: str = "bottom_up",
+) -> pd.DataFrame:
+    engine = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="local", seed=42),
+        reconciliation=ReconciliationOptions(reconciler=None, hierarchy=bundle.hierarchy),
+        hierarchical_intervals=HierarchicalIntervalEngineOptions(
+            phase=NixtlaHierarchicalIntervalPhase(
+                HierarchicalIntervalOptions(
+                    method="nixtla_conformal",
+                    coverage=0.9,
+                    strategy=strategy,
+                )
+            )
+        ),
     )
     try:
         result = engine.execute(tasks, actuals, origins)
@@ -306,6 +344,83 @@ def test_m5_residual_strategies_return_coherent_multi_horizon_forecasts(
     assert not ledger.empty
     assert set(ledger[H]) == {1, 2}
     _assert_node_rows_coherent(ledger, bundle.hierarchy)
+
+
+def test_m5_hierarchical_conformal_intervals_emit_node_bounds_and_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("hierarchicalforecast.core")
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter",
+        lambda model_config: _ResidualAdapter(model_config),
+    )
+    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
+    node_history = _synthetic_m5_node_history(bundle.hierarchy)
+    tasks = _synthetic_residual_tasks(node_history, horizon=2)
+    origins = [pd.Timestamp("2011-03-15")]
+    lower_col, upper_col = interval_column_names(0.9)
+
+    ledger = _run_m5_hierarchical_intervals(bundle, node_history, tasks, origins)
+
+    assert {lower_col, upper_col}.issubset(ledger.columns)
+    summing = build_summing_matrix(bundle.hierarchy)
+    assert set(ledger[UNIQUE_ID]) == set(summing.node_labels)
+    _assert_node_rows_coherent(ledger, bundle.hierarchy)
+
+    width_gaps: list[float] = []
+    for _, group in ledger.groupby([MODEL_NAME, FORECAST_ORIGIN, H], sort=False):
+        by_uid = group.set_index(UNIQUE_ID)
+        parent_width = float(
+            by_uid.loc["__total__", upper_col] - by_uid.loc["__total__", lower_col]
+        )
+        bottom_bounds = by_uid.loc[list(summing.bottom_ids), [lower_col, upper_col]]
+        child_width_sum = float((bottom_bounds[upper_col] - bottom_bounds[lower_col]).sum())
+        width_gaps.append(abs(parent_width - child_width_sum))
+    assert any(gap > 1e-9 for gap in width_gaps)
+
+    resolved, _new = resolve_actuals(ledger, node_history, pd.Timestamp("2011-03-17"))
+    metrics = compute_metrics(
+        resolved,
+        metrics=[mae],
+        group_by=[UNIQUE_ID],
+        interval_bounds=(lower_col, upper_col),
+    )
+    assert {"coverage", "mean_interval_width"}.issubset(metrics.columns)
+
+
+def test_hierarchical_interval_ordering_uses_bottom_rows_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter",
+        lambda model_config: _ResidualAdapter(model_config),
+    )
+    seen: dict[str, list[str]] = {}
+
+    def _fake_apply_order_policy(order_frame, config):
+        del config
+        seen["uids"] = order_frame[UNIQUE_ID].astype(str).tolist()
+        return pd.DataFrame({UNIQUE_ID: seen["uids"], "order_qty": [0.0] * len(order_frame)})
+
+    monkeypatch.setattr("calibre.execution.backend.apply_order_policy", _fake_apply_order_policy)
+    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
+    node_history = _synthetic_m5_node_history(bundle.hierarchy)
+    tasks = _synthetic_residual_tasks(node_history, horizon=1)
+    phase = NixtlaHierarchicalIntervalPhase(
+        HierarchicalIntervalOptions(method="nixtla_conformal", coverage=0.9, strategy="bottom_up")
+    )
+    engine = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="local", seed=42),
+        reconciliation=ReconciliationOptions(hierarchy=bundle.hierarchy),
+        hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=phase),
+        order=RsConfig(params=pd.DataFrame()),
+    )
+    try:
+        engine.execute(tasks, node_history, [pd.Timestamp("2011-03-15")])
+    finally:
+        engine.close()
+
+    assert seen["uids"] == list(build_summing_matrix(bundle.hierarchy).bottom_ids)
 
 
 def test_reconcile_byte_identical_when_hierarchy_none() -> None:
