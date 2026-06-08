@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -250,9 +251,8 @@ def score_m5_coverage(
     coverage: float = 0.9,
     output_dir: str | Path | None = None,
 ):
-    from calibre.evaluation.m5_coverage import score_resolved_ledger
-
-    artifacts = score_resolved_ledger(
+    coverage_module = import_module("benchmarks.m5.coverage")
+    artifacts = coverage_module.score_resolved_ledger(
         ledger_path,
         coverage=coverage,
         output_dir=output_dir,

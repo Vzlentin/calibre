@@ -140,8 +140,27 @@ def compute_interval_coverage(
         raise ValueError(f"coverage input missing required column(s): {missing}")
 
     columns = [*group_cols, *COVERAGE_DIAGNOSTIC_COLUMNS]
-    if ledger_df.empty and group_cols:
-        return pd.DataFrame(columns=columns)
+    if ledger_df.empty:
+        if group_cols:
+            return pd.DataFrame(columns=columns)
+        return pd.DataFrame(
+            [
+                {
+                    "target_coverage": float(coverage),
+                    "total_rows": 0,
+                    "resolved_rows": 0,
+                    "unresolved_rows": 0,
+                    "scored_rows": 0,
+                    "unscored_rows": 0,
+                    "coverage": np.nan,
+                    "mean_interval_width": np.nan,
+                    "median_interval_width": np.nan,
+                    "min_interval_width": np.nan,
+                    "max_interval_width": np.nan,
+                }
+            ],
+            columns=columns,
+        )
 
     y_values = pd.to_numeric(ledger_df[Y], errors="coerce")
     lower_values = pd.to_numeric(ledger_df[lower_col], errors="coerce")
@@ -157,43 +176,51 @@ def compute_interval_coverage(
     covered_mask = scored_mask & (lower_values <= y_values) & (y_values <= upper_values)
     widths = upper_values - lower_values
 
+    scoring = (
+        ledger_df.loc[:, group_cols].copy() if group_cols else pd.DataFrame(index=ledger_df.index)
+    )
+    scoring["_resolved"] = resolved_mask.astype("int64")
+    scoring["_scored"] = scored_mask.astype("int64")
+    scoring["_covered"] = covered_mask.astype("int64")
+    scoring["_width"] = widths.where(scored_mask)
+
     if group_cols:
-        grouped = ledger_df.groupby(group_cols, dropna=False, sort=False)
-        iterator = grouped
-    else:
-        iterator = [((), ledger_df)]
-
-    rows: list[dict[str, object]] = []
-    for keys, group in iterator:
-        if not isinstance(keys, tuple):
-            keys = (keys,)
-        idx = group.index
-        total_rows = int(len(group))
-        resolved_rows = int(resolved_mask.loc[idx].sum())
-        scored_rows = int(scored_mask.loc[idx].sum())
-        scored_idx = idx[scored_mask.loc[idx].to_numpy()]
-        scored_widths = widths.loc[scored_idx]
-
-        row: dict[str, object] = dict(zip(group_cols, keys, strict=False))
-        row.update(
-            {
-                "target_coverage": float(coverage),
-                "total_rows": total_rows,
-                "resolved_rows": resolved_rows,
-                "unresolved_rows": total_rows - resolved_rows,
-                "scored_rows": scored_rows,
-                "unscored_rows": resolved_rows - scored_rows,
-                "coverage": (
-                    float(covered_mask.loc[idx].sum() / scored_rows) if scored_rows > 0 else np.nan
-                ),
-                "mean_interval_width": (float(scored_widths.mean()) if scored_rows > 0 else np.nan),
-                "median_interval_width": (
-                    float(scored_widths.median()) if scored_rows > 0 else np.nan
-                ),
-                "min_interval_width": (float(scored_widths.min()) if scored_rows > 0 else np.nan),
-                "max_interval_width": (float(scored_widths.max()) if scored_rows > 0 else np.nan),
-            }
+        result = (
+            scoring.groupby(group_cols, dropna=False, sort=False)
+            .agg(
+                total_rows=("_resolved", "size"),
+                resolved_rows=("_resolved", "sum"),
+                scored_rows=("_scored", "sum"),
+                covered_rows=("_covered", "sum"),
+                mean_interval_width=("_width", "mean"),
+                median_interval_width=("_width", "median"),
+                min_interval_width=("_width", "min"),
+                max_interval_width=("_width", "max"),
+            )
+            .reset_index()
         )
-        rows.append(row)
+    else:
+        result = pd.DataFrame(
+            [
+                {
+                    "total_rows": int(len(scoring)),
+                    "resolved_rows": int(scoring["_resolved"].sum()),
+                    "scored_rows": int(scoring["_scored"].sum()),
+                    "covered_rows": int(scoring["_covered"].sum()),
+                    "mean_interval_width": float(scoring["_width"].mean()),
+                    "median_interval_width": float(scoring["_width"].median()),
+                    "min_interval_width": float(scoring["_width"].min()),
+                    "max_interval_width": float(scoring["_width"].max()),
+                }
+            ]
+        )
 
-    return pd.DataFrame(rows, columns=columns)
+    result["target_coverage"] = float(coverage)
+    result["unresolved_rows"] = result["total_rows"] - result["resolved_rows"]
+    result["unscored_rows"] = result["resolved_rows"] - result["scored_rows"]
+    result["coverage"] = np.where(
+        result["scored_rows"].gt(0),
+        result["covered_rows"] / result["scored_rows"],
+        np.nan,
+    )
+    return result.drop(columns="covered_rows")[columns]

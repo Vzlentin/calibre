@@ -136,19 +136,19 @@ coverage validation.
 
 ## Origin Window
 
-The full config uses 37 daily origins:
+The full config uses 64 daily origins:
 
 ```text
-origins >= warmup + scored + (H - 1)
-        >= 9      + 1      + 27
+origins >= ready-to-issue-h28 + h=28 settlement
+        >= (10 + 27)         + 27
 ```
 
 For 90% per-horizon MSCP, the runtime's higher-quantile finite-sample rule is
 infinite while `alpha <= 1 / (n + 1)`, so the first finite `(series, horizon)`
-partition has 10 resolved scores. The runbook expresses that as 9 warmup scores
-plus 1 scored origin, then adds the 27-day settlement delay for the longest
-`h=28` score. Coverage rows, tolerances, and reports are computed from the
-produced resolved ledger.
+partition has 10 resolved scores. For `h=28`, those scores themselves need the
+27-day settlement delay before a finite interval can be issued, and the first
+finite `h=28` interval then needs another 27 days to resolve. Coverage rows,
+tolerances, and reports are computed from the produced resolved ledger.
 
 ## Handoff Manifest
 

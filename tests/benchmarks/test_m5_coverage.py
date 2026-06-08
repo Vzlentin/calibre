@@ -6,6 +6,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from benchmarks.m5.coverage import (
+    COVERAGE_BY_NODE_NAME,
+    COVERAGE_REPORT_NAME,
+    LEVEL_COLUMN,
+    infer_m5_level,
+    write_coverage_artifacts,
+)
 from calibre.cli.main import app
 from calibre.core.forecast_frame import (
     DS,
@@ -16,13 +23,6 @@ from calibre.core.forecast_frame import (
     H,
     Y,
     interval_column_names,
-)
-from calibre.evaluation.m5_coverage import (
-    COVERAGE_BY_NODE_NAME,
-    COVERAGE_REPORT_NAME,
-    LEVEL_COLUMN,
-    infer_m5_level,
-    write_coverage_artifacts,
 )
 from calibre.reconciliation.summing import TOTAL_LABEL
 
@@ -84,13 +84,21 @@ def test_m5_coverage_writer_emits_node_artifact_and_report(tmp_path: Path) -> No
     assert set(node[LEVEL_COLUMN]) == {"bottom", "dept_id", "total"}
     assert int(node["scored_rows"].sum()) == 5
     assert int(node["unscored_rows"].sum()) == 1
+    assert artifacts.population["coverage"].iloc[0] == pytest.approx(0.8)
+    assert artifacts.per_horizon.set_index(H).loc[1, "coverage"] == pytest.approx(1.0)
+    assert artifacts.per_horizon.set_index(H).loc[2, "coverage"] == pytest.approx(0.5)
+    per_level = artifacts.per_level.set_index(LEVEL_COLUMN)
+    assert per_level.loc["bottom", "average_node_coverage"] == pytest.approx(0.5)
+    assert per_level.loc["bottom", "outlier_node_groups"] == 1
 
     report = artifacts.report_path.read_text(encoding="utf-8")
     assert "Target coverage" in report
-    assert "Population marginal coverage" in report
+    assert "Population marginal coverage: 80.00%" in report
+    assert "Acceptance gate: FAIL" in report
     assert "Per-Level Diagnostics" in report
     assert "Per-Horizon Diagnostics" in report
     assert "Per-Node Outliers" in report
+    assert "ITEM_1_STORE_1" in report
     assert "not coherent interval boxes or conditional per-node guarantees" in report
 
 
@@ -123,3 +131,10 @@ def test_score_m5_coverage_cli_writes_artifacts(tmp_path: Path, capsys) -> None:
     assert Path(payload["report"]) == tmp_path / COVERAGE_REPORT_NAME
     assert (tmp_path / COVERAGE_BY_NODE_NAME).exists()
     assert (tmp_path / COVERAGE_REPORT_NAME).exists()
+
+
+def test_score_m5_coverage_cli_missing_ledger_fails_clearly(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.resolved.parquet"
+
+    with pytest.raises(FileNotFoundError, match="resolved ledger not found"):
+        app(["score-m5-coverage", "--ledger", str(missing)])

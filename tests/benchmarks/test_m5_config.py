@@ -75,10 +75,11 @@ def test_m5_full_origin_window_meets_mscp_horizon_invariant() -> None:
     horizon = config.tasks[0].horizon
     assert runtime_config.resolved_quantile_rule == "higher"
     first_ready_count = _first_finite_higher_quantile_count(runtime_config.alpha)
-    minimum_origins = first_ready_count + (horizon - 1)
+    minimum_origins = first_ready_count + 2 * (horizon - 1)
 
     assert horizon == 28
     assert first_ready_count == 10
+    assert len(config.origins.to_list()) == 64
     assert len(config.origins.to_list()) >= minimum_origins
 
 
