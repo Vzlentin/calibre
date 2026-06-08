@@ -83,12 +83,18 @@ Every M5 run writes into an explicit per-run directory:
 
 ```text
 results/m5/<run-name>/
-  forecast-ledger.parquet
+  forecast-ledger.parquet           # configured ledger path
+  forecast-ledger.resolved.parquet  # resolved materialized ledger for streaming runs
   order-ledger.parquet              # only when ordering is configured
   coverage-by-node.parquet          # reserved for #85
   report.md                         # reserved for #85
   hierarchical-interval-baseline/   # reserved comparator lane for #85
 ```
+
+The full config uses `output.streaming: true`, so `forecast-ledger.parquet` is
+the raw append stream and `forecast-ledger.resolved.parquet` is the materialized
+ledger with resolved actuals and nonconformity scores. Use the resolved ledger
+for #85 scoring and reporting.
 
 Output paths are part of the YAML. When changing the strategy, model, origin
 window, or conformal settings, copy the config or edit the run directory to avoid
@@ -124,4 +130,10 @@ When a full local run is used as the handoff surface for #85, record:
 - Calibration partition recorded by the config/run (`global` until the source
   prerequisite lands and the config is updated).
 - Origin start, end, frequency, and horizon.
-- Produced artifact paths under `results/m5/<run-name>/`.
+- Produced artifact paths under `results/m5/<run-name>/`, including the resolved
+  ledger path for streaming runs.
+
+The current checked-in full config is globally calibrated because the reusable
+source-level series partition surface has not landed yet. It is valid for local
+connectivity and artifact-shape acceptance, but it becomes the #85 node-level
+coverage handoff surface only after a run uses series partitioning.
