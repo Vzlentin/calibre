@@ -9,7 +9,10 @@ import numpy as np
 import pandas as pd
 
 from calibre.core.forecast_frame import MODEL_NAME, UNIQUE_ID, H, Y, interval_column_names
-from calibre.evaluation.forecast_metrics import compute_interval_coverage
+from calibre.evaluation.forecast_metrics import (
+    prepare_interval_coverage_frame,
+    summarize_interval_coverage,
+)
 from calibre.reconciliation.summing import TOTAL_LABEL
 
 COVERAGE_BY_NODE_NAME = "coverage-by-node.parquet"
@@ -87,8 +90,13 @@ def write_coverage_artifacts(
     scored_input = ledger.loc[:, required].copy()
     scored_input[LEVEL_COLUMN] = _level_lookup(scored_input)
 
-    node = compute_interval_coverage(
+    scoring = prepare_interval_coverage_frame(
         scored_input,
+        coverage=coverage,
+        group_by=[UNIQUE_ID, LEVEL_COLUMN, H, MODEL_NAME],
+    )
+    node = summarize_interval_coverage(
+        scoring,
         coverage=coverage,
         group_by=[UNIQUE_ID, LEVEL_COLUMN, H, MODEL_NAME],
     )
@@ -104,9 +112,9 @@ def write_coverage_artifacts(
         thresholds.node_outlier_tolerance
     )
 
-    population = compute_interval_coverage(scored_input, coverage=coverage, group_by=[])
-    per_level = _per_level_summary(scored_input, node, coverage=coverage)
-    per_horizon = compute_interval_coverage(scored_input, coverage=coverage, group_by=[H])
+    population = summarize_interval_coverage(scoring, coverage=coverage, group_by=[])
+    per_level = _per_level_summary(scoring, node, coverage=coverage)
+    per_horizon = summarize_interval_coverage(scoring, coverage=coverage, group_by=[H])
     per_horizon = per_horizon.sort_values(H, kind="stable").reset_index(drop=True)
 
     run_dir = Path(output_dir)
@@ -160,13 +168,13 @@ def _validate_ledger_columns(ledger: pd.DataFrame, *, required: list[str]) -> No
 
 
 def _per_level_summary(
-    scored_input: pd.DataFrame,
+    scoring: pd.DataFrame,
     node: pd.DataFrame,
     *,
     coverage: float,
 ) -> pd.DataFrame:
-    pooled = compute_interval_coverage(
-        scored_input,
+    pooled = summarize_interval_coverage(
+        scoring,
         coverage=coverage,
         group_by=[LEVEL_COLUMN],
     ).rename(

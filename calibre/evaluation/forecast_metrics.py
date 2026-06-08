@@ -130,37 +130,28 @@ def compute_interval_coverage(
     as ``unscored_rows`` so warmup gaps do not masquerade as miscoverage.
     """
 
-    if group_by is None:
-        group_by = [UNIQUE_ID, H, MODEL_NAME]
-    group_cols = list(group_by)
+    prepared = prepare_interval_coverage_frame(
+        ledger_df,
+        coverage=coverage,
+        group_by=group_by,
+    )
+    return summarize_interval_coverage(prepared, coverage=coverage, group_by=group_by)
+
+
+def prepare_interval_coverage_frame(
+    ledger_df: pd.DataFrame,
+    *,
+    coverage: float,
+    group_by: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Prepare interval-coverage masks once for one or more aggregations."""
+
+    group_cols = _coverage_group_columns(group_by)
     lower_col, upper_col = interval_column_names(coverage)
     required = [Y, lower_col, upper_col, *group_cols]
     missing = [column for column in required if column not in ledger_df.columns]
     if missing:
         raise ValueError(f"coverage input missing required column(s): {missing}")
-
-    columns = [*group_cols, *COVERAGE_DIAGNOSTIC_COLUMNS]
-    if ledger_df.empty:
-        if group_cols:
-            return pd.DataFrame(columns=columns)
-        return pd.DataFrame(
-            [
-                {
-                    "target_coverage": float(coverage),
-                    "total_rows": 0,
-                    "resolved_rows": 0,
-                    "unresolved_rows": 0,
-                    "scored_rows": 0,
-                    "unscored_rows": 0,
-                    "coverage": np.nan,
-                    "mean_interval_width": np.nan,
-                    "median_interval_width": np.nan,
-                    "min_interval_width": np.nan,
-                    "max_interval_width": np.nan,
-                }
-            ],
-            columns=columns,
-        )
 
     y_values = pd.to_numeric(ledger_df[Y], errors="coerce")
     lower_values = pd.to_numeric(ledger_df[lower_col], errors="coerce")
@@ -179,10 +170,29 @@ def compute_interval_coverage(
     scoring = (
         ledger_df.loc[:, group_cols].copy() if group_cols else pd.DataFrame(index=ledger_df.index)
     )
-    scoring["_resolved"] = resolved_mask.astype("int64")
-    scoring["_scored"] = scored_mask.astype("int64")
-    scoring["_covered"] = covered_mask.astype("int64")
+    scoring["_resolved"] = resolved_mask
+    scoring["_scored"] = scored_mask
+    scoring["_covered"] = covered_mask
     scoring["_width"] = widths.where(scored_mask)
+    return scoring
+
+
+def summarize_interval_coverage(
+    scoring: pd.DataFrame,
+    *,
+    coverage: float,
+    group_by: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Aggregate a prepared interval-coverage frame."""
+
+    group_cols = _coverage_group_columns(group_by)
+    missing = [
+        column
+        for column in [*group_cols, "_resolved", "_scored", "_covered", "_width"]
+        if column not in scoring.columns
+    ]
+    if missing:
+        raise ValueError(f"coverage scoring input missing required column(s): {missing}")
 
     if group_cols:
         result = (
@@ -223,4 +233,11 @@ def compute_interval_coverage(
         result["covered_rows"] / result["scored_rows"],
         np.nan,
     )
+    columns = [*group_cols, *COVERAGE_DIAGNOSTIC_COLUMNS]
     return result.drop(columns="covered_rows")[columns]
+
+
+def _coverage_group_columns(group_by: Sequence[str] | None) -> list[str]:
+    if group_by is None:
+        group_by = [UNIQUE_ID, H, MODEL_NAME]
+    return list(group_by)
