@@ -6,10 +6,13 @@ dataset through the source CLI:
 ```bash
 uv run calibre run --config benchmarks/m5/config/smoke.yaml
 uv run calibre validate --config benchmarks/m5/config/full.yaml
+uv run calibre score-m5-coverage \
+  --ledger results/m5/full-mscp-bottom-up/forecast-ledger.resolved.parquet
 ```
 
-There is no `benchmarks.m5` Python entrypoint. The harness is the YAML contract
-plus this runbook; execution stays in `calibre run --config`.
+There is no benchmark-local forecast execution entrypoint. The harness is the
+YAML contract plus this runbook; execution stays in `calibre run --config`, and
+coverage scoring is a post-run artifact command over a resolved ledger.
 
 ## Configs
 
@@ -18,10 +21,10 @@ plus this runbook; execution stays in `calibre run --config`.
   only, not statistical evidence for M5 coverage.
 - `config/full.yaml` uses local full M5 data under `data/m5`, runs the canonical
   `evaluation` phase with 28-day horizons, point reconciliation, and MSCP
-  per-horizon conformal intervals. It is structurally valid today without
-  benchmark-local partition logic; the checked-in YAML carries the source-level
-  partition-selection TODO. The full config streams ledger output and uses
-  `execution.backend: auto` because full-M5 hierarchy expansion is large.
+  per-horizon conformal intervals with `conformal.partition: series`,
+  `calibration_window: 10`, and an explicit `max_partitions` guard. The full
+  config streams ledger output and uses `execution.backend: auto` because
+  full-M5 hierarchy expansion is large.
 
 For full-M5 work with hierarchy-aware reconciliation installed:
 
@@ -29,6 +32,8 @@ For full-M5 work with hierarchy-aware reconciliation installed:
 uv sync --extra dev --extra benchmarks --extra hierarchy
 uv run calibre validate --config benchmarks/m5/config/full.yaml
 uv run calibre run --config benchmarks/m5/config/full.yaml
+uv run calibre score-m5-coverage \
+  --ledger results/m5/full-mscp-bottom-up/forecast-ledger.resolved.parquet
 ```
 
 The full run is a local acceptance run only: it requires `data/m5`, is expensive,
@@ -86,8 +91,9 @@ results/m5/<run-name>/
   forecast-ledger.parquet           # configured ledger path
   forecast-ledger.resolved.parquet  # resolved materialized ledger for streaming runs
   order-ledger.parquet              # only when ordering is configured
-  coverage-by-node.parquet          # reserved for #85
-  report.md                         # reserved for #85
+  coverage-by-node.parquet          # per-node coverage diagnostics
+  coverage-summary.json             # structured gate status for agents/CI
+  report.md                         # human-readable coverage report
   hierarchical-interval-baseline/   # reserved comparator lane for #85
 ```
 
@@ -105,21 +111,50 @@ Nixtla hierarchical interval path emits coherent point forecasts and marginal
 intervals; published per-node interval boxes are not additive conditional
 coverage bands. Issue #85 owns the scoring semantics and thresholds.
 
+## Coverage Scoring
+
+Score only the resolved materialized ledger from a full-M5 streaming run:
+
+```bash
+uv run calibre score-m5-coverage \
+  --ledger results/m5/full-mscp-bottom-up/forecast-ledger.resolved.parquet \
+  --coverage 0.9
+```
+
+The command writes `coverage-by-node.parquet`, `coverage-summary.json`, and
+`report.md` into the run directory by default. It does not run forecasting,
+download M5, or mutate the source YAML. A non-`PASS` acceptance gate exits
+non-zero after writing artifacts; pass `--report-only` when you only want to
+refresh diagnostics.
+
+The local acceptance gate is:
+
+- full-population marginal coverage within +/- 3.0 percentage points of target;
+- per-level average node coverage within +/- 5.0 percentage points of target;
+- enough scored rows to avoid accepting a tiny finite-bound subset
+  (`minimum_scored_ratio` in the summary);
+- per-node outliers are emitted and counted as diagnostics only, not as
+  conditional-coverage failures.
+
+CI tests this scorer with synthetic M5-shaped ledgers. The checked-in
+`tests/fixtures/m5` smoke fixture remains a contract fixture only and is not M5
+coverage validation.
+
 ## Origin Window
 
-The full config uses 37 daily origins:
+The full config uses 64 daily origins:
 
 ```text
-origins >= warmup + scored + (H - 1)
-        >= 9      + 1      + 27
+origins >= ready-to-issue-h28 + h=28 settlement
+        >= (10 + 27)         + 27
 ```
 
 For 90% per-horizon MSCP, the runtime's higher-quantile finite-sample rule is
 infinite while `alpha <= 1 / (n + 1)`, so the first finite `(series, horizon)`
-partition has 10 resolved scores. The runbook expresses that as 9 warmup scores
-plus 1 scored origin, then adds the 27-day settlement delay for the longest
-`h=28` score. Issue #85 owns the coverage rows, tolerances, and reports computed
-from the produced ledger.
+partition has 10 resolved scores. For `h=28`, those scores themselves need the
+27-day settlement delay before a finite interval can be issued, and the first
+finite `h=28` interval then needs another 27 days to resolve. Coverage rows,
+tolerances, and reports are computed from the produced resolved ledger.
 
 ## Handoff Manifest
 
@@ -127,13 +162,9 @@ When a full local run is used as the handoff surface for #85, record:
 
 - Config path and git commit.
 - `dataset.phase` and sales file variant.
-- Calibration partition recorded by the config/run (`global` until the source
-  prerequisite lands and the config is updated).
+- Calibration partition recorded by the config/run (`series` for the canonical
+  #85 handoff).
 - Origin start, end, frequency, and horizon.
 - Produced artifact paths under `results/m5/<run-name>/`, including the resolved
-  ledger path for streaming runs.
-
-The current checked-in full config is globally calibrated because the reusable
-source-level series partition surface has not landed yet. It is valid for local
-connectivity and artifact-shape acceptance, but it becomes the #85 node-level
-coverage handoff surface only after a run uses series partitioning.
+  ledger path for streaming runs, `coverage-by-node.parquet`,
+  `coverage-summary.json`, and `report.md`.

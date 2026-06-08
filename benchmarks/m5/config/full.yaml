@@ -15,12 +15,15 @@ conformal:
   method: mscp
   mode: perhorizon
   coverage: 0.9
-  # TODO(#85 prerequisite): add `partition: series` here once the source
-  # BackendConfig conformal surface exposes reusable partition selection.
+  calibration_window: 10
+  partition: series
+  # Explicit guard for the full node x horizon partition set. Increase only
+  # after confirming local memory for the resulting calibration buffers.
+  max_partitions: 1000000
 origins:
-  # 37 daily origins = 9 warmup scores + 1 scored origin + 27-day h=28 settlement.
+  # 64 daily origins = 37 origins for finite h=28 MSCP + 27-day settlement.
   start: 2016-03-20
-  end: 2016-04-25
+  end: 2016-05-22
   freq: D
 output:
   ledger_path: results/m5/full-mscp-bottom-up/forecast-ledger.parquet

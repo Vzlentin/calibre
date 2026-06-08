@@ -14,7 +14,8 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.evaluation.forecast_metrics import (
+from calibre.evaluation import (
+    compute_interval_coverage,
     compute_metrics,
     compute_row_errors,
     resolve_actuals,
@@ -189,3 +190,102 @@ def test_compute_metrics_adds_interval_diagnostics_when_bounds_are_provided():
 
     assert result["coverage"].iloc[0] == pytest.approx(1.0)
     assert result["mean_interval_width"].iloc[0] == pytest.approx(3.0)
+
+
+def test_compute_interval_coverage_scores_finite_bounds_only() -> None:
+    lower_col, upper_col = interval_column_names(0.9)
+    df = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "A", "A", "A"],
+            H: [1, 1, 1, 1],
+            MODEL_NAME: ["m"] * 4,
+            Y: [10.0, 15.0, np.nan, 12.0],
+            lower_col: [9.0, 16.0, 0.0, np.nan],
+            upper_col: [11.0, 18.0, 20.0, 14.0],
+        }
+    )
+
+    result = compute_interval_coverage(df, coverage=0.9, group_by=[UNIQUE_ID])
+
+    row = result.iloc[0]
+    assert row["total_rows"] == 4
+    assert row["resolved_rows"] == 3
+    assert row["unresolved_rows"] == 1
+    assert row["scored_rows"] == 2
+    assert row["unscored_rows"] == 1
+    assert row["coverage"] == pytest.approx(0.5)
+    assert row["mean_interval_width"] == pytest.approx(2.0)
+
+
+def test_compute_interval_coverage_groups_by_node_level_horizon_and_model() -> None:
+    lower_col, upper_col = interval_column_names(0.9)
+    df = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "A", "dept_id=D", "dept_id=D"],
+            "level": ["bottom", "bottom", "dept_id", "dept_id"],
+            H: [1, 2, 1, 2],
+            MODEL_NAME: ["m", "m", "m", "m"],
+            Y: [10.0, 12.0, 20.0, 22.0],
+            lower_col: [9.0, 13.0, 19.0, 23.0],
+            upper_col: [11.0, 14.0, 21.0, 24.0],
+        }
+    )
+
+    result = compute_interval_coverage(
+        df,
+        coverage=0.9,
+        group_by=[UNIQUE_ID, "level", H, MODEL_NAME],
+    )
+
+    assert list(result.columns[:4]) == [UNIQUE_ID, "level", H, MODEL_NAME]
+    assert len(result) == 4
+    assert set(result["scored_rows"]) == {1}
+    assert result["coverage"].tolist() == [1.0, 0.0, 1.0, 0.0]
+
+
+def test_compute_interval_coverage_population_denominator() -> None:
+    lower_col, upper_col = interval_column_names(0.9)
+    df = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B", "C"],
+            H: [1, 1, 1],
+            MODEL_NAME: ["m", "m", "m"],
+            Y: [10.0, 20.0, np.nan],
+            lower_col: [9.0, 21.0, 0.0],
+            upper_col: [11.0, 23.0, 30.0],
+        }
+    )
+
+    result = compute_interval_coverage(df, coverage=0.9, group_by=[])
+
+    row = result.iloc[0]
+    assert len(result) == 1
+    assert row["total_rows"] == 3
+    assert row["resolved_rows"] == 2
+    assert row["unresolved_rows"] == 1
+    assert row["scored_rows"] == 2
+    assert row["unscored_rows"] == 0
+    assert row["coverage"] == pytest.approx(0.5)
+    assert row["mean_interval_width"] == pytest.approx(2.0)
+
+
+def test_compute_interval_coverage_reports_zero_scored_rows_without_false_coverage() -> None:
+    lower_col, upper_col = interval_column_names(0.9)
+    df = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "A"],
+            H: [1, 2],
+            MODEL_NAME: ["m", "m"],
+            Y: [10.0, 12.0],
+            lower_col: [np.nan, np.inf],
+            upper_col: [11.0, 13.0],
+        }
+    )
+
+    result = compute_interval_coverage(df, coverage=0.9, group_by=[UNIQUE_ID])
+
+    row = result.iloc[0]
+    assert row["resolved_rows"] == 2
+    assert row["scored_rows"] == 0
+    assert row["unscored_rows"] == 2
+    assert pd.isna(row["coverage"])

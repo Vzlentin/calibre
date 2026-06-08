@@ -15,8 +15,14 @@ from calibre.cli.config import (
 )
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
+from calibre.core.forecast_task import TaskGroups
 from calibre.core.io import is_local_fs, open_fs
 from calibre.core.metrics import set_order_cost
+from calibre.evaluation.m5_coverage import (
+    CoverageThresholds,
+    M5CoverageArtifacts,
+    score_resolved_ledger,
+)
 from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
@@ -81,6 +87,27 @@ def _enforce_unique_id_limit(bundle: DatasetBundle, max_unique_ids: int | None) 
     if unique_ids > max_unique_ids:
         raise ValueError(
             f"dataset contains {unique_ids} unique_id values; maximum allowed is {max_unique_ids}"
+        )
+
+
+def _enforce_conformal_partition_limit(
+    config: BackendConfig,
+    tasks: TaskGroups,
+    horizon: int,
+) -> None:
+    if config.conformal is None:
+        return
+    if config.conformal.partition != "series" or config.conformal.max_partitions is None:
+        return
+    estimated_partitions = sum(
+        int(task.history[UNIQUE_ID].astype(str).nunique()) * horizon for task in tasks.tasks
+    )
+    if estimated_partitions > config.conformal.max_partitions:
+        raise ValueError(
+            "conformal.partition='series' would create approximately "
+            f"{estimated_partitions} model/node/horizon partitions; configured maximum is "
+            f"{config.conformal.max_partitions}. Increase conformal.max_partitions only after "
+            "confirming the run has enough memory for the resulting calibration state."
         )
 
 
@@ -167,6 +194,7 @@ def run_config(
     reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
     actuals = build_node_history(bundle.history, reconciliation_hierarchy)
     tasks = build_tasks(actuals, model_configs, horizon)
+    _enforce_conformal_partition_limit(config, tasks, horizon)
     origins = config.origins.to_list()
     if not origins:
         raise ValueError("origins resolved to an empty list")
@@ -228,8 +256,11 @@ def run_config(
             currency=_metric_currency(config),
         )
 
-    ledger_rows = len(result.ledger.to_df())
-    logger.info("run complete", extra={"rows": ledger_rows})
+    if config.output.streaming:
+        logger.info("run complete", extra={"streaming": True})
+    else:
+        ledger_rows = len(result.ledger.to_df())
+        logger.info("run complete", extra={"rows": ledger_rows})
     if config.output.ledger_path is not None:
         logger.info("ledger written", extra={"ledger_path": config.output.ledger_path})
     return result
@@ -242,6 +273,31 @@ def validate(config_path: str | Path) -> BackendConfig:
         extra={"config_schema": config.config_schema, "tasks": len(config.tasks)},
     )
     return config
+
+
+def score_m5_coverage(
+    ledger_path: str | Path,
+    *,
+    coverage: float = 0.9,
+    output_dir: str | Path | None = None,
+    thresholds: CoverageThresholds | None = None,
+) -> M5CoverageArtifacts:
+    artifacts = score_resolved_ledger(
+        ledger_path,
+        coverage=coverage,
+        output_dir=output_dir,
+        thresholds=thresholds,
+    )
+    logger.info(
+        "m5 coverage artifacts written",
+        extra={
+            "coverage_by_node_path": str(artifacts.coverage_by_node_path),
+            "report_path": str(artifacts.report_path),
+            "summary_path": str(artifacts.summary_path),
+            "acceptance_status": artifacts.acceptance_status,
+        },
+    )
+    return artifacts
 
 
 def health() -> dict[str, Any]:

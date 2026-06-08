@@ -1,6 +1,13 @@
 """Forecast evaluation: point metrics and ledger scoring."""
 
-from calibre.evaluation.forecast_metrics import compute_metrics, compute_row_errors, resolve_actuals
+from calibre.evaluation.forecast_metrics import (
+    compute_interval_coverage,
+    compute_metrics,
+    compute_row_errors,
+    prepare_interval_coverage_frame,
+    resolve_actuals,
+    summarize_interval_coverage,
+)
 from calibre.evaluation.point_metrics import (
     METRICS,
     evaluate,
@@ -25,6 +32,9 @@ from calibre.evaluation.point_metrics import (
 
 __all__ = [
     "compute_metrics",
+    "compute_interval_coverage",
+    "prepare_interval_coverage_frame",
+    "summarize_interval_coverage",
     "compute_row_errors",
     "resolve_actuals",
     "METRICS",
