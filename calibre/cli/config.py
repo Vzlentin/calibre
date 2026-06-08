@@ -8,6 +8,7 @@ import pandas as pd
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.reconciliation import (
     HierarchicalIntervalOptions,
@@ -67,14 +68,20 @@ class ConformalConfig(_Section):
     calibration_window: int = 100
     gamma: float = 0.05
     mode: Literal["perhorizon", "cumulative"] = "perhorizon"
+    partition: Literal["global", "series"] = "global"
     protection_period: int | None = None
 
     def to_runtime_config(self) -> SymmetricIntervalConfig:
+        partition_key = {
+            "global": global_partition,
+            "series": series_partition,
+        }[self.partition]
         return SymmetricIntervalConfig(
             method=self.method,
             coverage=self.coverage,
             calibration_window=self.calibration_window,
             gamma=self.gamma,
+            partition_key=partition_key,
             mode=self.mode,
             protection_period=self.protection_period,
         )

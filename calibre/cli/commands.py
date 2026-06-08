@@ -244,6 +244,29 @@ def validate(config_path: str | Path) -> BackendConfig:
     return config
 
 
+def score_m5_coverage(
+    ledger_path: str | Path,
+    *,
+    coverage: float = 0.9,
+    output_dir: str | Path | None = None,
+):
+    from calibre.evaluation.m5_coverage import score_resolved_ledger
+
+    artifacts = score_resolved_ledger(
+        ledger_path,
+        coverage=coverage,
+        output_dir=output_dir,
+    )
+    logger.info(
+        "m5 coverage artifacts written",
+        extra={
+            "coverage_by_node_path": str(artifacts.coverage_by_node_path),
+            "report_path": str(artifacts.report_path),
+        },
+    )
+    return artifacts
+
+
 def health() -> dict[str, Any]:
     import importlib.metadata
 

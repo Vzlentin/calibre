@@ -7,6 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from calibre.cli.config import load_config_from_mapping
+from calibre.conformal.partitions import GLOBAL_PARTITION
+from calibre.core.forecast_frame import UNIQUE_ID
 
 _VALID: dict[str, Any] = {
     "config_schema": "1.0",
@@ -41,6 +43,29 @@ def test_invalid_method_raises_at_parse_time() -> None:
 def test_invalid_mode_raises_at_parse_time() -> None:
     with pytest.raises(ValidationError, match="mode"):
         load_config_from_mapping(_config(conformal={"method": "mscp", "mode": "bogus"}))
+
+
+def test_conformal_partition_defaults_to_global_runtime_key() -> None:
+    config = load_config_from_mapping(_config(conformal={"method": "mscp"}))
+
+    assert config.conformal is not None
+    runtime_config = config.conformal.to_runtime_config()
+
+    assert runtime_config.partition_key({UNIQUE_ID: "A"}) == GLOBAL_PARTITION
+
+
+def test_conformal_partition_series_uses_unique_id_runtime_key() -> None:
+    config = load_config_from_mapping(_config(conformal={"method": "mscp", "partition": "series"}))
+
+    assert config.conformal is not None
+    runtime_config = config.conformal.to_runtime_config()
+
+    assert runtime_config.partition_key({UNIQUE_ID: "A"}) == "A"
+
+
+def test_invalid_partition_raises_at_parse_time() -> None:
+    with pytest.raises(ValidationError, match="partition"):
+        load_config_from_mapping(_config(conformal={"method": "mscp", "partition": "bogus"}))
 
 
 def test_unknown_key_raises_at_parse_time() -> None:

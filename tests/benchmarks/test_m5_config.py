@@ -11,6 +11,7 @@ from calibre.core.forecast_frame import H
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SMOKE_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "smoke.yaml"
 _FULL_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "full.yaml"
+_M5_README = _REPO_ROOT / "benchmarks" / "m5" / "README.md"
 
 
 def _first_finite_higher_quantile_count(alpha: float) -> int:
@@ -29,7 +30,7 @@ def test_m5_smoke_config_parses_as_source_cli_config() -> None:
     assert config.output.ledger_path == "results/m5/smoke/forecast-ledger.parquet"
 
 
-def test_m5_full_config_parses_without_partition_prerequisite() -> None:
+def test_m5_full_config_uses_series_partition_handoff() -> None:
     config = load_config(_FULL_CONFIG)
 
     assert config.dataset.adapter == "m5"
@@ -38,6 +39,8 @@ def test_m5_full_config_parses_without_partition_prerequisite() -> None:
     assert config.conformal is not None
     assert config.conformal.method == "mscp"
     assert config.conformal.mode == "perhorizon"
+    assert config.conformal.coverage == 0.9
+    assert config.conformal.partition == "series"
     assert config.reconciliation is not None
     assert config.reconciliation.strategy == "bottom_up"
     assert config.output.ledger_path == "results/m5/full-mscp-bottom-up/forecast-ledger.parquet"
@@ -77,3 +80,15 @@ def test_m5_full_origin_window_meets_mscp_horizon_invariant() -> None:
     assert horizon == 28
     assert first_ready_count == 10
     assert len(config.origins.to_list()) >= minimum_origins
+
+
+def test_m5_runbook_keeps_fixture_out_of_statistical_acceptance() -> None:
+    text = _M5_README.read_text(encoding="utf-8")
+
+    assert "CI smoke fixture" in text
+    assert "not statistical evidence for M5 coverage" in text
+    assert "full run is a local acceptance run only" in text
+    assert "coverage-by-node.parquet" in text
+    assert "report.md" in text
+    assert "full-population marginal coverage" in text
+    assert "per-node outliers are emitted and counted as diagnostics only" in text

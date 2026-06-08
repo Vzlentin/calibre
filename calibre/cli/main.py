@@ -26,6 +26,11 @@ def _parser() -> argparse.ArgumentParser:
     sweep_parser = subparsers.add_parser("run-sweep")
     sweep_parser.add_argument("--configs", required=True)
 
+    m5_coverage_parser = subparsers.add_parser("score-m5-coverage")
+    m5_coverage_parser.add_argument("--ledger", required=True)
+    m5_coverage_parser.add_argument("--coverage", type=float, default=0.9)
+    m5_coverage_parser.add_argument("--output-dir")
+
     return parser
 
 
@@ -42,6 +47,21 @@ def app(argv: list[str] | None = None) -> int:
         print(json.dumps(commands.health(), sort_keys=True))
     elif args.command == "run-sweep":
         commands.run_sweep(args.configs)
+    elif args.command == "score-m5-coverage":
+        artifacts = commands.score_m5_coverage(
+            args.ledger,
+            coverage=args.coverage,
+            output_dir=args.output_dir,
+        )
+        print(
+            json.dumps(
+                {
+                    "coverage_by_node": str(artifacts.coverage_by_node_path),
+                    "report": str(artifacts.report_path),
+                },
+                sort_keys=True,
+            )
+        )
     else:
         parser.error(f"Unknown command: {args.command}")
     return 0
