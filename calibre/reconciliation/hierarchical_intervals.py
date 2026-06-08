@@ -96,7 +96,7 @@ def _load_reconciliation_class() -> type[Any]:
     except ImportError as exc:  # pragma: no cover - covered with import monkeypatch
         raise RuntimeError(
             "hierarchicalforecast is not installed. Install calibre with the "
-            "'hierarchy' extra: pip install calibre[hierarchy]"
+            "'hierarchy' extra: uv sync --extra hierarchy"
         ) from exc
     return core.HierarchicalReconciliation
 
@@ -146,16 +146,24 @@ class NixtlaHierarchicalIntervalPhase:
         y_df = _to_nixtla_fitted_df(fitted_by_model, subset, model_name)
         method = make_nixtla_method(self.options.strategy)
         reconciliation = _make_reconciliation(method)
-        reconciled = reconciliation.reconcile(
-            Y_hat_df=y_hat_df,
-            S_df=_to_s_df(subset),
-            tags=_to_tags(subset),
-            Y_df=y_df,
-            level=[_level_value(self.options.coverage)],
-            intervals_method="conformal",
-            seed=self.options.seed,
-            is_balanced=True,
-        )
+        forecast_origin = group[FORECAST_ORIGIN].iloc[0]
+        try:
+            reconciled = reconciliation.reconcile(
+                Y_hat_df=y_hat_df,
+                S_df=_to_s_df(subset),
+                tags=_to_tags(subset),
+                Y_df=y_df,
+                level=[_level_value(self.options.coverage)],
+                intervals_method="conformal",
+                seed=self.options.seed,
+                is_balanced=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Nixtla hierarchical conformal reconciliation failed "
+                f"for strategy={self.options.strategy!r}, model_name={model_name!r}, "
+                f"forecast_origin={forecast_origin!r}, coverage={self.options.coverage!r}"
+            ) from exc
         return _normalize_nixtla_output(
             group,
             reconciled,

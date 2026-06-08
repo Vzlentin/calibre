@@ -159,6 +159,35 @@ def test_valid_sidecar_produces_calibre_interval_columns(monkeypatch: pytest.Mon
     np.testing.assert_allclose(values, summing.S @ values[: summing.n_bottom])
 
 
+def test_nixtla_failure_includes_fused_phase_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _ExplodingReconciliation:
+        def __init__(self, method: Any) -> None:
+            del method
+
+        def reconcile(self, **kwargs: Any) -> pd.DataFrame:
+            del kwargs
+            raise ValueError("nixtla boom")
+
+    monkeypatch.setattr(hi, "make_nixtla_method", lambda strategy: object())
+    monkeypatch.setattr(hi, "_make_reconciliation", _ExplodingReconciliation)
+    phase = NixtlaHierarchicalIntervalPhase(
+        HierarchicalIntervalOptions(coverage=0.9, strategy="bottom_up")
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "strategy='bottom_up'.*model_name='m'.*"
+            "forecast_origin=Timestamp\\('2024-01-02 00:00:00'\\).*coverage=0.9"
+        ),
+    ):
+        phase.apply(
+            _forecast_frame(),
+            _hierarchy(),
+            HierarchicalIntervalContext(fitted_values=_fitted_values()),
+        )
+
+
 def test_missing_aggregate_fitted_key_fails_before_nixtla(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -203,7 +203,7 @@ def test_fused_phase_bypasses_reconcile_and_calibrate_and_commits_order(
     history = _node_history()
     phase = _SpyPhase()
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=_SpyReconciler(), hierarchy=_hierarchy()),
+        reconciliation=ReconciliationOptions(hierarchy=_hierarchy()),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=phase),
         order=RsConfig(params=pd.DataFrame()),
     )
@@ -237,6 +237,26 @@ def test_fused_phase_bypasses_reconcile_and_calibrate_and_commits_order(
     assert phase.fitted_values is not None
     assert not ledger.to_df().empty
     assert seen_order_uids == ["a", "b"]
+
+
+def test_fused_phase_rejects_conformal_runtime() -> None:
+    with pytest.raises(ValueError, match="cannot be combined with conformal runtime"):
+        BackendEngine(
+            conformal=ConformalOptions(runtime=object()),  # type: ignore[arg-type]
+            reconciliation=ReconciliationOptions(hierarchy=_hierarchy()),
+            hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=_SpyPhase()),
+        )
+
+
+def test_fused_phase_rejects_point_reconciler() -> None:
+    with pytest.raises(ValueError, match="cannot be combined with point reconciliation"):
+        BackendEngine(
+            reconciliation=ReconciliationOptions(
+                reconciler=_SpyReconciler(),
+                hierarchy=_hierarchy(),
+            ),
+            hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=_SpyPhase()),
+        )
 
 
 def test_fused_phase_failure_names_phase_and_origin(monkeypatch: pytest.MonkeyPatch) -> None:

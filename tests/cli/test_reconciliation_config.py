@@ -159,7 +159,7 @@ def test_hierarchical_intervals_section_resolves_to_fused_phase(
     assert isinstance(fused.phase, NixtlaHierarchicalIntervalPhase)
     assert fused.phase.options.strategy == "ols"
     assert reconciliation.hierarchy is not None
-    assert isinstance(reconciliation.reconciler, NoOpReconciler)
+    assert reconciliation.reconciler is None
     assert len(captured["tasks"].local) > 2
 
 
@@ -193,6 +193,28 @@ def test_hierarchical_intervals_rejects_point_reconciliation() -> None:
             _config(
                 conformal=None,
                 reconciliation={"strategy": "ols"},
+                hierarchical_intervals={"method": "nixtla_conformal"},
+            )
+        )
+
+
+def test_hierarchical_intervals_rejects_duplicate_task_model_names() -> None:
+    with pytest.raises(ValidationError, match="requires unique task model names"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                tasks=[
+                    {
+                        "model": "SeasonalNaive",
+                        "horizon": 2,
+                        "config": {"backend": "statsforecast", "season_length": 7},
+                    },
+                    {
+                        "model": "SeasonalNaive",
+                        "horizon": 2,
+                        "config": {"backend": "statsforecast", "season_length": 14},
+                    },
+                ],
                 hierarchical_intervals={"method": "nixtla_conformal"},
             )
         )

@@ -101,6 +101,9 @@ hierarchical_intervals:
   strategy: bottom_up  # bottom_up, ols, wls_struct, mint_shrink, wls_var, erm
 ```
 
+Install the optional hierarchy dependency before using this path:
+`uv sync --extra hierarchy`.
+
 This path requires a dataset `hierarchy`, requests horizonless fitted values
 keyed by `(unique_id, ds, model_name)`, and runs as
 `Predict -> HierarchicalIntervals -> Order -> Commit`. It is mutually exclusive

@@ -192,7 +192,11 @@ def run_config(
             initial_ledger=initial_ledger,
         ),
         reconciliation=ReconciliationOptions(
-            reconciler=reconciliation_config.to_reconciler(),
+            reconciler=(
+                None
+                if config.hierarchical_intervals is not None
+                else reconciliation_config.to_reconciler()
+            ),
             hierarchy=reconciliation_hierarchy,
         ),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(

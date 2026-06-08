@@ -248,6 +248,14 @@ class BackendConfig(BaseModel):
             raise ValueError(
                 "hierarchical_intervals cannot be combined with non-none reconciliation"
             )
+        model_names = [str(task.resolved_model_config()["name"]) for task in self.tasks]
+        duplicate_names = sorted({name for name in model_names if model_names.count(name) > 1})
+        if duplicate_names:
+            raise ValueError(
+                "hierarchical_intervals requires unique task model names; "
+                f"duplicate name(s): {duplicate_names}. Set tasks[].config.name "
+                "for distinct hierarchical interval models."
+            )
         return self
 
 

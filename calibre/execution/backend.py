@@ -171,8 +171,15 @@ class BackendEngine:
         self.reconciler = reconciliation.reconciler
         self.hierarchy = reconciliation.hierarchy
         self.hierarchical_interval_phase = hierarchical_intervals.phase
-        if self.hierarchical_interval_phase is not None and self.hierarchy is None:
-            raise ValueError("hierarchical intervals require a hierarchy")
+        if self.hierarchical_interval_phase is not None:
+            if self.hierarchy is None:
+                raise ValueError("hierarchical intervals require a hierarchy")
+            if conformal.runtime is not None or conformal.config is not None:
+                raise ValueError("hierarchical intervals cannot be combined with conformal runtime")
+            if reconciliation.reconciler is not None:
+                raise ValueError(
+                    "hierarchical intervals cannot be combined with point reconciliation"
+                )
         self._requires_fitted_values = bool(
             (
                 reconciliation.hierarchy is not None
@@ -368,12 +375,14 @@ class BackendEngine:
         in any phase is re-raised naming the phase and origin so the fragile
         sequencing the seam exposes is debuggable.
         """
+        fused_phase_active = self.hierarchical_interval_phase is not None
+        active_conformal_runtime = None if fused_phase_active else conformal_runtime
         with self._phase("ResolveOpen", origin):
-            self._resolve_open(ledger, actuals, origin, conformal_runtime)
+            self._resolve_open(ledger, actuals, origin, active_conformal_runtime)
         with self._phase("Predict", origin):
             prediction = self._predict(parallel_refs, direct_refs, origin)
             origin_preds = prediction.forecast
-        if self.hierarchical_interval_phase is not None:
+        if fused_phase_active:
             with self._phase("HierarchicalIntervals", origin):
                 origin_preds = self._hierarchical_intervals(
                     origin_preds,
@@ -386,11 +395,11 @@ class BackendEngine:
                     ReconciliationContext(fitted_values=prediction.fitted_values),
                 )
             with self._phase("Calibrate", origin):
-                origin_preds = self._calibrate(origin_preds, conformal_runtime)
+                origin_preds = self._calibrate(origin_preds, active_conformal_runtime)
         with self._phase("Order", origin):
             self._order(origin_preds, order_ledger)
         with self._phase("Commit", origin):
-            self._commit(ledger, origin_preds, actuals, origin, conformal_runtime)
+            self._commit(ledger, origin_preds, actuals, origin, active_conformal_runtime)
 
     @contextmanager
     def _phase(self, name: str, origin: pd.Timestamp) -> Iterator[None]:
