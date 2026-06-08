@@ -19,10 +19,9 @@ plus this runbook; execution stays in `calibre run --config`.
 - `config/full.yaml` uses local full M5 data under `data/m5`, runs the canonical
   `evaluation` phase with 28-day horizons, point reconciliation, and MSCP
   per-horizon conformal intervals. It is structurally valid today without
-  `conformal.partition`; add `partition: series` only after the source
-  `BackendConfig` conformal surface exposes reusable partition selection. The
-  full config streams ledger output and uses `execution.backend: auto` because
-  full-M5 hierarchy expansion is large.
+  benchmark-local partition logic; the checked-in YAML carries the source-level
+  partition-selection TODO. The full config streams ledger output and uses
+  `execution.backend: auto` because full-M5 hierarchy expansion is large.
 
 For full-M5 work with hierarchy-aware reconciliation installed:
 
@@ -122,7 +121,7 @@ When a full local run is used as the handoff surface for #85, record:
 
 - Config path and git commit.
 - `dataset.phase` and sales file variant.
-- Calibration partition (`global` today; `series` after the source prerequisite
-  lands and the config is updated).
+- Calibration partition recorded by the config/run (`global` until the source
+  prerequisite lands and the config is updated).
 - Origin start, end, frequency, and horizon.
 - Produced artifact paths under `results/m5/<run-name>/`.

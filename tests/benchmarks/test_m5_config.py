@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from math import isfinite
 from pathlib import Path
 
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config
-from calibre.conformal.numerics import finite_sample_radius
+from calibre.conformal.calibrators import RollingQuantileCalibrator
 from calibre.core.forecast_frame import H
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -53,22 +52,21 @@ def test_m5_full_origin_window_meets_mscp_horizon_invariant() -> None:
     assert config.conformal is not None
 
     runtime_config = config.conformal.to_runtime_config()
-    alpha = 1.0 - runtime_config.coverage
-    first_finite_count = next(
-        count
-        for count in range(1, 128)
-        if isfinite(
-            finite_sample_radius(
-                [1.0] * count,
-                alpha,
-                0.0,
-                runtime_config.resolved_quantile_rule,
-            )
-        )
+    calibrator = RollingQuantileCalibrator(
+        calibration_window=runtime_config.calibration_window,
+        quantile_rule=runtime_config.resolved_quantile_rule,
     )
+    first_ready_count = None
+    for count in range(1, runtime_config.calibration_window + 1):
+        calibrator.update(1.0)
+        if calibrator.ready(alpha=runtime_config.alpha):
+            first_ready_count = count
+            break
+
     horizon = config.tasks[0].horizon
-    minimum_origins = first_finite_count + (horizon - 1)
+    assert first_ready_count is not None
+    minimum_origins = first_ready_count + (horizon - 1)
 
     assert horizon == 28
-    assert first_finite_count == 10
+    assert first_ready_count == 10
     assert len(config.origins.to_list()) >= minimum_origins
