@@ -6,7 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.cli.commands import _estimate_hierarchical_expansion, _load_dataset, run_config
+from calibre.cli.commands import (
+    _effective_available_memory_bytes,
+    _estimate_hierarchical_expansion,
+    _estimated_node_history_peak_bytes,
+    _load_dataset,
+    _read_cgroup_available_memory_bytes,
+    run_config,
+)
 from calibre.cli.config import load_config_from_mapping
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.execution.validation import validate_dataset_bundle
@@ -47,6 +54,30 @@ def test_hierarchical_expansion_estimate_counts_lattice_nodes() -> None:
     assert estimate.forecast_partitions == 36
 
 
+def test_hierarchical_expansion_estimate_allows_hierarchy_superset() -> None:
+    history = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "A"],
+            DS: pd.date_range("2024-01-01", periods=2, freq="D"),
+            Y: [1.0, 2.0],
+        }
+    )
+    hierarchy = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            "dept_id": ["D1", "D2"],
+            "state_id": ["CA", "CA"],
+        }
+    )
+
+    estimate = _estimate_hierarchical_expansion(history, hierarchy, horizon=2)
+
+    assert estimate.bottom_unique_ids == 1
+    assert estimate.bottom_rows == 2
+    assert estimate.periods_per_bottom == 2
+    assert estimate.node_count == 6
+
+
 def test_hierarchical_expansion_estimate_rejects_inconsistent_inputs() -> None:
     history = pd.DataFrame(
         {
@@ -73,6 +104,64 @@ def test_hierarchical_expansion_estimate_rejects_empty_hierarchy() -> None:
 
     with pytest.raises(ValueError, match="hierarchy has no rows"):
         _estimate_hierarchical_expansion(history, hierarchy, horizon=1)
+
+
+def test_effective_available_memory_uses_lower_cgroup_budget() -> None:
+    assert _effective_available_memory_bytes(10_000, 4_000) == 4_000
+    assert _effective_available_memory_bytes(4_000, 10_000) == 4_000
+    assert _effective_available_memory_bytes(None, 4_000) == 4_000
+    assert _effective_available_memory_bytes(4_000, None) == 4_000
+    assert _effective_available_memory_bytes(None, None) is None
+
+
+def test_read_cgroup_available_memory_bytes_supports_v2(tmp_path: Path) -> None:
+    (tmp_path / "memory.max").write_text("10000\n", encoding="utf-8")
+    (tmp_path / "memory.current").write_text("2500\n", encoding="utf-8")
+    self_cgroup = tmp_path / "self-cgroup"
+    self_cgroup.write_text("0::/\n", encoding="utf-8")
+
+    assert (
+        _read_cgroup_available_memory_bytes(cgroup_root=tmp_path, self_cgroup=self_cgroup) == 7_500
+    )
+
+
+def test_read_cgroup_available_memory_bytes_supports_v1(tmp_path: Path) -> None:
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+    (memory_root / "memory.limit_in_bytes").write_text("10000\n", encoding="utf-8")
+    (memory_root / "memory.usage_in_bytes").write_text("3000\n", encoding="utf-8")
+    self_cgroup = tmp_path / "self-cgroup"
+    self_cgroup.write_text("7:memory:/\n", encoding="utf-8")
+
+    assert (
+        _read_cgroup_available_memory_bytes(cgroup_root=tmp_path, self_cgroup=self_cgroup) == 7_000
+    )
+
+
+def test_estimated_node_history_peak_reserves_downstream_overhead() -> None:
+    history = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "A", "B", "B"],
+            DS: pd.date_range("2024-01-01", periods=2, freq="D").tolist() * 2,
+            Y: [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    hierarchy = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            "dept_id": ["D1", "D2"],
+            "state_id": ["CA", "CA"],
+        }
+    )
+    one_model = _estimate_hierarchical_expansion(history, hierarchy, horizon=3, model_count=1)
+    two_models = _estimate_hierarchical_expansion(history, hierarchy, horizon=3, model_count=2)
+
+    assert _estimated_node_history_peak_bytes(two_models) > _estimated_node_history_peak_bytes(
+        one_model
+    )
+    assert (
+        _estimated_node_history_peak_bytes(one_model) > one_model.projected_node_history_rows * 128
+    )
 
 
 def test_run_config_smoke_on_m5_fixture(tmp_path: Path) -> None:
@@ -112,7 +201,9 @@ def test_run_config_with_reconciliation_emits_node_level_m5_ledger(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("calibre.cli.commands._read_linux_available_memory_bytes", lambda: 2**60)
+    monkeypatch.setattr(
+        "calibre.cli.commands._read_effective_available_memory_bytes", lambda: 2**60
+    )
     config = load_config_from_mapping(
         {
             "config_schema": "1.0",
@@ -175,6 +266,7 @@ def test_run_config_rejects_oversized_hierarchy_before_build_node_history(
         }
     )
     monkeypatch.setattr("calibre.cli.commands._read_linux_available_memory_bytes", lambda: 1)
+    monkeypatch.setattr("calibre.cli.commands._read_effective_available_memory_bytes", lambda: 1)
 
     def fail_build_node_history(*args, **kwargs):
         raise AssertionError("build_node_history should not run after the preflight guard fails")
@@ -190,6 +282,7 @@ def test_run_config_without_reconciliation_skips_hierarchy_memory_guard(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr("calibre.cli.commands._read_linux_available_memory_bytes", lambda: 1)
+    monkeypatch.setattr("calibre.cli.commands._read_effective_available_memory_bytes", lambda: 1)
     config = load_config_from_mapping(
         {
             "config_schema": "1.0",
