@@ -21,6 +21,7 @@ from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
     ConformalOptions,
+    HierarchicalIntervalEngineOptions,
     LedgerOutputOptions,
     ReconciliationOptions,
 )
@@ -110,9 +111,11 @@ def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
     raise ValueError(f"unknown order policy: {ordering.policy!r}")
 
 
-def _hierarchy_for_reconciliation(
-    config: BackendConfig, bundle: DatasetBundle
-) -> pd.DataFrame | None:
+def _hierarchy_for_run(config: BackendConfig, bundle: DatasetBundle) -> pd.DataFrame | None:
+    if config.hierarchical_intervals is not None:
+        if bundle.hierarchy is None:
+            raise ValueError("hierarchical_intervals requires a dataset hierarchy")
+        return bundle.hierarchy
     if config.reconciliation is None or config.reconciliation.strategy == "none":
         return None
     return bundle.hierarchy
@@ -161,7 +164,7 @@ def run_config(
     _enforce_unique_id_limit(bundle, max_unique_ids)
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
-    reconciliation_hierarchy = _hierarchy_for_reconciliation(config, bundle)
+    reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
     actuals = build_node_history(bundle.history, reconciliation_hierarchy)
     tasks = build_tasks(actuals, model_configs, horizon)
     origins = config.origins.to_list()
@@ -189,8 +192,19 @@ def run_config(
             initial_ledger=initial_ledger,
         ),
         reconciliation=ReconciliationOptions(
-            reconciler=reconciliation_config.to_reconciler(),
+            reconciler=(
+                None
+                if config.hierarchical_intervals is not None
+                else reconciliation_config.to_reconciler()
+            ),
             hierarchy=reconciliation_hierarchy,
+        ),
+        hierarchical_intervals=HierarchicalIntervalEngineOptions(
+            phase=(
+                config.hierarchical_intervals.to_phase()
+                if config.hierarchical_intervals is not None
+                else None
+            )
         ),
         order=_build_order_config(config),
     )

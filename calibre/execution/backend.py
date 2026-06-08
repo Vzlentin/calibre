@@ -62,6 +62,10 @@ from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config
 from calibre.forecasting.adapter_base import PredictionResult
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
+from calibre.reconciliation.hierarchical_intervals import (
+    HierarchicalIntervalContext,
+    HierarchicalIntervalPhase,
+)
 from calibre.reconciliation.protocols import Reconciler, ReconciliationContext
 from calibre.reconciliation.summing import build_summing_matrix
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
@@ -134,10 +138,18 @@ class ReconciliationOptions:
     hierarchy: pd.DataFrame | None = None
 
 
+@dataclass(frozen=True)
+class HierarchicalIntervalEngineOptions:
+    """Fused hierarchy + interval phase threaded independently of Reconciler."""
+
+    phase: HierarchicalIntervalPhase | None = None
+
+
 _DEFAULT_EXECUTION = ExecutionOptions()
 _DEFAULT_OUTPUT = LedgerOutputOptions()
 _DEFAULT_CONFORMAL = ConformalOptions()
 _DEFAULT_RECONCILIATION = ReconciliationOptions()
+_DEFAULT_HIERARCHICAL_INTERVALS = HierarchicalIntervalEngineOptions()
 
 
 class BackendEngine:
@@ -148,6 +160,9 @@ class BackendEngine:
         output: LedgerOutputOptions = _DEFAULT_OUTPUT,
         conformal: ConformalOptions = _DEFAULT_CONFORMAL,
         reconciliation: ReconciliationOptions = _DEFAULT_RECONCILIATION,
+        hierarchical_intervals: HierarchicalIntervalEngineOptions = (
+            _DEFAULT_HIERARCHICAL_INTERVALS
+        ),
         order: OrderPolicy | None = None,
     ) -> None:
         self.execution = execution
@@ -155,14 +170,30 @@ class BackendEngine:
         self.conformal = conformal
         self.reconciler = reconciliation.reconciler
         self.hierarchy = reconciliation.hierarchy
+        self.hierarchical_interval_phase = hierarchical_intervals.phase
+        if self.hierarchical_interval_phase is not None:
+            if self.hierarchy is None:
+                raise ValueError("hierarchical intervals require a hierarchy")
+            if conformal.runtime is not None or conformal.config is not None:
+                raise ValueError("hierarchical intervals cannot be combined with conformal runtime")
+            if reconciliation.reconciler is not None:
+                raise ValueError(
+                    "hierarchical intervals cannot be combined with point reconciliation"
+                )
         self._requires_fitted_values = bool(
-            reconciliation.hierarchy is not None
-            and reconciliation.reconciler is not None
-            and reconciliation.reconciler.requires_fitted_values
+            (
+                reconciliation.hierarchy is not None
+                and reconciliation.reconciler is not None
+                and reconciliation.reconciler.requires_fitted_values
+            )
+            or (
+                self.hierarchical_interval_phase is not None
+                and self.hierarchical_interval_phase.requires_fitted_values
+            )
         )
         self._order_bottom_ids = (
             frozenset(build_summing_matrix(self.hierarchy).bottom_ids)
-            if self.hierarchy is not None
+            if self.hierarchy is not None and order is not None
             else None
         )
         self.order_config = order
@@ -335,31 +366,40 @@ class BackendEngine:
         """Run one origin through the ordered per-origin phases.
 
         The phases run in a fixed order and thread explicit state between them:
-        ``ResolveOpen`` (carry-forward prior origins) → ``Predict`` →
-        ``Reconcile`` (point → coherent point) → ``Calibrate`` → ``Order`` →
-        ``Commit`` (append + final resolve + persist). Each phase is a small
-        method that takes/returns the next
+        ``ResolveOpen`` (carry-forward prior origins) → ``Predict`` → either
+        ``Reconcile`` (point → coherent point) → ``Calibrate`` or the fused
+        ``HierarchicalIntervals`` phase → ``Order`` → ``Commit`` (append +
+        final resolve + persist). Each phase is a small method that takes/returns the next
         phase's input so it can be driven independently in a test. This is a
         plain method-call sequence, not a dispatch framework (KTD6). A failure
         in any phase is re-raised naming the phase and origin so the fragile
         sequencing the seam exposes is debuggable.
         """
+        fused_phase_active = self.hierarchical_interval_phase is not None
+        active_conformal_runtime = None if fused_phase_active else conformal_runtime
         with self._phase("ResolveOpen", origin):
-            self._resolve_open(ledger, actuals, origin, conformal_runtime)
+            self._resolve_open(ledger, actuals, origin, active_conformal_runtime)
         with self._phase("Predict", origin):
             prediction = self._predict(parallel_refs, direct_refs, origin)
             origin_preds = prediction.forecast
-        with self._phase("Reconcile", origin):
-            origin_preds = self._reconcile(
-                origin_preds,
-                ReconciliationContext(fitted_values=prediction.fitted_values),
-            )
-        with self._phase("Calibrate", origin):
-            origin_preds = self._calibrate(origin_preds, conformal_runtime)
+        if fused_phase_active:
+            with self._phase("HierarchicalIntervals", origin):
+                origin_preds = self._hierarchical_intervals(
+                    origin_preds,
+                    HierarchicalIntervalContext(fitted_values=prediction.fitted_values),
+                )
+        else:
+            with self._phase("Reconcile", origin):
+                origin_preds = self._reconcile(
+                    origin_preds,
+                    ReconciliationContext(fitted_values=prediction.fitted_values),
+                )
+            with self._phase("Calibrate", origin):
+                origin_preds = self._calibrate(origin_preds, active_conformal_runtime)
         with self._phase("Order", origin):
             self._order(origin_preds, order_ledger)
         with self._phase("Commit", origin):
-            self._commit(ledger, origin_preds, actuals, origin, conformal_runtime)
+            self._commit(ledger, origin_preds, actuals, origin, active_conformal_runtime)
 
     @contextmanager
     def _phase(self, name: str, origin: pd.Timestamp) -> Iterator[None]:
@@ -434,6 +474,17 @@ class BackendEngine:
             self.hierarchy,
             context,
         )
+
+    def _hierarchical_intervals(
+        self,
+        origin_preds: pd.DataFrame,
+        context: HierarchicalIntervalContext,
+    ) -> pd.DataFrame:
+        """Fused hierarchical conformal phase — replace Reconcile + Calibrate."""
+        if self.hierarchical_interval_phase is None or origin_preds.empty:
+            return origin_preds
+        assert self.hierarchy is not None  # checked at construction
+        return self.hierarchical_interval_phase.apply(origin_preds, self.hierarchy, context)
 
     def _calibrate(
         self,
