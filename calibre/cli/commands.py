@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -41,9 +42,24 @@ from calibre.ordering.policy_config import (
     RsConfig,
     RssConfig,
 )
+from calibre.reconciliation.summing import build_hierarchy_index
 from calibre.storage.state import ConformalStateStore
 
 logger = logging.getLogger(__name__)
+
+_LOADED_HISTORY_BYTES_PER_ROW = 32
+_NODE_HISTORY_BYTES_PER_ROW = 128
+
+
+@dataclass(frozen=True, slots=True)
+class _HierarchicalExpansionEstimate:
+    bottom_unique_ids: int
+    aggregate_nodes: int
+    node_count: int
+    bottom_rows: int
+    periods_per_bottom: int
+    projected_node_history_rows: int
+    forecast_partitions: int
 
 
 def _fs_result_uri(fs, path: str) -> str:
@@ -109,6 +125,119 @@ def _enforce_conformal_partition_limit(
             f"{config.conformal.max_partitions}. Increase conformal.max_partitions only after "
             "confirming the run has enough memory for the resulting calibration state."
         )
+
+
+def _estimate_hierarchical_expansion(
+    history: pd.DataFrame,
+    hierarchy: pd.DataFrame,
+    *,
+    horizon: int,
+    model_count: int = 1,
+) -> _HierarchicalExpansionEstimate:
+    if horizon < 1:
+        raise ValueError("horizon must be at least 1")
+    if model_count < 1:
+        raise ValueError("model_count must be at least 1")
+    if UNIQUE_ID not in history.columns:
+        raise ValueError("history missing required column: unique_id")
+    if history.empty:
+        raise ValueError("history has no rows")
+
+    hierarchy_index = build_hierarchy_index(hierarchy)
+    bottom_ids = set(hierarchy_index.bottom_ids)
+    history_ids = set(history[UNIQUE_ID].astype(str).unique())
+    unknown = history_ids - bottom_ids
+    if unknown:
+        raise ValueError(
+            f"history contains unique_id values not present in hierarchy: {sorted(unknown)}"
+        )
+    missing = bottom_ids - history_ids
+    if missing:
+        raise ValueError(
+            f"hierarchy contains unique_id values not present in history: {sorted(missing)}"
+        )
+
+    bottom_rows = len(history)
+    bottom_unique_ids = len(hierarchy_index.bottom_ids)
+    periods_per_bottom = (bottom_rows + bottom_unique_ids - 1) // bottom_unique_ids
+    node_count = len(hierarchy_index.node_labels)
+    aggregate_nodes = node_count - bottom_unique_ids
+    projected_node_history_rows = periods_per_bottom * node_count
+
+    return _HierarchicalExpansionEstimate(
+        bottom_unique_ids=bottom_unique_ids,
+        aggregate_nodes=aggregate_nodes,
+        node_count=node_count,
+        bottom_rows=bottom_rows,
+        periods_per_bottom=periods_per_bottom,
+        projected_node_history_rows=projected_node_history_rows,
+        forecast_partitions=node_count * horizon * model_count,
+    )
+
+
+def _read_linux_available_memory_bytes() -> int | None:
+    try:
+        lines = Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        name, _, rest = line.partition(":")
+        if name != "MemAvailable":
+            continue
+        value, unit, *_ = rest.strip().split()
+        if unit != "kB":
+            return None
+        return int(value) * 1024
+    return None
+
+
+def _estimated_node_history_peak_bytes(estimate: _HierarchicalExpansionEstimate) -> int:
+    return (
+        estimate.bottom_rows * _LOADED_HISTORY_BYTES_PER_ROW
+        + estimate.projected_node_history_rows * _NODE_HISTORY_BYTES_PER_ROW
+    )
+
+
+def _format_bytes(value: int) -> str:
+    return f"{value / 1024**3:.2f} GiB"
+
+
+def _enforce_hierarchical_expansion_memory_limit(
+    config: BackendConfig,
+    bundle: DatasetBundle,
+    hierarchy: pd.DataFrame | None,
+    *,
+    horizon: int,
+) -> None:
+    if hierarchy is None:
+        return
+
+    estimate = _estimate_hierarchical_expansion(
+        bundle.history,
+        hierarchy,
+        horizon=horizon,
+        model_count=len(config.tasks),
+    )
+    available_memory = _read_linux_available_memory_bytes()
+    if available_memory is None:
+        return
+
+    estimated_peak = _estimated_node_history_peak_bytes(estimate)
+    if estimated_peak <= available_memory:
+        return
+
+    raise ValueError(
+        "hierarchical node-history expansion is estimated to need "
+        f"{_format_bytes(estimated_peak)} before forecasting, which exceeds the "
+        f"detected MemAvailable guard of {_format_bytes(available_memory)}. "
+        f"Estimated bottom rows: {estimate.bottom_rows}; "
+        f"node count: {estimate.node_count}; "
+        f"projected node-history rows: {estimate.projected_node_history_rows}; "
+        f"forecast partitions: {estimate.forecast_partitions}. "
+        "Streaming output does not avoid this input-side materialization; use a "
+        "smaller hierarchy/input or run on a host with more memory until sparse "
+        "lazy hierarchy execution is available."
+    )
 
 
 def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
@@ -192,6 +321,12 @@ def run_config(
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
     reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
+    _enforce_hierarchical_expansion_memory_limit(
+        config,
+        bundle,
+        reconciliation_hierarchy,
+        horizon=horizon,
+    )
     actuals = build_node_history(bundle.history, reconciliation_hierarchy)
     tasks = build_tasks(actuals, model_configs, horizon)
     _enforce_conformal_partition_limit(config, tasks, horizon)

@@ -22,9 +22,10 @@ coverage scoring is a post-run artifact command over a resolved ledger.
 - `config/full.yaml` uses local full M5 data under `data/m5`, runs the canonical
   `evaluation` phase with 28-day horizons, point reconciliation, and MSCP
   per-horizon conformal intervals with `conformal.partition: series`,
-  `calibration_window: 10`, and an explicit `max_partitions` guard. The full
-  config streams ledger output and uses `execution.backend: auto` because
-  full-M5 hierarchy expansion is large.
+  `calibration_window: 10`, and an explicit `max_partitions` conformal-state
+  guard. The full config streams ledger output and uses `execution.backend:
+  auto`, but streaming only reduces output buffering; it does not avoid the
+  input-side node-history materialization needed for hierarchical actuals.
 
 For full-M5 work with hierarchy-aware reconciliation installed:
 
@@ -37,7 +38,10 @@ uv run calibre score-m5-coverage \
 ```
 
 The full run is a local acceptance run only: it requires `data/m5`, is expensive,
-and is not part of CI.
+and is not part of CI. On hosts whose available memory cannot support the eager
+node-history expansion, `calibre run` now fails before `build_node_history` with
+the estimated bottom rows, node count, projected node-history rows, forecast
+partitions, and detected memory envelope instead of disappearing as an OS kill.
 
 ## Local Data Layout
 
@@ -110,6 +114,12 @@ The future hierarchical-interval comparator is a baseline lane only. Calibre's
 Nixtla hierarchical interval path emits coherent point forecasts and marginal
 intervals; published per-node interval boxes are not additive conditional
 coverage bands. Issue #85 owns the scoring semantics and thresholds.
+
+The memory-efficient full-M5 path remains deferred engineering work: sparse or
+lazy aggregate actual resolution, a `bottom_up` path that can synthesize
+aggregate forecast rows from bottom forecasts, and preservation of independent
+aggregate base forecasts for MinT-style strategies. Until that lands, the
+preflight guard is a deterministic stop, not the full scalability solution.
 
 ## Coverage Scoring
 

@@ -91,7 +91,10 @@ def test_m5_runbook_keeps_fixture_out_of_statistical_acceptance() -> None:
     assert "CI smoke fixture" in text
     assert "not statistical evidence for M5 coverage" in text
     assert "full run is a local acceptance run only" in text
+    assert "input-side node-history materialization" in text
+    assert "projected node-history rows" in text
     assert "coverage-by-node.parquet" in text
     assert "report.md" in text
     assert "full-population marginal coverage" in text
     assert "per-node outliers are emitted and counted as diagnostics only" in text
+    assert "lazy aggregate actual resolution" in text
