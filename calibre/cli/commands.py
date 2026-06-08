@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -34,6 +33,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
+from calibre.execution.hierarchy_memory import enforce_hierarchical_expansion_memory_limit
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import (
@@ -42,30 +42,9 @@ from calibre.ordering.policy_config import (
     RsConfig,
     RssConfig,
 )
-from calibre.reconciliation.summing import build_hierarchy_index
 from calibre.storage.state import ConformalStateStore
 
 logger = logging.getLogger(__name__)
-
-_LOADED_HISTORY_BYTES_PER_ROW = 32
-_NODE_HISTORY_BYTES_PER_ROW = 128
-_NODE_HISTORY_TEMPORARY_MULTIPLIER = 3
-_TASK_HISTORY_BYTES_PER_ROW = 96
-_FORECAST_PARTITION_BYTES = 256
-_RUNTIME_OVERHEAD_BYTES = 512 * 1024**2
-_CGROUP_UNLIMITED_BYTES = 1 << 60
-
-
-@dataclass(frozen=True, slots=True)
-class _HierarchicalExpansionEstimate:
-    bottom_unique_ids: int
-    aggregate_nodes: int
-    node_count: int
-    bottom_rows: int
-    periods_per_bottom: int
-    projected_node_history_rows: int
-    forecast_partitions: int
-    model_count: int
 
 
 def _fs_result_uri(fs, path: str) -> str:
@@ -131,220 +110,6 @@ def _enforce_conformal_partition_limit(
             f"{config.conformal.max_partitions}. Increase conformal.max_partitions only after "
             "confirming the run has enough memory for the resulting calibration state."
         )
-
-
-def _estimate_hierarchical_expansion(
-    history: pd.DataFrame,
-    hierarchy: pd.DataFrame,
-    *,
-    horizon: int,
-    model_count: int = 1,
-) -> _HierarchicalExpansionEstimate:
-    if horizon < 1:
-        raise ValueError("horizon must be at least 1")
-    if model_count < 1:
-        raise ValueError("model_count must be at least 1")
-    if UNIQUE_ID not in history.columns:
-        raise ValueError("history missing required column: unique_id")
-    if history.empty:
-        raise ValueError("history has no rows")
-
-    hierarchy_index = build_hierarchy_index(hierarchy)
-    bottom_ids = set(hierarchy_index.bottom_ids)
-    history_ids = set(history[UNIQUE_ID].astype(str).unique())
-    unknown = history_ids - bottom_ids
-    if unknown:
-        raise ValueError(
-            f"history contains unique_id values not present in hierarchy: {sorted(unknown)}"
-        )
-
-    bottom_rows = len(history)
-    bottom_unique_ids = len(history_ids)
-    periods_per_bottom = (bottom_rows + bottom_unique_ids - 1) // bottom_unique_ids
-    node_count = len(hierarchy_index.node_labels)
-    aggregate_nodes = node_count - len(hierarchy_index.bottom_ids)
-    projected_node_history_rows = periods_per_bottom * node_count
-
-    return _HierarchicalExpansionEstimate(
-        bottom_unique_ids=bottom_unique_ids,
-        aggregate_nodes=aggregate_nodes,
-        node_count=node_count,
-        bottom_rows=bottom_rows,
-        periods_per_bottom=periods_per_bottom,
-        projected_node_history_rows=projected_node_history_rows,
-        forecast_partitions=node_count * horizon * model_count,
-        model_count=model_count,
-    )
-
-
-def _read_linux_available_memory_bytes() -> int | None:
-    try:
-        lines = Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    for line in lines:
-        name, _, rest = line.partition(":")
-        if name != "MemAvailable":
-            continue
-        value, unit, *_ = rest.strip().split()
-        if unit != "kB":
-            return None
-        return int(value) * 1024
-    return None
-
-
-def _read_memory_limit_value(path: Path) -> int | None:
-    try:
-        raw = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if raw == "max":
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    if value >= _CGROUP_UNLIMITED_BYTES:
-        return None
-    return max(value, 0)
-
-
-def _read_memory_usage_value(path: Path) -> int | None:
-    try:
-        value = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-    return max(value, 0)
-
-
-def _cgroup_candidate_dirs(cgroup_root: Path, self_cgroup: Path) -> list[Path]:
-    candidates: list[Path] = []
-    try:
-        lines = self_cgroup.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        lines = []
-
-    for line in lines:
-        parts = line.split(":", 2)
-        if len(parts) != 3:
-            continue
-        _, controllers, relative = parts
-        relative_path = relative.lstrip("/")
-        if controllers == "":
-            candidates.append(cgroup_root / relative_path)
-        elif "memory" in controllers.split(","):
-            candidates.append(cgroup_root / "memory" / relative_path)
-            candidates.append(cgroup_root / relative_path)
-
-    candidates.extend([cgroup_root, cgroup_root / "memory"])
-    deduped: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        deduped.append(candidate)
-    return deduped
-
-
-def _read_cgroup_available_memory_bytes(
-    *,
-    cgroup_root: Path = Path("/sys/fs/cgroup"),
-    self_cgroup: Path = Path("/proc/self/cgroup"),
-) -> int | None:
-    remaining_values: list[int] = []
-    for candidate in _cgroup_candidate_dirs(cgroup_root, self_cgroup):
-        for limit_name, usage_name in (
-            ("memory.max", "memory.current"),
-            ("memory.limit_in_bytes", "memory.usage_in_bytes"),
-        ):
-            limit = _read_memory_limit_value(candidate / limit_name)
-            usage = _read_memory_usage_value(candidate / usage_name)
-            if limit is None or usage is None:
-                continue
-            remaining_values.append(max(limit - usage, 0))
-    if not remaining_values:
-        return None
-    return min(remaining_values)
-
-
-def _effective_available_memory_bytes(
-    host_available: int | None,
-    cgroup_available: int | None,
-) -> int | None:
-    values = [value for value in (host_available, cgroup_available) if value is not None]
-    if not values:
-        return None
-    return min(values)
-
-
-def _read_effective_available_memory_bytes() -> int | None:
-    return _effective_available_memory_bytes(
-        _read_linux_available_memory_bytes(),
-        _read_cgroup_available_memory_bytes(),
-    )
-
-
-def _estimated_node_history_peak_bytes(estimate: _HierarchicalExpansionEstimate) -> int:
-    loaded_history = estimate.bottom_rows * _LOADED_HISTORY_BYTES_PER_ROW
-    node_history_materialization = estimate.projected_node_history_rows * (
-        _NODE_HISTORY_BYTES_PER_ROW * (1 + _NODE_HISTORY_TEMPORARY_MULTIPLIER)
-    )
-    task_histories = (
-        estimate.projected_node_history_rows * estimate.model_count * _TASK_HISTORY_BYTES_PER_ROW
-    )
-    forecast_partition_state = estimate.forecast_partitions * _FORECAST_PARTITION_BYTES
-    return (
-        loaded_history
-        + node_history_materialization
-        + task_histories
-        + forecast_partition_state
-        + _RUNTIME_OVERHEAD_BYTES
-    )
-
-
-def _format_bytes(value: int) -> str:
-    return f"{value / 1024**3:.2f} GiB"
-
-
-def _enforce_hierarchical_expansion_memory_limit(
-    config: BackendConfig,
-    bundle: DatasetBundle,
-    hierarchy: pd.DataFrame | None,
-    *,
-    horizon: int,
-) -> None:
-    if hierarchy is None:
-        return
-
-    estimate = _estimate_hierarchical_expansion(
-        bundle.history,
-        hierarchy,
-        horizon=horizon,
-        model_count=len(config.tasks),
-    )
-    available_memory = _read_effective_available_memory_bytes()
-    if available_memory is None:
-        return
-
-    estimated_peak = _estimated_node_history_peak_bytes(estimate)
-    if estimated_peak <= available_memory:
-        return
-
-    raise ValueError(
-        "hierarchical node-history expansion is estimated to need "
-        f"{_format_bytes(estimated_peak)} before forecasting, which exceeds the "
-        f"detected effective memory guard of {_format_bytes(available_memory)}. "
-        f"Estimated bottom rows: {estimate.bottom_rows}; "
-        f"node count: {estimate.node_count}; "
-        f"projected node-history rows: {estimate.projected_node_history_rows}; "
-        f"forecast partitions: {estimate.forecast_partitions}. "
-        "The estimate includes pandas materialization, task-history copies, and "
-        "runtime overhead. "
-        "Streaming output does not avoid this input-side materialization; use a "
-        "smaller hierarchy/input or run on a host with more memory until sparse "
-        "lazy hierarchy execution is available."
-    )
 
 
 def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
@@ -428,11 +193,11 @@ def run_config(
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
     reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
-    _enforce_hierarchical_expansion_memory_limit(
-        config,
-        bundle,
+    enforce_hierarchical_expansion_memory_limit(
+        bundle.history,
         reconciliation_hierarchy,
         horizon=horizon,
+        model_count=len(config.tasks),
     )
     actuals = build_node_history(bundle.history, reconciliation_hierarchy)
     tasks = build_tasks(actuals, model_configs, horizon)
