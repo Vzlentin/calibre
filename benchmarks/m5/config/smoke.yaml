@@ -1,0 +1,21 @@
+config_schema: "1.0"
+dataset:
+  adapter: m5
+  path: tests/fixtures/m5
+  phase: evaluation
+tasks:
+  - model: SeasonalNaive
+    horizon: 1
+    config:
+      backend: statsforecast
+      season_length: 7
+origins:
+  start: 2011-01-30
+  end: 2011-01-30
+  freq: D
+output:
+  ledger_path: results/m5/smoke/forecast-ledger.parquet
+  streaming: false
+execution:
+  backend: local
+  seed: 42
