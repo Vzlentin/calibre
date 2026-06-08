@@ -70,6 +70,7 @@ class ConformalConfig(_Section):
     mode: Literal["perhorizon", "cumulative"] = "perhorizon"
     partition: Literal["global", "series"] = "global"
     protection_period: int | None = None
+    max_partitions: int | None = Field(default=None, ge=1)
 
     def to_runtime_config(self) -> SymmetricIntervalConfig:
         partition_key = {

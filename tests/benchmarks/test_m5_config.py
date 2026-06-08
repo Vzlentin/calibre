@@ -40,7 +40,9 @@ def test_m5_full_config_uses_series_partition_handoff() -> None:
     assert config.conformal.method == "mscp"
     assert config.conformal.mode == "perhorizon"
     assert config.conformal.coverage == 0.9
+    assert config.conformal.calibration_window == 10
     assert config.conformal.partition == "series"
+    assert config.conformal.max_partitions == 1_000_000
     assert config.reconciliation is not None
     assert config.reconciliation.strategy == "bottom_up"
     assert config.output.ledger_path == "results/m5/full-mscp-bottom-up/forecast-ledger.parquet"

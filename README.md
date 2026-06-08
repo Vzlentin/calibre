@@ -72,6 +72,7 @@ uv run calibre run-sweep --configs benchmarks/vn2/config/
 # Score a resolved full-M5 streaming ledger after a run
 uv run calibre score-m5-coverage \
   --ledger results/m5/full-mscp-bottom-up/forecast-ledger.resolved.parquet
+# Add --report-only to refresh diagnostics without failing on the gate.
 ```
 
 ### Dataset adapters
@@ -157,8 +158,10 @@ The current VN2 winning-config regression baseline is `total_cost=4992.20`.
 The M5 smoke config uses only `tests/fixtures/m5`; it is smoke/contract coverage,
 not statistical coverage validation. Full-M5 runs expect the external public M5
 files under ignored `data/m5/` and write artifacts under
-`results/m5/<run-name>/`, including `coverage-by-node.parquet` and `report.md`
-after scoring the resolved streaming ledger. See
+`results/m5/<run-name>/`, including `coverage-by-node.parquet`,
+`coverage-summary.json`, and `report.md` after scoring the resolved streaming
+ledger. The scoring command exits non-zero on a non-`PASS` gate unless
+`--report-only` is passed. See
 [`benchmarks/m5/README.md`](benchmarks/m5/README.md) for the data layout,
 integrity checks, origin-window invariant, acceptance tolerances, and #85
 handoff manifest before running the full local acceptance config.

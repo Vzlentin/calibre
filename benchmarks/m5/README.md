@@ -21,7 +21,8 @@ coverage scoring is a post-run artifact command over a resolved ledger.
   only, not statistical evidence for M5 coverage.
 - `config/full.yaml` uses local full M5 data under `data/m5`, runs the canonical
   `evaluation` phase with 28-day horizons, point reconciliation, and MSCP
-  per-horizon conformal intervals with `conformal.partition: series`. The full
+  per-horizon conformal intervals with `conformal.partition: series`,
+  `calibration_window: 10`, and an explicit `max_partitions` guard. The full
   config streams ledger output and uses `execution.backend: auto` because
   full-M5 hierarchy expansion is large.
 
@@ -91,6 +92,7 @@ results/m5/<run-name>/
   forecast-ledger.resolved.parquet  # resolved materialized ledger for streaming runs
   order-ledger.parquet              # only when ordering is configured
   coverage-by-node.parquet          # per-node coverage diagnostics
+  coverage-summary.json             # structured gate status for agents/CI
   report.md                         # human-readable coverage report
   hierarchical-interval-baseline/   # reserved comparator lane for #85
 ```
@@ -119,14 +121,18 @@ uv run calibre score-m5-coverage \
   --coverage 0.9
 ```
 
-The command writes `coverage-by-node.parquet` and `report.md` into the run
-directory by default. It does not run forecasting, download M5, or mutate the
-source YAML.
+The command writes `coverage-by-node.parquet`, `coverage-summary.json`, and
+`report.md` into the run directory by default. It does not run forecasting,
+download M5, or mutate the source YAML. A non-`PASS` acceptance gate exits
+non-zero after writing artifacts; pass `--report-only` when you only want to
+refresh diagnostics.
 
 The local acceptance gate is:
 
 - full-population marginal coverage within +/- 3.0 percentage points of target;
 - per-level average node coverage within +/- 5.0 percentage points of target;
+- enough scored rows to avoid accepting a tiny finite-bound subset
+  (`minimum_scored_ratio` in the summary);
 - per-node outliers are emitted and counted as diagnostics only, not as
   conditional-coverage failures.
 
@@ -160,4 +166,5 @@ When a full local run is used as the handoff surface for #85, record:
   #85 handoff).
 - Origin start, end, frequency, and horizon.
 - Produced artifact paths under `results/m5/<run-name>/`, including the resolved
-  ledger path for streaming runs, `coverage-by-node.parquet`, and `report.md`.
+  ledger path for streaming runs, `coverage-by-node.parquet`,
+  `coverage-summary.json`, and `report.md`.

@@ -6,6 +6,7 @@ import sys
 
 from calibre.cli import commands
 from calibre.core.logging import setup_logging
+from calibre.evaluation.m5_coverage import PASS
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -30,6 +31,11 @@ def _parser() -> argparse.ArgumentParser:
     m5_coverage_parser.add_argument("--ledger", required=True)
     m5_coverage_parser.add_argument("--coverage", type=float, default=0.9)
     m5_coverage_parser.add_argument("--output-dir")
+    m5_coverage_parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Write coverage artifacts without failing on a non-PASS acceptance gate.",
+    )
 
     return parser
 
@@ -58,10 +64,17 @@ def app(argv: list[str] | None = None) -> int:
                 {
                     "coverage_by_node": str(artifacts.coverage_by_node_path),
                     "report": str(artifacts.report_path),
+                    "summary": str(artifacts.summary_path),
+                    "acceptance_status": artifacts.acceptance_status,
+                    "population_status": artifacts.summary["population_status"],
+                    "level_status": artifacts.summary["level_status"],
+                    "completeness_status": artifacts.summary["completeness_status"],
                 },
                 sort_keys=True,
             )
         )
+        if not args.report_only and artifacts.acceptance_status != PASS:
+            return 1
     else:
         parser.error(f"Unknown command: {args.command}")
     return 0
