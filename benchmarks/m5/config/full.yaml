@@ -1,0 +1,30 @@
+config_schema: "1.0"
+dataset:
+  adapter: m5
+  path: data/m5
+  phase: evaluation
+tasks:
+  - model: SeasonalNaive
+    horizon: 28
+    config:
+      backend: statsforecast
+      season_length: 7
+reconciliation:
+  strategy: bottom_up
+conformal:
+  method: mscp
+  mode: perhorizon
+  coverage: 0.9
+  # TODO(#85 prerequisite): add `partition: series` here once the source
+  # BackendConfig conformal surface exposes reusable partition selection.
+origins:
+  # 37 daily origins = 9 warmup scores + 1 scored origin + 27-day h=28 settlement.
+  start: 2016-03-20
+  end: 2016-04-25
+  freq: D
+output:
+  ledger_path: results/m5/full-mscp-bottom-up/forecast-ledger.parquet
+  streaming: true
+execution:
+  backend: auto
+  seed: 42

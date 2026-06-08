@@ -19,6 +19,12 @@ Requires Python `>=3.11` and [`uv`](https://docs.astral.sh/uv/).
 uv sync --extra dev --extra benchmarks
 ```
 
+Full-M5 benchmark work that uses hierarchy-aware reconciliation also needs:
+
+```bash
+uv sync --extra dev --extra benchmarks --extra hierarchy
+```
+
 When using persistent API state, set `CALIBRE_DATABASE_URL` and apply the
 Alembic migrations:
 
@@ -127,11 +133,23 @@ uv run python benchmarks/vn2/run_benchmark.py
 # Run VN2 winning config (harness entrypoint)
 uv run python -m benchmarks.vn2 --config benchmarks/vn2/config/winning.yaml
 
+# Validate and run the M5 smoke harness
+uv run calibre validate --config benchmarks/m5/config/smoke.yaml
+uv run calibre run --config benchmarks/m5/config/smoke.yaml
+
+# Validate the full-M5 local acceptance config (requires external data to run)
+uv run calibre validate --config benchmarks/m5/config/full.yaml
+
 # Run ACI parity
 uv run python benchmarks/cp/aci/run_aci_parity.py
 ```
 
 The current VN2 winning-config regression baseline is `total_cost=4992.20`.
+The M5 smoke config uses only `tests/fixtures/m5`; full-M5 runs expect the
+external public M5 files under ignored `data/m5/` and write artifacts under
+`results/m5/<run-name>/`. See [`benchmarks/m5/README.md`](benchmarks/m5/README.md)
+for the data layout, integrity checks, origin-window invariant, and #85 handoff
+manifest before running the full local acceptance config.
 
 ## API
 
@@ -215,6 +233,7 @@ calibre/                 # Python package
 
 benchmarks/              # Benchmark suites
 ├── vn2/                 # VN2 inventory challenge
+├── m5/                  # M5 config-only harness
 └── cp/aci/              # Adaptive conformal inference parity
 
 tests/                   # pytest suite
