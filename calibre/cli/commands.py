@@ -33,6 +33,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
+from calibre.execution.hierarchy_memory import enforce_hierarchical_expansion_memory_limit
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import (
@@ -192,6 +193,12 @@ def run_config(
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
     reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
+    enforce_hierarchical_expansion_memory_limit(
+        bundle.history,
+        reconciliation_hierarchy,
+        horizon=horizon,
+        model_count=len(config.tasks),
+    )
     actuals = build_node_history(bundle.history, reconciliation_hierarchy)
     tasks = build_tasks(actuals, model_configs, horizon)
     _enforce_conformal_partition_limit(config, tasks, horizon)
