@@ -4,8 +4,7 @@ SKILL.md keeps the autofix-loop shape, the max-3-iterations rule, the PR #38
 repeated-failure stop, the on-green merge decision, the merge-gated cleanup
 decision, and the GATE. This file holds the bash.
 
-Poll CI status with the canonical `gh api` check-runs/status recipes in
-`.claude/skills/go/references/environment.md` (the single home for that recipe).
+Poll CI status with the canonical `gh api`.
 In Stage 5 the SHA is `HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`.
 
 ## Pull logs for failed runs
