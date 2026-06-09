@@ -169,7 +169,7 @@ def test_module_main_invokes_run_from_config(monkeypatch, tmp_path) -> None:
                 'config_schema: "1.0"',
                 "dataset:",
                 "  adapter: vn2",
-                f'  path: "{tmp_path / "data"}"',
+                f"  path: {(tmp_path / 'data').as_posix()}",
                 "tasks:",
                 "  - model: global_lgbm",
                 "    horizon: 3",
