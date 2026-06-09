@@ -34,7 +34,6 @@ calibre = "calibre.cli.main:app"
 dev = [
     "datasetsforecast",
     "httpx",
-    "pre-commit",
     "pytest",
     "ruff",
     "ty",
@@ -69,6 +68,11 @@ torch = { index = "pytorch-cpu", marker = "platform_system == 'Linux' and platfo
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'"
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
