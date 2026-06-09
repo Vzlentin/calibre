@@ -338,7 +338,10 @@ def test_run_config_rejects_oversized_hierarchy_before_build_node_history(
     def fail_build_node_history(*args, **kwargs):
         raise AssertionError("build_node_history should not run after the preflight guard fails")
 
-    monkeypatch.setattr("calibre.cli.commands.build_node_history", fail_build_node_history)
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.build_node_history",
+        fail_build_node_history,
+    )
 
     with pytest.raises(ValueError, match="projected node-history rows"):
         run_config(config)

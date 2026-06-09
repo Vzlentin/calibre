@@ -9,13 +9,10 @@ import pandas as pd
 
 from calibre.cli.config import (
     BackendConfig,
-    ReconciliationConfig,
     load_config,
     load_config_from_mapping,
 )
-from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
-from calibre.core.forecast_task import TaskGroups
 from calibre.core.io import is_local_fs, open_fs
 from calibre.core.metrics import set_order_cost
 from calibre.evaluation.m5_coverage import (
@@ -33,8 +30,7 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
-from calibre.execution.hierarchy_memory import enforce_hierarchical_expansion_memory_limit
-from calibre.execution.task_builder import build_node_history, build_tasks
+from calibre.execution.hierarchy_preparation import prepare_run
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering.policy_config import (
     NewsvendorConfig,
@@ -91,27 +87,6 @@ def _enforce_unique_id_limit(bundle: DatasetBundle, max_unique_ids: int | None) 
         )
 
 
-def _enforce_conformal_partition_limit(
-    config: BackendConfig,
-    tasks: TaskGroups,
-    horizon: int,
-) -> None:
-    if config.conformal is None:
-        return
-    if config.conformal.partition != "series" or config.conformal.max_partitions is None:
-        return
-    estimated_partitions = sum(
-        int(task.history[UNIQUE_ID].astype(str).nunique()) * horizon for task in tasks.tasks
-    )
-    if estimated_partitions > config.conformal.max_partitions:
-        raise ValueError(
-            "conformal.partition='series' would create approximately "
-            f"{estimated_partitions} model/node/horizon partitions; configured maximum is "
-            f"{config.conformal.max_partitions}. Increase conformal.max_partitions only after "
-            "confirming the run has enough memory for the resulting calibration state."
-        )
-
-
 def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
     if config.ordering is None:
         return None
@@ -137,16 +112,6 @@ def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
             raise ValueError("ordering.quantile is not a valid knob for the newsvendor policy")
         return NewsvendorConfig(params=params_frame, coverage=ordering.coverage)
     raise ValueError(f"unknown order policy: {ordering.policy!r}")
-
-
-def _hierarchy_for_run(config: BackendConfig, bundle: DatasetBundle) -> pd.DataFrame | None:
-    if config.hierarchical_intervals is not None:
-        if bundle.hierarchy is None:
-            raise ValueError("hierarchical_intervals requires a dataset hierarchy")
-        return bundle.hierarchy
-    if config.reconciliation is None or config.reconciliation.strategy == "none":
-        return None
-    return bundle.hierarchy
 
 
 def _metric_currency(config: BackendConfig) -> str:
@@ -190,26 +155,7 @@ def run_config(
 ) -> BackendResult:
     bundle = _load_dataset(config)
     _enforce_unique_id_limit(bundle, max_unique_ids)
-    model_configs = [task.resolved_model_config() for task in config.tasks]
-    horizon = config.tasks[0].horizon
-    reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
-    enforce_hierarchical_expansion_memory_limit(
-        bundle.history,
-        reconciliation_hierarchy,
-        horizon=horizon,
-        model_count=len(config.tasks),
-    )
-    actuals = build_node_history(bundle.history, reconciliation_hierarchy)
-    tasks = build_tasks(actuals, model_configs, horizon)
-    _enforce_conformal_partition_limit(config, tasks, horizon)
-    origins = config.origins.to_list()
-    if not origins:
-        raise ValueError("origins resolved to an empty list")
-
-    conformal_config: SymmetricIntervalConfig | None = (
-        config.conformal.to_runtime_config() if config.conformal is not None else None
-    )
-    reconciliation_config = config.reconciliation or ReconciliationConfig()
+    preparation = prepare_run(config, bundle)
     streaming_output = config.output.ledger_path if config.output.streaming else None
     streaming_order_output = config.output.order_ledger_path if config.output.streaming else None
 
@@ -221,30 +167,22 @@ def run_config(
             streaming=config.output.streaming,
         ),
         conformal=ConformalOptions(
-            config=conformal_config,
+            config=preparation.conformal_config,
             run_id=run_id,
             state_store=conformal_state_store,
             initial_ledger=initial_ledger,
         ),
         reconciliation=ReconciliationOptions(
-            reconciler=(
-                None
-                if config.hierarchical_intervals is not None
-                else reconciliation_config.to_reconciler()
-            ),
-            hierarchy=reconciliation_hierarchy,
+            reconciler=preparation.reconciler,
+            hierarchy=preparation.reconciliation_hierarchy,
         ),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(
-            phase=(
-                config.hierarchical_intervals.to_phase()
-                if config.hierarchical_intervals is not None
-                else None
-            )
+            phase=preparation.hierarchical_interval_phase
         ),
         order=_build_order_config(config),
     )
     try:
-        result = engine.execute(tasks, actuals, origins)
+        result = engine.execute(preparation.tasks, preparation.actuals, preparation.origins)
     finally:
         engine.close()
 
