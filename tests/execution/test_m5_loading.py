@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.execution.actuals import FrameActualsSource, HierarchyActualsSource
 from calibre.execution.m5_loading import build_m5_hierarchy, melt_m5_sales
 from calibre.execution.task_builder import build_node_history
 from calibre.reconciliation.summing import TOTAL_LABEL, build_summing_matrix
@@ -79,3 +80,27 @@ def test_m5_node_history_contains_expected_aggregate_labels(fixture_dir: Path) -
         (node_history[UNIQUE_ID] == TOTAL_LABEL) & (node_history[DS] == first_day), Y
     ].iloc[0]
     assert aggregate_total == pytest.approx(bottom_total)
+
+
+def test_lazy_m5_actuals_source_matches_eager_node_history(fixture_dir: Path) -> None:
+    sales = pd.read_csv(fixture_dir / "sales_train_evaluation.csv")
+    calendar = pd.read_csv(fixture_dir / "calendar.csv")
+    history = melt_m5_sales(sales, calendar)
+    hierarchy = build_m5_hierarchy(sales)
+    summing = build_summing_matrix(hierarchy)
+    first_day = history[DS].min()
+    requested = pd.DataFrame(
+        {
+            UNIQUE_ID: list(summing.node_labels),
+            DS: pd.to_datetime([first_day] * len(summing.node_labels)),
+            Y: [float("nan")] * len(summing.node_labels),
+        }
+    )
+
+    eager = FrameActualsSource(build_node_history(history, hierarchy)).resolve(
+        requested,
+        first_day,
+    )[0]
+    lazy = HierarchyActualsSource(history, hierarchy).resolve(requested, first_day)[0]
+
+    pd.testing.assert_series_equal(lazy[Y], eager[Y])

@@ -102,6 +102,18 @@ def test_resolve_no_pending_returns_unchanged():
     assert len(newly_resolved) == 0
 
 
+def test_resolve_no_pending_does_not_validate_unused_actuals():
+    ledger_df = _make_ledger_df()
+    ledger_df[Y] = [40.0, 10.0, 20.0, 30.0]
+    actuals = pd.DataFrame({UNIQUE_ID: ["SKU_001"], DS: ["not-a-date"], Y: [40.0]})
+    origin = pd.Timestamp("2024-03-31")
+
+    updated, newly_resolved = resolve_actuals(ledger_df, actuals, origin)
+
+    pd.testing.assert_frame_equal(updated, ledger_df)
+    assert len(newly_resolved) == 0
+
+
 def test_row_errors():
     df = pd.DataFrame(
         {

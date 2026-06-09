@@ -14,6 +14,7 @@ import pytest
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
+from calibre.execution.actuals import HierarchyActualsSource
 from calibre.execution.backend import (
     BackendEngine,
     ConformalOptions,
@@ -21,7 +22,7 @@ from calibre.execution.backend import (
     _with_group_tag,
 )
 from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
-from calibre.execution.task_builder import build_node_history, partition_tasks
+from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import RsConfig
 from calibre.reconciliation import NixtlaReconciler, NoOpReconciler, ReconciliationContext
@@ -283,7 +284,7 @@ def test_reconcile_phase_failure_names_phase_and_origin() -> None:
         )
 
 
-def test_resolve_due_fills_aggregate_actuals_from_node_history() -> None:
+def test_resolve_due_fills_aggregate_actuals_from_hierarchy_source() -> None:
     hierarchy = pd.DataFrame({UNIQUE_ID: ["A", "B"], "dept_id": ["D", "D"]})
     bottom_actuals = pd.DataFrame(
         {
@@ -292,7 +293,7 @@ def test_resolve_due_fills_aggregate_actuals_from_node_history() -> None:
             Y: [2.0, 3.0],
         }
     )
-    actuals = build_node_history(bottom_actuals, hierarchy)
+    actuals = HierarchyActualsSource(bottom_actuals, hierarchy)
     ledger = InMemoryLedger()
     ledger.append(
         pd.DataFrame(
@@ -313,6 +314,55 @@ def test_resolve_due_fills_aggregate_actuals_from_node_history() -> None:
 
     assert resolved.loc["dept_id=D", Y] == pytest.approx(5.0)
     assert resolved.loc["__total__", Y] == pytest.approx(5.0)
+
+
+def test_execute_threads_hierarchy_source_through_commit(monkeypatch) -> None:
+    hierarchy = pd.DataFrame({UNIQUE_ID: ["A", "B"], "dept_id": ["D", "D"]})
+    bottom_actuals = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            DS: pd.to_datetime(["2024-01-08", "2024-01-08"]),
+            Y: [2.0, 3.0],
+        }
+    )
+    task = ForecastTask(
+        history=pd.DataFrame(
+            {
+                UNIQUE_ID: ["dept_id=D"],
+                DS: pd.to_datetime(["2024-01-01"]),
+                Y: [5.0],
+            }
+        ),
+        horizon=1,
+        model_config={"backend": "stub", "model": "stub_model"},
+    )
+
+    class _AggregateAdapter(ModelAdapter):
+        def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+            del task, collect_fitted_values
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-01-08")],
+                    Y_HAT: [5.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter",
+        lambda model_config: _AggregateAdapter(model_config),
+    )
+
+    actuals = HierarchyActualsSource(bottom_actuals, hierarchy)
+    result = BackendEngine().execute(partition_tasks([task]), actuals, [pd.Timestamp("2024-01-08")])
+    row = result.ledger.to_df().iloc[0]
+
+    assert row[UNIQUE_ID] == "dept_id=D"
+    assert row[Y] == pytest.approx(5.0)
+    assert row["error"] == pytest.approx(0.0)
 
 
 def test_order_phase_filters_aggregate_rows_when_hierarchy_present(monkeypatch) -> None:

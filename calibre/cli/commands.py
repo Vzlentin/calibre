@@ -20,6 +20,7 @@ from calibre.evaluation.m5_coverage import (
     M5CoverageArtifacts,
     score_resolved_ledger,
 )
+from calibre.execution.actuals import FrameActualsSource, HierarchyActualsSource
 from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
@@ -182,7 +183,12 @@ def run_config(
         order=_build_order_config(config),
     )
     try:
-        result = engine.execute(preparation.tasks, preparation.actuals, preparation.origins)
+        actuals_source = (
+            HierarchyActualsSource(bundle.history, preparation.reconciliation_hierarchy)
+            if preparation.reconciliation_hierarchy is not None
+            else FrameActualsSource(preparation.actuals)
+        )
+        result = engine.execute(preparation.tasks, actuals_source, preparation.origins)
     finally:
         engine.close()
 

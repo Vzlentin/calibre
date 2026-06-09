@@ -2,6 +2,7 @@
 
 from calibre.core.forecast_task import TaskGroups
 from calibre.core.io import exists, join_uri, open_fs, resolve_path
+from calibre.execution.actuals import ActualsSource, FrameActualsSource, HierarchyActualsSource
 from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
@@ -44,6 +45,9 @@ from calibre.execution.validation import load_costs, validate_dataset_bundle
 __all__ = [
     "BackendEngine",
     "BackendResult",
+    "ActualsSource",
+    "FrameActualsSource",
+    "HierarchyActualsSource",
     "ConformalOptions",
     "ExecutionOptions",
     "LedgerOutputOptions",

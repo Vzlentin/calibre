@@ -30,7 +30,6 @@ from calibre.core.forecast_frame import (
     NONCONFORMITY_SCORE,
     UNIQUE_ID,
     Y,
-    validate_actuals_frame,
     validate_forecast_frame,
 )
 from calibre.core.forecast_task import ForecastTask, ForecastTaskRef, TaskGroups
@@ -42,7 +41,8 @@ from calibre.core.metrics import (
 )
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
-from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
+from calibre.evaluation.forecast_metrics import compute_row_errors
+from calibre.execution.actuals import ActualsSource, ensure_actuals_source
 from calibre.execution.ledger import (
     InMemoryLedger,
     InMemoryOrderLedger,
@@ -229,7 +229,7 @@ class BackendEngine:
     def execute(
         self,
         tasks: TaskGroups,
-        actuals: pd.DataFrame,
+        actuals: pd.DataFrame | ActualsSource,
         origins: list[pd.Timestamp],
     ) -> BackendResult:
         """Run all origins and return the final batch result."""
@@ -246,7 +246,7 @@ class BackendEngine:
     def iter_origins(
         self,
         tasks: TaskGroups,
-        actuals: pd.DataFrame,
+        actuals: pd.DataFrame | ActualsSource,
         origins: list[pd.Timestamp],
     ) -> Iterator[BackendResult]:
         """Yield the cumulative backend result after each completed origin.
@@ -254,7 +254,7 @@ class BackendEngine:
         ``tasks`` is a pre-partitioned :class:`TaskGroups`; scope was resolved
         once in ``build_tasks`` and is never re-interpreted here.
         """
-        validate_actuals_frame(actuals)
+        actuals_source = ensure_actuals_source(actuals)
         ledger: Ledger = (
             StreamingLedger(self.streaming_output)
             if self.streaming_output is not None
@@ -302,7 +302,7 @@ class BackendEngine:
                         self.run_origin(
                             ledger=ledger,
                             order_ledger=order_ledger,
-                            actuals=actuals,
+                            actuals=actuals_source,
                             origin=origin,
                             conformal_runtime=conformal_runtime,
                             parallel_refs=parallel_refs,
@@ -357,7 +357,7 @@ class BackendEngine:
         *,
         ledger: Ledger,
         order_ledger: OrderLedger | None,
-        actuals: pd.DataFrame,
+        actuals: pd.DataFrame | ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
         parallel_refs: list[ForecastTaskRef],
@@ -376,9 +376,10 @@ class BackendEngine:
         sequencing the seam exposes is debuggable.
         """
         fused_phase_active = self.hierarchical_interval_phase is not None
+        actuals_source = ensure_actuals_source(actuals)
         active_conformal_runtime = None if fused_phase_active else conformal_runtime
         with self._phase("ResolveOpen", origin):
-            self._resolve_open(ledger, actuals, origin, active_conformal_runtime)
+            self._resolve_open(ledger, actuals_source, origin, active_conformal_runtime)
         with self._phase("Predict", origin):
             prediction = self._predict(parallel_refs, direct_refs, origin)
             origin_preds = prediction.forecast
@@ -399,7 +400,7 @@ class BackendEngine:
         with self._phase("Order", origin):
             self._order(origin_preds, order_ledger)
         with self._phase("Commit", origin):
-            self._commit(ledger, origin_preds, actuals, origin, active_conformal_runtime)
+            self._commit(ledger, origin_preds, actuals_source, origin, active_conformal_runtime)
 
     @contextmanager
     def _phase(self, name: str, origin: pd.Timestamp) -> Iterator[None]:
@@ -423,7 +424,7 @@ class BackendEngine:
     def _resolve_open(
         self,
         ledger: Ledger,
-        actuals: pd.DataFrame,
+        actuals: ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
@@ -527,7 +528,7 @@ class BackendEngine:
         self,
         ledger: Ledger,
         origin_preds: pd.DataFrame,
-        actuals: pd.DataFrame,
+        actuals: ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
@@ -548,7 +549,7 @@ class BackendEngine:
     def _resolve_due(
         self,
         ledger: Ledger,
-        actuals: pd.DataFrame,
+        actuals: pd.DataFrame | ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
@@ -562,7 +563,8 @@ class BackendEngine:
         if current.empty:
             return
 
-        updated, newly_resolved = resolve_actuals(current, actuals, origin)
+        actuals_source = ensure_actuals_source(actuals)
+        updated, newly_resolved = actuals_source.resolve(current, origin)
         if newly_resolved.empty:
             return
 

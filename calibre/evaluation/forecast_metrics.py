@@ -40,24 +40,15 @@ def resolve_actuals(
 
     Returns (updated_ledger, newly_resolved_rows).
     """
-    updated = ledger_df.copy()
-
-    mask_pending = updated[Y].isna() & (updated[DS] <= current_origin)
-    if not mask_pending.any():
+    if not (ledger_df[Y].isna() & (ledger_df[DS] <= current_origin)).any():
+        updated = ledger_df.copy()
         return updated, pd.DataFrame(columns=updated.columns)
 
-    lookup = actuals.drop_duplicates(subset=[UNIQUE_ID, DS]).set_index([UNIQUE_ID, DS])[Y]
+    # Keep this import local: importing execution.actuals at module load creates
+    # an evaluation -> execution -> backend -> evaluation cycle.
+    from calibre.execution.actuals import FrameActualsSource
 
-    pending_idx = updated.index[mask_pending]
-    pending_keys = pd.MultiIndex.from_arrays(
-        [updated.loc[pending_idx, UNIQUE_ID].values, updated.loc[pending_idx, DS].values]
-    )
-    resolved_y = lookup.reindex(pending_keys).values
-    updated.loc[pending_idx, Y] = resolved_y
-
-    newly_resolved = updated.loc[pending_idx[updated.loc[pending_idx, Y].notna()]].copy()
-
-    return updated, newly_resolved
+    return FrameActualsSource(actuals).resolve(ledger_df, current_origin)
 
 
 def compute_row_errors(resolved_df: pd.DataFrame) -> pd.DataFrame:

@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from calibre.cli.commands import run_config
 from calibre.cli.config import ReconciliationConfig, load_config_from_mapping
+from calibre.execution.actuals import HierarchyActualsSource
 from calibre.execution.backend import BackendResult
 from calibre.execution.ledger import InMemoryLedger
 from calibre.reconciliation import NixtlaHierarchicalIntervalPhase, NixtlaReconciler, NoOpReconciler
@@ -81,6 +82,7 @@ def test_run_config_passes_bundle_hierarchy_into_engine(monkeypatch: pytest.Monk
             captured["reconciliation"] = kwargs["reconciliation"]
 
         def execute(self, tasks: Any, actuals: Any, origins: Any) -> BackendResult:
+            captured["actuals"] = actuals
             return BackendResult(ledger=InMemoryLedger())
 
         def close(self) -> None:
@@ -111,6 +113,7 @@ def test_run_config_passes_bundle_hierarchy_into_engine(monkeypatch: pytest.Monk
     assert options.reconciler.strategy == "ols"
     assert options.hierarchy is not None
     assert "unique_id" in options.hierarchy.columns
+    assert isinstance(captured["actuals"], HierarchyActualsSource)
 
 
 def test_hierarchical_intervals_section_resolves_to_fused_phase(
@@ -125,6 +128,7 @@ def test_hierarchical_intervals_section_resolves_to_fused_phase(
 
         def execute(self, tasks: Any, actuals: Any, origins: Any) -> BackendResult:
             captured["tasks"] = tasks
+            captured["actuals"] = actuals
             return BackendResult(ledger=InMemoryLedger())
 
         def close(self) -> None:
@@ -161,6 +165,7 @@ def test_hierarchical_intervals_section_resolves_to_fused_phase(
     assert reconciliation.hierarchy is not None
     assert reconciliation.reconciler is None
     assert len(captured["tasks"].local) > 2
+    assert isinstance(captured["actuals"], HierarchyActualsSource)
 
 
 def test_hierarchical_intervals_unknown_key_is_forbidden() -> None:
