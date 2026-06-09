@@ -227,6 +227,4 @@ results/
 
 # Compound Engineering machine-local config
 .compound-engineering/*
-!.compound-engineering/
-!.compound-engineering/config.local.example.yaml
 .compound-engineering/*.local.yaml
