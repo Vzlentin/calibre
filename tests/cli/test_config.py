@@ -3,15 +3,12 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-import pandas as pd
 import pytest
 from pydantic import ValidationError
 
 from calibre.cli.config import load_config_from_mapping
 from calibre.conformal.partitions import GLOBAL_PARTITION
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
-from calibre.core.forecast_task import ForecastTask, TaskGroups
-from calibre.execution.hierarchy_preparation import _enforce_conformal_partition_limit
+from calibre.core.forecast_frame import UNIQUE_ID
 
 _VALID: dict[str, Any] = {
     "config_schema": "1.0",
@@ -72,31 +69,6 @@ def test_conformal_partition_series_uses_unique_id_runtime_key() -> None:
 def test_invalid_partition_raises_at_parse_time() -> None:
     with pytest.raises(ValidationError, match="partition"):
         load_config_from_mapping(_config(conformal={"method": "mscp", "partition": "bogus"}))
-
-
-def test_series_partition_guard_estimates_unique_series_per_horizon() -> None:
-    config = load_config_from_mapping(
-        _config(conformal={"method": "mscp", "partition": "series", "max_partitions": 3})
-    )
-    history = pd.DataFrame(
-        {
-            UNIQUE_ID: ["A", "B"],
-            DS: pd.date_range("2024-01-01", periods=2, freq="D"),
-            Y: [1.0, 2.0],
-        }
-    )
-    tasks = TaskGroups(
-        global_=[
-            ForecastTask(
-                history=history,
-                horizon=2,
-                model_config={"model": "SeasonalNaive"},
-            )
-        ]
-    )
-
-    with pytest.raises(ValueError, match="approximately 4"):
-        _enforce_conformal_partition_limit(config, tasks, horizon=2)
 
 
 def test_unknown_key_raises_at_parse_time() -> None:

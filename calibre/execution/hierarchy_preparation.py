@@ -17,12 +17,6 @@ from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler
 
 
 @dataclass(frozen=True)
-class RunPreparationDiagnostics:
-    conformal_partition_estimate: int | None = None
-    hierarchy_memory_guard_applied: bool = False
-
-
-@dataclass(frozen=True)
 class RunPreparation:
     tasks: TaskGroups
     actuals: pd.DataFrame
@@ -31,7 +25,6 @@ class RunPreparation:
     reconciliation_hierarchy: pd.DataFrame | None
     reconciler: Reconciler | None
     hierarchical_interval_phase: HierarchicalIntervalPhase | None
-    diagnostics: RunPreparationDiagnostics
 
 
 def prepare_run(config: BackendConfig, bundle: DatasetBundle) -> RunPreparation:
@@ -50,7 +43,7 @@ def prepare_run(config: BackendConfig, bundle: DatasetBundle) -> RunPreparation:
 
     actuals = build_node_history(bundle.history, reconciliation_hierarchy)
     tasks = build_tasks(actuals, model_configs, horizon)
-    conformal_partition_estimate = _enforce_conformal_partition_limit(config, tasks, horizon)
+    _enforce_conformal_partition_limit(config, tasks, horizon)
     origins = config.origins.to_list()
     if not origins:
         raise ValueError("origins resolved to an empty list")
@@ -75,10 +68,6 @@ def prepare_run(config: BackendConfig, bundle: DatasetBundle) -> RunPreparation:
             if config.hierarchical_intervals is not None
             else None
         ),
-        diagnostics=RunPreparationDiagnostics(
-            conformal_partition_estimate=conformal_partition_estimate,
-            hierarchy_memory_guard_applied=guard_applied,
-        ),
     )
 
 
@@ -96,13 +85,21 @@ def _enforce_conformal_partition_limit(
     config: BackendConfig,
     tasks: TaskGroups,
     horizon: int,
-) -> int | None:
+) -> None:
     if config.conformal is None or config.conformal.partition != "series":
-        return None
+        return
 
-    estimated_partitions = sum(
-        int(task.history[UNIQUE_ID].astype(str).nunique()) * horizon for task in tasks.tasks
-    )
+    unique_ids_by_history: dict[int, int] = {}
+    estimated_partitions = 0
+    for task_group in (tasks.local, tasks.global_):
+        for task in task_group:
+            history_key = id(task.history)
+            if history_key not in unique_ids_by_history:
+                unique_ids_by_history[history_key] = int(
+                    task.history[UNIQUE_ID].astype(str).nunique()
+                )
+            estimated_partitions += unique_ids_by_history[history_key] * horizon
+
     if (
         config.conformal.max_partitions is not None
         and estimated_partitions > config.conformal.max_partitions
@@ -113,4 +110,3 @@ def _enforce_conformal_partition_limit(
             f"{config.conformal.max_partitions}. Increase conformal.max_partitions only after "
             "confirming the run has enough memory for the resulting calibration state."
         )
-    return estimated_partitions

@@ -71,15 +71,19 @@ def test_flat_preparation_keeps_bottom_actuals_and_skips_memory_guard(
 
     pd.testing.assert_frame_equal(preparation.actuals, bundle.history)
     assert preparation.reconciliation_hierarchy is None
-    assert preparation.diagnostics.hierarchy_memory_guard_applied is False
 
 
 def test_reconciliation_preparation_materializes_node_actuals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    guard_calls = []
+
+    def record_guard(*args, **kwargs):
+        guard_calls.append((args, kwargs))
+
     monkeypatch.setattr(
         "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
-        lambda *args, **kwargs: None,
+        record_guard,
     )
     hierarchy = _hierarchy()
 
@@ -92,7 +96,7 @@ def test_reconciliation_preparation_materializes_node_actuals(
     assert preparation.reconciliation_hierarchy is hierarchy
     assert preparation.reconciler is not None
     assert set(preparation.actuals[UNIQUE_ID]) == set(summing.node_labels)
-    assert preparation.diagnostics.hierarchy_memory_guard_applied is True
+    assert len(guard_calls) == 1
 
 
 def test_empty_origins_raise_clear_error() -> None:
@@ -102,8 +106,16 @@ def test_empty_origins_raise_clear_error() -> None:
         prepare_run(config, _bundle())
 
 
-def test_point_reconciliation_guard_runs_before_node_history(
+@pytest.mark.parametrize(
+    "config_override",
+    [
+        {"reconciliation": {"strategy": "bottom_up"}},
+        {"hierarchical_intervals": {"method": "nixtla_conformal"}},
+    ],
+)
+def test_hierarchy_guard_runs_before_node_history(
     monkeypatch: pytest.MonkeyPatch,
+    config_override,
 ) -> None:
     monkeypatch.setattr(
         "calibre.execution.hierarchy_memory.read_effective_available_memory_bytes", lambda: 1
@@ -118,31 +130,7 @@ def test_point_reconciliation_guard_runs_before_node_history(
     )
 
     with pytest.raises(ValueError, match="projected node-history rows"):
-        prepare_run(
-            _config(reconciliation={"strategy": "bottom_up"}), _bundle(hierarchy=_hierarchy())
-        )
-
-
-def test_hierarchical_interval_guard_runs_before_node_history(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "calibre.execution.hierarchy_memory.read_effective_available_memory_bytes", lambda: 1
-    )
-
-    def fail_build_node_history(*args, **kwargs):
-        raise AssertionError("build_node_history should not run after the preflight guard fails")
-
-    monkeypatch.setattr(
-        "calibre.execution.hierarchy_preparation.build_node_history",
-        fail_build_node_history,
-    )
-
-    with pytest.raises(ValueError, match="projected node-history rows"):
-        prepare_run(
-            _config(hierarchical_intervals={"method": "nixtla_conformal"}),
-            _bundle(hierarchy=_hierarchy()),
-        )
+        prepare_run(_config(**config_override), _bundle(hierarchy=_hierarchy()))
 
 
 def test_hierarchical_interval_preparation_uses_fused_phase_without_point_reconciler(
@@ -208,4 +196,3 @@ def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
 
     assert preparation.tasks.local == []
     assert len(preparation.tasks.global_) == 1
-    assert preparation.diagnostics.conformal_partition_estimate == 4
