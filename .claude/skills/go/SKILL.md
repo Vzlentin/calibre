@@ -1,13 +1,13 @@
 ---
 name: go
-description: Calibre implementation-orchestration pipeline. Given a plain idea, a GitHub issue (#N / number / roadmap code), or a path to a plan file, drive it end-to-end — resolve it to a plan (invoking /ce-plan when none exists), back it with a GitHub issue, then implement → simplify → review → resolve feedback → babysit CI → squash-merge → persist. Invoke with /go <idea | issue | plan-file> to build a backlog item hands-off.
-argument-hint: "[idea text, issue (#N / code), or path to a plan file]"
+description: Calibre implementation-orchestration pipeline. Given a plain idea, a GitHub issue (#N / number / roadmap code), or a path to a plan file, drive it end-to-end — resolve it to a plan (invoking /ce-plan when none exists), back it with a GitHub issue, then implement → simplify → review → resolve feedback → babysit CI → squash-merge → persist. Invoke with /go <idea | issue | plan-file> to build a backlog item hands-off, or /go --no-merge <...> to stop after a green PR for an outer gate/merge workflow.
+argument-hint: "[--no-merge] [idea text, issue (#N / code), or path to a plan file]"
 ---
 
 You are running the Calibre implementation-orchestration pipeline for the work
-item in `$ARGUMENTS`. Execute the stages **in order**. Every run ends in exactly
-one **terminal outcome** — `shipped` (PR squash-merged) or `failed` (a stage
-stopped short) — persisted to the plan store by Stage 6.
+item in `$ARGUMENTS`. Execute the stages **in order**. By default, every run ends
+in exactly one **terminal outcome** — `shipped` (PR squash-merged) or `failed` (a
+stage stopped short) — persisted to the plan store by Stage 6.
 
 Each stage ends in a **GATE**: if the stage did not do its job, stop — do not
 paper over a failed stage to reach the next one. A short-stopping GATE **is** the
@@ -20,6 +20,24 @@ input to a concrete plan in the store resolved by `/project-memory` (the vault,
 or the `docs/plans/` fallback; invoking `/ce-plan` when none exists), guarantees
 a backing issue so `closes #N` keeps working, then implements. The plan is the
 work order; the issue is the close-handle.
+
+## Run mode
+
+Parse `$ARGUMENTS` before Stage 0a:
+
+- **Ship mode (default):** no flag. Run the full pipeline, including squash-merge
+  and cleanup after green CI.
+- **Handoff mode:** `--no-merge` as the first argument. Remove the flag from the
+  work-item input, then run the same pipeline through CI, but do **not**
+  squash-merge, delete branches, remove worktrees, or mark the plan terminal.
+  Preserve the PR branch/worktree and report `ready-for-external-gates` when the
+  PR is green. Use this only when an outer orchestrator owns extra gates before
+  merge, such as architecture review, thermo review, benchmark acceptance, or a
+  campaign-level autonomous merge policy.
+
+All safety gates still apply in handoff mode. A failed implementation, review,
+feedback, or CI gate is still `failed`; only the post-green merge step is
+deferred.
 
 ## Project rules that bind every stage
 
@@ -51,8 +69,8 @@ the fan-out:
 
 ## Stage 0a— Classify the input
 
-Classify `$ARGUMENTS` into one of three kinds, in this order — first match
-wins:
+Classify the work-item input (after removing `--no-merge`, if present) into one
+of three kinds, in this order — first match wins:
 
 1. **Plan-file** — `$ARGUMENTS` resolves to an existing `.md` file (e.g.
    `2026-06-06-001-feat-foo-plan.md`). Open it and check it is an
@@ -112,7 +130,9 @@ rather than moving files here.
 
 ## Stage 0c — Ensure a backing GitHub issue
 
-Every run merges with `closes #N`, so guarantee an issue exists:
+Every run opens a PR that carries `closes #N`; in ship mode that merge closes the
+issue, and in handoff mode the close-handle remains ready for the outer merge
+workflow. Guarantee an issue exists:
 
 - **Reuse** when the work item already has one — the **Issue** input's `#N`, or a
   plan carrying `origin: "GitHub issue #N — …"`. Do not create a duplicate.
@@ -258,8 +278,14 @@ section to the PR body (`gh pr edit <PR> --body-file <tmp>`), do not merge red,
 and take the **preserve path** below.
 
 **On green** (and Stage 4 gate satisfied), confirm the PR body carries `closes #N`
-— Stage 0c guarantees the issue exists, so verify only that the line is present
-— then squash-merge (this also deletes the remote branch):
+— Stage 0c guarantees the issue exists, so verify only that the line is present.
+
+In **handoff mode** (`--no-merge`), stop here before merge. Do not delete the
+remote branch, local branch, or worktree. Record the exact PR URL, head SHA, base
+branch, WORKDIR, branch name, CI evidence summary, and any unresolved
+`needs-human` review threads, then proceed to Stage 6 as `ready-for-external-gates`.
+
+In **ship mode**, squash-merge (this also deletes the remote branch):
 
 ```bash
 gh pr merge <PR> --squash --delete-branch
@@ -274,48 +300,60 @@ the branch **without** `git checkout main`/`git pull` in the main checkout —
 preserving the user's branch and dirty tree is the whole point.
 
 **Preserve path (failure / any short-stop).** If `/loop-on-ci` cannot get the PR
-green, or any stage stopped short of a confirmed merge, do **not** clean up:
-leave the local `<type>/<slug>` branch and — in worktree mode — the
+green, or any stage stopped short of the mode's completion point, do **not** clean
+up: leave the local `<type>/<slug>` branch and — in worktree mode — the
 `.worktrees/<slug>` working tree intact so the user can resume/debug, and surface
 the worktree path + branch in the final report. This short-stop **is** the
 `failed` terminal outcome — proceed to Stage 6 to persist `failed` before
 reporting.
 
-**GATE:** either the PR is squash-merged **and** cleanup ran (local branch deleted
-in both modes; worktree removed in worktree mode) with `main` fast-forwarded; OR a
-clear report of why it stopped short, naming the preserved branch (and worktree
-path, if any).
+**GATE:** either:
+
+- **Ship mode:** the PR is squash-merged **and** cleanup ran (local branch deleted
+  in both modes; worktree removed in worktree mode) with `main` fast-forwarded.
+- **Handoff mode:** the PR is green and preserved for external gates, with PR URL,
+  head SHA, branch, and WORKDIR recorded.
+- **Failure:** a clear report of why it stopped short, naming the preserved branch
+  and worktree path, if any.
 
 ---
 
-## Stage 6 — Persist terminal outcome
+## Stage 6 — Persist outcome or handoff
 
 Stage 6 always runs from the main checkout (`$MAIN`), never from `WORKDIR` — by now
 the worktree may be removed by Stage 5 cleanup, and persistence is independent of
-execution mode. **Delegate persistence to `/project-memory`** and flip the plan to
-exactly one terminal status:
+execution mode. **Delegate persistence to `/project-memory`** and persist exactly
+one outcome:
 
 - **shipped** — the PR squash-merged: flip the plan's `status: active → shipped` in
   the resolved store and append the outcome — PR URL, merged SHA, key decisions.
 - **failed** — a GATE stopped short: flip the plan's `status: active → failed` in
   the resolved store and append the failing stage, the reason, and the preserved
   branch / worktree path.
+- **ready-for-external-gates** — handoff mode reached green CI and intentionally
+  stopped before merge: leave the plan `status: active`, append a handoff record
+  with PR URL, head SHA, base branch, CI evidence summary, branch, WORKDIR, and
+  the reason merge was deferred. Do not update `main`, close the issue, delete the
+  branch/worktree, or mark the plan shipped/failed.
 - **Edge case — failure before a plan exists.** A short-stop in Stage 0a/0b has no
   plan to flip — just report `failed`.
 
-**GATE:** the work item's plan reads exactly one of `status: shipped` (with the
-PR/SHA recorded) or `status: failed` (with the failing stage + reason) in the
-resolved store — or, when the run failed before a plan existed, the report states
-`failed`.
+**GATE:** the work item's plan reads exactly one of:
+
+- `status: shipped` with PR/SHA recorded;
+- `status: failed` with failing stage + reason recorded;
+- `status: active` with a `ready-for-external-gates` handoff record when
+  `--no-merge` intentionally deferred merge;
+- or, when the run failed before a plan existed, the report states `failed`.
 
 ---
 
 ## Done
 
-Lead with the **terminal outcome** — `shipped` or `failed`; on `failed`, name the
-failing stage + reason. Then report, in order: the resolved **input kind** (idea /
-issue / plan-file) and the **plan path** in the resolved store; the **execution
-mode** (direct / worktree, and on the preserve path the retained branch and — in
-worktree mode — the worktree path); issue #N; PR URL; merged (yes + SHA / no +
-reason); CI result; any `needs-human` review threads; and memory updates (plan
-status flip, plus architecture/lessons or "skipped").
+Lead with the **outcome** — `shipped`, `failed`, or
+`ready-for-external-gates`; on `failed`, name the failing stage + reason. Then
+report, in order: the resolved **input kind** (idea / issue / plan-file) and the
+**plan path** in the resolved store; the **execution mode** (direct / worktree,
+and any retained branch/worktree path); issue #N; PR URL; merged (yes + SHA, or
+no with reason); CI result; any `needs-human` review threads; and memory updates
+(plan status flip, handoff record, plus architecture/lessons or "skipped").
