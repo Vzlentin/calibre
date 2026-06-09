@@ -20,6 +20,7 @@ from calibre.core.forecast_frame import (
     interval_column_names,
 )
 from calibre.core.forecast_task import ForecastTask
+from calibre.execution.actuals import FrameActualsSource
 from calibre.execution.backend import (
     BackendEngine,
     ConformalOptions,
@@ -174,7 +175,7 @@ def test_default_route_still_calls_reconcile_and_calibrate(monkeypatch: pytest.M
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=_actuals(history),
+            actuals=FrameActualsSource(_actuals(history)),
             origin=pd.Timestamp("2024-01-04"),
             conformal_runtime=None,
             parallel_refs=parallel_refs,
@@ -226,7 +227,7 @@ def test_fused_phase_bypasses_reconcile_and_calibrate_and_commits_order(
         engine.run_origin(
             ledger=ledger,
             order_ledger=order_ledger,
-            actuals=_actuals(history),
+            actuals=FrameActualsSource(_actuals(history)),
             origin=pd.Timestamp("2024-01-04"),
             conformal_runtime=None,
             parallel_refs=parallel_refs,
@@ -281,7 +282,7 @@ def test_fused_phase_failure_names_phase_and_origin(monkeypatch: pytest.MonkeyPa
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=_actuals(history),
+            actuals=FrameActualsSource(_actuals(history)),
             origin=origin,
             conformal_runtime=None,
             parallel_refs=parallel_refs,
@@ -302,7 +303,7 @@ def test_flat_default_path_does_not_request_fitted_values(monkeypatch: pytest.Mo
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=_actuals(bottom_history),
+            actuals=FrameActualsSource(_actuals(bottom_history)),
             origin=pd.Timestamp("2024-01-04"),
             conformal_runtime=None,
             parallel_refs=parallel_refs,

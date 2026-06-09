@@ -30,7 +30,6 @@ from calibre.core.forecast_frame import (
     NONCONFORMITY_SCORE,
     UNIQUE_ID,
     Y,
-    validate_actuals_frame,
     validate_forecast_frame,
 )
 from calibre.core.forecast_task import ForecastTask, ForecastTaskRef, TaskGroups
@@ -42,7 +41,8 @@ from calibre.core.metrics import (
 )
 from calibre.core.seeding import Seed, seed_model_config, set_seed
 from calibre.core.tracing import span
-from calibre.evaluation.forecast_metrics import compute_row_errors, resolve_actuals
+from calibre.evaluation.forecast_metrics import compute_row_errors
+from calibre.execution.actuals import ActualsSource, as_actuals_source
 from calibre.execution.ledger import (
     InMemoryLedger,
     InMemoryOrderLedger,
@@ -229,7 +229,7 @@ class BackendEngine:
     def execute(
         self,
         tasks: TaskGroups,
-        actuals: pd.DataFrame,
+        actuals: pd.DataFrame | ActualsSource,
         origins: list[pd.Timestamp],
     ) -> BackendResult:
         """Run all origins and return the final batch result."""
@@ -246,15 +246,19 @@ class BackendEngine:
     def iter_origins(
         self,
         tasks: TaskGroups,
-        actuals: pd.DataFrame,
+        actuals: pd.DataFrame | ActualsSource,
         origins: list[pd.Timestamp],
     ) -> Iterator[BackendResult]:
         """Yield the cumulative backend result after each completed origin.
 
         ``tasks`` is a pre-partitioned :class:`TaskGroups`; scope was resolved
-        once in ``build_tasks`` and is never re-interpreted here.
+        once in ``build_tasks`` and is never re-interpreted here. ``actuals``
+        is either a pre-materialized actuals frame (wrapped in the frame-backed
+        source, preserving eager behavior) or an :class:`ActualsSource` that
+        resolves actuals lazily; delayed-feedback timing stays in
+        ``_resolve_due`` either way.
         """
-        validate_actuals_frame(actuals)
+        actuals_source = as_actuals_source(actuals)
         ledger: Ledger = (
             StreamingLedger(self.streaming_output)
             if self.streaming_output is not None
@@ -302,7 +306,7 @@ class BackendEngine:
                         self.run_origin(
                             ledger=ledger,
                             order_ledger=order_ledger,
-                            actuals=actuals,
+                            actuals=actuals_source,
                             origin=origin,
                             conformal_runtime=conformal_runtime,
                             parallel_refs=parallel_refs,
@@ -357,7 +361,7 @@ class BackendEngine:
         *,
         ledger: Ledger,
         order_ledger: OrderLedger | None,
-        actuals: pd.DataFrame,
+        actuals: ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
         parallel_refs: list[ForecastTaskRef],
@@ -423,7 +427,7 @@ class BackendEngine:
     def _resolve_open(
         self,
         ledger: Ledger,
-        actuals: pd.DataFrame,
+        actuals: ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
@@ -527,7 +531,7 @@ class BackendEngine:
         self,
         ledger: Ledger,
         origin_preds: pd.DataFrame,
-        actuals: pd.DataFrame,
+        actuals: ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
@@ -548,7 +552,7 @@ class BackendEngine:
     def _resolve_due(
         self,
         ledger: Ledger,
-        actuals: pd.DataFrame,
+        actuals: ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
     ) -> None:
@@ -562,7 +566,7 @@ class BackendEngine:
         if current.empty:
             return
 
-        updated, newly_resolved = resolve_actuals(current, actuals, origin)
+        updated, newly_resolved = actuals.resolve(current, origin)
         if newly_resolved.empty:
             return
 

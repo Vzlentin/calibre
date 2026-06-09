@@ -3,7 +3,7 @@
 U4b extracts the per-origin path into ordered, individually testable phases
 (ResolveOpen -> Predict -> Calibrate -> Order -> Commit) called in fixed
 order by ``run_origin``. These tests drive ONE phase at a time with a
-constructed input — the test surface the seam unlocks. The end-to-end
+constructed input â€” the test surface the seam unlocks. The end-to-end
 byte-identical behavior is locked separately by the U4a characterization
 tests in ``test_engine.py``; here we pin the contract of each individual phase.
 """
@@ -27,6 +27,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import RsPolicyParameters
+from calibre.execution.actuals import FrameActualsSource
 from calibre.execution.backend import (
     BackendEngine,
     ConformalOptions,
@@ -286,7 +287,9 @@ def test_commit_phase_validates_appends_and_persists_once_per_call():
     engine._persist_conformal_state = _spy
 
     ledger = InMemoryLedger()
-    engine._commit(ledger, preds, task.history, dates[11], engine.conformal_runtime)
+    engine._commit(
+        ledger, preds, FrameActualsSource(task.history), dates[11], engine.conformal_runtime
+    )
     assert len(ledger.to_df()) == 2  # two horizons appended
     assert persist_calls["n"] == 1  # persist called exactly once for this origin
     # The single persist wrote the partition snapshot for the now-due h=1 row.
@@ -300,7 +303,7 @@ def test_persist_fires_exactly_once_per_origin_over_full_run():
     inside each of its two per-origin resolve calls (up to twice per origin);
     the Commit phase now owns the only persist. We drive ``engine.execute`` with a
     counting state store and a ``_persist_conformal_state`` spy and assert the
-    call count equals the number of executed origins — never double.
+    call count equals the number of executed origins â€” never double.
     """
     task, dates, _pattern = _periodic_task()
     engine, store = _engine_with_state_store()
@@ -331,7 +334,7 @@ def test_commit_phase_appends_without_runtime_and_does_not_persist():
         preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
 
     ledger = InMemoryLedger()
-    engine._commit(ledger, preds, task.history, dates[11], None)
+    engine._commit(ledger, preds, FrameActualsSource(task.history), dates[11], None)
     assert len(ledger.to_df()) == 2
 
 
@@ -361,7 +364,7 @@ def test_resolve_open_carries_forward_prior_origin_before_predict():
     rows_before = len(ledger.to_df())
 
     # ResolveOpen at the next origin must resolve the now-due h=1 row in place.
-    engine._resolve_open(ledger, actuals, dates[8], runtime)
+    engine._resolve_open(ledger, FrameActualsSource(actuals), dates[8], runtime)
 
     df = ledger.to_df()
     assert len(df) == rows_before  # ResolveOpen appends nothing
@@ -380,7 +383,7 @@ def test_resolve_open_noop_without_runtime():
     ledger = InMemoryLedger()
     ledger.append(prior)
     before = ledger.to_df().copy()
-    engine._resolve_open(ledger, actuals, dates[8], None)
+    engine._resolve_open(ledger, FrameActualsSource(actuals), dates[8], None)
     pd.testing.assert_frame_equal(ledger.to_df(), before)
 
 
@@ -388,7 +391,7 @@ def test_commit_appends_then_resolves_after_origin():
     """Commit's after-origin effect: append THIS origin, then resolve due rows.
 
     Complements ResolveOpen: Commit appends the current origin's predictions and
-    only then resolves anything now due — the inverse ordering from ResolveOpen.
+    only then resolves anything now due â€” the inverse ordering from ResolveOpen.
     """
     task, dates, _pattern = _periodic_task()
     runtime = SymmetricIntervalRuntime(
@@ -402,7 +405,7 @@ def test_commit_appends_then_resolves_after_origin():
         preds = _predict_frame(engine, parallel_refs, direct_refs, dates[7])
     preds = engine._calibrate(preds, runtime)
 
-    engine._commit(ledger, preds, actuals, dates[7], runtime)
+    engine._commit(ledger, preds, FrameActualsSource(actuals), dates[7], runtime)
     df = ledger.to_df()
     assert len(df) == 2  # this origin's two horizons were appended
     # h=1 is due as of this origin and resolves within the same Commit.
@@ -430,7 +433,7 @@ def test_phase_failure_names_phase_and_origin():
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=actuals,
+            actuals=FrameActualsSource(actuals),
             origin=origin,
             conformal_runtime=None,
             parallel_refs=refs[0],
@@ -460,7 +463,7 @@ def test_commit_phase_failure_preserves_valueerror_type():
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=actuals,
+            actuals=FrameActualsSource(actuals),
             origin=origin,
             conformal_runtime=None,
             parallel_refs=[],

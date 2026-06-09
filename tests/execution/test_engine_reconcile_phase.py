@@ -14,6 +14,7 @@ import pytest
 from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.forecast_task import ForecastTask
+from calibre.execution.actuals import FrameActualsSource
 from calibre.execution.backend import (
     BackendEngine,
     ConformalOptions,
@@ -172,7 +173,7 @@ def test_no_hierarchy_path_does_not_request_fitted_values(monkeypatch) -> None:
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=actuals,
+            actuals=FrameActualsSource(actuals),
             origin=dates[11],
             conformal_runtime=None,
             parallel_refs=parallel_refs,
@@ -192,7 +193,7 @@ def test_residual_reconcile_receives_fitted_context() -> None:
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=actuals,
+            actuals=FrameActualsSource(actuals),
             origin=dates[11],
             conformal_runtime=None,
             parallel_refs=parallel_refs,
@@ -231,7 +232,7 @@ def test_reconcile_runs_before_calibrate_on_raw_yhat() -> None:
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=actuals,
+            actuals=FrameActualsSource(actuals),
             origin=dates[11],
             conformal_runtime=runtime,
             parallel_refs=parallel_refs,
@@ -275,7 +276,7 @@ def test_reconcile_phase_failure_names_phase_and_origin() -> None:
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
-            actuals=actuals,
+            actuals=FrameActualsSource(actuals),
             origin=origin,
             conformal_runtime=None,
             parallel_refs=parallel_refs,
@@ -308,7 +309,9 @@ def test_resolve_due_fills_aggregate_actuals_from_node_history() -> None:
         )
     )
 
-    BackendEngine()._resolve_due(ledger, actuals, pd.Timestamp("2024-01-08"), None)
+    BackendEngine()._resolve_due(
+        ledger, FrameActualsSource(actuals), pd.Timestamp("2024-01-08"), None
+    )
     resolved = ledger.to_df().set_index(UNIQUE_ID)
 
     assert resolved.loc["dept_id=D", Y] == pytest.approx(5.0)
