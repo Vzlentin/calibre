@@ -2,18 +2,68 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import pandas as pd
 
-from calibre.cli.config import BackendConfig, ReconciliationConfig
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.forecast_task import TaskGroups
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.hierarchy_memory import enforce_hierarchical_expansion_memory_limit
 from calibre.execution.task_builder import build_node_history, build_tasks
-from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler
+from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler, resolve_reconciler
+
+
+class _TaskConfig(Protocol):
+    @property
+    def horizon(self) -> int: ...
+
+    def resolved_model_config(self) -> dict[str, Any]: ...
+
+
+class _OriginsConfig(Protocol):
+    def to_list(self) -> list[pd.Timestamp]: ...
+
+
+class _ConformalConfig(Protocol):
+    @property
+    def partition(self) -> str: ...
+
+    @property
+    def max_partitions(self) -> int | None: ...
+
+    def to_runtime_config(self) -> SymmetricIntervalConfig: ...
+
+
+class _ReconciliationConfig(Protocol):
+    @property
+    def strategy(self) -> str: ...
+
+    def to_reconciler(self) -> Reconciler: ...
+
+
+class _HierarchicalIntervalConfig(Protocol):
+    def to_phase(self) -> HierarchicalIntervalPhase: ...
+
+
+class RunPreparationConfig(Protocol):
+    @property
+    def tasks(self) -> Sequence[_TaskConfig]: ...
+
+    @property
+    def origins(self) -> _OriginsConfig: ...
+
+    @property
+    def conformal(self) -> _ConformalConfig | None: ...
+
+    @property
+    def reconciliation(self) -> _ReconciliationConfig | None: ...
+
+    @property
+    def hierarchical_intervals(self) -> _HierarchicalIntervalConfig | None: ...
 
 
 @dataclass(frozen=True)
@@ -25,9 +75,10 @@ class RunPreparation:
     reconciliation_hierarchy: pd.DataFrame | None
     reconciler: Reconciler | None
     hierarchical_interval_phase: HierarchicalIntervalPhase | None
+    conformal_partition_estimate: int | None
 
 
-def prepare_run(config: BackendConfig, bundle: DatasetBundle) -> RunPreparation:
+def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPreparation:
     """Resolve hierarchy-specific run inputs for ``BackendEngine`` construction."""
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
@@ -43,7 +94,7 @@ def prepare_run(config: BackendConfig, bundle: DatasetBundle) -> RunPreparation:
 
     actuals = build_node_history(bundle.history, reconciliation_hierarchy)
     tasks = build_tasks(actuals, model_configs, horizon)
-    _enforce_conformal_partition_limit(config, tasks, horizon)
+    conformal_partition_estimate = _enforce_conformal_partition_limit(config, tasks, horizon)
     origins = config.origins.to_list()
     if not origins:
         raise ValueError("origins resolved to an empty list")
@@ -51,7 +102,6 @@ def prepare_run(config: BackendConfig, bundle: DatasetBundle) -> RunPreparation:
     conformal_config: SymmetricIntervalConfig | None = (
         config.conformal.to_runtime_config() if config.conformal is not None else None
     )
-    reconciliation_config = config.reconciliation or ReconciliationConfig()
     return RunPreparation(
         tasks=tasks,
         actuals=actuals,
@@ -61,17 +111,20 @@ def prepare_run(config: BackendConfig, bundle: DatasetBundle) -> RunPreparation:
         reconciler=(
             None
             if config.hierarchical_intervals is not None
-            else reconciliation_config.to_reconciler()
+            else config.reconciliation.to_reconciler()
+            if config.reconciliation is not None
+            else resolve_reconciler("none")
         ),
         hierarchical_interval_phase=(
             config.hierarchical_intervals.to_phase()
             if config.hierarchical_intervals is not None
             else None
         ),
+        conformal_partition_estimate=conformal_partition_estimate,
     )
 
 
-def _hierarchy_for_run(config: BackendConfig, bundle: DatasetBundle) -> pd.DataFrame | None:
+def _hierarchy_for_run(config: RunPreparationConfig, bundle: DatasetBundle) -> pd.DataFrame | None:
     if config.hierarchical_intervals is not None:
         if bundle.hierarchy is None:
             raise ValueError("hierarchical_intervals requires a dataset hierarchy")
@@ -82,12 +135,16 @@ def _hierarchy_for_run(config: BackendConfig, bundle: DatasetBundle) -> pd.DataF
 
 
 def _enforce_conformal_partition_limit(
-    config: BackendConfig,
+    config: RunPreparationConfig,
     tasks: TaskGroups,
     horizon: int,
-) -> None:
-    if config.conformal is None or config.conformal.partition != "series":
-        return
+) -> int | None:
+    if (
+        config.conformal is None
+        or config.conformal.partition != "series"
+        or config.conformal.max_partitions is None
+    ):
+        return None
 
     unique_ids_by_history: dict[int, int] = {}
     estimated_partitions = 0
@@ -100,13 +157,11 @@ def _enforce_conformal_partition_limit(
                 )
             estimated_partitions += unique_ids_by_history[history_key] * horizon
 
-    if (
-        config.conformal.max_partitions is not None
-        and estimated_partitions > config.conformal.max_partitions
-    ):
+    if estimated_partitions > config.conformal.max_partitions:
         raise ValueError(
             "conformal.partition='series' would create approximately "
             f"{estimated_partitions} model/node/horizon partitions; configured maximum is "
             f"{config.conformal.max_partitions}. Increase conformal.max_partitions only after "
             "confirming the run has enough memory for the resulting calibration state."
         )
+    return estimated_partitions

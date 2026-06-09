@@ -93,7 +93,11 @@ def test_reconciliation_preparation_materializes_node_actuals(
     )
 
     summing = build_summing_matrix(hierarchy)
-    assert preparation.reconciliation_hierarchy is hierarchy
+    assert preparation.reconciliation_hierarchy is not None
+    pd.testing.assert_frame_equal(
+        preparation.reconciliation_hierarchy.reset_index(drop=True),
+        hierarchy.reset_index(drop=True),
+    )
     assert preparation.reconciler is not None
     assert set(preparation.actuals[UNIQUE_ID]) == set(summing.node_labels)
     assert len(guard_calls) == 1
@@ -180,6 +184,22 @@ def test_multiple_model_configs_multiply_series_partition_estimate() -> None:
         prepare_run(config, _bundle())
 
 
+def test_series_partition_limit_counts_hierarchy_expanded_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        lambda *args, **kwargs: None,
+    )
+    config = _config(
+        reconciliation={"strategy": "bottom_up"},
+        conformal={"method": "mscp", "partition": "series", "max_partitions": 7},
+    )
+
+    with pytest.raises(ValueError, match="approximately 8"):
+        prepare_run(config, _bundle(hierarchy=_hierarchy()))
+
+
 def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
     config = _config(
         tasks=[
@@ -196,3 +216,4 @@ def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
 
     assert preparation.tasks.local == []
     assert len(preparation.tasks.global_) == 1
+    assert preparation.conformal_partition_estimate == 4
