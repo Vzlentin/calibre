@@ -6,8 +6,10 @@ import pytest
 from calibre.cli.config import load_config_from_mapping
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.order_types import CostStruct
+from calibre.execution.actuals import HierarchyActualsSource
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.hierarchy_preparation import prepare_run
+from calibre.reconciliation import BottomUpReconciler
 from calibre.reconciliation.summing import build_summing_matrix
 
 
@@ -88,7 +90,7 @@ def test_reconciliation_preparation_materializes_node_actuals(
     hierarchy = _hierarchy()
 
     preparation = prepare_run(
-        _config(reconciliation={"strategy": "bottom_up"}),
+        _config(reconciliation={"strategy": "ols"}),
         _bundle(hierarchy=hierarchy),
     )
 
@@ -99,8 +101,39 @@ def test_reconciliation_preparation_materializes_node_actuals(
         hierarchy.reset_index(drop=True),
     )
     assert preparation.reconciler is not None
+    assert isinstance(preparation.actuals, pd.DataFrame)
     assert set(preparation.actuals[UNIQUE_ID]) == set(summing.node_labels)
     assert len(guard_calls) == 1
+
+
+def test_bottom_up_preparation_builds_bottom_only_tasks_and_lazy_actuals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_guard(*args, **kwargs):
+        raise AssertionError("bottom-only bottom_up must not run the expansion memory guard")
+
+    def fail_build_node_history(*args, **kwargs):
+        raise AssertionError("bottom-only bottom_up must not materialize node history")
+
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        fail_guard,
+    )
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.build_node_history",
+        fail_build_node_history,
+    )
+
+    preparation = prepare_run(
+        _config(reconciliation={"strategy": "bottom_up"}),
+        _bundle(hierarchy=_hierarchy()),
+    )
+
+    assert isinstance(preparation.actuals, HierarchyActualsSource)
+    assert isinstance(preparation.reconciler, BottomUpReconciler)
+    task_uids = {str(task.history[UNIQUE_ID].iloc[0]) for task in preparation.tasks.local}
+    assert task_uids == {"a", "b"}
+    assert preparation.tasks.global_ == []
 
 
 def test_empty_origins_raise_clear_error() -> None:
@@ -113,7 +146,7 @@ def test_empty_origins_raise_clear_error() -> None:
 @pytest.mark.parametrize(
     "config_override",
     [
-        {"reconciliation": {"strategy": "bottom_up"}},
+        {"reconciliation": {"strategy": "ols"}},
         {"hierarchical_intervals": {"method": "nixtla_conformal"}},
     ],
 )

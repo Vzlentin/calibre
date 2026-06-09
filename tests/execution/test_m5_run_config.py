@@ -323,7 +323,7 @@ def test_run_config_rejects_oversized_hierarchy_before_build_node_history(
                 }
             ],
             "origins": {"start": "2011-01-30", "end": "2011-01-30", "freq": "D"},
-            "reconciliation": {"strategy": "bottom_up"},
+            "reconciliation": {"strategy": "ols"},
             "output": {
                 "ledger_path": str(tmp_path / "m5-node-ledger.parquet"),
                 "streaming": False,

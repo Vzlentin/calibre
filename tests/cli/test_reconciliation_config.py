@@ -11,7 +11,12 @@ from calibre.cli.commands import run_config
 from calibre.cli.config import ReconciliationConfig, load_config_from_mapping
 from calibre.execution.backend import BackendResult
 from calibre.execution.ledger import InMemoryLedger
-from calibre.reconciliation import NixtlaHierarchicalIntervalPhase, NixtlaReconciler, NoOpReconciler
+from calibre.reconciliation import (
+    BottomUpReconciler,
+    NixtlaHierarchicalIntervalPhase,
+    NixtlaReconciler,
+    NoOpReconciler,
+)
 
 _M5_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
 
@@ -47,13 +52,18 @@ def test_strategy_none_round_trips_to_noop() -> None:
 
 @pytest.mark.parametrize(
     "strategy",
-    ["bottom_up", "ols", "wls_struct", "mint_shrink", "wls_var", "erm"],
+    ["ols", "wls_struct", "mint_shrink", "wls_var", "erm"],
 )
 def test_nixtla_strategy_resolves(strategy: str) -> None:
     config = load_config_from_mapping(_config(reconciliation={"strategy": strategy}))
     reconciler = config.reconciliation.to_reconciler()
     assert isinstance(reconciler, NixtlaReconciler)
     assert reconciler.strategy == strategy
+
+
+def test_bottom_up_strategy_resolves_to_native_reconciler() -> None:
+    config = load_config_from_mapping(_config(reconciliation={"strategy": "bottom_up"}))
+    assert isinstance(config.reconciliation.to_reconciler(), BottomUpReconciler)
 
 
 @pytest.mark.parametrize("strategy", ["mint", "mint_cov", "top_down", "bogus"])

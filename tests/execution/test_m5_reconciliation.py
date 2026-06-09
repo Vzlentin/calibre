@@ -43,6 +43,7 @@ from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.forecasting.adapter_base import ModelAdapter, build_fitted_values_frame
 from calibre.ordering.policy_config import RsConfig
 from calibre.reconciliation import (
+    BottomUpReconciler,
     HierarchicalIntervalOptions,
     NixtlaHierarchicalIntervalPhase,
     NixtlaReconciler,
@@ -94,6 +95,22 @@ def _m5_bundle_tasks_origins():
     tasks = build_tasks(node_history, model_configs, 1)
     origins = config.origins.to_list()
     return bundle, node_history, tasks, origins
+
+
+def _m5_bottom_tasks(bundle):
+    """Bottom-only tasks for the native bottom_up path (no aggregate tasks)."""
+    return build_tasks(
+        bundle.history,
+        [
+            {
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "name": "SeasonalNaive",
+                "season_length": 7,
+            }
+        ],
+        1,
+    )
 
 
 def _run_m5(bundle, actuals, tasks, origins, reconciler) -> pd.DataFrame:
@@ -258,14 +275,14 @@ def test_m5_ols_run_completes_and_reconcile_executes() -> None:
 
 
 def test_m5_bottom_yhat_identical_to_noop_run() -> None:
-    """bottom_up keeps bottom y_hat unchanged while overwriting aggregates."""
+    """Native bottom_up keeps bottom y_hat unchanged while synthesizing aggregates."""
     bundle, actuals, tasks, origins = _m5_bundle_tasks_origins()
     keys = [UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME, H]
     bottom_ids = set(build_summing_matrix(bundle.hierarchy).bottom_ids)
 
     none_run = _run_m5(bundle, actuals, tasks, origins, NoOpReconciler()).sort_values(keys)
     bottom_up_run = _run_m5(
-        bundle, actuals, tasks, origins, NixtlaReconciler("bottom_up")
+        bundle, actuals, _m5_bottom_tasks(bundle), origins, BottomUpReconciler()
     ).sort_values(keys)
     none_bottom = none_run[none_run[UNIQUE_ID].isin(bottom_ids)]
     bottom_up_bottom = bottom_up_run[bottom_up_run[UNIQUE_ID].isin(bottom_ids)]
@@ -274,6 +291,8 @@ def test_m5_bottom_yhat_identical_to_noop_run() -> None:
         bottom_up_bottom[Y_HAT].to_numpy(),
         none_bottom[Y_HAT].to_numpy(),
     )
+    # Aggregate rows exist in the ledger even though no aggregate task ran.
+    assert not bottom_up_run[~bottom_up_run[UNIQUE_ID].isin(bottom_ids)].empty
     _assert_node_rows_coherent(bottom_up_run, bundle.hierarchy)
 
 
@@ -317,9 +336,9 @@ def test_m5_min_trace_moves_bottom_forecasts_from_divergent_node_bases(
     assert not np.allclose(reconciled_bottom, bottom_base)
     _assert_node_rows_coherent(reconciled, bundle.hierarchy)
 
-    bottom_up = _run_m5(bundle, actuals, tasks, origins, NixtlaReconciler("bottom_up")).sort_values(
-        keys
-    )
+    bottom_up = _run_m5(
+        bundle, actuals, _m5_bottom_tasks(bundle), origins, BottomUpReconciler()
+    ).sort_values(keys)
     bottom_up_values = bottom_up.set_index(UNIQUE_ID)[Y_HAT]
     bottom_up_bottom = bottom_up_values.reindex(summing.bottom_ids).to_numpy(dtype=np.float64)
     np.testing.assert_allclose(bottom_up_bottom, bottom_base, rtol=1e-10, atol=1e-10)

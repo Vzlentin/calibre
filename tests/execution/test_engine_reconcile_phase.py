@@ -25,7 +25,12 @@ from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
 from calibre.execution.task_builder import build_node_history, partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import RsConfig
-from calibre.reconciliation import NixtlaReconciler, NoOpReconciler, ReconciliationContext
+from calibre.reconciliation import (
+    BottomUpReconciler,
+    NixtlaReconciler,
+    NoOpReconciler,
+    ReconciliationContext,
+)
 
 
 @contextmanager
@@ -340,9 +345,7 @@ def test_order_phase_filters_aggregate_rows_when_hierarchy_present(monkeypatch) 
 
     monkeypatch.setattr("calibre.execution.backend.apply_order_policy", _fake_apply_order_policy)
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(
-            reconciler=NixtlaReconciler("bottom_up"), hierarchy=hierarchy
-        ),
+        reconciliation=ReconciliationOptions(reconciler=BottomUpReconciler(), hierarchy=hierarchy),
         order=RsConfig(params=pd.DataFrame()),
     )
 
