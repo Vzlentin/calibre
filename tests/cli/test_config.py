@@ -7,11 +7,11 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from calibre.cli.commands import _enforce_conformal_partition_limit
 from calibre.cli.config import load_config_from_mapping
 from calibre.conformal.partitions import GLOBAL_PARTITION
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask, TaskGroups
+from calibre.execution.hierarchy_preparation import _enforce_conformal_partition_limit
 
 _VALID: dict[str, Any] = {
     "config_schema": "1.0",
