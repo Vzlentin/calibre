@@ -230,3 +230,19 @@ def test_hierarchy_actuals_source_matches_eager_node_history_for_present_nan_val
     )[0]
 
     pd.testing.assert_series_equal(lazy[Y], eager[Y])
+
+
+def test_hierarchy_actuals_source_preserves_present_nan_bottom_values() -> None:
+    hierarchy = pd.DataFrame({UNIQUE_ID: ["A"], "dept_id": ["D"]})
+    bottom_actuals = pd.DataFrame(
+        {UNIQUE_ID: ["A"], DS: pd.to_datetime(["2024-01-02"]), Y: [np.nan]}
+    )
+    requested = _ledger([("A", "2024-01-02", 0.0)])
+
+    updated, newly_resolved = HierarchyActualsSource(bottom_actuals, hierarchy).resolve(
+        requested,
+        pd.Timestamp("2024-01-02"),
+    )
+
+    assert pd.isna(updated.loc[0, Y])
+    assert newly_resolved.empty

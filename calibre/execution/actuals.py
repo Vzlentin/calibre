@@ -138,7 +138,10 @@ class HierarchyActualsSource:
             resolved_cache[cache_key] = np.nan
             return np.nan
         values = self._lookup.reindex(keys)
-        resolved = float(values.sum())
+        if len(members) == 1:
+            resolved = float(values.iloc[0]) if pd.notna(values.iloc[0]) else np.nan
+        else:
+            resolved = float(values.sum())
         resolved_cache[cache_key] = resolved
         return resolved
 
