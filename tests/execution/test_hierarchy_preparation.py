@@ -233,6 +233,77 @@ def test_series_partition_limit_counts_hierarchy_expanded_nodes(
         prepare_run(config, _bundle(hierarchy=_hierarchy()))
 
 
+def test_eager_guard_and_partition_limit_consume_shared_expansion_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One source of truth: the memory guard receives the estimate computed by
+    run preparation, and the series-partition limit uses that same estimate's
+    forecast_partitions instead of recounting from built tasks."""
+    from calibre.execution.hierarchy_memory import HierarchicalExpansionEstimate
+
+    sentinel = HierarchicalExpansionEstimate(
+        bottom_unique_ids=2,
+        aggregate_nodes=2,
+        node_count=4,
+        bottom_rows=8,
+        projected_node_count=4,
+        projected_node_history_rows=16,
+        forecast_partitions=8,
+        model_count=1,
+    )
+    captured: dict[str, HierarchicalExpansionEstimate] = {}
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.estimate_hierarchical_expansion",
+        lambda *args, **kwargs: sentinel,
+    )
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        lambda estimate: captured.setdefault("estimate", estimate),
+    )
+    config = _config(
+        reconciliation={"strategy": "ols"},
+        conformal={"method": "mscp", "partition": "series", "max_partitions": 7},
+    )
+
+    with pytest.raises(ValueError, match="approximately 8"):
+        prepare_run(config, _bundle(hierarchy=_hierarchy()))
+
+    assert captured["estimate"] is sentinel
+
+
+def test_eager_hierarchy_partition_estimate_matches_materialized_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real (non-mocked) eager estimate reproduces the count the old
+    task-based recount produced: materialized node count x horizon x models."""
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_memory.read_effective_available_memory_bytes",
+        lambda: 2**60,
+    )
+    config = _config(
+        tasks=[
+            {
+                "model": "SeasonalNaive",
+                "horizon": 2,
+                "config": {"backend": "statsforecast", "season_length": 2},
+            },
+            {
+                "model": "Naive",
+                "horizon": 2,
+                "config": {"backend": "statsforecast"},
+            },
+        ],
+        reconciliation={"strategy": "ols"},
+        conformal={"method": "mscp", "partition": "series", "max_partitions": 100},
+    )
+
+    preparation = prepare_run(config, _bundle(hierarchy=_hierarchy()))
+
+    assert isinstance(preparation.actuals, pd.DataFrame)
+    materialized_nodes = preparation.actuals[UNIQUE_ID].nunique()
+    assert preparation.conformal_partition_estimate == materialized_nodes * 2 * 2
+
+
 def test_bottom_up_preparation_runs_end_to_end_through_engine() -> None:
     """The shipped bottom-only wiring works as a whole: bottom tasks +
     BottomUpReconciler + HierarchyActualsSource through BackendEngine, with

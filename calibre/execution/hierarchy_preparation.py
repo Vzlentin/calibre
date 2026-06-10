@@ -13,7 +13,10 @@ from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.forecast_task import TaskGroups
 from calibre.execution.actuals import ActualsSource, HierarchyActualsSource
 from calibre.execution.dataset import DatasetBundle
-from calibre.execution.hierarchy_memory import enforce_hierarchical_expansion_memory_limit
+from calibre.execution.hierarchy_memory import (
+    enforce_hierarchical_expansion_memory_limit,
+    estimate_hierarchical_expansion,
+)
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler, resolve_reconciler
 from calibre.reconciliation.summing import build_hierarchy_index
@@ -85,35 +88,43 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
     reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
-    bottom_only = reconciliation_hierarchy is not None and _is_point_bottom_up(config)
+    hierarchy_index = (
+        build_hierarchy_index(reconciliation_hierarchy)
+        if reconciliation_hierarchy is not None
+        else None
+    )
+    bottom_only = hierarchy_index is not None and _is_point_bottom_up(config)
 
     actuals: pd.DataFrame | ActualsSource
-    ledger_node_count: int | None = None
+    hierarchy_partitions: int | None = None
     if bottom_only:
         # Native point bottom_up consumes bottom-only forecasts and synthesizes
         # aggregate node rows itself, so the run never materializes the eager
         # node-history frame: tasks come from bottom history and actuals
         # resolve lazily. The #136 expansion guard targets exactly that
-        # materialization, so it does not apply here.
-        assert reconciliation_hierarchy is not None
+        # materialization, so it does not apply here. Ledger partitions still
+        # span the full hierarchy node set once aggregates are synthesized.
+        assert reconciliation_hierarchy is not None and hierarchy_index is not None
         actuals = HierarchyActualsSource(bundle.history, reconciliation_hierarchy)
         tasks = build_tasks(bundle.history, model_configs, horizon)
-        ledger_node_count = len(build_hierarchy_index(reconciliation_hierarchy).node_labels)
+        hierarchy_partitions = len(hierarchy_index.node_labels) * horizon * len(config.tasks)
     else:
-        if reconciliation_hierarchy is not None:
-            enforce_hierarchical_expansion_memory_limit(
+        if hierarchy_index is not None:
+            expansion = estimate_hierarchical_expansion(
                 bundle.history,
-                reconciliation_hierarchy,
+                hierarchy_index,
                 horizon=horizon,
                 model_count=len(config.tasks),
             )
+            enforce_hierarchical_expansion_memory_limit(expansion)
+            hierarchy_partitions = expansion.forecast_partitions
         actuals = build_node_history(bundle.history, reconciliation_hierarchy)
         tasks = build_tasks(actuals, model_configs, horizon)
     conformal_partition_estimate = _enforce_conformal_partition_limit(
         config,
         tasks,
         horizon,
-        ledger_node_count=ledger_node_count,
+        hierarchy_partitions=hierarchy_partitions,
     )
     origins = config.origins.to_list()
     if not origins:
@@ -167,7 +178,7 @@ def _enforce_conformal_partition_limit(
     tasks: TaskGroups,
     horizon: int,
     *,
-    ledger_node_count: int | None = None,
+    hierarchy_partitions: int | None = None,
 ) -> int | None:
     if (
         config.conformal is None
@@ -176,11 +187,11 @@ def _enforce_conformal_partition_limit(
     ):
         return None
 
-    if ledger_node_count is not None:
-        # Bottom-only bottom_up runs synthesize aggregate node rows at
-        # reconcile time, so ledger partitions span the full hierarchy node
-        # set even though forecast tasks only carry bottom series.
-        estimated_partitions = ledger_node_count * horizon * len(config.tasks)
+    if hierarchy_partitions is not None:
+        # Hierarchy runs consume the partition count derived from the shared
+        # preparation facts: the full node set for bottom-only synthesis, the
+        # projected node set from the expansion estimate for eager runs.
+        estimated_partitions = hierarchy_partitions
     else:
         unique_ids_by_history: dict[int, int] = {}
         estimated_partitions = 0
