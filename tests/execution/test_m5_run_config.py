@@ -20,7 +20,11 @@ from calibre.execution.hierarchy_memory import (
 )
 from calibre.execution.task_builder import build_node_history
 from calibre.execution.validation import validate_dataset_bundle
-from calibre.reconciliation.summing import TOTAL_LABEL, build_summing_matrix
+from calibre.reconciliation.summing import (
+    TOTAL_LABEL,
+    build_hierarchy_index,
+    build_summing_matrix,
+)
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
 
@@ -43,7 +47,7 @@ def test_hierarchical_expansion_estimate_counts_lattice_nodes() -> None:
 
     estimate = estimate_hierarchical_expansion(
         history,
-        hierarchy,
+        build_hierarchy_index(hierarchy),
         horizon=3,
         model_count=2,
     )
@@ -76,7 +80,7 @@ def test_hierarchical_expansion_estimate_matches_ragged_node_history_rows() -> N
     )
 
     node_history = build_node_history(history, hierarchy)
-    estimate = estimate_hierarchical_expansion(history, hierarchy, horizon=2)
+    estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=2)
     naive_full_panel_rows = 2 * len(build_summing_matrix(hierarchy).node_labels)
 
     assert estimate.projected_node_history_rows == len(node_history) == 12
@@ -101,7 +105,7 @@ def test_hierarchical_expansion_estimate_matches_hierarchy_superset_node_history
     )
 
     node_history = build_node_history(history, hierarchy)
-    estimate = estimate_hierarchical_expansion(history, hierarchy, horizon=2)
+    estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=2)
     naive_full_panel_rows = 2 * len(build_summing_matrix(hierarchy).node_labels)
 
     assert estimate.projected_node_history_rows == len(node_history) == 4
@@ -121,7 +125,7 @@ def test_hierarchical_expansion_estimate_rejects_inconsistent_inputs() -> None:
     hierarchy = pd.DataFrame({UNIQUE_ID: ["A", "B"], "dept_id": ["D1", "D1"]})
 
     with pytest.raises(ValueError, match="not present in hierarchy"):
-        estimate_hierarchical_expansion(history, hierarchy, horizon=1)
+        estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=1)
 
 
 def test_hierarchical_expansion_estimate_rejects_empty_hierarchy() -> None:
@@ -135,7 +139,7 @@ def test_hierarchical_expansion_estimate_rejects_empty_hierarchy() -> None:
     hierarchy = pd.DataFrame({UNIQUE_ID: [], "dept_id": []})
 
     with pytest.raises(ValueError, match="hierarchy has no rows"):
-        estimate_hierarchical_expansion(history, hierarchy, horizon=1)
+        estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=1)
 
 
 def test_effective_available_memory_uses_lower_cgroup_budget() -> None:
@@ -185,8 +189,11 @@ def test_estimated_node_history_peak_reserves_downstream_overhead() -> None:
             "state_id": ["CA", "CA"],
         }
     )
-    one_model = estimate_hierarchical_expansion(history, hierarchy, horizon=3, model_count=1)
-    two_models = estimate_hierarchical_expansion(history, hierarchy, horizon=3, model_count=2)
+    hierarchy_index = build_hierarchy_index(hierarchy)
+    one_model = estimate_hierarchical_expansion(history, hierarchy_index, horizon=3, model_count=1)
+    two_models = estimate_hierarchical_expansion(
+        history, hierarchy_index, horizon=3, model_count=2
+    )
 
     assert estimated_node_history_peak_bytes(two_models) > estimated_node_history_peak_bytes(
         one_model
@@ -220,7 +227,7 @@ def test_estimated_node_history_peak_bounds_m5_fixture_expansion() -> None:
     node_history = build_node_history(bundle.history, bundle.hierarchy)
     estimate = estimate_hierarchical_expansion(
         bundle.history,
-        bundle.hierarchy,
+        build_hierarchy_index(bundle.hierarchy),
         horizon=config.tasks[0].horizon,
         model_count=len(config.tasks),
     )
