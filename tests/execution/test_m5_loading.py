@@ -79,3 +79,32 @@ def test_m5_node_history_contains_expected_aggregate_labels(fixture_dir: Path) -
         (node_history[UNIQUE_ID] == TOTAL_LABEL) & (node_history[DS] == first_day), Y
     ].iloc[0]
     assert aggregate_total == pytest.approx(bottom_total)
+
+
+def test_melt_derives_day_labels_when_calendar_lacks_d_column(fixture_dir: Path) -> None:
+    sales = pd.read_csv(fixture_dir / "sales_train_evaluation.csv")
+    calendar = pd.read_csv(fixture_dir / "calendar.csv")
+    # The datasetsforecast mirror ships the calendar without the Kaggle "d"
+    # column; shuffle rows to prove derivation follows date order, not row order.
+    no_d = calendar.drop(columns="d").sample(frac=1.0, random_state=7).reset_index(drop=True)
+
+    derived = melt_m5_sales(sales, no_d)
+    expected = melt_m5_sales(sales, calendar)
+    pd.testing.assert_frame_equal(derived, expected)
+
+
+def test_melt_rejects_underivable_calendar_without_d_column(fixture_dir: Path) -> None:
+    sales = pd.read_csv(fixture_dir / "sales_train_evaluation.csv")
+    calendar = pd.read_csv(fixture_dir / "calendar.csv")
+    gapped = calendar.drop(columns="d").drop(index=1).reset_index(drop=True)
+
+    with pytest.raises(ValueError, match="contiguous daily sequence"):
+        melt_m5_sales(sales, gapped)
+
+
+def test_melt_rejects_calendar_without_date_column(fixture_dir: Path) -> None:
+    sales = pd.read_csv(fixture_dir / "sales_train_evaluation.csv")
+    calendar = pd.read_csv(fixture_dir / "calendar.csv").drop(columns="date")
+
+    with pytest.raises(ValueError, match="missing required 'date' column"):
+        melt_m5_sales(sales, calendar)

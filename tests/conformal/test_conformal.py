@@ -724,3 +724,39 @@ def test_cumulative_runtime_observe_raises_on_duplicate_horizons():
     dup = enriched.iloc[[0]].copy()
     with pytest.raises(ValueError, match="Duplicate H"):
         runtime.observe(pd.concat([enriched, dup]))
+
+
+def test_predict_batch_matches_per_row_predict_across_window_lengths():
+    import numpy as np
+
+    from calibre.conformal.calibrators import RollingQuantileCalibrator
+
+    for rule in ("higher", "conformal"):
+        for ready_on_empty in (False, True):
+            calibrator = RollingQuantileCalibrator(
+                calibration_window=10,
+                quantile_rule=rule,
+                ready_on_empty=ready_on_empty,
+            )
+            rng = np.random.default_rng(11)
+            partitions = []
+            for n in range(0, 14):
+                partition = f"m:h1:series_{n}"
+                partitions.append(partition)
+                for score in rng.random(n):
+                    calibrator.update(float(score), partition)
+            partitions.append("m:h1:never_seen")
+
+            for alpha in (0.05, 0.1, 0.5, 1.0 / 11.0):
+                radii, ready = calibrator.predict_batch(alpha, partitions)
+                for position, partition in enumerate(partitions):
+                    expected_radius = calibrator.predict(alpha, partition)
+                    expected_issue = calibrator.ready(partition, alpha) and np.isfinite(
+                        expected_radius
+                    )
+                    assert radii[position] == expected_radius or (
+                        np.isinf(radii[position]) and np.isinf(expected_radius)
+                    ), (rule, ready_on_empty, alpha, partition)
+                    assert bool(ready[position] and np.isfinite(radii[position])) == bool(
+                        expected_issue
+                    ), (rule, ready_on_empty, alpha, partition)
