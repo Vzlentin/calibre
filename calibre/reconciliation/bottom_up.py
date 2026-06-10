@@ -103,7 +103,7 @@ class BottomUpReconciler:
 
         yhat = group[Y_HAT].to_numpy(dtype=np.float64)
         nan_mask = np.isnan(yhat)
-        members = attrs.loc[uid_str.to_numpy()]
+        members = attrs.loc[uid_str.to_list()]
 
         # Synthesize an aggregate only when every bottom member of that node is
         # present in the cross-section. A partial member sum would later be
@@ -128,7 +128,7 @@ class BottomUpReconciler:
             )
             expected = expected_members[col]
             for value, row in agg.iterrows():
-                if row["present"] != expected[value]:
+                if row["present"] != expected[str(value)]:
                     continue
                 aggregate_labels.append(f"{col}={value}")
                 aggregate_values.append(np.nan if row["nans"] else float(row["total"]))
