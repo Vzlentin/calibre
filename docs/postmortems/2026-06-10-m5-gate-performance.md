@@ -1,10 +1,17 @@
-# Post-mortem: the first full M5 gate run, and the performance cascade it exposed
+# À chaud: the first full M5 gate run, and the performance cascade it exposed
 
 **Date:** 2026-06-10
 **Trigger:** making the full M5 benchmark (30,490 series, 64 daily origins, h=28,
 bottom_up reconciliation, MSCP per-horizon conformal at `partition: series`) the
 Wave 2 quality gate instead of VN2.
 **Host:** Windows 10 laptop, 16 GB RAM, 4 physical cores.
+
+**Status of this document:** this is the *à chaud* analysis — measurements,
+mechanics, and candidate directions captured the same day, while the evidence
+was live (py-spy dumps, phase logs, run restarts). It deliberately makes **no
+architectural decisions.** A separate *à froid* post-mortem and architecture
+refactor planning session, run with fresh context, owns the decisions; this
+document is its primary input.
 
 ## Headline
 
@@ -139,10 +146,11 @@ defects in one day.
   log-based progress signals (parquet mtime, console-wrapped JSON lines) were
   both misleading. Phase-duration logs in JSON are the reliable signal.
 
-## Architectural agenda for the optimization session
+## Candidate directions for the à froid session
 
-The session must end in decisions, not patches. Proposed decisions, with the
-measured evidence above as the forcing function:
+Captured while the evidence was hot; none of these are decided. The à froid
+session should confirm, amend, or reject each with the measurements above as
+the forcing function:
 
 **D1 — Decouple model scope from dispatch granularity.**
 Local (per-series) model *semantics* must not imply per-series *scheduling*.
@@ -178,6 +186,8 @@ sparse aggregation or an explicit scale ceiling, but not silent gigabytes.
 
 ## Follow-ups
 
-- [ ] File issues for D1–D6 and schedule the optimization session.
+- [ ] Run the à froid post-mortem + architecture refactor planning session
+      (fresh context, this document as primary input); land D1–D6 verdicts
+      there and convert them into issues.
 - [ ] `HierarchyActualsSource` member counting on raw dtypes vs stringified
       source (review finding ADV-1, crash-not-corruption, low severity).
