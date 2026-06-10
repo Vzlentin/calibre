@@ -92,9 +92,7 @@ class BottomUpReconciler:
         # only resolves aggregates whose full member set is observed), silently
         # undercounting the forecast; suppressing the node keeps forecast and
         # actual completeness rules aligned.
-        full_member_counts = dict(
-            zip(summing.node_labels, summing.S.sum(axis=1), strict=True)
-        )
+        full_member_counts = dict(zip(summing.node_labels, summing.S.sum(axis=1), strict=True))
         aggregate_rows = subset.S[subset.n_bottom :]
         subset_labels = subset.node_labels[subset.n_bottom :]
         complete = np.array(
