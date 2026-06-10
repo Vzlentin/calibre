@@ -564,7 +564,7 @@ class BackendEngine:
         """
         if not origin_preds.empty:
             validate_forecast_frame(origin_preds)
-            with span("ledger_append", origin=str(origin)):
+            with span("ledger_append", origin=origin):
                 ledger.append(origin_preds)
 
         self._resolve_due(ledger, actuals, origin, conformal_runtime)
@@ -583,17 +583,17 @@ class BackendEngine:
         persist conformal state — persistence is consolidated into Commit so it
         fires exactly once per origin.
         """
-        with span("ledger_resolution_frame", origin=str(origin)):
+        with span("ledger_resolution_frame", origin=origin):
             current = ledger.resolution_frame()
         if current.empty:
             return
 
-        with span("actuals_lookup", origin=str(origin)):
+        with span("actuals_lookup", origin=origin):
             updated, newly_resolved = actuals.resolve(current, origin)
         if newly_resolved.empty:
             return
 
-        with span("resolve_scoring", origin=str(origin)):
+        with span("resolve_scoring", origin=origin):
             if conformal_runtime is not None:
                 newly_resolved = conformal_runtime.observe(newly_resolved)
                 self._record_conformal_coverage(newly_resolved, conformal_runtime)
@@ -609,7 +609,7 @@ class BackendEngine:
                     updated[col] = np.nan
                 updated.loc[scored.index, col] = scored[col]
 
-        with span("ledger_update_resolved", origin=str(origin)):
+        with span("ledger_update_resolved", origin=origin):
             ledger.update_resolved(updated)
 
     def _restore_conformal_state(self) -> None:

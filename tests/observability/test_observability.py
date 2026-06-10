@@ -62,27 +62,7 @@ def test_json_logging_includes_standard_extra_fields() -> None:
 
 def test_backend_logs_adapter_fit_predict_phases(monkeypatch) -> None:
     stream = io.StringIO()
-    setup_logging(stream=stream)
-    monkeypatch.setattr(
-        "calibre.execution.prediction.resolve_adapter",
-        lambda _: _ObservabilityAdapter(),
-    )
-    history = pd.DataFrame(
-        {
-            UNIQUE_ID: ["A", "A", "A"],
-            DS: pd.date_range("2024-01-07", periods=3, freq="W-SUN"),
-            Y: [1.0, 2.0, 3.0],
-        }
-    )
-    task = ForecastTask(
-        history=history,
-        horizon=1,
-        model_config={"backend": "stub", "model": "stub_model", "name": "stub_model"},
-    )
-
-    BackendEngine(execution=ExecutionOptions(freq="W-SUN")).execute(
-        partition_tasks([task]), history, [pd.Timestamp("2024-01-28")]
-    )
+    _run_standard_path_engine(monkeypatch, stream)
 
     records = _json_lines(stream)
     by_phase = {record.get("phase"): record for record in records}
