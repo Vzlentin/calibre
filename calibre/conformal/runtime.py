@@ -13,7 +13,7 @@ import pandas as pd
 
 from calibre.conformal.calibrators import RollingQuantileCalibrator
 from calibre.conformal.controllers import AdaptiveAlphaController, FixedAlphaController
-from calibre.conformal.partitions import global_partition
+from calibre.conformal.partitions import GLOBAL_PARTITION, global_partition, series_partition
 from calibre.conformal.protocols import Calibrator, Controller, Score
 from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.types import IntervalPrediction
@@ -162,13 +162,19 @@ def _as_scalar_score(score) -> float:
     return float(arr[0])
 
 
-def _validate_horizon_layout(frame: pd.DataFrame) -> pd.DataFrame:
-    ordered = frame.sort_values(H).copy()
-    horizons = ordered[H].to_numpy()
-    expected = np.arange(1, len(ordered) + 1, dtype=horizons.dtype)
-    if not np.array_equal(horizons, expected):
+def _validate_horizon_layout_grouped(
+    horizons: np.ndarray,
+    group_codes: np.ndarray,
+    group_count: int,
+) -> None:
+    """Require every group's horizons to be exactly ``1..len(group)``."""
+    order = np.lexsort((horizons, group_codes))
+    sorted_horizons = horizons[order]
+    counts = np.bincount(group_codes, minlength=group_count)
+    starts = np.cumsum(counts) - counts
+    positions_in_group = np.arange(len(horizons)) - np.repeat(starts, counts)
+    if not np.array_equal(sorted_horizons, positions_in_group + 1):
         raise ValueError("Conformal runtime expects one row per horizon in ascending order")
-    return ordered
 
 
 def _hashable(value: Hashable) -> Hashable:
@@ -300,43 +306,74 @@ class SymmetricIntervalRuntime:
         )
         return result
 
+    def _base_partition_values(self, frame: pd.DataFrame) -> list[str]:
+        """Vectorized ``_base_partition`` for the shipped partition keys.
+
+        Unknown callables fall back to the row-wise definition so custom
+        partition keys keep their exact semantics.
+        """
+        key = self.config.partition_key
+        if key is global_partition:
+            return [GLOBAL_PARTITION] * len(frame)
+        if key is series_partition:
+            return [str(_hashable(value)) for value in frame[UNIQUE_ID].to_numpy()]
+        return [str(_hashable(key(row))) for _, row in frame.iterrows()]
+
+    def _partition_values(self, frame: pd.DataFrame) -> list[str]:
+        models = frame[MODEL_NAME].to_numpy()
+        horizons = frame[H].to_numpy()
+        return [
+            f"{model}:h{int(horizon)}:{base}"
+            for model, horizon, base in zip(
+                models, horizons, self._base_partition_values(frame), strict=True
+            )
+        ]
+
     def _apply_perhorizon(self, frame: pd.DataFrame) -> pd.DataFrame:
         lower_col, upper_col = self.config.interval_columns
-        parts: list[pd.DataFrame] = []
+        result = frame.copy()
 
-        for _, group in frame.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False):
-            ordered = _validate_horizon_layout(group)
-            lower_values = np.full(len(ordered), np.nan, dtype=float)
-            upper_values = np.full(len(ordered), np.nan, dtype=float)
-            alpha_values = np.full(len(ordered), np.nan, dtype=float)
-            state_refs: list[str] = []
-            partitions: list[str] = []
+        group_keys = pd.MultiIndex.from_arrays(
+            [
+                result[UNIQUE_ID].to_numpy(),
+                result[MODEL_NAME].to_numpy(),
+                result[FORECAST_ORIGIN].to_numpy(),
+            ]
+        )
+        group_codes, uniques = pd.factorize(group_keys, sort=False)
+        _validate_horizon_layout_grouped(result[H].to_numpy(), group_codes, len(uniques))
 
-            for pos, (_, row) in enumerate(ordered.iterrows()):
-                alpha = self.controller.get_alpha()
-                partition = self._partition_for_row(row)
-                partitions.append(partition)
-                radius = self.calibrator.predict(alpha, partition)
-                alpha_values[pos] = alpha
-                if self.calibrator.ready(partition, alpha) and np.isfinite(radius):
-                    center = float(row[Y_HAT])
-                    lower_values[pos] = center - float(radius)
-                    upper_values[pos] = center + float(radius)
-                state_refs.append(self._state_ref(partition))
+        partitions = self._partition_values(result)
+        alpha = float(self.controller.get_alpha())
+        radii, ready = self.calibrator.predict_batch(alpha, partitions)
+        issue = ready & np.isfinite(radii)
+        centers = result[Y_HAT].to_numpy(dtype=float)
+        with np.errstate(invalid="ignore"):
+            lower_values = np.where(issue, centers - radii, np.nan)
+            upper_values = np.where(issue, centers + radii, np.nan)
 
-            ordered[lower_col] = lower_values
-            ordered[upper_col] = upper_values
-            ordered[CONFORMAL_METHOD] = self.method_name
-            ordered[CONFORMAL_MODE] = self.config.mode
-            ordered[CONFORMAL_ALPHA] = alpha_values
-            ordered[CALIBRATION_STATE_REF] = state_refs
-            ordered[CONFORMAL_PARTITION] = partitions
-            if NONCONFORMITY_SCORE not in ordered.columns:
-                ordered[NONCONFORMITY_SCORE] = np.nan
-            parts.append(ordered)
-            self._issued_count += 1
+        # Mirror the per-group accounting of the row-wise path: groups are
+        # numbered in first-occurrence order and every row of a group shares
+        # the issued count its group was processed at.
+        issued = self._issued_count + group_codes
+        method = self.method_name
+        mode = self.config.mode
+        state_refs = [
+            f"{method}:{mode}:{count}:{partition}"
+            for count, partition in zip(issued, partitions, strict=True)
+        ]
 
-        return pd.concat(parts).sort_index()
+        result[lower_col] = lower_values
+        result[upper_col] = upper_values
+        result[CONFORMAL_METHOD] = method
+        result[CONFORMAL_MODE] = mode
+        result[CONFORMAL_ALPHA] = alpha
+        result[CALIBRATION_STATE_REF] = state_refs
+        result[CONFORMAL_PARTITION] = partitions
+        if NONCONFORMITY_SCORE not in result.columns:
+            result[NONCONFORMITY_SCORE] = np.nan
+        self._issued_count += len(uniques)
+        return result.sort_index()
 
     def _apply_cumulative(self, frame: pd.DataFrame) -> pd.DataFrame:
         if self.config.protection_period is None:
@@ -412,30 +449,64 @@ class SymmetricIntervalRuntime:
     def _observe_perhorizon(
         self, observed: pd.DataFrame, lower_col: str, upper_col: str
     ) -> pd.DataFrame:
-        for _, group in observed.groupby([UNIQUE_ID, MODEL_NAME], sort=False):
-            ordered = group.sort_values([DS, FORECAST_ORIGIN, H])
-            for idx, row in ordered.iterrows():
-                if pd.isna(row[Y]) or pd.isna(row[Y_HAT]):
-                    continue
-                partition = self._partition_for_row(row)
-                score = _as_scalar_score(self.score(float(row[Y]), float(row[Y_HAT])))
-                self.calibrator.update(score, partition)
-                prediction = IntervalPrediction(
-                    center=float(row[Y_HAT]),
-                    lower=float(row[lower_col]) if pd.notna(row[lower_col]) else np.nan,
-                    upper=float(row[upper_col]) if pd.notna(row[upper_col]) else np.nan,
-                    radius=max(
-                        abs(float(row[Y_HAT]) - float(row[lower_col]))
-                        if pd.notna(row[lower_col])
-                        else 0.0,
-                        abs(float(row[upper_col]) - float(row[Y_HAT]))
-                        if pd.notna(row[upper_col])
-                        else 0.0,
-                    ),
-                    alpha=float(row.get(CONFORMAL_ALPHA, self.controller.get_alpha())),
-                )
-                self.controller.observe(float(row[Y]), prediction, int(row[H]))
-                observed.at[idx, NONCONFORMITY_SCORE] = score
+        resolved_mask = observed[Y].notna() & observed[Y_HAT].notna()
+        if not bool(resolved_mask.any()):
+            return observed
+        resolved = observed.loc[resolved_mask]
+
+        # The row-wise path consumed groups in first-occurrence (unique_id,
+        # model) order, each group sorted by (ds, origin, h). Calibration
+        # windows and adaptive-alpha updates are order-sensitive, so the
+        # vectorized path replays rows in exactly that order.
+        group_keys = pd.MultiIndex.from_arrays(
+            [resolved[UNIQUE_ID].to_numpy(), resolved[MODEL_NAME].to_numpy()]
+        )
+        group_codes, _ = pd.factorize(group_keys, sort=False)
+        order = np.lexsort(
+            (
+                resolved[H].to_numpy(),
+                resolved[FORECAST_ORIGIN].to_numpy(),
+                resolved[DS].to_numpy(),
+                group_codes,
+            )
+        )
+
+        y_true = resolved[Y].to_numpy(dtype=float)
+        y_hat = resolved[Y_HAT].to_numpy(dtype=float)
+        scores = np.asarray(self.score(y_true, y_hat), dtype=float).reshape(-1)
+        if scores.shape != y_true.shape:
+            raise ValueError("Expected Score to return one score per row")
+
+        lower_values = resolved[lower_col].to_numpy(dtype=float)
+        upper_values = resolved[upper_col].to_numpy(dtype=float)
+        if CONFORMAL_ALPHA in resolved.columns:
+            alpha_values = resolved[CONFORMAL_ALPHA].to_numpy(dtype=float)
+        else:
+            alpha_values = np.full(len(resolved), float(self.controller.get_alpha()))
+        horizons = resolved[H].to_numpy()
+        partitions = self._partition_values(resolved)
+
+        calibrator_update = self.calibrator.update
+        controller_observe = self.controller.observe
+        for position in order:
+            score = float(scores[position])
+            calibrator_update(score, partitions[position])
+            center = float(y_hat[position])
+            lower = float(lower_values[position])
+            upper = float(upper_values[position])
+            prediction = IntervalPrediction(
+                center=center,
+                lower=lower,
+                upper=upper,
+                radius=max(
+                    abs(center - lower) if not np.isnan(lower) else 0.0,
+                    abs(upper - center) if not np.isnan(upper) else 0.0,
+                ),
+                alpha=float(alpha_values[position]),
+            )
+            controller_observe(float(y_true[position]), prediction, int(horizons[position]))
+
+        observed.loc[resolved_mask, NONCONFORMITY_SCORE] = scores
         return observed
 
     def _observe_cumulative(self, observed: pd.DataFrame) -> pd.DataFrame:

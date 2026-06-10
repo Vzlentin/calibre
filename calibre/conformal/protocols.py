@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol
 
 import numpy as np
@@ -13,6 +14,12 @@ class Calibrator(Protocol):
     def fit(self, scores: dict[str, list[float]]) -> None: ...
 
     def predict(self, alpha: float, partition: str = "__global__") -> float: ...
+
+    def predict_batch(
+        self,
+        alpha: float,
+        partitions: Sequence[str],
+    ) -> tuple[np.ndarray, np.ndarray]: ...
 
     def update(self, new_score: float, partition: str = "__global__") -> None: ...
 
