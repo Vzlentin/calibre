@@ -9,6 +9,11 @@ tasks:
     config:
       backend: statsforecast
       season_length: 7
+      # Global scope: one vectorized statsforecast panel call per origin.
+      # Local scope at M5 scale means 30,490 per-series tasks per origin and
+      # the run drowns in task-dispatch overhead (~3 min/origin predict);
+      # SeasonalNaive forecasts are identical either way.
+      scope: global
 reconciliation:
   strategy: bottom_up
 conformal:
