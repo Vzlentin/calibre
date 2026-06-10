@@ -166,3 +166,30 @@ def test_no_hierarchy_or_empty_frame_pass_through() -> None:
     assert reconciler(frame, None, _CONTEXT) is frame
     empty = frame.iloc[0:0]
     assert reconciler(empty, _hierarchy(), _CONTEXT) is empty
+
+
+def test_nan_bottom_counts_as_present_and_poisons_containing_aggregates() -> None:
+    """NaN propagation is carried by the explicit isnan counter, not skipna
+    arithmetic: a NaN member still counts toward completeness and forces NaN
+    on every aggregate that contains it."""
+    frame = _bottom_frame(y_hats=[1.0, float("nan"), 4.0])  # a_s2 is NaN
+
+    result = BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+
+    values = result.set_index(UNIQUE_ID)[Y_HAT]
+    # The NaN member is present, so every aggregate is still synthesized.
+    assert set(values.index) == {
+        "a_s1",
+        "a_s2",
+        "b_s1",
+        "item_id=a",
+        "item_id=b",
+        "store_id=s1",
+        "store_id=s2",
+        TOTAL_LABEL,
+    }
+    assert np.isnan(values["item_id=a"])
+    assert np.isnan(values["store_id=s2"])
+    assert np.isnan(values[TOTAL_LABEL])
+    assert values["item_id=b"] == pytest.approx(4.0)
+    assert values["store_id=s1"] == pytest.approx(5.0)
