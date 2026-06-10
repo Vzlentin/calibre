@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Literal
 
 import numpy as np
@@ -50,6 +50,49 @@ class RollingQuantileCalibrator:
             self._initial_radius,
             quantile_rule=self._quantile_rule,
         )
+
+    def predict_batch(
+        self,
+        alpha: float,
+        partitions: Sequence[str],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Vectorized :meth:`predict` + issue-readiness over many partitions.
+
+        Returns ``(radii, ready)`` aligned with ``partitions``. Row ``i`` is
+        exactly ``predict(alpha, partitions[i])`` and the issue condition the
+        per-row path computes (``ready(partition, alpha)`` with a finite
+        radius). Windows are bucketed by length so each bucket is one
+        ``np.quantile`` call, which keeps the math bit-identical to
+        :func:`finite_sample_radius`.
+        """
+        alpha = float(alpha)
+        count = len(partitions)
+        radii = np.full(count, self._initial_radius, dtype=float)
+        nonempty = np.zeros(count, dtype=bool)
+
+        empty: deque[float] = deque()
+        windows = [self._scores.get(str(partition)) or empty for partition in partitions]
+        by_length: dict[int, list[int]] = {}
+        for position, window in enumerate(windows):
+            if window:
+                nonempty[position] = True
+                by_length.setdefault(len(window), []).append(position)
+
+        clipped_alpha = float(np.clip(alpha, 0.0, 1.0))
+        for length, positions in by_length.items():
+            if self._quantile_rule == "higher" and alpha <= 1.0 / (length + 1):
+                radii[positions] = np.inf
+                continue
+            matrix = np.array([windows[position] for position in positions], dtype=float)
+            if self._quantile_rule == "higher":
+                radii[positions] = np.quantile(matrix, 1.0 - clipped_alpha, axis=1, method="higher")
+            else:
+                rank = int(np.ceil((length + 1) * (1.0 - clipped_alpha))) - 1
+                rank = min(max(rank, 0), length - 1)
+                radii[positions] = np.sort(matrix, axis=1)[:, rank]
+
+        ready = np.isfinite(radii) & (nonempty | self._ready_on_empty)
+        return radii, ready
 
     def update(self, new_score: float, partition: str = "__global__") -> None:
         key = str(partition)
