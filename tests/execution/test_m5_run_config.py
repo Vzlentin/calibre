@@ -191,9 +191,7 @@ def test_estimated_node_history_peak_reserves_downstream_overhead() -> None:
     )
     hierarchy_index = build_hierarchy_index(hierarchy)
     one_model = estimate_hierarchical_expansion(history, hierarchy_index, horizon=3, model_count=1)
-    two_models = estimate_hierarchical_expansion(
-        history, hierarchy_index, horizon=3, model_count=2
-    )
+    two_models = estimate_hierarchical_expansion(history, hierarchy_index, horizon=3, model_count=2)
 
     assert estimated_node_history_peak_bytes(two_models) > estimated_node_history_peak_bytes(
         one_model
