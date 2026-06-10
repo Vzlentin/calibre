@@ -18,13 +18,15 @@ from calibre.core.forecast_frame import (
     FORECAST_ORIGIN,
     MODEL_NAME,
     UNIQUE_ID,
-    Y_HAT,
     H,
     Y,
-    is_quantile_column,
     validate_fitted_values_frame,
 )
-from calibre.reconciliation.apply import ReconciliationCrossSection, VectorReconciler
+from calibre.reconciliation.apply import (
+    ReconciliationCrossSection,
+    VectorReconciler,
+    reject_quantile_columns,
+)
 from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import SummingMatrix
 
@@ -38,12 +40,26 @@ NixtlaStrategy = Literal[
 ]
 
 NIXTLA_STRATEGIES = cast(tuple[NixtlaStrategy, ...], get_args(NixtlaStrategy))
-_SUPPORTED_STRATEGIES = frozenset(NIXTLA_STRATEGIES)
+# Point reconciliation strategies served by Nixtla. ``bottom_up`` stays in
+# ``NIXTLA_STRATEGIES`` for the fused hierarchical-interval phase, but point
+# bottom_up is Calibre's native ``BottomUpReconciler`` — it needs no aggregate
+# base forecasts, so routing it through this harness would silently re-impose
+# the eager node-history/task cost.
+NIXTLA_POINT_STRATEGIES = cast(
+    tuple[NixtlaStrategy, ...],
+    tuple(strategy for strategy in NIXTLA_STRATEGIES if strategy != "bottom_up"),
+)
+_SUPPORTED_STRATEGIES = frozenset(NIXTLA_POINT_STRATEGIES)
 _RESIDUAL_STRATEGIES = frozenset({"mint_shrink", "wls_var", "erm"})
 _UNSUPPORTED_STRATEGY_MESSAGES = {
     "mint_cov": (
         "mint_cov is not exposed by Calibre because the full M5 lattice produces "
         "ill-conditioned covariance estimates; use mint_shrink, wls_var, or erm"
+    ),
+    "bottom_up": (
+        "point bottom_up reconciliation is served by Calibre's native "
+        "BottomUpReconciler (resolve_reconciler('bottom_up')), not the Nixtla "
+        "harness; hierarchical_intervals.strategy='bottom_up' remains a Nixtla path"
     ),
 }
 _COHERENCE_RTOL = 1e-6
@@ -130,16 +146,6 @@ def _from_nixtla_layout(y_hat: np.ndarray, layout: _NixtlaLayout) -> np.ndarray:
     return np.asarray(y_hat, dtype=np.float64).reshape(-1)[layout.inverse_permutation]
 
 
-def _reject_quantile_columns(frame: pd.DataFrame) -> None:
-    quantile_cols = [str(column) for column in frame.columns if is_quantile_column(str(column))]
-    if quantile_cols:
-        raise ValueError(
-            "Nixtla hierarchy reconciliation only reconciles the point forecast column "
-            f"{Y_HAT!r}; quantile columns remain unreconciled and are not supported: "
-            f"{quantile_cols}"
-        )
-
-
 def _cache_key(summing: SummingMatrix) -> _CacheKey:
     S = np.ascontiguousarray(summing.S, dtype=np.float64)
     digest = hashlib.blake2b(S.tobytes(), digest_size=16).digest()
@@ -179,7 +185,7 @@ class NixtlaReconciler(VectorReconciler):
         context: ReconciliationContext,
     ) -> pd.DataFrame:
         if hierarchy is not None and not frame.empty:
-            _reject_quantile_columns(frame)
+            reject_quantile_columns(frame, strategy="Nixtla")
         return super().__call__(frame, hierarchy, context)
 
     def prepare_reconcile(

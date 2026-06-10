@@ -11,10 +11,12 @@ import pandas as pd
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.forecast_task import TaskGroups
+from calibre.execution.actuals import ActualsSource, HierarchyActualsSource
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.hierarchy_memory import enforce_hierarchical_expansion_memory_limit
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler, resolve_reconciler
+from calibre.reconciliation.summing import build_hierarchy_index
 
 
 class _TaskConfig(Protocol):
@@ -69,7 +71,7 @@ class RunPreparationConfig(Protocol):
 @dataclass(frozen=True)
 class RunPreparation:
     tasks: TaskGroups
-    actuals: pd.DataFrame
+    actuals: pd.DataFrame | ActualsSource
     origins: list[pd.Timestamp]
     conformal_config: SymmetricIntervalConfig | None
     reconciliation_hierarchy: pd.DataFrame | None
@@ -83,18 +85,36 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
     model_configs = [task.resolved_model_config() for task in config.tasks]
     horizon = config.tasks[0].horizon
     reconciliation_hierarchy = _hierarchy_for_run(config, bundle)
-    guard_applied = reconciliation_hierarchy is not None
-    if guard_applied:
-        enforce_hierarchical_expansion_memory_limit(
-            bundle.history,
-            reconciliation_hierarchy,
-            horizon=horizon,
-            model_count=len(config.tasks),
-        )
+    bottom_only = reconciliation_hierarchy is not None and _is_point_bottom_up(config)
 
-    actuals = build_node_history(bundle.history, reconciliation_hierarchy)
-    tasks = build_tasks(actuals, model_configs, horizon)
-    conformal_partition_estimate = _enforce_conformal_partition_limit(config, tasks, horizon)
+    actuals: pd.DataFrame | ActualsSource
+    ledger_node_count: int | None = None
+    if bottom_only:
+        # Native point bottom_up consumes bottom-only forecasts and synthesizes
+        # aggregate node rows itself, so the run never materializes the eager
+        # node-history frame: tasks come from bottom history and actuals
+        # resolve lazily. The #136 expansion guard targets exactly that
+        # materialization, so it does not apply here.
+        assert reconciliation_hierarchy is not None
+        actuals = HierarchyActualsSource(bundle.history, reconciliation_hierarchy)
+        tasks = build_tasks(bundle.history, model_configs, horizon)
+        ledger_node_count = len(build_hierarchy_index(reconciliation_hierarchy).node_labels)
+    else:
+        if reconciliation_hierarchy is not None:
+            enforce_hierarchical_expansion_memory_limit(
+                bundle.history,
+                reconciliation_hierarchy,
+                horizon=horizon,
+                model_count=len(config.tasks),
+            )
+        actuals = build_node_history(bundle.history, reconciliation_hierarchy)
+        tasks = build_tasks(actuals, model_configs, horizon)
+    conformal_partition_estimate = _enforce_conformal_partition_limit(
+        config,
+        tasks,
+        horizon,
+        ledger_node_count=ledger_node_count,
+    )
     origins = config.origins.to_list()
     if not origins:
         raise ValueError("origins resolved to an empty list")
@@ -124,6 +144,14 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
     )
 
 
+def _is_point_bottom_up(config: RunPreparationConfig) -> bool:
+    return (
+        config.hierarchical_intervals is None
+        and config.reconciliation is not None
+        and config.reconciliation.strategy == "bottom_up"
+    )
+
+
 def _hierarchy_for_run(config: RunPreparationConfig, bundle: DatasetBundle) -> pd.DataFrame | None:
     if config.hierarchical_intervals is not None:
         if bundle.hierarchy is None:
@@ -138,6 +166,8 @@ def _enforce_conformal_partition_limit(
     config: RunPreparationConfig,
     tasks: TaskGroups,
     horizon: int,
+    *,
+    ledger_node_count: int | None = None,
 ) -> int | None:
     if (
         config.conformal is None
@@ -146,16 +176,22 @@ def _enforce_conformal_partition_limit(
     ):
         return None
 
-    unique_ids_by_history: dict[int, int] = {}
-    estimated_partitions = 0
-    for task_group in (tasks.local, tasks.global_):
-        for task in task_group:
-            history_key = id(task.history)
-            if history_key not in unique_ids_by_history:
-                unique_ids_by_history[history_key] = int(
-                    task.history[UNIQUE_ID].astype(str).nunique()
-                )
-            estimated_partitions += unique_ids_by_history[history_key] * horizon
+    if ledger_node_count is not None:
+        # Bottom-only bottom_up runs synthesize aggregate node rows at
+        # reconcile time, so ledger partitions span the full hierarchy node
+        # set even though forecast tasks only carry bottom series.
+        estimated_partitions = ledger_node_count * horizon * len(config.tasks)
+    else:
+        unique_ids_by_history: dict[int, int] = {}
+        estimated_partitions = 0
+        for task_group in (tasks.local, tasks.global_):
+            for task in task_group:
+                history_key = id(task.history)
+                if history_key not in unique_ids_by_history:
+                    unique_ids_by_history[history_key] = int(
+                        task.history[UNIQUE_ID].astype(str).nunique()
+                    )
+                estimated_partitions += unique_ids_by_history[history_key] * horizon
 
     if estimated_partitions > config.conformal.max_partitions:
         raise ValueError(

@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from calibre.reconciliation import (
+    BottomUpReconciler,
     NixtlaReconciler,
     NoOpReconciler,
     ReconciliationContext,
@@ -46,12 +47,21 @@ def test_resolved_noop_is_a_reconciler_instance() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["bottom_up", "ols", "wls_struct", "mint_shrink", "wls_var", "erm"],
+    ["ols", "wls_struct", "mint_shrink", "wls_var", "erm"],
 )
 def test_nixtla_strategies_resolve_to_adapter(name: str) -> None:
     reconciler = resolve_reconciler(name)
     assert isinstance(reconciler, NixtlaReconciler)
     assert reconciler.strategy == name
+
+
+def test_bottom_up_resolves_to_native_reconciler() -> None:
+    assert isinstance(resolve_reconciler("bottom_up"), BottomUpReconciler)
+
+
+def test_nixtla_adapter_rejects_point_bottom_up() -> None:
+    with pytest.raises(ValueError, match="native"):
+        NixtlaReconciler("bottom_up")
 
 
 def test_unknown_strategy_lists_available_names() -> None:

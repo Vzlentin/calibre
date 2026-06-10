@@ -28,12 +28,24 @@ from calibre.core.forecast_frame import (
     UNIQUE_ID,
     Y_HAT,
     H,
+    is_quantile_column,
 )
 from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
 
 _GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
 _ORDER_COL = "__calibre_reconcile_order__"
+
+
+def reject_quantile_columns(frame: pd.DataFrame, *, strategy: str) -> None:
+    """Point reconciliation rewrites ``y_hat`` only; quantile columns would drift."""
+    quantile_cols = [str(column) for column in frame.columns if is_quantile_column(str(column))]
+    if quantile_cols:
+        raise ValueError(
+            f"{strategy} hierarchy reconciliation only reconciles the point forecast column "
+            f"{Y_HAT!r}; quantile columns remain unreconciled and are not supported: "
+            f"{quantile_cols}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
