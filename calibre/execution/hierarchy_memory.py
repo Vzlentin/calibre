@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID
-from calibre.reconciliation.summing import TOTAL_LABEL, build_hierarchy_index
+from calibre.reconciliation.summing import TOTAL_LABEL, HierarchyIndex
 
 _LOADED_HISTORY_BYTES_PER_ROW = 32
 _NODE_HISTORY_BYTES_PER_ROW = 128
@@ -33,7 +33,7 @@ class HierarchicalExpansionEstimate:
 
 def estimate_hierarchical_expansion(
     history: pd.DataFrame,
-    hierarchy: pd.DataFrame,
+    hierarchy_index: HierarchyIndex,
     *,
     horizon: int,
     model_count: int = 1,
@@ -42,7 +42,8 @@ def estimate_hierarchical_expansion(
 
     The preflight must not materialize the expanded frame, but it must mirror
     ``build_node_history``: aggregate and total rows only exist for dates where
-    all bottom members of that node are present.
+    all bottom members of that node are present. ``hierarchy_index`` is the
+    index run preparation already built, so cardinality facts have one source.
     """
     if horizon < 1:
         raise ValueError("horizon must be at least 1")
@@ -54,7 +55,6 @@ def estimate_hierarchical_expansion(
     if history.empty:
         raise ValueError("history has no rows")
 
-    hierarchy_index = build_hierarchy_index(hierarchy)
     data = history[[UNIQUE_ID, DS]].copy()
     data[UNIQUE_ID] = data[UNIQUE_ID].astype(str)
     data[DS] = pd.to_datetime(data[DS]).astype("datetime64[ns]")
@@ -247,21 +247,14 @@ def format_bytes(value: int) -> str:
 
 
 def enforce_hierarchical_expansion_memory_limit(
-    history: pd.DataFrame,
-    hierarchy: pd.DataFrame | None,
-    *,
-    horizon: int,
-    model_count: int,
+    estimate: HierarchicalExpansionEstimate,
 ) -> None:
-    if hierarchy is None:
-        return
+    """Block eager node-history expansion that cannot fit in detected memory.
 
-    estimate = estimate_hierarchical_expansion(
-        history,
-        hierarchy,
-        horizon=horizon,
-        model_count=model_count,
-    )
+    Consumes the shared :class:`HierarchicalExpansionEstimate` facts computed
+    once by run preparation rather than recomputing a parallel model of the
+    hierarchy run.
+    """
     available_memory = read_effective_available_memory_bytes()
     if available_memory is None:
         return
