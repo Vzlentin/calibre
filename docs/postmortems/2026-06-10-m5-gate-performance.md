@@ -53,19 +53,36 @@ groupby-sum) — 3.4 s per origin, no matrix at all.
 > dense S and remain guarded by the #136 memory preflight — they have the same
 > wall waiting behind them if they ever need to run at full M5 scale.
 
-### 3. Per-series task dispatch (PR #149)
+### 3. Per-series task dispatch (PR #149 — a workaround, not the fix)
 
 The benchmark config ran SeasonalNaive at default local scope: **30,490
-ForecastTasks per origin**, each a Ray round-trip (serialize per-series
-history → fit ~2 ms → serialize result → single-threaded driver
-deserialization). ~3 min/origin of pure dispatch overhead; py-spy showed the
-driver in `ray deserialize_objects`. **Fix:** `scope: global` — one vectorized
-statsforecast panel call per origin (0.5 s), byte-identical forecasts
-(verified with strict `assert_frame_equal` before switching).
+ForecastTasks per origin**. The mechanics, from the code: `execute()` stages
+**one parquet file per (series, model) task** (`ForecastTask.to_uri`,
+30,490 files); every origin then makes 30,490 `ray.remote()` submissions,
+each worker **re-reads its per-series parquet** (`ForecastTaskRef
+.materialize()`), truncates, fits a ~2 ms model, and returns a tiny frame the
+driver deserializes single-threaded (`ray.get` over 30,490 refs). Over 64
+origins: ~2M scheduling round-trips and ~2M small file reads around ~0.5 s of
+actual math per origin. py-spy showed the driver pinned in
+`ray deserialize_objects`.
 
-> Lesson: task granularity is a first-class performance decision. Per-series
-> scope exists for heterogeneous per-series models; for panel-capable
-> backends it is pure overhead multiplied by series count.
+**Why it exists:** the URI-backed task-ref design is rational for *few large*
+tasks (big histories stay out of the object store; workers pull from staging,
+including S3). The defect is that the **dispatch unit is conflated with the
+model-semantics unit** — "local model" (fit per series) silently became "one
+distributed task per series", multiplying a few-big-tasks design by the
+series count.
+
+**Shipped mitigation (#149):** `scope: global` — one vectorized statsforecast
+panel call per origin (0.5 s), byte-identical forecasts for SeasonalNaive
+(verified with strict `assert_frame_equal` before switching). This is a
+config workaround that happens to be correct for a single homogeneous local
+model; it is **not** the architecture for Calibre's core use case of many
+series × many models ensembled locally.
+
+> Lesson: task granularity is a first-class architectural decision,
+> independent of model scope. Per-series dispatch is never the right
+> scheduling unit for panel-capable backends.
 
 ### 4. Row-wise conformal runtime (PR #150)
 
@@ -122,10 +139,45 @@ defects in one day.
   log-based progress signals (parquet mtime, console-wrapped JSON lines) were
   both misleading. Phase-duration logs in JSON are the reliable signal.
 
+## Architectural agenda for the optimization session
+
+The session must end in decisions, not patches. Proposed decisions, with the
+measured evidence above as the forcing function:
+
+**D1 — Decouple model scope from dispatch granularity.**
+Local (per-series) model *semantics* must not imply per-series *scheduling*.
+Execution should group local tasks by `(backend, resolved config)` and
+dispatch **chunks of series as panel calls**: statsforecast fits every
+classical local model per-series inside one vectorized call, so "local" is
+preserved exactly while the scheduling unit becomes ~dozens of chunk tasks
+instead of 30,490 series tasks. Per-series overrides and local ensembles
+(workstreams 3–4) group by distinct config: *k* configs ≈ *k* panel calls per
+origin — the ensemble case costs `m_models × 0.5 s`, not
+`m_models × 30,490 × dispatch overhead`. Target budget: **a local-model M5
+origin costs seconds, ensembles included.**
+
+**D2 — Stage the panel once, not per task.**
+Replace 30,490 per-series staged parquet files with one shared panel artifact
+(or a single `ray.put` object ref); workers slice their chunk. Staging cost
+becomes O(1) per run instead of O(series × models).
+
+**D3 — Chunk-level result return.**
+Workers return one frame per chunk; the driver concatenates dozens of frames,
+not 30,490 — eliminating the single-threaded `ray.get` deserialization wall.
+
+**D4 — Vectorize the ledger resolve/commit path** (~130 s/origin → seconds;
+same per-row disease as the conformal runtime, see "Open bottlenecks").
+
+**D5 — Instrument every phase.** Reconcile, ResolveOpen sub-steps (actuals
+lookup / ledger mutation / parquet append), and Commit get duration logs.
+~85% of origin wall time was unattributed today; unmeasured phases are where
+the next regression hides.
+
+**D6 — Decide the fate of dense-S eager reconciliation paths.** Grouped/
+sparse aggregation or an explicit scale ceiling, but not silent gigabytes.
+
 ## Follow-ups
 
-- [ ] Vectorize the ledger resolve/commit path (~130 s/origin → seconds).
-- [ ] Add phase-duration logging for Reconcile, ResolveOpen sub-steps, Commit.
+- [ ] File issues for D1–D6 and schedule the optimization session.
 - [ ] `HierarchyActualsSource` member counting on raw dtypes vs stringified
       source (review finding ADV-1, crash-not-corruption, low severity).
-- [ ] Decide fate of dense-S eager reconciliation paths at scale.
