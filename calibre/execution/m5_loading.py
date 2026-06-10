@@ -18,6 +18,30 @@ def _day_columns(columns: list[str]) -> list[str]:
     )
 
 
+def _with_day_labels(calendar: pd.DataFrame) -> pd.DataFrame:
+    """Return the calendar with Kaggle ``d`` labels, deriving them if absent.
+
+    The datasetsforecast M5 mirror (used by ``benchmarks/m5/download_m5_data.py``)
+    drops the ``d`` column the Kaggle release carries. The official mapping is
+    positional — ``d_N`` is the N-th calendar day — so it is reconstructed from
+    the date-sorted rows, guarded by a daily-contiguity check that makes the
+    positional assignment sound.
+    """
+    if "d" in calendar.columns:
+        return calendar
+    ordered = calendar.copy()
+    ordered["date"] = pd.to_datetime(ordered["date"])
+    ordered = ordered.sort_values("date").reset_index(drop=True)
+    deltas = ordered["date"].diff().iloc[1:]
+    if not (deltas == pd.Timedelta(days=1)).all():
+        raise ValueError(
+            "M5 calendar frame has no 'd' column and its dates are not a "
+            "contiguous daily sequence; day labels cannot be derived"
+        )
+    ordered["d"] = [f"d_{index}" for index in range(1, len(ordered) + 1)]
+    return ordered
+
+
 def melt_m5_sales(sales: pd.DataFrame, calendar: pd.DataFrame) -> pd.DataFrame:
     """Reshape wide M5 sales into long-format ``[unique_id, ds, y]``.
 
@@ -28,8 +52,9 @@ def melt_m5_sales(sales: pd.DataFrame, calendar: pd.DataFrame) -> pd.DataFrame:
     if not day_cols:
         raise ValueError("M5 sales frame has no d_* day columns")
 
-    if "d" not in calendar.columns or "date" not in calendar.columns:
-        raise ValueError("M5 calendar frame missing required 'd'/'date' columns")
+    if "date" not in calendar.columns:
+        raise ValueError("M5 calendar frame missing required 'date' column")
+    calendar = _with_day_labels(calendar)
     day_to_date = dict(
         zip(
             calendar["d"].astype(str),
