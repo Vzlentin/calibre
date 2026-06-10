@@ -37,10 +37,10 @@ produces — the smoke fixture was hand-built in Kaggle shape. **Fix:** derive
 > Lesson: a benchmark harness that has never been executed end-to-end is
 > documentation, not a gate. The data-loading path is part of the benchmark.
 
-### 2. Dense summing matrix at hierarchy scale (fixed inside PR #145)
+### 2. Dense summing matrix at hierarchy scale (fixed inside PR #145, in flight at time of writing)
 
 `build_summing_matrix` materializes a dense `(33,563 × 30,490)` float64 `S`
-(~8.2 GiB), and `SummingMatrix.subset` fancy-index-copied it once per
+(~8.2 GB), and `SummingMatrix.subset` fancy-index-copied it once per
 `(model, origin, h)` cross-section — 28 copies per origin. py-spy showed the
 driver pinned inside `subset` ~2 h into the run with 12 GB RSS and nothing
 written. **Fix:** `BottomUpReconciler` now does grouped member sums per
