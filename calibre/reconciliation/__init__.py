@@ -8,6 +8,7 @@ phase because they own both hierarchy and interval output for that run.
 """
 
 from calibre.reconciliation.apply import VectorReconciler
+from calibre.reconciliation.bottom_up import BottomUpReconciler
 from calibre.reconciliation.hierarchical_intervals import (
     HierarchicalIntervalContext,
     HierarchicalIntervalOptions,
@@ -29,6 +30,7 @@ from calibre.reconciliation.summing import (
 
 __all__ = [
     "TOTAL_LABEL",
+    "BottomUpReconciler",
     "NixtlaReconciler",
     "NixtlaHierarchicalIntervalPhase",
     "NoOpReconciler",

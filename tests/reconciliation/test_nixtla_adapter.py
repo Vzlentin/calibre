@@ -90,20 +90,6 @@ def test_min_trace_strategy_reconciles_small_lattice_to_coherent_vector(strategy
     )
 
 
-def test_bottom_up_bottom_only_cross_section_keeps_bottom_block() -> None:
-    _require_hierarchy_extra()
-    summing = SummingMatrix(
-        S=np.eye(2, dtype=np.float64),
-        bottom_ids=("a", "b"),
-        node_labels=("a", "b"),
-    )
-    base = np.array([4.0, 5.0], dtype=np.float64)
-
-    reconciled = NixtlaReconciler("bottom_up").reconcile_vector(base, summing)
-
-    np.testing.assert_allclose(reconciled[: summing.n_bottom], base)
-
-
 def test_s_layout_conversion_round_trips_to_identity_first_order() -> None:
     summing = build_summing_matrix(_hierarchy()).subset(["a", "c"])
     base = _coherent_base(summing, [2.0, 7.0])
