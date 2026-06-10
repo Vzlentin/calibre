@@ -35,9 +35,12 @@ class BottomUpReconciler:
 
     Each ``(model_name, forecast_origin, h)`` cross-section must contain only
     bottom-level hierarchy rows; aggregate rows are emitted by this reconciler
-    as ``S @ bottom`` over the supplied bottom subset, appended in canonical
-    node order after the (unchanged) bottom rows. Synthesized rows copy the
-    cross-section's frame columns, so the forecast-frame contract is preserved.
+    as ``S @ bottom``, appended in canonical node order after the (unchanged)
+    bottom rows. An aggregate is synthesized only when all of its bottom
+    members are present in the cross-section — the same completeness rule
+    ``HierarchyActualsSource`` applies to aggregate actuals. Synthesized rows
+    copy the cross-section's frame columns, so the forecast-frame contract is
+    preserved.
     """
 
     requires_fitted_values = False
@@ -82,8 +85,31 @@ class BottomUpReconciler:
         subset = summing.subset(list(uid_str))
         yhat_by_id = dict(zip(uid_str, group[Y_HAT].astype(np.float64), strict=True))
         bottom = np.array([yhat_by_id[uid] for uid in subset.bottom_ids], dtype=np.float64)
-        aggregates = subset.S[subset.n_bottom :] @ bottom
-        aggregate_labels = subset.node_labels[subset.n_bottom :]
+
+        # Synthesize an aggregate only when every bottom member of that node is
+        # present in the cross-section. A partial member sum would later be
+        # resolved against the complete-member actual (HierarchyActualsSource
+        # only resolves aggregates whose full member set is observed), silently
+        # undercounting the forecast; suppressing the node keeps forecast and
+        # actual completeness rules aligned.
+        full_member_counts = dict(
+            zip(summing.node_labels, summing.S.sum(axis=1), strict=True)
+        )
+        aggregate_rows = subset.S[subset.n_bottom :]
+        subset_labels = subset.node_labels[subset.n_bottom :]
+        complete = np.array(
+            [
+                present_members == full_member_counts[label]
+                for label, present_members in zip(
+                    subset_labels, aggregate_rows.sum(axis=1), strict=True
+                )
+            ],
+            dtype=bool,
+        )
+        aggregates = (aggregate_rows @ bottom)[complete]
+        aggregate_labels = [
+            label for label, keep in zip(subset_labels, complete, strict=True) if keep
+        ]
 
         template_rows = group.iloc[[0] * len(aggregate_labels)].copy()
         template_rows[UNIQUE_ID] = list(aggregate_labels)

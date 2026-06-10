@@ -94,18 +94,19 @@ def test_synthesized_rows_preserve_frame_columns() -> None:
     assert aggregates[Y].isna().all()
 
 
-def test_partial_bottom_subset_synthesizes_only_covered_nodes() -> None:
+def test_partial_bottom_subset_synthesizes_only_complete_member_nodes() -> None:
     frame = _bottom_frame()
     frame = frame[frame[UNIQUE_ID] != "a_s2"].reset_index(drop=True)
 
     result = BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
 
     values = result.set_index(UNIQUE_ID)[Y_HAT]
-    assert values["item_id=a"] == pytest.approx(1.0)  # only a_s1 present
+    # Aggregates whose full member set is forecast are synthesized; aggregates
+    # missing any member (item_id=a, the total) are suppressed so they cannot
+    # be scored against complete-member actuals later.
     assert values["item_id=b"] == pytest.approx(4.0)
     assert values["store_id=s1"] == pytest.approx(5.0)
-    assert values[TOTAL_LABEL] == pytest.approx(5.0)
-    assert "store_id=s2" not in set(values.index)
+    assert set(values.index) == {"a_s1", "b_s1", "item_id=b", "store_id=s1"}
 
 
 def test_groups_are_expanded_independently() -> None:

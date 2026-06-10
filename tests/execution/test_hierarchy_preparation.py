@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from calibre.cli.config import load_config_from_mapping
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, Y_HAT, H, Y
 from calibre.core.order_types import CostStruct
 from calibre.execution.actuals import HierarchyActualsSource
 from calibre.execution.dataset import DatasetBundle
@@ -231,6 +231,54 @@ def test_series_partition_limit_counts_hierarchy_expanded_nodes(
 
     with pytest.raises(ValueError, match="approximately 8"):
         prepare_run(config, _bundle(hierarchy=_hierarchy()))
+
+
+def test_bottom_up_preparation_runs_end_to_end_through_engine() -> None:
+    """The shipped bottom-only wiring works as a whole: bottom tasks +
+    BottomUpReconciler + HierarchyActualsSource through BackendEngine, with
+    synthesized aggregate forecasts staying coherent with the bottom rows and
+    aggregate actuals resolving to the full member sums."""
+    from calibre.execution.backend import (
+        BackendEngine,
+        ExecutionOptions,
+        ReconciliationOptions,
+    )
+    from calibre.reconciliation.summing import TOTAL_LABEL
+
+    hierarchy = _hierarchy()
+    config = _config(reconciliation={"strategy": "bottom_up"})
+    preparation = prepare_run(config, _bundle(hierarchy=hierarchy))
+
+    engine = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="local", seed=42),
+        reconciliation=ReconciliationOptions(
+            reconciler=preparation.reconciler,
+            hierarchy=preparation.reconciliation_hierarchy,
+        ),
+    )
+    try:
+        result = engine.execute(preparation.tasks, preparation.actuals, preparation.origins)
+    finally:
+        engine.close()
+    ledger = result.ledger.to_df()
+
+    # Aggregate rows exist without any aggregate task having run.
+    assert set(ledger[UNIQUE_ID]) == {"a", "b", "dept=D", TOTAL_LABEL}
+
+    # Synthesized aggregate forecasts equal the bottom sums per cross-section.
+    for _, cross_section in ledger.groupby([FORECAST_ORIGIN, H]):
+        values = cross_section.set_index(UNIQUE_ID)[Y_HAT]
+        bottom_sum = values["a"] + values["b"]
+        assert values["dept=D"] == pytest.approx(bottom_sum)
+        assert values[TOTAL_LABEL] == pytest.approx(bottom_sum)
+
+    # Aggregate actuals resolved lazily equal the full member sums: on
+    # 2024-01-03 the bottom actuals are a=3.0 and b=4.0.
+    resolved = ledger[ledger[DS] == pd.Timestamp("2024-01-03")].set_index(UNIQUE_ID)[Y]
+    assert resolved["a"] == pytest.approx(3.0)
+    assert resolved["b"] == pytest.approx(4.0)
+    assert resolved["dept=D"] == pytest.approx(7.0)
+    assert resolved[TOTAL_LABEL] == pytest.approx(7.0)
 
 
 def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
