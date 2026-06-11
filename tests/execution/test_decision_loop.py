@@ -11,6 +11,7 @@ from calibre.core.forecast_frame import (
     FORECAST_ORIGIN,
     MODEL_NAME,
     UNIQUE_ID,
+    Y_HAT,
     Y,
     interval_column_names,
 )
@@ -35,8 +36,14 @@ def _make_frame(
     lower: list[float | None] | None = None,
     upper: list[float | None] | None = None,
     model_name: str = "m",
+    y_hat: list[float | None] | None = None,
 ) -> pd.DataFrame:
-    """Build a minimal conformal forecast frame."""
+    """Build a minimal conformal forecast frame.
+
+    ``Y_HAT`` defaults to a finite point forecast on every row — the
+    per-horizon readiness rule is ``Y & Y_HAT`` non-null (#157), so rows
+    need a point forecast to be observable.
+    """
     ds_vals = [origin + pd.Timedelta(weeks=h) for h in range(1, horizon + 1)]
     df = pd.DataFrame(
         {
@@ -45,6 +52,7 @@ def _make_frame(
             FORECAST_ORIGIN: origin,
             MODEL_NAME: model_name,
             Y: y_vals if y_vals is not None else [None] * horizon,
+            Y_HAT: y_hat if y_hat is not None else [10.0] * horizon,
         }
     )
     lo_col, hi_col = interval_column_names(0.9)
@@ -223,6 +231,44 @@ class TestObservePerHorizon:
         rt.observe.assert_not_called()
         assert len(remaining) == 1
 
+    def test_nan_bound_but_resolved_row_is_observed(self) -> None:
+        """#157: a resolved row (Y & Y_HAT) with NaN bounds still reaches observe.
+
+        The old filter required finite bounds, deadlocking a cold runtime that
+        emits NaN bounds until its first score. Readiness is now Y & Y_HAT.
+        """
+        lo_col, hi_col = interval_column_names(0.9)
+        # Interval columns present but NaN — the cold-runtime shape.
+        frame = _make_frame("A", _ORIGIN, horizon=1, y_vals=[None], lower=[None], upper=[None])
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 15.0)])
+        rt = self._make_runtime()
+
+        remaining = observe_per_horizon(rt, [frame], lookup, lo_col, hi_col)
+
+        rt.observe.assert_called_once()
+        assert remaining == []
+
+    def test_row_with_actual_but_no_point_forecast_stays_pending(self) -> None:
+        """A row with Y but NaN Y_HAT is not ready — the runtime's own rule."""
+        lo_col, hi_col = interval_column_names(0.9)
+        frame = _make_frame(
+            "A",
+            _ORIGIN,
+            horizon=1,
+            y_vals=[None],
+            lower=[10.0],
+            upper=[20.0],
+            y_hat=[None],
+        )
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 15.0)])
+        rt = self._make_runtime()
+
+        remaining = observe_per_horizon(rt, [frame], lookup, lo_col, hi_col)
+
+        rt.observe.assert_not_called()
+        assert len(remaining) == 1
+        assert len(remaining[0]) == 1
+
 
 class TestObserveCumulative:
     def _make_runtime(self) -> MagicMock:
@@ -320,3 +366,73 @@ class TestObservePending:
 
         assert seen["pending"] is pending
         assert seen["lookup"] is lookup
+
+
+class TestColdStartDeadlock:
+    """#157: a cold unseeded mscp per-horizon runtime must reach its first
+    observation through the dispatcher; pending must not grow unboundedly.
+
+    A fresh mscp runtime emits NaN bounds until its first score. The old
+    per-horizon filter required finite bounds, so NaN-bound rows never reached
+    observe, the calibrator never scored, and pending grew without bound — a
+    deadlock. With the Y & Y_HAT readiness rule, the first observation lands.
+    """
+
+    @staticmethod
+    def _apply_frame(uid: str, origin: pd.Timestamp, y_hat: list[float]) -> pd.DataFrame:
+        from calibre.core.forecast_frame import H
+
+        horizon = len(y_hat)
+        return pd.DataFrame(
+            {
+                UNIQUE_ID: [uid] * horizon,
+                DS: [origin + pd.Timedelta(weeks=h) for h in range(1, horizon + 1)],
+                FORECAST_ORIGIN: [origin] * horizon,
+                MODEL_NAME: ["m"] * horizon,
+                H: list(range(1, horizon + 1)),
+                Y: [float("nan")] * horizon,
+                Y_HAT: y_hat,
+            }
+        )
+
+    def test_cold_mscp_reaches_first_observation_and_pending_drains(self) -> None:
+        from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+
+        # coverage=0.5 so a single resolved score per partition makes mscp
+        # ready — keeps the test cheap while exercising the exact cold-start
+        # path (NaN bounds → observe → finite bounds). Must use mscp: ACI's
+        # ready_on_empty masks the deadlock this test locks.
+        config = SymmetricIntervalConfig(method="mscp", coverage=0.5, calibration_window=5)
+        runtime = SymmetricIntervalRuntime(config)
+        lower_col, upper_col = config.interval_columns
+
+        origins = [_ORIGIN + pd.Timedelta(weeks=k) for k in range(3)]
+        # Actuals for every (uid, ds) the windows will resolve against.
+        actuals = {
+            ("A", origin + pd.Timedelta(weeks=h)): 12.0 for origin in origins for h in (1, 2)
+        }
+
+        pending: list[pd.DataFrame] = []
+        for origin in origins:
+            applied = runtime.apply(self._apply_frame("A", origin, [10.0, 10.0]))
+            # Cold runtime: the very first apply must emit NaN bounds.
+            if origin == origins[0]:
+                assert applied[lower_col].isna().all()
+                assert applied[upper_col].isna().all()
+            pending.append(applied)
+            lookup = pd.Series(actuals, dtype=float)
+            lookup.index = pd.MultiIndex.from_tuples(lookup.index)
+            pending = observe_pending(runtime, pending, lookup)
+
+        # The deadlock is broken: the calibrator scored, so a fresh apply now
+        # yields finite bounds (this stays all-NaN forever on the old filter,
+        # which never let the NaN-bound rows reach observe).
+        final = runtime.apply(
+            self._apply_frame("A", origins[-1] + pd.Timedelta(weeks=1), [10.0, 10.0])
+        )
+        assert final[lower_col].notna().any()
+        assert final[upper_col].notna().any()
+
+        # Pending drains: every window whose actuals exist has been observed,
+        # so nothing accumulates unboundedly.
+        assert pending == []

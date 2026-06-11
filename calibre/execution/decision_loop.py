@@ -20,6 +20,7 @@ from calibre.core.forecast_frame import (
     FORECAST_ORIGIN,
     MODEL_NAME,
     UNIQUE_ID,
+    Y_HAT,
     Y,
 )
 from calibre.core.forecast_task import TaskGroups
@@ -69,9 +70,12 @@ def observe_per_horizon(
 ) -> list[pd.DataFrame]:
     """Observe resolved per-horizon rows; return the still-pending frames.
 
-    A row is ready when it has a non-null actual *and* both interval columns
-    present. Implements the dispatch rule from lessons.md §40 so benchmarks
-    don't have to re-derive it.
+    A row is ready when it has a non-null actual *and* a non-null point
+    forecast (``Y_HAT``) — the runtime's own readiness rule
+    (``runtime._observe_perhorizon``). Bounds may be NaN: a cold non-ACI
+    runtime emits NaN bounds until its first score, and filtering those rows
+    out would deadlock its calibration (#157). The structural interval-column
+    guard lives in ``runtime.observe``, which raises if the columns are absent.
     """
     still_pending: list[pd.DataFrame] = []
     for frame in pending:
@@ -79,7 +83,7 @@ def observe_per_horizon(
             still_pending.append(frame)
             continue
         updated = _fill_actuals(frame, actuals_lookup)
-        ready = updated[Y].notna() & updated[lower_col].notna() & updated[upper_col].notna()
+        ready = updated[Y].notna() & updated[Y_HAT].notna()
         to_observe, unresolved = updated[ready], updated[~ready]
         if not to_observe.empty:
             with contextlib.suppress(ValueError):
