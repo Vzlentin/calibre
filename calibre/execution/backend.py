@@ -583,11 +583,17 @@ class BackendEngine:
         persist conformal state — persistence is consolidated into Commit so it
         fires exactly once per origin.
         """
+        # Span name is intentionally "ledger_resolution_frame" even though the
+        # method is now due_frame(): the name is load-bearing for M5 log analysis
+        # (it keys the ResolveOpen/Commit timing breakdown) and is held constant
+        # across the keyed-ledger refactor.
         with span("ledger_resolution_frame", origin=origin):
-            current = ledger.resolution_frame()
-        if current.empty:
-            return
+            current = ledger.due_frame(origin)
 
+        # The actuals_lookup span fires on every Commit-reached origin (even when
+        # the due frame is empty): resolve on an empty frame is cheap and the
+        # span's emission under this exact name is a load-bearing observability
+        # contract. The meaningful early return is on empty newly_resolved.
         with span("actuals_lookup", origin=origin):
             updated, newly_resolved = actuals.resolve(current, origin)
         if newly_resolved.empty:
@@ -609,8 +615,12 @@ class BackendEngine:
                     updated[col] = np.nan
                 updated.loc[scored.index, col] = scored[col]
 
+        # Span name is intentionally "ledger_update_resolved" even though the
+        # method is now apply_resolutions(): kept constant for M5 log analysis
+        # (it is not test-asserted, so a rename here would pass CI silently —
+        # the constant name is the contract).
         with span("ledger_update_resolved", origin=origin):
-            ledger.update_resolved(updated)
+            ledger.apply_resolutions(updated)
 
     def _restore_conformal_state(self) -> None:
         if (

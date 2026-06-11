@@ -104,6 +104,21 @@ class HierarchyActualsSource:
             col: self._index.frame.groupby(col, sort=False)[UNIQUE_ID].nunique()
             for col in self._index.attr_cols
         }
+        # Per-run cache of *complete* (node, ds) -> y sums. Bottom history is
+        # fixed at construction, so completeness per (node, ds) is fixed for the
+        # whole run and a cached entry never invalidates — a future change that
+        # let bottom history grow mid-run (streaming history) would break this
+        # invariant silently, so it is asserted here in prose. Only complete
+        # aggregates are cached; incomplete ones are absent (never cached as
+        # absent-forever facts) and recomputed on the fixed-history complete-set
+        # check the next time their (node, ds) is requested.
+        # Stored as a float64 Series keyed by a (unique_id, ds) MultiIndex so
+        # the hit path serves ~10^6 rows via one C-level get_indexer instead of
+        # per-element dict probes (the index engine is cached between hit-only
+        # origins; it rebuilds only when a miss extends the cache).
+        self._lookup_cache: pd.Series = pd.Series(
+            dtype="float64", index=pd.MultiIndex.from_arrays([[], []], names=[UNIQUE_ID, DS])
+        )
 
     def resolve(
         self,
@@ -133,7 +148,57 @@ class HierarchyActualsSource:
         return updated, newly_resolved
 
     def _lookup_for(self, uids: pd.Series, ds_values: pd.Series) -> pd.Series:
-        """Build a ``(unique_id, ds) -> y`` lookup for the requested rows only."""
+        """Build a ``(unique_id, ds) -> y`` lookup for the requested rows only.
+
+        Wraps :meth:`_compute_lookup` with the per-run complete-sum cache: every
+        requested ``(node, ds)`` is computed at most once per run. Already-cached
+        pairs are served directly; only the not-yet-computed pairs reach the
+        window scan, attribute merge, and group-by — so a forever-pending
+        incomplete aggregate that re-enters the due set every origin costs a
+        cheap lookup-miss for its already-resolved siblings instead of a full
+        rebuild. The returned shape (a Series indexed by ``(unique_id, ds)``
+        carrying only the complete entries) is identical to computing without
+        the cache.
+        """
+        # Deduplicate to the distinct requested pairs (the uncached path returns
+        # one entry per (node, ds); resolve() reindexes onto the full pending
+        # keys, so a duplicated index here would break that reindex). Built as a
+        # MultiIndex so dedup, cache membership, and the serve are all C-level.
+        requested = pd.MultiIndex.from_arrays(
+            [uids.astype(str).to_numpy(), pd.to_datetime(ds_values).to_numpy()]
+        ).unique()
+
+        indexer = self._lookup_cache.index.get_indexer(requested)
+        missing = requested[indexer < 0]
+        if len(missing):
+            computed = self._compute_lookup(
+                pd.Series(missing.get_level_values(0), dtype="object"),
+                pd.Series(missing.get_level_values(1), dtype="datetime64[ns]"),
+            )
+            if not computed.empty:
+                computed = computed.astype("float64")
+                self._lookup_cache = (
+                    computed
+                    if self._lookup_cache.empty
+                    else pd.concat([self._lookup_cache, computed])
+                )
+                indexer = self._lookup_cache.index.get_indexer(requested)
+
+        # Serve only the complete cached entries, one row per distinct pair —
+        # matching the shape the uncached path produces.
+        hit = indexer >= 0
+        if not hit.any():
+            return pd.Series(dtype="float64", index=pd.MultiIndex.from_arrays([[], []]))
+        return pd.Series(
+            self._lookup_cache.to_numpy()[indexer[hit]],
+            index=requested[hit],
+            dtype="float64",
+        )
+
+    def _compute_lookup(self, uids: pd.Series, ds_values: pd.Series) -> pd.Series:
+        """Compute ``(unique_id, ds) -> y`` for the requested rows from bottom
+        history (window scan + attribute merge + completeness-gated group-bys).
+        Returns only complete entries; no caching."""
         requested_ds = set(ds_values.unique())
         window = self._bottom[self._bottom[DS].isin(requested_ds)]
         requested = set(uids.unique())
