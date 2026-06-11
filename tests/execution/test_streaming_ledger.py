@@ -150,9 +150,10 @@ def test_streaming_resolution_keeps_only_pending_rows(monkeypatch, tmp_path) -> 
         actual.sort_values(_KEY).reset_index(drop=True),
         expected.sort_values(_KEY).reset_index(drop=True),
     )
-    # resolution_frame() is the public view of the still-pending rows; bounded
-    # memory means it never grows to the full origins * horizon row count.
-    assert len(result.ledger.resolution_frame()) <= 10
+    # due_frame(far future) returns every still-pending row; bounded memory
+    # means it never grows to the full origins * horizon row count.
+    all_pending = result.ledger.due_frame(pd.Timestamp("2999-01-01"))
+    assert len(all_pending) <= 10
     assert len(pd.read_parquet(path)) == len(origins) * task.horizon
 
 
@@ -220,26 +221,27 @@ def test_origin_iterator_matches_batch_conformal_and_ordering(monkeypatch) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_streaming_append_keeps_only_pending_in_resolution_frame(tmp_path) -> None:
+def test_streaming_append_keeps_only_pending_in_due_frame(tmp_path) -> None:
     ledger = StreamingLedger(tmp_path / "ledger.parquet")
     ledger.append(_pending_frame(3))
-    pending = ledger.resolution_frame()
+    pending = ledger.due_frame(pd.Timestamp("2999-01-01"))
     assert len(pending) == 3
     assert pending[Y].isna().all()
+    assert list(pending.index) == [0, 1, 2]  # RangeIndex contract
     ledger.close()
 
 
-def test_streaming_merge_prefers_resolved_on_key_collision(tmp_path) -> None:
+def test_streaming_apply_resolutions_prefers_resolved_on_key_collision(tmp_path) -> None:
     path = tmp_path / "ledger.parquet"
     ledger = StreamingLedger(path)
     ledger.append(_pending_frame(2))
 
-    # Resolve only h=1; h=2 stays pending.
+    # Resolve only h=1; h=2 stays pending (keyed upsert, not wholesale replace).
     resolved = _pending_frame(2)
     resolved.loc[resolved[H] == 1, Y] = 11.0
-    ledger.update_resolved(resolved)
+    ledger.apply_resolutions(resolved)
     # The streaming buffer now holds only the still-pending row.
-    assert len(ledger.resolution_frame()) == 1
+    assert len(ledger.due_frame(pd.Timestamp("2999-01-01"))) == 1
     ledger.close()
 
     final = pd.read_parquet(resolved_ledger_uri(path)).sort_values(H).reset_index(drop=True)
@@ -253,7 +255,7 @@ def test_streaming_close_finalizes_artifact_and_removes_updates_temp(tmp_path) -
     ledger.append(_pending_frame(2))
     resolved = _pending_frame(2)
     resolved[Y] = [5.0, 6.0]
-    ledger.update_resolved(resolved)
+    ledger.apply_resolutions(resolved)
 
     # The resolved-updates side file exists while the ledger is open.
     updates_path = tmp_path / "ledger.resolved-updates.parquet"
@@ -264,6 +266,59 @@ def test_streaming_close_finalizes_artifact_and_removes_updates_temp(tmp_path) -
     # close() finalizes the merged artifact and removes the temp side file.
     assert (tmp_path / "ledger.resolved.parquet").exists()
     assert not updates_path.exists()
+
+
+def test_streaming_due_frame_boundary_and_empty(tmp_path) -> None:
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    # ds values: 2024-01-07 (h=1), 2024-01-14 (h=2).
+    ledger.append(_pending_frame(2))
+    on_boundary = ledger.due_frame(pd.Timestamp("2024-01-07"))
+    assert on_boundary[H].tolist() == [1]  # ds == origin included, ds > origin excluded
+    none_due = ledger.due_frame(pd.Timestamp("2024-01-01"))
+    assert none_due.empty
+    ledger.close()
+
+
+def test_streaming_apply_resolutions_keyed_upsert_leaves_not_due_untouched(tmp_path) -> None:
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_pending_frame(4))  # ds weekly from 2024-01-07
+    # Only the first two are due; resolve h=1, leave h=2 pending.
+    due = ledger.due_frame(pd.Timestamp("2024-01-14"))
+    assert due[H].tolist() == [1, 2]
+    due.loc[due[H] == 1, Y] = 99.0
+    ledger.apply_resolutions(due)
+    remaining = ledger.due_frame(pd.Timestamp("2999-01-01"))
+    # h=1 left the open set; h=2,3,4 (incl. the never-due rows) remain.
+    assert sorted(remaining[H].tolist()) == [2, 3, 4]
+    ledger.close()
+
+
+def test_streaming_apply_resolutions_unknown_key_raises(tmp_path) -> None:
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_pending_frame(2))
+    rogue = _pending_frame(1, origin="2099-01-01")  # never appended key
+    rogue.loc[0, Y] = 1.0
+    with pytest.raises(ValueError, match="not in the open set"):
+        ledger.apply_resolutions(rogue)
+    ledger.close()
+
+
+def test_streaming_append_duplicate_key_raises(tmp_path) -> None:
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_pending_frame(2))
+    with pytest.raises(ValueError, match="duplicate forecast keys"):
+        ledger.append(_pending_frame(2))  # identical 5-tuples
+    ledger.close()
+
+
+def test_streaming_apply_resolutions_empty_is_noop(tmp_path) -> None:
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_pending_frame(2))
+    before = len(ledger.due_frame(pd.Timestamp("2999-01-01")))
+    ledger.apply_resolutions(_pending_frame(2).iloc[0:0])
+    assert len(ledger.due_frame(pd.Timestamp("2999-01-01"))) == before
+    assert not (tmp_path / "ledger.resolved-updates.parquet").exists()
+    ledger.close()
 
 
 def test_streaming_finalize_missing_key_columns_raises(tmp_path) -> None:
@@ -470,12 +525,14 @@ def test_partitioned_streaming_output_writes_hive_partitions(tmp_path) -> None:
             MODEL_NAME: ["stub", "stub"],
         }
     )
-    second = first.assign(**{Y_HAT: [3.0, 4.0]})
+    # second carries a distinct forecast_origin so its 5-tuple keys do not
+    # collide with first (the keyed open set rejects duplicate appends).
+    second = first.assign(**{Y_HAT: [3.0, 4.0], FORECAST_ORIGIN: [pd.Timestamp("2024-01-08")] * 2})
 
     ledger.append(first)
     ledger.append(second)
     # All rows are unresolved, so the streaming buffer carries them as pending.
-    assert len(ledger.resolution_frame()) == 4
+    assert len(ledger.due_frame(pd.Timestamp("2999-01-01"))) == 4
     ledger.close()
 
     written = pd.read_parquet(path).sort_values([UNIQUE_ID, Y_HAT]).reset_index(drop=True)

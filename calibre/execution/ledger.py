@@ -276,13 +276,21 @@ def _make_sink(path: str, partition_cols: list[str] | None) -> LedgerSink:
 @runtime_checkable
 class Ledger(Protocol):
     """Forecast ledger interface. The construction site picks an adapter once;
-    no caller flips a mode after the fact."""
+    no caller flips a mode after the fact.
+
+    The ledger owns the resolve contract: ``due_frame(origin)`` hands the engine
+    only the rows due for resolution as of ``origin`` (a RangeIndex copy), and
+    ``apply_resolutions(df)`` performs a keyed upsert of those rows back into the
+    open set — resolved rows leave it, still-pending due rows stay, and rows not
+    in the due frame are untouched. The engine never pushes a mutated full
+    pending frame.
+    """
 
     def append(self, df: pd.DataFrame) -> None: ...
 
-    def resolution_frame(self) -> pd.DataFrame: ...
+    def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame: ...
 
-    def update_resolved(self, df: pd.DataFrame) -> None: ...
+    def apply_resolutions(self, df: pd.DataFrame) -> None: ...
 
     def to_df(self) -> pd.DataFrame: ...
 
@@ -304,27 +312,67 @@ class OrderLedger(Protocol):
     def close(self) -> None: ...
 
 
+def _key_index(df: pd.DataFrame) -> pd.MultiIndex:
+    """Build the 5-tuple forecast key MultiIndex for ``df``."""
+    return pd.MultiIndex.from_frame(df[_FORECAST_KEY_COLUMNS])
+
+
 class InMemoryLedger:
-    """Forecast ledger that accumulates frames in memory. ``update_resolved``
-    replaces the whole frame; there is no pending side buffer."""
+    """Forecast ledger that accumulates rows in memory in append order.
+
+    ``apply_resolutions`` updates matching keys *in place* (preserving each row's
+    append position) rather than re-concatenating open and resolved rows — so
+    ``to_df()`` stays byte-identical, in both values and row order, to the
+    pre-keyed-contract path (the VN2 regression gate rides on this)."""
 
     def __init__(self) -> None:
-        self._frames: list[pd.DataFrame] = []
+        self._frame: pd.DataFrame | None = None
+        self._positions: dict[tuple, int] = {}
 
     def append(self, df: pd.DataFrame) -> None:
         validate_forecast_frame(df)
-        self._frames.append(df)
+        new_keys = list(_key_index(df))
+        duplicates = [key for key in new_keys if key in self._positions]
+        if duplicates:
+            raise ValueError(f"duplicate forecast keys appended to ledger: {duplicates[:10]}")
+        start = 0 if self._frame is None else len(self._frame)
+        self._frame = df.copy() if self._frame is None else pd.concat([self._frame, df])
+        self._frame = self._frame.reset_index(drop=True)
+        for offset, key in enumerate(new_keys):
+            self._positions[key] = start + offset
 
-    def resolution_frame(self) -> pd.DataFrame:
-        return self.to_df()
+    def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
+        if self._frame is None:
+            return pd.DataFrame(columns=REQUIRED_COLUMNS)
+        mask = self._frame[Y].isna() & (self._frame[DS] <= origin)
+        return self._frame.loc[mask].reset_index(drop=True)
 
-    def update_resolved(self, df: pd.DataFrame) -> None:
-        self._frames = [df]
+    def apply_resolutions(self, df: pd.DataFrame) -> None:
+        if df.empty:
+            return
+        if self._frame is None:
+            raise ValueError("apply_resolutions called before any append")
+        keys = list(_key_index(df))
+        unknown = [key for key in keys if key not in self._positions]
+        if unknown:
+            raise ValueError(f"apply_resolutions for keys not in the open set: {unknown[:10]}")
+        # The accumulated frame always carries a RangeIndex (append() resets it),
+        # so each append position is also its index label.
+        positions = [self._positions[key] for key in keys]
+        # Update each resolved row in place at its append position, column by
+        # column so each column keeps its own dtype (a single .to_numpy() block
+        # assign would coerce a mixed frame to object and drift dtypes the VN2
+        # gate depends on). New (updates-only) columns are created NaN-filled
+        # first, then written on the resolved positions.
+        for col in df.columns:
+            if col not in self._frame.columns:
+                self._frame[col] = np.nan
+            self._frame.loc[positions, col] = df[col].to_numpy()
 
     def to_df(self) -> pd.DataFrame:
-        if not self._frames:
+        if self._frame is None:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
-        return pd.concat(self._frames, ignore_index=True)
+        return self._frame.copy()
 
     def to_parquet(self, path: str | Path) -> None:
         write_parquet(self.to_df(), path)
@@ -354,24 +402,45 @@ class StreamingLedger:
         validate_forecast_frame(df)
         self._sink.append(df)
         pending = df[df[Y].isna()].copy()
-        if not pending.empty:
-            self._pending = (
-                pending
-                if self._pending is None or self._pending.empty
-                else pd.concat([self._pending, pending], ignore_index=True)
-            )
+        if pending.empty:
+            return
+        pending.index = _key_index(pending)
+        if self._pending is None:
+            self._pending = pending
+            return
+        duplicates = self._pending.index.intersection(pending.index)
+        if len(duplicates):
+            raise ValueError(f"duplicate forecast keys appended to ledger: {list(duplicates)[:10]}")
+        self._pending = pd.concat([self._pending, pending])
 
-    def resolution_frame(self) -> pd.DataFrame:
+    def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
         if self._pending is None:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
-        return self._pending.copy()
+        # Pending rows all have y NaN by construction, so due = ds <= origin.
+        due = self._pending.loc[self._pending[DS] <= origin]
+        return due.reset_index(drop=True)
 
-    def update_resolved(self, df: pd.DataFrame) -> None:
+    def apply_resolutions(self, df: pd.DataFrame) -> None:
+        if df.empty:
+            return
+        keys = _key_index(df)
+        if self._pending is None:
+            raise ValueError("apply_resolutions called before any pending append")
+        unknown = keys.difference(self._pending.index)
+        if len(unknown):
+            raise ValueError(
+                f"apply_resolutions for keys not in the open set: {list(unknown)[:10]}"
+            )
         resolved = df[df[Y].notna()].copy()
         if not resolved.empty:
             self._append_resolved_updates(resolved)
-        pending = df[df[Y].isna()].copy()
-        self._pending = pending if not pending.empty else None
+            # Keyed upsert: resolved rows leave the open set; still-pending due
+            # rows (y still NaN, e.g. incomplete aggregates) stay, and rows that
+            # were never in the due frame are untouched (not a wholesale replace).
+            resolved_keys = _key_index(resolved)
+            self._pending = self._pending.drop(index=resolved_keys)
+            if self._pending.empty:
+                self._pending = None
 
     def to_df(self) -> pd.DataFrame:
         if exists(self._resolved_path):
@@ -379,7 +448,7 @@ class StreamingLedger:
         if exists(self._stream_path):
             return self._materialize_streaming_frame()
         if self._pending is not None:
-            return self._pending.copy()
+            return self._pending.reset_index(drop=True)
         return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
     def to_parquet(self, path: str | Path) -> None:
