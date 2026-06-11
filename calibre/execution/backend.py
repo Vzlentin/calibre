@@ -29,6 +29,7 @@ from calibre.core.forecast_frame import (
     MODEL_NAME,
     NONCONFORMITY_SCORE,
     UNIQUE_ID,
+    H,
     Y,
     validate_forecast_frame,
 )
@@ -614,6 +615,29 @@ class BackendEngine:
         # contract. The meaningful early return is on empty newly_resolved.
         with span("actuals_lookup", origin=origin):
             updated, newly_resolved = actuals.resolve(current, origin)
+
+        # Cumulative engine-internal conformal scores a window only at its
+        # terminal horizon and only when the whole window is present. When a
+        # window's horizons resolve across multiple origins, resolving its early
+        # rows per-origin would strand them: the runtime skips the still-partial
+        # window (no side effect) and apply_resolutions then removes them from
+        # the open set, so the window can never be presented complete and never
+        # scores. Defer incomplete cumulative windows here — their rows stay
+        # unresolved (y NaN) in the open set until the terminal horizon resolves,
+        # at which point the whole window is due together. Strictly gated to the
+        # SymmetricIntervalRuntime cumulative path; perhorizon, runtime-None, and
+        # CumulativeRiskRuntime paths are untouched.
+        if (
+            isinstance(conformal_runtime, SymmetricIntervalRuntime)
+            and conformal_runtime.mode == "cumulative"
+            and conformal_runtime.config.protection_period is not None
+        ):
+            updated, newly_resolved = self._defer_incomplete_cumulative_windows(
+                updated,
+                newly_resolved,
+                int(conformal_runtime.config.protection_period),
+            )
+
         if newly_resolved.empty:
             return
 
@@ -639,6 +663,60 @@ class BackendEngine:
         # the constant name is the contract).
         with span("ledger_update_resolved", origin=origin):
             ledger.apply_resolutions(updated)
+
+    @staticmethod
+    def _defer_incomplete_cumulative_windows(
+        updated: pd.DataFrame,
+        newly_resolved: pd.DataFrame,
+        protection_period: int,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Hold back incomplete cumulative windows from this resolution batch.
+
+        Mirrors the runtime's completeness rule (``calibre/conformal/runtime.py``
+        ``_observe_cumulative``): within each ``(unique_id, model_name,
+        forecast_origin)`` window, only horizons ``h <= protection_period`` are
+        scored, and the window is observable only once all of them are present
+        (count ``>= protection_period``) with no NaN ``y``. Windows that fail
+        that test have their ``h <= protection_period`` rows reverted to
+        unresolved: dropped from ``newly_resolved`` and reset to ``y`` NaN in
+        ``updated`` so the ledger keeps them open (y NaN) for a later origin.
+
+        Rows with ``h > protection_period`` sit outside every scoring window and
+        are never deferred — deferring them would strand them in the open set
+        forever (no window completes them), so they resolve per-origin exactly as
+        today. The mirror assumes contiguous ``h = 1..horizon``, which the task
+        builder guarantees.
+        """
+        if newly_resolved.empty:
+            return updated, newly_resolved
+
+        window_rows = newly_resolved[newly_resolved[H] <= protection_period]
+        if window_rows.empty:
+            return updated, newly_resolved
+
+        group_cols = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
+        defer_index: list[Any] = []
+        for _, group in window_rows.groupby(group_cols, sort=False):
+            # Completeness is judged against the window as seen in `updated`,
+            # which carries every present horizon for this window (including any
+            # already filled at a prior call), not only this batch's new rows.
+            key = group[group_cols].iloc[0]
+            window = updated[
+                (updated[UNIQUE_ID] == key[UNIQUE_ID])
+                & (updated[MODEL_NAME] == key[MODEL_NAME])
+                & (updated[FORECAST_ORIGIN] == key[FORECAST_ORIGIN])
+                & (updated[H] <= protection_period)
+            ]
+            if len(window) >= protection_period and not window[Y].isna().any():
+                continue
+            defer_index.extend(group.index.tolist())
+
+        if not defer_index:
+            return updated, newly_resolved
+
+        updated.loc[defer_index, Y] = np.nan
+        newly_resolved = newly_resolved.drop(index=defer_index)
+        return updated, newly_resolved
 
     def _restore_conformal_state(self) -> None:
         if (
