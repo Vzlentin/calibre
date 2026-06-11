@@ -13,7 +13,11 @@ import pytest
 
 from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.execution.task_builder import build_node_history, build_tasks, partition_tasks
-from calibre.reconciliation.summing import TOTAL_LABEL, build_summing_matrix
+from calibre.reconciliation.summing import (
+    TOTAL_LABEL,
+    build_hierarchy_index,
+    build_summing_matrix,
+)
 
 
 @pytest.fixture
@@ -71,7 +75,7 @@ class TestBuildNodeHistory:
         pd.testing.assert_frame_equal(out, sample_sales)
 
     def test_builds_aggregate_rows_aligned_to_summing_labels(self, sample_sales, sample_hierarchy):
-        out = build_node_history(sample_sales, sample_hierarchy)
+        out = build_node_history(sample_sales, build_hierarchy_index(sample_hierarchy))
         summing = build_summing_matrix(sample_hierarchy)
 
         assert out["unique_id"].unique().tolist() == list(summing.node_labels)
@@ -85,6 +89,25 @@ class TestBuildNodeHistory:
         assert d1 == pytest.approx(20.0)
         assert total == pytest.approx(30.0)
 
+    def test_str_colliding_attr_values_merge_into_one_aggregate(self, sample_sales):
+        # int 1 and str "1" in one attr column merge under the stringified
+        # predicate — one aggregate row summing both members, no duplicates.
+        hierarchy = pd.DataFrame(
+            {"unique_id": ["series_a", "series_b", "series_c"], "grp": [1, "1", "2"]}
+        )
+        out = build_node_history(sample_sales, build_hierarchy_index(hierarchy))
+
+        labels = out["unique_id"].unique().tolist()
+        assert labels.count("grp=1") == 1
+        first_day = sample_sales["ds"].min()
+        merged = out[(out["unique_id"] == "grp=1") & (out["ds"] == first_day)]
+        assert len(merged) == 1
+        both_members = sample_sales[
+            (sample_sales["unique_id"].isin(["series_a", "series_b"]))
+            & (sample_sales["ds"] == first_day)
+        ]["y"].sum()
+        assert merged["y"].iloc[0] == pytest.approx(both_members)
+
     def test_partial_history_dates_omit_incomplete_aggregates(self, sample_sales, sample_hierarchy):
         partial = sample_sales[
             ~(
@@ -92,7 +115,7 @@ class TestBuildNodeHistory:
                 & (sample_sales["ds"] == pd.Timestamp("2024-01-01"))
             )
         ]
-        out = build_node_history(partial, sample_hierarchy)
+        out = build_node_history(partial, build_hierarchy_index(sample_hierarchy))
 
         first_day = pd.Timestamp("2024-01-01")
         d1 = out[(out["unique_id"] == "dept_id=D1") & (out["ds"] == first_day)]
@@ -112,7 +135,7 @@ class TestBuildNodeHistory:
         )
 
         with pytest.raises(ValueError, match="not present in hierarchy"):
-            build_node_history(bad, sample_hierarchy)
+            build_node_history(bad, build_hierarchy_index(sample_hierarchy))
 
 
 class TestBuildTasksLocal:
@@ -168,7 +191,7 @@ class TestBuildTasksLocal:
         assert len(groups) == 0
 
     def test_hierarchy_creates_one_local_task_per_node(self, sample_sales, sample_hierarchy):
-        node_history = build_node_history(sample_sales, sample_hierarchy)
+        node_history = build_node_history(sample_sales, build_hierarchy_index(sample_hierarchy))
         groups = build_tasks(
             node_history,
             [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2}],
@@ -216,7 +239,7 @@ class TestBuildTasksGlobal:
     def test_hierarchy_global_scope_deduplicates_node_panel(
         self, sample_sales, sample_hierarchy, statsforecast_global_config
     ):
-        node_history = build_node_history(sample_sales, sample_hierarchy)
+        node_history = build_node_history(sample_sales, build_hierarchy_index(sample_hierarchy))
         groups = build_tasks(
             node_history,
             statsforecast_global_config,
@@ -265,7 +288,7 @@ class TestBuildTasksOverrides:
 
     def test_hierarchy_override_accepts_known_aggregate_label(self, sample_sales, sample_hierarchy):
         override_cfg = [{"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2}]
-        node_history = build_node_history(sample_sales, sample_hierarchy)
+        node_history = build_node_history(sample_sales, build_hierarchy_index(sample_hierarchy))
         groups = build_tasks(
             node_history,
             [{"backend": "statsforecast", "model": "Naive"}],

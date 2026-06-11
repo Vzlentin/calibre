@@ -174,7 +174,7 @@ def run_config(
         ),
         reconciliation=ReconciliationOptions(
             reconciler=preparation.reconciler,
-            hierarchy=preparation.reconciliation_hierarchy,
+            hierarchy_index=preparation.hierarchy_index,
         ),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(
             phase=preparation.hierarchical_interval_phase

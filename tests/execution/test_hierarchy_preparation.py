@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -72,7 +74,7 @@ def test_flat_preparation_keeps_bottom_actuals_and_skips_memory_guard(
     preparation = prepare_run(_config(), bundle)
 
     pd.testing.assert_frame_equal(preparation.actuals, bundle.history)
-    assert preparation.reconciliation_hierarchy is None
+    assert preparation.hierarchy_index is None
 
 
 def test_reconciliation_preparation_materializes_node_actuals(
@@ -95,11 +97,8 @@ def test_reconciliation_preparation_materializes_node_actuals(
     )
 
     summing = build_summing_matrix(hierarchy)
-    assert preparation.reconciliation_hierarchy is not None
-    pd.testing.assert_frame_equal(
-        preparation.reconciliation_hierarchy.reset_index(drop=True),
-        hierarchy.reset_index(drop=True),
-    )
+    assert preparation.hierarchy_index is not None
+    assert preparation.hierarchy_index.node_labels == summing.node_labels
     assert preparation.reconciler is not None
     assert isinstance(preparation.actuals, pd.DataFrame)
     assert set(preparation.actuals[UNIQUE_ID]) == set(summing.node_labels)
@@ -136,6 +135,33 @@ def test_bottom_up_preparation_builds_bottom_only_tasks_and_lazy_actuals(
     assert preparation.tasks.global_ == []
 
 
+def test_prepare_run_threads_one_shared_hierarchy_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lazy actuals source consumes the SAME index object run preparation
+    built and exposes (mirrors #147's shared-facts identity assertion)."""
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        lambda *args, **kwargs: None,
+    )
+
+    preparation = prepare_run(
+        _config(reconciliation={"strategy": "bottom_up"}),
+        _bundle(hierarchy=_hierarchy()),
+    )
+
+    assert preparation.hierarchy_index is not None
+    assert isinstance(preparation.actuals, HierarchyActualsSource)
+    # Identity, not equality: no consumer rebuilds the index.
+    assert preparation.actuals._index is preparation.hierarchy_index
+
+
+def test_flat_preparation_has_no_hierarchy_index() -> None:
+    preparation = prepare_run(_config(), _bundle(hierarchy=_hierarchy()))
+
+    assert preparation.hierarchy_index is None
+
+
 def test_empty_origins_raise_clear_error() -> None:
     config = _config(origins={"start": "2024-01-01", "end": "2024-01-02", "freq": "W-SUN"})
 
@@ -170,6 +196,51 @@ def test_hierarchy_guard_runs_before_node_history(
         prepare_run(_config(**config_override), _bundle(hierarchy=_hierarchy()))
 
 
+def test_densifying_preflight_accounts_dense_s_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The eager (densifying) branch sets dense_s_bytes = node_count x n_bottom x 8."""
+    captured = {}
+
+    def capture(estimate):
+        captured["estimate"] = estimate
+
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        capture,
+    )
+
+    prepare_run(_config(reconciliation={"strategy": "ols"}), _bundle(hierarchy=_hierarchy()))
+
+    # _hierarchy(): 2 bottom (a, b) + dept=D + __total__ = 4 nodes -> 4 * 2 * 8.
+    assert captured["estimate"].dense_s_bytes == 4 * 2 * 8
+
+
+def test_densifying_guard_message_includes_dense_s_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_memory.read_effective_available_memory_bytes", lambda: 1
+    )
+
+    with pytest.raises(ValueError, match="dense summing-matrix bytes"):
+        prepare_run(_config(reconciliation={"strategy": "ols"}), _bundle(hierarchy=_hierarchy()))
+
+
+def test_bottom_up_preflight_never_accounts_dense_s_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native bottom_up takes the bottom_only branch: it never builds the eager
+    expansion estimate, so the dense-S term never applies."""
+
+    def fail_enforce(*args, **kwargs):
+        raise AssertionError("bottom_up must not run the eager expansion guard")
+
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        fail_enforce,
+    )
+
+    # No AssertionError raised: the guard (and its dense-S term) is never reached.
+    prepare_run(_config(reconciliation={"strategy": "bottom_up"}), _bundle(hierarchy=_hierarchy()))
+
+
 def test_hierarchical_interval_preparation_uses_fused_phase_without_point_reconciler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -183,7 +254,7 @@ def test_hierarchical_interval_preparation_uses_fused_phase_without_point_reconc
         _bundle(hierarchy=_hierarchy()),
     )
 
-    assert preparation.reconciliation_hierarchy is not None
+    assert preparation.hierarchy_index is not None
     assert preparation.reconciler is None
     assert preparation.hierarchical_interval_phase is not None
     assert preparation.conformal_config is None
@@ -268,7 +339,12 @@ def test_eager_guard_and_partition_limit_consume_shared_expansion_facts(
     with pytest.raises(ValueError, match="approximately 8"):
         prepare_run(config, _bundle(hierarchy=_hierarchy()))
 
-    assert captured["estimate"] is sentinel
+    # The guard receives the estimate run preparation computed, augmented only
+    # with the densifying dense-S term (node_count x n_bottom x 8); every other
+    # fact is carried through unchanged, so it is still one source of truth.
+    guard_estimate = captured["estimate"]
+    assert replace(guard_estimate, dense_s_bytes=0) == sentinel
+    assert guard_estimate.dense_s_bytes == sentinel.node_count * sentinel.bottom_unique_ids * 8
 
 
 def test_eager_hierarchy_partition_estimate_matches_materialized_nodes(
@@ -324,7 +400,7 @@ def test_bottom_up_preparation_runs_end_to_end_through_engine() -> None:
         execution=ExecutionOptions(freq="D", backend="local", seed=42),
         reconciliation=ReconciliationOptions(
             reconciler=preparation.reconciler,
-            hierarchy=preparation.reconciliation_hierarchy,
+            hierarchy_index=preparation.hierarchy_index,
         ),
     )
     try:
@@ -369,3 +445,46 @@ def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
     assert preparation.tasks.local == []
     assert len(preparation.tasks.global_) == 1
     assert preparation.conformal_partition_estimate == 4
+
+
+def test_partition_limit_memo_is_clone_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flat-panel partition memo keys on history content, not id(): two
+    cloned-but-equal histories collapse to one memo entry (#159). The estimate
+    is the same either way; the spy proves the count is computed once."""
+    from calibre.core.forecast_task import ForecastTask, TaskGroups
+    from calibre.execution.hierarchy_preparation import _enforce_conformal_partition_limit
+
+    history = pd.DataFrame(
+        {
+            UNIQUE_ID: ["a", "b"],
+            DS: pd.date_range("2024-01-01", periods=2, freq="D"),
+            Y: [1.0, 2.0],
+        }
+    )
+    # Two distinct objects with identical content (id() would recount each).
+    tasks = TaskGroups(
+        local=[
+            ForecastTask(history=history.copy(), horizon=2, model_config={"backend": "x"}),
+            ForecastTask(history=history.copy(), horizon=2, model_config={"backend": "x"}),
+        ],
+        global_=[],
+    )
+
+    seen_keys: list[tuple[str, ...]] = []
+    real_unique = pd.Series.unique
+
+    def _spy_unique(self):
+        result = real_unique(self)
+        seen_keys.append(tuple(sorted(str(value) for value in result)))
+        return result
+
+    monkeypatch.setattr(pd.Series, "unique", _spy_unique, raising=False)
+
+    config = _config(conformal={"method": "mscp", "partition": "series", "max_partitions": 100})
+    estimate = _enforce_conformal_partition_limit(config, tasks, horizon=2)
+
+    # Per-task accumulation unchanged: 2 uids x horizon 2, summed over 2 tasks.
+    assert estimate == 2 * 2 + 2 * 2
+    # Both cloned histories resolve to the same content key, so the memo holds a
+    # single distinct entry for them (the key scan runs per task, the count once).
+    assert len(set(seen_keys)) == 1

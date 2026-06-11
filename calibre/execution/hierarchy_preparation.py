@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import pandas as pd
@@ -19,7 +19,7 @@ from calibre.execution.hierarchy_memory import (
 )
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler, resolve_reconciler
-from calibre.reconciliation.summing import build_hierarchy_index
+from calibre.reconciliation.summing import HierarchyIndex, build_hierarchy_index
 
 
 class _TaskConfig(Protocol):
@@ -77,7 +77,7 @@ class RunPreparation:
     actuals: pd.DataFrame | ActualsSource
     origins: list[pd.Timestamp]
     conformal_config: SymmetricIntervalConfig | None
-    reconciliation_hierarchy: pd.DataFrame | None
+    hierarchy_index: HierarchyIndex | None
     reconciler: Reconciler | None
     hierarchical_interval_phase: HierarchicalIntervalPhase | None
     conformal_partition_estimate: int | None
@@ -105,7 +105,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         # materialization, so it does not apply here. Ledger partitions still
         # span the full hierarchy node set once aggregates are synthesized.
         assert reconciliation_hierarchy is not None and hierarchy_index is not None
-        actuals = HierarchyActualsSource(bundle.history, reconciliation_hierarchy)
+        actuals = HierarchyActualsSource(bundle.history, hierarchy_index)
         tasks = build_tasks(bundle.history, model_configs, horizon)
         hierarchy_partitions = len(hierarchy_index.node_labels) * horizon * len(config.tasks)
     else:
@@ -116,9 +116,16 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
                 horizon=horizon,
                 model_count=len(config.tasks),
             )
+            # This branch is the densifying path (ols/erm/MinT point reconcilers
+            # and the fused interval phase all build the dense S per origin);
+            # native bottom_up takes the bottom_only branch and never reaches
+            # here, so accounting the dense-S term unconditionally here is the
+            # implicit gate. node_count x n_bottom x 8 bytes (float64).
+            dense_s_bytes = len(hierarchy_index.node_labels) * len(hierarchy_index.bottom_ids) * 8
+            expansion = replace(expansion, dense_s_bytes=dense_s_bytes)
             enforce_hierarchical_expansion_memory_limit(expansion)
             hierarchy_partitions = expansion.forecast_partitions
-        actuals = build_node_history(bundle.history, reconciliation_hierarchy)
+        actuals = build_node_history(bundle.history, hierarchy_index)
         tasks = build_tasks(actuals, model_configs, horizon)
     conformal_partition_estimate = _enforce_conformal_partition_limit(
         config,
@@ -138,7 +145,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         actuals=actuals,
         origins=origins,
         conformal_config=conformal_config,
-        reconciliation_hierarchy=reconciliation_hierarchy,
+        hierarchy_index=hierarchy_index,
         reconciler=(
             None
             if config.hierarchical_intervals is not None
@@ -193,15 +200,23 @@ def _enforce_conformal_partition_limit(
         # projected node set from the expansion estimate for eager runs.
         estimated_partitions = hierarchy_partitions
     else:
-        unique_ids_by_history: dict[int, int] = {}
+        # Memoize the per-history uid count on a content-derived key — the sorted
+        # stringified uid tuple, the load-bearing component of task_builder's
+        # _global_dedup_key — instead of id(task.history), which silently
+        # recounts a cloned-but-equal history frame. The cached fact is a
+        # uid-count, which depends only on the uid set, so config/horizon are not
+        # part of the key (a tuple, not a joined string, so comma-bearing
+        # unique_ids cannot alias). This memo is reachable only on the flat-panel
+        # partition path (hierarchy runs take the branch above), and the key is
+        # itself a uid scan, so the change is correctness-motivated (clone-safe),
+        # not a performance optimization.
+        unique_ids_by_history: dict[tuple[str, ...], int] = {}
         estimated_partitions = 0
         for task_group in (tasks.local, tasks.global_):
             for task in task_group:
-                history_key = id(task.history)
+                history_key = tuple(sorted(task.history[UNIQUE_ID].astype(str).unique()))
                 if history_key not in unique_ids_by_history:
-                    unique_ids_by_history[history_key] = int(
-                        task.history[UNIQUE_ID].astype(str).nunique()
-                    )
+                    unique_ids_by_history[history_key] = len(history_key)
                 estimated_partitions += unique_ids_by_history[history_key] * horizon
 
     if estimated_partitions > config.conformal.max_partitions:

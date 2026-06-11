@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -79,7 +80,7 @@ def test_hierarchical_expansion_estimate_matches_ragged_node_history_rows() -> N
         }
     )
 
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=2)
     naive_full_panel_rows = 2 * len(build_summing_matrix(hierarchy).node_labels)
 
@@ -104,7 +105,7 @@ def test_hierarchical_expansion_estimate_matches_hierarchy_superset_node_history
         }
     )
 
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=2)
     naive_full_panel_rows = 2 * len(build_summing_matrix(hierarchy).node_labels)
 
@@ -222,7 +223,7 @@ def test_estimated_node_history_peak_bounds_m5_fixture_expansion() -> None:
     bundle = _load_dataset(config)
     assert bundle.hierarchy is not None
 
-    node_history = build_node_history(bundle.history, bundle.hierarchy)
+    node_history = build_node_history(bundle.history, build_hierarchy_index(bundle.hierarchy))
     estimate = estimate_hierarchical_expansion(
         bundle.history,
         build_hierarchy_index(bundle.hierarchy),
@@ -233,6 +234,27 @@ def test_estimated_node_history_peak_bounds_m5_fixture_expansion() -> None:
     assert estimate.projected_node_history_rows == len(node_history)
     assert estimate.projected_node_count == node_history[UNIQUE_ID].nunique()
     assert estimated_node_history_peak_bytes(estimate) > node_history.memory_usage(deep=True).sum()
+
+
+def test_direct_call_estimate_leaves_dense_s_bytes_zero() -> None:
+    """estimate_hierarchical_expansion never sets the dense-S term itself; only
+    run preparation's densifying branch does (so direct-call peaks are unchanged)."""
+    history = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            DS: pd.date_range("2024-01-01", periods=2, freq="D").tolist(),
+            Y: [1.0, 2.0],
+        }
+    )
+    hierarchy = pd.DataFrame({UNIQUE_ID: ["A", "B"], "dept_id": ["D", "D"]})
+
+    estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=1)
+
+    assert estimate.dense_s_bytes == 0
+    peak = estimated_node_history_peak_bytes(estimate)
+    # The dense-S term is additive: a non-zero term raises the peak.
+    densified = replace(estimate, dense_s_bytes=4 * 2 * 8)
+    assert estimated_node_history_peak_bytes(densified) == peak + 4 * 2 * 8
 
 
 def test_run_config_smoke_on_m5_fixture(tmp_path: Path) -> None:

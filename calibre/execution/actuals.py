@@ -24,7 +24,7 @@ import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, validate_actuals_frame
 from calibre.evaluation.forecast_metrics import resolve_actuals
-from calibre.reconciliation.summing import TOTAL_LABEL, build_hierarchy_index
+from calibre.reconciliation.summing import TOTAL_LABEL, HierarchyIndex
 
 
 class ActualsSource(Protocol):
@@ -61,7 +61,8 @@ class FrameActualsSource:
 class HierarchyActualsSource:
     """Resolve hierarchy node actuals on demand from bottom history.
 
-    Holds the bottom-level history and the hierarchy attribute frame. Bottom
+    Holds the bottom-level history and the prebuilt :class:`HierarchyIndex`
+    (the same instance run preparation built — never rebuilt here). Bottom
     node actuals are direct lookups; ``"<column>=<value>"`` aggregates and the
     grand total are summed over their member bottom series only for the
     requested ``(node, ds)`` pairs, with the same all-members-present
@@ -69,9 +70,9 @@ class HierarchyActualsSource:
     eager node-history frame holds row-for-row.
     """
 
-    def __init__(self, bottom_history: pd.DataFrame, hierarchy: pd.DataFrame) -> None:
+    def __init__(self, bottom_history: pd.DataFrame, hierarchy_index: HierarchyIndex) -> None:
         validate_actuals_frame(bottom_history)
-        self._index = build_hierarchy_index(hierarchy)
+        self._index = hierarchy_index
 
         data = bottom_history[[UNIQUE_ID, DS, Y]].copy()
         data[UNIQUE_ID] = data[UNIQUE_ID].astype(str)
@@ -100,10 +101,10 @@ class HierarchyActualsSource:
         self._bottom = data
         self._node_labels = set(self._index.node_labels)
         self._bottom_ids = set(self._index.bottom_ids)
-        self._members_by_attr = {
-            col: self._index.frame.groupby(col, sort=False)[UNIQUE_ID].nunique()
-            for col in self._index.attr_cols
-        }
+        # The single stringified counting authority — keys match the stringified
+        # attribute values used everywhere aggregate labels are produced, so the
+        # completeness check below groups on the stringified column too (#148).
+        self._members_by_attr = self._index.expected_members()
         # Per-run cache of *complete* (node, ds) -> y sums. Bottom history is
         # fixed at construction, so completeness per (node, ds) is fixed for the
         # whole run and a cached entry never invalidates — a future change that
@@ -227,7 +228,11 @@ class HierarchyActualsSource:
                     on=UNIQUE_ID,
                     how="inner",
                 )
-            members = joined[joined[col].astype(str).isin(wanted_values)]
+            # Group on the stringified attribute column so the completeness
+            # comparison reads the same stringified member counts the predicate
+            # produces (str-colliding values resolve to one coherent group).
+            members = joined.assign(**{col: joined[col].astype(str)})
+            members = members[members[col].isin(wanted_values)]
             grouped = (
                 members.groupby([col, DS], sort=True)
                 .agg(**{Y: (Y, "sum"), "_member_count": (UNIQUE_ID, "nunique")})

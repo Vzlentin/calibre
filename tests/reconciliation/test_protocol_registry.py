@@ -11,6 +11,7 @@ from calibre.reconciliation import (
     available_reconcilers,
     resolve_reconciler,
 )
+from calibre.reconciliation.summing import build_hierarchy_index
 
 
 def _frame() -> pd.DataFrame:
@@ -32,11 +33,13 @@ def test_none_resolves_to_identity_passthrough() -> None:
 
 
 def test_none_is_identity_even_with_non_none_hierarchy() -> None:
-    """The no-op reconciler ignores the hierarchy and is a strict identity."""
+    """The no-op reconciler ignores the hierarchy index and is a strict identity."""
     reconciler = resolve_reconciler("none")
     frame = _frame()
-    hierarchy = pd.DataFrame({"unique_id": ["A", "B"], "store_id": ["S1", "S2"]})
-    out = reconciler(frame, hierarchy, ReconciliationContext())
+    hierarchy_index = build_hierarchy_index(
+        pd.DataFrame({"unique_id": ["A", "B"], "store_id": ["S1", "S2"]})
+    )
+    out = reconciler(frame, hierarchy_index, ReconciliationContext())
     pd.testing.assert_frame_equal(out, frame)
 
 

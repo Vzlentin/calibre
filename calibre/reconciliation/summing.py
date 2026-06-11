@@ -39,6 +39,33 @@ class HierarchyIndex:
     attr_cols: tuple[str, ...]
     bottom_ids: tuple[str, ...]
     node_labels: tuple[str, ...]
+    members_by_attr: dict[str, pd.Series]
+
+    def expected_members(self) -> dict[str, pd.Series]:
+        """Per-attribute-column member counts, grouped on stringified values.
+
+        The single counting authority every member-completeness site reads
+        (``build_node_history``, ``HierarchyActualsSource``, the bottom-up
+        reconciler, and the preflight estimate). Each attribute column is
+        stringified with ``astype(str)`` before grouping, so the returned
+        ``Series`` is keyed by the same stringified values that
+        ``build_summing_matrix`` and ``node_labels`` use for aggregate labels.
+
+        ``.size()`` and ``.nunique()`` coincide here: the index frame is
+        deduplicated on stringified ``unique_id`` (see :func:`build_hierarchy_index`),
+        so each bottom id contributes exactly one row per attribute column, and
+        NaN attribute values are rejected at index build (so no group is dropped
+        by ``nunique``'s NaN handling). The only behavioral difference from a
+        raw ``groupby`` is that values colliding under ``str()`` (e.g. ``1`` and
+        ``"1"``) are coherently merged into one group — matching what label
+        production and the dense summing matrix already do — and that
+        ``category``-dtype phantom groups for unobserved categories are dropped
+        by construction.
+
+        Precomputed once at index build (the index is frozen and the counts are
+        run-constant): the bottom-up reconciler reads this per origin.
+        """
+        return self.members_by_attr
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,22 +160,28 @@ def build_hierarchy_index(hierarchy: pd.DataFrame) -> HierarchyIndex:
             f"bottom unique_id values: {duplicates}"
         )
 
+    members_by_attr: dict[str, pd.Series] = {}
+    for col in attr_cols:
+        values = frame[col].astype(str)
+        members_by_attr[col] = values.groupby(values).size()
+
     return HierarchyIndex(
         frame=frame,
         attr_cols=attr_cols,
         bottom_ids=bottom_ids,
         node_labels=tuple(labels),
+        members_by_attr=members_by_attr,
     )
 
 
-def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
-    """Build a :class:`SummingMatrix` from a hierarchy attribute frame.
+def summing_matrix_from_index(hierarchy_index: HierarchyIndex) -> SummingMatrix:
+    """Densify a prebuilt :class:`HierarchyIndex` into a :class:`SummingMatrix`.
 
-    ``hierarchy`` must carry a ``unique_id`` column; every other column is
-    treated as a cross-sectional grouping dimension (discovered generically). The
-    bottom ids are sorted for deterministic node labels.
+    The dense S is derived on demand by the strategies that genuinely need it;
+    it is never owned by the index or run preparation. Callers that hold the
+    threaded index densify through this entry point so no index facts are
+    re-derived (same S bytes as the from-frame path).
     """
-    hierarchy_index = build_hierarchy_index(hierarchy)
     frame = hierarchy_index.frame
     attr_cols = hierarchy_index.attr_cols
     bottom_ids = hierarchy_index.bottom_ids
@@ -168,3 +201,16 @@ def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
         bottom_ids=bottom_ids,
         node_labels=hierarchy_index.node_labels,
     )
+
+
+def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
+    """Build a :class:`SummingMatrix` from a hierarchy attribute frame.
+
+    ``hierarchy`` must carry a ``unique_id`` column; every other column is
+    treated as a cross-sectional grouping dimension (discovered generically). The
+    bottom ids are sorted for deterministic node labels. Convenience entry
+    point for callers holding only a raw frame (tests, ad-hoc tooling);
+    production paths hold the threaded index and densify through
+    :func:`summing_matrix_from_index`.
+    """
+    return summing_matrix_from_index(build_hierarchy_index(hierarchy))

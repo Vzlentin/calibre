@@ -24,7 +24,11 @@ from calibre.reconciliation.nixtla_adapter import (
     _to_nixtla_layout,
 )
 from calibre.reconciliation.protocols import ReconciliationContext
-from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
+from calibre.reconciliation.summing import (
+    SummingMatrix,
+    build_hierarchy_index,
+    build_summing_matrix,
+)
 
 
 class _CountingMethod:
@@ -164,7 +168,7 @@ def test_residual_min_trace_factory_passes_strategy_and_single_thread(
 
     NixtlaReconciler(strategy)(
         _tiny_forecast_frame(),
-        _tiny_hierarchy(),
+        build_hierarchy_index(_tiny_hierarchy()),
         ReconciliationContext(fitted_values=_tiny_fitted_values()),
     )
 
@@ -190,7 +194,7 @@ def test_erm_factory_uses_closed_method(monkeypatch: pytest.MonkeyPatch) -> None
 
     NixtlaReconciler("erm")(
         _tiny_forecast_frame(),
-        _tiny_hierarchy(),
+        build_hierarchy_index(_tiny_hierarchy()),
         ReconciliationContext(fitted_values=_tiny_fitted_values()),
     )
 
@@ -380,7 +384,7 @@ def test_residual_strategies_use_fitted_context_and_return_coherent_frame(strate
 
     out = NixtlaReconciler(strategy, method_factory=factory)(
         frame,
-        _tiny_hierarchy(),
+        build_hierarchy_index(_tiny_hierarchy()),
         ReconciliationContext(fitted_values=_tiny_fitted_values()),
     )
 
@@ -396,7 +400,7 @@ def test_residual_strategy_requires_fitted_context() -> None:
     with pytest.raises(ValueError, match="requires in-sample fitted values"):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualMethod)(
             _tiny_forecast_frame(),
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(),
         )
 
@@ -408,7 +412,7 @@ def test_residual_strategy_names_missing_fitted_node() -> None:
     with pytest.raises(ValueError, match="dept=D"):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualMethod)(
             _tiny_forecast_frame(),
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(fitted_values=fitted),
         )
 
@@ -420,7 +424,7 @@ def test_residual_strategy_rejects_misaligned_fitted_timestamps() -> None:
     with pytest.raises(ValueError, match="misaligned"):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualMethod)(
             _tiny_forecast_frame(),
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(fitted_values=fitted),
         )
 
@@ -437,7 +441,7 @@ def test_reconciliation_rejects_quantile_columns_under_active_hierarchy() -> Non
     with pytest.raises(ValueError, match="quantile columns remain unreconciled"):
         NixtlaReconciler("ols", method_factory=_CountingMethod)(
             frame,
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(),
         )
 
@@ -452,7 +456,7 @@ def test_residual_sidecar_lookup_is_not_horizon_specific() -> None:
 
     NixtlaReconciler("mint_shrink", method_factory=factory)(
         frame,
-        _tiny_hierarchy(),
+        build_hierarchy_index(_tiny_hierarchy()),
         ReconciliationContext(fitted_values=fitted),
     )
 
@@ -501,7 +505,7 @@ def test_residual_fit_failure_is_wrapped_with_context() -> None:
     ):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualFitFailure)(
             _tiny_forecast_frame(),
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(fitted_values=_tiny_fitted_values()),
         )
 
@@ -513,7 +517,7 @@ def test_residual_predict_failure_is_wrapped_with_context() -> None:
     ):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualPredictFailure)(
             _tiny_forecast_frame(),
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(fitted_values=_tiny_fitted_values()),
         )
 
@@ -522,7 +526,7 @@ def test_residual_predict_requires_mean_key() -> None:
     with pytest.raises(ValueError, match="missing 'mean'.*model_name='m'.*forecast_origin=.*h=1"):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualMissingMean)(
             _tiny_forecast_frame(),
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(fitted_values=_tiny_fitted_values()),
         )
 
@@ -531,6 +535,6 @@ def test_residual_predict_requires_expected_mean_shape() -> None:
     with pytest.raises(ValueError, match=r"shape \(3, 1\); expected \(4, 1\)"):
         NixtlaReconciler("mint_shrink", method_factory=_ResidualWrongShape)(
             _tiny_forecast_frame(),
-            _tiny_hierarchy(),
+            build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(fitted_values=_tiny_fitted_values()),
         )

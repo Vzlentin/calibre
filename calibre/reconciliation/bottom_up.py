@@ -26,7 +26,7 @@ from calibre.core.forecast_frame import (
 )
 from calibre.reconciliation.apply import reject_quantile_columns
 from calibre.reconciliation.protocols import ReconciliationContext
-from calibre.reconciliation.summing import TOTAL_LABEL, HierarchyIndex, build_hierarchy_index
+from calibre.reconciliation.summing import TOTAL_LABEL, HierarchyIndex
 
 _GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
 
@@ -56,19 +56,16 @@ class BottomUpReconciler:
     def __call__(
         self,
         frame: pd.DataFrame,
-        hierarchy: pd.DataFrame | None,
+        hierarchy_index: HierarchyIndex | None,
         context: ReconciliationContext,
     ) -> pd.DataFrame:
         del context
-        if hierarchy is None or frame.empty:
+        if hierarchy_index is None or frame.empty:
             return frame
         reject_quantile_columns(frame, strategy="bottom_up")
-        index = build_hierarchy_index(hierarchy)
+        index = hierarchy_index
         attrs = index.frame.set_index(UNIQUE_ID)
-        expected_members = {
-            col: attrs[col].astype(str).groupby(attrs[col].astype(str)).size()
-            for col in index.attr_cols
-        }
+        expected_members = index.expected_members()
         parts = [
             self._expand_group(group, index, attrs, expected_members)
             for _, group in frame.groupby(_GROUP_KEYS, sort=False)

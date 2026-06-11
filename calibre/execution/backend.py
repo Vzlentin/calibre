@@ -68,7 +68,7 @@ from calibre.reconciliation.hierarchical_intervals import (
     HierarchicalIntervalPhase,
 )
 from calibre.reconciliation.protocols import Reconciler, ReconciliationContext
-from calibre.reconciliation.summing import build_summing_matrix
+from calibre.reconciliation.summing import HierarchyIndex
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
 
 logger = logging.getLogger(__name__)
@@ -128,15 +128,16 @@ class ConformalOptions:
 
 @dataclass(frozen=True)
 class ReconciliationOptions:
-    """Reconciler + hierarchy threaded into the engine (mirrors ConformalOptions).
+    """Reconciler + hierarchy index threaded into the engine (mirrors ConformalOptions).
 
-    A ``None`` reconciler or ``None`` hierarchy makes the Reconcile phase a no-op
-    by construction — the path VN2 (``hierarchy=None``) takes, keeping the
-    baseline byte-identical (R11).
+    A ``None`` reconciler or ``None`` hierarchy index makes the Reconcile phase a
+    no-op by construction — the path VN2 (``hierarchy_index=None``) takes, keeping
+    the baseline byte-identical (R11). The engine consumes the single index run
+    preparation built; it never sees the raw hierarchy frame and never builds S.
     """
 
     reconciler: Reconciler | None = None
-    hierarchy: pd.DataFrame | None = None
+    hierarchy_index: HierarchyIndex | None = None
 
 
 @dataclass(frozen=True)
@@ -170,10 +171,10 @@ class BackendEngine:
         self.output = output
         self.conformal = conformal
         self.reconciler = reconciliation.reconciler
-        self.hierarchy = reconciliation.hierarchy
+        self.hierarchy_index = reconciliation.hierarchy_index
         self.hierarchical_interval_phase = hierarchical_intervals.phase
         if self.hierarchical_interval_phase is not None:
-            if self.hierarchy is None:
+            if self.hierarchy_index is None:
                 raise ValueError("hierarchical intervals require a hierarchy")
             if conformal.runtime is not None or conformal.config is not None:
                 raise ValueError("hierarchical intervals cannot be combined with conformal runtime")
@@ -183,7 +184,7 @@ class BackendEngine:
                 )
         self._requires_fitted_values = bool(
             (
-                reconciliation.hierarchy is not None
+                reconciliation.hierarchy_index is not None
                 and reconciliation.reconciler is not None
                 and reconciliation.reconciler.requires_fitted_values
             )
@@ -193,8 +194,8 @@ class BackendEngine:
             )
         )
         self._order_bottom_ids = (
-            frozenset(build_summing_matrix(self.hierarchy).bottom_ids)
-            if self.hierarchy is not None and order is not None
+            frozenset(self.hierarchy_index.bottom_ids)
+            if self.hierarchy_index is not None and order is not None
             else None
         )
         self.order_config = order
@@ -491,11 +492,11 @@ class BackendEngine:
         or the predictions are empty (R3, R11) — the VN2 path, byte-identical by
         construction. This phase is blind to conformal/order state.
         """
-        if self.reconciler is None or self.hierarchy is None or origin_preds.empty:
+        if self.reconciler is None or self.hierarchy_index is None or origin_preds.empty:
             return origin_preds
         return self.reconciler(
             origin_preds,
-            self.hierarchy,
+            self.hierarchy_index,
             context,
         )
 
@@ -507,8 +508,8 @@ class BackendEngine:
         """Fused hierarchical conformal phase — replace Reconcile + Calibrate."""
         if self.hierarchical_interval_phase is None or origin_preds.empty:
             return origin_preds
-        assert self.hierarchy is not None  # checked at construction
-        return self.hierarchical_interval_phase.apply(origin_preds, self.hierarchy, context)
+        assert self.hierarchy_index is not None  # checked at construction
+        return self.hierarchical_interval_phase.apply(origin_preds, self.hierarchy_index, context)
 
     def _calibrate(
         self,

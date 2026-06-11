@@ -50,7 +50,7 @@ from calibre.reconciliation import (
     NoOpReconciler,
     ReconciliationContext,
 )
-from calibre.reconciliation.summing import build_summing_matrix
+from calibre.reconciliation.summing import build_hierarchy_index, build_summing_matrix
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
 
@@ -90,7 +90,7 @@ def _m5_bundle_tasks_origins():
         }
     )
     bundle = _load_dataset(config)
-    node_history = build_node_history(bundle.history, bundle.hierarchy)
+    node_history = build_node_history(bundle.history, build_hierarchy_index(bundle.hierarchy))
     model_configs = [task.resolved_model_config() for task in config.tasks]
     tasks = build_tasks(node_history, model_configs, 1)
     origins = config.origins.to_list()
@@ -121,7 +121,9 @@ def _run_m5(bundle, actuals, tasks, origins, reconciler) -> pd.DataFrame:
                 method="aci", coverage=0.9, calibration_window=4, gamma=0.05
             )
         ),
-        reconciliation=ReconciliationOptions(reconciler=reconciler, hierarchy=bundle.hierarchy),
+        reconciliation=ReconciliationOptions(
+            reconciler=reconciler, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
     )
     try:
         result = engine.execute(tasks, actuals, origins)
@@ -140,7 +142,9 @@ def _run_m5_hierarchical_intervals(
 ) -> pd.DataFrame:
     engine = BackendEngine(
         execution=ExecutionOptions(freq="D", backend="local", seed=42),
-        reconciliation=ReconciliationOptions(reconciler=None, hierarchy=bundle.hierarchy),
+        reconciliation=ReconciliationOptions(
+            reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(
             phase=NixtlaHierarchicalIntervalPhase(
                 HierarchicalIntervalOptions(
@@ -236,7 +240,7 @@ def _synthetic_m5_node_history(hierarchy: pd.DataFrame) -> pd.DataFrame:
         for idx, uid in enumerate(bottom_ids)
         for step, ds in enumerate(dates)
     ]
-    return build_node_history(pd.DataFrame(rows), hierarchy)
+    return build_node_history(pd.DataFrame(rows), build_hierarchy_index(hierarchy))
 
 
 def _synthetic_residual_tasks(node_history: pd.DataFrame, *, horizon: int = 1):
@@ -430,7 +434,9 @@ def test_hierarchical_interval_ordering_uses_bottom_rows_only(
     )
     engine = BackendEngine(
         execution=ExecutionOptions(freq="D", backend="local", seed=42),
-        reconciliation=ReconciliationOptions(hierarchy=bundle.hierarchy),
+        reconciliation=ReconciliationOptions(
+            hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=phase),
         order=RsConfig(params=pd.DataFrame()),
     )
@@ -456,7 +462,9 @@ def test_reconcile_byte_identical_when_hierarchy_none() -> None:
         }
     )
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=NixtlaReconciler("ols"), hierarchy=None)
+        reconciliation=ReconciliationOptions(
+            reconciler=NixtlaReconciler("ols"), hierarchy_index=None
+        )
     )
     out = engine._reconcile(preds, ReconciliationContext())
     pd.testing.assert_frame_equal(out, preds)

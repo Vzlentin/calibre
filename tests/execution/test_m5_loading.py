@@ -8,7 +8,11 @@ import pytest
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.execution.m5_loading import build_m5_hierarchy, melt_m5_sales
 from calibre.execution.task_builder import build_node_history
-from calibre.reconciliation.summing import TOTAL_LABEL, build_summing_matrix
+from calibre.reconciliation.summing import (
+    TOTAL_LABEL,
+    build_hierarchy_index,
+    build_summing_matrix,
+)
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
 
@@ -65,7 +69,7 @@ def test_m5_node_history_contains_expected_aggregate_labels(fixture_dir: Path) -
     calendar = pd.read_csv(fixture_dir / "calendar.csv")
     history = melt_m5_sales(sales, calendar)
     hierarchy = build_m5_hierarchy(sales)
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     summing = build_summing_matrix(hierarchy)
 
     assert node_history[UNIQUE_ID].unique().tolist() == list(summing.node_labels)
