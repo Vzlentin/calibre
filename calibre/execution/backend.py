@@ -298,13 +298,13 @@ class BackendEngine:
         conformal_runtime = self.conformal_runtime
 
         try:
-            parallel_tasks = [_with_group_tag(task) for task in tasks.local]
+            local_tasks = [_with_group_tag(task) for task in tasks.local]
             direct_tasks = [_with_group_tag(task) for task in tasks.global_]
 
             with self._task_staging_prefix() as staging_prefix:
                 with span("staging_materialize"):
                     chunk_refs = self._materialize_local_chunks(
-                        parallel_tasks,
+                        local_tasks,
                         join_uri(staging_prefix, "local"),
                     )
                     direct_refs = self._materialize_task_refs(
@@ -808,7 +808,6 @@ class BackendEngine:
                         chunk_base,
                         horizon=chunk_tasks[0].horizon,
                         model_config=model_config,
-                        forecast_origin=chunk_tasks[0].forecast_origin,
                         task_group=chunk_tasks[0].task_group,
                     )
                 )

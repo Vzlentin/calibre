@@ -148,23 +148,31 @@ def _process_local_chunk(
     future_panel = (
         _read_parquet_cached(chunk_ref.future_x_uri) if chunk_ref.future_x_uri is not None else None
     )
-    model_config = dict(chunk_ref.model_config)
+
+    # Group once per chunk: per-uid boolean masks over the full panel would be
+    # O(chunk_size^2 x rows) and grow quadratically with the chunk_size knob.
+    history_by_uid = dict(tuple(panel.groupby(UNIQUE_ID, sort=False)))
+    future_by_uid: dict[object, pd.DataFrame] = (
+        dict(tuple(future_panel.groupby(UNIQUE_ID, sort=False)))
+        if future_panel is not None and not future_panel.empty
+        else {}
+    )
 
     results: list[PredictionResult] = []
     for uid in chunk_ref.unique_ids:
-        history = panel[(panel[UNIQUE_ID] == uid) & (panel[DS] < origin)]
+        uid_history = history_by_uid.get(uid)
+        if uid_history is None:
+            continue
+        history = uid_history[uid_history[DS] < origin]
         if history.empty:
             continue
 
-        future_x = None
-        if future_panel is not None and not future_panel.empty:
-            uid_future = future_panel[future_panel[UNIQUE_ID] == uid]
-            future_x = uid_future if not uid_future.empty else None
+        future_x = future_by_uid.get(uid)
 
         origin_task = ForecastTask(
             history=history.reset_index(drop=True),
             horizon=chunk_ref.horizon,
-            model_config=dict(model_config),
+            model_config=dict(chunk_ref.model_config),
             forecast_origin=origin,
             future_x=future_x.reset_index(drop=True) if future_x is not None else None,
             task_group=chunk_ref.task_group,

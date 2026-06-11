@@ -136,7 +136,6 @@ def _chunk(config: dict, *uids: str) -> ChunkTaskRef:
         unique_ids=tuple(uids),
         model_config=config,
         horizon=2,
-        forecast_origin=None,
         history_uri="memory://missing/history.parquet",
     )
 

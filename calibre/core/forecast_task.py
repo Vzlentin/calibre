@@ -129,7 +129,6 @@ class ChunkTaskRef:
     unique_ids: tuple[str, ...]
     model_config: dict[str, Any]
     horizon: int
-    forecast_origin: pd.Timestamp | None
     history_uri: str
     future_x_uri: str | None = None
     task_group: str | None = None
@@ -141,7 +140,6 @@ def stage_local_chunk(
     *,
     horizon: int,
     model_config: dict[str, Any],
-    forecast_origin: pd.Timestamp | None,
     task_group: str | None,
 ) -> ChunkTaskRef:
     """Stage one chunk: concat the per-series histories + filtered future_x.
@@ -170,7 +168,6 @@ def stage_local_chunk(
         unique_ids=unique_ids,
         model_config=dict(model_config),
         horizon=horizon,
-        forecast_origin=forecast_origin,
         history_uri=history_uri,
         future_x_uri=future_x_uri,
         task_group=task_group,
