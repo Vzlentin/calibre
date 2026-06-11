@@ -552,8 +552,15 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
     # discarded exactly the observations the cumulative runtime needs to
     # complete a window (lessons.md §40). decision_loop owns the per-horizon vs
     # cumulative readiness logic; route through it so the API cannot diverge.
-    observe_pending(runtime, [calibrated], actuals_lookup)
-    store.upsert_conformal_state(session_id, runtime.get_partition_states())
+    try:
+        observe_pending(runtime, [calibrated], actuals_lookup)
+        store.upsert_conformal_state(session_id, runtime.get_partition_states())
+    except Exception:
+        # Mirror _run_fit_job: a failed background job is recorded loudly with
+        # session context instead of dying as a bare framework traceback. The
+        # runtime was rebuilt from persisted state and upsert only runs on
+        # success, so durable conformal state is untouched by a failure here.
+        logger.exception("observe job failed", extra={"session_id": session_id})
 
 
 @app.post("/tune", response_model=TuneHandle, status_code=202)
