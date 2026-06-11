@@ -240,3 +240,79 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
     actual = resumed.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
 
     pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_backend_resumes_across_deferred_cumulative_window(tmp_path) -> None:
+    """A kill with a cumulative window mid-flight resumes to the exact
+    uninterrupted result: deferred y-NaN rows re-enter the open set via the
+    initial ledger, the window completes at its terminal origin, and it scores
+    exactly once (the restored calibrator state carries no score for it yet).
+    """
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 5
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
+    task = ForecastTask(
+        history=actuals,
+        horizon=3,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    config = SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=10,
+        mode="cumulative",
+        protection_period=3,
+    )
+    # Weekly origins one step apart: the dates[7] window completes only at
+    # dates[9], so killing after two origins leaves it mid-flight (deferred).
+    origins = [dates[7], dates[8], dates[9], dates[10], dates[11]]
+
+    uninterrupted = BackendEngine(conformal=ConformalOptions(config=config)).execute(
+        partition_tasks([task]), actuals, origins=origins
+    )
+
+    db = make_engine(f"sqlite+pysqlite:///{(tmp_path / 'resume-cumulative.db').as_posix()}")
+    Base.metadata.create_all(db)
+    factory = make_session_factory(db)
+    ledger_path = tmp_path / "ledger-cumulative.parquet"
+
+    with session_scope(factory) as session:
+        run = RunRepo(session).create(config={"name": "resume-cumulative-test"})
+        run_id = run.id
+        interrupted = BackendEngine(
+            conformal=ConformalOptions(
+                config=config,
+                run_id=run_id,
+                state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+            ),
+        ).execute(partition_tasks([task]), actuals, origins=origins[:2])
+        part_one = interrupted.ledger.to_df()
+        # The seam this test exists for: the part-1 ledger carries deferred
+        # in-window rows (y NaN) from the still-incomplete window.
+        deferred = part_one[(part_one[H] <= 3) & part_one[Y].isna()]
+        assert not deferred.empty, "kill point must leave a window mid-flight"
+        pointer = write_ledger_shard(part_one, str(ledger_path))
+        ForecastPointerRepo(session).upsert(
+            run_id, "ledger", str(pointer["uri"]), int(pointer["byte_size"])
+        )
+
+    with session_scope(factory) as session:
+        initial_ledger = read_initial_ledger(ForecastPointerRepo(session), run_id)
+        assert initial_ledger is not None
+        resumed = BackendEngine(
+            conformal=ConformalOptions(
+                config=config,
+                run_id=run_id,
+                state_store=SqlConformalStateStore(ConformalStateRepo(session)),
+                initial_ledger=initial_ledger,
+            ),
+        ).execute(partition_tasks([task]), actuals, origins=origins[2:])
+
+    sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
+    expected = uninterrupted.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
+    actual = resumed.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
+
+    # Full-frame equality covers exactly-once scoring: a double-observed window
+    # would drift nonconformity_score; a lost window would leave it NaN.
+    pd.testing.assert_frame_equal(actual, expected)
+    assert expected[NONCONFORMITY_SCORE].notna().any()

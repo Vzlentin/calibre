@@ -498,9 +498,10 @@ def test_cumulative_deferral_open_set_invariant_streaming(tmp_path):
     # completed and scored) or all still y-NaN (deferred together). A mixed
     # window would mean a resolve-then-retain bug.
     last_origin = origins[-1]
+    window_cols = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
     for df in (in_memory_df, streaming_df):
         due = df[(df[H] <= 3) & (df[DS] <= last_origin)]
-        per_window = due.groupby(FORECAST_ORIGIN)[Y].agg(["count", "size"])
+        per_window = due.groupby(window_cols)[Y].agg(["count", "size"])
         assert ((per_window["count"] == 0) | (per_window["count"] == per_window["size"])).all()
         # Non-vacuous: the fixture produces both completed and deferred windows.
         assert (per_window["count"] == per_window["size"]).any()
@@ -530,6 +531,29 @@ def test_cumulative_protection_period_exceeding_horizon_raises():
 
     with pytest.raises(ValueError, match="exceeds available horizon"):
         engine.execute(partition_tasks([task]), actuals, origins)
+
+
+def test_cumulative_guard_keys_on_minimum_horizon_across_tasks():
+    """The guard pins min-not-max semantics on mixed-horizon batches.
+
+    The conformal config is runtime-global, so a single task whose horizon is
+    below protection_period could never complete a window (silent no-learn for
+    that series) even when other tasks are fine — the conservative whole-run
+    abort is the contract. Production builders emit uniform horizons; this
+    locks the semantics for direct engine construction.
+    """
+    task, actuals, origins, conformal_config = _cumulative_split_window_setup()
+    short = ForecastTask(
+        history=task.history.assign(unique_id="SKU_SHORT"),
+        horizon=task.horizon - 1,
+        model_config=task.model_config,
+    )
+    engine = BackendEngine(
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
+    )
+
+    with pytest.raises(ValueError, match="exceeds available horizon"):
+        engine.execute(partition_tasks([task, short]), actuals, origins)
 
 
 def test_multi_series():

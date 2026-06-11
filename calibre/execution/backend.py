@@ -279,6 +279,27 @@ class BackendEngine:
         ``_resolve_due`` either way.
         """
         actuals_source = as_actuals_source(actuals)
+        # Preflight guard only — _restore_conformal_state may REPLACE
+        # self.conformal_runtime below, so the loop's runtime is re-captured
+        # after restore; mode/protection_period are construction-time facts
+        # identical across that swap.
+        preflight_runtime = self.conformal_runtime
+        if (
+            isinstance(preflight_runtime, SymmetricIntervalRuntime)
+            and preflight_runtime.mode == "cumulative"
+            and preflight_runtime.config.protection_period is not None
+        ):
+            horizons = [task.horizon for task in tasks]
+            protection_period = preflight_runtime.config.protection_period
+            if horizons and protection_period > min(horizons):
+                # A window can never accumulate protection_period horizons, so
+                # the deferral would keep every in-window row pending forever —
+                # fail loudly before any ledger or sink is allocated.
+                raise ValueError(
+                    f"Protection period {protection_period} exceeds available "
+                    f"horizon {min(horizons)}: cumulative windows could never "
+                    "complete and their rows would stay pending forever"
+                )
         ledger: Ledger = (
             StreamingLedger(self.streaming_output)
             if self.streaming_output is not None
@@ -297,22 +318,6 @@ class BackendEngine:
             self._restore_conformal_state()
         self._advance_issued_count_from_initial_ledger()
         conformal_runtime = self.conformal_runtime
-        if (
-            isinstance(conformal_runtime, SymmetricIntervalRuntime)
-            and conformal_runtime.mode == "cumulative"
-            and conformal_runtime.config.protection_period is not None
-        ):
-            horizons = [task.horizon for task in tasks]
-            protection_period = conformal_runtime.config.protection_period
-            if horizons and protection_period > min(horizons):
-                # A window can never accumulate protection_period horizons, so
-                # the deferral would keep every in-window row pending forever —
-                # fail loudly at run start instead of silently never resolving.
-                raise ValueError(
-                    f"Protection period {protection_period} exceeds available "
-                    f"horizon {min(horizons)}: cumulative windows could never "
-                    "complete and their rows would stay pending forever"
-                )
 
         try:
             local_tasks = [_with_group_tag(task) for task in tasks.local]
