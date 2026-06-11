@@ -297,6 +297,22 @@ class BackendEngine:
             self._restore_conformal_state()
         self._advance_issued_count_from_initial_ledger()
         conformal_runtime = self.conformal_runtime
+        if (
+            isinstance(conformal_runtime, SymmetricIntervalRuntime)
+            and conformal_runtime.mode == "cumulative"
+            and conformal_runtime.config.protection_period is not None
+        ):
+            horizons = [task.horizon for task in tasks]
+            protection_period = conformal_runtime.config.protection_period
+            if horizons and protection_period > min(horizons):
+                # A window can never accumulate protection_period horizons, so
+                # the deferral would keep every in-window row pending forever —
+                # fail loudly at run start instead of silently never resolving.
+                raise ValueError(
+                    f"Protection period {protection_period} exceeds available "
+                    f"horizon {min(horizons)}: cumulative windows could never "
+                    "complete and their rows would stay pending forever"
+                )
 
         try:
             local_tasks = [_with_group_tag(task) for task in tasks.local]
@@ -703,15 +719,10 @@ class BackendEngine:
         in_window = updated[updated[H] <= protection_period]
         stats = in_window.groupby(group_cols, sort=False)[Y].agg(["size", "count"])
         complete = stats[(stats["size"] >= protection_period) & (stats["count"] == stats["size"])]
-        complete_keys = set(complete.index)
 
-        defer_index: list[Any] = []
-        for key, group in window_rows.groupby(group_cols, sort=False):
-            if key in complete_keys:
-                continue
-            defer_index.extend(group.index.tolist())
-
-        if not defer_index:
+        window_keys = pd.MultiIndex.from_frame(window_rows[group_cols])
+        defer_index = window_rows.index[~window_keys.isin(complete.index)]
+        if defer_index.empty:
             return updated, newly_resolved
 
         updated.loc[defer_index, Y] = np.nan

@@ -518,6 +518,8 @@ class SymmetricIntervalRuntime:
         protection_period = int(self.config.protection_period)
         group_cols = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
 
+        # Completeness rule mirrored by BackendEngine's cumulative-window
+        # deferral (calibre/execution/backend.py) — keep the two in sync.
         for _, group in observed.groupby(group_cols, sort=False):
             ordered = group.sort_values(H)
             window = ordered[ordered[H] <= protection_period]

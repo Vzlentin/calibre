@@ -493,11 +493,18 @@ def test_cumulative_deferral_open_set_invariant_streaming(tmp_path):
         partition_tasks([task]), actuals, origins
     ).ledger.to_df()
 
-    # Open-set invariant: any in-window (h <= protection_period) row left
-    # unresolved carries y NaN — deferral never resolves-then-retains.
+    # Deferral is all-or-nothing per window: among rows due by the final
+    # origin, a window's in-window rows are either all resolved (the window
+    # completed and scored) or all still y-NaN (deferred together). A mixed
+    # window would mean a resolve-then-retain bug.
+    last_origin = origins[-1]
     for df in (in_memory_df, streaming_df):
-        open_window_rows = df[(df[H] <= 3) & df[Y].isna()]
-        assert open_window_rows[Y].isna().all()
+        due = df[(df[H] <= 3) & (df[DS] <= last_origin)]
+        per_window = due.groupby(FORECAST_ORIGIN)[Y].agg(["count", "size"])
+        assert ((per_window["count"] == 0) | (per_window["count"] == per_window["size"])).all()
+        # Non-vacuous: the fixture produces both completed and deferred windows.
+        assert (per_window["count"] == per_window["size"]).any()
+        assert (per_window["count"] == 0).any()
 
     # Both adapters resolve the same set of in-window rows.
     def resolved_window_keys(df):
@@ -505,6 +512,24 @@ def test_cumulative_deferral_open_set_invariant_streaming(tmp_path):
         return set(map(tuple, resolved[[FORECAST_ORIGIN, H]].itertuples(index=False, name=None)))
 
     assert resolved_window_keys(in_memory_df) == resolved_window_keys(streaming_df)
+
+
+def test_cumulative_protection_period_exceeding_horizon_raises():
+    """protection_period > horizon means no window can ever complete: the run
+    fails loudly at start instead of silently deferring every in-window row
+    forever (total silent data loss)."""
+    task, actuals, origins, _config = _cumulative_split_window_setup()
+    config = SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=10,
+        mode="cumulative",
+        protection_period=task.horizon + 1,
+    )
+    engine = BackendEngine(conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(config)))
+
+    with pytest.raises(ValueError, match="exceeds available horizon"):
+        engine.execute(partition_tasks([task]), actuals, origins)
 
 
 def test_multi_series():
