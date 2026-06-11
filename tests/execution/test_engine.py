@@ -345,6 +345,217 @@ def test_conformal_updates_before_next_origin():
     assert (lower + upper) / 2 == pytest.approx(point)
 
 
+def _cumulative_split_window_setup(protection_period=3):
+    """Engine inputs whose origins are spaced tighter than the window span.
+
+    Weekly origins one step apart with ``protection_period`` horizons mean each
+    forecast window's horizons resolve across ``protection_period`` separate
+    origins — the split-window case #156 targets.
+    """
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 5
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
+    task = ForecastTask(
+        history=pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern}),
+        horizon=protection_period,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    conformal_config = SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=10,
+        mode="cumulative",
+        protection_period=protection_period,
+    )
+    # Consecutive weekly origins one step apart. SeasonalNaive maps h=1 to the
+    # origin date itself, so a window forecast at dates[7] resolves h=1 at
+    # dates[7], h=2 at dates[8], h=3 at dates[9] — completing only at dates[9],
+    # three origins after it was issued.
+    origins = [dates[7], dates[8], dates[9], dates[10], dates[11]]
+    return task, actuals, origins, conformal_config
+
+
+def test_cumulative_split_window_learning_lock():
+    """Split-window DoD lock — RED on main, GREEN on the deferral branch.
+
+    A cumulative window whose horizons resolve across multiple origins must be
+    observed complete exactly once so the calibrator updates (#156 DoD). On main
+    the early horizons resolve per-origin, the runtime skips the still-partial
+    window, and ``apply_resolutions`` then evicts them — so the window never
+    scores and this asserts fail. The deferral keeps the window open until its
+    terminal horizon lands, at which point it scores.
+    """
+    task, actuals, origins, conformal_config = _cumulative_split_window_setup()
+    runtime = SymmetricIntervalRuntime(conformal_config)
+    engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
+
+    result = engine.execute(partition_tasks([task]), actuals, origins)
+
+    # Positive-effect assertion: the cumulative calibrator scored the window.
+    partition = "SeasonalNaive:cumulative:__global__"
+    score_history = runtime.get_diagnostics()["calibrator"]["score_history"]
+    assert partition in score_history
+    assert len(score_history[partition]) >= 1
+
+    # The window's terminal horizon (h == protection_period) carries a real
+    # nonconformity score in the ledger, not NaN.
+    df = result.ledger.to_df()
+    terminal = df[(df[H] == 3) & df[Y].notna()]
+    assert not terminal.empty
+    assert terminal[NONCONFORMITY_SCORE].notna().any()
+
+
+def test_cumulative_window_scores_exactly_once_across_resolve_phases():
+    """R4: a completed window scores once, not twice across ResolveOpen/Commit.
+
+    ``_resolve_due`` runs twice per origin (ResolveOpen pre-Predict, Commit at
+    end). A window completed in ResolveOpen leaves the open set there and must
+    not reappear in Commit's due frame — so its partition shows one score per
+    completed window, never double-counted.
+    """
+    task, actuals, origins, conformal_config = _cumulative_split_window_setup()
+    runtime = SymmetricIntervalRuntime(conformal_config)
+    engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
+
+    engine.execute(partition_tasks([task]), actuals, origins)
+
+    partition = "SeasonalNaive:cumulative:__global__"
+    score_history = runtime.get_diagnostics()["calibrator"]["score_history"]
+    # SeasonalNaive maps h=1 to the origin date itself, so a window forecast at
+    # dates[k] has its terminal horizon (h=3) land at dates[k+2]. Across origins
+    # dates[7..11] exactly three windows fully complete within the run (forecast
+    # at dates[7], dates[8], dates[9], completing at dates[9], dates[10],
+    # dates[11]). Each scores once — no double counting across ResolveOpen/Commit.
+    assert len(score_history[partition]) == 3
+
+
+def test_cumulative_high_horizon_rows_resolve_per_origin():
+    """U1 h > protection_period: out-of-window horizons never defer.
+
+    Horizons above ``protection_period`` sit outside every scoring window; they
+    must resolve the moment their actual lands and leave no open-set residue,
+    while the in-window horizons defer until the window completes.
+    """
+    dates = pd.date_range("2024-01-07", periods=20, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 5
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
+    task = ForecastTask(
+        history=pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern}),
+        horizon=4,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 4},
+    )
+    conformal_config = SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=10,
+        mode="cumulative",
+        protection_period=2,
+    )
+    runtime = SymmetricIntervalRuntime(conformal_config)
+    engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
+
+    # Run every consecutive origin through to the end so all windows that can
+    # complete do, leaving only the trailing straddling window open.
+    origins = list(dates[7:18])
+    result = engine.execute(partition_tasks([task]), actuals, origins)
+
+    df = result.ledger.to_df()
+    # Every resolved (y non-NaN) row with h > protection_period is in the ledger;
+    # none was deferred. The last origin's h=3,4 rows are due (ds <= origin) and
+    # resolve immediately even though their window's h<=2 horizons may still be
+    # pending at that origin.
+    last_origin = origins[-1]
+    high_h_due = df[(df[H] > 2) & (df[DS] <= last_origin)]
+    assert not high_h_due.empty
+    assert high_h_due[Y].notna().all()
+
+
+def test_cumulative_deferral_open_set_invariant_streaming(tmp_path):
+    """U1 streaming + in-memory parity: every open row carries y NaN.
+
+    The streaming and in-memory adapters must show identical deferral, and the
+    open-set invariant (open rows have y NaN) must hold for both.
+    """
+    task, actuals, origins, conformal_config = _cumulative_split_window_setup()
+
+    in_memory_engine = BackendEngine(
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
+    )
+    in_memory_result = in_memory_engine.execute(partition_tasks([task]), actuals, origins)
+    in_memory_df = in_memory_result.ledger.to_df()
+
+    path = tmp_path / "cumulative-stream.parquet"
+    streaming_engine = BackendEngine(
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config)),
+        output=LedgerOutputOptions(forecast_path=path.as_posix(), streaming=True),
+    )
+    streaming_df = streaming_engine.execute(
+        partition_tasks([task]), actuals, origins
+    ).ledger.to_df()
+
+    # Deferral is all-or-nothing per window: among rows due by the final
+    # origin, a window's in-window rows are either all resolved (the window
+    # completed and scored) or all still y-NaN (deferred together). A mixed
+    # window would mean a resolve-then-retain bug.
+    last_origin = origins[-1]
+    window_cols = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
+    for df in (in_memory_df, streaming_df):
+        due = df[(df[H] <= 3) & (df[DS] <= last_origin)]
+        per_window = due.groupby(window_cols)[Y].agg(["count", "size"])
+        assert ((per_window["count"] == 0) | (per_window["count"] == per_window["size"])).all()
+        # Non-vacuous: the fixture produces both completed and deferred windows.
+        assert (per_window["count"] == per_window["size"]).any()
+        assert (per_window["count"] == 0).any()
+
+    # Both adapters resolve the same set of in-window rows.
+    def resolved_window_keys(df):
+        resolved = df[(df[H] <= 3) & df[Y].notna()]
+        return set(map(tuple, resolved[[FORECAST_ORIGIN, H]].itertuples(index=False, name=None)))
+
+    assert resolved_window_keys(in_memory_df) == resolved_window_keys(streaming_df)
+
+
+def test_cumulative_protection_period_exceeding_horizon_raises():
+    """protection_period > horizon means no window can ever complete: the run
+    fails loudly at start instead of silently deferring every in-window row
+    forever (total silent data loss)."""
+    task, actuals, origins, _config = _cumulative_split_window_setup()
+    config = SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=10,
+        mode="cumulative",
+        protection_period=task.horizon + 1,
+    )
+    engine = BackendEngine(conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(config)))
+
+    with pytest.raises(ValueError, match="exceeds available horizon"):
+        engine.execute(partition_tasks([task]), actuals, origins)
+
+
+def test_cumulative_guard_keys_on_minimum_horizon_across_tasks():
+    """The guard pins min-not-max semantics on mixed-horizon batches.
+
+    The conformal config is runtime-global, so a single task whose horizon is
+    below protection_period could never complete a window (silent no-learn for
+    that series) even when other tasks are fine — the conservative whole-run
+    abort is the contract. Production builders emit uniform horizons; this
+    locks the semantics for direct engine construction.
+    """
+    task, actuals, origins, conformal_config = _cumulative_split_window_setup()
+    short = ForecastTask(
+        history=task.history.assign(unique_id="SKU_SHORT"),
+        horizon=task.horizon - 1,
+        model_config=task.model_config,
+    )
+    engine = BackendEngine(
+        conformal=ConformalOptions(runtime=SymmetricIntervalRuntime(conformal_config))
+    )
+
+    with pytest.raises(ValueError, match="exceeds available horizon"):
+        engine.execute(partition_tasks([task, short]), actuals, origins)
+
+
 def test_multi_series():
     """Two series, single model, single origin."""
     dates = pd.date_range("2024-01-07", periods=20, freq="W")

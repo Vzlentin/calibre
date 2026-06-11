@@ -100,7 +100,10 @@ def observe_cumulative(
 
     A window is ready when every row in its ``(uid, model, origin)`` group
     has a non-null actual. Implements the dispatch rule from lessons.md §40
-    for cumulative mode.
+    for cumulative mode. Window-completeness semantics are siblings of the
+    runtime's ``_observe_cumulative`` (calibre/conformal/runtime.py) and the
+    engine's cumulative-window deferral (calibre/execution/backend.py) —
+    keep the three in sync.
     """
     still_pending: list[pd.DataFrame] = []
     for frame in pending:
