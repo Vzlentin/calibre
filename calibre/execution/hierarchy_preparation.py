@@ -202,15 +202,23 @@ def _enforce_conformal_partition_limit(
         # projected node set from the expansion estimate for eager runs.
         estimated_partitions = hierarchy_partitions
     else:
-        unique_ids_by_history: dict[int, int] = {}
+        # Memoize the per-history uid count on a content-derived key — the sorted
+        # stringified uid tuple, the load-bearing component of task_builder's
+        # _global_dedup_key — instead of id(task.history), which silently
+        # recounts a cloned-but-equal history frame. The cached fact is a
+        # uid-count, which depends only on the uid set, so config/horizon are not
+        # part of the key (a tuple, not a joined string, so comma-bearing
+        # unique_ids cannot alias). This memo is reachable only on the flat-panel
+        # partition path (hierarchy runs take the branch above), and the key is
+        # itself a uid scan, so the change is correctness-motivated (clone-safe),
+        # not a performance optimization.
+        unique_ids_by_history: dict[tuple[str, ...], int] = {}
         estimated_partitions = 0
         for task_group in (tasks.local, tasks.global_):
             for task in task_group:
-                history_key = id(task.history)
+                history_key = tuple(sorted(task.history[UNIQUE_ID].astype(str).unique()))
                 if history_key not in unique_ids_by_history:
-                    unique_ids_by_history[history_key] = int(
-                        task.history[UNIQUE_ID].astype(str).nunique()
-                    )
+                    unique_ids_by_history[history_key] = len(history_key)
                 estimated_partitions += unique_ids_by_history[history_key] * horizon
 
     if estimated_partitions > config.conformal.max_partitions:

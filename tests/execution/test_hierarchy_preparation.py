@@ -448,3 +448,46 @@ def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
     assert preparation.tasks.local == []
     assert len(preparation.tasks.global_) == 1
     assert preparation.conformal_partition_estimate == 4
+
+
+def test_partition_limit_memo_is_clone_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flat-panel partition memo keys on history content, not id(): two
+    cloned-but-equal histories collapse to one memo entry (#159). The estimate
+    is the same either way; the spy proves the count is computed once."""
+    from calibre.core.forecast_task import ForecastTask, TaskGroups
+    from calibre.execution.hierarchy_preparation import _enforce_conformal_partition_limit
+
+    history = pd.DataFrame(
+        {
+            UNIQUE_ID: ["a", "b"],
+            DS: pd.date_range("2024-01-01", periods=2, freq="D"),
+            Y: [1.0, 2.0],
+        }
+    )
+    # Two distinct objects with identical content (id() would recount each).
+    tasks = TaskGroups(
+        local=[
+            ForecastTask(history=history.copy(), horizon=2, model_config={"backend": "x"}),
+            ForecastTask(history=history.copy(), horizon=2, model_config={"backend": "x"}),
+        ],
+        global_=[],
+    )
+
+    seen_keys: list[tuple[str, ...]] = []
+    real_unique = pd.Series.unique
+
+    def _spy_unique(self):
+        result = real_unique(self)
+        seen_keys.append(tuple(sorted(str(value) for value in result)))
+        return result
+
+    monkeypatch.setattr(pd.Series, "unique", _spy_unique, raising=False)
+
+    config = _config(conformal={"method": "mscp", "partition": "series", "max_partitions": 100})
+    estimate = _enforce_conformal_partition_limit(config, tasks, horizon=2)
+
+    # Per-task accumulation unchanged: 2 uids x horizon 2, summed over 2 tasks.
+    assert estimate == 2 * 2 + 2 * 2
+    # Both cloned histories resolve to the same content key, so the memo holds a
+    # single distinct entry for them (the key scan runs per task, the count once).
+    assert len(set(seen_keys)) == 1
