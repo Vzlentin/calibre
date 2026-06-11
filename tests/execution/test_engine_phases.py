@@ -43,21 +43,21 @@ from calibre.ordering.policy_config import RsConfig
 def _materialize_refs_for(engine, tasks):
     """Build the URI-backed task refs the way ``iter_origins`` does.
 
-    Yields ``(parallel_refs, direct_refs)`` for a pre-partitioned task list so
+    Yields ``(chunk_refs, direct_refs)`` for a pre-partitioned task list so
     phase tests can drive ``_predict`` with the same input the engine threads.
     The staging temp dir is alive only for the duration of the ``with`` block.
     """
     groups = partition_tasks(tasks)
-    parallel_tasks = [_with_group_tag(t) for t in groups.local]
+    local_tasks = [_with_group_tag(t) for t in groups.local]
     direct_tasks = [_with_group_tag(t) for t in groups.global_]
     with engine._task_staging_prefix() as staging_prefix:
-        parallel_refs = engine._materialize_task_refs(parallel_tasks, f"{staging_prefix}/local")
+        chunk_refs = engine._materialize_local_chunks(local_tasks, f"{staging_prefix}/local")
         direct_refs = engine._materialize_task_refs(direct_tasks, f"{staging_prefix}/global")
-        yield parallel_refs, direct_refs
+        yield chunk_refs, direct_refs
 
 
-def _predict_frame(engine, parallel_refs, direct_refs, origin):
-    return engine._predict(parallel_refs, direct_refs, origin).forecast
+def _predict_frame(engine, chunk_refs, direct_refs, origin):
+    return engine._predict(chunk_refs, direct_refs, origin).forecast
 
 
 def _periodic_task(horizon=2):
@@ -112,8 +112,8 @@ def test_predict_phase_concatenates_local_and_global():
         },
     )
     engine = BackendEngine()
-    with _materialize_refs_for(engine, [local_task, global_task]) as (parallel_refs, direct_refs):
-        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
+    with _materialize_refs_for(engine, [local_task, global_task]) as (chunk_refs, direct_refs):
+        preds = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
 
     assert not preds.empty
     models = set(preds[MODEL_NAME].unique())
@@ -139,8 +139,8 @@ def test_calibrate_phase_applies_intervals():
         SymmetricIntervalConfig(method="aci", coverage=0.9, calibration_window=4, gamma=0.05)
     )
     engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        raw = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        raw = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
 
     lower_col, upper_col = runtime.interval_columns
     assert lower_col not in raw.columns
@@ -198,8 +198,8 @@ def test_order_phase_appends_to_order_ledger():
     """Order derives one decision and appends it to the order ledger."""
     task, dates, _pattern = _periodic_task()
     engine = _rs_engine()
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        preds = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
     preds = engine._calibrate(preds, engine.conformal_runtime)
 
     order_ledger = InMemoryOrderLedger()
@@ -214,8 +214,8 @@ def test_order_phase_skipped_without_order_config():
     """Order leaves the order ledger untouched when no policy is configured."""
     task, dates, _pattern = _periodic_task()
     engine = BackendEngine()  # no order config
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        preds = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
 
     order_ledger = InMemoryOrderLedger()
     engine._order(preds, order_ledger)
@@ -273,8 +273,8 @@ def test_commit_phase_validates_appends_and_persists_once_per_call():
     """
     task, dates, _pattern = _periodic_task()
     engine, store = _engine_with_state_store()
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        preds = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
     preds = engine._calibrate(preds, engine.conformal_runtime)
 
     persist_calls = {"n": 0}
@@ -330,8 +330,8 @@ def test_commit_phase_appends_without_runtime_and_does_not_persist():
     """Commit with no runtime still appends; persist no-ops (no store writes)."""
     task, dates, _pattern = _periodic_task()
     engine = BackendEngine()
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[11])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        preds = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
 
     ledger = InMemoryLedger()
     engine._commit(ledger, preds, FrameActualsSource(task.history), dates[11], None)
@@ -356,8 +356,8 @@ def test_resolve_open_carries_forward_prior_origin_before_predict():
 
     # Seed the ledger with a prior origin's (unresolved) predictions.
     ledger = InMemoryLedger()
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        prior = _predict_frame(engine, parallel_refs, direct_refs, dates[7])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        prior = _predict_frame(engine, chunk_refs, direct_refs, dates[7])
     prior = engine._calibrate(prior, runtime)
     ledger.append(prior)
     assert ledger.to_df()[Y].isna().all()  # unresolved before carry-forward
@@ -377,8 +377,8 @@ def test_resolve_open_noop_without_runtime():
     task, dates, _pattern = _periodic_task()
     engine = BackendEngine()
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        prior = _predict_frame(engine, parallel_refs, direct_refs, dates[7])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        prior = _predict_frame(engine, chunk_refs, direct_refs, dates[7])
 
     ledger = InMemoryLedger()
     ledger.append(prior)
@@ -401,8 +401,8 @@ def test_commit_appends_then_resolves_after_origin():
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
 
     ledger = InMemoryLedger()
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        preds = _predict_frame(engine, parallel_refs, direct_refs, dates[7])
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        preds = _predict_frame(engine, chunk_refs, direct_refs, dates[7])
     preds = engine._calibrate(preds, runtime)
 
     engine._commit(ledger, preds, FrameActualsSource(actuals), dates[7], runtime)
@@ -420,8 +420,8 @@ def test_phase_failure_names_phase_and_origin():
     task, dates, _pattern = _periodic_task()
     engine = BackendEngine()
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
-        refs = (parallel_refs, direct_refs)
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        refs = (chunk_refs, direct_refs)
 
     origin = dates[11]
 
@@ -436,7 +436,7 @@ def test_phase_failure_names_phase_and_origin():
             actuals=FrameActualsSource(actuals),
             origin=origin,
             conformal_runtime=None,
-            parallel_refs=refs[0],
+            chunk_refs=refs[0],
             direct_refs=refs[1],
         )
 
@@ -466,6 +466,6 @@ def test_commit_phase_failure_preserves_valueerror_type():
             actuals=FrameActualsSource(actuals),
             origin=origin,
             conformal_runtime=None,
-            parallel_refs=[],
+            chunk_refs=[],
             direct_refs=[],
         )

@@ -117,15 +117,26 @@ def test_ray_backend_matches_local_backend() -> None:
     tasks = _tasks(panel)
     origins = [pd.Timestamp("2024-03-17"), pd.Timestamp("2024-03-24")]
     expected = BackendEngine().execute(partition_tasks(tasks), panel, origins).ledger.to_df()
-    engine = BackendEngine(
+    one_chunk = BackendEngine(
         execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
     )
+    # chunk_size=1 stages one chunk per series, so multiple chunks flow through
+    # _run_chunks_on_ray's batching loop (max_concurrency=1) — the Ray-side
+    # chunk-size invariance lock the in-process equality tests cannot provide.
+    per_series = BackendEngine(
+        execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1, chunk_size=1)
+    )
     try:
-        actual = engine.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+        actual = one_chunk.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+        actual_per_series = per_series.execute(
+            partition_tasks(tasks), panel, origins
+        ).ledger.to_df()
     finally:
-        engine.close()
+        one_chunk.close()
+        per_series.close()
 
     pd.testing.assert_frame_equal(_sorted(actual), _sorted(expected))
+    pd.testing.assert_frame_equal(_sorted(actual_per_series), _sorted(expected))
 
 
 def test_ray_remote_handle_rebuilds_after_owned_runtime_shutdown() -> None:
@@ -200,14 +211,21 @@ def test_ray_quantile_columns_survive() -> None:
 
 
 def test_ray_worker_loads_mlforecast_adapter_without_mlforecast_importable() -> None:
-    # NOTE: This monkeypatch is safe only in local_mode because workers are
-    # not reused. On real clusters with reused workers, the patched state could
-    # leak to subsequent tasks.
+    # The worker mutates sys.modules and builtins.__import__ to prove the adapter
+    # imports lazily. On a real (worker-reusing) cluster that patched state could
+    # leak to later tasks, so this test owns a DEDICATED single-CPU cluster and
+    # hard-shuts it down: the leak-prone worker process never outlives the test,
+    # and a subsequent task importing mlforecast normally is unaffected.
     ray = pytest.importorskip("ray")
 
-    owns_ray = not ray.is_initialized()
-    if not ray.is_initialized():
-        ray.init(include_dashboard=False, ignore_reinit_error=True, _skip_env_hook=True)
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(
+        include_dashboard=False,
+        ignore_reinit_error=True,
+        num_cpus=1,
+        _skip_env_hook=True,
+    )
 
     @ray.remote
     def _load_adapter_with_blocked_mlforecast_import() -> str:
@@ -237,8 +255,7 @@ def test_ray_worker_loads_mlforecast_adapter_without_mlforecast_importable() -> 
     try:
         assert ray.get(_load_adapter_with_blocked_mlforecast_import.remote()) == "MLForecastAdapter"
     finally:
-        if owns_ray:
-            ray.shutdown()
+        ray.shutdown()
 
 
 def _write_cli_config(tmp_path: Path, *, backend: str) -> Path:

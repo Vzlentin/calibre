@@ -328,6 +328,48 @@ def test_predict_without_future_x_omits_X_df(monkeypatch, lgbm_task):
     assert "X_df" not in predict_kwargs
 
 
+def test_fit_forwards_static_features_to_mlforecast(monkeypatch, repeating_history):
+    """``static_features`` from the config reaches ``MLForecast.fit`` verbatim.
+
+    An empty list declares every exogenous column dynamic, which is what a
+    time-varying ``future_x`` feature (e.g. ``promo``) requires.
+    """
+    history = repeating_history.copy()
+    history["promo"] = [0.0, 1.0] * 12
+    task = ForecastTask(
+        history=history,
+        horizon=4,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "freq": "W",
+            "static_features": [],
+        },
+    )
+    mock_instance = MagicMock()
+    monkeypatch.setattr(
+        "calibre.forecasting.mlforecast_adapter.MLForecast", MagicMock(return_value=mock_instance)
+    )
+
+    MLForecastAdapter(task.model_config).fit(task)
+
+    _, fit_kwargs = mock_instance.fit.call_args
+    assert fit_kwargs["static_features"] == []
+
+
+def test_fit_omits_static_features_when_unset(monkeypatch, lgbm_task):
+    """Absent ``static_features`` is not forwarded (mlforecast keeps its default)."""
+    mock_instance = MagicMock()
+    monkeypatch.setattr(
+        "calibre.forecasting.mlforecast_adapter.MLForecast", MagicMock(return_value=mock_instance)
+    )
+
+    MLForecastAdapter(lgbm_task.model_config).fit(lgbm_task)
+
+    _, fit_kwargs = mock_instance.fit.call_args
+    assert "static_features" not in fit_kwargs
+
+
 def test_fitted_values_normalize_to_sidecar_contract(repeating_history):
     task = ForecastTask(
         history=repeating_history,

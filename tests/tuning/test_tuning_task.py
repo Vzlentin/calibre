@@ -55,7 +55,6 @@ def ray_local_runtime():
     ray.init(
         include_dashboard=False,
         ignore_reinit_error=True,
-        local_mode=True,
         _skip_env_hook=True,
     )
     try:
@@ -265,7 +264,6 @@ def test_run_optuna_study_rejects_grace_period_not_less_than_max_t():
             cpu_per_trial=1.0,
             max_concurrent_trials=1,
             ray_address=None,
-            ray_local_mode=False,
             tune_storage_path="unused",
         )
 
@@ -298,6 +296,11 @@ def test_asha_prunes_trials_between_origins(monkeypatch, tmp_path):
                 grace_period=1,
             ),
             num_samples=1,
+            # Serialize trials so ASHA has trial 0's rung baseline before trial 1
+            # reports — on a real (async) cluster concurrent trials would both
+            # clear the first rung and nothing would prune. This was implicit
+            # under the retired local_mode (synchronous) runtime.
+            max_concurrent_trials=1,
         ),
         run_config=tune.RunConfig(storage_path=str(tmp_path / "asha-tune"), verbose=0),
     )

@@ -32,7 +32,6 @@ class RayRuntimeHandle:
 def acquire_ray_runtime(
     *,
     address: str | None = None,
-    local_mode: bool = False,
 ) -> RayRuntimeHandle:
     """Initialize or attach to Ray with explicit local ownership accounting."""
     global _LOCAL_RAY, _LOCAL_REFCOUNT
@@ -58,7 +57,6 @@ def acquire_ray_runtime(
         ray.init(
             include_dashboard=False,
             ignore_reinit_error=True,
-            local_mode=local_mode,
             _skip_env_hook=True,
         )
         _LOCAL_RAY = ray

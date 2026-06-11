@@ -179,6 +179,7 @@ class ExecutionConfig(_Section):
     ray_threshold: int = Field(default=10, ge=1)
     max_concurrency: int | None = Field(default=None, ge=1)
     cpu_per_task: float | None = Field(default=None, gt=0)
+    chunk_size: int = Field(default=256, ge=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -207,6 +208,7 @@ class ExecutionConfig(_Section):
             ray_threshold=self.ray_threshold,
             max_concurrency=self.max_concurrency,
             cpu_per_task=self.cpu_per_task,
+            chunk_size=self.chunk_size,
             seed=self.seed,
         )
 

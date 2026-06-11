@@ -257,7 +257,6 @@ def run_optuna_study(
     cpu_per_trial: float,
     max_concurrent_trials: int,
     ray_address: str | None,
-    ray_local_mode: bool,
     tune_storage_path: str,
     metric: str = _OBJECTIVE_METRIC,
     mode: str = "min",
@@ -308,10 +307,7 @@ def run_optuna_study(
         grace_period=asha_grace_period,
     )
 
-    ray_runtime = acquire_ray_runtime(
-        address=ray_address,
-        local_mode=ray_local_mode,
-    )
+    ray_runtime = acquire_ray_runtime(address=ray_address)
     try:
         import ray
 
@@ -644,7 +640,6 @@ def optimize_global_task_candidate(task: GlobalTuningTask) -> TuningCandidate:
         cpu_per_trial=config.cpu_per_trial,
         max_concurrent_trials=max_concurrent_trials,
         ray_address=config.ray_address,
-        ray_local_mode=config.ray_local_mode,
         tune_storage_path=_resolve_tune_storage_path_config(config),
         experiment_name=config.tune_experiment_name,
         callbacks=_build_mlflow_callbacks(config),
@@ -694,7 +689,6 @@ def _run_optuna_study(task: LocalTuningTask) -> dict[str, Any]:
         cpu_per_trial=config.cpu_per_trial,
         max_concurrent_trials=max_concurrent_trials,
         ray_address=config.ray_address,
-        ray_local_mode=config.ray_local_mode,
         tune_storage_path=_resolve_tune_storage_path(worker_task),
         experiment_name=config.tune_experiment_name,
         callbacks=_build_mlflow_callbacks(config),

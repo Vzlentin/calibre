@@ -40,7 +40,7 @@ from calibre.execution.backend import (
     LedgerOutputOptions,
 )
 from calibre.execution.ledger import OrderLedger
-from calibre.execution.prediction import _process_task_ref
+from calibre.execution.prediction import _process_local_chunk
 from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import NewsvendorConfig, RsConfig
@@ -92,7 +92,7 @@ def test_execute_accepts_grouped_constructor_options(single_series_setup, tmp_pa
 
 
 def test_ray_worker_function_is_module_level_picklable():
-    pickle.dumps(_process_task_ref)
+    pickle.dumps(_process_local_chunk)
 
 
 def test_remote_ray_staging_uses_shared_uri_and_cleans_up(monkeypatch):
@@ -740,7 +740,13 @@ def test_mixed_local_and_global_tasks():
 
 
 def test_auto_backend_uses_ray_at_threshold():
-    """backend='auto' with task_count == ray_threshold should use Ray."""
+    """backend='auto' uses Ray once the dispatchable-unit count hits ray_threshold.
+
+    ``ray_threshold`` counts chunks for local scope, not series. With
+    ``chunk_size=1`` the two same-config series split into two chunks, so a
+    threshold of 2 trips Ray — the same observable as the per-series era, stated
+    in the new chunk unit.
+    """
     pytest.importorskip("ray")
     dates = pd.date_range("2024-01-07", periods=8, freq="W")
     actuals = pd.concat(
@@ -766,7 +772,7 @@ def test_auto_backend_uses_ray_at_threshold():
     ]
 
     engine = BackendEngine(
-        execution=ExecutionOptions(backend="auto", ray_threshold=2, max_concurrency=1)
+        execution=ExecutionOptions(backend="auto", ray_threshold=2, max_concurrency=1, chunk_size=1)
     )
     try:
         result = engine.execute(partition_tasks(tasks), actuals, origins=[dates[-1]])

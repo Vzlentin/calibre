@@ -76,6 +76,25 @@ def test_unknown_key_raises_at_parse_time() -> None:
         load_config_from_mapping(_config(conformal={"method": "mscp", "conformal_window": 10}))
 
 
+def test_execution_chunk_size_plumbs_into_execution_options() -> None:
+    config = load_config_from_mapping(_config(execution={"backend": "local", "chunk_size": 32}))
+
+    assert config.execution.chunk_size == 32
+    assert config.execution.to_execution_options(freq="W-MON").chunk_size == 32
+
+
+def test_execution_chunk_size_defaults_to_256() -> None:
+    config = load_config_from_mapping(_config())
+
+    assert config.execution.chunk_size == 256
+    assert config.execution.to_execution_options(freq="W-MON").chunk_size == 256
+
+
+def test_execution_chunk_size_rejects_non_positive() -> None:
+    with pytest.raises(ValidationError, match="chunk_size"):
+        load_config_from_mapping(_config(execution={"backend": "local", "chunk_size": 0}))
+
+
 def test_dataset_extra_keys_collected_into_options() -> None:
     config = load_config_from_mapping(_config())
 

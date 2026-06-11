@@ -204,8 +204,11 @@ rewritten as local-scope per-series tasks or migrated to future panel Tune work.
 
 ## Ray Notes
 
-`execution.backend: auto` starts Ray only when the per-origin local task count
-meets `execution.ray_threshold` (default `10`). Set `backend: local` for health
+`execution.backend: auto` starts Ray only when the per-origin dispatch count
+meets `execution.ray_threshold` (default `10`). Dispatch units are chunks for
+local scope — same-config series grouped into `execution.chunk_size` slices
+(default `256`) — and config panels for global scope, so small local runs stay
+in-process even with many series. Set `backend: local` for health
 checks, tiny fixtures, and Windows development when startup cost matters. For
 multi-node execution, run Ray on Linux containers or KubeRay and pass
 `execution.ray_address`; Calibre connects to remote clusters without shutting
@@ -213,8 +216,10 @@ them down.
 
 Remote Ray requires `execution.staging_uri`. This URI must point to storage visible
 from every worker, such as `s3://`, `gs://`, `abfs://`, or a mounted shared
-filesystem/PVC path. Calibre stages `ForecastTaskRef` Parquet payloads under a
-run-scoped prefix and cleans that prefix on best effort when the engine closes.
+filesystem/PVC path. Calibre stages Parquet payloads under a run-scoped prefix —
+one panel-history file per local chunk (`ChunkTaskRef`) plus per-series
+`ForecastTaskRef` files for global configs — and cleans that prefix on best
+effort when the engine closes.
 
 Example:
 
@@ -224,10 +229,12 @@ execution:
   ray_address: ray://calibre-ray-head:10001
   staging_uri: s3://my-bucket/calibre/staging
   ray_threshold: 10
+  chunk_size: 256
   max_concurrency: 64
   cpu_per_task: 1
 ```
 
 `cpu_per_task` requests Ray task CPU resources and caps common model thread
 settings such as `n_jobs`, `num_threads`, and `nthread` when those keys are present.
-`max_concurrency` limits how many per-series tasks the driver submits at once.
+`max_concurrency` limits how many Ray tasks (local chunks or global config
+panels) the driver submits at once.

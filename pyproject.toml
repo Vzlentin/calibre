@@ -40,7 +40,7 @@ dev = [
     "moto[server,s3]",
     "types-PyYAML",
     "pandas-stubs>=3.0.0.260204",
-    "ray[default,tune]>=2.38,<2.55",
+    "ray[default,tune]>=2.38,<3",
     "mlforecast",
     "lightgbm",
     "xgboost<2",

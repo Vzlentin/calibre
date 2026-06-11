@@ -88,7 +88,7 @@ def test_optimize_global_task_returns_complete_global_model_config(tmp_path) -> 
                 n_trials=1,
                 freq="W",
                 seed=7,
-                ray_local_mode=True,
+                max_concurrent_trials=1,
                 tune_storage_path=str(tmp_path / "ray-tune"),
             ),
         )

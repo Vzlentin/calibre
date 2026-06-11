@@ -37,12 +37,12 @@ from calibre.reconciliation.summing import build_hierarchy_index
 @contextmanager
 def _materialize_refs_for(engine, tasks):
     groups = partition_tasks(tasks)
-    parallel_tasks = [_with_group_tag(t) for t in groups.local]
+    local_tasks = [_with_group_tag(t) for t in groups.local]
     direct_tasks = [_with_group_tag(t) for t in groups.global_]
     with engine._task_staging_prefix() as staging_prefix:
-        parallel_refs = engine._materialize_task_refs(parallel_tasks, f"{staging_prefix}/local")
+        chunk_refs = engine._materialize_local_chunks(local_tasks, f"{staging_prefix}/local")
         direct_refs = engine._materialize_task_refs(direct_tasks, f"{staging_prefix}/global")
-        yield parallel_refs, direct_refs
+        yield chunk_refs, direct_refs
 
 
 def _periodic_task(horizon=2):
@@ -177,14 +177,14 @@ def test_no_hierarchy_path_does_not_request_fitted_values(monkeypatch) -> None:
     )
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
 
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
             actuals=FrameActualsSource(actuals),
             origin=dates[11],
             conformal_runtime=None,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
@@ -199,14 +199,14 @@ def test_residual_reconcile_receives_fitted_context() -> None:
     )
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
 
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
             actuals=FrameActualsSource(actuals),
             origin=dates[11],
             conformal_runtime=None,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
@@ -242,14 +242,14 @@ def test_reconcile_runs_before_calibrate_on_raw_yhat() -> None:
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
     lower_col, upper_col = runtime.interval_columns
 
-    with _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs):
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
             actuals=FrameActualsSource(actuals),
             origin=dates[11],
             conformal_runtime=runtime,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
@@ -284,7 +284,7 @@ def test_reconcile_phase_failure_names_phase_and_origin() -> None:
     origin = dates[11]
 
     with (
-        _materialize_refs_for(engine, [task]) as (parallel_refs, direct_refs),
+        _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs),
         pytest.raises(RuntimeError, match=rf"Reconcile phase failed at origin {origin}"),
     ):
         engine.run_origin(
@@ -293,7 +293,7 @@ def test_reconcile_phase_failure_names_phase_and_origin() -> None:
             actuals=FrameActualsSource(actuals),
             origin=origin,
             conformal_runtime=None,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
