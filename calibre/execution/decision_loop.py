@@ -7,7 +7,6 @@ bookkeeping or the per-horizon vs cumulative split logic.
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -86,8 +85,7 @@ def observe_per_horizon(
         ready = updated[Y].notna() & updated[Y_HAT].notna()
         to_observe, unresolved = updated[ready], updated[~ready]
         if not to_observe.empty:
-            with contextlib.suppress(ValueError):
-                runtime.observe(to_observe)
+            runtime.observe(to_observe)
         if not unresolved.empty:
             still_pending.append(unresolved)
     return still_pending
@@ -112,8 +110,7 @@ def observe_cumulative(
         window_complete = grouped_y.transform("count").eq(grouped_y.transform("size"))
         to_observe, unresolved = updated[window_complete], updated[~window_complete]
         if not to_observe.empty:
-            with contextlib.suppress(ValueError):
-                runtime.observe(to_observe)
+            runtime.observe(to_observe)
         if not unresolved.empty:
             still_pending.append(unresolved)
     return still_pending

@@ -436,3 +436,85 @@ class TestColdStartDeadlock:
         # Pending drains: every window whose actuals exist has been observed,
         # so nothing accumulates unboundedly.
         assert pending == []
+
+
+class TestObserveRaisesLoudly:
+    """#158: a structurally malformed window must raise through the dispatcher
+    rather than being silently swallowed (the removed suppress(ValueError))."""
+
+    @staticmethod
+    def _duplicate_h_window(uid: str, origin: pd.Timestamp, extra_cols: dict) -> pd.DataFrame:
+        from calibre.core.forecast_frame import H
+
+        # H = [1, 1, 2]: a duplicate horizon within the protection window. Y is
+        # NaN here (filled from the lookup) so the window resolves to complete.
+        ds = [origin + pd.Timedelta(weeks=h) for h in (1, 1, 2)]
+        frame = pd.DataFrame(
+            {
+                UNIQUE_ID: [uid] * 3,
+                DS: ds,
+                FORECAST_ORIGIN: [origin] * 3,
+                MODEL_NAME: ["m"] * 3,
+                H: [1, 1, 2],
+                Y: [float("nan")] * 3,
+                Y_HAT: [10.0, 10.0, 10.0],
+            }
+        )
+        for col, value in extra_cols.items():
+            frame[col] = value
+        return frame
+
+    def test_symmetric_cumulative_duplicate_h_raises(self) -> None:
+        import pytest
+
+        from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+
+        config = SymmetricIntervalConfig(
+            method="mscp", coverage=0.5, mode="cumulative", protection_period=2
+        )
+        runtime = SymmetricIntervalRuntime(config)
+        lo_col, hi_col = config.interval_columns
+        frame = self._duplicate_h_window("A", _ORIGIN, {lo_col: float("nan"), hi_col: float("nan")})
+        lookup = _actuals_lookup(
+            [
+                ("A", _ORIGIN + pd.Timedelta(weeks=1), 12.0),
+                ("A", _ORIGIN + pd.Timedelta(weeks=2), 12.0),
+            ]
+        )
+
+        with pytest.raises(ValueError, match="Duplicate H values in cumulative observe window"):
+            observe_pending(runtime, [frame], lookup)
+
+    def test_crc_duplicate_h_raises(self) -> None:
+        import pytest
+
+        from calibre.conformal.cumulative_risk import (
+            CumulativeConformalRiskConfig,
+            CumulativeRiskRuntime,
+        )
+        from calibre.core.forecast_frame import quantile_column
+
+        runtime = CumulativeRiskRuntime(
+            CumulativeConformalRiskConfig(
+                coverage=0.5,
+                protection_period=2,
+                base_column=quantile_column(0.5),
+            )
+        )
+        lo_col, hi_col = runtime.interval_columns
+        frame = self._duplicate_h_window(
+            "A",
+            _ORIGIN,
+            {lo_col: float("nan"), hi_col: float("nan"), quantile_column(0.5): 10.0},
+        )
+        lookup = _actuals_lookup(
+            [
+                ("A", _ORIGIN + pd.Timedelta(weeks=1), 12.0),
+                ("A", _ORIGIN + pd.Timedelta(weeks=2), 12.0),
+            ]
+        )
+
+        with pytest.raises(
+            ValueError, match="Duplicate H values in cumulative conformal order window"
+        ):
+            observe_pending(runtime, [frame], lookup)
