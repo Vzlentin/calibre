@@ -27,6 +27,7 @@ from calibre.execution.decision_loop import (
     DecisionLoopConfig,
     RoundResult,
     observe_cumulative,
+    observe_pending,
     observe_per_horizon,
 )
 from calibre.execution.ledger import (
@@ -61,6 +62,7 @@ __all__ = [
     "DecisionLoopConfig",
     "RoundResult",
     "observe_cumulative",
+    "observe_pending",
     "observe_per_horizon",
     "Ledger",
     "InMemoryLedger",

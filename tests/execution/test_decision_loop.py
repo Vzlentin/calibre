@@ -20,6 +20,7 @@ from calibre.execution.decision_loop import (
     DecisionLoopConfig,
     RoundResult,
     observe_cumulative,
+    observe_pending,
     observe_per_horizon,
 )
 
@@ -256,3 +257,68 @@ class TestObserveCumulative:
 
         rt.observe.assert_not_called()
         assert len(remaining) == 1
+
+
+class TestObservePending:
+    """The mode-keyed dispatcher routes to the matching per-mode helper."""
+
+    def _make_runtime(self, mode: str) -> MagicMock:
+        rt = MagicMock()
+        rt.observe.return_value = None
+        rt.mode = mode
+        rt.interval_columns = interval_column_names(0.9)
+        return rt
+
+    def test_cumulative_mode_routes_to_cumulative_helper(self) -> None:
+        """mode="cumulative" applies window-completeness: a partial window
+        stays pending and observe is never called."""
+        frame = _make_frame("A", _ORIGIN, horizon=2)
+        # Only h=1 resolved → window incomplete under cumulative semantics.
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 3.0)])
+        rt = self._make_runtime("cumulative")
+
+        remaining = observe_pending(rt, [frame], lookup)
+
+        rt.observe.assert_not_called()
+        assert len(remaining) == 1
+        assert len(remaining[0]) == 2  # whole window retained, not split per-row
+
+    def test_perhorizon_mode_routes_with_columns_from_interval_columns(self) -> None:
+        """mode="perhorizon" applies per-row readiness using the bound columns
+        derived from runtime.interval_columns."""
+        lo_col, hi_col = interval_column_names(0.9)
+        frame = _make_frame("A", _ORIGIN, horizon=2, lower=[10.0, 11.0], upper=[20.0, 21.0])
+        # Only h=1 resolved → that single row is observed; h=2 stays pending.
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 5.0)])
+        rt = self._make_runtime("perhorizon")
+
+        remaining = observe_pending(rt, [frame], lookup)
+
+        rt.observe.assert_called_once()
+        observed = rt.observe.call_args.args[0]
+        assert observed[lo_col].notna().all()
+        assert len(remaining) == 1
+        assert len(remaining[0]) == 1  # only the h=2 row stays pending
+
+    def test_pending_passed_through_untouched(self, monkeypatch) -> None:
+        """The dispatcher must not re-group/re-sort/pre-process pending before
+        delegating: the helper receives the exact list object and lookup."""
+        frame = _make_frame("A", _ORIGIN, horizon=2)
+        pending = [frame]
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 3.0)])
+        rt = self._make_runtime("cumulative")
+
+        seen: dict[str, object] = {}
+
+        def _spy(runtime, p, actuals_lookup):
+            seen["pending"] = p
+            seen["lookup"] = actuals_lookup
+            return p
+
+        monkeypatch.setattr(
+            "calibre.execution.decision_loop.observe_cumulative", _spy
+        )
+        observe_pending(rt, pending, lookup)
+
+        assert seen["pending"] is pending
+        assert seen["lookup"] is lookup

@@ -115,6 +115,26 @@ def observe_cumulative(
     return still_pending
 
 
+def observe_pending(
+    runtime: ConformalRuntime,
+    pending: list[pd.DataFrame],
+    actuals_lookup: pd.Series,
+) -> list[pd.DataFrame]:
+    """Observe resolved pending frames; return the still-pending frames.
+
+    Single mode-keyed entry point for driver-side observe: keys on
+    ``runtime.mode`` and delegates to :func:`observe_cumulative` or
+    :func:`observe_per_horizon` (deriving the bound columns from
+    ``runtime.interval_columns``). ``pending`` is passed through untouched —
+    no re-grouping, re-sorting, or pre-processing — so the helpers' pending
+    bookkeeping stays byte-identical (CRC recency weighting depends on it).
+    """
+    if runtime.mode == "cumulative":
+        return observe_cumulative(runtime, pending, actuals_lookup)
+    lower_col, upper_col = runtime.interval_columns
+    return observe_per_horizon(runtime, pending, actuals_lookup, lower_col, upper_col)
+
+
 class DecisionLoop:
     """Rolling inventory decision loop.
 
@@ -127,7 +147,8 @@ class DecisionLoop:
     3. Compute orders via ``policy(frame)``.
     4. Fetch realised demand via ``get_actuals(round_num)``.
     5. Step the simulator.
-    6. Feed resolved actuals back to the conformal runtime via ``observe_fn``.
+    6. Feed resolved actuals back to the conformal runtime via
+       :func:`observe_pending` (mode-keyed on ``runtime.mode``).
     7. Fire ``config.on_round`` with the :class:`RoundResult`.
 
     Delivery rounds (``config.n_delivery_rounds``) follow: they step the
@@ -150,14 +171,9 @@ class DecisionLoop:
         config: Loop-level settings (n_rounds, n_delivery_rounds, on_round).
         runtime: Optional conformal runtime.  When set, its ``apply`` is called
             after (optional) ensembling and the output is appended to the
-            pending-forecast queue for later ``observe_fn`` calls.
+            pending-forecast queue for later :func:`observe_pending` calls.
         ensemble: Optional ``ledger_df → frame`` aggregation applied before
             conformal.  Typically ``ensemble_median``.
-        observe_fn: ``(runtime, pending, actuals_lookup) → new_pending``.
-            Use :func:`observe_per_horizon` or :func:`observe_cumulative`
-            (possibly via ``functools.partial``) to match the conformal mode.
-            Only called when ``runtime`` is set and ``actual_demand`` is
-            non-empty.
     """
 
     def __init__(
@@ -171,13 +187,9 @@ class DecisionLoop:
         config: DecisionLoopConfig,
         runtime: ConformalRuntime | None = None,
         ensemble: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
-        observe_fn: Callable[[ConformalRuntime, list[pd.DataFrame], pd.Series], list[pd.DataFrame]]
-        | None = None,
         pending_observation_repo: PendingObservationRepo | None = None,
         session_id: str | None = None,
     ) -> None:
-        if observe_fn is not None and runtime is None:
-            raise ValueError("observe_fn requires runtime")
         if pending_observation_repo is not None and session_id is None:
             raise ValueError("session_id is required with pending_observation_repo")
         self._engine = engine
@@ -188,7 +200,6 @@ class DecisionLoop:
         self._config = config
         self._runtime = runtime
         self._ensemble = ensemble
-        self._observe_fn = observe_fn
         self._pending_observation_repo = pending_observation_repo
         self._session_id = session_id
 
@@ -244,12 +255,7 @@ class DecisionLoop:
                 self._config.on_round(rr)
             results.append(rr)
 
-            if (
-                self._observe_fn is not None
-                and actual_demand
-                and freq_offset is not None
-                and self._runtime is not None
-            ):
+            if self._runtime is not None and actual_demand and freq_offset is not None:
                 actuals_ds = origin + freq_offset
                 for uid, demand in actual_demand.items():
                     actuals_cache[(uid, actuals_ds)] = demand
@@ -262,7 +268,7 @@ class DecisionLoop:
                         lower_col=lower_col,
                         upper_col=upper_col,
                     )
-                    remaining = self._observe_fn(self._runtime, pending_frames, lookup)
+                    remaining = observe_pending(self._runtime, pending_frames, lookup)
                     self._pending_observation_repo.replace_session(
                         self._session_id or "",
                         remaining,
@@ -270,7 +276,7 @@ class DecisionLoop:
                         upper_col=upper_col,
                     )
                 else:
-                    pending = self._observe_fn(self._runtime, pending, lookup)
+                    pending = observe_pending(self._runtime, pending, lookup)
 
         for week_offset in range(1, self._config.n_delivery_rounds + 1):
             delivery_num = self._config.n_rounds + week_offset

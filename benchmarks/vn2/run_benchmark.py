@@ -67,8 +67,6 @@ from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
     RoundResult,
-    observe_cumulative,
-    observe_per_horizon,
 )
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
@@ -191,7 +189,6 @@ def run_benchmark(
                 cpu_per_task=cpu_per_task,
             )
             conformal_runtime = order_conformal_runtime
-            observe_fn = observe_cumulative
             mlflow.log_param("order_conformal_method", resolved_order_config.method_name)
             mlflow.log_param("order_conformal_coverage", resolved_order_config.coverage)
             mlflow.log_param("order_conformal_weight_decay", resolved_order_config.weight_decay)
@@ -202,14 +199,8 @@ def run_benchmark(
             mlflow.log_param("order_conformal_warmup_origins", order_conformal_warmup_origins)
         elif conformal_config is not None:
             conformal_runtime = build_symmetric_interval_runtime(conformal_config)
-            if conformal_config.mode == "cumulative":
-                observe_fn = observe_cumulative
-            else:
-                lower_col, upper_col = conformal_config.interval_columns
-                observe_fn = partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col)
         else:
             conformal_runtime = None
-            observe_fn = None
 
         engine = BackendEngine(
             execution=ExecutionOptions(
@@ -306,7 +297,6 @@ def run_benchmark(
                     on_round=on_round,
                 ),
                 runtime=conformal_runtime,
-                observe_fn=observe_fn,
                 ensemble=partial(
                     prepare_policy_forecast_frame,
                     protection_period=horizon,
