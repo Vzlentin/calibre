@@ -62,6 +62,16 @@ def _runtime(*, weight_decay: float | None = None) -> CumulativeRiskRuntime:
     )
 
 
+def test_cumulative_crc_runtime_reports_cumulative_mode() -> None:
+    assert _runtime().mode == "cumulative"
+
+
+def test_cumulative_crc_runtime_mode_is_read_only() -> None:
+    runtime = _runtime()
+    with pytest.raises(AttributeError):
+        runtime.mode = "perhorizon"  # type: ignore[misc]
+
+
 def test_cumulative_crc_runtime_emits_upper_bound_at_terminal_horizon() -> None:
     runtime = _runtime()
     lower_col, upper_col = interval_column_names(0.5)
