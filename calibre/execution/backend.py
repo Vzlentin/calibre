@@ -36,6 +36,7 @@ from calibre.core.forecast_task import ForecastTask, ForecastTaskRef, TaskGroups
 from calibre.core.io import join_uri, rm
 from calibre.core.metrics import (
     observe_forecast_duration,
+    observe_phase_duration,
     set_conformal_coverage,
     set_conformal_coverage_drift,
 )
@@ -273,7 +274,8 @@ class BackendEngine:
                 if self.streaming_order_output is not None
                 else InMemoryOrderLedger()
             )
-        self._restore_conformal_state()
+        with span("conformal_state_restore"):
+            self._restore_conformal_state()
         self._advance_issued_count_from_initial_ledger()
         conformal_runtime = self.conformal_runtime
 
@@ -282,14 +284,15 @@ class BackendEngine:
             direct_tasks = [_with_group_tag(task) for task in tasks.global_]
 
             with self._task_staging_prefix() as staging_prefix:
-                parallel_refs = self._materialize_task_refs(
-                    parallel_tasks,
-                    join_uri(staging_prefix, "local"),
-                )
-                direct_refs = self._materialize_task_refs(
-                    direct_tasks,
-                    join_uri(staging_prefix, "global"),
-                )
+                with span("staging_materialize"):
+                    parallel_refs = self._materialize_task_refs(
+                        parallel_tasks,
+                        join_uri(staging_prefix, "local"),
+                    )
+                    direct_refs = self._materialize_task_refs(
+                        direct_tasks,
+                        join_uri(staging_prefix, "global"),
+                    )
 
                 completed_origins = self._completed_initial_origins()
                 for origin in origins:
@@ -302,16 +305,15 @@ class BackendEngine:
                         yield BackendResult(ledger=ledger, order_ledger=order_ledger)
                         continue
                     origin_started = time.perf_counter()
-                    with span("backtest", origin=str(origin)):
-                        self.run_origin(
-                            ledger=ledger,
-                            order_ledger=order_ledger,
-                            actuals=actuals_source,
-                            origin=origin,
-                            conformal_runtime=conformal_runtime,
-                            parallel_refs=parallel_refs,
-                            direct_refs=direct_refs,
-                        )
+                    self.run_origin(
+                        ledger=ledger,
+                        order_ledger=order_ledger,
+                        actuals=actuals_source,
+                        origin=origin,
+                        conformal_runtime=conformal_runtime,
+                        parallel_refs=parallel_refs,
+                        direct_refs=direct_refs,
+                    )
                     duration = time.perf_counter() - origin_started
                     observe_forecast_duration("mixed", "origin", duration)
                     logger.info(
@@ -324,9 +326,11 @@ class BackendEngine:
                     )
                     yield BackendResult(ledger=ledger, order_ledger=order_ledger)
         finally:
-            ledger.close()
+            with span("ledger_close"):
+                ledger.close()
             if order_ledger is not None:
-                order_ledger.close()
+                with span("order_ledger_close"):
+                    order_ledger.close()
 
     def shutdown_owned_ray(self) -> None:
         """Shutdown a local Ray runtime this engine started."""
@@ -413,7 +417,12 @@ class BackendEngine:
         API's ``except ValueError``) still match. If the type cannot be rebuilt
         from a single message, fall back to ``RuntimeError`` rather than masking
         the failure with a reconstruction error.
+
+        Timing lives in ``finally`` so a failing phase is still attributed — the
+        failure path is exactly where attribution matters most. The
+        rewrap-and-raise path is otherwise byte-identical to before.
         """
+        started = time.perf_counter()
         try:
             yield
         except Exception as exc:
@@ -423,6 +432,17 @@ class BackendEngine:
             except Exception:
                 rewrapped = RuntimeError(message)
             raise rewrapped from exc
+        finally:
+            duration = time.perf_counter() - started
+            observe_phase_duration(name, duration)
+            logger.info(
+                "completed phase",
+                extra={
+                    "phase": name,
+                    "origin": origin,
+                    "duration_ms": round(duration * 1000.0, 3),
+                },
+            )
 
     def _resolve_open(
         self,
@@ -544,7 +564,8 @@ class BackendEngine:
         """
         if not origin_preds.empty:
             validate_forecast_frame(origin_preds)
-            ledger.append(origin_preds)
+            with span("ledger_append", origin=origin):
+                ledger.append(origin_preds)
 
         self._resolve_due(ledger, actuals, origin, conformal_runtime)
         self._persist_conformal_state(conformal_runtime)
@@ -562,30 +583,34 @@ class BackendEngine:
         persist conformal state — persistence is consolidated into Commit so it
         fires exactly once per origin.
         """
-        current = ledger.resolution_frame()
+        with span("ledger_resolution_frame", origin=origin):
+            current = ledger.resolution_frame()
         if current.empty:
             return
 
-        updated, newly_resolved = actuals.resolve(current, origin)
+        with span("actuals_lookup", origin=origin):
+            updated, newly_resolved = actuals.resolve(current, origin)
         if newly_resolved.empty:
             return
 
-        if conformal_runtime is not None:
-            newly_resolved = conformal_runtime.observe(newly_resolved)
-            self._record_conformal_coverage(newly_resolved, conformal_runtime)
-            if NONCONFORMITY_SCORE not in updated.columns:
-                updated[NONCONFORMITY_SCORE] = np.nan
-            updated.loc[newly_resolved.index, NONCONFORMITY_SCORE] = newly_resolved[
-                NONCONFORMITY_SCORE
-            ]
+        with span("resolve_scoring", origin=origin):
+            if conformal_runtime is not None:
+                newly_resolved = conformal_runtime.observe(newly_resolved)
+                self._record_conformal_coverage(newly_resolved, conformal_runtime)
+                if NONCONFORMITY_SCORE not in updated.columns:
+                    updated[NONCONFORMITY_SCORE] = np.nan
+                updated.loc[newly_resolved.index, NONCONFORMITY_SCORE] = newly_resolved[
+                    NONCONFORMITY_SCORE
+                ]
 
-        scored = compute_row_errors(newly_resolved)
-        for col in ("error", "abs_error", "pct_error"):
-            if col not in updated.columns:
-                updated[col] = np.nan
-            updated.loc[scored.index, col] = scored[col]
+            scored = compute_row_errors(newly_resolved)
+            for col in ("error", "abs_error", "pct_error"):
+                if col not in updated.columns:
+                    updated[col] = np.nan
+                updated.loc[scored.index, col] = scored[col]
 
-        ledger.update_resolved(updated)
+        with span("ledger_update_resolved", origin=origin):
+            ledger.update_resolved(updated)
 
     def _restore_conformal_state(self) -> None:
         if (

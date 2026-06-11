@@ -7,6 +7,11 @@ forecast_duration_seconds = Histogram(
     "Forecast execution duration.",
     ["model", "phase"],
 )
+phase_duration_seconds = Histogram(
+    "calibre_phase_duration_seconds",
+    "Per-origin engine phase duration.",
+    ["phase"],
+)
 conformal_coverage_ratio = Gauge(
     "calibre_conformal_coverage_ratio",
     "Observed conformal coverage ratio.",
@@ -30,6 +35,10 @@ def serve(port: int) -> None:
 
 def observe_forecast_duration(model: str, phase: str, seconds: float) -> None:
     forecast_duration_seconds.labels(model=model, phase=phase).observe(float(seconds))
+
+
+def observe_phase_duration(phase: str, seconds: float) -> None:
+    phase_duration_seconds.labels(phase=phase).observe(float(seconds))
 
 
 def set_conformal_coverage(model: str, mode: str, ratio: float) -> None:
