@@ -155,6 +155,42 @@ def test_observe_perhorizon_drops_unresolved_rows(session):
     assert observed[H].tolist() == [1], "only the resolved horizon should be observed"
 
 
+def test_observe_failure_is_logged_not_raised_and_state_not_persisted(session, caplog):
+    """A structurally bad window fails loudly in observe; the job boundary
+    records it with session context, does not re-raise, and durable conformal
+    state is untouched (upsert runs only on success)."""
+    import logging
+
+    session_id, make = session
+    runtime = make("cumulative", _calibrated_window(bounds_at_each_horizon=False))
+
+    def _raise(resolved: pd.DataFrame) -> pd.DataFrame:
+        raise ValueError("Duplicate H values in cumulative observe window")
+
+    runtime.observe = _raise
+    # Non-empty states prove the skip: were upsert reached, this would persist.
+    runtime.get_partition_states = lambda: {"m:cumulative:__global__": {"scores": [1.0]}}
+
+    with caplog.at_level(logging.ERROR):
+        api_main._run_observe_job(session_id, _actual_records(WINDOW_DS))
+
+    assert "observe job failed" in caplog.text
+    assert api_main._lifecycle_store().get_conformal_state(session_id) == {}
+
+
+def test_observe_success_persists_partition_states(session):
+    """The inverse lock: a successful observe upserts non-empty partition states."""
+    session_id, make = session
+    runtime = make("cumulative", _calibrated_window(bounds_at_each_horizon=False))
+    runtime.get_partition_states = lambda: {"m:cumulative:__global__": {"scores": [1.0]}}
+
+    api_main._run_observe_job(session_id, _actual_records(WINDOW_DS))
+
+    assert api_main._lifecycle_store().get_conformal_state(session_id) == {
+        "m:cumulative:__global__": {"scores": [1.0]}
+    }
+
+
 def test_observe_calibrated_without_y_column_does_not_crash(session):
     """A hand-crafted /calibrate payload may omit y; observe adds it, not KeyError.
 

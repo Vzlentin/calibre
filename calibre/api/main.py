@@ -556,9 +556,10 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
         observe_pending(runtime, [calibrated], actuals_lookup)
         store.upsert_conformal_state(session_id, runtime.get_partition_states())
     except Exception:
-        # Mirror _run_fit_job: a failed background job is recorded loudly with
-        # session context instead of dying as a bare framework traceback. The
-        # runtime was rebuilt from persisted state and upsert only runs on
+        # Log-and-surface at the job boundary (same catch shape as
+        # _run_fit_job, though unlike fits there is no per-job record for a
+        # consumer to poll — a pollable observe status is a named follow-up).
+        # The runtime was rebuilt from persisted state and upsert only runs on
         # success, so durable conformal state is untouched by a failure here.
         logger.exception("observe job failed", extra={"session_id": session_id})
 
