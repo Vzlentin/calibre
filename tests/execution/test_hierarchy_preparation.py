@@ -136,6 +136,33 @@ def test_bottom_up_preparation_builds_bottom_only_tasks_and_lazy_actuals(
     assert preparation.tasks.global_ == []
 
 
+def test_prepare_run_threads_one_shared_hierarchy_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lazy actuals source consumes the SAME index object run preparation
+    built and exposes (mirrors #147's shared-facts identity assertion)."""
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        lambda *args, **kwargs: None,
+    )
+
+    preparation = prepare_run(
+        _config(reconciliation={"strategy": "bottom_up"}),
+        _bundle(hierarchy=_hierarchy()),
+    )
+
+    assert preparation.hierarchy_index is not None
+    assert isinstance(preparation.actuals, HierarchyActualsSource)
+    # Identity, not equality: no consumer rebuilds the index.
+    assert preparation.actuals._index is preparation.hierarchy_index
+
+
+def test_flat_preparation_has_no_hierarchy_index() -> None:
+    preparation = prepare_run(_config(), _bundle(hierarchy=_hierarchy()))
+
+    assert preparation.hierarchy_index is None
+
+
 def test_empty_origins_raise_clear_error() -> None:
     config = _config(origins={"start": "2024-01-01", "end": "2024-01-02", "freq": "W-SUN"})
 
@@ -324,7 +351,7 @@ def test_bottom_up_preparation_runs_end_to_end_through_engine() -> None:
         execution=ExecutionOptions(freq="D", backend="local", seed=42),
         reconciliation=ReconciliationOptions(
             reconciler=preparation.reconciler,
-            hierarchy=preparation.reconciliation_hierarchy,
+            hierarchy_index=preparation.hierarchy_index,
         ),
     )
     try:

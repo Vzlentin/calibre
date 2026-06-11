@@ -33,7 +33,11 @@ from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter, build_fitted_values_frame
 from calibre.ordering.policy_config import RsConfig
 from calibre.reconciliation import HierarchicalIntervalContext, ReconciliationContext
-from calibre.reconciliation.summing import build_summing_matrix
+from calibre.reconciliation.summing import (
+    HierarchyIndex,
+    build_hierarchy_index,
+    build_summing_matrix,
+)
 
 
 @contextmanager
@@ -102,10 +106,10 @@ class _SpyPhase:
     def apply(
         self,
         frame: pd.DataFrame,
-        hierarchy: pd.DataFrame,
+        hierarchy_index: HierarchyIndex,
         context: HierarchicalIntervalContext,
     ) -> pd.DataFrame:
-        del hierarchy
+        del hierarchy_index
         self.calls += 1
         self.fitted_values = context.fitted_values
         if self.explode:
@@ -134,7 +138,7 @@ def _node_history() -> pd.DataFrame:
     )
     from calibre.execution.task_builder import build_node_history
 
-    return build_node_history(bottom, hierarchy)
+    return build_node_history(bottom, build_hierarchy_index(hierarchy))
 
 
 def _tasks(history: pd.DataFrame, *, horizon: int = 1) -> list[ForecastTask]:
@@ -160,7 +164,9 @@ def test_default_route_still_calls_reconcile_and_calibrate(monkeypatch: pytest.M
     history = _node_history()
     reconciler = _SpyReconciler()
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=reconciler, hierarchy=_hierarchy())
+        reconciliation=ReconciliationOptions(
+            reconciler=reconciler, hierarchy_index=build_hierarchy_index(_hierarchy())
+        )
     )
     calls = {"calibrate": 0}
 
@@ -204,7 +210,7 @@ def test_fused_phase_bypasses_reconcile_and_calibrate_and_commits_order(
     history = _node_history()
     phase = _SpyPhase()
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(hierarchy=_hierarchy()),
+        reconciliation=ReconciliationOptions(hierarchy_index=build_hierarchy_index(_hierarchy())),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=phase),
         order=RsConfig(params=pd.DataFrame()),
     )
@@ -244,7 +250,9 @@ def test_fused_phase_rejects_conformal_runtime() -> None:
     with pytest.raises(ValueError, match="cannot be combined with conformal runtime"):
         BackendEngine(
             conformal=ConformalOptions(runtime=object()),  # type: ignore[arg-type]
-            reconciliation=ReconciliationOptions(hierarchy=_hierarchy()),
+            reconciliation=ReconciliationOptions(
+                hierarchy_index=build_hierarchy_index(_hierarchy())
+            ),
             hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=_SpyPhase()),
         )
 
@@ -254,7 +262,7 @@ def test_fused_phase_rejects_point_reconciler() -> None:
         BackendEngine(
             reconciliation=ReconciliationOptions(
                 reconciler=_SpyReconciler(),
-                hierarchy=_hierarchy(),
+                hierarchy_index=build_hierarchy_index(_hierarchy()),
             ),
             hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=_SpyPhase()),
         )
@@ -268,7 +276,7 @@ def test_fused_phase_failure_names_phase_and_origin(monkeypatch: pytest.MonkeyPa
     history = _node_history()
     origin = pd.Timestamp("2024-01-04")
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(hierarchy=_hierarchy()),
+        reconciliation=ReconciliationOptions(hierarchy_index=build_hierarchy_index(_hierarchy())),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=_SpyPhase(explode=True)),
     )
 
@@ -331,7 +339,7 @@ def test_initial_ledger_resume_skips_fused_phase(monkeypatch: pytest.MonkeyPatch
     phase = _SpyPhase(explode=True)
     engine = BackendEngine(
         conformal=ConformalOptions(initial_ledger=initial),
-        reconciliation=ReconciliationOptions(hierarchy=_hierarchy()),
+        reconciliation=ReconciliationOptions(hierarchy_index=build_hierarchy_index(_hierarchy())),
         hierarchical_intervals=HierarchicalIntervalEngineOptions(phase=phase),
     )
 

@@ -36,7 +36,11 @@ from calibre.reconciliation.nixtla_adapter import (
     NixtlaStrategy,
     make_nixtla_method,
 )
-from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
+from calibre.reconciliation.summing import (
+    HierarchyIndex,
+    SummingMatrix,
+    summing_matrix_from_index,
+)
 
 HierarchicalIntervalMethod = Literal["nixtla_conformal"]
 _NIXTLA_MODEL_COL = "__calibre_model__"
@@ -84,7 +88,7 @@ class HierarchicalIntervalPhase(Protocol):
     def apply(
         self,
         frame: pd.DataFrame,
-        hierarchy: pd.DataFrame,
+        hierarchy_index: HierarchyIndex,
         context: HierarchicalIntervalContext,
     ) -> pd.DataFrame: ...
 
@@ -120,14 +124,14 @@ class NixtlaHierarchicalIntervalPhase:
     def apply(
         self,
         frame: pd.DataFrame,
-        hierarchy: pd.DataFrame,
+        hierarchy_index: HierarchyIndex,
         context: HierarchicalIntervalContext,
     ) -> pd.DataFrame:
         if frame.empty:
             return frame
         fitted = _validated_fitted_values(context)
         fitted_by_model = _fitted_values_by_model(fitted)
-        summing = build_summing_matrix(hierarchy)
+        summing = summing_matrix_from_index(hierarchy_index)
         parts = [
             self._apply_model_group(group, summing, fitted_by_model)
             for _, group in frame.groupby(_GROUP_KEYS, sort=False)

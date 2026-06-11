@@ -31,7 +31,11 @@ from calibre.core.forecast_frame import (
     is_quantile_column,
 )
 from calibre.reconciliation.protocols import ReconciliationContext
-from calibre.reconciliation.summing import SummingMatrix, build_summing_matrix
+from calibre.reconciliation.summing import (
+    HierarchyIndex,
+    SummingMatrix,
+    summing_matrix_from_index,
+)
 
 _GROUP_KEYS = [MODEL_NAME, FORECAST_ORIGIN, H]
 _ORDER_COL = "__calibre_reconcile_order__"
@@ -73,12 +77,12 @@ class VectorReconciler:
     def __call__(
         self,
         frame: pd.DataFrame,
-        hierarchy: pd.DataFrame | None,
+        hierarchy_index: HierarchyIndex | None,
         context: ReconciliationContext,
     ) -> pd.DataFrame:
-        if hierarchy is None or frame.empty:
+        if hierarchy_index is None or frame.empty:
             return frame
-        summing = build_summing_matrix(hierarchy)
+        summing = summing_matrix_from_index(hierarchy_index)
         state = self.prepare_reconcile(summing, context)
         order_col = _ORDER_COL
         while order_col in frame.columns:

@@ -19,7 +19,7 @@ from calibre.execution.hierarchy_memory import (
 )
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler, resolve_reconciler
-from calibre.reconciliation.summing import build_hierarchy_index
+from calibre.reconciliation.summing import HierarchyIndex, build_hierarchy_index
 
 
 class _TaskConfig(Protocol):
@@ -78,6 +78,7 @@ class RunPreparation:
     origins: list[pd.Timestamp]
     conformal_config: SymmetricIntervalConfig | None
     reconciliation_hierarchy: pd.DataFrame | None
+    hierarchy_index: HierarchyIndex | None
     reconciler: Reconciler | None
     hierarchical_interval_phase: HierarchicalIntervalPhase | None
     conformal_partition_estimate: int | None
@@ -105,7 +106,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         # materialization, so it does not apply here. Ledger partitions still
         # span the full hierarchy node set once aggregates are synthesized.
         assert reconciliation_hierarchy is not None and hierarchy_index is not None
-        actuals = HierarchyActualsSource(bundle.history, reconciliation_hierarchy)
+        actuals = HierarchyActualsSource(bundle.history, hierarchy_index)
         tasks = build_tasks(bundle.history, model_configs, horizon)
         hierarchy_partitions = len(hierarchy_index.node_labels) * horizon * len(config.tasks)
     else:
@@ -118,7 +119,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
             )
             enforce_hierarchical_expansion_memory_limit(expansion)
             hierarchy_partitions = expansion.forecast_partitions
-        actuals = build_node_history(bundle.history, reconciliation_hierarchy)
+        actuals = build_node_history(bundle.history, hierarchy_index)
         tasks = build_tasks(actuals, model_configs, horizon)
     conformal_partition_estimate = _enforce_conformal_partition_limit(
         config,
@@ -139,6 +140,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         origins=origins,
         conformal_config=conformal_config,
         reconciliation_hierarchy=reconciliation_hierarchy,
+        hierarchy_index=hierarchy_index,
         reconciler=(
             None
             if config.hierarchical_intervals is not None

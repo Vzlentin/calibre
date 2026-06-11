@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from calibre.reconciliation.summing import HierarchyIndex
 
 
 @dataclass(frozen=True)
@@ -24,9 +27,11 @@ class Reconciler(Protocol):
 
     A ``Reconciler`` makes the point forecasts in a forecast frame coherent
     across a cross-sectional hierarchy. The call signature is fixed by the
-    architecture: a forecast frame plus an optional hierarchy attribute frame in,
-    a forecast frame (same node row-set, reconciled ``y_hat``) out. A ``None``
-    hierarchy is a no-op pass-through.
+    architecture: a forecast frame plus an optional prebuilt
+    :class:`HierarchyIndex` in, a forecast frame (same node row-set, reconciled
+    ``y_hat``) out. The index is the single one run preparation built and
+    threaded through the engine — no reconciler rebuilds it. A ``None`` index is
+    a no-op pass-through.
 
     Strategy-specific inputs such as MinT residual covariance are threaded
     through ``ReconciliationContext`` so the forecast-frame ledger stays a future
@@ -39,6 +44,6 @@ class Reconciler(Protocol):
     def __call__(
         self,
         frame: pd.DataFrame,
-        hierarchy: pd.DataFrame | None,
+        hierarchy_index: HierarchyIndex | None,
         context: ReconciliationContext,
     ) -> pd.DataFrame: ...

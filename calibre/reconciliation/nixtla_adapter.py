@@ -28,7 +28,7 @@ from calibre.reconciliation.apply import (
     reject_quantile_columns,
 )
 from calibre.reconciliation.protocols import ReconciliationContext
-from calibre.reconciliation.summing import SummingMatrix
+from calibre.reconciliation.summing import HierarchyIndex, SummingMatrix
 
 NixtlaStrategy = Literal[
     "bottom_up",
@@ -181,12 +181,12 @@ class NixtlaReconciler(VectorReconciler):
     def __call__(
         self,
         frame: pd.DataFrame,
-        hierarchy: pd.DataFrame | None,
+        hierarchy_index: HierarchyIndex | None,
         context: ReconciliationContext,
     ) -> pd.DataFrame:
-        if hierarchy is not None and not frame.empty:
+        if hierarchy_index is not None and not frame.empty:
             reject_quantile_columns(frame, strategy="Nixtla")
-        return super().__call__(frame, hierarchy, context)
+        return super().__call__(frame, hierarchy_index, context)
 
     def prepare_reconcile(
         self,

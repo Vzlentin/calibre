@@ -31,6 +31,7 @@ from calibre.reconciliation import (
     NoOpReconciler,
     ReconciliationContext,
 )
+from calibre.reconciliation.summing import build_hierarchy_index
 
 
 @contextmanager
@@ -143,7 +144,9 @@ def test_reconcile_noop_without_reconciler() -> None:
 def test_reconcile_noop_with_noop_reconciler_and_hierarchy() -> None:
     """The no-op reconciler with a non-None hierarchy is a strict identity."""
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=NoOpReconciler(), hierarchy=_hierarchy())
+        reconciliation=ReconciliationOptions(
+            reconciler=NoOpReconciler(), hierarchy_index=build_hierarchy_index(_hierarchy())
+        )
     )
     frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], Y_HAT: [3.0]})
     out = engine._reconcile(frame, ReconciliationContext())
@@ -153,7 +156,7 @@ def test_reconcile_noop_with_noop_reconciler_and_hierarchy() -> None:
 def test_reconcile_noop_when_hierarchy_none_without_calling_reconciler() -> None:
     """hierarchy=None short-circuits before delegating (R3, R11)."""
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=_BoomReconciler(), hierarchy=None)
+        reconciliation=ReconciliationOptions(reconciler=_BoomReconciler(), hierarchy_index=None)
     )
     frame = pd.DataFrame({UNIQUE_ID: ["SKU_001"], Y_HAT: [3.0]})
     out = engine._reconcile(frame, ReconciliationContext())
@@ -169,7 +172,7 @@ def test_no_hierarchy_path_does_not_request_fitted_values(monkeypatch) -> None:
     engine = BackendEngine(
         reconciliation=ReconciliationOptions(
             reconciler=NixtlaReconciler("mint_shrink"),
-            hierarchy=None,
+            hierarchy_index=None,
         )
     )
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
@@ -190,7 +193,9 @@ def test_residual_reconcile_receives_fitted_context() -> None:
     task, dates, pattern = _periodic_task(horizon=1)
     spy = _NeedsFittedSpy()
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=spy, hierarchy=_hierarchy())
+        reconciliation=ReconciliationOptions(
+            reconciler=spy, hierarchy_index=build_hierarchy_index(_hierarchy())
+        )
     )
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
 
@@ -212,7 +217,9 @@ def test_residual_reconcile_receives_fitted_context() -> None:
 
 def test_reconcile_noop_on_empty_predictions() -> None:
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=_BoomReconciler(), hierarchy=_hierarchy())
+        reconciliation=ReconciliationOptions(
+            reconciler=_BoomReconciler(), hierarchy_index=build_hierarchy_index(_hierarchy())
+        )
     )
     empty = pd.DataFrame(columns=[UNIQUE_ID, Y_HAT])
     out = engine._reconcile(empty, ReconciliationContext())
@@ -228,7 +235,9 @@ def test_reconcile_runs_before_calibrate_on_raw_yhat() -> None:
     spy = _SpyReconciler()
     engine = BackendEngine(
         conformal=ConformalOptions(runtime=runtime),
-        reconciliation=ReconciliationOptions(reconciler=spy, hierarchy=_hierarchy()),
+        reconciliation=ReconciliationOptions(
+            reconciler=spy, hierarchy_index=build_hierarchy_index(_hierarchy())
+        ),
     )
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
     lower_col, upper_col = runtime.interval_columns
@@ -268,7 +277,7 @@ def test_reconcile_phase_failure_names_phase_and_origin() -> None:
     engine = BackendEngine(
         reconciliation=ReconciliationOptions(
             reconciler=_ExplodingReconciler(),
-            hierarchy=_hierarchy(),
+            hierarchy_index=build_hierarchy_index(_hierarchy()),
         )
     )
     actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": _pattern})
@@ -298,7 +307,7 @@ def test_resolve_due_fills_aggregate_actuals_from_node_history() -> None:
             Y: [2.0, 3.0],
         }
     )
-    actuals = build_node_history(bottom_actuals, hierarchy)
+    actuals = build_node_history(bottom_actuals, build_hierarchy_index(hierarchy))
     ledger = InMemoryLedger()
     ledger.append(
         pd.DataFrame(
@@ -345,7 +354,9 @@ def test_order_phase_filters_aggregate_rows_when_hierarchy_present(monkeypatch) 
 
     monkeypatch.setattr("calibre.execution.backend.apply_order_policy", _fake_apply_order_policy)
     engine = BackendEngine(
-        reconciliation=ReconciliationOptions(reconciler=BottomUpReconciler(), hierarchy=hierarchy),
+        reconciliation=ReconciliationOptions(
+            reconciler=BottomUpReconciler(), hierarchy_index=build_hierarchy_index(hierarchy)
+        ),
         order=RsConfig(params=pd.DataFrame()),
     )
 

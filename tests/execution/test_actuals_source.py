@@ -22,7 +22,7 @@ from calibre.execution.actuals import (
     as_actuals_source,
 )
 from calibre.execution.task_builder import build_node_history
-from calibre.reconciliation.summing import TOTAL_LABEL
+from calibre.reconciliation.summing import TOTAL_LABEL, build_hierarchy_index
 
 
 def _hierarchy() -> pd.DataFrame:
@@ -79,14 +79,14 @@ def test_as_actuals_source_wraps_frames_and_passes_sources_through() -> None:
     frame_source = as_actuals_source(_bottom_history())
     assert isinstance(frame_source, FrameActualsSource)
 
-    lazy = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    lazy = HierarchyActualsSource(_bottom_history(), build_hierarchy_index(_hierarchy()))
     assert as_actuals_source(lazy) is lazy
 
 
 def test_hierarchy_source_parity_with_eager_node_history() -> None:
     history = _bottom_history()
     hierarchy = _hierarchy()
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     ledger = _ledger(
         [
             ("item_a_s1", "2024-01-02"),
@@ -102,14 +102,16 @@ def test_hierarchy_source_parity_with_eager_node_history() -> None:
     origin = pd.Timestamp("2024-01-04")
 
     expected_updated, expected_new = resolve_actuals(ledger, node_history, origin)
-    updated, new = HierarchyActualsSource(history, hierarchy).resolve(ledger, origin)
+    updated, new = HierarchyActualsSource(history, build_hierarchy_index(hierarchy)).resolve(
+        ledger, origin
+    )
 
     pd.testing.assert_frame_equal(updated, expected_updated)
     pd.testing.assert_frame_equal(new, expected_new)
 
 
 def test_sparse_aggregate_resolution_sums_members() -> None:
-    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), build_hierarchy_index(_hierarchy()))
     ledger = _ledger([("item_id=item_a", "2024-01-02"), ("store_id=s2", "2024-01-02")])
 
     updated, new = source.resolve(ledger, pd.Timestamp("2024-01-02"))
@@ -123,7 +125,7 @@ def test_sparse_aggregate_resolution_sums_members() -> None:
 def test_incomplete_aggregate_dates_stay_pending() -> None:
     history = _bottom_history()
     hierarchy = _hierarchy()
-    source = HierarchyActualsSource(history, hierarchy)
+    source = HierarchyActualsSource(history, build_hierarchy_index(hierarchy))
     last_day = "2024-01-04"
     ledger = _ledger(
         [
@@ -141,13 +143,13 @@ def test_incomplete_aggregate_dates_stay_pending() -> None:
     assert list(new.index) == [3]
 
     # Eager node history has no rows for the incomplete dates either.
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     expected_updated, _ = resolve_actuals(ledger, node_history, pd.Timestamp(last_day))
     pd.testing.assert_frame_equal(updated, expected_updated)
 
 
 def test_partial_due_window_resolves_only_due_rows() -> None:
-    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), build_hierarchy_index(_hierarchy()))
     ledger = _ledger(
         [
             ("item_id=item_a", "2024-01-02"),
@@ -170,7 +172,7 @@ def test_partial_due_window_resolves_only_due_rows() -> None:
 
 
 def test_unknown_ledger_node_raises() -> None:
-    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), build_hierarchy_index(_hierarchy()))
     ledger = _ledger([("nope", "2024-01-02"), ("item_id=missing", "2024-01-02")])
 
     with pytest.raises(ValueError, match=r"not present in hierarchy.*item_id=missing.*nope"):
@@ -182,14 +184,14 @@ def test_unknown_history_unique_id_raises() -> None:
     history.loc[0, UNIQUE_ID] = "rogue"
 
     with pytest.raises(ValueError, match="rogue"):
-        HierarchyActualsSource(history, _hierarchy())
+        HierarchyActualsSource(history, build_hierarchy_index(_hierarchy()))
 
 
 def test_duplicate_bottom_keys_raise() -> None:
     history = pd.concat([_bottom_history(), _bottom_history().iloc[[0]]], ignore_index=True)
 
     with pytest.raises(ValueError, match="duplicate"):
-        HierarchyActualsSource(history, _hierarchy())
+        HierarchyActualsSource(history, build_hierarchy_index(_hierarchy()))
 
 
 def test_engine_resolves_identically_through_lazy_hierarchy_source() -> None:
@@ -200,7 +202,7 @@ def test_engine_resolves_identically_through_lazy_hierarchy_source() -> None:
 
     history = _bottom_history()
     hierarchy = _hierarchy()
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     model_configs = [
         {"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2, "name": "snaive"}
     ]
@@ -222,12 +224,12 @@ def test_engine_resolves_identically_through_lazy_hierarchy_source() -> None:
             engine.close()
 
     eager = _run(node_history)
-    lazy = _run(HierarchyActualsSource(history, hierarchy))
+    lazy = _run(HierarchyActualsSource(history, build_hierarchy_index(hierarchy)))
     pd.testing.assert_frame_equal(lazy, eager)
 
 
 def test_bottom_only_requests_skip_aggregate_work() -> None:
-    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), build_hierarchy_index(_hierarchy()))
     ledger = _ledger([("item_a_s1", "2024-01-01"), ("item_b_s1", "2024-01-02")])
 
     updated, new = source.resolve(ledger, pd.Timestamp("2024-01-02"))
@@ -268,7 +270,7 @@ def test_cached_resolution_matches_fresh_instance_per_origin() -> None:
     )
     origins = [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-04")]
 
-    cached_source = HierarchyActualsSource(history, hierarchy)
+    cached_source = HierarchyActualsSource(history, build_hierarchy_index(hierarchy))
     cached = _resolve_sequence(cached_source, ledger, origins)
 
     # A fresh instance per origin can never serve a cache hit, so it is the
@@ -276,7 +278,9 @@ def test_cached_resolution_matches_fresh_instance_per_origin() -> None:
     fresh = []
     current = ledger
     for origin in origins:
-        current, new = HierarchyActualsSource(history, hierarchy).resolve(current, origin)
+        current, new = HierarchyActualsSource(history, build_hierarchy_index(hierarchy)).resolve(
+            current, origin
+        )
         fresh.append((current.copy(), new.copy()))
 
     for (c_updated, c_new), (f_updated, f_new) in zip(cached, fresh, strict=True):
@@ -285,7 +289,7 @@ def test_cached_resolution_matches_fresh_instance_per_origin() -> None:
 
 
 def test_repeated_origin_lookup_does_no_bottom_history_rebuild(monkeypatch) -> None:
-    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), build_hierarchy_index(_hierarchy()))
     ledger = _ledger([("item_id=item_a", "2024-01-02"), (TOTAL_LABEL, "2024-01-02")])
 
     calls: list[set] = []
@@ -339,7 +343,9 @@ def _collision_history() -> pd.DataFrame:
 
 
 def test_str_collision_resolves_one_merged_aggregate_through_cache() -> None:
-    source = HierarchyActualsSource(_collision_history(), _collision_hierarchy())
+    source = HierarchyActualsSource(
+        _collision_history(), build_hierarchy_index(_collision_hierarchy())
+    )
     # Day 1: both m_int (y=1) and m_str (y=11) observed -> grp=1 = 12.
     ledger = _ledger([("grp=1", "2024-01-01")])
 
@@ -350,7 +356,9 @@ def test_str_collision_resolves_one_merged_aggregate_through_cache() -> None:
 
 
 def test_str_collision_aggregate_stays_pending_when_one_member_missing() -> None:
-    source = HierarchyActualsSource(_collision_history(), _collision_hierarchy())
+    source = HierarchyActualsSource(
+        _collision_history(), build_hierarchy_index(_collision_hierarchy())
+    )
     # Day 2: m_str unobserved, so the merged grp=1 aggregate is incomplete.
     ledger = _ledger([("grp=1", "2024-01-02")])
 
@@ -371,7 +379,7 @@ def test_categorical_attr_column_resolves_without_phantom_groups() -> None:
             Y: [2.0, 3.0, 5.0],
         }
     )
-    source = HierarchyActualsSource(history, hierarchy)
+    source = HierarchyActualsSource(history, build_hierarchy_index(hierarchy))
     # grp=A (members a, b) resolves; the unobserved category C is not a node.
     ledger = _ledger([("grp=A", "2024-01-01")])
 
@@ -384,7 +392,7 @@ def test_categorical_attr_column_resolves_without_phantom_groups() -> None:
 
 
 def test_cache_recomputes_only_new_ds_values(monkeypatch) -> None:
-    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), build_hierarchy_index(_hierarchy()))
 
     seen_ds: list[set] = []
     real_compute = source._compute_lookup

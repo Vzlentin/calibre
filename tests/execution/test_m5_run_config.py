@@ -79,7 +79,7 @@ def test_hierarchical_expansion_estimate_matches_ragged_node_history_rows() -> N
         }
     )
 
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=2)
     naive_full_panel_rows = 2 * len(build_summing_matrix(hierarchy).node_labels)
 
@@ -104,7 +104,7 @@ def test_hierarchical_expansion_estimate_matches_hierarchy_superset_node_history
         }
     )
 
-    node_history = build_node_history(history, hierarchy)
+    node_history = build_node_history(history, build_hierarchy_index(hierarchy))
     estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=2)
     naive_full_panel_rows = 2 * len(build_summing_matrix(hierarchy).node_labels)
 
@@ -222,7 +222,7 @@ def test_estimated_node_history_peak_bounds_m5_fixture_expansion() -> None:
     bundle = _load_dataset(config)
     assert bundle.hierarchy is not None
 
-    node_history = build_node_history(bundle.history, bundle.hierarchy)
+    node_history = build_node_history(bundle.history, build_hierarchy_index(bundle.hierarchy))
     estimate = estimate_hierarchical_expansion(
         bundle.history,
         build_hierarchy_index(bundle.hierarchy),

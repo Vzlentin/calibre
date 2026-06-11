@@ -24,7 +24,7 @@ import pandas as pd
 
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y, validate_actuals_frame
 from calibre.evaluation.forecast_metrics import resolve_actuals
-from calibre.reconciliation.summing import TOTAL_LABEL, build_hierarchy_index
+from calibre.reconciliation.summing import TOTAL_LABEL, HierarchyIndex
 
 
 class ActualsSource(Protocol):
@@ -69,9 +69,9 @@ class HierarchyActualsSource:
     eager node-history frame holds row-for-row.
     """
 
-    def __init__(self, bottom_history: pd.DataFrame, hierarchy: pd.DataFrame) -> None:
+    def __init__(self, bottom_history: pd.DataFrame, hierarchy_index: HierarchyIndex) -> None:
         validate_actuals_frame(bottom_history)
-        self._index = build_hierarchy_index(hierarchy)
+        self._index = hierarchy_index
 
         data = bottom_history[[UNIQUE_ID, DS, Y]].copy()
         data[UNIQUE_ID] = data[UNIQUE_ID].astype(str)
@@ -230,11 +230,10 @@ class HierarchyActualsSource:
             # Group on the stringified attribute column so the completeness
             # comparison reads the same stringified member counts the predicate
             # produces (str-colliding values resolve to one coherent group).
-            col_str = joined[col].astype(str)
-            members = joined[col_str.isin(wanted_values)]
+            members = joined.assign(**{col: joined[col].astype(str)})
+            members = members[members[col].isin(wanted_values)]
             grouped = (
-                members.assign(**{col: col_str[col_str.isin(wanted_values)]})
-                .groupby([col, DS], sort=True)
+                members.groupby([col, DS], sort=True)
                 .agg(**{Y: (Y, "sum"), "_member_count": (UNIQUE_ID, "nunique")})
                 .reset_index()
             )

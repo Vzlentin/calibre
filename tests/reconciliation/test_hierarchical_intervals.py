@@ -22,7 +22,7 @@ from calibre.core.forecast_frame import (
 from calibre.reconciliation import HierarchicalIntervalContext, HierarchicalIntervalOptions
 from calibre.reconciliation import hierarchical_intervals as hi
 from calibre.reconciliation.hierarchical_intervals import NixtlaHierarchicalIntervalPhase
-from calibre.reconciliation.summing import build_summing_matrix
+from calibre.reconciliation.summing import build_hierarchy_index, build_summing_matrix
 
 
 class _FakeReconciliation:
@@ -145,7 +145,7 @@ def test_valid_sidecar_produces_calibre_interval_columns(monkeypatch: pytest.Mon
 
     out = phase.apply(
         _forecast_frame(),
-        _hierarchy(),
+        build_hierarchy_index(_hierarchy()),
         HierarchicalIntervalContext(fitted_values=_fitted_values()),
     )
 
@@ -183,7 +183,7 @@ def test_nixtla_failure_includes_fused_phase_context(monkeypatch: pytest.MonkeyP
     ):
         phase.apply(
             _forecast_frame(),
-            _hierarchy(),
+            build_hierarchy_index(_hierarchy()),
             HierarchicalIntervalContext(fitted_values=_fitted_values()),
         )
 
@@ -197,7 +197,11 @@ def test_missing_aggregate_fitted_key_fails_before_nixtla(
     phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions())
 
     with pytest.raises(ValueError, match="dept=D.*2024-01-02.*m"):
-        phase.apply(_forecast_frame(), _hierarchy(), HierarchicalIntervalContext(fitted))
+        phase.apply(
+            _forecast_frame(),
+            build_hierarchy_index(_hierarchy()),
+            HierarchicalIntervalContext(fitted),
+        )
 
     assert _FakeReconciliation.calls == []
 
@@ -208,7 +212,11 @@ def test_duplicate_fitted_keys_fail_before_nixtla(monkeypatch: pytest.MonkeyPatc
     phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions())
 
     with pytest.raises(ValueError, match="Duplicate fitted-value rows"):
-        phase.apply(_forecast_frame(), _hierarchy(), HierarchicalIntervalContext(fitted))
+        phase.apply(
+            _forecast_frame(),
+            build_hierarchy_index(_hierarchy()),
+            HierarchicalIntervalContext(fitted),
+        )
 
     assert _FakeReconciliation.calls == []
 
@@ -220,7 +228,7 @@ def test_multi_model_sidecars_do_not_mix_model_names(monkeypatch: pytest.MonkeyP
     with pytest.raises(ValueError, match="model_name='m2'"):
         phase.apply(
             _forecast_frame(models=("m1", "m2")),
-            _hierarchy(),
+            build_hierarchy_index(_hierarchy()),
             HierarchicalIntervalContext(_fitted_values(models=("m1",))),
         )
 
@@ -233,7 +241,7 @@ def test_horizonless_sidecar_is_reused_for_multiple_horizons(
 
     out = phase.apply(
         _forecast_frame(horizon=2),
-        _hierarchy(),
+        build_hierarchy_index(_hierarchy()),
         HierarchicalIntervalContext(_fitted_values()),
     )
 

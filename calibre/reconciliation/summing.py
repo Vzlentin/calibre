@@ -167,14 +167,14 @@ def build_hierarchy_index(hierarchy: pd.DataFrame) -> HierarchyIndex:
     )
 
 
-def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
-    """Build a :class:`SummingMatrix` from a hierarchy attribute frame.
+def summing_matrix_from_index(hierarchy_index: HierarchyIndex) -> SummingMatrix:
+    """Densify a prebuilt :class:`HierarchyIndex` into a :class:`SummingMatrix`.
 
-    ``hierarchy`` must carry a ``unique_id`` column; every other column is
-    treated as a cross-sectional grouping dimension (discovered generically). The
-    bottom ids are sorted for deterministic node labels.
+    The dense S is derived on demand by the strategies that genuinely need it;
+    it is never owned by the index or run preparation. Callers that hold the
+    threaded index densify through this entry point so no index facts are
+    re-derived (same S bytes as the from-frame path).
     """
-    hierarchy_index = build_hierarchy_index(hierarchy)
     frame = hierarchy_index.frame
     attr_cols = hierarchy_index.attr_cols
     bottom_ids = hierarchy_index.bottom_ids
@@ -194,3 +194,15 @@ def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
         bottom_ids=bottom_ids,
         node_labels=hierarchy_index.node_labels,
     )
+
+
+def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
+    """Build a :class:`SummingMatrix` from a hierarchy attribute frame.
+
+    ``hierarchy`` must carry a ``unique_id`` column; every other column is
+    treated as a cross-sectional grouping dimension (discovered generically). The
+    bottom ids are sorted for deterministic node labels. Config-level callers
+    that only have the raw frame use this; callers holding the threaded index
+    densify through :func:`summing_matrix_from_index` instead.
+    """
+    return summing_matrix_from_index(build_hierarchy_index(hierarchy))

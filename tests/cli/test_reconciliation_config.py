@@ -119,8 +119,8 @@ def test_run_config_passes_bundle_hierarchy_into_engine(monkeypatch: pytest.Monk
     options = captured["reconciliation"]
     assert isinstance(options.reconciler, NixtlaReconciler)
     assert options.reconciler.strategy == "ols"
-    assert options.hierarchy is not None
-    assert "unique_id" in options.hierarchy.columns
+    assert options.hierarchy_index is not None
+    assert "unique_id" in options.hierarchy_index.frame.columns
 
 
 def test_hierarchical_intervals_section_resolves_to_fused_phase(
@@ -168,7 +168,7 @@ def test_hierarchical_intervals_section_resolves_to_fused_phase(
     fused = captured["hierarchical_intervals"]
     assert isinstance(fused.phase, NixtlaHierarchicalIntervalPhase)
     assert fused.phase.options.strategy == "ols"
-    assert reconciliation.hierarchy is not None
+    assert reconciliation.hierarchy_index is not None
     assert reconciliation.reconciler is None
     assert len(captured["tasks"].local) > 2
 

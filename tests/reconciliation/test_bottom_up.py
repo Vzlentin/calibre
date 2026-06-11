@@ -17,7 +17,11 @@ from calibre.core.forecast_frame import (
 )
 from calibre.reconciliation import BottomUpReconciler, ReconciliationContext, resolve_reconciler
 from calibre.reconciliation.nixtla_adapter import NixtlaReconciler
-from calibre.reconciliation.summing import TOTAL_LABEL, build_summing_matrix
+from calibre.reconciliation.summing import (
+    TOTAL_LABEL,
+    build_hierarchy_index,
+    build_summing_matrix,
+)
 
 _CONTEXT = ReconciliationContext()
 
@@ -30,6 +34,12 @@ def _hierarchy() -> pd.DataFrame:
             "store_id": ["s1", "s2", "s1"],
         }
     )
+
+
+def _index():
+    """The reconciler now takes the prebuilt index; build it from the same
+    fixture frame so the asserted outcomes are unchanged."""
+    return build_hierarchy_index(_hierarchy())
 
 
 def _bottom_frame(h: int = 1, model: str = "m", y_hats: list[float] | None = None) -> pd.DataFrame:
@@ -58,7 +68,7 @@ def test_nixtla_reconciler_rejects_point_bottom_up() -> None:
 
 def test_synthesizes_aggregates_equal_to_summing_matrix_product() -> None:
     frame = _bottom_frame()
-    result = BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+    result = BottomUpReconciler()(frame, _index(), _CONTEXT)
 
     summing = build_summing_matrix(_hierarchy())
     expected = summing.S @ np.array([1.0, 2.0, 4.0])
@@ -83,7 +93,7 @@ def test_synthesizes_aggregates_equal_to_summing_matrix_product() -> None:
 
 def test_synthesized_rows_preserve_frame_columns() -> None:
     frame = _bottom_frame()
-    result = BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+    result = BottomUpReconciler()(frame, _index(), _CONTEXT)
 
     assert list(result.columns) == list(frame.columns)
     aggregates = result.iloc[3:]
@@ -98,7 +108,7 @@ def test_partial_bottom_subset_synthesizes_only_complete_member_nodes() -> None:
     frame = _bottom_frame()
     frame = frame[frame[UNIQUE_ID] != "a_s2"].reset_index(drop=True)
 
-    result = BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+    result = BottomUpReconciler()(frame, _index(), _CONTEXT)
 
     values = result.set_index(UNIQUE_ID)[Y_HAT]
     # Aggregates whose full member set is forecast are synthesized; aggregates
@@ -118,7 +128,7 @@ def test_groups_are_expanded_independently() -> None:
         ],
         ignore_index=True,
     )
-    result = BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+    result = BottomUpReconciler()(frame, _index(), _CONTEXT)
 
     keyed = result.set_index([MODEL_NAME, H, UNIQUE_ID])[Y_HAT]
     assert keyed[("m", 1, TOTAL_LABEL)] == pytest.approx(7.0)
@@ -133,7 +143,7 @@ def test_aggregate_input_rows_are_rejected() -> None:
     frame = pd.concat([frame, extra], ignore_index=True)
 
     with pytest.raises(ValueError, match="bottom-level forecast rows only"):
-        BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+        BottomUpReconciler()(frame, _index(), _CONTEXT)
 
 
 def test_unknown_node_rows_are_rejected() -> None:
@@ -141,14 +151,14 @@ def test_unknown_node_rows_are_rejected() -> None:
     frame.loc[0, UNIQUE_ID] = "rogue"
 
     with pytest.raises(ValueError, match="rogue"):
-        BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+        BottomUpReconciler()(frame, _index(), _CONTEXT)
 
 
 def test_duplicate_bottom_rows_are_rejected() -> None:
     frame = pd.concat([_bottom_frame(), _bottom_frame().iloc[[0]]], ignore_index=True)
 
     with pytest.raises(ValueError, match="duplicate"):
-        BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+        BottomUpReconciler()(frame, _index(), _CONTEXT)
 
 
 def test_quantile_columns_are_rejected() -> None:
@@ -156,7 +166,7 @@ def test_quantile_columns_are_rejected() -> None:
     frame["q_0.9"] = 1.0
 
     with pytest.raises(ValueError, match="quantile columns"):
-        BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+        BottomUpReconciler()(frame, _index(), _CONTEXT)
 
 
 def test_no_hierarchy_or_empty_frame_pass_through() -> None:
@@ -165,7 +175,7 @@ def test_no_hierarchy_or_empty_frame_pass_through() -> None:
 
     assert reconciler(frame, None, _CONTEXT) is frame
     empty = frame.iloc[0:0]
-    assert reconciler(empty, _hierarchy(), _CONTEXT) is empty
+    assert reconciler(empty, _index(), _CONTEXT) is empty
 
 
 def test_nan_bottom_counts_as_present_and_poisons_containing_aggregates() -> None:
@@ -174,7 +184,7 @@ def test_nan_bottom_counts_as_present_and_poisons_containing_aggregates() -> Non
     on every aggregate that contains it."""
     frame = _bottom_frame(y_hats=[1.0, float("nan"), 4.0])  # a_s2 is NaN
 
-    result = BottomUpReconciler()(frame, _hierarchy(), _CONTEXT)
+    result = BottomUpReconciler()(frame, _index(), _CONTEXT)
 
     values = result.set_index(UNIQUE_ID)[Y_HAT]
     # The NaN member is present, so every aggregate is still synthesized.

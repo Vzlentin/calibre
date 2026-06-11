@@ -10,7 +10,7 @@ import pandas as pd
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.forecasting.adapter_registry import get_adapter_cls, get_scope
-from calibre.reconciliation.summing import TOTAL_LABEL, build_hierarchy_index
+from calibre.reconciliation.summing import TOTAL_LABEL, HierarchyIndex
 
 
 def partition_tasks(tasks: list[ForecastTask]) -> TaskGroups:
@@ -47,14 +47,15 @@ def _global_dedup_key(task: ForecastTask) -> tuple[tuple[str, ...], str, int]:
     return uids, config, task.horizon
 
 
-def build_node_history(sales: pd.DataFrame, hierarchy: pd.DataFrame | None) -> pd.DataFrame:
+def build_node_history(sales: pd.DataFrame, hierarchy_index: HierarchyIndex | None) -> pd.DataFrame:
     """Expand bottom-level history to the hierarchy's full node set.
 
-    ``hierarchy=None`` preserves the flat-panel input contract. With a hierarchy,
-    aggregate rows are real time series whose labels and ordering come directly
-    from the hierarchy's canonical node index.
+    ``hierarchy_index=None`` preserves the flat-panel input contract. With an
+    index, aggregate rows are real time series whose labels and ordering come
+    directly from the threaded index's canonical node order — the same instance
+    run preparation built, never rebuilt here.
     """
-    if hierarchy is None:
+    if hierarchy_index is None:
         return sales.copy()
 
     data = sales[[UNIQUE_ID, DS, Y]].copy()
@@ -62,7 +63,6 @@ def build_node_history(sales: pd.DataFrame, hierarchy: pd.DataFrame | None) -> p
     data[DS] = pd.to_datetime(data[DS]).astype("datetime64[ns]")
     data[Y] = data[Y].astype("float64")
 
-    hierarchy_index = build_hierarchy_index(hierarchy)
     unknown = set(data[UNIQUE_ID].unique()) - set(hierarchy_index.bottom_ids)
     if unknown:
         raise ValueError(
