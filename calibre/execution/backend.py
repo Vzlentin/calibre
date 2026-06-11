@@ -778,8 +778,10 @@ class BackendEngine:
     ) -> list[ChunkTaskRef]:
         """Group local tasks by resolved config and stage O(chunks) artifacts.
 
-        Tasks are grouped by their resolved model config (so distinct configs
-        never share a chunk), then each group is split into ``chunk_size`` slices.
+        Tasks are grouped by their resolved (model config, horizon) — so
+        distinct configs or horizons never share a chunk and duplicate
+        (uid, config, horizon) tasks collapse to one — then each group is
+        split into ``chunk_size`` slices.
         Each slice is staged as one panel-history parquet plus, when any series
         carries exogenous features, one uid-filtered future_x parquet — so total
         staging is O(chunks), not O(series).
@@ -962,16 +964,27 @@ def _group_global_refs_by_config(
 def _group_local_tasks_by_config(
     tasks: list[ForecastTask],
 ) -> list[tuple[dict, list[ForecastTask]]]:
-    """Group local tasks by resolved config so distinct configs never co-chunk.
+    """Group local tasks by resolved (config, horizon) so they never co-chunk.
 
     Mirrors :func:`_group_global_refs_by_config` but over un-staged tasks (the
     grouping decides chunk membership *before* staging). Insertion order is
     preserved within and across groups, keeping chunk assignment deterministic.
+
+    Duplicate (unique_id, config, horizon) tasks collapse to their first
+    occurrence — the local mirror of ``build_tasks``' global dedup. The chunk
+    worker slices the staged panel per uid, so a duplicate's concatenated
+    history would otherwise read back as one series with every row doubled.
     """
-    grouped: dict[str, tuple[dict, list[ForecastTask]]] = {}
+    grouped: dict[tuple[str, int], tuple[dict, list[ForecastTask]]] = {}
+    seen: set[tuple[str, str, int]] = set()
     for task in tasks:
-        key = _model_config_key(task.model_config)
-        if key not in grouped:
-            grouped[key] = (dict(task.model_config), [])
-        grouped[key][1].append(task)
+        config_key = _model_config_key(task.model_config)
+        task_key = (task.unique_id, config_key, task.horizon)
+        if task_key in seen:
+            continue
+        seen.add(task_key)
+        group_key = (config_key, task.horizon)
+        if group_key not in grouped:
+            grouped[group_key] = (dict(task.model_config), [])
+        grouped[group_key][1].append(task)
     return list(grouped.values())

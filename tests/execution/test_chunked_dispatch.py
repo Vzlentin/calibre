@@ -10,6 +10,11 @@ The fixture deliberately mixes TWO local configs over a multi-series panel:
 * an ``mlforecast`` LightGBM with a ``future_x`` exogenous column (a *pooled*
   adapter — one model over the stacked panel).
 
+The seasonal group also carries a late-starting series whose history is empty
+before the first origin: the chunk worker must skip it at that origin (the
+cold-start path) without disturbing its chunk-mates, then fit it at the second
+origin — at every chunk size.
+
 Running at ``chunk_size`` 1 / 2 / large and asserting frame equality across all
 ledgers proves the invariance for both. The mlforecast lock is the one that
 would have caught the rejected panel-route design: had chunks been fed through
@@ -30,6 +35,7 @@ from calibre.execution.task_builder import partition_tasks
 
 _SEASONAL_UIDS = ("SN_A", "SN_B", "SN_C")
 _ML_UIDS = ("ML_A", "ML_B", "ML_C")
+_LATE_UID = "SN_LATE"
 _ORIGINS = [pd.Timestamp("2024-06-09"), pd.Timestamp("2024-06-16")]
 
 
@@ -48,6 +54,12 @@ def _ml_history(uid: str, phase: float) -> pd.DataFrame:
     base = [(5.0 + phase), (12.0 + phase), (19.0 + phase), (26.0 + phase)] * 6
     promo = [0.0, 1.0] * 12
     return pd.DataFrame({UNIQUE_ID: uid, DS: dates, Y: base, "promo": promo})
+
+
+def _late_history() -> pd.DataFrame:
+    # One observation at the first origin: ``ds < origin`` is empty there (the
+    # cold-start skip), and the series fits on this single row at origin 2.
+    return pd.DataFrame({UNIQUE_ID: _LATE_UID, DS: [_ORIGINS[0]], Y: [7.5]})
 
 
 def _ml_future_x(uid: str) -> pd.DataFrame:
@@ -75,6 +87,17 @@ def _tasks() -> list[ForecastTask]:
         )
         for idx, uid in enumerate(_SEASONAL_UIDS)
     ]
+    seasonal.append(
+        ForecastTask(
+            history=_late_history(),
+            horizon=2,
+            model_config={
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "season_length": 4,
+            },
+        )
+    )
     ml = [
         ForecastTask(
             history=_ml_history(uid, phase=float(idx)),
@@ -106,6 +129,7 @@ def _actuals() -> pd.DataFrame:
     frames += [
         _ml_history(uid, phase=float(idx))[[UNIQUE_ID, DS, Y]] for idx, uid in enumerate(_ML_UIDS)
     ]
+    frames.append(_late_history())
     return pd.concat(frames, ignore_index=True)
 
 
@@ -129,6 +153,11 @@ def test_chunked_local_output_is_invariant_across_chunk_sizes() -> None:
 
     pd.testing.assert_frame_equal(paired, per_series)
     pd.testing.assert_frame_equal(one_chunk, per_series)
+
+    # The cold-start path actually fired: the late series is skipped at the
+    # first origin (empty pre-origin history) and forecast at the second.
+    late = per_series[per_series[UNIQUE_ID] == _LATE_UID]
+    assert set(late[FORECAST_ORIGIN]) == {_ORIGINS[1]}
 
 
 def test_mlforecast_chunking_stays_per_series_not_pooled() -> None:

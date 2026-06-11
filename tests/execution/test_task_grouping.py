@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pandas as pd
 
@@ -131,6 +132,50 @@ def test_distinct_configs_never_share_a_chunk() -> None:
     assert len(groups) == 2
     members = {tuple(t.unique_id for t in group_tasks) for _config, group_tasks in groups}
     assert members == {("A", "C"), ("B",)}
+
+
+def test_duplicate_uid_config_tasks_collapse_to_first() -> None:
+    """Duplicate (uid, config, horizon) tasks dedup before chunk staging.
+
+    Without the dedup, both copies' histories are concatenated into the staged
+    chunk panel, and the worker's per-uid slice reads one series with every row
+    doubled — silent forecast corruption.
+    """
+    first = _local_task("A")
+    groups = _group_local_tasks_by_config([first, _local_task("B"), _local_task("A")])
+
+    assert len(groups) == 1
+    _config, group_tasks = groups[0]
+    assert [task.unique_id for task in group_tasks] == ["A", "B"]
+    assert group_tasks[0] is first
+
+
+def test_same_config_different_horizons_group_separately() -> None:
+    """Horizon is part of the chunk group key; the staged chunk applies one
+    horizon to every member, so mixed horizons must never co-chunk."""
+    groups = _group_local_tasks_by_config([_local_task("A"), replace(_local_task("B"), horizon=3)])
+
+    assert len(groups) == 2
+    horizons = {group_tasks[0].horizon for _config, group_tasks in groups}
+    assert horizons == {2, 3}
+
+
+def test_duplicate_local_task_yields_same_ledger_as_single_copy() -> None:
+    """End-to-end lock for the doubled-history corruption: a duplicated
+    (uid, config) task produces exactly the ledger of a single copy."""
+    tasks = [_local_task("A"), _local_task("B")]
+    panel = pd.concat([task.history for task in tasks], ignore_index=True)
+    origins = [pd.Timestamp("2024-03-03")]
+
+    single = BackendEngine(execution=ExecutionOptions(chunk_size=256))
+    baseline = single.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+
+    duplicated = BackendEngine(execution=ExecutionOptions(chunk_size=256))
+    with_duplicate = duplicated.execute(
+        partition_tasks([*tasks, _local_task("A")]), panel, origins
+    ).ledger.to_df()
+
+    pd.testing.assert_frame_equal(_sorted(with_duplicate), _sorted(baseline))
 
 
 def test_chunk_count_is_ceil_of_series_over_chunk_size() -> None:
