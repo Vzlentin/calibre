@@ -61,7 +61,8 @@ class FrameActualsSource:
 class HierarchyActualsSource:
     """Resolve hierarchy node actuals on demand from bottom history.
 
-    Holds the bottom-level history and the hierarchy attribute frame. Bottom
+    Holds the bottom-level history and the prebuilt :class:`HierarchyIndex`
+    (the same instance run preparation built — never rebuilt here). Bottom
     node actuals are direct lookups; ``"<column>=<value>"`` aggregates and the
     grand total are summed over their member bottom series only for the
     requested ``(node, ds)`` pairs, with the same all-members-present

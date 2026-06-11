@@ -89,6 +89,25 @@ class TestBuildNodeHistory:
         assert d1 == pytest.approx(20.0)
         assert total == pytest.approx(30.0)
 
+    def test_str_colliding_attr_values_merge_into_one_aggregate(self, sample_sales):
+        # int 1 and str "1" in one attr column merge under the stringified
+        # predicate — one aggregate row summing both members, no duplicates.
+        hierarchy = pd.DataFrame(
+            {"unique_id": ["series_a", "series_b", "series_c"], "grp": [1, "1", "2"]}
+        )
+        out = build_node_history(sample_sales, build_hierarchy_index(hierarchy))
+
+        labels = out["unique_id"].unique().tolist()
+        assert labels.count("grp=1") == 1
+        first_day = sample_sales["ds"].min()
+        merged = out[(out["unique_id"] == "grp=1") & (out["ds"] == first_day)]
+        assert len(merged) == 1
+        both_members = sample_sales[
+            (sample_sales["unique_id"].isin(["series_a", "series_b"]))
+            & (sample_sales["ds"] == first_day)
+        ]["y"].sum()
+        assert merged["y"].iloc[0] == pytest.approx(both_members)
+
     def test_partial_history_dates_omit_incomplete_aggregates(self, sample_sales, sample_hierarchy):
         partial = sample_sales[
             ~(

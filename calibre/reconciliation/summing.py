@@ -39,6 +39,7 @@ class HierarchyIndex:
     attr_cols: tuple[str, ...]
     bottom_ids: tuple[str, ...]
     node_labels: tuple[str, ...]
+    members_by_attr: dict[str, pd.Series]
 
     def expected_members(self) -> dict[str, pd.Series]:
         """Per-attribute-column member counts, grouped on stringified values.
@@ -60,12 +61,11 @@ class HierarchyIndex:
         production and the dense summing matrix already do — and that
         ``category``-dtype phantom groups for unobserved categories are dropped
         by construction.
+
+        Precomputed once at index build (the index is frozen and the counts are
+        run-constant): the bottom-up reconciler reads this per origin.
         """
-        counts: dict[str, pd.Series] = {}
-        for col in self.attr_cols:
-            values = self.frame[col].astype(str)
-            counts[col] = values.groupby(values).size()
-        return counts
+        return self.members_by_attr
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,11 +160,17 @@ def build_hierarchy_index(hierarchy: pd.DataFrame) -> HierarchyIndex:
             f"bottom unique_id values: {duplicates}"
         )
 
+    members_by_attr: dict[str, pd.Series] = {}
+    for col in attr_cols:
+        values = frame[col].astype(str)
+        members_by_attr[col] = values.groupby(values).size()
+
     return HierarchyIndex(
         frame=frame,
         attr_cols=attr_cols,
         bottom_ids=bottom_ids,
         node_labels=tuple(labels),
+        members_by_attr=members_by_attr,
     )
 
 
@@ -202,8 +208,9 @@ def build_summing_matrix(hierarchy: pd.DataFrame) -> SummingMatrix:
 
     ``hierarchy`` must carry a ``unique_id`` column; every other column is
     treated as a cross-sectional grouping dimension (discovered generically). The
-    bottom ids are sorted for deterministic node labels. Config-level callers
-    that only have the raw frame use this; callers holding the threaded index
-    densify through :func:`summing_matrix_from_index` instead.
+    bottom ids are sorted for deterministic node labels. Convenience entry
+    point for callers holding only a raw frame (tests, ad-hoc tooling);
+    production paths hold the threaded index and densify through
+    :func:`summing_matrix_from_index`.
     """
     return summing_matrix_from_index(build_hierarchy_index(hierarchy))
