@@ -171,27 +171,56 @@ def _cast_keys_to_canonical(table: pa.Table) -> pa.Table:
     return pa.table(columns, schema=_CANONICAL_KEY_SCHEMA)
 
 
-def _winning_update_rows(update_keys: pa.Table) -> tuple[pa.Table, np.ndarray]:
-    """Keep-last dedup of update keys by ascending stream position.
+def _key_dictionaries(datasets: list[pds.Dataset]) -> list[np.ndarray]:
+    """Distinct canonical values per key column across ``datasets``.
 
-    Returns the distinct (winning) key table and a boolean mask over the update
-    rows selecting the last occurrence of each key. Arrow group-bys give no
-    stable-order guarantee, so the last occurrence is chosen explicitly by the
-    maximum ``__upd_row`` position within each key group.
+    Key cardinalities are tiny relative to row counts (tens of thousands of
+    ids, dozens of dates/origins/horizons), so the dictionaries fit trivially
+    in memory; they are collected with a streamed per-row-group pass so the
+    full key columns never do.
     """
-    n_upd = update_keys.num_rows
-    positions = pa.array(np.arange(n_upd, dtype=np.int64))
-    with_pos = update_keys.append_column("__upd_row", positions)
-    winners = (
-        with_pos.group_by(_FORECAST_KEY_COLUMNS)
-        .aggregate([("__upd_row", "max")])
-        .column("__upd_row_max")
-        .to_numpy()
-    )
-    winning_mask = np.zeros(n_upd, dtype=bool)
-    winning_mask[winners] = True
-    distinct_keys = with_pos.filter(pa.array(winning_mask)).drop_columns(["__upd_row"])
-    return distinct_keys, winning_mask
+    uniques: list[list[np.ndarray]] = [[] for _ in _CANONICAL_KEY_SCHEMA]
+    for dataset in datasets:
+        for table in _iter_row_group_tables(dataset, list(_FORECAST_KEY_COLUMNS)):
+            keys = _cast_keys_to_canonical(table).to_pandas()
+            for i, field in enumerate(_CANONICAL_KEY_SCHEMA):
+                uniques[i].append(pd.unique(keys[field.name].to_numpy()))
+    return [pd.unique(np.concatenate(per_column)) for per_column in uniques]
+
+
+def _composite_key_codes(dataset: pds.Dataset, dictionaries: list[np.ndarray]) -> np.ndarray:
+    """Collapse each row's 5-column key into one exact int64 composite code.
+
+    Each key column is factorized against its (tiny) dictionary and the codes
+    are combined with mixed-radix arithmetic, so membership between two key
+    sets becomes vectorized int64 comparison instead of a multi-gigabyte
+    string hash join — the Acero join on raw key columns is what OOMed the
+    60M-row finalize on a 16 GB host. Codes are exact (no hashing), built one
+    row group at a time; the only full-length allocations are the int64 code
+    arrays themselves (~8 bytes/row).
+    """
+    radices = [max(len(dictionary), 1) for dictionary in dictionaries]
+    capacity = 1
+    for radix in radices:
+        capacity *= radix
+    if capacity >= 2**63:
+        raise ValueError(
+            "streaming ledger finalize aborted: key cardinality product "
+            f"{capacity} overflows the int64 composite key space"
+        )
+    chunks: list[np.ndarray] = []
+    for table in _iter_row_group_tables(dataset, list(_FORECAST_KEY_COLUMNS)):
+        keys = _cast_keys_to_canonical(table).to_pandas()
+        codes = np.zeros(len(keys), dtype=np.int64)
+        for i, field in enumerate(_CANONICAL_KEY_SCHEMA):
+            indices = pd.Categorical(keys[field.name], categories=dictionaries[i]).codes
+            if (indices < 0).any():
+                raise ValueError(f"streaming ledger key column {field.name!r} contains nulls")
+            codes = codes * radices[i] + indices.astype(np.int64, copy=False)
+        chunks.append(codes)
+    if not chunks:
+        return np.empty(0, dtype=np.int64)
+    return np.concatenate(chunks)
 
 
 def _pa_filesystem(uri: str) -> tuple[Any, str]:
@@ -591,38 +620,35 @@ class StreamingLedger:
         if missing:
             raise ValueError(f"Cannot resolve streaming ledger without key columns: {missing}")
 
-        # Build the key tables from the same row-group iterator used to write the
-        # rows, so the boolean masks line up positionally with the streamed
-        # row groups regardless of fragment ordering.
-        update_keys = _cast_keys_to_canonical(
-            pa.concat_tables(_iter_row_group_tables(upd_dataset, _FORECAST_KEY_COLUMNS))
-        )
-        distinct_keys, winning_mask = _winning_update_rows(update_keys)
-        n_distinct = distinct_keys.num_rows
+        # Factorize the 5-column keys into exact int64 composite codes using the
+        # same row-group iterator order used to write the rows, so the boolean
+        # masks line up positionally with the streamed row groups regardless of
+        # fragment ordering. Membership is then vectorized int64 isin — the
+        # earlier Acero string join OOMed at 60M rows on the 16 GB gate host.
+        dictionaries = _key_dictionaries([upd_dataset, raw_dataset])
+        upd_codes = _composite_key_codes(upd_dataset, dictionaries)
 
-        raw_keys = _cast_keys_to_canonical(
-            pa.concat_tables(_iter_row_group_tables(raw_dataset, _FORECAST_KEY_COLUMNS))
-        )
-        raw_keys = raw_keys.append_column("__row", pa.array(np.arange(n_raw, dtype=np.int64)))
-        distinct_keys = distinct_keys.append_column(
-            "__hit", pa.array(np.ones(n_distinct, dtype=np.int8))
-        )
+        # Keep-last dedup by ascending stream position: the first occurrence in
+        # the reversed array is the last occurrence in stream order.
+        first_in_reversed = np.unique(upd_codes[::-1], return_index=True)[1]
+        winning_idx = (n_upd - 1) - first_in_reversed
+        winning_mask = np.zeros(n_upd, dtype=bool)
+        winning_mask[winning_idx] = True
+        n_distinct = len(winning_idx)
 
-        joined = raw_keys.join(distinct_keys, keys=_FORECAST_KEY_COLUMNS, join_type="left outer")
-        # __hit is null for raw rows with no matching update; valid rows resolved.
-        hit_rows = joined.filter(joined.column("__hit").is_valid()).column("__row").to_numpy()
+        raw_codes = _composite_key_codes(raw_dataset, dictionaries)
+        resolved_mask = np.isin(raw_codes, upd_codes[winning_mask])
         # Accounting guard: every distinct update key must map onto exactly one
         # raw row. An unmatched update is a resolution for a row never issued —
         # corruption — so abort rather than silently drop it.
-        if len(hit_rows) != n_distinct:
+        hits = int(resolved_mask.sum())
+        if hits != n_distinct:
             raise ValueError(
                 "streaming ledger finalize aborted: "
-                f"{n_distinct} distinct update keys mapped onto {len(hit_rows)} raw rows "
+                f"{n_distinct} distinct update keys mapped onto {hits} raw rows "
                 "(expected 1:1)"
             )
-        resolved_mask = np.zeros(n_raw, dtype=bool)
-        resolved_mask[hit_rows] = True
-        del joined, raw_keys, distinct_keys, hit_rows
+        del raw_codes, upd_codes, winning_idx, first_in_reversed
 
         union_schema = _union_schema(raw_schema, upd_schema)
 
