@@ -11,6 +11,7 @@ from calibre.core.forecast_frame import (
     FORECAST_ORIGIN,
     MODEL_NAME,
     UNIQUE_ID,
+    Y_HAT,
     Y,
     interval_column_names,
 )
@@ -20,6 +21,7 @@ from calibre.execution.decision_loop import (
     DecisionLoopConfig,
     RoundResult,
     observe_cumulative,
+    observe_pending,
     observe_per_horizon,
 )
 
@@ -34,8 +36,14 @@ def _make_frame(
     lower: list[float | None] | None = None,
     upper: list[float | None] | None = None,
     model_name: str = "m",
+    y_hat: list[float | None] | None = None,
 ) -> pd.DataFrame:
-    """Build a minimal conformal forecast frame."""
+    """Build a minimal conformal forecast frame.
+
+    ``Y_HAT`` defaults to a finite point forecast on every row — the
+    per-horizon readiness rule is ``Y & Y_HAT`` non-null (#157), so rows
+    need a point forecast to be observable.
+    """
     ds_vals = [origin + pd.Timedelta(weeks=h) for h in range(1, horizon + 1)]
     df = pd.DataFrame(
         {
@@ -44,6 +52,7 @@ def _make_frame(
             FORECAST_ORIGIN: origin,
             MODEL_NAME: model_name,
             Y: y_vals if y_vals is not None else [None] * horizon,
+            Y_HAT: y_hat if y_hat is not None else [10.0] * horizon,
         }
     )
     lo_col, hi_col = interval_column_names(0.9)
@@ -222,6 +231,44 @@ class TestObservePerHorizon:
         rt.observe.assert_not_called()
         assert len(remaining) == 1
 
+    def test_nan_bound_but_resolved_row_is_observed(self) -> None:
+        """#157: a resolved row (Y & Y_HAT) with NaN bounds still reaches observe.
+
+        The old filter required finite bounds, deadlocking a cold runtime that
+        emits NaN bounds until its first score. Readiness is now Y & Y_HAT.
+        """
+        lo_col, hi_col = interval_column_names(0.9)
+        # Interval columns present but NaN — the cold-runtime shape.
+        frame = _make_frame("A", _ORIGIN, horizon=1, y_vals=[None], lower=[None], upper=[None])
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 15.0)])
+        rt = self._make_runtime()
+
+        remaining = observe_per_horizon(rt, [frame], lookup, lo_col, hi_col)
+
+        rt.observe.assert_called_once()
+        assert remaining == []
+
+    def test_row_with_actual_but_no_point_forecast_stays_pending(self) -> None:
+        """A row with Y but NaN Y_HAT is not ready — the runtime's own rule."""
+        lo_col, hi_col = interval_column_names(0.9)
+        frame = _make_frame(
+            "A",
+            _ORIGIN,
+            horizon=1,
+            y_vals=[None],
+            lower=[10.0],
+            upper=[20.0],
+            y_hat=[None],
+        )
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 15.0)])
+        rt = self._make_runtime()
+
+        remaining = observe_per_horizon(rt, [frame], lookup, lo_col, hi_col)
+
+        rt.observe.assert_not_called()
+        assert len(remaining) == 1
+        assert len(remaining[0]) == 1
+
 
 class TestObserveCumulative:
     def _make_runtime(self) -> MagicMock:
@@ -256,3 +303,218 @@ class TestObserveCumulative:
 
         rt.observe.assert_not_called()
         assert len(remaining) == 1
+
+
+class TestObservePending:
+    """The mode-keyed dispatcher routes to the matching per-mode helper."""
+
+    def _make_runtime(self, mode: str) -> MagicMock:
+        rt = MagicMock()
+        rt.observe.return_value = None
+        rt.mode = mode
+        rt.interval_columns = interval_column_names(0.9)
+        return rt
+
+    def test_cumulative_mode_routes_to_cumulative_helper(self) -> None:
+        """mode="cumulative" applies window-completeness: a partial window
+        stays pending and observe is never called."""
+        frame = _make_frame("A", _ORIGIN, horizon=2)
+        # Only h=1 resolved → window incomplete under cumulative semantics.
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 3.0)])
+        rt = self._make_runtime("cumulative")
+
+        remaining = observe_pending(rt, [frame], lookup)
+
+        rt.observe.assert_not_called()
+        assert len(remaining) == 1
+        assert len(remaining[0]) == 2  # whole window retained, not split per-row
+
+    def test_perhorizon_mode_routes_with_columns_from_interval_columns(self) -> None:
+        """mode="perhorizon" applies per-row readiness using the bound columns
+        derived from runtime.interval_columns."""
+        lo_col, hi_col = interval_column_names(0.9)
+        frame = _make_frame("A", _ORIGIN, horizon=2, lower=[10.0, 11.0], upper=[20.0, 21.0])
+        # Only h=1 resolved → that single row is observed; h=2 stays pending.
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 5.0)])
+        rt = self._make_runtime("perhorizon")
+
+        remaining = observe_pending(rt, [frame], lookup)
+
+        rt.observe.assert_called_once()
+        observed = rt.observe.call_args.args[0]
+        assert observed[lo_col].notna().all()
+        assert len(remaining) == 1
+        assert len(remaining[0]) == 1  # only the h=2 row stays pending
+
+    def test_pending_passed_through_untouched(self, monkeypatch) -> None:
+        """The dispatcher must not re-group/re-sort/pre-process pending before
+        delegating: the helper receives the exact list object and lookup."""
+        frame = _make_frame("A", _ORIGIN, horizon=2)
+        pending = [frame]
+        lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 3.0)])
+        rt = self._make_runtime("cumulative")
+
+        seen: dict[str, object] = {}
+
+        def _spy(runtime, p, actuals_lookup):
+            seen["pending"] = p
+            seen["lookup"] = actuals_lookup
+            return p
+
+        monkeypatch.setattr("calibre.execution.decision_loop.observe_cumulative", _spy)
+        observe_pending(rt, pending, lookup)
+
+        assert seen["pending"] is pending
+        assert seen["lookup"] is lookup
+
+
+class TestColdStartDeadlock:
+    """#157: a cold unseeded mscp per-horizon runtime must reach its first
+    observation through the dispatcher; pending must not grow unboundedly.
+
+    A fresh mscp runtime emits NaN bounds until its first score. The old
+    per-horizon filter required finite bounds, so NaN-bound rows never reached
+    observe, the calibrator never scored, and pending grew without bound — a
+    deadlock. With the Y & Y_HAT readiness rule, the first observation lands.
+    """
+
+    @staticmethod
+    def _apply_frame(uid: str, origin: pd.Timestamp, y_hat: list[float]) -> pd.DataFrame:
+        from calibre.core.forecast_frame import H
+
+        horizon = len(y_hat)
+        return pd.DataFrame(
+            {
+                UNIQUE_ID: [uid] * horizon,
+                DS: [origin + pd.Timedelta(weeks=h) for h in range(1, horizon + 1)],
+                FORECAST_ORIGIN: [origin] * horizon,
+                MODEL_NAME: ["m"] * horizon,
+                H: list(range(1, horizon + 1)),
+                Y: [float("nan")] * horizon,
+                Y_HAT: y_hat,
+            }
+        )
+
+    def test_cold_mscp_reaches_first_observation_and_pending_drains(self) -> None:
+        from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+
+        # coverage=0.5 so a single resolved score per partition makes mscp
+        # ready — keeps the test cheap while exercising the exact cold-start
+        # path (NaN bounds → observe → finite bounds). Must use mscp: ACI's
+        # ready_on_empty masks the deadlock this test locks.
+        config = SymmetricIntervalConfig(method="mscp", coverage=0.5, calibration_window=5)
+        runtime = SymmetricIntervalRuntime(config)
+        lower_col, upper_col = config.interval_columns
+
+        origins = [_ORIGIN + pd.Timedelta(weeks=k) for k in range(3)]
+        # Actuals for every (uid, ds) the windows will resolve against.
+        actuals = {
+            ("A", origin + pd.Timedelta(weeks=h)): 12.0 for origin in origins for h in (1, 2)
+        }
+
+        pending: list[pd.DataFrame] = []
+        for origin in origins:
+            applied = runtime.apply(self._apply_frame("A", origin, [10.0, 10.0]))
+            # Cold runtime: the very first apply must emit NaN bounds.
+            if origin == origins[0]:
+                assert applied[lower_col].isna().all()
+                assert applied[upper_col].isna().all()
+            pending.append(applied)
+            lookup = pd.Series(actuals, dtype=float)
+            lookup.index = pd.MultiIndex.from_tuples(lookup.index)
+            pending = observe_pending(runtime, pending, lookup)
+
+        # The deadlock is broken: the calibrator scored, so a fresh apply now
+        # yields finite bounds (this stays all-NaN forever on the old filter,
+        # which never let the NaN-bound rows reach observe).
+        final = runtime.apply(
+            self._apply_frame("A", origins[-1] + pd.Timedelta(weeks=1), [10.0, 10.0])
+        )
+        assert final[lower_col].notna().any()
+        assert final[upper_col].notna().any()
+
+        # Pending drains: every window whose actuals exist has been observed,
+        # so nothing accumulates unboundedly.
+        assert pending == []
+
+
+class TestObserveRaisesLoudly:
+    """#158: a structurally malformed window must raise through the dispatcher
+    rather than being silently swallowed (the removed suppress(ValueError))."""
+
+    @staticmethod
+    def _duplicate_h_window(uid: str, origin: pd.Timestamp, extra_cols: dict) -> pd.DataFrame:
+        from calibre.core.forecast_frame import H
+
+        # H = [1, 1, 2]: a duplicate horizon within the protection window. Y is
+        # NaN here (filled from the lookup) so the window resolves to complete.
+        ds = [origin + pd.Timedelta(weeks=h) for h in (1, 1, 2)]
+        frame = pd.DataFrame(
+            {
+                UNIQUE_ID: [uid] * 3,
+                DS: ds,
+                FORECAST_ORIGIN: [origin] * 3,
+                MODEL_NAME: ["m"] * 3,
+                H: [1, 1, 2],
+                Y: [float("nan")] * 3,
+                Y_HAT: [10.0, 10.0, 10.0],
+            }
+        )
+        for col, value in extra_cols.items():
+            frame[col] = value
+        return frame
+
+    def test_symmetric_cumulative_duplicate_h_raises(self) -> None:
+        import pytest
+
+        from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+
+        config = SymmetricIntervalConfig(
+            method="mscp", coverage=0.5, mode="cumulative", protection_period=2
+        )
+        runtime = SymmetricIntervalRuntime(config)
+        lo_col, hi_col = config.interval_columns
+        frame = self._duplicate_h_window("A", _ORIGIN, {lo_col: float("nan"), hi_col: float("nan")})
+        lookup = _actuals_lookup(
+            [
+                ("A", _ORIGIN + pd.Timedelta(weeks=1), 12.0),
+                ("A", _ORIGIN + pd.Timedelta(weeks=2), 12.0),
+            ]
+        )
+
+        with pytest.raises(ValueError, match="Duplicate H values in cumulative observe window"):
+            observe_pending(runtime, [frame], lookup)
+
+    def test_crc_duplicate_h_raises(self) -> None:
+        import pytest
+
+        from calibre.conformal.cumulative_risk import (
+            CumulativeConformalRiskConfig,
+            CumulativeRiskRuntime,
+        )
+        from calibre.core.forecast_frame import quantile_column
+
+        runtime = CumulativeRiskRuntime(
+            CumulativeConformalRiskConfig(
+                coverage=0.5,
+                protection_period=2,
+                base_column=quantile_column(0.5),
+            )
+        )
+        lo_col, hi_col = runtime.interval_columns
+        frame = self._duplicate_h_window(
+            "A",
+            _ORIGIN,
+            {lo_col: float("nan"), hi_col: float("nan"), quantile_column(0.5): 10.0},
+        )
+        lookup = _actuals_lookup(
+            [
+                ("A", _ORIGIN + pd.Timedelta(weeks=1), 12.0),
+                ("A", _ORIGIN + pd.Timedelta(weeks=2), 12.0),
+            ]
+        )
+
+        with pytest.raises(
+            ValueError, match="Duplicate H values in cumulative conformal order window"
+        ):
+            observe_pending(runtime, [frame], lookup)

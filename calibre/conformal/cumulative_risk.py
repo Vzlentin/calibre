@@ -280,6 +280,10 @@ class CumulativeRiskRuntime:
     def interval_columns(self) -> tuple[str, str]:
         return self.config.interval_columns
 
+    @property
+    def mode(self) -> str:
+        return "cumulative"
+
     def adaptive_drift(self) -> float | None:
         return None
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from functools import partial
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -16,7 +15,7 @@ from calibre.core.forecast_frame import (
     interval_column_names,
 )
 from calibre.core.forecast_task import TaskGroups
-from calibre.execution.decision_loop import DecisionLoop, DecisionLoopConfig, observe_per_horizon
+from calibre.execution.decision_loop import DecisionLoop, DecisionLoopConfig
 from calibre.storage.models import Base
 from calibre.storage.postgres import (
     PendingObservationRepo,
@@ -58,6 +57,7 @@ def _loop(
     engine.execute.return_value = result
     lower_col, upper_col = interval_column_names(0.9)
     runtime.interval_columns = (lower_col, upper_col)
+    runtime.mode = "perhorizon"
 
     return DecisionLoop(
         engine=engine,
@@ -67,7 +67,6 @@ def _loop(
         get_actuals=lambda round_num: {"A": actual},
         config=DecisionLoopConfig(n_rounds=1),
         runtime=runtime,
-        observe_fn=partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col),
         pending_observation_repo=repo,
         session_id=session_id,
     )
