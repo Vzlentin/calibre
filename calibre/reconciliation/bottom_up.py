@@ -65,10 +65,7 @@ class BottomUpReconciler:
         reject_quantile_columns(frame, strategy="bottom_up")
         index = build_hierarchy_index(hierarchy)
         attrs = index.frame.set_index(UNIQUE_ID)
-        expected_members = {
-            col: attrs[col].astype(str).groupby(attrs[col].astype(str)).size()
-            for col in index.attr_cols
-        }
+        expected_members = index.expected_members()
         parts = [
             self._expand_group(group, index, attrs, expected_members)
             for _, group in frame.groupby(_GROUP_KEYS, sort=False)

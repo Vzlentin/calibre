@@ -6,6 +6,7 @@ import pytest
 
 from calibre.reconciliation.summing import (
     TOTAL_LABEL,
+    build_hierarchy_index,
     build_summing_matrix,
 )
 
@@ -144,6 +145,53 @@ def test_null_attribute_value_raises() -> None:
     frame = pd.DataFrame({"unique_id": ["a", "b"], "store": ["S1", None]})
     with pytest.raises(ValueError, match="has null values"):
         build_summing_matrix(frame)
+
+
+# ---------------------------------------------------------------------------
+# expected_members predicate — the single stringified counting authority (#148).
+# ---------------------------------------------------------------------------
+
+
+def test_expected_members_matches_raw_counts_on_clean_string_hierarchy() -> None:
+    index = build_hierarchy_index(_two_attr_frame())
+    expected = index.expected_members()
+
+    assert set(expected) == {"cat", "store"}
+    # Counts are identical to a raw groupby on legal string data.
+    assert expected["cat"].to_dict() == {"X": 2, "Y": 1}
+    assert expected["store"].to_dict() == {"S1": 2, "S2": 1}
+
+
+def test_expected_members_merges_str_colliding_values() -> None:
+    # int 1 and str "1" on different bottom ids collide under str(): the
+    # predicate counts both members in one coherent group (#148), matching what
+    # node labels and the dense summing matrix already do.
+    frame = pd.DataFrame({"unique_id": ["a", "b", "c"], "grp": [1, "1", 2]})
+    index = build_hierarchy_index(frame)
+    expected = index.expected_members()["grp"]
+
+    assert expected["1"] == 2
+    assert expected["2"] == 1
+    # The dense summing matrix merges the same two values into one node row.
+    summing = build_summing_matrix(frame)
+    assert "grp=1" in summing.node_labels
+    grp_row = summing.S[summing.node_labels.index("grp=1")]
+    np.testing.assert_array_equal(grp_row, np.array([1.0, 1.0, 0.0]))
+
+
+def test_expected_members_drops_categorical_phantom_groups() -> None:
+    # A category-dtype column with an unobserved category would emit a phantom
+    # zero-count group under raw groupby(observed=False); the stringified
+    # predicate drops it by construction, matching node labels exactly.
+    grp = pd.Categorical(["A", "A", "B"], categories=["A", "B", "C"])
+    frame = pd.DataFrame({"unique_id": ["a", "b", "c"], "grp": grp})
+    index = build_hierarchy_index(frame)
+    expected = index.expected_members()["grp"]
+
+    assert set(expected.index) == {"A", "B"}  # no phantom "C"
+    summing = build_summing_matrix(frame)
+    assert "grp=C" not in summing.node_labels
+    assert {"grp=A", "grp=B"} <= set(summing.node_labels)
 
 
 def test_missing_unique_id_column_raises() -> None:

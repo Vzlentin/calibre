@@ -78,15 +78,22 @@ def build_node_history(sales: pd.DataFrame, hierarchy: pd.DataFrame | None) -> p
         on=UNIQUE_ID,
         how="inner",
     )
+    expected_members = hierarchy_index.expected_members()
     aggregate_rows: list[pd.DataFrame] = []
     for col in hierarchy_index.attr_cols:
-        expected_members = hierarchy_index.frame.groupby(col, sort=False)[UNIQUE_ID].nunique()
+        # Group on the stringified attribute column so the completeness check
+        # reads the single stringified counting authority (#148): str-colliding
+        # values merge into one coherent node instead of silently duplicating.
+        col_str = joined[col].astype(str)
         grouped = (
-            joined.groupby([col, DS], sort=True)
+            joined.assign(**{col: col_str})
+            .groupby([col, DS], sort=True)
             .agg(**{Y: (Y, "sum"), "_member_count": (UNIQUE_ID, "nunique")})
             .reset_index()
         )
-        complete = grouped[grouped["_member_count"] == grouped[col].map(expected_members)].copy()
+        complete = grouped[
+            grouped["_member_count"] == grouped[col].map(expected_members[col])
+        ].copy()
         complete[UNIQUE_ID] = col + "=" + complete[col].astype(str)
         complete["_node_order"] = complete[UNIQUE_ID].map(node_order).astype("int64")
         aggregate_rows.append(complete[[UNIQUE_ID, DS, Y, "_node_order"]])

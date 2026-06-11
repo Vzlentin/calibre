@@ -308,6 +308,81 @@ def test_repeated_origin_lookup_does_no_bottom_history_rebuild(monkeypatch) -> N
     assert len(calls) == 1  # unchanged: no rebuild
 
 
+# ---------------------------------------------------------------------------
+# U1 (#148): mixed-dtype attr-value collisions merge coherently through the
+# cached resolve path; category-dtype phantom groups never appear.
+# ---------------------------------------------------------------------------
+
+
+def _collision_hierarchy() -> pd.DataFrame:
+    # int 1 and str "1" on different bottom ids collide under str(): the
+    # stringified predicate merges them into one "grp=1" aggregate counting
+    # both members, matching the node labels and dense summing matrix.
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: ["m_int", "m_str", "m_two"],
+            "grp": [1, "1", 2],
+        }
+    )
+
+
+def _collision_history() -> pd.DataFrame:
+    dates = pd.date_range("2024-01-01", periods=2, freq="D")
+    rows = []
+    for i, uid in enumerate(["m_int", "m_str", "m_two"]):
+        for j, ds in enumerate(dates):
+            rows.append({UNIQUE_ID: uid, DS: ds, Y: float(10 * i + j + 1)})
+    frame = pd.DataFrame(rows)
+    # m_str is unobserved on the last date: the merged grp=1 aggregate is then
+    # incomplete (only m_int present) and must stay pending.
+    return frame[~((frame[UNIQUE_ID] == "m_str") & (frame[DS] == dates[-1]))].reset_index(drop=True)
+
+
+def test_str_collision_resolves_one_merged_aggregate_through_cache() -> None:
+    source = HierarchyActualsSource(_collision_history(), _collision_hierarchy())
+    # Day 1: both m_int (y=1) and m_str (y=11) observed -> grp=1 = 12.
+    ledger = _ledger([("grp=1", "2024-01-01")])
+
+    updated, new = source.resolve(ledger, pd.Timestamp("2024-01-01"))
+
+    assert updated.loc[0, Y] == pytest.approx(1.0 + 11.0)  # both members counted
+    assert list(new.index) == [0]
+
+
+def test_str_collision_aggregate_stays_pending_when_one_member_missing() -> None:
+    source = HierarchyActualsSource(_collision_history(), _collision_hierarchy())
+    # Day 2: m_str unobserved, so the merged grp=1 aggregate is incomplete.
+    ledger = _ledger([("grp=1", "2024-01-02")])
+
+    updated, new = source.resolve(ledger, pd.Timestamp("2024-01-02"))
+
+    assert pd.isna(updated.loc[0, Y])
+    assert new.empty
+
+
+def test_categorical_attr_column_resolves_without_phantom_groups() -> None:
+    grp = pd.Categorical(["A", "A", "B"], categories=["A", "B", "C"])
+    hierarchy = pd.DataFrame({UNIQUE_ID: ["a", "b", "c"], "grp": grp})
+    dates = pd.date_range("2024-01-01", periods=1, freq="D")
+    history = pd.DataFrame(
+        {
+            UNIQUE_ID: ["a", "b", "c"],
+            DS: list(dates) * 3,
+            Y: [2.0, 3.0, 5.0],
+        }
+    )
+    source = HierarchyActualsSource(history, hierarchy)
+    # grp=A (members a, b) resolves; the unobserved category C is not a node.
+    ledger = _ledger([("grp=A", "2024-01-01")])
+
+    updated, new = source.resolve(ledger, pd.Timestamp("2024-01-01"))
+
+    assert updated.loc[0, Y] == pytest.approx(2.0 + 3.0)
+    assert list(new.index) == [0]
+    with pytest.raises(ValueError, match="not present in hierarchy"):
+        source.resolve(_ledger([("grp=C", "2024-01-01")]), pd.Timestamp("2024-01-01"))
+
+
 def test_cache_recomputes_only_new_ds_values(monkeypatch) -> None:
     source = HierarchyActualsSource(_bottom_history(), _hierarchy())
 

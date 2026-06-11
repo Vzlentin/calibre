@@ -40,6 +40,32 @@ class HierarchyIndex:
     bottom_ids: tuple[str, ...]
     node_labels: tuple[str, ...]
 
+    def expected_members(self) -> dict[str, pd.Series]:
+        """Per-attribute-column member counts, grouped on stringified values.
+
+        The single counting authority every member-completeness site reads
+        (``build_node_history``, ``HierarchyActualsSource``, the bottom-up
+        reconciler, and the preflight estimate). Each attribute column is
+        stringified with ``astype(str)`` before grouping, so the returned
+        ``Series`` is keyed by the same stringified values that
+        ``build_summing_matrix`` and ``node_labels`` use for aggregate labels.
+
+        ``.size()`` and ``.nunique()`` coincide here: the index frame is
+        deduplicated on stringified ``unique_id`` (see :func:`build_hierarchy_index`),
+        so each bottom id contributes exactly one row per attribute column, and
+        NaN attribute values are rejected at index build (so no group is dropped
+        by ``nunique``'s NaN handling). The only behavioral difference from a
+        raw ``groupby`` is that values colliding under ``str()`` (e.g. ``1`` and
+        ``"1"``) are coherently merged into one group — matching what label
+        production and the dense summing matrix already do — and that
+        ``category``-dtype phantom groups for unobserved categories are dropped
+        by construction.
+        """
+        return {
+            col: self.frame[col].astype(str).groupby(self.frame[col].astype(str)).size()
+            for col in self.attr_cols
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class SummingMatrix:

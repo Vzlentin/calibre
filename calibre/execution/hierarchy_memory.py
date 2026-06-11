@@ -76,14 +76,18 @@ def estimate_hierarchical_expansion(
         how="inner",
     )
 
+    expected_members = hierarchy_index.expected_members()
     for col in hierarchy_index.attr_cols:
-        expected_members = hierarchy_frame.groupby(col, sort=False)[UNIQUE_ID].nunique()
+        # Group on the stringified attribute column so the projection reads the
+        # single stringified counting authority (#148), matching expansion.
+        col_str = joined[col].astype(str)
         grouped = (
-            joined.groupby([col, DS], sort=True)
+            joined.assign(**{col: col_str})
+            .groupby([col, DS], sort=True)
             .agg(_member_count=(UNIQUE_ID, "nunique"))
             .reset_index()
         )
-        complete = grouped[grouped["_member_count"] == grouped[col].map(expected_members)]
+        complete = grouped[grouped["_member_count"] == grouped[col].map(expected_members[col])]
         projected_node_history_rows += len(complete)
         projected_node_labels.update(
             f"{col}={value}" for value in complete[col].astype(str).unique()
