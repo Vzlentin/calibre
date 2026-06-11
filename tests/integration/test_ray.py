@@ -200,14 +200,21 @@ def test_ray_quantile_columns_survive() -> None:
 
 
 def test_ray_worker_loads_mlforecast_adapter_without_mlforecast_importable() -> None:
-    # NOTE: This monkeypatch is safe only in local_mode because workers are
-    # not reused. On real clusters with reused workers, the patched state could
-    # leak to subsequent tasks.
+    # The worker mutates sys.modules and builtins.__import__ to prove the adapter
+    # imports lazily. On a real (worker-reusing) cluster that patched state could
+    # leak to later tasks, so this test owns a DEDICATED single-CPU cluster and
+    # hard-shuts it down: the leak-prone worker process never outlives the test,
+    # and a subsequent task importing mlforecast normally is unaffected.
     ray = pytest.importorskip("ray")
 
-    owns_ray = not ray.is_initialized()
-    if not ray.is_initialized():
-        ray.init(include_dashboard=False, ignore_reinit_error=True, _skip_env_hook=True)
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(
+        include_dashboard=False,
+        ignore_reinit_error=True,
+        num_cpus=1,
+        _skip_env_hook=True,
+    )
 
     @ray.remote
     def _load_adapter_with_blocked_mlforecast_import() -> str:
@@ -237,8 +244,7 @@ def test_ray_worker_loads_mlforecast_adapter_without_mlforecast_importable() -> 
     try:
         assert ray.get(_load_adapter_with_blocked_mlforecast_import.remote()) == "MLForecastAdapter"
     finally:
-        if owns_ray:
-            ray.shutdown()
+        ray.shutdown()
 
 
 def _write_cli_config(tmp_path: Path, *, backend: str) -> Path:

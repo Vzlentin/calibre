@@ -423,7 +423,6 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
         seed=0,
         search_forecast=True,
         max_concurrent_trials=1,
-        ray_local_mode=True,
     )
 
     # Scheduler-handoff effect: the Tune result's objective + config flow back
@@ -435,7 +434,6 @@ def test_cost_search_uses_ray_tune_scheduler_handoff(monkeypatch) -> None:
     assert captured["max_t"] == 3
     assert captured["asha_grace_period"] == 1
     assert captured["max_concurrent_trials"] == 1
-    assert captured["ray_local_mode"] is True
     assert captured["metric"] == "objective"
     assert captured["time_attr"] == "tune_step"
     assert captured["fail_fast"] == "raise"

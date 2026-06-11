@@ -39,7 +39,6 @@ class StudyConfig:
     max_concurrent_trials: int | None = None
     max_uid_concurrency: int | None = None
     ray_address: str | None = None
-    ray_local_mode: bool = False
     tune_storage_path: str | None = None
     results_dir: str | None = "results"
     tune_experiment_name: str | None = None

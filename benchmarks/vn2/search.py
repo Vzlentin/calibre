@@ -160,7 +160,6 @@ def run_hpo(
     cpu_per_trial: float = 1.0,
     max_concurrent_trials: int | None = None,
     ray_address: str | None = None,
-    ray_local_mode: bool = False,
     tune_storage_path: str | Path | None = None,
     tune_experiment_name: str | None = "vn2_hpo",
 ) -> dict[str, Any]:
@@ -221,7 +220,6 @@ def run_hpo(
             cpu_per_trial=cpu_per_trial,
             max_concurrent_trials=max_concurrent_trials,
             ray_address=ray_address,
-            ray_local_mode=ray_local_mode,
             tune_storage_path=str(tune_storage_path) if tune_storage_path is not None else None,
             tune_experiment_name=tune_experiment_name,
         ),
@@ -428,7 +426,6 @@ def run_cost_search(
     cpu_per_trial: float = 1.0,
     max_concurrent_trials: int | None = None,
     ray_address: str | None = None,
-    ray_local_mode: bool = False,
     tune_storage_path: str | Path | None = None,
     ray_tune_experiment_name: str | None = "vn2_cost_search",
 ) -> optuna.Study:
@@ -535,7 +532,6 @@ def run_cost_search(
                 int(max_concurrent_trials) if max_concurrent_trials is not None else int(n_trials),
             ),
             ray_address=ray_address,
-            ray_local_mode=ray_local_mode,
             tune_storage_path=_tune_storage_path(tune_storage_path),
             metric=OBJECTIVE_METRIC,
             mode="min",

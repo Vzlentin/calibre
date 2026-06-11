@@ -525,7 +525,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pyyaml" },
     { name = "ray", extras = ["default", "tune"], marker = "extra == 'benchmarks'", specifier = ">=2.38,<3" },
-    { name = "ray", extras = ["default", "tune"], marker = "extra == 'dev'", specifier = ">=2.38,<2.55" },
+    { name = "ray", extras = ["default", "tune"], marker = "extra == 'dev'", specifier = ">=2.38,<3" },
     { name = "ray", extras = ["default", "tune"], marker = "extra == 'ray'", specifier = ">=2.38,<3" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "s3fs", marker = "extra == 'cloud'" },
