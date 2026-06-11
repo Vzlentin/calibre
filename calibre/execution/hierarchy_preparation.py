@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import pandas as pd
@@ -117,6 +117,13 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
                 horizon=horizon,
                 model_count=len(config.tasks),
             )
+            # This branch is the densifying path (ols/erm/MinT point reconcilers
+            # and the fused interval phase all build the dense S per origin);
+            # native bottom_up takes the bottom_only branch and never reaches
+            # here, so accounting the dense-S term unconditionally here is the
+            # implicit gate. node_count x n_bottom x 8 bytes (float64).
+            dense_s_bytes = len(hierarchy_index.node_labels) * len(hierarchy_index.bottom_ids) * 8
+            expansion = replace(expansion, dense_s_bytes=dense_s_bytes)
             enforce_hierarchical_expansion_memory_limit(expansion)
             hierarchy_partitions = expansion.forecast_partitions
         actuals = build_node_history(bundle.history, hierarchy_index)

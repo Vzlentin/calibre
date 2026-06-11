@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -197,6 +199,51 @@ def test_hierarchy_guard_runs_before_node_history(
         prepare_run(_config(**config_override), _bundle(hierarchy=_hierarchy()))
 
 
+def test_densifying_preflight_accounts_dense_s_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The eager (densifying) branch sets dense_s_bytes = node_count x n_bottom x 8."""
+    captured = {}
+
+    def capture(estimate):
+        captured["estimate"] = estimate
+
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        capture,
+    )
+
+    prepare_run(_config(reconciliation={"strategy": "ols"}), _bundle(hierarchy=_hierarchy()))
+
+    # _hierarchy(): 2 bottom (a, b) + dept=D + __total__ = 4 nodes -> 4 * 2 * 8.
+    assert captured["estimate"].dense_s_bytes == 4 * 2 * 8
+
+
+def test_densifying_guard_message_includes_dense_s_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_memory.read_effective_available_memory_bytes", lambda: 1
+    )
+
+    with pytest.raises(ValueError, match="dense summing-matrix bytes"):
+        prepare_run(_config(reconciliation={"strategy": "ols"}), _bundle(hierarchy=_hierarchy()))
+
+
+def test_bottom_up_preflight_never_accounts_dense_s_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native bottom_up takes the bottom_only branch: it never builds the eager
+    expansion estimate, so the dense-S term never applies."""
+
+    def fail_enforce(*args, **kwargs):
+        raise AssertionError("bottom_up must not run the eager expansion guard")
+
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        fail_enforce,
+    )
+
+    # No AssertionError raised: the guard (and its dense-S term) is never reached.
+    prepare_run(_config(reconciliation={"strategy": "bottom_up"}), _bundle(hierarchy=_hierarchy()))
+
+
 def test_hierarchical_interval_preparation_uses_fused_phase_without_point_reconciler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -295,7 +342,12 @@ def test_eager_guard_and_partition_limit_consume_shared_expansion_facts(
     with pytest.raises(ValueError, match="approximately 8"):
         prepare_run(config, _bundle(hierarchy=_hierarchy()))
 
-    assert captured["estimate"] is sentinel
+    # The guard receives the estimate run preparation computed, augmented only
+    # with the densifying dense-S term (node_count x n_bottom x 8); every other
+    # fact is carried through unchanged, so it is still one source of truth.
+    guard_estimate = captured["estimate"]
+    assert replace(guard_estimate, dense_s_bytes=0) == sentinel
+    assert guard_estimate.dense_s_bytes == sentinel.node_count * sentinel.bottom_unique_ids * 8
 
 
 def test_eager_hierarchy_partition_estimate_matches_materialized_nodes(

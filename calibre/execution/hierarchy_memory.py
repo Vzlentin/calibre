@@ -29,6 +29,12 @@ class HierarchicalExpansionEstimate:
     projected_node_history_rows: int
     forecast_partitions: int
     model_count: int
+    # Dense summing-matrix bytes a densifying strategy (ols/erm/MinT/fused)
+    # must allocate per origin: node_count x n_bottom x 8. Zero unless run
+    # preparation sets it in the eager branch — native bottom_up and
+    # strategy="none" never densify, so the term never applies to them. Defaults
+    # to 0 so direct-call estimates (which do not densify) are unaffected.
+    dense_s_bytes: int = 0
 
 
 def estimate_hierarchical_expansion(
@@ -242,6 +248,7 @@ def estimated_node_history_peak_bytes(estimate: HierarchicalExpansionEstimate) -
         + node_history_materialization
         + task_histories
         + forecast_partition_state
+        + estimate.dense_s_bytes
         + _RUNTIME_OVERHEAD_BYTES
     )
 
@@ -275,8 +282,10 @@ def enforce_hierarchical_expansion_memory_limit(
         f"node count: {estimate.node_count}; "
         f"projected node-history rows: {estimate.projected_node_history_rows}; "
         f"projected forecast nodes: {estimate.projected_node_count}; "
-        f"forecast partitions: {estimate.forecast_partitions}. "
-        "The estimate includes pandas materialization, task-history copies, and "
+        f"forecast partitions: {estimate.forecast_partitions}; "
+        f"dense summing-matrix bytes: {format_bytes(estimate.dense_s_bytes)}. "
+        "The estimate includes pandas materialization, task-history copies, the "
+        "dense summing matrix densifying strategies allocate per origin, and "
         "runtime overhead. "
         "Streaming output does not avoid this input-side materialization; use a "
         "smaller hierarchy/input or run on a host with more memory until sparse "
