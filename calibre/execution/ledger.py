@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -25,9 +24,7 @@ from calibre.core.forecast_frame import (
     Y,
     validate_forecast_frame,
 )
-from calibre.core.io import exists, is_local_fs, join_uri, open_fs, write_parquet
-
-logger = logging.getLogger(__name__)
+from calibre.core.io import exists, is_local_fs, join_uri, open_fs, rm, write_parquet
 
 
 class LedgerSink(Protocol):
@@ -408,7 +405,7 @@ class StreamingLedger:
         if self._pending is None:
             self._pending = pending
             return
-        duplicates = self._pending.index.intersection(pending.index)
+        duplicates = pending.index[pending.index.isin(self._pending.index)]
         if len(duplicates):
             raise ValueError(f"duplicate forecast keys appended to ledger: {list(duplicates)[:10]}")
         self._pending = pd.concat([self._pending, pending])
@@ -426,7 +423,7 @@ class StreamingLedger:
         keys = _key_index(df)
         if self._pending is None:
             raise ValueError("apply_resolutions called before any pending append")
-        unknown = keys.difference(self._pending.index)
+        unknown = keys[~keys.isin(self._pending.index)]
         if len(unknown):
             raise ValueError(
                 f"apply_resolutions for keys not in the open set: {list(unknown)[:10]}"
@@ -438,7 +435,9 @@ class StreamingLedger:
             # rows (y still NaN, e.g. incomplete aggregates) stay, and rows that
             # were never in the due frame are untouched (not a wholesale replace).
             resolved_keys = _key_index(resolved)
-            self._pending = self._pending.drop(index=resolved_keys)
+            # isin keeps this O(pending) hash-probe instead of drop()'s
+            # super-linear MultiIndex path — the open set is ~26M rows at M5.
+            self._pending = self._pending[~self._pending.index.isin(resolved_keys)]
             if self._pending.empty:
                 self._pending = None
 
@@ -510,18 +509,14 @@ class StreamingLedger:
                 writer.close()
             if handle is not None:
                 handle.close()
-            fs, fs_path = open_fs(self._resolved_path)
-            with contextlib.suppress(FileNotFoundError):
-                fs.rm(fs_path)
+            rm(self._resolved_path, recursive=False)
             raise
         if writer is not None:
             writer.close()
         if handle is not None:
             handle.close()
         if exists(self._resolved_updates_path):
-            fs, fs_path = open_fs(self._resolved_updates_path)
-            with contextlib.suppress(FileNotFoundError):
-                fs.rm(fs_path)
+            rm(self._resolved_updates_path, recursive=False)
 
     def _materialize_streaming_frame(self) -> pd.DataFrame:
         """In-memory equivalent of the finalize artifact, for ``to_df()`` before

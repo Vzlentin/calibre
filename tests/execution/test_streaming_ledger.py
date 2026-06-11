@@ -19,6 +19,7 @@ from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import NewsvendorPolicyParameters
 from calibre.execution.backend import BackendEngine, ConformalOptions, LedgerOutputOptions
 from calibre.execution.ledger import (
+    _FORECAST_KEY_COLUMNS,
     InMemoryLedger,
     StreamingLedger,
     StreamingOrderLedger,
@@ -28,7 +29,7 @@ from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import NewsvendorConfig
 
-_KEY = [UNIQUE_ID, DS, FORECAST_ORIGIN, MODEL_NAME, H]
+_KEY = _FORECAST_KEY_COLUMNS
 
 
 class _StubAdapter(ModelAdapter):
