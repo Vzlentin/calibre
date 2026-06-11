@@ -235,3 +235,96 @@ def test_bottom_only_requests_skip_aggregate_work() -> None:
     assert updated.loc[0, Y] == pytest.approx(0.0)
     assert updated.loc[1, Y] == pytest.approx(21.0)
     assert len(new) == 2
+
+
+# ---------------------------------------------------------------------------
+# U3: per-run aggregate cache — complete (node, ds) sums computed at most once.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_sequence(source: HierarchyActualsSource, ledger: pd.DataFrame, origins) -> list:
+    """Resolve the same ledger across a sequence of origins, carrying forward the
+    updated frame (mirrors the engine's per-origin carry-forward)."""
+    outputs = []
+    current = ledger
+    for origin in origins:
+        current, new = source.resolve(current, origin)
+        outputs.append((current.copy(), new.copy()))
+    return outputs
+
+
+def test_cached_resolution_matches_fresh_instance_per_origin() -> None:
+    history = _bottom_history()
+    hierarchy = _hierarchy()
+    ledger = _ledger(
+        [
+            ("item_id=item_a", "2024-01-02"),
+            ("store_id=s1", "2024-01-02"),
+            (TOTAL_LABEL, "2024-01-02"),
+            ("item_id=item_a", "2024-01-03"),
+            ("item_b_s1", "2024-01-03"),
+            ("item_id=item_b", "2024-01-04"),  # incomplete on last day, stays pending
+        ]
+    )
+    origins = [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-04")]
+
+    cached_source = HierarchyActualsSource(history, hierarchy)
+    cached = _resolve_sequence(cached_source, ledger, origins)
+
+    # A fresh instance per origin can never serve a cache hit, so it is the
+    # uncached reference. Carry the same frame forward to keep inputs identical.
+    fresh = []
+    current = ledger
+    for origin in origins:
+        current, new = HierarchyActualsSource(history, hierarchy).resolve(current, origin)
+        fresh.append((current.copy(), new.copy()))
+
+    for (c_updated, c_new), (f_updated, f_new) in zip(cached, fresh, strict=True):
+        pd.testing.assert_frame_equal(c_updated, f_updated)
+        pd.testing.assert_frame_equal(c_new, f_new)
+
+
+def test_repeated_origin_lookup_does_no_bottom_history_rebuild(monkeypatch) -> None:
+    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+    ledger = _ledger([("item_id=item_a", "2024-01-02"), (TOTAL_LABEL, "2024-01-02")])
+
+    calls: list[set] = []
+    real_compute = source._compute_lookup
+
+    def _spy(uids: pd.Series, ds_values: pd.Series) -> pd.Series:
+        calls.append(set(zip(uids, ds_values, strict=True)))
+        return real_compute(uids, ds_values)
+
+    monkeypatch.setattr(source, "_compute_lookup", _spy)
+
+    first, _ = source.resolve(ledger, pd.Timestamp("2024-01-02"))
+    assert len(calls) == 1  # first call computes the two complete aggregates
+    assert first.loc[0, Y] == pytest.approx(12.0)
+
+    # Second resolve of the same (node, ds) pairs: every pair is cached, so
+    # _compute_lookup is never reached again (no window scan / merge / group-by).
+    again = _ledger([("item_id=item_a", "2024-01-02"), (TOTAL_LABEL, "2024-01-02")])
+    source.resolve(again, pd.Timestamp("2024-01-02"))
+    assert len(calls) == 1  # unchanged: no rebuild
+
+
+def test_cache_recomputes_only_new_ds_values(monkeypatch) -> None:
+    source = HierarchyActualsSource(_bottom_history(), _hierarchy())
+
+    seen_ds: list[set] = []
+    real_compute = source._compute_lookup
+
+    def _spy(uids: pd.Series, ds_values: pd.Series) -> pd.Series:
+        seen_ds.append(set(pd.Timestamp(ds) for ds in ds_values))
+        return real_compute(uids, ds_values)
+
+    monkeypatch.setattr(source, "_compute_lookup", _spy)
+
+    source.resolve(_ledger([("item_id=item_a", "2024-01-02")]), pd.Timestamp("2024-01-02"))
+    # Re-request the cached ds plus a new one: only the new ds reaches compute.
+    source.resolve(
+        _ledger([("item_id=item_a", "2024-01-02"), ("item_id=item_a", "2024-01-03")]),
+        pd.Timestamp("2024-01-03"),
+    )
+    assert seen_ds[0] == {pd.Timestamp("2024-01-02")}
+    assert seen_ds[1] == {pd.Timestamp("2024-01-03")}  # cached ds not recomputed
