@@ -256,16 +256,36 @@ def test_engine_run_emits_engine_level_spans(monkeypatch) -> None:
     stream = io.StringIO()
     _run_standard_path_engine(monkeypatch, stream)
 
-    span_names = [
-        record["span"]
-        for record in _json_lines(stream)
-        if record.get("message") == "completed span"
+    span_records = [
+        record for record in _json_lines(stream) if record.get("message") == "completed span"
     ]
+    span_names = [record["span"] for record in span_records]
     for name in ("staging_materialize", "conformal_state_restore", "ledger_close"):
         assert span_names.count(name) == 1, f"expected exactly one {name} span"
     # Substep spans fire on origins where resolution work occurs (Commit's resolve).
     assert "ledger_append" in span_names
     assert "ledger_resolution_frame" in span_names
+    assert "actuals_lookup" in span_names
+    append_record = next(record for record in span_records if record["span"] == "ledger_append")
+    assert append_record["origin"] == "2024-01-28T00:00:00"
+
+
+def test_span_reserved_logging_keys_never_mask_the_body_exception() -> None:
+    stream = io.StringIO()
+    setup_logging(stream=stream)
+
+    with pytest.raises(RuntimeError, match="real failure"), span("z", module="m", origin="o"):
+        raise RuntimeError("real failure")
+
+    records = [
+        record
+        for record in _json_lines(stream)
+        if record.get("message") == "completed span" and record.get("span") == "z"
+    ]
+    assert len(records) == 1
+    assert records[0]["attr_module"] == "m"
+    assert records[0]["origin"] == "o"
+    assert records[0]["duration_ms"] >= 0.0
 
 
 def test_engine_run_does_not_emit_backtest_span(monkeypatch) -> None:
