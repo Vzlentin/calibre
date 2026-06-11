@@ -695,19 +695,19 @@ class BackendEngine:
             return updated, newly_resolved
 
         group_cols = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
+        # Completeness is judged against the window as seen in `updated`, which
+        # carries every present horizon for this window (including any already
+        # filled at a prior call), not only this batch's new rows. One grouped
+        # pass over the in-window slice keeps this O(batch); a per-group rescan
+        # of `updated` would be quadratic in the resolution batch.
+        in_window = updated[updated[H] <= protection_period]
+        stats = in_window.groupby(group_cols, sort=False)[Y].agg(["size", "count"])
+        complete = stats[(stats["size"] >= protection_period) & (stats["count"] == stats["size"])]
+        complete_keys = set(complete.index)
+
         defer_index: list[Any] = []
-        for _, group in window_rows.groupby(group_cols, sort=False):
-            # Completeness is judged against the window as seen in `updated`,
-            # which carries every present horizon for this window (including any
-            # already filled at a prior call), not only this batch's new rows.
-            key = group[group_cols].iloc[0]
-            window = updated[
-                (updated[UNIQUE_ID] == key[UNIQUE_ID])
-                & (updated[MODEL_NAME] == key[MODEL_NAME])
-                & (updated[FORECAST_ORIGIN] == key[FORECAST_ORIGIN])
-                & (updated[H] <= protection_period)
-            ]
-            if len(window) >= protection_period and not window[Y].isna().any():
+        for key, group in window_rows.groupby(group_cols, sort=False):
+            if key in complete_keys:
                 continue
             defer_index.extend(group.index.tolist())
 
