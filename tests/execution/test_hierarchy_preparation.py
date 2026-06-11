@@ -74,7 +74,7 @@ def test_flat_preparation_keeps_bottom_actuals_and_skips_memory_guard(
     preparation = prepare_run(_config(), bundle)
 
     pd.testing.assert_frame_equal(preparation.actuals, bundle.history)
-    assert preparation.reconciliation_hierarchy is None
+    assert preparation.hierarchy_index is None
 
 
 def test_reconciliation_preparation_materializes_node_actuals(
@@ -97,11 +97,8 @@ def test_reconciliation_preparation_materializes_node_actuals(
     )
 
     summing = build_summing_matrix(hierarchy)
-    assert preparation.reconciliation_hierarchy is not None
-    pd.testing.assert_frame_equal(
-        preparation.reconciliation_hierarchy.reset_index(drop=True),
-        hierarchy.reset_index(drop=True),
-    )
+    assert preparation.hierarchy_index is not None
+    assert preparation.hierarchy_index.node_labels == summing.node_labels
     assert preparation.reconciler is not None
     assert isinstance(preparation.actuals, pd.DataFrame)
     assert set(preparation.actuals[UNIQUE_ID]) == set(summing.node_labels)
@@ -257,7 +254,7 @@ def test_hierarchical_interval_preparation_uses_fused_phase_without_point_reconc
         _bundle(hierarchy=_hierarchy()),
     )
 
-    assert preparation.reconciliation_hierarchy is not None
+    assert preparation.hierarchy_index is not None
     assert preparation.reconciler is None
     assert preparation.hierarchical_interval_phase is not None
     assert preparation.conformal_config is None

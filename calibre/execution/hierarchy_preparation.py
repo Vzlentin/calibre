@@ -77,7 +77,6 @@ class RunPreparation:
     actuals: pd.DataFrame | ActualsSource
     origins: list[pd.Timestamp]
     conformal_config: SymmetricIntervalConfig | None
-    reconciliation_hierarchy: pd.DataFrame | None
     hierarchy_index: HierarchyIndex | None
     reconciler: Reconciler | None
     hierarchical_interval_phase: HierarchicalIntervalPhase | None
@@ -146,7 +145,6 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         actuals=actuals,
         origins=origins,
         conformal_config=conformal_config,
-        reconciliation_hierarchy=reconciliation_hierarchy,
         hierarchy_index=hierarchy_index,
         reconciler=(
             None

@@ -61,10 +61,11 @@ class HierarchyIndex:
         ``category``-dtype phantom groups for unobserved categories are dropped
         by construction.
         """
-        return {
-            col: self.frame[col].astype(str).groupby(self.frame[col].astype(str)).size()
-            for col in self.attr_cols
-        }
+        counts: dict[str, pd.Series] = {}
+        for col in self.attr_cols:
+            values = self.frame[col].astype(str)
+            counts[col] = values.groupby(values).size()
+        return counts
 
 
 @dataclass(frozen=True, slots=True)
