@@ -13,7 +13,7 @@ from calibre.core.forecast_frame import (
     H,
     Y,
 )
-from calibre.core.forecast_task import ForecastTaskRef
+from calibre.core.forecast_task import ChunkTaskRef, ForecastTaskRef
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.forecasting.adapter_base import PredictionResult
 
@@ -131,12 +131,22 @@ def test_global_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
     assert engine._remote_process_global_panel.options_kwargs == {"num_cpus": 1.0}
 
 
-def test_local_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
-    def _fake_process_task_ref(ref, origin, local_scope, collect_fitted_values):
-        del origin, local_scope, collect_fitted_values
-        return PredictionResult(forecast=pd.DataFrame({"name": [ref.unique_id]}))
+def _chunk(config: dict, *uids: str) -> ChunkTaskRef:
+    return ChunkTaskRef(
+        unique_ids=tuple(uids),
+        model_config=config,
+        horizon=2,
+        forecast_origin=None,
+        history_uri="memory://missing/history.parquet",
+    )
 
-    monkeypatch.setattr(backend, "_process_task_ref", _fake_process_task_ref)
+
+def test_local_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
+    def _fake_process_local_chunk(chunk_ref, origin, collect_fitted_values):
+        del origin, collect_fitted_values
+        return PredictionResult(forecast=pd.DataFrame({"name": list(chunk_ref.unique_ids)}))
+
+    monkeypatch.setattr(backend, "_process_local_chunk", _fake_process_local_chunk)
     engine = BackendEngine(
         execution=ExecutionOptions(backend="ray", max_concurrency=2, cpu_per_task=2.0)
     )
@@ -144,9 +154,9 @@ def test_local_fanout_applies_cpu_per_task_options(monkeypatch) -> None:
 
     config = {"backend": "stub", "model": "stub", "scope": "local"}
     result = engine._run_local_scope(
-        [_ref(config, 1), _ref(config, 2)],
+        [_chunk(config, "sku_1"), _chunk(config, "sku_2")],
         pd.Timestamp("2024-01-01"),
     ).forecast
 
     assert sorted(result["name"]) == ["sku_1", "sku_2"]
-    assert engine._remote_process_task.options_kwargs == {"num_cpus": 2.0}
+    assert engine._remote_process_local_chunk.options_kwargs == {"num_cpus": 2.0}

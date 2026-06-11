@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask, TaskGroups
-from calibre.execution.backend import BackendEngine
+from calibre.execution.backend import BackendEngine, ExecutionOptions, _group_local_tasks_by_config
 from calibre.execution.task_builder import partition_tasks
 
 
@@ -96,3 +98,140 @@ def test_local_and_global_partition_routed_separately() -> None:
     assert not ledger.empty
     # Local path forecasts series A; global path forecasts the full panel.
     assert set(ledger[UNIQUE_ID].unique()) == {"A", "B"}
+
+
+# ---------------------------------------------------------------------------
+# Chunked-local dispatch (U1 #162): grouping, chunk-count math, and the
+# staging-local chunk identity must never leak into the ledger.
+# ---------------------------------------------------------------------------
+
+
+def _local_task(uid: str, *, season_length: int = 2) -> ForecastTask:
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    return ForecastTask(
+        history=pd.DataFrame({UNIQUE_ID: uid, DS: dates, Y: [10.0, 20.0] * 6}),
+        horizon=2,
+        model_config={
+            "backend": "statsforecast",
+            "model": "SeasonalNaive",
+            "season_length": season_length,
+        },
+    )
+
+
+def test_distinct_configs_never_share_a_chunk() -> None:
+    """Tasks with different resolved configs land in separate config groups."""
+    tasks = [
+        _local_task("A", season_length=2),
+        _local_task("B", season_length=4),
+        _local_task("C", season_length=2),
+    ]
+    groups = _group_local_tasks_by_config(tasks)
+
+    assert len(groups) == 2
+    members = {tuple(t.unique_id for t in group_tasks) for _config, group_tasks in groups}
+    assert members == {("A", "C"), ("B",)}
+
+
+def test_chunk_count_is_ceil_of_series_over_chunk_size() -> None:
+    """A same-config group of N series stages ceil(N / chunk_size) chunks."""
+    engine = BackendEngine(execution=ExecutionOptions(chunk_size=2))
+    tasks = [_local_task(f"S{i}") for i in range(5)]
+    refs = engine._materialize_local_chunks(tasks, "memory://chunk-count-test/local")
+
+    assert len(refs) == math.ceil(5 / 2)
+    # Every series appears exactly once across the chunks.
+    staged_uids = [uid for ref in refs for uid in ref.unique_ids]
+    assert sorted(staged_uids) == ["S0", "S1", "S2", "S3", "S4"]
+
+
+def test_chunk_size_one_makes_one_chunk_per_series() -> None:
+    engine = BackendEngine(execution=ExecutionOptions(chunk_size=1))
+    tasks = [_local_task("A"), _local_task("B"), _local_task("C")]
+    refs = engine._materialize_local_chunks(tasks, "memory://chunk-one-test/local")
+
+    assert len(refs) == 3
+    assert all(len(ref.unique_ids) == 1 for ref in refs)
+
+
+def test_chunked_local_ledger_uid_set_equals_real_series() -> None:
+    """The synthetic chunk identity never reaches the ledger; real uids do.
+
+    A single chunk holds three series (chunk_size large); the ledger must carry
+    the three real per-series uids, not any chunk-level id.
+    """
+    panel = pd.concat(
+        [_local_task(uid).history for uid in ("A", "B", "C")],
+        ignore_index=True,
+    )
+    tasks = [_local_task(uid) for uid in ("A", "B", "C")]
+    origins = [pd.Timestamp("2024-03-03")]
+
+    engine = BackendEngine(execution=ExecutionOptions(chunk_size=256))
+    ledger = engine.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+
+    assert set(ledger[UNIQUE_ID].unique()) == {"A", "B", "C"}
+
+
+def test_chunked_local_mixed_future_x_presence_within_a_chunk(monkeypatch) -> None:
+    """A chunk where only some series carry future_x fits each series correctly.
+
+    The chunk worker re-slices future_x per uid and passes None when a series has
+    no rows — mirroring the per-series behavior, so mixed presence is harmless.
+    The stub adapter records exactly what each series received: A gets its single
+    promo row (sliced to A), B gets None.
+    """
+    from calibre.forecasting.adapter_base import ModelAdapter
+
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    pattern = [10.0, 20.0, 30.0, 40.0] * 3
+    future_x = pd.DataFrame({UNIQUE_ID: ["A"], DS: [pd.Timestamp("2024-04-07")], "promo": [1.0]})
+    panel = pd.concat(
+        [
+            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: pattern}),
+            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: pattern}),
+        ],
+        ignore_index=True,
+    )
+    tasks = [
+        ForecastTask(
+            history=pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: pattern}),
+            horizon=1,
+            model_config={"backend": "stub", "model": "stub_model"},
+            future_x=future_x,
+        ),
+        ForecastTask(
+            history=pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: pattern}),
+            horizon=1,
+            model_config={"backend": "stub", "model": "stub_model"},
+        ),
+    ]
+    origins = [pd.Timestamp("2024-03-24")]
+
+    received: dict[str, pd.DataFrame | None] = {}
+
+    class _StubAdapter(ModelAdapter):
+        def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+            del collect_fitted_values
+            received[task.unique_id] = task.future_x
+
+        def predict(self, task: ForecastTask) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    UNIQUE_ID: [task.unique_id],
+                    DS: [pd.Timestamp("2024-04-07")],
+                    "y_hat": [10.0],
+                    H: [1],
+                }
+            )
+
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
+
+    engine = BackendEngine(execution=ExecutionOptions(chunk_size=256))
+    ledger = engine.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+
+    assert set(ledger[UNIQUE_ID].unique()) == {"A", "B"}
+    # A received its single promo row sliced to A; B carried no future_x rows → None.
+    assert received["A"] is not None
+    assert set(received["A"][UNIQUE_ID].unique()) == {"A"}
+    assert received["B"] is None

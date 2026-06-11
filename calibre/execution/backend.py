@@ -32,7 +32,13 @@ from calibre.core.forecast_frame import (
     Y,
     validate_forecast_frame,
 )
-from calibre.core.forecast_task import ForecastTask, ForecastTaskRef, TaskGroups
+from calibre.core.forecast_task import (
+    ChunkTaskRef,
+    ForecastTask,
+    ForecastTaskRef,
+    TaskGroups,
+    stage_local_chunk,
+)
 from calibre.core.io import join_uri, rm
 from calibre.core.metrics import (
     observe_forecast_duration,
@@ -57,7 +63,7 @@ from calibre.execution.prediction import (
     _concat_prediction_results,
     _empty_prediction_result,
     _process_global_panel,
-    _process_task_ref,
+    _process_local_chunk,
 )
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config
@@ -88,9 +94,18 @@ class ExecutionOptions:
     backend: Literal["local", "ray", "auto"] = "auto"
     ray_address: str | None = None
     staging_uri: str | None = None
+    # ``ray_threshold`` counts dispatchable units, not series: chunks for local
+    # scope (one chunk == one staged artifact == one Ray task) and config groups
+    # for global scope. ``backend="auto"`` uses Ray once that count reaches it.
     ray_threshold: int = 10
     max_concurrency: int | None = None
     cpu_per_task: float | None = None
+    # ``chunk_size`` bounds how many same-config local series are staged and
+    # fitted per chunk; it caps one worker's materialized histories to one
+    # chunk. Local-scope-only — global dispatch is untouched (one panel per
+    # config group). The chunk worker still fits each series independently, so
+    # chunking never changes per-series math for any backend.
+    chunk_size: int = 256
     seed: int | None = None
 
     def __post_init__(self) -> None:
@@ -104,6 +119,8 @@ class ExecutionOptions:
             raise ValueError("max_concurrency must be at least 1")
         if self.cpu_per_task is not None and self.cpu_per_task <= 0:
             raise ValueError("cpu_per_task must be positive")
+        if self.chunk_size < 1:
+            raise ValueError("chunk_size must be at least 1")
 
 
 @dataclass(frozen=True)
@@ -219,7 +236,7 @@ class BackendEngine:
         self._ray_runtime: RayRuntimeHandle | None = None
         # Handles stay Any: precise generics live in private ray._private.worker and
         # would force positional-only .remote() calls; not worth it for this slice.
-        self._remote_process_task: Any | None = None
+        self._remote_process_local_chunk: Any | None = None
         self._remote_process_global_panel: Any | None = None
 
     def __enter__(self) -> BackendEngine:
@@ -286,7 +303,7 @@ class BackendEngine:
 
             with self._task_staging_prefix() as staging_prefix:
                 with span("staging_materialize"):
-                    parallel_refs = self._materialize_task_refs(
+                    chunk_refs = self._materialize_local_chunks(
                         parallel_tasks,
                         join_uri(staging_prefix, "local"),
                     )
@@ -312,7 +329,7 @@ class BackendEngine:
                         actuals=actuals_source,
                         origin=origin,
                         conformal_runtime=conformal_runtime,
-                        parallel_refs=parallel_refs,
+                        chunk_refs=chunk_refs,
                         direct_refs=direct_refs,
                     )
                     duration = time.perf_counter() - origin_started
@@ -338,7 +355,7 @@ class BackendEngine:
         if self._ray_runtime is not None:
             self._ray_runtime.release()
         self._ray_runtime = None
-        self._remote_process_task = None
+        self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
 
     def close(self) -> None:
@@ -369,7 +386,7 @@ class BackendEngine:
         actuals: ActualsSource,
         origin: pd.Timestamp,
         conformal_runtime: ConformalRuntime | None,
-        parallel_refs: list[ForecastTaskRef],
+        chunk_refs: list[ChunkTaskRef],
         direct_refs: list[ForecastTaskRef],
     ) -> None:
         """Run one origin through the ordered per-origin phases.
@@ -389,7 +406,7 @@ class BackendEngine:
         with self._phase("ResolveOpen", origin):
             self._resolve_open(ledger, actuals, origin, active_conformal_runtime)
         with self._phase("Predict", origin):
-            prediction = self._predict(parallel_refs, direct_refs, origin)
+            prediction = self._predict(chunk_refs, direct_refs, origin)
             origin_preds = prediction.forecast
         if fused_phase_active:
             with self._phase("HierarchicalIntervals", origin):
@@ -466,7 +483,7 @@ class BackendEngine:
 
     def _predict(
         self,
-        parallel_refs: list[ForecastTaskRef],
+        chunk_refs: list[ChunkTaskRef],
         direct_refs: list[ForecastTaskRef],
         origin: pd.Timestamp,
     ) -> PredictionResult:
@@ -474,7 +491,7 @@ class BackendEngine:
 
         Returns an empty forecast frame when there are no tasks.
         """
-        local_preds = self._run_local_scope(parallel_refs, origin)
+        local_preds = self._run_local_scope(chunk_refs, origin)
         global_preds = self._run_global_scope(direct_refs, origin)
         return _concat_prediction_results([local_preds, global_preds])
 
@@ -728,6 +745,13 @@ class BackendEngine:
         origins = pd.to_datetime(self.initial_ledger[FORECAST_ORIGIN], errors="coerce")
         return {pd.Timestamp(origin) for origin in origins.dropna().unique()}
 
+    def _resolved_model_config(self, task: ForecastTask) -> dict:
+        model_config = {
+            **seed_model_config(task.model_config, self.seed),
+            "freq": self.freq,
+        }
+        return cap_threaded_config(model_config, self.execution.cpu_per_task)
+
     def _materialize_task_refs(
         self,
         tasks: list[ForecastTask],
@@ -735,16 +759,11 @@ class BackendEngine:
     ) -> list[ForecastTaskRef]:
         refs: list[ForecastTaskRef] = []
         for idx, task in enumerate(tasks):
-            model_config = {
-                **seed_model_config(task.model_config, self.seed),
-                "freq": self.freq,
-            }
-            model_config = cap_threaded_config(model_config, self.execution.cpu_per_task)
             task_base = join_uri(base_dir, str(idx))
             ref = ForecastTask(
                 history=task.history,
                 horizon=task.horizon,
-                model_config=model_config,
+                model_config=self._resolved_model_config(task),
                 forecast_origin=task.forecast_origin,
                 future_x=task.future_x,
                 task_group=task.task_group,
@@ -752,24 +771,66 @@ class BackendEngine:
             refs.append(ref)
         return refs
 
+    def _materialize_local_chunks(
+        self,
+        tasks: list[ForecastTask],
+        base_dir: str,
+    ) -> list[ChunkTaskRef]:
+        """Group local tasks by resolved config and stage O(chunks) artifacts.
+
+        Tasks are grouped by their resolved model config (so distinct configs
+        never share a chunk), then each group is split into ``chunk_size`` slices.
+        Each slice is staged as one panel-history parquet plus, when any series
+        carries exogenous features, one uid-filtered future_x parquet — so total
+        staging is O(chunks), not O(series).
+        """
+        resolved = [
+            ForecastTask(
+                history=task.history,
+                horizon=task.horizon,
+                model_config=self._resolved_model_config(task),
+                forecast_origin=task.forecast_origin,
+                future_x=task.future_x,
+                task_group=task.task_group,
+            )
+            for task in tasks
+        ]
+        groups = _group_local_tasks_by_config(resolved)
+        chunk_size = self.execution.chunk_size
+        chunk_refs: list[ChunkTaskRef] = []
+        for group_idx, (model_config, group_tasks) in enumerate(groups):
+            for chunk_idx, start in enumerate(range(0, len(group_tasks), chunk_size)):
+                chunk_tasks = group_tasks[start : start + chunk_size]
+                chunk_base = join_uri(base_dir, str(group_idx), str(chunk_idx))
+                chunk_refs.append(
+                    stage_local_chunk(
+                        chunk_tasks,
+                        chunk_base,
+                        horizon=chunk_tasks[0].horizon,
+                        model_config=model_config,
+                        forecast_origin=chunk_tasks[0].forecast_origin,
+                        task_group=chunk_tasks[0].task_group,
+                    )
+                )
+        return chunk_refs
+
     def _run_local_scope(
         self,
-        refs: list[ForecastTaskRef],
+        chunk_refs: list[ChunkTaskRef],
         origin: pd.Timestamp,
     ) -> PredictionResult:
-        if not refs:
+        if not chunk_refs:
             return _empty_prediction_result()
-        if self._should_use_ray(len(refs)):
-            return self._run_refs_on_ray(refs, origin, local_scope=True)
+        if self._should_use_ray(len(chunk_refs)):
+            return self._run_chunks_on_ray(chunk_refs, origin)
         return _concat_prediction_results(
             [
-                _process_task_ref(
-                    ref,
+                _process_local_chunk(
+                    chunk_ref,
                     origin,
-                    local_scope=True,
                     collect_fitted_values=self._requires_fitted_values,
                 )
-                for ref in refs
+                for chunk_ref in chunk_refs
             ]
         )
 
@@ -810,7 +871,7 @@ class BackendEngine:
             return
         # Acquiring a fresh runtime invalidates any cached remote-function handles;
         # drop them so the callers rebuild them against the new runtime.
-        self._remote_process_task = None
+        self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
 
@@ -832,7 +893,7 @@ class BackendEngine:
         results: list[PredictionResult] = []
 
         for start in range(0, len(groups), concurrency):
-            chunk = groups[start : start + concurrency]
+            batch = groups[start : start + concurrency]
             object_refs = [
                 remote_process.remote(
                     group_refs,
@@ -840,41 +901,38 @@ class BackendEngine:
                     origin,
                     self._requires_fitted_values,
                 )
-                for config, group_refs in chunk
+                for config, group_refs in batch
             ]
             results.extend(ray.get(object_refs))
 
         return _concat_prediction_results(results)
 
-    def _run_refs_on_ray(
+    def _run_chunks_on_ray(
         self,
-        refs: list[ForecastTaskRef],
+        chunk_refs: list[ChunkTaskRef],
         origin: pd.Timestamp,
-        *,
-        local_scope: bool,
     ) -> PredictionResult:
         self._ensure_ray()
         import ray
 
-        if self._remote_process_task is None:
-            remote_fn = ray.remote(_process_task_ref)
+        if self._remote_process_local_chunk is None:
+            remote_fn = ray.remote(_process_local_chunk)
             if self.execution.cpu_per_task is not None:
                 remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
-            self._remote_process_task = remote_fn
-        remote_process = self._remote_process_task
-        concurrency = self.execution.max_concurrency or len(refs)
+            self._remote_process_local_chunk = remote_fn
+        remote_process = self._remote_process_local_chunk
+        concurrency = self.execution.max_concurrency or len(chunk_refs)
         results: list[PredictionResult] = []
 
-        for start in range(0, len(refs), concurrency):
-            chunk = refs[start : start + concurrency]
+        for start in range(0, len(chunk_refs), concurrency):
+            batch = chunk_refs[start : start + concurrency]
             object_refs = [
                 remote_process.remote(
-                    ref,
+                    chunk_ref,
                     origin,
-                    local_scope,
                     self._requires_fitted_values,
                 )
-                for ref in chunk
+                for chunk_ref in batch
             ]
             results.extend(ray.get(object_refs))
 
@@ -899,4 +957,22 @@ def _group_global_refs_by_config(
         if key not in grouped:
             grouped[key] = (dict(ref.model_config), [])
         grouped[key][1].append(ref)
+    return list(grouped.values())
+
+
+def _group_local_tasks_by_config(
+    tasks: list[ForecastTask],
+) -> list[tuple[dict, list[ForecastTask]]]:
+    """Group local tasks by resolved config so distinct configs never co-chunk.
+
+    Mirrors :func:`_group_global_refs_by_config` but over un-staged tasks (the
+    grouping decides chunk membership *before* staging). Insertion order is
+    preserved within and across groups, keeping chunk assignment deterministic.
+    """
+    grouped: dict[str, tuple[dict, list[ForecastTask]]] = {}
+    for task in tasks:
+        key = _model_config_key(task.model_config)
+        if key not in grouped:
+            grouped[key] = (dict(task.model_config), [])
+        grouped[key][1].append(task)
     return list(grouped.values())

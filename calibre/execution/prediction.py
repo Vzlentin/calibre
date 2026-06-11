@@ -23,7 +23,12 @@ from calibre.core.forecast_frame import (
     Y,
     is_quantile_column,
 )
-from calibre.core.forecast_task import ForecastTask, ForecastTaskRef
+from calibre.core.forecast_task import (
+    ChunkTaskRef,
+    ForecastTask,
+    ForecastTaskRef,
+    _read_parquet_cached,
+)
 from calibre.forecasting.adapter_base import PredictionResult
 from calibre.forecasting.adapter_registry import resolve_adapter
 from calibre.forecasting.cache import ModelArtifactCache
@@ -121,49 +126,59 @@ def _empty_prediction_result() -> PredictionResult:
     return PredictionResult(forecast=_empty_forecast_frame())
 
 
-def _process_task_ref(
-    ref: ForecastTaskRef,
+def _process_local_chunk(
+    chunk_ref: ChunkTaskRef,
     origin: pd.Timestamp,
-    local_scope: bool,
     collect_fitted_values: bool,
 ) -> PredictionResult:
-    """Materialize and execute one URI-backed task ref.
+    """Materialize one staged chunk and fit each of its series independently.
+
+    The chunk panel is read once, then the worker iterates the chunk's uids and
+    runs the SAME per-series fit/predict as the per-series path: own adapter
+    instance (via ``fit_predict_task``), own history slice, own per-uid future_x
+    slice (``None`` when the series has no future_x rows). Fitting per series
+    inside the task keeps local semantics exact for every backend — pooled
+    adapters (mlforecast/neuralforecast) never see more than one series.
 
     This function is intentionally conformal- and order-blind so all mutable
-    conformal state stays on the driver.
+    conformal state stays on the driver. The chunk identity stays staging-local:
+    every returned row carries its real per-series unique_id.
     """
-    task = ForecastTaskRef(
-        unique_id=ref.unique_id,
-        model_config=dict(ref.model_config),
-        horizon=ref.horizon,
-        forecast_origin=origin,
-        history_uri=ref.history_uri,
-        future_x_uri=ref.future_x_uri,
-        task_group=ref.task_group,
-    ).materialize()
-
-    history = task.history[task.history[DS] < origin]
-    if history.empty:
-        return _empty_prediction_result()
-
-    future_x = task.future_x
-    if local_scope and future_x is not None and not future_x.empty:
-        future_x = future_x[future_x[UNIQUE_ID] == ref.unique_id]
-
-    origin_task = ForecastTask(
-        history=history,
-        horizon=task.horizon,
-        model_config=task.model_config,
-        forecast_origin=origin,
-        future_x=future_x,
-        task_group=task.task_group,
+    panel = _read_parquet_cached(chunk_ref.history_uri)
+    future_panel = (
+        _read_parquet_cached(chunk_ref.future_x_uri) if chunk_ref.future_x_uri is not None else None
     )
-    result = fit_predict_task(origin_task, collect_fitted_values=collect_fitted_values)
-    return PredictionResult(
-        forecast=_finalize_preds(result.forecast, origin, origin_task.model_name),
-        fitted_values=result.fitted_values,
-        artifact_key=result.artifact_key,
-    )
+    model_config = dict(chunk_ref.model_config)
+
+    results: list[PredictionResult] = []
+    for uid in chunk_ref.unique_ids:
+        history = panel[(panel[UNIQUE_ID] == uid) & (panel[DS] < origin)]
+        if history.empty:
+            continue
+
+        future_x = None
+        if future_panel is not None and not future_panel.empty:
+            uid_future = future_panel[future_panel[UNIQUE_ID] == uid]
+            future_x = uid_future if not uid_future.empty else None
+
+        origin_task = ForecastTask(
+            history=history.reset_index(drop=True),
+            horizon=chunk_ref.horizon,
+            model_config=dict(model_config),
+            forecast_origin=origin,
+            future_x=future_x.reset_index(drop=True) if future_x is not None else None,
+            task_group=chunk_ref.task_group,
+        )
+        result = fit_predict_task(origin_task, collect_fitted_values=collect_fitted_values)
+        results.append(
+            PredictionResult(
+                forecast=_finalize_preds(result.forecast, origin, origin_task.model_name),
+                fitted_values=result.fitted_values,
+                artifact_key=result.artifact_key,
+            )
+        )
+
+    return _concat_prediction_results(results)
 
 
 def _process_global_panel(

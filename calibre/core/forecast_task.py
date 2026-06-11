@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from calibre.core.forecast_frame import UNIQUE_ID
+from calibre.core.forecast_frame import DS, UNIQUE_ID
 
 
 @lru_cache(maxsize=1024)
@@ -111,3 +111,67 @@ class ForecastTaskRef:
             future_x=future_x,
             task_group=self.task_group,
         )
+
+
+@dataclass(frozen=True)
+class ChunkTaskRef:
+    """One staged artifact pair for a bounded group of same-config local series.
+
+    A chunk stages one panel-history parquet (the concatenated per-series
+    histories) and, when any series carries exogenous features, one future_x
+    parquet filtered to the chunk's uids. The shared ``horizon``/``model_config``
+    apply to every series in the chunk; the worker iterates ``unique_ids`` and
+    fits each series independently, so per-series local semantics are exact for
+    every backend. The chunk identity is staging-local only — it never reaches
+    forecast/ledger rows, which carry the real per-series uids.
+    """
+
+    unique_ids: tuple[str, ...]
+    model_config: dict[str, Any]
+    horizon: int
+    forecast_origin: pd.Timestamp | None
+    history_uri: str
+    future_x_uri: str | None = None
+    task_group: str | None = None
+
+
+def stage_local_chunk(
+    tasks: list[ForecastTask],
+    base_uri: str,
+    *,
+    horizon: int,
+    model_config: dict[str, Any],
+    forecast_origin: pd.Timestamp | None,
+    task_group: str | None,
+) -> ChunkTaskRef:
+    """Stage one chunk: concat the per-series histories + filtered future_x.
+
+    Every task in ``tasks`` shares ``horizon``/``model_config`` (they were
+    grouped by resolved config upstream). The chunk's future_x is the union of
+    the per-series future_x frames; mixed presence is harmless because the
+    worker re-slices per uid (and passes ``None`` when a series has no rows).
+    """
+    from calibre.core.io import join_uri, write_parquet
+
+    unique_ids = tuple(task.unique_id for task in tasks)
+    history = pd.concat([task.history for task in tasks], ignore_index=True)
+    history_uri = join_uri(base_uri, "history.parquet")
+    write_parquet(history, history_uri)
+
+    future_frames = [task.future_x for task in tasks if task.future_x is not None]
+    future_x_uri: str | None = None
+    if future_frames:
+        future_x = pd.concat(future_frames, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
+        future_x = future_x[future_x[UNIQUE_ID].isin(unique_ids)]
+        future_x_uri = join_uri(base_uri, "future_x.parquet")
+        write_parquet(future_x, future_x_uri)
+
+    return ChunkTaskRef(
+        unique_ids=unique_ids,
+        model_config=dict(model_config),
+        horizon=horizon,
+        forecast_origin=forecast_origin,
+        history_uri=history_uri,
+        future_x_uri=future_x_uri,
+        task_group=task_group,
+    )

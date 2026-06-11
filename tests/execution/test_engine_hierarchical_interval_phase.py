@@ -43,12 +43,12 @@ from calibre.reconciliation.summing import (
 @contextmanager
 def _materialize_refs_for(engine: BackendEngine, tasks: list[ForecastTask]):
     groups = partition_tasks(tasks)
-    parallel_tasks = [_with_group_tag(t) for t in groups.local]
+    local_tasks = [_with_group_tag(t) for t in groups.local]
     direct_tasks = [_with_group_tag(t) for t in groups.global_]
     with engine._task_staging_prefix() as staging_prefix:
-        parallel_refs = engine._materialize_task_refs(parallel_tasks, f"{staging_prefix}/local")
+        chunk_refs = engine._materialize_local_chunks(local_tasks, f"{staging_prefix}/local")
         direct_refs = engine._materialize_task_refs(direct_tasks, f"{staging_prefix}/global")
-        yield parallel_refs, direct_refs
+        yield chunk_refs, direct_refs
 
 
 class _SimpleAdapter(ModelAdapter):
@@ -177,14 +177,14 @@ def test_default_route_still_calls_reconcile_and_calibrate(monkeypatch: pytest.M
 
     engine._calibrate = MethodType(_calibrate, engine)
 
-    with _materialize_refs_for(engine, _tasks(history)) as (parallel_refs, direct_refs):
+    with _materialize_refs_for(engine, _tasks(history)) as (chunk_refs, direct_refs):
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
             actuals=FrameActualsSource(_actuals(history)),
             origin=pd.Timestamp("2024-01-04"),
             conformal_runtime=None,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
@@ -229,14 +229,14 @@ def test_fused_phase_bypasses_reconcile_and_calibrate_and_commits_order(
     ledger = InMemoryLedger()
     order_ledger = InMemoryOrderLedger()
 
-    with _materialize_refs_for(engine, _tasks(history)) as (parallel_refs, direct_refs):
+    with _materialize_refs_for(engine, _tasks(history)) as (chunk_refs, direct_refs):
         engine.run_origin(
             ledger=ledger,
             order_ledger=order_ledger,
             actuals=FrameActualsSource(_actuals(history)),
             origin=pd.Timestamp("2024-01-04"),
             conformal_runtime=None,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
@@ -281,7 +281,7 @@ def test_fused_phase_failure_names_phase_and_origin(monkeypatch: pytest.MonkeyPa
     )
 
     with (
-        _materialize_refs_for(engine, _tasks(history)) as (parallel_refs, direct_refs),
+        _materialize_refs_for(engine, _tasks(history)) as (chunk_refs, direct_refs),
         pytest.raises(
             RuntimeError,
             match=rf"HierarchicalIntervals phase failed at origin {origin}",
@@ -293,7 +293,7 @@ def test_fused_phase_failure_names_phase_and_origin(monkeypatch: pytest.MonkeyPa
             actuals=FrameActualsSource(_actuals(history)),
             origin=origin,
             conformal_runtime=None,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
@@ -307,14 +307,14 @@ def test_flat_default_path_does_not_request_fitted_values(monkeypatch: pytest.Mo
     bottom_history = history[history[UNIQUE_ID].isin(["a", "b"])].copy()
     engine = BackendEngine()
 
-    with _materialize_refs_for(engine, _tasks(bottom_history)) as (parallel_refs, direct_refs):
+    with _materialize_refs_for(engine, _tasks(bottom_history)) as (chunk_refs, direct_refs):
         engine.run_origin(
             ledger=InMemoryLedger(),
             order_ledger=None,
             actuals=FrameActualsSource(_actuals(bottom_history)),
             origin=pd.Timestamp("2024-01-04"),
             conformal_runtime=None,
-            parallel_refs=parallel_refs,
+            chunk_refs=chunk_refs,
             direct_refs=direct_refs,
         )
 
