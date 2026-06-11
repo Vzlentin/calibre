@@ -151,6 +151,13 @@ def stage_local_chunk(
     """
     from calibre.core.io import join_uri, write_parquet
 
+    for task in tasks:
+        n_uids = task.history[UNIQUE_ID].nunique()
+        if n_uids > 1:
+            raise ValueError(
+                f"local task for {task.unique_id!r} carries {n_uids} series; "
+                "local scope stages one series per task"
+            )
     unique_ids = tuple(task.unique_id for task in tasks)
     history = pd.concat([task.history for task in tasks], ignore_index=True)
     history_uri = join_uri(base_uri, "history.parquet")
@@ -160,7 +167,9 @@ def stage_local_chunk(
     future_x_uri: str | None = None
     if future_frames:
         future_x = pd.concat(future_frames, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
-        future_x = future_x[future_x[UNIQUE_ID].isin(unique_ids)]
+        # Filter on stringified identity: ``unique_ids`` are str (via
+        # ForecastTask.unique_id) while the column may carry a non-string dtype.
+        future_x = future_x[future_x[UNIQUE_ID].astype(str).isin(unique_ids)]
         future_x_uri = join_uri(base_uri, "future_x.parquet")
         write_parquet(future_x, future_x_uri)
 

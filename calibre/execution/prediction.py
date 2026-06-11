@@ -151,9 +151,12 @@ def _process_local_chunk(
 
     # Group once per chunk: per-uid boolean masks over the full panel would be
     # O(chunk_size^2 x rows) and grow quadratically with the chunk_size knob.
-    history_by_uid = dict(tuple(panel.groupby(UNIQUE_ID, sort=False)))
-    future_by_uid: dict[object, pd.DataFrame] = (
-        dict(tuple(future_panel.groupby(UNIQUE_ID, sort=False)))
+    # Keys are stringified to match chunk_ref.unique_ids (always str, via
+    # ForecastTask.unique_id) even when the panel's unique_id column carries a
+    # non-string dtype; each slice keeps its native dtype untouched.
+    history_by_uid = {str(uid): group for uid, group in panel.groupby(UNIQUE_ID, sort=False)}
+    future_by_uid: dict[str, pd.DataFrame] = (
+        {str(uid): group for uid, group in future_panel.groupby(UNIQUE_ID, sort=False)}
         if future_panel is not None and not future_panel.empty
         else {}
     )

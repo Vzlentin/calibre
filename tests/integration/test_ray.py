@@ -117,15 +117,26 @@ def test_ray_backend_matches_local_backend() -> None:
     tasks = _tasks(panel)
     origins = [pd.Timestamp("2024-03-17"), pd.Timestamp("2024-03-24")]
     expected = BackendEngine().execute(partition_tasks(tasks), panel, origins).ledger.to_df()
-    engine = BackendEngine(
+    one_chunk = BackendEngine(
         execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1)
     )
+    # chunk_size=1 stages one chunk per series, so multiple chunks flow through
+    # _run_chunks_on_ray's batching loop (max_concurrency=1) — the Ray-side
+    # chunk-size invariance lock the in-process equality tests cannot provide.
+    per_series = BackendEngine(
+        execution=ExecutionOptions(backend="ray", max_concurrency=1, ray_threshold=1, chunk_size=1)
+    )
     try:
-        actual = engine.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+        actual = one_chunk.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+        actual_per_series = per_series.execute(
+            partition_tasks(tasks), panel, origins
+        ).ledger.to_df()
     finally:
-        engine.close()
+        one_chunk.close()
+        per_series.close()
 
     pd.testing.assert_frame_equal(_sorted(actual), _sorted(expected))
+    pd.testing.assert_frame_equal(_sorted(actual_per_series), _sorted(expected))
 
 
 def test_ray_remote_handle_rebuilds_after_owned_runtime_shutdown() -> None:

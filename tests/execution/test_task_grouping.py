@@ -4,6 +4,7 @@ import math
 from dataclasses import replace
 
 import pandas as pd
+import pytest
 
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask, TaskGroups
@@ -176,6 +177,61 @@ def test_duplicate_local_task_yields_same_ledger_as_single_copy() -> None:
     ).ledger.to_df()
 
     pd.testing.assert_frame_equal(_sorted(with_duplicate), _sorted(baseline))
+
+
+def test_multi_series_local_task_raises_at_staging() -> None:
+    """A local task whose history carries >1 unique_id fails loudly at staging.
+
+    Such a task violates the partition contract (one local task per
+    (unique_id, config)); the chunk worker would silently forecast only the
+    first series, so staging raises instead of producing partial output.
+    """
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    multi = pd.concat(
+        [pd.DataFrame({UNIQUE_ID: uid, DS: dates, Y: [10.0, 20.0] * 6}) for uid in ("A", "B")],
+        ignore_index=True,
+    )
+    task = ForecastTask(
+        history=multi,
+        horizon=2,
+        model_config={"backend": "statsforecast", "model": "SeasonalNaive", "season_length": 2},
+    )
+
+    engine = BackendEngine(execution=ExecutionOptions(chunk_size=256))
+    with pytest.raises(ValueError, match="one series per task"):
+        engine._materialize_local_chunks([task], "memory://multi-uid-guard/local")
+
+
+def test_integer_uid_panel_forecasts_through_chunked_dispatch() -> None:
+    """A non-string unique_id column must not silently drop series.
+
+    ChunkTaskRef.unique_ids are stringified (via ForecastTask.unique_id), so the
+    chunk worker's per-uid lookup must stringify the panel's native-dtype group
+    keys to match. Before that normalization an int64-uid panel staged through
+    partition_tasks produced an EMPTY ledger with no error — every lookup
+    missed — while the old per-series path forecast it fine.
+    """
+    dates = pd.date_range("2024-01-07", periods=12, freq="W")
+    tasks = [
+        ForecastTask(
+            history=pd.DataFrame({UNIQUE_ID: uid, DS: dates, Y: [10.0, 20.0] * 6}),
+            horizon=2,
+            model_config={
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "season_length": 2,
+            },
+        )
+        for uid in (101, 202)
+    ]
+    panel = pd.concat([task.history for task in tasks], ignore_index=True)
+    origins = [pd.Timestamp("2024-03-03")]
+
+    engine = BackendEngine(execution=ExecutionOptions(chunk_size=256))
+    ledger = engine.execute(partition_tasks(tasks), panel, origins).ledger.to_df()
+
+    assert not ledger.empty
+    assert set(ledger[UNIQUE_ID].astype(str)) == {"101", "202"}
 
 
 def test_chunk_count_is_ceil_of_series_over_chunk_size() -> None:
