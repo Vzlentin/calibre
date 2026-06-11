@@ -37,6 +37,7 @@ _RESERVED_KEYS = frozenset(
         "scope",
         "quantiles",
         "strategy",
+        "static_features",
     }
 )
 
@@ -196,6 +197,8 @@ class MLForecastAdapter(ModelAdapter):
             fit_kwargs["max_horizon"] = task.horizon
         if collect_fitted_values:
             fit_kwargs["fitted"] = True
+        if (static_features := self._config.get("static_features")) is not None:
+            fit_kwargs["static_features"] = list(static_features)
         self._mlf.fit(mlf_df, **fit_kwargs)
 
     def dump_state(self) -> bytes:
