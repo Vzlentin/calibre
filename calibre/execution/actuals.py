@@ -112,7 +112,13 @@ class HierarchyActualsSource:
         # aggregates are cached; incomplete ones are absent (never cached as
         # absent-forever facts) and recomputed on the fixed-history complete-set
         # check the next time their (node, ds) is requested.
-        self._lookup_cache: dict[tuple[str, pd.Timestamp], float] = {}
+        # Stored as a float64 Series keyed by a (unique_id, ds) MultiIndex so
+        # the hit path serves ~10^6 rows via one C-level get_indexer instead of
+        # per-element dict probes (the index engine is cached between hit-only
+        # origins; it rebuilds only when a miss extends the cache).
+        self._lookup_cache: pd.Series = pd.Series(
+            dtype="float64", index=pd.MultiIndex.from_arrays([[], []], names=[UNIQUE_ID, DS])
+        )
 
     def resolve(
         self,
@@ -154,37 +160,40 @@ class HierarchyActualsSource:
         carrying only the complete entries) is identical to computing without
         the cache.
         """
-        # Cache keys are (str uid, pd.Timestamp ds) — the same native types the
-        # _compute_lookup result index yields, so store and lookup stay aligned.
         # Deduplicate to the distinct requested pairs (the uncached path returns
         # one entry per (node, ds); resolve() reindexes onto the full pending
-        # keys, so a duplicated index here would break that reindex).
-        requested_pairs = {
-            (str(uid), pd.Timestamp(ds)) for uid, ds in zip(uids, ds_values, strict=True)
-        }
+        # keys, so a duplicated index here would break that reindex). Built as a
+        # MultiIndex so dedup, cache membership, and the serve are all C-level.
+        requested = pd.MultiIndex.from_arrays(
+            [uids.astype(str).to_numpy(), pd.to_datetime(ds_values).to_numpy()]
+        ).unique()
 
-        uncached = {pair for pair in requested_pairs if pair not in self._lookup_cache}
-        if uncached:
-            uncached_uids = pd.Series([uid for uid, _ in uncached], dtype="object")
-            uncached_ds = pd.Series([ds for _, ds in uncached], dtype="datetime64[ns]")
-            computed = self._compute_lookup(uncached_uids, uncached_ds)
-            for key, value in zip(computed.index, computed.to_numpy(), strict=True):
-                uid, ds = key
-                self._lookup_cache[(str(uid), pd.Timestamp(ds))] = float(value)
+        indexer = self._lookup_cache.index.get_indexer(requested)
+        missing = requested[indexer < 0]
+        if len(missing):
+            computed = self._compute_lookup(
+                pd.Series(missing.get_level_values(0), dtype="object"),
+                pd.Series(missing.get_level_values(1), dtype="datetime64[ns]"),
+            )
+            if not computed.empty:
+                computed = computed.astype("float64")
+                self._lookup_cache = (
+                    computed
+                    if self._lookup_cache.empty
+                    else pd.concat([self._lookup_cache, computed])
+                )
+                indexer = self._lookup_cache.index.get_indexer(requested)
 
         # Serve only the complete cached entries, one row per distinct pair —
         # matching the shape the uncached path produces.
-        complete = [
-            (uid, ds, self._lookup_cache[(uid, ds)])
-            for (uid, ds) in requested_pairs
-            if (uid, ds) in self._lookup_cache
-        ]
-        if not complete:
+        hit = indexer >= 0
+        if not hit.any():
             return pd.Series(dtype="float64", index=pd.MultiIndex.from_arrays([[], []]))
-        index = pd.MultiIndex.from_arrays(
-            [[uid for uid, _, _ in complete], [ds for _, ds, _ in complete]]
+        return pd.Series(
+            self._lookup_cache.to_numpy()[indexer[hit]],
+            index=requested[hit],
+            dtype="float64",
         )
-        return pd.Series([value for _, _, value in complete], index=index, dtype="float64")
 
     def _compute_lookup(self, uids: pd.Series, ds_values: pd.Series) -> pd.Series:
         """Compute ``(unique_id, ds) -> y`` for the requested rows from bottom

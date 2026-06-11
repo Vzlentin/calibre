@@ -405,8 +405,12 @@ class StreamingLedger:
         if self._pending is None:
             self._pending = pending
             return
-        duplicates = pending.index[pending.index.isin(self._pending.index)]
-        if len(duplicates):
+        # Probe the 26M-row open set against the small new batch (cheap hash of
+        # the new keys) — isin(self._pending.index) would rebuild an O(pending)
+        # hash table on every append.
+        dup_mask = self._pending.index.isin(pending.index)
+        if dup_mask.any():
+            duplicates = self._pending.index[dup_mask]
             raise ValueError(f"duplicate forecast keys appended to ledger: {list(duplicates)[:10]}")
         self._pending = pd.concat([self._pending, pending])
 
@@ -423,8 +427,13 @@ class StreamingLedger:
         keys = _key_index(df)
         if self._pending is None:
             raise ValueError("apply_resolutions called before any pending append")
-        unknown = keys[~keys.isin(self._pending.index)]
-        if len(unknown):
+        # Same probe-direction rule as append: hash the small key batch, scan
+        # the open set once. The open-set index is unique, so a matched-count
+        # equality proves every input key is known.
+        known_mask = self._pending.index.isin(keys)
+        if int(known_mask.sum()) != len(keys):
+            known = self._pending.index[known_mask]
+            unknown = keys[~keys.isin(known)]
             raise ValueError(
                 f"apply_resolutions for keys not in the open set: {list(unknown)[:10]}"
             )
@@ -505,11 +514,18 @@ class StreamingLedger:
         try:
             self._stream_resolved(_write)
         except Exception:
+            # Cleanup must never mask the original failure: a raising
+            # writer.close() (e.g. disk-full on the footer flush) would
+            # otherwise skip the handle close and the partial-artifact removal
+            # and replace the root-cause exception.
             if writer is not None:
-                writer.close()
+                with contextlib.suppress(Exception):
+                    writer.close()
             if handle is not None:
-                handle.close()
-            rm(self._resolved_path, recursive=False)
+                with contextlib.suppress(Exception):
+                    handle.close()
+            with contextlib.suppress(Exception):
+                rm(self._resolved_path, recursive=False)
             raise
         if writer is not None:
             writer.close()

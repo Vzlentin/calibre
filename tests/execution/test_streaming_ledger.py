@@ -417,10 +417,12 @@ def test_streaming_finalize_matches_reference_merge_with_keep_last(tmp_path) -> 
 
     actual = _finalize(tmp_path, raw, updates)
     expected = _reference_merge(raw, updates)
+    # check_dtype=True: the union-schema cast must not drift dtypes vs the old
+    # combine_first reference (this is what _cast_keys_to_canonical and
+    # _align_to_schema exist to guarantee).
     pd.testing.assert_frame_equal(
         actual.sort_values(_KEY).reset_index(drop=True),
         expected.sort_values(_KEY).reset_index(drop=True),
-        check_dtype=False,
     )
     # keep-last: the later re-resolution (y=12.0, score=0.7) wins, not y=11.0.
     won = actual.set_index([UNIQUE_ID, H]).loc[("SKU_001", 1)]
@@ -480,6 +482,23 @@ def test_streaming_finalize_zero_updates_equals_raw_stream(tmp_path) -> None:
         raw.sort_values(_KEY).reset_index(drop=True),
         check_dtype=False,
     )
+
+
+def test_apply_resolutions_before_any_append_raises_in_memory() -> None:
+    resolved = pd.DataFrame(
+        [_update_row(_raw_stream_row("SKU_001", 1), y=11.0, score=0.5, error=1.0)]
+    )
+    with pytest.raises(ValueError, match="before any"):
+        InMemoryLedger().apply_resolutions(resolved)
+
+
+def test_apply_resolutions_before_any_append_raises_streaming(tmp_path) -> None:
+    ledger = StreamingLedger(str(tmp_path / "ledger.parquet"))
+    resolved = pd.DataFrame(
+        [_update_row(_raw_stream_row("SKU_001", 1), y=11.0, score=0.5, error=1.0)]
+    )
+    with pytest.raises(ValueError, match="before any"):
+        ledger.apply_resolutions(resolved)
 
 
 def test_streaming_finalize_unmatched_update_key_aborts(tmp_path) -> None:
