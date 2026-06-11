@@ -42,7 +42,7 @@ from calibre.core.io import join_uri, read_parquet
 from calibre.core.run_status import RunStatus
 from calibre.core.serialization import frame_from_records, json_safe_records
 from calibre.execution.dataset import SalesAdapter, SnapshotSalesAdapter
-from calibre.execution.decision_loop import observe_cumulative, observe_per_horizon
+from calibre.execution.decision_loop import observe_pending
 from calibre.execution.fit_validation import validate_fit_config
 from calibre.execution.prediction import (
     _coerce_forecast_frame_dtypes,
@@ -552,10 +552,7 @@ def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
     # discarded exactly the observations the cumulative runtime needs to
     # complete a window (lessons.md §40). decision_loop owns the per-horizon vs
     # cumulative readiness logic; route through it so the API cannot diverge.
-    if runtime.mode == "cumulative":
-        observe_cumulative(runtime, [calibrated], actuals_lookup)
-    else:
-        observe_per_horizon(runtime, [calibrated], actuals_lookup, lower_col, upper_col)
+    observe_pending(runtime, [calibrated], actuals_lookup)
     store.upsert_conformal_state(session_id, runtime.get_partition_states())
 
 

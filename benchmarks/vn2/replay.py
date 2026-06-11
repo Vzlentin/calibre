@@ -58,7 +58,7 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.io import join_uri
 from calibre.core.order_types import RsPolicyParameters
-from calibre.execution import observe_cumulative
+from calibre.execution import observe_pending
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import partition_tasks
@@ -468,7 +468,7 @@ def replay_cached_cost(
             lookup = pd.Series(actuals_cache, dtype=float)
             if not lookup.empty:
                 lookup.index = pd.MultiIndex.from_tuples(lookup.index)
-            pending = observe_cumulative(runtime, pending, lookup)
+            pending = observe_pending(runtime, pending, lookup)
 
     for week_offset in range(1, cache.delivery_weeks + 1):
         delivery_num = cache.decision_rounds + week_offset

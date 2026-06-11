@@ -25,11 +25,9 @@ End-to-end pipeline:
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import math
 import sys
-from functools import partial
 from pathlib import Path
 
 import mlflow
@@ -74,7 +72,6 @@ from calibre.conformal.runtime import (
 from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
-    MODEL_NAME,
     UNIQUE_ID,
     Y,
     interval_column_names,
@@ -86,8 +83,7 @@ from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
     RoundResult,
-    observe_cumulative,
-    observe_per_horizon,
+    observe_pending,
 )
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
@@ -112,42 +108,6 @@ def _build_rs_params(
         )
         for uid, s in simulator.states.items()
     ]
-
-
-def _split_ready(
-    frame: pd.DataFrame,
-    mode: str,
-    lower_col: str,
-    upper_col: str,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split a pending-forecast frame into (to_observe, still_unresolved).
-
-    Cumulative mode: a row is ready iff every row in its
-    (uid, model, origin) window has a resolved actual.
-    Per-horizon mode: a row is ready iff it has both an actual and intervals.
-    """
-    if mode == "cumulative":
-        group_keys = [UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN]
-        grouped_y = frame.groupby(group_keys, sort=False)[Y]
-        window_complete = grouped_y.transform("count").eq(grouped_y.transform("size"))
-        return frame[window_complete], frame[~window_complete]
-    resolved = frame[Y].notna() & frame[lower_col].notna() & frame[upper_col].notna()
-    return frame[resolved], frame[~resolved]
-
-
-def _fill_actuals(
-    frame: pd.DataFrame,
-    lookup: pd.Series,
-) -> pd.DataFrame:
-    """Vectorized fill of NaN y from a (uid, ds)-indexed Series."""
-    if frame.empty or not frame[Y].isna().any():
-        return frame
-    keys = pd.MultiIndex.from_arrays([frame[UNIQUE_ID].values, frame[DS].values])
-    filled = lookup.reindex(keys).to_numpy()
-    result = frame.copy()
-    missing_mask = result[Y].isna().to_numpy()
-    result.loc[missing_mask, Y] = filled[missing_mask]
-    return result
 
 
 def _run_warmup(
@@ -195,7 +155,7 @@ def _run_warmup(
 
     ensemble_df = ensemble_median(ledger_df)
 
-    lower_col, upper_col = interval_column_names(conformal_config.coverage)
+    lower_col, _ = interval_column_names(conformal_config.coverage)
     actuals_lookup = sales.drop_duplicates(subset=[UNIQUE_ID, DS]).set_index([UNIQUE_ID, DS])[Y]
 
     pending_applied: list[pd.DataFrame] = []
@@ -209,22 +169,7 @@ def _run_warmup(
         if lower_col not in applied.columns:
             continue
 
-        still_pending: list[pd.DataFrame] = []
-        for prev_applied in pending_applied:
-            if not (prev_applied[DS] <= origin).any():
-                still_pending.append(prev_applied)
-                continue
-
-            updated = _fill_actuals(prev_applied, actuals_lookup)
-            to_observe, unresolved = _split_ready(
-                updated, conformal_config.mode, lower_col, upper_col
-            )
-            if not to_observe.empty:
-                with contextlib.suppress(ValueError):
-                    conformal_runtime.observe(to_observe)
-            if not unresolved.empty:
-                still_pending.append(unresolved)
-
+        still_pending = observe_pending(conformal_runtime, pending_applied, actuals_lookup)
         pending_applied = still_pending + [applied]
 
     return conformal_runtime
@@ -348,11 +293,6 @@ def run_seasonal(
 
         engine = BackendEngine(execution=ExecutionOptions(freq="W-MON"))
 
-        if conformal_config.mode == "cumulative":
-            observe_fn = observe_cumulative
-        else:
-            observe_fn = partial(observe_per_horizon, lower_col=lower_col, upper_col=upper_col)
-
         def _build_round(rn: int) -> tuple[TaskGroups, pd.Timestamp, pd.DataFrame]:
             if verbose:
                 logger.info("\n--- Decision round %s ---", rn)
@@ -456,7 +396,6 @@ def run_seasonal(
             ),
             runtime=conformal_runtime,
             ensemble=ensemble_median,
-            observe_fn=observe_fn,
         ).run()
 
         rows = []

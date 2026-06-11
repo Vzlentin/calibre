@@ -315,9 +315,7 @@ class TestObservePending:
             seen["lookup"] = actuals_lookup
             return p
 
-        monkeypatch.setattr(
-            "calibre.execution.decision_loop.observe_cumulative", _spy
-        )
+        monkeypatch.setattr("calibre.execution.decision_loop.observe_cumulative", _spy)
         observe_pending(rt, pending, lookup)
 
         assert seen["pending"] is pending
