@@ -132,6 +132,8 @@ class OrderingConfig(_Section):
     policy: str
     coverage: float = 0.9
     quantile: float | None = None
+    # None means "unset": the domain default lives on NewsvendorConfig.period.
+    period: int | None = None
     params: list[dict[str, Any]] | dict[str, Any] | None = None
 
 

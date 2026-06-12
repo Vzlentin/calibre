@@ -266,6 +266,28 @@ def test_cli_yaml_newsvendor_ordering_builds_newsvendor_config() -> None:
     assert isinstance(order_config, NewsvendorConfig)
 
 
+def test_cli_yaml_newsvendor_ordering_with_period_builds_newsvendor_config() -> None:
+    config = load_config_from_mapping(
+        _config_with_ordering(
+            {
+                "policy": "newsvendor",
+                "period": 2,
+                "params": [
+                    {
+                        "unique_id": "A",
+                        "underage_cost": 3.0,
+                        "overage_cost": 1.0,
+                        "inventory_position": 0.0,
+                    }
+                ],
+            }
+        )
+    )
+    order_config = _build_order_config(config)
+    assert isinstance(order_config, NewsvendorConfig)
+    assert order_config.period == 2
+
+
 def test_cli_yaml_newsvendor_with_quantile_is_rejected() -> None:
     config = load_config_from_mapping(
         _config_with_ordering(

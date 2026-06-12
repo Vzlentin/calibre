@@ -52,13 +52,7 @@ from calibre.execution.prediction import (
 )
 from calibre.forecasting import get_scope
 from calibre.forecasting.cache import ModelArtifactCache
-from calibre.ordering.policy_config import (
-    NewsvendorConfig,
-    OrderPolicy,
-    RsConfig,
-    RssConfig,
-    apply_order_policy,
-)
+from calibre.ordering import apply_order_policy, build_order_policy
 from calibre.storage.lifecycle_repo import SqlLifecycleStore
 from calibre.storage.objstore import artifact_base_uri, signed_url
 from calibre.storage.postgres import (
@@ -402,38 +396,6 @@ def run_observe_job(
         logger.exception("observe job failed", extra={"session_id": session_id})
 
 
-def _build_order_policy(ordering: dict) -> OrderPolicy:
-    """Map an ``/order`` ordering spec to the per-policy config.
-
-    Rejects ``quantile`` for the rss and newsvendor policies (where it does not
-    apply); unrecognized knobs are otherwise ignored.
-    """
-    policy = ordering["policy"]
-    params = ordering["params"]
-    params_frame = params if isinstance(params, pd.DataFrame) else pd.DataFrame(params)
-    coverage = float(ordering.get("coverage", 0.9))
-    if policy == "rs":
-        quantile = ordering.get("quantile")
-        return RsConfig(
-            params=params_frame,
-            coverage=coverage,
-            quantile=None if quantile is None else float(quantile),
-        )
-    if policy == "rss":
-        if ordering.get("quantile") is not None:
-            raise ValueError("quantile is not a valid knob for the rss policy")
-        return RssConfig(params=params_frame, coverage=coverage)
-    if policy == "newsvendor":
-        if ordering.get("quantile") is not None:
-            raise ValueError("quantile is not a valid knob for the newsvendor policy")
-        return NewsvendorConfig(
-            params=params_frame,
-            coverage=coverage,
-            period=int(ordering.get("period", 1)),
-        )
-    raise ValueError(f"unknown order policy: {policy!r}")
-
-
 def _maybe_json_records(frame: pd.DataFrame | None) -> list[dict] | None:
     if frame is None or frame.empty:
         return None
@@ -632,7 +594,7 @@ def create_app(
     def order(req: OrderRequest, request: Request) -> OrderResponse:
         frame = _coerce_forecast_frame_dtypes(frame_from_records(req.calibrated))
         try:
-            policy_config = _build_order_policy(req.ordering)
+            policy_config = build_order_policy(req.ordering)
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"invalid ordering spec: {exc}") from exc
         try:

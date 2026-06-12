@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 from fastapi.testclient import TestClient
 
-from calibre.api.main import _build_order_policy, app
+from calibre.api.main import app
 from calibre.core.forecast_frame import (
     DS,
     FORECAST_ORIGIN,
@@ -15,7 +14,6 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.ordering.policy_config import NewsvendorConfig, RsConfig, RssConfig
 
 
 def _calibrated_records() -> list[dict]:
@@ -51,44 +49,6 @@ _RS_PARAMS = [{"unique_id": "A", "inventory_position": 5.0, "lead_time": 1, "rev
 _NEWSVENDOR_PARAMS = [
     {"unique_id": "A", "underage_cost": 3.0, "overage_cost": 1.0, "inventory_position": 5.0}
 ]
-
-
-class TestBuildOrderPolicy:
-    def test_rs_spec_builds_rs_config(self) -> None:
-        config = _build_order_policy({"policy": "rs", "params": _RS_PARAMS, "coverage": 0.95})
-        assert isinstance(config, RsConfig)
-        assert config.coverage == 0.95
-        assert config.quantile is None
-
-    def test_rs_spec_with_quantile_builds_rs_config_with_quantile(self) -> None:
-        config = _build_order_policy({"policy": "rs", "params": _RS_PARAMS, "quantile": 0.833})
-        assert isinstance(config, RsConfig)
-        assert config.quantile == pytest.approx(0.833)
-
-    def test_rss_spec_builds_rss_config(self) -> None:
-        config = _build_order_policy({"policy": "rss", "params": _RS_PARAMS})
-        assert isinstance(config, RssConfig)
-
-    def test_newsvendor_spec_builds_newsvendor_config(self) -> None:
-        config = _build_order_policy(
-            {"policy": "newsvendor", "params": _NEWSVENDOR_PARAMS, "period": 2}
-        )
-        assert isinstance(config, NewsvendorConfig)
-        assert config.period == 2
-
-    def test_newsvendor_spec_rejects_quantile_knob(self) -> None:
-        with pytest.raises(ValueError, match="quantile is not a valid knob for the newsvendor"):
-            _build_order_policy(
-                {"policy": "newsvendor", "params": _NEWSVENDOR_PARAMS, "quantile": 0.9}
-            )
-
-    def test_rss_spec_rejects_quantile_knob(self) -> None:
-        with pytest.raises(ValueError, match="quantile is not a valid knob for the rss"):
-            _build_order_policy({"policy": "rss", "params": _RS_PARAMS, "quantile": 0.9})
-
-    def test_unknown_policy_raises(self) -> None:
-        with pytest.raises(ValueError, match="unknown order policy: 'bogus'"):
-            _build_order_policy({"policy": "bogus", "params": _RS_PARAMS})
 
 
 class TestOrderEndpoint:

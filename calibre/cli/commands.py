@@ -32,12 +32,7 @@ from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.hierarchy_preparation import prepare_run
 from calibre.execution.validation import validate_dataset_bundle
-from calibre.ordering.policy_config import (
-    NewsvendorConfig,
-    OrderPolicy,
-    RsConfig,
-    RssConfig,
-)
+from calibre.ordering import OrderPolicy, build_order_policy
 from calibre.storage.state import ConformalStateStore
 
 logger = logging.getLogger(__name__)
@@ -90,28 +85,7 @@ def _enforce_unique_id_limit(bundle: DatasetBundle, max_unique_ids: int | None) 
 def _build_order_config(config: BackendConfig) -> OrderPolicy | None:
     if config.ordering is None:
         return None
-    if config.ordering.params is None:
-        raise ValueError("ordering.params is required for generic CLI ordering runs")
-    params = config.ordering.params
-    if isinstance(params, dict):
-        params = [params]
-    params_frame = pd.DataFrame(params)
-    ordering = config.ordering
-    if ordering.policy == "rs":
-        return RsConfig(
-            params=params_frame,
-            coverage=ordering.coverage,
-            quantile=ordering.quantile,
-        )
-    if ordering.policy == "rss":
-        if ordering.quantile is not None:
-            raise ValueError("ordering.quantile is not a valid knob for the rss policy")
-        return RssConfig(params=params_frame, coverage=ordering.coverage)
-    if ordering.policy == "newsvendor":
-        if ordering.quantile is not None:
-            raise ValueError("ordering.quantile is not a valid knob for the newsvendor policy")
-        return NewsvendorConfig(params=params_frame, coverage=ordering.coverage)
-    raise ValueError(f"unknown order policy: {ordering.policy!r}")
+    return build_order_policy(config.ordering.model_dump())
 
 
 def _metric_currency(config: BackendConfig) -> str:
