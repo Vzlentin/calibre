@@ -7,7 +7,7 @@ from uuid import UUID
 import pandas as pd
 from fastapi.testclient import TestClient
 
-from calibre.api.main import app
+from calibre.api.main import app, create_app
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
 from calibre.core.forecast_frame import (
@@ -91,6 +91,30 @@ def _payload(adapter: str = "unit_api") -> dict:
     }
 
 
+def test_module_app_symbol_is_a_fastapi_instance() -> None:
+    """``calibre.api.main:app`` is the uvicorn + Terraform import target; it must
+    survive the factory cutover as a module-level FastAPI instance."""
+    from fastapi import FastAPI
+
+    from calibre.api.main import app as module_app
+
+    assert isinstance(module_app, FastAPI)
+
+
+def test_create_app_isolates_store_state() -> None:
+    """Two apps built with distinct stores share no module state."""
+    from calibre.api.lifecycle import LifecycleStore
+    from calibre.api.main import create_app
+
+    store_a, store_b = LifecycleStore(), LifecycleStore()
+    app_a = create_app(lifecycle_store=store_a)
+    app_b = create_app(lifecycle_store=store_b)
+
+    assert app_a.state.stores.lifecycle_store is store_a
+    assert app_b.state.stores.lifecycle_store is store_b
+    assert app_a.state.stores.lifecycle_store is not app_b.state.stores.lifecycle_store
+
+
 def test_metrics_endpoint_exposes_prometheus_payload() -> None:
     client = TestClient(app)
 
@@ -138,7 +162,9 @@ def test_backtests_endpoint_persists_runs_and_pointers(monkeypatch, tmp_path) ->
         "ledger_path": ledger_path.as_posix(),
         "streaming": False,
     }
-    client = TestClient(app)
+    # Build the app after the DB env is set so the run store resolves to the
+    # SQL-backed store at construction time.
+    client = TestClient(create_app())
     expected_payload = _payload()
     expected_result = run_config(load_config_from_mapping(expected_payload["config"]))
     expected_ledger = expected_result.ledger.to_df().reset_index(drop=True)
@@ -207,7 +233,9 @@ def test_backtests_endpoint_retries_failed_db_run_from_streaming_pointer(
     expected_payload["config"]["output"] = {}
     expected = run_config(load_config_from_mapping(expected_payload["config"])).ledger.to_df()
 
-    client = TestClient(app)
+    # Build the app after the DB env is set so the run store resolves to the
+    # SQL-backed store at construction time.
+    client = TestClient(create_app())
     calls["count"] = 0
     calls["fail"] = True
     first = client.post("/backtests", json=payload, headers={"Idempotency-Key": "retry-key"})

@@ -4,9 +4,16 @@ This is route orchestration extracted from [calibre/api/main.py](calibre/api/mai
 it consumes a ``TuneRequest``, runs per-series or panel HPO via
 ``calibre.tuning.optimize_*``, persists/resumes results through the tuning
 repos, and writes study status to the lifecycle store. ``main.py`` keeps the
-thin ``/tune`` + ``/studies/{id}`` route handlers and resolves the lifecycle
-store + db factory, passing them into :func:`run_tune_job` so the app-state
-accessors stay in ``main.py`` and this module never imports back into it.
+thin ``/tune`` + ``/studies/{id}`` route handlers and reads the lifecycle store
++ db factory off the app's injected state, passing them into :func:`run_tune_job`
+so this module never imports back into it.
+
+NOTE: the earlier "app-state accessors stay in ``main.py``" framing is superseded
+by ``main.py``'s ``create_app`` factory — store wiring now lives on ``app.state``
+(constructed once, env-resolved) rather than in module-level lazy accessors. The
+keyword-only ``store``/``factory`` injection this module pioneered is now the
+shared pattern across the promoted lifecycle functions (``run_observe_job``,
+``runtime_for_session``).
 """
 
 from __future__ import annotations

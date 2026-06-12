@@ -6,10 +6,9 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 
-from calibre.api import main as api_main
 from calibre.api import tuning_service
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import app
+from calibre.api.main import create_app
 from calibre.api.schemas import TuneRequest
 from calibre.api.tuning_service import (
     register_tuning_objective,
@@ -77,24 +76,21 @@ def tuning_db(tmp_path, monkeypatch):
     monkeypatch.setenv("CALIBRE_DATABASE_URL", db_url)
     config = Config("alembic.ini")
     command.upgrade(config, "head")
-    monkeypatch.setattr(api_main, "_DB_FACTORY", None)
-    monkeypatch.setattr(api_main, "_DB_URL", None)
-    monkeypatch.setattr(api_main, "_SQL_STORE", None)
     return db_url
 
 
 @pytest.fixture(autouse=True)
-def _reset_state(monkeypatch):
-    fresh = LifecycleStore()
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
+def _reset_registries(monkeypatch):
     monkeypatch.setattr(tuning_service, "_SEARCH_SPACES", {})
     monkeypatch.setattr(tuning_service, "_OBJECTIVES", {})
-    return fresh
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(tuning_db):
+    # Build the app after CALIBRE_DATABASE_URL is set so its db_factory (used by
+    # the /tune fanout's tuning repos) resolves to this test's migrated DB at
+    # construction time; lifecycle records stay in-memory.
+    return TestClient(create_app(lifecycle_store=LifecycleStore()))
 
 
 def _factory_for(db_url: str):

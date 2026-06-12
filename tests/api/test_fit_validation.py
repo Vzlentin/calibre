@@ -12,21 +12,19 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from calibre.api import main as api_main
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import app
+from calibre.api.main import create_app
 from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, H
 
 
 @pytest.fixture(autouse=True)
-def _reset_store(monkeypatch, tmp_path):
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", LifecycleStore())
+def _artifact_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
 
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return TestClient(create_app(lifecycle_store=LifecycleStore()))
 
 
 def _history(uid: str = "A") -> list[dict]:

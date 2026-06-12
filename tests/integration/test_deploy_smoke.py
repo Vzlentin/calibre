@@ -19,35 +19,32 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 
-from calibre.api import main as api_main
-from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import app
+from calibre.api.main import create_app
 from calibre.api.run_store import SqlRunStore
 from calibre.core.forecast_frame import UNIQUE_ID, interval_column_names
 
 
 @pytest.fixture(params=["memory", "sql"])
-def migrated_client(request, fresh_db_url, tmp_path, monkeypatch):
-    """App booted against a freshly migrated database, with clean stores.
+def migrated_app(request, fresh_db_url, tmp_path, monkeypatch):
+    """App constructed against a freshly migrated database, with clean stores.
 
     Parametrized over the lifecycle backend so the full roundtrip runs against
     both the in-memory store and the SQL store (frames -> parquet on a migrated
-    DB) — the SQL path is the one PR #38 broke.
+    DB) — the SQL path is the one PR #38 broke. The env is set first so the
+    factory resolves the run store, db factory, and (env-selected) lifecycle
+    store at construction time — no module globals to reset.
     """
     monkeypatch.setenv("CALIBRE_DATABASE_URL", fresh_db_url)
     if request.param == "sql":
         monkeypatch.setenv("LIFECYCLE_STORE", "sql")
         monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
     command.upgrade(Config("alembic.ini"), "head")
+    return create_app()
 
-    # Reset module globals so the app re-resolves stores against this test's
-    # database rather than leaking prior state.
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", LifecycleStore())
-    monkeypatch.setattr(api_main, "_DB_FACTORY", None)
-    monkeypatch.setattr(api_main, "_DB_URL", None)
-    monkeypatch.setattr(api_main, "_SQL_STORE", None)
-    monkeypatch.setattr(api_main, "_SQL_LIFECYCLE_STORE", None)
-    return TestClient(app)
+
+@pytest.fixture
+def migrated_client(migrated_app):
+    return TestClient(migrated_app)
 
 
 def _history_records(uid: str = "A") -> list[dict]:
@@ -82,14 +79,15 @@ def _fit_payload(sales_uri: str) -> dict:
     }
 
 
-def test_app_wired_to_migrated_db(migrated_client) -> None:
+def test_app_wired_to_migrated_db(migrated_app) -> None:
     """With CALIBRE_DATABASE_URL set, the app selects the SQL-backed store."""
-    assert migrated_client.get("/healthz").json() == {"status": "ok"}
-    assert isinstance(api_main._run_store(), SqlRunStore)
+    client = TestClient(migrated_app)
+    assert client.get("/healthz").json() == {"status": "ok"}
+    assert isinstance(migrated_app.state.stores.run_store, SqlRunStore)
 
 
-def test_lifecycle_roundtrip_on_migrated_db(migrated_client, sales_uri) -> None:
-    client = migrated_client
+def test_lifecycle_roundtrip_on_migrated_db(migrated_app, sales_uri) -> None:
+    client = TestClient(migrated_app)
 
     fit = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit.status_code == 202, fit.text
@@ -148,6 +146,6 @@ def test_lifecycle_roundtrip_on_migrated_db(migrated_client, sales_uri) -> None:
         },
     )
     assert observe.status_code == 202, observe.text
-    assert api_main._lifecycle_store().get_conformal_state(session_id), (
+    assert migrated_app.state.stores.lifecycle_store.get_conformal_state(session_id), (
         "observe should persist conformal state"
     )

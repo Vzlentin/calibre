@@ -10,11 +10,11 @@ resolved bounds + actuals.
 
 These pins drive the observe job through a stable test wrapper
 ``observe_for_test(session_id, records, *, store, runtime)`` rather than the
-module internals directly. The wrapper is the migration seam: today it delegates
-to the private observe job with the runtime stubbed at the module boundary; once
-the job is promoted to ``run_observe_job(session_id, records, *, store)`` the
-wrapper's internals swap to the public function (the runtime is rehydrated
-inside it) while these call sites stay byte-identical.
+module internals directly. The wrapper calls the public
+``run_observe_job(session_id, records, *, store)`` with the lifecycle store
+injected; the recording runtime is supplied by stubbing the public
+``runtime_for_session`` producer (the end-to-end pin uses a real runtime and
+stubs nothing). No module globals or private functions are touched.
 """
 
 from __future__ import annotations
@@ -55,16 +55,13 @@ def observe_for_test(
 ) -> None:
     """Stable observe-job seam for the characterization pins.
 
-    U1 end-state: the ``session`` fixture has already bound ``store`` and
-    ``runtime`` onto the module seam (``_LIFECYCLE_STORE`` /
-    ``_runtime_for_session``) via ``monkeypatch``, so this just drives the
-    private observe job. U3 swaps this body for
-    ``api_main.run_observe_job(session_id, records, store=store)`` (the runtime
-    is rehydrated inside it) and the fixture stops monkeypatching, leaving every
-    call site below unchanged.
+    Drives the public observe job with the lifecycle store injected. The
+    ``runtime`` arg is the recording runtime the ``session`` fixture has already
+    bound onto the public ``runtime_for_session`` producer; the job rehydrates
+    the runtime internally, so it is not passed positionally.
     """
-    del store, runtime  # bound on the module seam by the session fixture in U1
-    api_main._run_observe_job(session_id, records)
+    del runtime  # bound on the public runtime_for_session producer by the fixture
+    api_main.run_observe_job(session_id, records, store=store)
 
 
 class _RecordingRuntime:
@@ -124,14 +121,12 @@ def session(monkeypatch):
     """A fit record installed in a fresh lifecycle store; returns the session id.
 
     Yields ``(session_id, store, make)`` where ``make(mode, calibrated)`` installs
-    the fit and returns the recording runtime the wrapper observes through. In U1
-    the fixture binds the store and runtime onto the module seam via
-    ``monkeypatch`` (auto-restored), so the seam is the only module state touched;
-    ``observe_for_test`` then just drives the private job. U3 removes this binding
-    once the job takes an injected store directly.
+    the fit and returns the recording runtime the wrapper observes through. The
+    store is passed explicitly into ``run_observe_job`` (no module state); the
+    recording runtime is bound onto the public ``runtime_for_session`` producer
+    via ``monkeypatch`` so the job rehydrates it instead of a real one.
     """
     store = LifecycleStore()
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", store)
     session_id = "sess-observe"
 
     def _make(mode: str, calibrated: pd.DataFrame) -> _RecordingRuntime:
@@ -151,7 +146,7 @@ def session(monkeypatch):
         )
         store.put_fit(record)
         runtime = _RecordingRuntime(mode)
-        monkeypatch.setattr(api_main, "_runtime_for_session", lambda _record: runtime)
+        monkeypatch.setattr(api_main, "runtime_for_session", lambda _record, *, store: runtime)
         return runtime
 
     return session_id, store, _make
@@ -261,7 +256,7 @@ def test_observe_end_to_end_through_real_runtime(session, monkeypatch):
     session_id, store, _make = session
     config = SymmetricIntervalConfig(method="mscp", coverage=0.9, mode="perhorizon")
     runtime = build_symmetric_interval_runtime(config)
-    monkeypatch.setattr(api_main, "_runtime_for_session", lambda _record: runtime)
+    monkeypatch.setattr(api_main, "runtime_for_session", lambda _record, *, store: runtime)
 
     forecast = pd.DataFrame(
         {

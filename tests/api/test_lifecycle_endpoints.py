@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from calibre.api import main as api_main
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import app
+from calibre.api.main import create_app
 from calibre.core.forecast_frame import (
     DS,
     UNIQUE_ID,
@@ -55,16 +55,20 @@ class _StubAdapter(ModelAdapter):
 
 
 @pytest.fixture(autouse=True)
-def _reset_lifecycle_store(monkeypatch, tmp_path):
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", LifecycleStore())
+def _artifact_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
     _StubAdapter.fit_calls = 0
     _StubAdapter.load_calls = 0
 
 
 @pytest.fixture
+def store():
+    """The in-memory lifecycle store the test app is constructed with."""
+    return LifecycleStore()
+
+
+@pytest.fixture
 def stub_adapter(monkeypatch):
-    monkeypatch.setattr("calibre.api.main.resolve_adapter", lambda _: _StubAdapter(), raising=False)
     monkeypatch.setattr(
         "calibre.execution.prediction.resolve_adapter", lambda cfg: _StubAdapter(cfg)
     )
@@ -72,8 +76,8 @@ def stub_adapter(monkeypatch):
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(store):
+    return TestClient(create_app(lifecycle_store=store))
 
 
 def _history_records(uid: str = "A") -> list[dict]:
@@ -114,7 +118,7 @@ def _fit_payload(sales_uri: str) -> dict:
     }
 
 
-def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sales_uri):
+def test_fit_predict_calibrate_order_observe_roundtrip(client, store, stub_adapter, sales_uri):
     fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit_resp.status_code == 202, fit_resp.text
     handle = fit_resp.json()
@@ -191,7 +195,7 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sal
     assert observe_resp.status_code == 202, observe_resp.text
     assert observe_resp.json()["session_id"] == session_id
 
-    state = api_main._LIFECYCLE_STORE.get_conformal_state(session_id)
+    state = store.get_conformal_state(session_id)
     # observe records one calibrator partition per resolved (model, horizon),
     # each carrying the absolute error of actual vs calibrated forecast:
     # |9 - 5| = 4 at h1, |11 - 6| = 5 at h2.
@@ -250,7 +254,7 @@ def test_session_state_404_when_missing(client):
 
 
 def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales_uri):
-    monkeypatch.setattr(api_main, "_run_fit_job", lambda fit_id: None)
+    monkeypatch.setattr(api_main, "_run_fit_job", lambda fit_id, *, store: None)
     fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     fit_id = fit_resp.json()["fit_id"]
 
@@ -258,7 +262,9 @@ def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales
     assert predict_resp.status_code == 409
 
 
-def test_multi_fit_selection_is_first_for_writes_last_for_reads(client, stub_adapter, sales_uri):
+def test_multi_fit_selection_is_first_for_writes_last_for_reads(
+    client, store, stub_adapter, sales_uri
+):
     """Characterization pin (R5): with several fits in a session, /calibrate and
     /predict-driven /sessions diverge on which fit they select today. /calibrate
     writes to the FIRST (insertion-order) fit, while /sessions reads the LAST.
@@ -268,8 +274,6 @@ def test_multi_fit_selection_is_first_for_writes_last_for_reads(client, stub_ada
     Two identical /fit payloads share a derived session_id but mint distinct
     fit_ids -> one session, two fits in insertion order.
     """
-    store = api_main._LIFECYCLE_STORE
-
     first_fit_id = client.post("/fit", json=_fit_payload(sales_uri)).json()["fit_id"]
     second = client.post("/fit", json=_fit_payload(sales_uri)).json()
     last_fit_id = second["fit_id"]
