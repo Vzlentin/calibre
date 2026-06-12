@@ -41,7 +41,10 @@ MLForecast/LightGBM, and NeuralForecast. Use the full image for remote Ray worke
 the VN2 winning benchmark, and other global LightGBM or neural configs.
 
 The VN2 winning benchmark is reproduced only through the harness module
-(`python -m benchmarks.vn2`, as shown above and in the CI gate). The product
+(`python -m benchmarks.vn2`, as shown above and in the CI gate). Pass `--tune`
+to run the fixed-budget hyper-parameter search before the replay — the HPO
+budget (trials, origins, timeout) comes from `benchmarks/vn2/config.py` module
+constants; the YAML's model block and any hpo budget are not read. The product
 `calibre run` command runs a single dataset backtest of whatever config you pass —
 it does **not** run the benchmark's multi-round replay, so the orchestrator
 examples below deploy product backtests, not the benchmark.
@@ -193,8 +196,8 @@ rewritten as local-scope per-series tasks or migrated to future panel Tune work.
 5. **Run the winning benchmark** after the smoke test passes:
 
    ```python
-   from benchmarks.vn2.run_winning import run_winning
-   summary = run_winning(
+   from benchmarks.vn2.run_benchmark import run_benchmark
+   summary = run_benchmark(
        data_dir="/dbfs/mnt/calibre/vn2-fixture",
        results_dir="/dbfs/mnt/calibre/results",
        verbose=True,

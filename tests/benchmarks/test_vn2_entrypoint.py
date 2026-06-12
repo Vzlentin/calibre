@@ -161,7 +161,7 @@ def test_run_from_config_skips_ledger_when_path_unset(monkeypatch, tmp_path) -> 
     assert summary["total_cost"].sum() == 2.0
 
 
-def test_module_main_invokes_run_from_config(monkeypatch, tmp_path) -> None:
+def _write_cfg(tmp_path) -> str:
     cfg_path = tmp_path / "cfg.yaml"
     cfg_path.write_text(
         "\n".join(
@@ -187,15 +187,34 @@ def test_module_main_invokes_run_from_config(monkeypatch, tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    seen: list[object] = []
+    return str(cfg_path)
 
-    def _fake_run_from_config(config):
-        seen.append(config)
+
+def _patch_main_run_from_config(monkeypatch) -> list[tuple[object, bool]]:
+    seen: list[tuple[object, bool]] = []
+
+    def _fake_run_from_config(config, *, tune: bool = False):
+        seen.append((config, tune))
         return pd.DataFrame({UNIQUE_ID: ["A"], "total_cost": [0.0]})
 
     monkeypatch.setattr("benchmarks.vn2.__main__.run_from_config", _fake_run_from_config)
     monkeypatch.setattr("benchmarks.vn2.__main__.load_dotenv", lambda: None)
+    return seen
 
-    vn2_main.main(["--config", str(cfg_path)])
+
+def test_module_main_invokes_run_from_config(monkeypatch, tmp_path) -> None:
+    seen = _patch_main_run_from_config(monkeypatch)
+
+    vn2_main.main(["--config", _write_cfg(tmp_path)])
 
     assert len(seen) == 1
+    assert seen[0][1] is False
+
+
+def test_module_main_threads_tune_flag(monkeypatch, tmp_path) -> None:
+    seen = _patch_main_run_from_config(monkeypatch)
+
+    vn2_main.main(["--config", _write_cfg(tmp_path), "--tune"])
+
+    assert len(seen) == 1
+    assert seen[0][1] is True

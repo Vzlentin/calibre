@@ -336,12 +336,12 @@ def run_benchmark(
     return summary_df
 
 
-def run_from_config(config: BackendConfig) -> pd.DataFrame:
+def run_from_config(config: BackendConfig, *, tune: bool = False) -> pd.DataFrame:
     """Run the VN2 benchmark from a parsed BackendConfig (CLI mapping)."""
     summary = run_benchmark(
         data_dir=config.dataset.path,
         horizon=config.tasks[0].horizon,
-        tune=False,
+        tune=tune,
         results_dir=None,
         verbose=True,
         execution_backend=config.execution.backend,
