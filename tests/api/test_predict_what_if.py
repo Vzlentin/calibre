@@ -4,9 +4,8 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from calibre.api import main as api_main
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import app
+from calibre.api.main import create_app
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y_HAT, H
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.adapter_base import ModelAdapter
@@ -63,10 +62,14 @@ def received_future_x() -> list[pd.DataFrame | None]:
     return []
 
 
+@pytest.fixture
+def store():
+    """The in-memory lifecycle store the test app is constructed with."""
+    return LifecycleStore()
+
+
 @pytest.fixture(autouse=True)
-def _reset_lifecycle_store(monkeypatch, tmp_path, received_future_x):
-    fresh = LifecycleStore()
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
+def _resolve_adapter(monkeypatch, tmp_path, received_future_x):
     monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
 
     def _make_adapter(cfg):
@@ -75,12 +78,11 @@ def _reset_lifecycle_store(monkeypatch, tmp_path, received_future_x):
         return adapter
 
     monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", _make_adapter)
-    return fresh
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(store):
+    return TestClient(create_app(lifecycle_store=store))
 
 
 def _history_records() -> list[dict]:

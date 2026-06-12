@@ -116,11 +116,23 @@ class LifecycleStore:
     def fits_for_session(self, session_id: str) -> list[FitRecord]:
         return [r for r in self._fits.values() if r.session_id == session_id]
 
-    def first_fit_for_session(self, session_id: str) -> FitRecord | None:
+    def last_fit_for_session(self, session_id: str) -> FitRecord | None:
+        """The session's most recent fit — the canonical selection everywhere.
+
+        Last by insertion order (dicts preserve it). The SQL store orders by
+        ``created_at desc, fit_id desc``, which agrees on the common path
+        (distinct created_at); on an exact created_at tie the SQL store breaks
+        by fit_id while this store keeps insertion order — a sub-second
+        same-session re-fit edge no caller relies on. Calibration writes
+        ``last_calibrated`` onto this fit and ``/sessions`` reads it, so write
+        and read agree; a re-fit creates a fresh last fit whose
+        ``last_calibrated`` is None until the client calibrates it.
+        """
+        latest: FitRecord | None = None
         for record in self._fits.values():
             if record.session_id == session_id:
-                return record
-        return None
+                latest = record
+        return latest
 
     def fits_for_tenant_uid(self, tenant: str, uid: str) -> list[FitRecord]:
         return [
@@ -169,7 +181,7 @@ class LifecycleStoreProtocol(Protocol):
     def get_fit(self, fit_id: str) -> FitRecord | None: ...
     def update_fit(self, fit_id: str, **fields: object) -> FitRecord: ...
     def fits_for_session(self, session_id: str) -> list[FitRecord]: ...
-    def first_fit_for_session(self, session_id: str) -> FitRecord | None: ...
+    def last_fit_for_session(self, session_id: str) -> FitRecord | None: ...
     def fits_for_tenant_uid(self, tenant: str, uid: str) -> list[FitRecord]: ...
     def put_orders(self, tenant: str, session_id: str, orders: pd.DataFrame) -> None: ...
     def orders_for_tenant_uid(self, tenant: str, uid: str) -> pd.DataFrame: ...

@@ -120,9 +120,11 @@ class LifecycleFitRecord(Base):
     error: Mapped[str | None] = mapped_column(String, nullable=True)
     artifact_urls: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
     frame_uris: Mapped[dict] = mapped_column(JsonDict, nullable=False, default=dict)
-    # Insertion order — the canonical "first fit" for a session (a session can
-    # hold several fits, since session_id is derived from config). Postgres has
-    # sub-second resolution; fit_id breaks any tie deterministically.
+    # Creation order — selection key for the canonical LAST (most recently
+    # created) fit of a session (a session can hold several fits, since
+    # session_id is derived from config; see lifecycle_repo.last_fit_for_session,
+    # created_at desc). Postgres has sub-second resolution; fit_id breaks any
+    # tie deterministically.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

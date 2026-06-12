@@ -4,10 +4,9 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from calibre.api import main as api_main
 from calibre.api import tuning_service
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import app
+from calibre.api.main import create_app
 from calibre.api.tuning_service import (
     register_tuning_objective,
     register_tuning_search_space,
@@ -17,17 +16,14 @@ from calibre.tuning import Accuracy, LocalTuningTask, TuningCandidate
 
 
 @pytest.fixture(autouse=True)
-def _reset_state(monkeypatch):
-    fresh = LifecycleStore()
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", fresh)
+def _reset_registries(monkeypatch):
     monkeypatch.setattr(tuning_service, "_SEARCH_SPACES", {})
     monkeypatch.setattr(tuning_service, "_OBJECTIVES", {})
-    return fresh
 
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return TestClient(create_app(lifecycle_store=LifecycleStore()))
 
 
 @pytest.fixture

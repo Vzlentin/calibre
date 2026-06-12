@@ -111,8 +111,8 @@ def test_lookups_by_session_and_tenant(tmp_path):
     store.put_fit(_fit_record())
 
     assert {r.fit_id for r in make().fits_for_session("sess-1")} == {"fit-1"}
-    assert make().first_fit_for_session("sess-1").fit_id == "fit-1"
-    assert make().first_fit_for_session("missing") is None
+    assert make().last_fit_for_session("sess-1").fit_id == "fit-1"
+    assert make().last_fit_for_session("missing") is None
     assert {r.fit_id for r in make().fits_for_tenant_uid("acme", "A")} == {"fit-1"}
     assert make().fits_for_tenant_uid("acme", "ZZZ") == []
 
@@ -140,16 +140,16 @@ def test_study_round_trip_and_update(tmp_path):
     assert loaded.best_candidates == {"A": {"model_config": {"season_length": 4}}}
 
 
-def test_first_fit_uses_creation_order_not_fit_id(tmp_path):
-    """A session can hold several fits; "first" must be the earliest created,
-    not the lexicographically smallest (random) fit_id."""
+def test_last_fit_uses_creation_order_not_fit_id(tmp_path):
+    """A session can hold several fits; "last" must be the most recently created,
+    not the lexicographically largest (random) fit_id."""
     db_url = f"sqlite+pysqlite:///{(tmp_path / 'lc.db').as_posix()}"
     Base.metadata.create_all(make_engine(db_url))
     factory = make_session_factory(make_engine(db_url))
 
     earlier = datetime(2024, 1, 1, tzinfo=UTC)
-    # The earlier-created fit deliberately has the LARGER fit_id, so ordering by
-    # fit_id alone would wrongly pick the later one.
+    # The later-created fit deliberately has the SMALLER fit_id, so ordering by
+    # fit_id alone would wrongly pick the earlier one.
     with session_scope(factory) as session:
         for fit_id, created in [("zzz", earlier), ("aaa", earlier + timedelta(hours=1))]:
             session.add(
@@ -170,9 +170,58 @@ def test_first_fit_uses_creation_order_not_fit_id(tmp_path):
             )
 
     store = SqlLifecycleStore(make_session_factory(make_engine(db_url)), str(tmp_path / "art"))
-    first = store.first_fit_for_session("s")
-    assert first is not None
-    assert first.fit_id == "zzz", "first_fit should be the earliest created, not min fit_id"
+    last = store.last_fit_for_session("s")
+    assert last is not None
+    assert last.fit_id == "aaa", "last_fit should be the most recently created, not max fit_id"
+
+
+def test_last_fit_sql_breaks_created_at_ties_by_fit_id(tmp_path):
+    """On equal created_at, the SQL store breaks the tie by fit_id desc, so the
+    selection is deterministic rather than insertion-arbitrary."""
+    db_url = f"sqlite+pysqlite:///{(tmp_path / 'lc.db').as_posix()}"
+    Base.metadata.create_all(make_engine(db_url))
+    factory = make_session_factory(make_engine(db_url))
+
+    same = datetime(2024, 1, 1, tzinfo=UTC)
+    with session_scope(factory) as session:
+        for fit_id in ("aaa", "zzz"):
+            session.add(
+                LifecycleFitRecord(
+                    fit_id=fit_id,
+                    session_id="s",
+                    tenant="t",
+                    sku_set=["A"],
+                    forecaster_config={},
+                    horizon=1,
+                    freq="W",
+                    conformal_config=None,
+                    status="queued",
+                    artifact_urls={},
+                    frame_uris={},
+                    created_at=same,
+                )
+            )
+
+    store = SqlLifecycleStore(make_session_factory(make_engine(db_url)), str(tmp_path / "art"))
+    last = store.last_fit_for_session("s")
+    assert last is not None
+    assert last.fit_id == "zzz", "created_at ties break by fit_id desc"
+
+
+def test_last_fit_in_memory_is_last_by_insertion_order():
+    """The in-memory store selects the most recently put fit for a session,
+    parity with the SQL store's most-recent selection."""
+    store = LifecycleStore()
+    for fit_id in ("first", "second", "third"):
+        record = _fit_record()
+        record.fit_id = fit_id
+        record.session_id = "sess-1"
+        store.put_fit(record)
+
+    last = store.last_fit_for_session("sess-1")
+    assert last is not None
+    assert last.fit_id == "third"
+    assert store.last_fit_for_session("missing") is None
 
 
 def _orders_frame() -> pd.DataFrame:

@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import os
 
+import numpy as np
 import pandas as pd
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.orm import sessionmaker
 
@@ -68,57 +69,59 @@ from calibre.storage.postgres import (
 from calibre.storage.sales_repo import SqlSalesAdapter
 from calibre.storage.session import derive_session_id
 
-app = FastAPI(title="Calibre", version="0.1.0")
-
 logger = logging.getLogger(__name__)
 
-_MEMORY_STORE = MemoryRunStore()
-_DB_URL: str | None = None
-_DB_FACTORY: sessionmaker | None = None
-_SQL_STORE: SqlRunStore | None = None
-_LIFECYCLE_STORE = LifecycleStore()
-_SQL_LIFECYCLE_STORE: SqlLifecycleStore | None = None
+
+class AppStores:
+    """The app's resolved store wiring, owned by ``app.state``.
+
+    One owner for the run store, lifecycle store, and db session factory —
+    constructed once by :func:`create_app` (env-driven defaults resolved at
+    construction time) and read by routes off ``request.app.state.stores``.
+    Replaces the former module globals + lazy per-request accessors.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_store: RunStore,
+        lifecycle_store: LifecycleStoreProtocol,
+        db_factory: sessionmaker | None,
+    ) -> None:
+        self.run_store = run_store
+        self.lifecycle_store = lifecycle_store
+        self.db_factory = db_factory
 
 
-def _db_session_factory() -> sessionmaker | None:
-    global _DB_FACTORY, _DB_URL, _SQL_STORE, _SQL_LIFECYCLE_STORE
+def _resolve_db_factory() -> sessionmaker | None:
     url = database_url()
     if not url:
         return None
-    if _DB_FACTORY is None or url != _DB_URL:
-        _DB_URL = url
-        _DB_FACTORY = make_session_factory(make_engine(url))
-        _SQL_STORE = None
-        _SQL_LIFECYCLE_STORE = None
-    return _DB_FACTORY
+    return make_session_factory(make_engine(url))
 
 
-def _run_store() -> RunStore:
-    global _SQL_STORE
-    factory = _db_session_factory()
-    if factory is None:
-        return _MEMORY_STORE
-    if _SQL_STORE is None:
-        _SQL_STORE = SqlRunStore(factory)
-    return _SQL_STORE
+def _default_run_store(db_factory: sessionmaker | None) -> RunStore:
+    if db_factory is None:
+        return MemoryRunStore()
+    return SqlRunStore(db_factory)
 
 
-def _lifecycle_store() -> LifecycleStoreProtocol:
+def _default_lifecycle_store(db_factory: sessionmaker | None) -> LifecycleStoreProtocol:
     """Select the lifecycle store: SQL when LIFECYCLE_STORE=sql, else in-memory.
 
     The in-memory store is process-local (lost on restart, invisible across
-    workers); set LIFECYCLE_STORE=sql with CALIBRE_DATABASE_URL for a
-    deployment that survives both.
+    workers); set LIFECYCLE_STORE=sql with CALIBRE_DATABASE_URL for a deployment
+    that survives both.
     """
-    global _SQL_LIFECYCLE_STORE
     if os.environ.get("LIFECYCLE_STORE") != "sql":
-        return _LIFECYCLE_STORE
-    factory = _db_session_factory()
-    if factory is None:
+        return LifecycleStore()
+    if db_factory is None:
         raise RuntimeError("LIFECYCLE_STORE=sql requires CALIBRE_DATABASE_URL to be set")
-    if _SQL_LIFECYCLE_STORE is None:
-        _SQL_LIFECYCLE_STORE = SqlLifecycleStore(factory)
-    return _SQL_LIFECYCLE_STORE
+    return SqlLifecycleStore(db_factory)
+
+
+def _stores(request: Request) -> AppStores:
+    return request.app.state.stores
 
 
 def _model_artifact_cache() -> ModelArtifactCache:
@@ -136,19 +139,18 @@ def _read_parquet_uri(uri: str, label: str) -> pd.DataFrame:
         raise HTTPException(status_code=400, detail=f"{label} not readable: {exc}") from exc
 
 
-def _sales_adapter(uri: str) -> SalesAdapter:
+def _sales_adapter(uri: str, db_factory: sessionmaker | None) -> SalesAdapter:
     """Resolve a ``sales_uri`` to a SalesAdapter by scheme.
 
     ``sql://`` / ``db://`` reads the project's own Postgres ``sales`` table;
     anything else is treated as a parquet/fsspec snapshot URI."""
     if uri.startswith(("sql://", "db://")):
-        factory = _db_session_factory()
-        if factory is None:
+        if db_factory is None:
             raise HTTPException(
                 status_code=400,
                 detail="sql:// sales_uri requires CALIBRE_DATABASE_URL to be set",
             )
-        return SqlSalesAdapter(factory)
+        return SqlSalesAdapter(db_factory)
     return SnapshotSalesAdapter(uri)
 
 
@@ -161,9 +163,14 @@ def _resolve_as_of(value: str | None) -> pd.Timestamp | None:
         raise HTTPException(status_code=400, detail=f"invalid as_of: {exc}") from exc
 
 
-def _load_sales(sales_uri: str, sku_set: list[str], as_of: pd.Timestamp | None) -> pd.DataFrame:
+def _load_sales(
+    sales_uri: str,
+    sku_set: list[str],
+    as_of: pd.Timestamp | None,
+    db_factory: sessionmaker | None,
+) -> pd.DataFrame:
     try:
-        history = _sales_adapter(sales_uri).load_sales(sku_set, as_of)
+        history = _sales_adapter(sales_uri, db_factory).load_sales(sku_set, as_of)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=f"sales_uri not readable: {exc}") from exc
     if UNIQUE_ID not in history.columns or DS not in history.columns:
@@ -176,17 +183,37 @@ def _actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
 
     Mirrors the lookup ``DecisionLoop.run`` constructs so the API observes
     through the same code path: ``(str, Timestamp)`` keys, dropping rows with no
-    actual ``y`` to record.
+    actual ``y`` to record. Vectorized (no per-row iteration) so the /observe
+    route can afford it synchronously; duplicate keys keep the last row, like
+    the dict build it replaces.
     """
-    cache = {
-        (str(row[UNIQUE_ID]), pd.Timestamp(row[DS])): float(row[Y])
-        for _, row in actuals.iterrows()
-        if not pd.isna(row[Y])
-    }
-    lookup = pd.Series(cache, dtype=float)
-    if not lookup.empty:
-        lookup.index = pd.MultiIndex.from_tuples(lookup.index)
-    return lookup
+    usable = actuals[actuals[Y].notna()]
+    if usable.empty:
+        return pd.Series(dtype=float)
+    keys = pd.MultiIndex.from_arrays([usable[UNIQUE_ID].astype(str), pd.to_datetime(usable[DS])])
+    lookup = pd.Series(usable[Y].astype(float).to_numpy(), index=keys, dtype=float)
+    return lookup[~keys.duplicated(keep="last")]
+
+
+def _usable_actuals_lookup(actual_records: list[dict]) -> pd.Series | None:
+    """Parse posted actuals into the observe lookup — the single source of
+    payload-shape truth shared by the /observe route and ``run_observe_job``.
+
+    Returns None when the frame is empty or missing unique_id/ds/y (the
+    request-shape failure), else the ``(unique_id, ds) -> y`` lookup, which may
+    still be empty (no non-null y rows). The stored-frame schema checks
+    (interval columns) stay job-only — they concern the calibrated frame, not
+    the request payload.
+    """
+    actuals = frame_from_records(actual_records)
+    if (
+        actuals.empty
+        or UNIQUE_ID not in actuals.columns
+        or DS not in actuals.columns
+        or Y not in actuals.columns
+    ):
+        return None
+    return _actuals_lookup(actuals)
 
 
 def _merge_future_x_override(
@@ -240,87 +267,26 @@ def _conformal_config_from_dict(payload: dict) -> ConformalConfig:
     )
 
 
-def _runtime_for_session(
+def runtime_for_session(
     record: FitRecord,
+    *,
+    store: LifecycleStoreProtocol,
 ) -> SymmetricIntervalRuntime:
+    """Rehydrate the session's conformal runtime from persisted state.
+
+    Keyword-only ``store`` injection mirrors ``tuning_service.run_tune_job``: the
+    runtime IS the rehydration producer, so it is this function's output rather
+    than a parameter. Session-owned conformal state carries across re-fits.
+    """
     assert record.conformal_config is not None
     runtime_config = _conformal_config_from_dict(record.conformal_config).to_runtime_config()
-    saved = _lifecycle_store().get_conformal_state(record.session_id)
+    saved = store.get_conformal_state(record.session_id)
     if saved:
         return SymmetricIntervalRuntime.from_partition_states(runtime_config, saved)
     return build_symmetric_interval_runtime(runtime_config)
 
 
-@app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/metrics")
-def metrics() -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-
-@app.post("/backtests", response_model=RunResponse, status_code=202)
-def backtests(
-    req: BacktestRequest,
-    bg: BackgroundTasks,
-    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
-) -> RunResponse:
-    store = _run_store()
-    run = store.create(req.config, idempotency_key=idempotency_key)
-    if run.status == RunStatus.FAILED:
-        run = store.queue(run.id)
-    if run.status in {RunStatus.QUEUED, RunStatus.FAILED}:
-        bg.add_task(store.run_backtest_job, run.id)
-    return run
-
-
-@app.get("/runs/{run_id}", response_model=RunResponse)
-def get_run_status(run_id: str) -> RunResponse:
-    run = _run_store().get(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail="run not found")
-    return run
-
-
-@app.post("/fit", response_model=FitHandle, status_code=202)
-def fit(req: FitRequest, bg: BackgroundTasks) -> FitHandle:
-    if not req.sku_set:
-        raise HTTPException(status_code=400, detail="sku_set must not be empty")
-    history = _load_sales(req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of))
-    future_x = _read_parquet_uri(req.future_x_uri, "future_x_uri") if req.future_x_uri else None
-    session_id = derive_session_id(
-        req.tenant,
-        req.sku_set,
-        req.forecaster_config,
-        req.conformal_config or {},
-    )
-    fit_id = LifecycleStore.new_fit_id()
-    record = FitRecord(
-        fit_id=fit_id,
-        session_id=session_id,
-        tenant=req.tenant,
-        sku_set=list(req.sku_set),
-        forecaster_config=dict(req.forecaster_config),
-        horizon=int(req.horizon),
-        freq=req.freq,
-        history=history,
-        future_x=future_x,
-        conformal_config=dict(req.conformal_config) if req.conformal_config else None,
-        status=RunStatus.QUEUED,
-    )
-    _lifecycle_store().put_fit(record)
-    bg.add_task(_run_fit_job, fit_id)
-    return FitHandle(
-        fit_id=fit_id,
-        session_id=session_id,
-        status=RunStatus.QUEUED,
-    )
-
-
-def _run_fit_job(fit_id: str) -> None:
-    store = _lifecycle_store()
+def _run_fit_job(fit_id: str, *, store: LifecycleStoreProtocol) -> None:
     record = store.get_fit(fit_id)
     if record is None:
         return
@@ -352,78 +318,88 @@ def _run_fit_job(fit_id: str) -> None:
         store.update_fit(fit_id, status=RunStatus.FAILED, error=format_error(exc))
 
 
-@app.get("/fits/{fit_id}", response_model=FitHandle)
-def get_fit(fit_id: str) -> FitHandle:
-    record = _lifecycle_store().get_fit(fit_id)
+def run_observe_job(
+    session_id: str,
+    actual_records: list[dict],
+    *,
+    store: LifecycleStoreProtocol,
+    fit_id: str,
+) -> None:
+    # Operate on exactly the fit the /observe route validated: it resolved and
+    # passed the LAST fit's id, so the job never re-selects (no request/job
+    # re-selection race). The guards below stay as loud-log defense for the
+    # narrow window between request validation and job execution.
+    record = store.get_fit(fit_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="fit not found")
-    return FitHandle(
-        fit_id=record.fit_id,
-        session_id=record.session_id,
-        status=record.status,
-        artifact_urls=dict(record.artifact_urls),
-        error=record.error,
-    )
-
-
-@app.post("/predict", response_model=PredictResponse)
-def predict(req: PredictRequest) -> PredictResponse:
-    record = _lifecycle_store().get_fit(req.fit_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="fit not found")
-    if record.status != RunStatus.SUCCEEDED:
-        raise HTTPException(status_code=409, detail=f"fit not ready: status={record.status.value}")
-    try:
-        origin = pd.Timestamp(req.origin)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"invalid origin: {exc}") from exc
-
-    history = record.history[record.history[DS] < origin]
-    if history.empty:
-        raise HTTPException(status_code=400, detail="history is empty before origin")
-
-    forecaster_config = {**record.forecaster_config, "freq": record.freq}
-    try:
-        future_x = _merge_future_x_override(record.future_x, req.future_x_override)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    task = ForecastTask(
-        history=history,
-        horizon=record.horizon,
-        model_config=forecaster_config,
-        forecast_origin=origin,
-        future_x=future_x,
-    )
-    try:
-        prediction = fit_predict_task(task, cache=_model_artifact_cache())
-    except Exception as exc:
-        logger.exception("predict failed", extra={"fit_id": req.fit_id})
-        raise HTTPException(status_code=500, detail=format_error(exc)) from exc
-    forecast_frame = _coerce_forecast_frame_dtypes(
-        _finalize_preds(prediction.forecast, origin, task.model_name)
-    )
-    _lifecycle_store().update_fit(record.fit_id, last_forecast=forecast_frame)
-    return PredictResponse(rows=len(forecast_frame), forecast=json_safe_records(forecast_frame))
-
-
-@app.post("/calibrate", response_model=CalibrateResponse)
-def calibrate(req: CalibrateRequest) -> CalibrateResponse:
-    store = _lifecycle_store()
-    record = store.first_fit_for_session(req.session_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="session not found")
+        logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
+        return
+    if record.session_id != session_id:
+        # The public contract carries both keys; a mismatch would rehydrate one
+        # session's runtime and persist under another (split-brain state) —
+        # refuse loudly instead.
+        raise ValueError(
+            f"fit {fit_id!r} belongs to session {record.session_id!r}, not {session_id!r}"
+        )
     if record.conformal_config is None:
-        raise HTTPException(status_code=400, detail="session has no conformal config")
-    forecast_frame = _coerce_forecast_frame_dtypes(frame_from_records(req.forecast))
-    runtime = _runtime_for_session(record)
-    calibrated_frame = runtime.apply(forecast_frame)
-    partition_states = runtime.get_partition_states()
-    store.upsert_conformal_state(req.session_id, partition_states)
-    store.update_fit(record.fit_id, last_calibrated=calibrated_frame)
-    return CalibrateResponse(
-        rows=len(calibrated_frame),
-        calibrated=json_safe_records(calibrated_frame),
-    )
+        logger.warning(
+            "observe skipped: session has no conformal config",
+            extra={"session_id": session_id},
+        )
+        return
+    if record.last_calibrated is None or record.last_calibrated.empty:
+        logger.warning(
+            "observe skipped: no calibrated frame on session (call /calibrate first)",
+            extra={"session_id": session_id},
+        )
+        return
+
+    actuals_lookup = _usable_actuals_lookup(actual_records)
+    if actuals_lookup is None:
+        logger.warning(
+            "observe skipped: actuals empty or missing unique_id/ds/y",
+            extra={"session_id": session_id, "rows": len(actual_records)},
+        )
+        return
+
+    runtime = runtime_for_session(record, store=store)
+    lower_col, upper_col = runtime.interval_columns
+    calibrated = record.last_calibrated.copy()
+    if lower_col not in calibrated.columns or upper_col not in calibrated.columns:
+        logger.warning(
+            "observe skipped: calibrated frame missing interval columns",
+            extra={"session_id": session_id, "expected": [lower_col, upper_col]},
+        )
+        return
+    if Y not in calibrated.columns:
+        # last_calibrated normally carries y (a NaN placeholder) from the
+        # predict output, but a hand-crafted /calibrate payload may omit it.
+        # The observe dispatch fills actuals into this column, so ensure it
+        # exists rather than letting _fill_actuals raise KeyError.
+        calibrated[Y] = float("nan")
+
+    if actuals_lookup.empty:
+        logger.warning(
+            "observe skipped: no usable actuals (no non-null y rows)",
+            extra={"session_id": session_id, "rows": len(actual_records)},
+        )
+        return
+
+    # Dispatch on the conformal mode rather than pre-filtering rows with NaN
+    # bounds. Cumulative mode emits NaN bounds on a window's intermediate
+    # horizons by construction, so dropping NaN-bound rows (the old behaviour)
+    # discarded exactly the observations the cumulative runtime needs to
+    # complete a window (lessons.md §40). decision_loop owns the per-horizon vs
+    # cumulative readiness logic; route through it so the API cannot diverge.
+    try:
+        observe_pending(runtime, [calibrated], actuals_lookup)
+        store.upsert_conformal_state(session_id, runtime.get_partition_states())
+    except Exception:
+        # Log-and-surface at the job boundary (same catch shape as
+        # _run_fit_job, though unlike fits there is no per-job record for a
+        # consumer to poll — a pollable observe status is a named follow-up).
+        # The runtime was rebuilt from persisted state and upsert only runs on
+        # success, so durable conformal state is untouched by a failure here.
+        logger.exception("observe job failed", extra={"session_id": session_id})
 
 
 def _build_order_policy(ordering: dict) -> OrderPolicy:
@@ -458,218 +434,371 @@ def _build_order_policy(ordering: dict) -> OrderPolicy:
     raise ValueError(f"unknown order policy: {policy!r}")
 
 
-@app.post("/order", response_model=OrderResponse)
-def order(req: OrderRequest) -> OrderResponse:
-    frame = _coerce_forecast_frame_dtypes(frame_from_records(req.calibrated))
-    try:
-        policy_config = _build_order_policy(req.ordering)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"invalid ordering spec: {exc}") from exc
-    try:
-        orders_frame = apply_order_policy(frame, policy_config)
-    except Exception as exc:
-        logger.exception("order policy application failed")
-        raise HTTPException(status_code=400, detail=format_error(exc)) from exc
-    if req.session_id is not None:
-        store = _lifecycle_store()
-        record = store.first_fit_for_session(req.session_id)
-        if record is not None:
-            store.put_orders(record.tenant, req.session_id, orders_frame)
-    return OrderResponse(rows=len(orders_frame), orders=json_safe_records(orders_frame))
-
-
-@app.post("/observe", response_model=ObserveResponse, status_code=202)
-def observe(req: ObserveRequest, bg: BackgroundTasks) -> ObserveResponse:
-    store = _lifecycle_store()
-    record = store.first_fit_for_session(req.session_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    if record.conformal_config is None:
-        raise HTTPException(status_code=400, detail="session has no conformal config")
-    bg.add_task(_run_observe_job, req.session_id, req.actuals)
-    return ObserveResponse(session_id=req.session_id, status=RunStatus.QUEUED)
-
-
-def _run_observe_job(session_id: str, actual_records: list[dict]) -> None:
-    store = _lifecycle_store()
-    record = store.first_fit_for_session(session_id)
-    if record is None:
-        logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
-        return
-    if record.conformal_config is None:
-        logger.warning(
-            "observe skipped: session has no conformal config",
-            extra={"session_id": session_id},
-        )
-        return
-    if record.last_calibrated is None or record.last_calibrated.empty:
-        logger.warning(
-            "observe skipped: no calibrated frame on session (call /calibrate first)",
-            extra={"session_id": session_id},
-        )
-        return
-
-    actuals = frame_from_records(actual_records)
-    if (
-        actuals.empty
-        or UNIQUE_ID not in actuals.columns
-        or DS not in actuals.columns
-        or Y not in actuals.columns
-    ):
-        logger.warning(
-            "observe skipped: actuals empty or missing unique_id/ds/y",
-            extra={"session_id": session_id, "rows": len(actuals)},
-        )
-        return
-
-    runtime = _runtime_for_session(record)
-    lower_col, upper_col = runtime.interval_columns
-    calibrated = record.last_calibrated.copy()
-    if lower_col not in calibrated.columns or upper_col not in calibrated.columns:
-        logger.warning(
-            "observe skipped: calibrated frame missing interval columns",
-            extra={"session_id": session_id, "expected": [lower_col, upper_col]},
-        )
-        return
-    if Y not in calibrated.columns:
-        # last_calibrated normally carries y (a NaN placeholder) from the
-        # predict output, but a hand-crafted /calibrate payload may omit it.
-        # The observe dispatch fills actuals into this column, so ensure it
-        # exists rather than letting _fill_actuals raise KeyError.
-        calibrated[Y] = float("nan")
-
-    actuals_lookup = _actuals_lookup(actuals)
-    if actuals_lookup.empty:
-        logger.warning(
-            "observe skipped: no usable actuals (no non-null y rows)",
-            extra={"session_id": session_id, "rows": len(actuals)},
-        )
-        return
-
-    # Dispatch on the conformal mode rather than pre-filtering rows with NaN
-    # bounds. Cumulative mode emits NaN bounds on a window's intermediate
-    # horizons by construction, so dropping NaN-bound rows (the old behaviour)
-    # discarded exactly the observations the cumulative runtime needs to
-    # complete a window (lessons.md §40). decision_loop owns the per-horizon vs
-    # cumulative readiness logic; route through it so the API cannot diverge.
-    try:
-        observe_pending(runtime, [calibrated], actuals_lookup)
-        store.upsert_conformal_state(session_id, runtime.get_partition_states())
-    except Exception:
-        # Log-and-surface at the job boundary (same catch shape as
-        # _run_fit_job, though unlike fits there is no per-job record for a
-        # consumer to poll — a pollable observe status is a named follow-up).
-        # The runtime was rebuilt from persisted state and upsert only runs on
-        # success, so durable conformal state is untouched by a failure here.
-        logger.exception("observe job failed", extra={"session_id": session_id})
-
-
-@app.post("/tune", response_model=TuneHandle, status_code=202)
-def tune(req: TuneRequest, bg: BackgroundTasks) -> TuneHandle:
-    if not req.sku_set:
-        raise HTTPException(status_code=400, detail="sku_set must not be empty")
-    if not tuning_service.has_search_space(req.search_space_id):
-        raise HTTPException(
-            status_code=400, detail=f"unknown search_space_id: {req.search_space_id}"
-        )
-    if not tuning_service.has_objective(req.objective_id):
-        raise HTTPException(status_code=400, detail=f"unknown objective_id: {req.objective_id}")
-    try:
-        model_scope = get_scope(req.base_model_config)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if req.hpo_scope != model_scope:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"hpo_scope={req.hpo_scope!r} does not match "
-                f"base_model_config scope={model_scope!r}"
-            ),
-        )
-    history = _load_sales(req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of))
-    actuals = _read_parquet_uri(req.actuals_uri, "actuals_uri")
-    if not req.origins:
-        raise HTTPException(status_code=400, detail="origins must not be empty")
-    try:
-        origins = [pd.Timestamp(o) for o in req.origins]
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=f"invalid origins: {exc}") from exc
-    session_id = derive_session_id(
-        req.tenant,
-        req.sku_set,
-        req.base_model_config,
-        req.conformal_config or {},
-    )
-    study_id = LifecycleStore.new_study_id()
-    store = _lifecycle_store()
-    store.put_study(
-        TuneRecord(
-            study_id=study_id,
-            session_id=session_id,
-            tenant=req.tenant,
-            sku_set=list(req.sku_set),
-            status=RunStatus.QUEUED,
-        )
-    )
-    factory = _db_session_factory()
-    bg.add_task(
-        tuning_service.run_tune_job,
-        study_id,
-        req,
-        history,
-        actuals,
-        origins,
-        store=store,
-        factory=factory,
-    )
-    return TuneHandle(study_id=study_id, session_id=session_id, status=RunStatus.QUEUED)
-
-
-@app.get("/studies/{study_id}", response_model=TuneStudyResponse)
-def get_study(study_id: str) -> TuneStudyResponse:
-    record = _lifecycle_store().get_study(study_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="study not found")
-    best_candidates = {
-        uid: TuneCandidatePayload(
-            model_config_values=payload.get("model_config", {}),
-            conformal_config=payload.get("conformal_config", {}),
-            ordering_config=payload.get("ordering_config", {}),
-        )
-        for uid, payload in record.best_candidates.items()
-    }
-    return TuneStudyResponse(
-        study_id=record.study_id,
-        session_id=record.session_id,
-        tenant=record.tenant,
-        sku_set=list(record.sku_set),
-        status=record.status,
-        best_candidates=best_candidates,
-        error=record.error,
-    )
-
-
 def _maybe_json_records(frame: pd.DataFrame | None) -> list[dict] | None:
     if frame is None or frame.empty:
         return None
     return json_safe_records(frame)
 
 
-@app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
-def session_state(tenant: str, uid: str) -> SessionStateResponse:
-    store = _lifecycle_store()
-    fits = store.fits_for_tenant_uid(tenant, uid)
-    if not fits:
-        raise HTTPException(status_code=404, detail="session not found")
-    # fits_for_tenant_uid returns metadata only; load frames for the selected fit.
-    record = store.get_fit(fits[-1].fit_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    return SessionStateResponse(
-        session_id=record.session_id,
-        tenant=tenant,
-        unique_id=uid,
-        state=store.get_conformal_state(record.session_id),
-        last_forecast=_maybe_json_records(record.last_forecast),
-        open_orders=_maybe_json_records(store.orders_for_tenant_uid(tenant, uid)),
+def _latest_fit(fits: list[FitRecord]) -> FitRecord:
+    """The most recent fit from an ascending ``created_at, fit_id`` list.
+
+    Both stores return ``fits_for_tenant_uid`` ordered ascending, so the last
+    element is the latest — the same canonical "last fit" selection
+    ``last_fit_for_session`` makes on the session-keyed paths. Named so the read
+    model's selection rule is explicit rather than a bare ``[-1]``.
+    """
+    return fits[-1]
+
+
+def create_app(
+    *,
+    run_store: RunStore | None = None,
+    lifecycle_store: LifecycleStoreProtocol | None = None,
+    db_factory: sessionmaker | None = None,
+) -> FastAPI:
+    """Construct the Calibre API app with injected (or env-resolved) stores.
+
+    Env-driven defaults (``CALIBRE_DATABASE_URL``, ``LIFECYCLE_STORE``) resolve
+    once here at construction time — not lazily per request — so a test that
+    wants a specific wiring builds its own app rather than mutating module state.
+    The module-level ``app = create_app()`` below preserves the
+    ``calibre.api.main:app`` symbol uvicorn and Terraform import.
+
+    Boot contract: because the module-level app constructs at import,
+    ``import calibre.api.main`` under ``LIFECYCLE_STORE=sql`` with no
+    ``CALIBRE_DATABASE_URL`` raises immediately — a deliberate boot-time
+    fail-fast for a config that could never serve (the serving process
+    surfaces the misconfig at deploy instead of 500ing per request).
+    Engine construction itself never connects: a well-formed but unreachable
+    URL still constructs, and the connection failure lands on first use.
+    """
+    if db_factory is None:
+        db_factory = _resolve_db_factory()
+    if run_store is None:
+        run_store = _default_run_store(db_factory)
+    if lifecycle_store is None:
+        lifecycle_store = _default_lifecycle_store(db_factory)
+
+    app = FastAPI(title="Calibre", version="0.1.0")
+    app.state.stores = AppStores(
+        run_store=run_store,
+        lifecycle_store=lifecycle_store,
+        db_factory=db_factory,
     )
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/metrics")
+    def metrics() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    @app.post("/backtests", response_model=RunResponse, status_code=202)
+    def backtests(
+        req: BacktestRequest,
+        bg: BackgroundTasks,
+        request: Request,
+        idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    ) -> RunResponse:
+        store = _stores(request).run_store
+        run = store.create(req.config, idempotency_key=idempotency_key)
+        if run.status == RunStatus.FAILED:
+            run = store.queue(run.id)
+        if run.status in {RunStatus.QUEUED, RunStatus.FAILED}:
+            bg.add_task(store.run_backtest_job, run.id)
+        return run
+
+    @app.get("/runs/{run_id}", response_model=RunResponse)
+    def get_run_status(run_id: str, request: Request) -> RunResponse:
+        run = _stores(request).run_store.get(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return run
+
+    @app.post("/fit", response_model=FitHandle, status_code=202)
+    def fit(req: FitRequest, bg: BackgroundTasks, request: Request) -> FitHandle:
+        stores = _stores(request)
+        if not req.sku_set:
+            raise HTTPException(status_code=400, detail="sku_set must not be empty")
+        history = _load_sales(
+            req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of), stores.db_factory
+        )
+        future_x = _read_parquet_uri(req.future_x_uri, "future_x_uri") if req.future_x_uri else None
+        session_id = derive_session_id(
+            req.tenant,
+            req.sku_set,
+            req.forecaster_config,
+            req.conformal_config or {},
+        )
+        fit_id = LifecycleStore.new_fit_id()
+        record = FitRecord(
+            fit_id=fit_id,
+            session_id=session_id,
+            tenant=req.tenant,
+            sku_set=list(req.sku_set),
+            forecaster_config=dict(req.forecaster_config),
+            horizon=int(req.horizon),
+            freq=req.freq,
+            history=history,
+            future_x=future_x,
+            conformal_config=dict(req.conformal_config) if req.conformal_config else None,
+            status=RunStatus.QUEUED,
+        )
+        stores.lifecycle_store.put_fit(record)
+        bg.add_task(_run_fit_job, fit_id, store=stores.lifecycle_store)
+        return FitHandle(
+            fit_id=fit_id,
+            session_id=session_id,
+            status=RunStatus.QUEUED,
+        )
+
+    @app.get("/fits/{fit_id}", response_model=FitHandle)
+    def get_fit(fit_id: str, request: Request) -> FitHandle:
+        record = _stores(request).lifecycle_store.get_fit(fit_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="fit not found")
+        return FitHandle(
+            fit_id=record.fit_id,
+            session_id=record.session_id,
+            status=record.status,
+            artifact_urls=dict(record.artifact_urls),
+            error=record.error,
+        )
+
+    @app.post("/predict", response_model=PredictResponse)
+    def predict(req: PredictRequest, request: Request) -> PredictResponse:
+        store = _stores(request).lifecycle_store
+        record = store.get_fit(req.fit_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="fit not found")
+        if record.status != RunStatus.SUCCEEDED:
+            raise HTTPException(
+                status_code=409, detail=f"fit not ready: status={record.status.value}"
+            )
+        try:
+            origin = pd.Timestamp(req.origin)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid origin: {exc}") from exc
+
+        history = record.history[record.history[DS] < origin]
+        if history.empty:
+            raise HTTPException(status_code=400, detail="history is empty before origin")
+
+        forecaster_config = {**record.forecaster_config, "freq": record.freq}
+        try:
+            future_x = _merge_future_x_override(record.future_x, req.future_x_override)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        task = ForecastTask(
+            history=history,
+            horizon=record.horizon,
+            model_config=forecaster_config,
+            forecast_origin=origin,
+            future_x=future_x,
+        )
+        try:
+            prediction = fit_predict_task(task, cache=_model_artifact_cache())
+        except Exception as exc:
+            logger.exception("predict failed", extra={"fit_id": req.fit_id})
+            raise HTTPException(status_code=500, detail=format_error(exc)) from exc
+        forecast_frame = _coerce_forecast_frame_dtypes(
+            _finalize_preds(prediction.forecast, origin, task.model_name)
+        )
+        store.update_fit(record.fit_id, last_forecast=forecast_frame)
+        return PredictResponse(rows=len(forecast_frame), forecast=json_safe_records(forecast_frame))
+
+    @app.post("/calibrate", response_model=CalibrateResponse)
+    def calibrate(req: CalibrateRequest, request: Request) -> CalibrateResponse:
+        store = _stores(request).lifecycle_store
+        record = store.last_fit_for_session(req.session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        if record.conformal_config is None:
+            raise HTTPException(status_code=400, detail="session has no conformal config")
+        forecast_frame = _coerce_forecast_frame_dtypes(frame_from_records(req.forecast))
+        runtime = runtime_for_session(record, store=store)
+        calibrated_frame = runtime.apply(forecast_frame)
+        partition_states = runtime.get_partition_states()
+        store.upsert_conformal_state(req.session_id, partition_states)
+        store.update_fit(record.fit_id, last_calibrated=calibrated_frame)
+        return CalibrateResponse(
+            rows=len(calibrated_frame),
+            calibrated=json_safe_records(calibrated_frame),
+        )
+
+    @app.post("/order", response_model=OrderResponse)
+    def order(req: OrderRequest, request: Request) -> OrderResponse:
+        frame = _coerce_forecast_frame_dtypes(frame_from_records(req.calibrated))
+        try:
+            policy_config = _build_order_policy(req.ordering)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid ordering spec: {exc}") from exc
+        try:
+            orders_frame = apply_order_policy(frame, policy_config)
+        except Exception as exc:
+            logger.exception("order policy application failed")
+            raise HTTPException(status_code=400, detail=format_error(exc)) from exc
+        if req.session_id is not None:
+            store = _stores(request).lifecycle_store
+            record = store.last_fit_for_session(req.session_id)
+            if record is not None:
+                store.put_orders(record.tenant, req.session_id, orders_frame)
+        return OrderResponse(rows=len(orders_frame), orders=json_safe_records(orders_frame))
+
+    @app.post("/observe", response_model=ObserveResponse, status_code=202)
+    def observe(req: ObserveRequest, bg: BackgroundTasks, request: Request) -> ObserveResponse:
+        store = _stores(request).lifecycle_store
+        # Validate preconditions synchronously so a client learns at request time
+        # that the observation can't be recorded, rather than getting a 202 and
+        # having the job silently drop it (the #163 symptom). The route resolves
+        # the LAST fit and passes its id into the job so both operate on the same
+        # fit (no re-selection race).
+        record = store.last_fit_for_session(req.session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        if record.conformal_config is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "session has no conformal config; POST /fit with a "
+                    "conformal_config to enable observation"
+                ),
+            )
+        if record.last_calibrated is None or record.last_calibrated.empty:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "no calibrated frame on the latest fit (a re-fit mints a "
+                    "fresh uncalibrated fit; prior conformal state is "
+                    "preserved); call /calibrate first"
+                ),
+            )
+        try:
+            lookup = _usable_actuals_lookup(req.actuals)
+            # Require a finite value: string "NaN"/"inf" y coerces to a
+            # non-finite float the job would accept-then-never-record — the
+            # same contract failure as no usable rows. Malformed values (e.g.
+            # non-numeric y) raise here and land on 422, never a bare 500.
+            usable = lookup is not None and bool(np.isfinite(lookup.to_numpy()).any())
+        except (TypeError, ValueError):
+            usable = False
+        if not usable:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "actuals must be non-empty and include unique_id, ds, and at least one finite y"
+                ),
+            )
+        bg.add_task(run_observe_job, req.session_id, req.actuals, store=store, fit_id=record.fit_id)
+        return ObserveResponse(session_id=req.session_id, status=RunStatus.QUEUED)
+
+    @app.post("/tune", response_model=TuneHandle, status_code=202)
+    def tune(req: TuneRequest, bg: BackgroundTasks, request: Request) -> TuneHandle:
+        stores = _stores(request)
+        if not req.sku_set:
+            raise HTTPException(status_code=400, detail="sku_set must not be empty")
+        if not tuning_service.has_search_space(req.search_space_id):
+            raise HTTPException(
+                status_code=400, detail=f"unknown search_space_id: {req.search_space_id}"
+            )
+        if not tuning_service.has_objective(req.objective_id):
+            raise HTTPException(status_code=400, detail=f"unknown objective_id: {req.objective_id}")
+        try:
+            model_scope = get_scope(req.base_model_config)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if req.hpo_scope != model_scope:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"hpo_scope={req.hpo_scope!r} does not match "
+                    f"base_model_config scope={model_scope!r}"
+                ),
+            )
+        history = _load_sales(
+            req.sales_uri, list(req.sku_set), _resolve_as_of(req.as_of), stores.db_factory
+        )
+        actuals = _read_parquet_uri(req.actuals_uri, "actuals_uri")
+        if not req.origins:
+            raise HTTPException(status_code=400, detail="origins must not be empty")
+        try:
+            origins = [pd.Timestamp(o) for o in req.origins]
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid origins: {exc}") from exc
+        session_id = derive_session_id(
+            req.tenant,
+            req.sku_set,
+            req.base_model_config,
+            req.conformal_config or {},
+        )
+        study_id = LifecycleStore.new_study_id()
+        store = stores.lifecycle_store
+        store.put_study(
+            TuneRecord(
+                study_id=study_id,
+                session_id=session_id,
+                tenant=req.tenant,
+                sku_set=list(req.sku_set),
+                status=RunStatus.QUEUED,
+            )
+        )
+        bg.add_task(
+            tuning_service.run_tune_job,
+            study_id,
+            req,
+            history,
+            actuals,
+            origins,
+            store=store,
+            factory=stores.db_factory,
+        )
+        return TuneHandle(study_id=study_id, session_id=session_id, status=RunStatus.QUEUED)
+
+    @app.get("/studies/{study_id}", response_model=TuneStudyResponse)
+    def get_study(study_id: str, request: Request) -> TuneStudyResponse:
+        record = _stores(request).lifecycle_store.get_study(study_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="study not found")
+        best_candidates = {
+            uid: TuneCandidatePayload(
+                model_config_values=payload.get("model_config", {}),
+                conformal_config=payload.get("conformal_config", {}),
+                ordering_config=payload.get("ordering_config", {}),
+            )
+            for uid, payload in record.best_candidates.items()
+        }
+        return TuneStudyResponse(
+            study_id=record.study_id,
+            session_id=record.session_id,
+            tenant=record.tenant,
+            sku_set=list(record.sku_set),
+            status=record.status,
+            best_candidates=best_candidates,
+            error=record.error,
+        )
+
+    @app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
+    def session_state(tenant: str, uid: str, request: Request) -> SessionStateResponse:
+        store = _stores(request).lifecycle_store
+        fits = store.fits_for_tenant_uid(tenant, uid)
+        if not fits:
+            raise HTTPException(status_code=404, detail="session not found")
+        # fits_for_tenant_uid returns metadata only; load frames for the latest fit.
+        record = store.get_fit(_latest_fit(fits).fit_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return SessionStateResponse(
+            session_id=record.session_id,
+            tenant=tenant,
+            unique_id=uid,
+            state=store.get_conformal_state(record.session_id),
+            last_forecast=_maybe_json_records(record.last_forecast),
+            open_orders=_maybe_json_records(store.orders_for_tenant_uid(tenant, uid)),
+        )
+
+    return app
+
+
+app = create_app()

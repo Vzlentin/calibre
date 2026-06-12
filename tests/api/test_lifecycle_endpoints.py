@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from calibre.api import main as api_main
 from calibre.api.lifecycle import LifecycleStore
-from calibre.api.main import app
+from calibre.api.main import create_app
 from calibre.core.forecast_frame import (
     DS,
     UNIQUE_ID,
@@ -55,16 +55,20 @@ class _StubAdapter(ModelAdapter):
 
 
 @pytest.fixture(autouse=True)
-def _reset_lifecycle_store(monkeypatch, tmp_path):
-    monkeypatch.setattr(api_main, "_LIFECYCLE_STORE", LifecycleStore())
+def _artifact_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("CALIBRE_ARTIFACT_URI", str(tmp_path / "artifacts"))
     _StubAdapter.fit_calls = 0
     _StubAdapter.load_calls = 0
 
 
 @pytest.fixture
+def store():
+    """The in-memory lifecycle store the test app is constructed with."""
+    return LifecycleStore()
+
+
+@pytest.fixture
 def stub_adapter(monkeypatch):
-    monkeypatch.setattr("calibre.api.main.resolve_adapter", lambda _: _StubAdapter(), raising=False)
     monkeypatch.setattr(
         "calibre.execution.prediction.resolve_adapter", lambda cfg: _StubAdapter(cfg)
     )
@@ -72,8 +76,8 @@ def stub_adapter(monkeypatch):
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(store):
+    return TestClient(create_app(lifecycle_store=store))
 
 
 def _history_records(uid: str = "A") -> list[dict]:
@@ -114,7 +118,7 @@ def _fit_payload(sales_uri: str) -> dict:
     }
 
 
-def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sales_uri):
+def test_fit_predict_calibrate_order_observe_roundtrip(client, store, stub_adapter, sales_uri):
     fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit_resp.status_code == 202, fit_resp.text
     handle = fit_resp.json()
@@ -191,7 +195,7 @@ def test_fit_predict_calibrate_order_observe_roundtrip(client, stub_adapter, sal
     assert observe_resp.status_code == 202, observe_resp.text
     assert observe_resp.json()["session_id"] == session_id
 
-    state = api_main._LIFECYCLE_STORE.get_conformal_state(session_id)
+    state = store.get_conformal_state(session_id)
     # observe records one calibrator partition per resolved (model, horizon),
     # each carrying the absolute error of actual vs calibrated forecast:
     # |9 - 5| = 4 at h1, |11 - 6| = 5 at h2.
@@ -250,12 +254,143 @@ def test_session_state_404_when_missing(client):
 
 
 def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales_uri):
-    monkeypatch.setattr(api_main, "_run_fit_job", lambda fit_id: None)
+    monkeypatch.setattr(api_main, "_run_fit_job", lambda fit_id, *, store: None)
     fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     fit_id = fit_resp.json()["fit_id"]
 
     predict_resp = client.post("/predict", json={"fit_id": fit_id, "origin": "2024-02-04"})
     assert predict_resp.status_code == 409
+
+
+def test_multi_fit_selection_is_last_everywhere(client, store, stub_adapter, sales_uri):
+    """LAST-fit canonical (R3): with several fits in a session, /calibrate,
+    /observe, and /sessions all operate on the LAST (most-recent) fit.
+
+    This is the flip of the former first/first/last split: writing calibration
+    to the first fit while /sessions read the last diverged session state, since
+    last_calibrated lives on the fit record and the read model already chose the
+    last. Now write and read agree on the latest fit.
+
+    Two identical /fit payloads share a derived session_id but mint distinct
+    fit_ids -> one session, two fits in insertion order.
+    """
+    first_fit_id = client.post("/fit", json=_fit_payload(sales_uri)).json()["fit_id"]
+    second = client.post("/fit", json=_fit_payload(sales_uri)).json()
+    last_fit_id = second["fit_id"]
+    session_id = second["session_id"]
+    assert first_fit_id != last_fit_id
+
+    fits = store.fits_for_session(session_id)
+    assert [r.fit_id for r in fits] == [first_fit_id, last_fit_id], "insertion order"
+
+    # Predict on the LAST fit so the calibrate path has a forecast to calibrate.
+    last_forecast = client.post(
+        "/predict", json={"fit_id": last_fit_id, "origin": "2024-02-04"}
+    ).json()["forecast"]
+
+    calibrate = client.post(
+        "/calibrate", json={"session_id": session_id, "forecast": last_forecast}
+    )
+    assert calibrate.status_code == 200, calibrate.text
+
+    # /calibrate now selects the LAST fit: its last_calibrated is populated, the
+    # first fit's stays None.
+    assert store.get_fit(last_fit_id).last_calibrated is not None
+    assert store.get_fit(first_fit_id).last_calibrated is None
+
+    # /sessions reads the LAST fit and sees its forecast — write and read agree.
+    state = client.get("/sessions/acme/A").json()
+    assert [row[Y_HAT] for row in state["last_forecast"]] == [row[Y_HAT] for row in last_forecast]
+
+    observe = client.post(
+        "/observe",
+        json={
+            "session_id": session_id,
+            "actuals": [
+                {UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0},
+                {UNIQUE_ID: "A", "ds": "2024-02-18", "y": 11.0},
+            ],
+        },
+    )
+    assert observe.status_code == 202, observe.text
+    # The observe job ran against the LAST fit's calibrated frame -> conformal
+    # state is recorded for the session.
+    assert store.get_conformal_state(session_id)
+
+
+def test_refit_then_observe_409_until_recalibrated(client, store, stub_adapter, sales_uri):
+    """Re-fit lifecycle ruling (R3): conformal state is session-owned and carries
+    across re-fits, but a re-fit creates a fresh LAST fit whose last_calibrated is
+    None — so /observe on it fails loudly (409, "call /calibrate first") until the
+    client calibrates the new fit, after which observation resumes against the
+    carried-forward session conformal state. A deliberate contract, not the old
+    silent no-op.
+    """
+    # First fit: predict -> calibrate -> observe so the session accrues conformal
+    # state on the original fit.
+    first = client.post("/fit", json=_fit_payload(sales_uri)).json()
+    first_fit_id = first["fit_id"]
+    session_id = first["session_id"]
+
+    forecast = client.post(
+        "/predict", json={"fit_id": first_fit_id, "origin": "2024-02-04"}
+    ).json()["forecast"]
+    assert (
+        client.post("/calibrate", json={"session_id": session_id, "forecast": forecast}).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/observe",
+            json={
+                "session_id": session_id,
+                "actuals": [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0}],
+            },
+        ).status_code
+        == 202
+    )
+    state_after_first = store.get_conformal_state(session_id)
+    assert state_after_first, "first leg accrues session conformal state"
+
+    # Re-fit: a fresh LAST fit, last_calibrated None, sharing the session.
+    refit_id = client.post("/fit", json=_fit_payload(sales_uri)).json()["fit_id"]
+    assert refit_id != first_fit_id
+    assert store.last_fit_for_session(session_id).fit_id == refit_id
+    assert store.get_fit(refit_id).last_calibrated is None
+
+    # /observe on the re-fit fails loudly until it is calibrated.
+    blocked = client.post(
+        "/observe",
+        json={
+            "session_id": session_id,
+            "actuals": [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0}],
+        },
+    )
+    assert blocked.status_code == 409, blocked.text
+
+    # The carried-forward session state is untouched by the blocked observe.
+    assert store.get_conformal_state(session_id) == state_after_first
+
+    # Calibrate the new fit, then observation resumes (202) and the session state
+    # grows from the carried-forward baseline rather than resetting.
+    refit_forecast = client.post(
+        "/predict", json={"fit_id": refit_id, "origin": "2024-02-04"}
+    ).json()["forecast"]
+    assert (
+        client.post(
+            "/calibrate", json={"session_id": session_id, "forecast": refit_forecast}
+        ).status_code
+        == 200
+    )
+    resumed = client.post(
+        "/observe",
+        json={
+            "session_id": session_id,
+            "actuals": [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0}],
+        },
+    )
+    assert resumed.status_code == 202, resumed.text
+    assert store.get_conformal_state(session_id), "observation resumes on the carried session state"
 
 
 def test_predict_reuses_fit_time_artifact_for_canonical_origin(client, stub_adapter, sales_uri):
