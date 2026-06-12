@@ -22,9 +22,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 
 from calibre.api import main as api_main
 from calibre.api.lifecycle import FitRecord, LifecycleStore
+from calibre.api.main import create_app
 from calibre.conformal.runtime import (
     SymmetricIntervalConfig,
     build_symmetric_interval_runtime,
@@ -55,13 +57,16 @@ def observe_for_test(
 ) -> None:
     """Stable observe-job seam for the characterization pins.
 
-    Drives the public observe job with the lifecycle store injected. The
-    ``runtime`` arg is the recording runtime the ``session`` fixture has already
-    bound onto the public ``runtime_for_session`` producer; the job rehydrates
-    the runtime internally, so it is not passed positionally.
+    Drives the public observe job with the lifecycle store injected and the
+    resolved LAST fit's id (mirroring what the /observe route passes, so the job
+    operates on exactly that fit). The ``runtime`` arg is the recording runtime
+    the ``session`` fixture has already bound onto the public
+    ``runtime_for_session`` producer; the job rehydrates the runtime internally,
+    so it is not passed positionally.
     """
     del runtime  # bound on the public runtime_for_session producer by the fixture
-    api_main.run_observe_job(session_id, records, store=store)
+    fit_id = store.last_fit_for_session(session_id).fit_id
+    api_main.run_observe_job(session_id, records, store=store, fit_id=fit_id)
 
 
 class _RecordingRuntime:
@@ -300,3 +305,122 @@ def test_observe_end_to_end_through_real_runtime(session, monkeypatch):
     for partition in state:
         scores = state[partition]["calibrator"]["score_history"][partition]
         assert [float(s) for s in scores] == [1.0]
+
+
+# --- /observe synchronous precondition errors (U5) -------------------------
+
+
+def _seed_fit(store: LifecycleStore, *, calibrated: pd.DataFrame | None) -> str:
+    """Install a perhorizon-mscp fit for ``sess-observe``; return its session id."""
+    store.put_fit(
+        FitRecord(
+            fit_id="fit-1",
+            session_id="sess-observe",
+            tenant="acme",
+            sku_set=["A"],
+            forecaster_config={"backend": "statsforecast", "model": "Naive"},
+            horizon=3,
+            freq="W-SUN",
+            history=pd.DataFrame(),
+            future_x=None,
+            conformal_config={"method": "mscp", "coverage": 0.9, "mode": "perhorizon"},
+            status=RunStatus.SUCCEEDED,
+            last_calibrated=calibrated,
+        )
+    )
+    return "sess-observe"
+
+
+def test_observe_before_calibrate_returns_409():
+    """Observe on a fit with no calibrated frame fails loudly at request time —
+    no more 202-then-silent-drop."""
+    store = LifecycleStore()
+    session_id = _seed_fit(store, calibrated=None)
+    client = TestClient(create_app(lifecycle_store=store))
+
+    resp = client.post(
+        "/observe",
+        json={"session_id": session_id, "actuals": _actual_records(WINDOW_DS)},
+    )
+
+    assert resp.status_code == 409, resp.text
+    assert "calibrate" in resp.json()["detail"].lower()
+
+
+def test_observe_missing_session_returns_404():
+    store = LifecycleStore()
+    client = TestClient(create_app(lifecycle_store=store))
+
+    resp = client.post(
+        "/observe",
+        json={"session_id": "nope", "actuals": _actual_records(WINDOW_DS)},
+    )
+
+    assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.parametrize(
+    "actuals",
+    [
+        [],  # empty payload
+        [{UNIQUE_ID: "A", "ds": "2024-02-11"}],  # missing y column
+        [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": None}],  # all-null y -> no usable row
+    ],
+)
+def test_observe_unusable_actuals_returns_422(actuals):
+    """Empty or no-usable-row actuals are rejected synchronously (422)."""
+    store = LifecycleStore()
+    session_id = _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=True))
+    client = TestClient(create_app(lifecycle_store=store))
+
+    resp = client.post("/observe", json={"session_id": session_id, "actuals": actuals})
+
+    assert resp.status_code == 422, resp.text
+
+
+def test_observe_happy_path_still_202_and_observes(monkeypatch):
+    """A valid observe still returns 202 and records conformal state."""
+    store = LifecycleStore()
+    session_id = _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=True))
+    runtime = _RecordingRuntime("perhorizon")
+    runtime.get_partition_states = lambda: {"m:h1:__global__": {"scores": [1.0]}}
+    monkeypatch.setattr(api_main, "runtime_for_session", lambda _record, *, store: runtime)
+
+    client = TestClient(create_app(lifecycle_store=store))
+    resp = client.post(
+        "/observe",
+        json={"session_id": session_id, "actuals": _actual_records(WINDOW_DS[:1])},
+    )
+
+    assert resp.status_code == 202, resp.text
+    assert len(runtime.observed) == 1
+    assert store.get_conformal_state(session_id) == {"m:h1:__global__": {"scores": [1.0]}}
+
+
+def test_observe_job_runtime_failure_leaves_durable_state_untouched(monkeypatch, caplog):
+    """A failure that slips past request-time validation still logs loudly at the
+    job boundary and leaves durable conformal state untouched (the existing
+    failure-path lock, now reached only by runtime — not precondition — failures)."""
+    import logging
+
+    store = LifecycleStore()
+    session_id = _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=False))
+    runtime = _RecordingRuntime("cumulative")
+
+    def _raise(resolved: pd.DataFrame) -> pd.DataFrame:
+        raise ValueError("Duplicate H values in cumulative observe window")
+
+    runtime.observe = _raise
+    runtime.get_partition_states = lambda: {"m:cumulative:__global__": {"scores": [1.0]}}
+    monkeypatch.setattr(api_main, "runtime_for_session", lambda _record, *, store: runtime)
+
+    client = TestClient(create_app(lifecycle_store=store))
+    with caplog.at_level(logging.ERROR):
+        resp = client.post(
+            "/observe",
+            json={"session_id": session_id, "actuals": _actual_records(WINDOW_DS)},
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert "observe job failed" in caplog.text
+    assert store.get_conformal_state(session_id) == {}

@@ -195,6 +195,26 @@ def _actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
     return lookup
 
 
+def _has_usable_actuals(actual_records: list[dict]) -> bool:
+    """Whether posted actuals can produce at least one observation.
+
+    Mirrors the job's two precondition checks so /observe can reject unusable
+    payloads synchronously (422): the frame must carry unique_id/ds/y, and at
+    least one row must have a non-null y to record. The stored-frame schema
+    checks (interval columns) stay job-only — they concern the calibrated frame,
+    not the request payload.
+    """
+    actuals = frame_from_records(actual_records)
+    if (
+        actuals.empty
+        or UNIQUE_ID not in actuals.columns
+        or DS not in actuals.columns
+        or Y not in actuals.columns
+    ):
+        return False
+    return not _actuals_lookup(actuals).empty
+
+
 def _merge_future_x_override(
     base: pd.DataFrame | None,
     override: dict[str, list[dict]] | None,
@@ -302,8 +322,13 @@ def run_observe_job(
     actual_records: list[dict],
     *,
     store: LifecycleStoreProtocol,
+    fit_id: str,
 ) -> None:
-    record = store.last_fit_for_session(session_id)
+    # Operate on exactly the fit the /observe route validated: it resolved and
+    # passed the LAST fit's id, so the job never re-selects (no request/job
+    # re-selection race). The guards below stay as loud-log defense for the
+    # narrow window between request validation and job execution.
+    record = store.get_fit(fit_id)
     if record is None:
         logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
         return
@@ -615,12 +640,27 @@ def create_app(
     @app.post("/observe", response_model=ObserveResponse, status_code=202)
     def observe(req: ObserveRequest, bg: BackgroundTasks, request: Request) -> ObserveResponse:
         store = _stores(request).lifecycle_store
+        # Validate preconditions synchronously so a client learns at request time
+        # that the observation can't be recorded, rather than getting a 202 and
+        # having the job silently drop it (the #163 symptom). The route resolves
+        # the LAST fit and passes its id into the job so both operate on the same
+        # fit (no re-selection race).
         record = store.last_fit_for_session(req.session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="session not found")
         if record.conformal_config is None:
             raise HTTPException(status_code=400, detail="session has no conformal config")
-        bg.add_task(run_observe_job, req.session_id, req.actuals, store=store)
+        if record.last_calibrated is None or record.last_calibrated.empty:
+            raise HTTPException(
+                status_code=409,
+                detail="no calibrated frame on the latest fit; call /calibrate first",
+            )
+        if not _has_usable_actuals(req.actuals):
+            raise HTTPException(
+                status_code=422,
+                detail="actuals must be non-empty and include unique_id, ds, and a non-null y",
+            )
+        bg.add_task(run_observe_job, req.session_id, req.actuals, store=store, fit_id=record.fit_id)
         return ObserveResponse(session_id=req.session_id, status=RunStatus.QUEUED)
 
     @app.post("/tune", response_model=TuneHandle, status_code=202)

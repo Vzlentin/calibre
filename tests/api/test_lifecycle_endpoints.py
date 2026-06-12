@@ -318,6 +318,81 @@ def test_multi_fit_selection_is_last_everywhere(client, store, stub_adapter, sal
     assert store.get_conformal_state(session_id)
 
 
+def test_refit_then_observe_409_until_recalibrated(client, store, stub_adapter, sales_uri):
+    """Re-fit lifecycle ruling (R3): conformal state is session-owned and carries
+    across re-fits, but a re-fit creates a fresh LAST fit whose last_calibrated is
+    None — so /observe on it fails loudly (409, "call /calibrate first") until the
+    client calibrates the new fit, after which observation resumes against the
+    carried-forward session conformal state. A deliberate contract, not the old
+    silent no-op.
+    """
+    # First fit: predict -> calibrate -> observe so the session accrues conformal
+    # state on the original fit.
+    first = client.post("/fit", json=_fit_payload(sales_uri)).json()
+    first_fit_id = first["fit_id"]
+    session_id = first["session_id"]
+
+    forecast = client.post(
+        "/predict", json={"fit_id": first_fit_id, "origin": "2024-02-04"}
+    ).json()["forecast"]
+    assert (
+        client.post("/calibrate", json={"session_id": session_id, "forecast": forecast}).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/observe",
+            json={
+                "session_id": session_id,
+                "actuals": [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0}],
+            },
+        ).status_code
+        == 202
+    )
+    state_after_first = store.get_conformal_state(session_id)
+    assert state_after_first, "first leg accrues session conformal state"
+
+    # Re-fit: a fresh LAST fit, last_calibrated None, sharing the session.
+    refit_id = client.post("/fit", json=_fit_payload(sales_uri)).json()["fit_id"]
+    assert refit_id != first_fit_id
+    assert store.last_fit_for_session(session_id).fit_id == refit_id
+    assert store.get_fit(refit_id).last_calibrated is None
+
+    # /observe on the re-fit fails loudly until it is calibrated.
+    blocked = client.post(
+        "/observe",
+        json={
+            "session_id": session_id,
+            "actuals": [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0}],
+        },
+    )
+    assert blocked.status_code == 409, blocked.text
+
+    # The carried-forward session state is untouched by the blocked observe.
+    assert store.get_conformal_state(session_id) == state_after_first
+
+    # Calibrate the new fit, then observation resumes (202) and the session state
+    # grows from the carried-forward baseline rather than resetting.
+    refit_forecast = client.post(
+        "/predict", json={"fit_id": refit_id, "origin": "2024-02-04"}
+    ).json()["forecast"]
+    assert (
+        client.post(
+            "/calibrate", json={"session_id": session_id, "forecast": refit_forecast}
+        ).status_code
+        == 200
+    )
+    resumed = client.post(
+        "/observe",
+        json={
+            "session_id": session_id,
+            "actuals": [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0}],
+        },
+    )
+    assert resumed.status_code == 202, resumed.text
+    assert store.get_conformal_state(session_id), "observation resumes on the carried session state"
+
+
 def test_predict_reuses_fit_time_artifact_for_canonical_origin(client, stub_adapter, sales_uri):
     fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit_resp.status_code == 202, fit_resp.text
