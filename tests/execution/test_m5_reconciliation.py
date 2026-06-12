@@ -382,8 +382,13 @@ def test_point_wls_var_agrees_with_dense_closed_form() -> None:
     base = _divergent_node_values(summing)
     periods = 10
     residuals = _node_residual_matrix(summing.n_nodes, periods)
-    # Dense MinTrace wls_var weights: mean squared residual per node + 2e-8.
-    w_diag = (residuals**2).sum(axis=1) / periods + 2e-8
+    # MinTraceSparse wls_var weights: unbiased residual variance per node
+    # (nanvar, ddof=1). This is a documented estimator change from the dense
+    # MinTrace path, which weighted by the mean squared residual + 2e-8
+    # jitter — at this fixture the two estimators diverge by ~1.5% in the
+    # reconciled values, well past the solver tolerance, so this pin proves
+    # the sparse path carries the upstream sparse estimator.
+    w_diag = residuals.var(axis=1, ddof=1)
     expected = _closed_form_min_trace(summing.S, w_diag, base)
 
     out = NixtlaReconciler("wls_var")(

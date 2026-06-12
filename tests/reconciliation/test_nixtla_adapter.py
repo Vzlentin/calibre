@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 from calibre.core.forecast_frame import (
     DS,
@@ -20,14 +21,18 @@ from calibre.core.forecast_frame import (
 )
 from calibre.reconciliation.nixtla_adapter import (
     NixtlaReconciler,
+    _cache_key,
     _from_nixtla_layout,
+    _make_checked_min_trace_sparse,
     _to_nixtla_layout,
 )
 from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import (
+    SparseSummingMatrix,
     SummingMatrix,
     build_hierarchy_index,
     build_summing_matrix,
+    sparse_summing_matrix_from_index,
 )
 
 
@@ -106,21 +111,31 @@ def test_s_layout_conversion_round_trips_to_identity_first_order() -> None:
 
 
 @pytest.mark.parametrize("strategy", ["ols", "wls_struct"])
-def test_min_trace_factory_passes_strategy_and_single_thread(
+def test_sparse_roster_factory_constructs_checked_min_trace_sparse(
     monkeypatch: pytest.MonkeyPatch, strategy: str
 ) -> None:
+    """ols/wls_struct are sparse-capable: the factory builds the Calibre-owned
+    checked subclass of ``MinTraceSparse`` (method, num_threads=1), never the
+    dense ``MinTrace``."""
     captured: list[tuple[str, int]] = []
 
-    class _FakeMinTrace(_CountingMethod):
+    class _FakeMinTraceSparse(_CountingMethod):
         def __init__(self, *, method: str, num_threads: int) -> None:
             super().__init__()
             captured.append((method, num_threads))
+
+    class _FailDenseMinTrace(_CountingMethod):
+        def __init__(self, *, method: str, num_threads: int) -> None:
+            del method, num_threads
+            raise AssertionError("dense MinTrace must not be constructed for the sparse roster")
 
     def _fake_import_module(name: str) -> SimpleNamespace:
         assert name == "hierarchicalforecast.methods"
         return SimpleNamespace(
             BottomUp=_CountingMethod,
-            MinTrace=_FakeMinTrace,
+            BottomUpSparse=_CountingMethod,
+            MinTrace=_FailDenseMinTrace,
+            MinTraceSparse=_FakeMinTraceSparse,
             ERM=_CountingMethod,
         )
 
@@ -140,24 +155,33 @@ def test_min_trace_factory_passes_strategy_and_single_thread(
 
 
 @pytest.mark.parametrize(
-    ("strategy", "expected_method"),
-    [("mint_shrink", "mint_shrink"), ("wls_var", "wls_var")],
+    ("strategy", "expected_constructor"),
+    [("mint_shrink", "MinTrace"), ("wls_var", "MinTraceSparse")],
 )
-def test_residual_min_trace_factory_passes_strategy_and_single_thread(
-    monkeypatch: pytest.MonkeyPatch, strategy: str, expected_method: str
+def test_residual_factory_splits_dense_and_sparse_min_trace(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, expected_constructor: str
 ) -> None:
-    captured: list[tuple[str, int]] = []
+    """wls_var has an upstream sparse variant; mint_shrink does not and keeps
+    the dense ``MinTrace`` path unchanged."""
+    captured: list[tuple[str, str, int]] = []
 
     class _FakeMinTrace(_ResidualMethod):
         def __init__(self, *, method: str, num_threads: int) -> None:
             super().__init__()
-            captured.append((method, num_threads))
+            captured.append(("MinTrace", method, num_threads))
+
+    class _FakeMinTraceSparse(_ResidualMethod):
+        def __init__(self, *, method: str, num_threads: int) -> None:
+            super().__init__()
+            captured.append(("MinTraceSparse", method, num_threads))
 
     def _fake_import_module(name: str) -> SimpleNamespace:
         assert name == "hierarchicalforecast.methods"
         return SimpleNamespace(
             BottomUp=_CountingMethod,
+            BottomUpSparse=_CountingMethod,
             MinTrace=_FakeMinTrace,
+            MinTraceSparse=_FakeMinTraceSparse,
             ERM=_ResidualMethod,
         )
 
@@ -172,7 +196,7 @@ def test_residual_min_trace_factory_passes_strategy_and_single_thread(
         ReconciliationContext(fitted_values=_tiny_fitted_values()),
     )
 
-    assert captured == [(expected_method, 1)]
+    assert captured == [(expected_constructor, strategy, 1)]
 
 
 def test_erm_factory_uses_closed_method(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -538,3 +562,133 @@ def test_residual_predict_requires_expected_mean_shape() -> None:
             build_hierarchy_index(_tiny_hierarchy()),
             ReconciliationContext(fitted_values=_tiny_fitted_values()),
         )
+
+
+# ---------------------------------------------------------------------------
+# Sparse point path (#168): producer-selection seam, csr layout, cache key,
+# and the bicgstab convergence guard.
+# ---------------------------------------------------------------------------
+
+
+def _four_bottom_hierarchy() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: ["a", "b", "c", "d"],
+            "dept": ["D1", "D1", "D2", "D2"],
+            "store": ["S1", "S2", "S1", "S2"],
+        }
+    )
+
+
+def _coherent_tiny_forecast_frame() -> pd.DataFrame:
+    frame = _tiny_forecast_frame()
+    frame[Y_HAT] = np.array([2.0, 3.0, 5.0, 5.0], dtype=np.float64)
+    return frame
+
+
+@pytest.mark.parametrize("strategy", ["ols", "wls_struct", "wls_var"])
+def test_sparse_roster_build_summing_selects_sparse_producer(strategy: str) -> None:
+    index = build_hierarchy_index(_hierarchy())
+    assert isinstance(NixtlaReconciler(strategy).build_summing(index), SparseSummingMatrix)
+
+
+@pytest.mark.parametrize("strategy", ["mint_shrink", "erm"])
+def test_dense_roster_build_summing_keeps_dense_producer(strategy: str) -> None:
+    index = build_hierarchy_index(_hierarchy())
+    assert isinstance(NixtlaReconciler(strategy).build_summing(index), SummingMatrix)
+
+
+def test_dense_producer_never_invoked_for_sparse_roster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seam liveness: a roster strategy must never materialize the dense S."""
+
+    def _fail(hierarchy_index):
+        raise AssertionError("dense summing producer must not run for a sparse-capable strategy")
+
+    monkeypatch.setattr("calibre.reconciliation.apply.summing_matrix_from_index", _fail)
+    _methods, factory = _counting_factory()
+
+    out = NixtlaReconciler("ols", method_factory=factory)(
+        _coherent_tiny_forecast_frame(),
+        build_hierarchy_index(_tiny_hierarchy()),
+        ReconciliationContext(),
+    )
+
+    assert len(out) == 4
+
+
+def test_sparse_layout_keeps_csr_and_identity_last_block() -> None:
+    summing = sparse_summing_matrix_from_index(build_hierarchy_index(_hierarchy()))
+    base = summing.S @ np.array([1.0, 2.0, 3.0])
+
+    layout = _to_nixtla_layout(base, summing)
+
+    assert isinstance(layout.S, sparse.csr_array)
+    np.testing.assert_array_equal(
+        layout.S[-summing.n_bottom :].toarray(), np.eye(summing.n_bottom)
+    )
+    np.testing.assert_array_equal(_from_nixtla_layout(layout.y_hat, layout), base)
+
+
+def test_sparse_projection_cache_hits_same_hierarchy_and_misses_different() -> None:
+    methods, factory = _counting_factory()
+    reconciler = NixtlaReconciler("ols", method_factory=factory)
+    first = sparse_summing_matrix_from_index(build_hierarchy_index(_hierarchy()))
+    # A fresh producer call over equal hierarchy facts: distinct object, same key.
+    rebuilt = sparse_summing_matrix_from_index(build_hierarchy_index(_hierarchy()))
+    other = sparse_summing_matrix_from_index(build_hierarchy_index(_four_bottom_hierarchy()))
+
+    reconciler.reconcile_vector(first.S @ np.array([1.0, 2.0, 3.0]), first)
+    reconciler.reconcile_vector(rebuilt.S @ np.array([4.0, 5.0, 6.0]), rebuilt)
+    assert len(methods) == 1
+
+    reconciler.reconcile_vector(other.S @ np.array([1.0, 2.0, 3.0, 4.0]), other)
+    assert len(methods) == 2
+
+
+def test_sparse_cache_key_is_deterministic_across_construction_orders() -> None:
+    summing = sparse_summing_matrix_from_index(build_hierarchy_index(_hierarchy()))
+    coo = summing.S.tocoo()
+    order = np.random.default_rng(0).permutation(coo.nnz)
+    shuffled = SparseSummingMatrix(
+        S=sparse.csr_array(
+            (coo.data[order], (coo.row[order], coo.col[order])), shape=summing.S.shape
+        ),
+        bottom_ids=summing.bottom_ids,
+        node_labels=summing.node_labels,
+    )
+
+    assert _cache_key(summing) == _cache_key(shuffled)
+
+
+def test_starved_bicgstab_solve_raises_convergence_guard() -> None:
+    """KTD-4: hierarchicalforecast silently returns the best-effort iterate and
+    the output is S-coherent by construction, so the Calibre-owned checked
+    method is the only convergence signal — a starved solve must raise."""
+    _require_hierarchy_extra()
+    summing = sparse_summing_matrix_from_index(build_hierarchy_index(_four_bottom_hierarchy()))
+    base = np.arange(1.0, summing.n_nodes + 1.0, dtype=np.float64)
+    layout = _to_nixtla_layout(base, summing)
+    method = _make_checked_min_trace_sparse("wls_struct", bicgstab_maxiter=1)
+    method.fit(S=layout.S, y_hat=layout.y_hat, tags=layout.tags)
+
+    with pytest.raises(RuntimeError, match="bicgstab solve failed"):
+        method.predict(S=layout.S, y_hat=layout.y_hat)
+
+
+def test_unstarved_checked_solve_converges_and_matches_closed_form() -> None:
+    """The checked variant changes nothing on a healthy solve: it agrees with
+    the dense closed form S (S' W^-1 S)^-1 S' W^-1 y within solver tolerance."""
+    _require_hierarchy_extra()
+    index = build_hierarchy_index(_four_bottom_hierarchy())
+    summing = sparse_summing_matrix_from_index(index)
+    dense = build_summing_matrix(_four_bottom_hierarchy())
+    base = np.arange(1.0, summing.n_nodes + 1.0, dtype=np.float64)
+
+    reconciled = NixtlaReconciler("wls_struct").reconcile_vector(base, summing)
+
+    w_diag = dense.S @ np.ones(dense.n_bottom)
+    weighted = dense.S.T / w_diag
+    bottom = np.linalg.solve(weighted @ dense.S, weighted @ base)
+    np.testing.assert_allclose(reconciled, dense.S @ bottom, rtol=1e-3, atol=1e-6)

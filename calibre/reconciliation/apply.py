@@ -33,7 +33,7 @@ from calibre.core.forecast_frame import (
 from calibre.reconciliation.protocols import ReconciliationContext
 from calibre.reconciliation.summing import (
     HierarchyIndex,
-    SummingMatrix,
+    SummingMatrixLike,
     summing_matrix_from_index,
 )
 
@@ -57,8 +57,8 @@ class ReconciliationCrossSection:
     """One forecast cross-section aligned to a summing-matrix subset."""
 
     group: pd.DataFrame
-    summing: SummingMatrix
-    subset: SummingMatrix
+    summing: SummingMatrixLike
+    subset: SummingMatrixLike
     base: np.ndarray
     context: ReconciliationContext
     state: Any = None
@@ -82,7 +82,7 @@ class VectorReconciler:
     ) -> pd.DataFrame:
         if hierarchy_index is None or frame.empty:
             return frame
-        summing = summing_matrix_from_index(hierarchy_index)
+        summing = self.build_summing(hierarchy_index)
         state = self.prepare_reconcile(summing, context)
         order_col = _ORDER_COL
         while order_col in frame.columns:
@@ -95,16 +95,28 @@ class VectorReconciler:
         ]
         return pd.concat(parts).sort_values(order_col, kind="stable").drop(columns=order_col)
 
+    def build_summing(self, hierarchy_index: HierarchyIndex) -> SummingMatrixLike:
+        """Produce the summing-matrix representation for one frame apply.
+
+        Producer-selection seam: the summing matrix is built here in the
+        strategy-blind base harness, before any per-strategy code runs, so a
+        strategy with a sparse-capable implementation overrides this hook to
+        choose the csr producer. The base default stays dense for every other
+        consumer — without the override the full dense S (7.6 GiB at full M5)
+        would be materialized regardless of what the strategy can consume.
+        """
+        return summing_matrix_from_index(hierarchy_index)
+
     def prepare_reconcile(
         self,
-        summing: SummingMatrix,
+        summing: SummingMatrixLike,
         context: ReconciliationContext,
     ) -> Any:
         """Prepare state shared across cross-sections for one frame apply."""
         del summing, context
         return None
 
-    def reconcile_vector(self, base: np.ndarray, summing: SummingMatrix) -> np.ndarray:
+    def reconcile_vector(self, base: np.ndarray, summing: SummingMatrixLike) -> np.ndarray:
         """Map a node-level base vector to a coherent node-level vector.
 
         ``base`` and the return value are both length ``summing.n_nodes`` and
@@ -123,8 +135,8 @@ class VectorReconciler:
     def _base_vector(
         self,
         group: pd.DataFrame,
-        summing: SummingMatrix,
-    ) -> tuple[SummingMatrix, np.ndarray]:
+        summing: SummingMatrixLike,
+    ) -> tuple[SummingMatrixLike, np.ndarray]:
         uid_str = group[UNIQUE_ID].astype(str)
         duplicates = uid_str[uid_str.duplicated()].unique()
         if len(duplicates) > 0:
@@ -174,11 +186,11 @@ class VectorReconciler:
     def _coherent_vector(
         self,
         group: pd.DataFrame,
-        summing: SummingMatrix,
+        summing: SummingMatrixLike,
         *,
         context: ReconciliationContext,
         state: Any,
-    ) -> tuple[SummingMatrix, np.ndarray]:
+    ) -> tuple[SummingMatrixLike, np.ndarray]:
         subset, base = self._base_vector(group, summing)
         cross_section = ReconciliationCrossSection(
             group=group,
@@ -193,7 +205,7 @@ class VectorReconciler:
     def _reconcile_group(
         self,
         group: pd.DataFrame,
-        summing: SummingMatrix,
+        summing: SummingMatrixLike,
         *,
         context: ReconciliationContext,
         state: Any,
