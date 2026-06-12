@@ -19,6 +19,7 @@ from calibre.execution.hierarchy_memory import (
 )
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler, resolve_reconciler
+from calibre.reconciliation.nixtla_adapter import NIXTLA_SPARSE_STRATEGIES
 from calibre.reconciliation.summing import HierarchyIndex, build_hierarchy_index
 
 
@@ -51,6 +52,9 @@ class _ReconciliationConfig(Protocol):
 
 
 class _HierarchicalIntervalConfig(Protocol):
+    @property
+    def strategy(self) -> str: ...
+
     def to_phase(self) -> HierarchicalIntervalPhase: ...
 
 
@@ -116,13 +120,18 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
                 horizon=horizon,
                 model_count=len(config.tasks),
             )
-            # This branch is the densifying path (ols/erm/MinT point reconcilers
-            # and the fused interval phase all build the dense S per origin);
+            # This branch is the matrix-requiring path (the Nixtla point
+            # reconcilers and the fused interval phase build S per origin);
             # native bottom_up takes the bottom_only branch and never reaches
-            # here, so accounting the dense-S term unconditionally here is the
-            # implicit gate. node_count x n_bottom x 8 bytes (float64).
-            dense_s_bytes = len(hierarchy_index.node_labels) * len(hierarchy_index.bottom_ids) * 8
-            expansion = replace(expansion, dense_s_bytes=dense_s_bytes)
+            # here. The S term is strategy-conditional: the sparse-capable
+            # roster builds a csr (nnz*8 data + nnz*4 indices + (rows+1)*4
+            # indptr, nnz analytic from index facts), while erm/mint_shrink
+            # have no upstream sparse implementation and keep the dense
+            # node_count x n_bottom x 8 ceiling.
+            expansion = replace(
+                expansion,
+                summing_matrix_bytes=_summing_matrix_bytes(config, hierarchy_index),
+            )
             enforce_hierarchical_expansion_memory_limit(expansion)
             hierarchy_partitions = expansion.forecast_partitions
         actuals = build_node_history(bundle.history, hierarchy_index)
@@ -160,6 +169,30 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         ),
         conformal_partition_estimate=conformal_partition_estimate,
     )
+
+
+def _summing_matrix_bytes(config: RunPreparationConfig, hierarchy_index: HierarchyIndex) -> int:
+    """Per-origin summing-matrix bytes for the eager (matrix-requiring) branch.
+
+    The strategy decides the representation, so the preflight charges what the
+    run will actually allocate: the csr estimate for the sparse-capable roster
+    (computable from index facts without building anything), the dense float64
+    product only for the strategies with no upstream sparse implementation.
+    """
+    strategy = (
+        config.hierarchical_intervals.strategy
+        if config.hierarchical_intervals is not None
+        else config.reconciliation.strategy
+        if config.reconciliation is not None
+        else "none"
+    )
+    n_bottom = len(hierarchy_index.bottom_ids)
+    n_nodes = len(hierarchy_index.node_labels)
+    if strategy in NIXTLA_SPARSE_STRATEGIES:
+        # Identity block + one membership per attribute column + total row.
+        nnz = n_bottom * (2 + len(hierarchy_index.attr_cols))
+        return nnz * 8 + nnz * 4 + (n_nodes + 1) * 4
+    return n_nodes * n_bottom * 8
 
 
 def _is_point_bottom_up(config: RunPreparationConfig) -> bool:

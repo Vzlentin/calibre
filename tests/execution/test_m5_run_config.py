@@ -236,9 +236,10 @@ def test_estimated_node_history_peak_bounds_m5_fixture_expansion() -> None:
     assert estimated_node_history_peak_bytes(estimate) > node_history.memory_usage(deep=True).sum()
 
 
-def test_direct_call_estimate_leaves_dense_s_bytes_zero() -> None:
-    """estimate_hierarchical_expansion never sets the dense-S term itself; only
-    run preparation's densifying branch does (so direct-call peaks are unchanged)."""
+def test_direct_call_estimate_leaves_summing_matrix_bytes_zero() -> None:
+    """estimate_hierarchical_expansion never sets the summing-matrix term
+    itself; only run preparation's eager matrix-requiring branch does (so
+    direct-call peaks are unchanged)."""
     history = pd.DataFrame(
         {
             UNIQUE_ID: ["A", "B"],
@@ -250,11 +251,12 @@ def test_direct_call_estimate_leaves_dense_s_bytes_zero() -> None:
 
     estimate = estimate_hierarchical_expansion(history, build_hierarchy_index(hierarchy), horizon=1)
 
-    assert estimate.dense_s_bytes == 0
+    assert estimate.summing_matrix_bytes == 0
     peak = estimated_node_history_peak_bytes(estimate)
-    # The dense-S term is additive: a non-zero term raises the peak.
-    densified = replace(estimate, dense_s_bytes=4 * 2 * 8)
-    assert estimated_node_history_peak_bytes(densified) == peak + 4 * 2 * 8
+    # The summing-matrix term is additive regardless of which representation
+    # (csr or dense) sized it: a non-zero term raises the peak by exactly that.
+    with_matrix = replace(estimate, summing_matrix_bytes=4 * 2 * 8)
+    assert estimated_node_history_peak_bytes(with_matrix) == peak + 4 * 2 * 8
 
 
 def test_run_config_smoke_on_m5_fixture(tmp_path: Path) -> None:
