@@ -258,6 +258,64 @@ def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales
     assert predict_resp.status_code == 409
 
 
+def test_multi_fit_selection_is_first_for_writes_last_for_reads(client, stub_adapter, sales_uri):
+    """Characterization pin (R5): with several fits in a session, /calibrate and
+    /predict-driven /sessions diverge on which fit they select today. /calibrate
+    writes to the FIRST (insertion-order) fit, while /sessions reads the LAST.
+    This is exactly the split U4 collapses to LAST everywhere; pin today's
+    behavior before the flip.
+
+    Two identical /fit payloads share a derived session_id but mint distinct
+    fit_ids -> one session, two fits in insertion order.
+    """
+    store = api_main._LIFECYCLE_STORE
+
+    first_fit_id = client.post("/fit", json=_fit_payload(sales_uri)).json()["fit_id"]
+    second = client.post("/fit", json=_fit_payload(sales_uri)).json()
+    last_fit_id = second["fit_id"]
+    session_id = second["session_id"]
+    assert first_fit_id != last_fit_id
+
+    fits = store.fits_for_session(session_id)
+    assert [r.fit_id for r in fits] == [first_fit_id, last_fit_id], "insertion order"
+
+    # Predict on each fit so both carry a distinct last_forecast frame.
+    first_forecast = client.post(
+        "/predict", json={"fit_id": first_fit_id, "origin": "2024-02-04"}
+    ).json()["forecast"]
+
+    calibrate = client.post(
+        "/calibrate", json={"session_id": session_id, "forecast": first_forecast}
+    )
+    assert calibrate.status_code == 200, calibrate.text
+
+    # /calibrate selects the FIRST fit today: its last_calibrated is populated,
+    # the last fit's stays None.
+    assert store.get_fit(first_fit_id).last_calibrated is not None
+    assert store.get_fit(last_fit_id).last_calibrated is None
+
+    # /sessions reads the LAST fit today; it has no forecast yet (never
+    # predicted), so last_forecast is absent even though the first fit has one.
+    state = client.get("/sessions/acme/A").json()
+    assert state["last_forecast"] is None
+    assert store.get_fit(first_fit_id).last_forecast is not None
+
+    observe = client.post(
+        "/observe",
+        json={
+            "session_id": session_id,
+            "actuals": [
+                {UNIQUE_ID: "A", "ds": "2024-02-11", "y": 9.0},
+                {UNIQUE_ID: "A", "ds": "2024-02-18", "y": 11.0},
+            ],
+        },
+    )
+    assert observe.status_code == 202, observe.text
+    # The observe job ran against the FIRST fit's calibrated frame -> conformal
+    # state is recorded for the session.
+    assert store.get_conformal_state(session_id)
+
+
 def test_predict_reuses_fit_time_artifact_for_canonical_origin(client, stub_adapter, sales_uri):
     fit_resp = client.post("/fit", json=_fit_payload(sales_uri))
     assert fit_resp.status_code == 202, fit_resp.text
