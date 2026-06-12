@@ -262,14 +262,14 @@ def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales
     assert predict_resp.status_code == 409
 
 
-def test_multi_fit_selection_is_first_for_writes_last_for_reads(
-    client, store, stub_adapter, sales_uri
-):
-    """Characterization pin (R5): with several fits in a session, /calibrate and
-    /predict-driven /sessions diverge on which fit they select today. /calibrate
-    writes to the FIRST (insertion-order) fit, while /sessions reads the LAST.
-    This is exactly the split U4 collapses to LAST everywhere; pin today's
-    behavior before the flip.
+def test_multi_fit_selection_is_last_everywhere(client, store, stub_adapter, sales_uri):
+    """LAST-fit canonical (R3): with several fits in a session, /calibrate,
+    /observe, and /sessions all operate on the LAST (most-recent) fit.
+
+    This is the flip of the former first/first/last split: writing calibration
+    to the first fit while /sessions read the last diverged session state, since
+    last_calibrated lives on the fit record and the read model already chose the
+    last. Now write and read agree on the latest fit.
 
     Two identical /fit payloads share a derived session_id but mint distinct
     fit_ids -> one session, two fits in insertion order.
@@ -283,26 +283,24 @@ def test_multi_fit_selection_is_first_for_writes_last_for_reads(
     fits = store.fits_for_session(session_id)
     assert [r.fit_id for r in fits] == [first_fit_id, last_fit_id], "insertion order"
 
-    # Predict on each fit so both carry a distinct last_forecast frame.
-    first_forecast = client.post(
-        "/predict", json={"fit_id": first_fit_id, "origin": "2024-02-04"}
+    # Predict on the LAST fit so the calibrate path has a forecast to calibrate.
+    last_forecast = client.post(
+        "/predict", json={"fit_id": last_fit_id, "origin": "2024-02-04"}
     ).json()["forecast"]
 
     calibrate = client.post(
-        "/calibrate", json={"session_id": session_id, "forecast": first_forecast}
+        "/calibrate", json={"session_id": session_id, "forecast": last_forecast}
     )
     assert calibrate.status_code == 200, calibrate.text
 
-    # /calibrate selects the FIRST fit today: its last_calibrated is populated,
-    # the last fit's stays None.
-    assert store.get_fit(first_fit_id).last_calibrated is not None
-    assert store.get_fit(last_fit_id).last_calibrated is None
+    # /calibrate now selects the LAST fit: its last_calibrated is populated, the
+    # first fit's stays None.
+    assert store.get_fit(last_fit_id).last_calibrated is not None
+    assert store.get_fit(first_fit_id).last_calibrated is None
 
-    # /sessions reads the LAST fit today; it has no forecast yet (never
-    # predicted), so last_forecast is absent even though the first fit has one.
+    # /sessions reads the LAST fit and sees its forecast — write and read agree.
     state = client.get("/sessions/acme/A").json()
-    assert state["last_forecast"] is None
-    assert store.get_fit(first_fit_id).last_forecast is not None
+    assert [row[Y_HAT] for row in state["last_forecast"]] == [row[Y_HAT] for row in last_forecast]
 
     observe = client.post(
         "/observe",
@@ -315,7 +313,7 @@ def test_multi_fit_selection_is_first_for_writes_last_for_reads(
         },
     )
     assert observe.status_code == 202, observe.text
-    # The observe job ran against the FIRST fit's calibrated frame -> conformal
+    # The observe job ran against the LAST fit's calibrated frame -> conformal
     # state is recorded for the session.
     assert store.get_conformal_state(session_id)
 

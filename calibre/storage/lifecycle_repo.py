@@ -181,15 +181,19 @@ class SqlLifecycleStore:
             ).all()
             return [self._row_to_fit(row) for row in rows]
 
-    def first_fit_for_session(self, session_id: str) -> FitRecord | None:
+    def last_fit_for_session(self, session_id: str) -> FitRecord | None:
         with session_scope(self._factory) as session:
-            # Earliest-created fit is the canonical "first" for a session, to
-            # match the in-memory store's insertion order (a session can hold
-            # several fits). fit_id breaks ties deterministically.
+            # Most-recently-created fit is the canonical selection for a session
+            # (a session can hold several fits), matching the in-memory store's
+            # last-by-insertion-order. fit_id breaks created_at ties
+            # deterministically.
             row = session.scalars(
                 select(LifecycleFitRecord)
                 .where(LifecycleFitRecord.session_id == session_id)
-                .order_by(LifecycleFitRecord.created_at, LifecycleFitRecord.fit_id)
+                .order_by(
+                    LifecycleFitRecord.created_at.desc(),
+                    LifecycleFitRecord.fit_id.desc(),
+                )
                 .limit(1)
             ).first()
             return self._row_to_fit(row) if row is not None else None

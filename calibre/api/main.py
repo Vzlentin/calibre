@@ -303,7 +303,7 @@ def run_observe_job(
     *,
     store: LifecycleStoreProtocol,
 ) -> None:
-    record = store.first_fit_for_session(session_id)
+    record = store.last_fit_for_session(session_id)
     if record is None:
         logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
         return
@@ -411,6 +411,17 @@ def _maybe_json_records(frame: pd.DataFrame | None) -> list[dict] | None:
     if frame is None or frame.empty:
         return None
     return json_safe_records(frame)
+
+
+def _latest_fit(fits: list[FitRecord]) -> FitRecord:
+    """The most recent fit from an ascending ``created_at, fit_id`` list.
+
+    Both stores return ``fits_for_tenant_uid`` ordered ascending, so the last
+    element is the latest — the same canonical "last fit" selection
+    ``last_fit_for_session`` makes on the session-keyed paths. Named so the read
+    model's selection rule is explicit rather than a bare ``[-1]``.
+    """
+    return fits[-1]
 
 
 def create_app(
@@ -566,7 +577,7 @@ def create_app(
     @app.post("/calibrate", response_model=CalibrateResponse)
     def calibrate(req: CalibrateRequest, request: Request) -> CalibrateResponse:
         store = _stores(request).lifecycle_store
-        record = store.first_fit_for_session(req.session_id)
+        record = store.last_fit_for_session(req.session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="session not found")
         if record.conformal_config is None:
@@ -596,7 +607,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=format_error(exc)) from exc
         if req.session_id is not None:
             store = _stores(request).lifecycle_store
-            record = store.first_fit_for_session(req.session_id)
+            record = store.last_fit_for_session(req.session_id)
             if record is not None:
                 store.put_orders(record.tenant, req.session_id, orders_frame)
         return OrderResponse(rows=len(orders_frame), orders=json_safe_records(orders_frame))
@@ -604,7 +615,7 @@ def create_app(
     @app.post("/observe", response_model=ObserveResponse, status_code=202)
     def observe(req: ObserveRequest, bg: BackgroundTasks, request: Request) -> ObserveResponse:
         store = _stores(request).lifecycle_store
-        record = store.first_fit_for_session(req.session_id)
+        record = store.last_fit_for_session(req.session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="session not found")
         if record.conformal_config is None:
@@ -703,8 +714,8 @@ def create_app(
         fits = store.fits_for_tenant_uid(tenant, uid)
         if not fits:
             raise HTTPException(status_code=404, detail="session not found")
-        # fits_for_tenant_uid returns metadata only; load frames for the selected fit.
-        record = store.get_fit(fits[-1].fit_id)
+        # fits_for_tenant_uid returns metadata only; load frames for the latest fit.
+        record = store.get_fit(_latest_fit(fits).fit_id)
         if record is None:
             raise HTTPException(status_code=404, detail="session not found")
         return SessionStateResponse(
