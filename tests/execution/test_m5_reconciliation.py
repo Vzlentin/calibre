@@ -258,6 +258,144 @@ def _synthetic_residual_tasks(node_history: pd.DataFrame, *, horizon: int = 1):
     )
 
 
+# ---------------------------------------------------------------------------
+# Sparse-vs-dense agreement pins (#168). The expectations are the dense MinT
+# closed form S (S' W^-1 S)^-1 S' W^-1 y, captured against the dense path and
+# held within a bicgstab-generous tolerance so the same pins prove the sparse
+# MinTraceSparse path agrees with the old dense closed-form results.
+# ---------------------------------------------------------------------------
+
+# Generous enough for an iterative bicgstab solve (atol=1e-5 on the normal
+# equations), deliberately not float-roundoff tight; a wrong weight vector or
+# projection produces O(1) relative errors and still fails these pins.
+_SOLVER_RTOL = 1e-3
+_SOLVER_ATOL = 1e-6
+
+
+def _closed_form_min_trace(S: np.ndarray, w_diag: np.ndarray, base: np.ndarray) -> np.ndarray:
+    """Dense MinT projection with diagonal W: S (S' W^-1 S)^-1 S' W^-1 y."""
+    weighted = S.T / w_diag
+    bottom = np.linalg.solve(weighted @ S, weighted @ base)
+    return S @ bottom
+
+
+def _divergent_node_values(summing) -> np.ndarray:
+    """A deliberately incoherent node vector aligned to ``summing.node_labels``."""
+    rng = np.random.default_rng(7)
+    bottom = rng.uniform(5.0, 20.0, size=summing.n_bottom)
+    values = np.empty(summing.n_nodes, dtype=np.float64)
+    values[: summing.n_bottom] = bottom
+    coherent_aggregates = summing.S[summing.n_bottom :] @ bottom
+    perturbation = rng.uniform(0.8, 1.2, size=coherent_aggregates.size)
+    values[summing.n_bottom :] = coherent_aggregates * perturbation + 1.0
+    return values
+
+
+def _m5_hierarchy_frame() -> pd.DataFrame:
+    config = load_config_from_mapping(
+        {
+            "config_schema": "1.0",
+            "dataset": {"adapter": "m5", "path": str(_FIXTURE)},
+            "tasks": [
+                {
+                    "model": "SeasonalNaive",
+                    "horizon": 1,
+                    "config": {"backend": "statsforecast", "season_length": 7},
+                }
+            ],
+            "origins": {"start": "2011-01-30", "end": "2011-01-30", "freq": "D"},
+            "execution": {"backend": "local", "seed": 42},
+        }
+    )
+    bundle = _load_dataset(config)
+    assert bundle.hierarchy is not None
+    return bundle.hierarchy
+
+
+def _node_point_frame(node_labels: tuple[str, ...], values: np.ndarray) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: pd.Series(list(node_labels), dtype="object"),
+            DS: pd.to_datetime(["2011-02-01"] * len(node_labels)),
+            Y: np.full(len(node_labels), np.nan, dtype=np.float64),
+            Y_HAT: np.asarray(values, dtype=np.float64),
+            H: np.ones(len(node_labels), dtype=np.int64),
+            FORECAST_ORIGIN: pd.to_datetime(["2011-01-31"] * len(node_labels)),
+            MODEL_NAME: pd.Series(["m"] * len(node_labels), dtype="object"),
+        }
+    )
+
+
+def _node_residual_matrix(n_nodes: int, periods: int) -> np.ndarray:
+    """Deterministic per-node residuals with clearly nonzero means and variances."""
+    t = np.arange(periods, dtype=np.float64)
+    node = np.arange(n_nodes, dtype=np.float64)[:, None]
+    return 0.5 + 0.1 * node + 0.3 * np.sin(t[None, :] + node)
+
+
+def _node_fitted_frame(node_labels: tuple[str, ...], periods: int = 10) -> pd.DataFrame:
+    residuals = _node_residual_matrix(len(node_labels), periods)
+    dates = pd.date_range("2011-01-10", periods=periods, freq="D")
+    rows = []
+    for node_idx, label in enumerate(node_labels):
+        for step, ds in enumerate(dates):
+            y = 10.0 + node_idx + step
+            rows.append(
+                {
+                    UNIQUE_ID: label,
+                    DS: ds,
+                    Y: y,
+                    MODEL_NAME: "m",
+                    FITTED_Y_HAT: y - residuals[node_idx, step],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("strategy", ["ols", "wls_struct"])
+def test_point_min_trace_agrees_with_dense_closed_form(strategy: str) -> None:
+    pytest.importorskip("hierarchicalforecast.methods")
+    hierarchy = _m5_hierarchy_frame()
+    summing = build_summing_matrix(hierarchy)
+    base = _divergent_node_values(summing)
+    w_diag = (
+        np.ones(summing.n_nodes)
+        if strategy == "ols"
+        else summing.S @ np.ones(summing.n_bottom)
+    )
+    expected = _closed_form_min_trace(summing.S, w_diag, base)
+
+    out = NixtlaReconciler(strategy)(
+        _node_point_frame(summing.node_labels, base),
+        build_hierarchy_index(hierarchy),
+        ReconciliationContext(),
+    )
+
+    values = out.set_index(UNIQUE_ID)[Y_HAT].reindex(summing.node_labels).to_numpy(np.float64)
+    np.testing.assert_allclose(values, expected, rtol=_SOLVER_RTOL, atol=_SOLVER_ATOL)
+
+
+def test_point_wls_var_agrees_with_dense_closed_form() -> None:
+    pytest.importorskip("hierarchicalforecast.methods")
+    hierarchy = _m5_hierarchy_frame()
+    summing = build_summing_matrix(hierarchy)
+    base = _divergent_node_values(summing)
+    periods = 10
+    residuals = _node_residual_matrix(summing.n_nodes, periods)
+    # Dense MinTrace wls_var weights: mean squared residual per node + 2e-8.
+    w_diag = (residuals**2).sum(axis=1) / periods + 2e-8
+    expected = _closed_form_min_trace(summing.S, w_diag, base)
+
+    out = NixtlaReconciler("wls_var")(
+        _node_point_frame(summing.node_labels, base),
+        build_hierarchy_index(hierarchy),
+        ReconciliationContext(fitted_values=_node_fitted_frame(summing.node_labels, periods)),
+    )
+
+    values = out.set_index(UNIQUE_ID)[Y_HAT].reindex(summing.node_labels).to_numpy(np.float64)
+    np.testing.assert_allclose(values, expected, rtol=_SOLVER_RTOL, atol=_SOLVER_ATOL)
+
+
 def test_summing_matrix_built_from_real_m5_attributes() -> None:
     bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
     summing = build_summing_matrix(bundle.hierarchy)
