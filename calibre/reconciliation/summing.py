@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,57 @@ from scipy import sparse
 from calibre.core.forecast_frame import UNIQUE_ID
 
 TOTAL_LABEL = "__total__"
+
+
+class _SummingMatrixOps:
+    """Shared label-derived interface for both summing-matrix representations.
+
+    ``subset`` relies only on representation-agnostic operations — column
+    fancy-indexing, ``sum(axis=1)`` returning a plain ndarray, and boolean row
+    masking — which hold for both ``np.ndarray`` and ``csr_array``.
+    """
+
+    __slots__ = ()
+
+    S: Any  # np.ndarray | sparse.csr_array — narrowed by each dataclass
+    bottom_ids: tuple[str, ...]
+    node_labels: tuple[str, ...]
+
+    @property
+    def n_bottom(self) -> int:
+        return len(self.bottom_ids)
+
+    @property
+    def n_nodes(self) -> int:
+        return len(self.node_labels)
+
+    @property
+    def total_index(self) -> int:
+        return self.node_labels.index(TOTAL_LABEL)
+
+    def _subset_parts(
+        self, present_ids: Sequence[str]
+    ) -> tuple[Any, tuple[str, ...], tuple[str, ...]]:
+        """Restrict S to ``present_ids`` (a subset of the bottom ids).
+
+        Columns are sliced to the present bottom ids (preserving canonical
+        order) and any aggregate/identity row left with no present member is
+        dropped, so a cross-section that forecasts only some series still
+        aligns to a coherent summing matrix. The bottom identity block stays
+        the leading rows, so the reconciled bottom vector remains
+        ``S[:n_bottom]``. Returns ``(S, bottom_ids, node_labels)`` for the
+        concrete ``subset`` implementations to wrap in their own type.
+        """
+        wanted = {str(uid) for uid in present_ids}
+        unknown = wanted - set(self.bottom_ids)
+        if unknown:
+            raise ValueError(f"present_ids not in summing matrix bottom ids: {sorted(unknown)}")
+        col_idx = [i for i, uid in enumerate(self.bottom_ids) if uid in wanted]
+        present = tuple(self.bottom_ids[i] for i in col_idx)
+        sub = self.S[:, col_idx]
+        keep = sub.sum(axis=1) > 0
+        labels = tuple(label for label, k in zip(self.node_labels, keep, strict=True) if k)
+        return sub[keep], present, labels
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +122,7 @@ class HierarchyIndex:
 
 
 @dataclass(frozen=True, slots=True)
-class SummingMatrix:
+class SummingMatrix(_SummingMatrixOps):
     """A dense summing matrix plus the node/bottom labels that index it.
 
     Attributes:
@@ -85,44 +137,14 @@ class SummingMatrix:
     bottom_ids: tuple[str, ...]
     node_labels: tuple[str, ...]
 
-    @property
-    def n_bottom(self) -> int:
-        return len(self.bottom_ids)
-
-    @property
-    def n_nodes(self) -> int:
-        return len(self.node_labels)
-
-    @property
-    def total_index(self) -> int:
-        return self.node_labels.index(TOTAL_LABEL)
-
     def subset(self, present_ids: Sequence[str]) -> SummingMatrix:
-        """Restrict S to ``present_ids`` (a subset of the bottom ids).
-
-        Columns are sliced to the present bottom ids (preserving canonical
-        order) and any aggregate/identity row left with no present member is
-        dropped, so a cross-section that forecasts only some series still aligns
-        to a coherent summing matrix. The bottom identity block stays the leading
-        rows, so the reconciled bottom vector remains ``S[:n_bottom]``.
-        """
-        wanted = {str(uid) for uid in present_ids}
-        unknown = wanted - set(self.bottom_ids)
-        if unknown:
-            raise ValueError(f"present_ids not in summing matrix bottom ids: {sorted(unknown)}")
-        col_idx = [i for i, uid in enumerate(self.bottom_ids) if uid in wanted]
-        present = tuple(self.bottom_ids[i] for i in col_idx)
-        sub = self.S[:, col_idx]
-        keep = sub.sum(axis=1) > 0
-        return SummingMatrix(
-            S=sub[keep],
-            bottom_ids=present,
-            node_labels=tuple(label for label, k in zip(self.node_labels, keep, strict=True) if k),
-        )
+        """Restrict S to ``present_ids``; rules in ``_subset_parts``."""
+        S, bottom_ids, node_labels = self._subset_parts(present_ids)
+        return SummingMatrix(S=S, bottom_ids=bottom_ids, node_labels=node_labels)
 
 
 @dataclass(frozen=True, slots=True)
-class SparseSummingMatrix:
+class SparseSummingMatrix(_SummingMatrixOps):
     """A csr summing matrix plus the node/bottom labels that index it.
 
     Same node layout and consumer interface as :class:`SummingMatrix`
@@ -146,38 +168,10 @@ class SparseSummingMatrix:
     bottom_ids: tuple[str, ...]
     node_labels: tuple[str, ...]
 
-    @property
-    def n_bottom(self) -> int:
-        return len(self.bottom_ids)
-
-    @property
-    def n_nodes(self) -> int:
-        return len(self.node_labels)
-
-    @property
-    def total_index(self) -> int:
-        return self.node_labels.index(TOTAL_LABEL)
-
     def subset(self, present_ids: Sequence[str]) -> SparseSummingMatrix:
-        """Restrict S to ``present_ids``, mirroring ``SummingMatrix.subset``.
-
-        Same node-label filtering rules as the dense port: columns are sliced
-        to the present bottom ids in canonical order and any row left with no
-        present member is dropped, keeping the bottom identity block leading.
-        """
-        wanted = {str(uid) for uid in present_ids}
-        unknown = wanted - set(self.bottom_ids)
-        if unknown:
-            raise ValueError(f"present_ids not in summing matrix bottom ids: {sorted(unknown)}")
-        col_idx = [i for i, uid in enumerate(self.bottom_ids) if uid in wanted]
-        present = tuple(self.bottom_ids[i] for i in col_idx)
-        sub = self.S[:, col_idx]
-        keep = sub.sum(axis=1) > 0
-        return SparseSummingMatrix(
-            S=sub[keep],
-            bottom_ids=present,
-            node_labels=tuple(label for label, k in zip(self.node_labels, keep, strict=True) if k),
-        )
+        """Restrict S to ``present_ids``; rules in ``_subset_parts``."""
+        S, bottom_ids, node_labels = self._subset_parts(present_ids)
+        return SparseSummingMatrix(S=S, bottom_ids=bottom_ids, node_labels=node_labels)
 
 
 SummingMatrixLike = SummingMatrix | SparseSummingMatrix

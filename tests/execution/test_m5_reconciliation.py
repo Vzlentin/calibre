@@ -52,6 +52,7 @@ from calibre.reconciliation import (
     ReconciliationContext,
 )
 from calibre.reconciliation.summing import build_hierarchy_index, build_summing_matrix
+from tests.infra import closed_form_min_trace
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "m5"
 
@@ -273,13 +274,6 @@ _SOLVER_RTOL = 1e-3
 _SOLVER_ATOL = 1e-6
 
 
-def _closed_form_min_trace(S: np.ndarray, w_diag: np.ndarray, base: np.ndarray) -> np.ndarray:
-    """Dense MinT projection with diagonal W: S (S' W^-1 S)^-1 S' W^-1 y."""
-    weighted = S.T / w_diag
-    bottom = np.linalg.solve(weighted @ S, weighted @ base)
-    return S @ bottom
-
-
 def _divergent_node_values(summing) -> np.ndarray:
     """A deliberately incoherent node vector aligned to ``summing.node_labels``."""
     rng = np.random.default_rng(7)
@@ -362,7 +356,7 @@ def test_point_min_trace_agrees_with_dense_closed_form(strategy: str) -> None:
     w_diag = (
         np.ones(summing.n_nodes) if strategy == "ols" else summing.S @ np.ones(summing.n_bottom)
     )
-    expected = _closed_form_min_trace(summing.S, w_diag, base)
+    expected = closed_form_min_trace(summing.S, w_diag, base)
 
     out = NixtlaReconciler(strategy)(
         _node_point_frame(summing.node_labels, base),
@@ -384,11 +378,11 @@ def test_point_wls_var_agrees_with_dense_closed_form() -> None:
     # MinTraceSparse wls_var weights: unbiased residual variance per node
     # (nanvar, ddof=1). This is a documented estimator change from the dense
     # MinTrace path, which weighted by the mean squared residual + 2e-8
-    # jitter — at this fixture the two estimators diverge by ~1.5% in the
+    # jitter â€” at this fixture the two estimators diverge by ~1.5% in the
     # reconciled values, well past the solver tolerance, so this pin proves
     # the sparse path carries the upstream sparse estimator.
     w_diag = residuals.var(axis=1, ddof=1)
-    expected = _closed_form_min_trace(summing.S, w_diag, base)
+    expected = closed_form_min_trace(summing.S, w_diag, base)
 
     out = NixtlaReconciler("wls_var")(
         _node_point_frame(summing.node_labels, base),
@@ -411,7 +405,7 @@ def test_fused_min_trace_point_output_agrees_with_dense_closed_form(strategy: st
     w_diag = (
         np.ones(summing.n_nodes) if strategy == "ols" else summing.S @ np.ones(summing.n_bottom)
     )
-    expected = _closed_form_min_trace(summing.S, w_diag, base)
+    expected = closed_form_min_trace(summing.S, w_diag, base)
 
     phase = NixtlaHierarchicalIntervalPhase(
         HierarchicalIntervalOptions(method="nixtla_conformal", coverage=0.9, strategy=strategy)

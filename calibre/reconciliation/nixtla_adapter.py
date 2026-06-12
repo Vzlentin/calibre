@@ -168,6 +168,9 @@ def _make_checked_min_trace_sparse(
                 y_insample=y_insample,
                 y_hat_insample=y_hat_insample,
             )
+            # csr_matrix (not csr_array) deliberately mirrors the upstream
+            # MinTraceSparse P-action arithmetic this closure replaces — the
+            # checked variant must replay the exact same operators.
             S_csr = sparse.csr_matrix(S)
             w_diag = np.asarray(W.diagonal(), dtype=np.float64)
             R = sparse.csr_matrix(
@@ -262,7 +265,10 @@ def _cache_key(summing: SummingMatrixLike) -> _CacheKey:
         # the csr index arrays (~850 KB at full M5) instead of the dense
         # bytes (7.6 GiB) the dense branch below would hash.
         S = summing.S
-        digest = hashlib.blake2b(S.indices.tobytes() + S.indptr.tobytes(), digest_size=16).digest()
+        hasher = hashlib.blake2b(digest_size=16)
+        hasher.update(S.indices.tobytes())
+        hasher.update(S.indptr.tobytes())
+        digest = hasher.digest()
         shape = (int(S.shape[0]), int(S.shape[1]))
         return (tuple(summing.bottom_ids), tuple(summing.node_labels), shape, digest)
     dense = np.ascontiguousarray(summing.S, dtype=np.float64)

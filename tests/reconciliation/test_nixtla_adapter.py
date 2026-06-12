@@ -34,6 +34,7 @@ from calibre.reconciliation.summing import (
     build_summing_matrix,
     sparse_summing_matrix_from_index,
 )
+from tests.infra import closed_form_min_trace
 
 
 class _CountingMethod:
@@ -687,6 +688,5 @@ def test_unstarved_checked_solve_converges_and_matches_closed_form() -> None:
     reconciled = NixtlaReconciler("wls_struct").reconcile_vector(base, summing)
 
     w_diag = dense.S @ np.ones(dense.n_bottom)
-    weighted = dense.S.T / w_diag
-    bottom = np.linalg.solve(weighted @ dense.S, weighted @ base)
-    np.testing.assert_allclose(reconciled, dense.S @ bottom, rtol=1e-3, atol=1e-6)
+    expected = closed_form_min_trace(dense.S, w_diag, base)
+    np.testing.assert_allclose(reconciled, expected, rtol=1e-3, atol=1e-6)
