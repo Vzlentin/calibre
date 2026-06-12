@@ -44,6 +44,7 @@ from calibre.forecasting.adapter_base import ModelAdapter, build_fitted_values_f
 from calibre.ordering.policy_config import RsConfig
 from calibre.reconciliation import (
     BottomUpReconciler,
+    HierarchicalIntervalContext,
     HierarchicalIntervalOptions,
     NixtlaHierarchicalIntervalPhase,
     NixtlaReconciler,
@@ -399,6 +400,56 @@ def test_point_wls_var_agrees_with_dense_closed_form() -> None:
 
     values = out.set_index(UNIQUE_ID)[Y_HAT].reindex(summing.node_labels).to_numpy(np.float64)
     np.testing.assert_allclose(values, expected, rtol=_SOLVER_RTOL, atol=_SOLVER_ATOL)
+
+
+@pytest.mark.parametrize("strategy", ["ols", "wls_struct"])
+def test_fused_min_trace_point_output_agrees_with_dense_closed_form(strategy: str) -> None:
+    """The fused phase's reconciled mean through MinTraceSparse + sparse S_df
+    matches the dense MinT closed form within solver tolerance (#168)."""
+    pytest.importorskip("hierarchicalforecast.core")
+    hierarchy = _m5_hierarchy_frame()
+    summing = build_summing_matrix(hierarchy)
+    base = _divergent_node_values(summing)
+    w_diag = (
+        np.ones(summing.n_nodes)
+        if strategy == "ols"
+        else summing.S @ np.ones(summing.n_bottom)
+    )
+    expected = _closed_form_min_trace(summing.S, w_diag, base)
+
+    phase = NixtlaHierarchicalIntervalPhase(
+        HierarchicalIntervalOptions(method="nixtla_conformal", coverage=0.9, strategy=strategy)
+    )
+    out = phase.apply(
+        _node_point_frame(summing.node_labels, base),
+        build_hierarchy_index(hierarchy),
+        HierarchicalIntervalContext(fitted_values=_node_fitted_frame(summing.node_labels)),
+    )
+
+    values = out.set_index(UNIQUE_ID)[Y_HAT].reindex(summing.node_labels).to_numpy(np.float64)
+    np.testing.assert_allclose(values, expected, rtol=_SOLVER_RTOL, atol=_SOLVER_ATOL)
+
+
+def test_fused_bottom_up_point_output_equals_bottom_sums() -> None:
+    """Fused bottom_up through BottomUpSparse + sparse S_df: the reconciled
+    mean is exactly the aggregated bottom block of the base forecasts."""
+    pytest.importorskip("hierarchicalforecast.core")
+    hierarchy = _m5_hierarchy_frame()
+    summing = build_summing_matrix(hierarchy)
+    base = _divergent_node_values(summing)
+    expected = summing.S @ base[: summing.n_bottom]
+
+    phase = NixtlaHierarchicalIntervalPhase(
+        HierarchicalIntervalOptions(method="nixtla_conformal", coverage=0.9, strategy="bottom_up")
+    )
+    out = phase.apply(
+        _node_point_frame(summing.node_labels, base),
+        build_hierarchy_index(hierarchy),
+        HierarchicalIntervalContext(fitted_values=_node_fitted_frame(summing.node_labels)),
+    )
+
+    values = out.set_index(UNIQUE_ID)[Y_HAT].reindex(summing.node_labels).to_numpy(np.float64)
+    np.testing.assert_allclose(values, expected, rtol=1e-10, atol=1e-10)
 
 
 def test_summing_matrix_built_from_real_m5_attributes() -> None:
