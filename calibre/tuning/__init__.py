@@ -1,6 +1,9 @@
 from calibre.tuning.objectives import Accuracy, Cost, CumulativePinball, Pareto, TuningObjective
 from calibre.tuning.optimizer import (
+    OBJECTIVE_METRIC,
+    ORIGIN_INDEX,
     StudyOutcome,
+    evaluate_candidate,
     optimize_global_task,
     optimize_global_task_candidate,
     optimize_local_task,
@@ -10,6 +13,8 @@ from calibre.tuning.optimizer import (
 from calibre.tuning.task import GlobalTuningTask, LocalTuningTask, StudyConfig, TuningCandidate
 
 __all__ = [
+    "OBJECTIVE_METRIC",
+    "ORIGIN_INDEX",
     "Accuracy",
     "Cost",
     "CumulativePinball",
@@ -20,6 +25,7 @@ __all__ = [
     "StudyOutcome",
     "TuningCandidate",
     "TuningObjective",
+    "evaluate_candidate",
     "optimize_global_task",
     "optimize_global_task_candidate",
     "optimize_local_task",

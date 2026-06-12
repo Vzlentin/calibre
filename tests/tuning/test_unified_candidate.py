@@ -13,8 +13,8 @@ from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_
 from calibre.tuning.optimizer import (
     _apply_conformal_overrides,
     _apply_ordering_overrides,
-    _evaluate_candidate,
     _resolve_candidate,
+    evaluate_candidate,
 )
 from calibre.tuning.task import LocalTuningTask, StudyConfig, TuningCandidate
 
@@ -163,7 +163,7 @@ def test_conformal_params_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     candidate = task.search_space(optuna.trial.FixedTrial({}))
-    _evaluate_candidate(task, candidate, [pd.Timestamp("2024-01-14")])
+    evaluate_candidate(task, candidate, [pd.Timestamp("2024-01-14")])
 
     assert captured, "from_state was not invoked"
     applied = captured[-1]
@@ -224,7 +224,7 @@ def test_ordering_params_propagate_to_objective(monkeypatch: pytest.MonkeyPatch)
     )
 
     candidate = task.search_space(optuna.trial.FixedTrial({}))
-    value = _evaluate_candidate(task, candidate, [pd.Timestamp("2024-01-14")])
+    value = evaluate_candidate(task, candidate, [pd.Timestamp("2024-01-14")])
 
     assert weights_seen == [4.0]
     assert value == pytest.approx(4.0 * 2.0)
