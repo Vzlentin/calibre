@@ -8,7 +8,8 @@ from contextlib import contextmanager
 
 @contextmanager
 def restore_cwd():
-    """Restore the original working directory on exit, even on error.
+    """Save the working directory and restore it on exit, even on error —
+    a ``chdir`` inside the block cannot leak to the caller.
 
     Backs the autouse ``_restore_cwd`` fixture in ``tests/conftest.py``: some
     test dependencies (e.g. Ray Tune trials) chdir and don't always restore,

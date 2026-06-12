@@ -13,13 +13,13 @@ from calibre.tuning.optimizer import (
 from calibre.tuning.task import GlobalTuningTask, LocalTuningTask, StudyConfig, TuningCandidate
 
 __all__ = [
-    "OBJECTIVE_METRIC",
-    "ORIGIN_INDEX",
     "Accuracy",
     "Cost",
     "CumulativePinball",
     "GlobalTuningTask",
     "LocalTuningTask",
+    "OBJECTIVE_METRIC",
+    "ORIGIN_INDEX",
     "Pareto",
     "StudyConfig",
     "StudyOutcome",
