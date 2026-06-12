@@ -20,7 +20,14 @@ from mlforecast.lag_transforms import RollingMean
 import benchmarks.vn2.replay as replay_module
 import benchmarks.vn2.run_benchmark as run_benchmark_module
 import benchmarks.vn2.search as search_module
-from benchmarks.vn2.config import BEST_CONFIG, CUMULATIVE_BEST_CONFIG, TOP1_CRC_CONFIG
+from benchmarks.vn2.config import (
+    BEST_CONFIG,
+    CUMULATIVE_BEST_CONFIG,
+    HPO_N_ORIGINS,
+    HPO_N_TRIALS,
+    HPO_TIMEOUT_SEC,
+    TOP1_CRC_CONFIG,
+)
 from benchmarks.vn2.data import as_cumulative_decision_frame, prepare_cumulative_target_history
 from benchmarks.vn2.diagnostics import optimal_order_path_for_sku
 from benchmarks.vn2.replay import (
@@ -311,6 +318,12 @@ def test_run_benchmark_tune_true_runs_hpo_and_threads_its_config(monkeypatch) ->
     assert len(hpo_calls) == 1
     assert threaded["config"] is tuned_config
     assert not result.empty
+    # The documented fixed-budget contract: with no overrides, the HPO budget
+    # reaching run_hpo is the config.py module constants — what the --tune
+    # help text and deployment.md promise (the YAML carries no budget).
+    assert hpo_calls[0]["n_trials"] == HPO_N_TRIALS
+    assert hpo_calls[0]["n_origins"] == HPO_N_ORIGINS
+    assert hpo_calls[0]["timeout_sec"] == HPO_TIMEOUT_SEC
 
 
 def test_run_from_config_threads_tune_flag_to_run_benchmark(monkeypatch) -> None:
