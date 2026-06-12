@@ -95,4 +95,39 @@ class TestOrderEndpoint:
             },
         )
         assert resp.status_code == 400, resp.text
-        assert "quantile is not a valid knob for the newsvendor" in resp.json()["detail"]
+        assert (
+            "invalid ordering spec: ordering.quantile is not a valid knob for the newsvendor"
+            in resp.json()["detail"]
+        )
+
+    def test_order_endpoint_missing_params_is_4xx(self) -> None:
+        client = TestClient(app)
+        resp = client.post(
+            "/order",
+            json={
+                "calibrated": _calibrated_records(),
+                "ordering": {"policy": "rs"},
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "ordering.params is required" in resp.json()["detail"]
+
+    def test_order_endpoint_newsvendor_explicit_null_period_uses_default(self) -> None:
+        """Explicit ``period: null`` is equivalent to omitting the knob: the
+        factory keys optional knobs on value-is-not-None, never key presence
+        (the CLI's model_dump() always emits the key as None), so the request
+        succeeds with NewsvendorConfig's default period of 1."""
+        client = TestClient(app)
+        resp = client.post(
+            "/order",
+            json={
+                "calibrated": _calibrated_records(),
+                "ordering": {
+                    "policy": "newsvendor",
+                    "params": _NEWSVENDOR_PARAMS,
+                    "period": None,
+                },
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["orders"]) == 1
