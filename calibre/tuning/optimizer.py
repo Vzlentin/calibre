@@ -528,6 +528,9 @@ def evaluate_candidate(
     candidate: TuningCandidate,
     origins: list[pd.Timestamp],
 ) -> float:
+    """Evaluate one candidate over the given origins and return the aggregated
+    objective cost — the trial-evaluation seam shared by the Ray trainable and
+    the sequential fallback."""
     runtime_snapshot = _snapshot_conformal_runtime(task)
     conformal_options = _conformal_options(
         runtime_snapshot.config if runtime_snapshot is not None else None,
