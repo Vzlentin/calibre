@@ -17,11 +17,21 @@ def main(argv: list[str] | None = None) -> None:
         required=True,
         help="Path to a BackendConfig YAML file",
     )
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help=(
+            "Run the fixed-budget hyper-parameter search before the benchmark "
+            "replay. The HPO budget (trials, origins, timeout) comes from "
+            "benchmarks/vn2/config.py module constants; the YAML's model block "
+            "and any hpo budget are not read."
+        ),
+    )
     args = parser.parse_args(argv)
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     config = load_config(args.config)
-    run_from_config(config)
+    run_from_config(config, tune=args.tune)
 
 
 if __name__ == "__main__":

@@ -29,9 +29,10 @@ from benchmarks.vn2.replay import (
     round_actuals,
     run_order_conformal_warmup,
 )
-from benchmarks.vn2.run_benchmark import run_benchmark
+from benchmarks.vn2.run_benchmark import run_benchmark, run_from_config
 from benchmarks.vn2.search import run_cost_search, run_hpo
 from benchmarks.vn2.simulator import ProductState, extract_new_actuals, load_initial_states
+from calibre.cli.config import load_config_from_mapping
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
     CumulativeRiskRuntime,
@@ -108,9 +109,12 @@ class TestVN2BenchmarkIntegration:
         series = _get_first_n_series(3)
         assert set(benchmark_costs["unique_id"]) == set(series)
         assert len(benchmark_costs) == len(series)
-        assert {"unique_id", "holding_cost", "shortage_cost", "total_cost"}.issubset(
-            benchmark_costs.columns
-        )
+        assert set(benchmark_costs.columns) == {
+            "unique_id",
+            "holding_cost",
+            "shortage_cost",
+            "total_cost",
+        }
 
     def test_costs_are_finite_non_negative_and_additive(
         self, benchmark_costs: pd.DataFrame
@@ -268,6 +272,73 @@ def test_run_benchmark_defaults_to_committed_best_config(monkeypatch) -> None:
     )
 
     assert not result.empty
+
+
+def test_run_benchmark_tune_true_runs_hpo_and_threads_its_config(monkeypatch) -> None:
+    """tune=True liveness lock: run_hpo fires exactly once and its returned
+    config (not BEST_CONFIG) is the one threaded into the benchmark run."""
+    hpo_calls: list[dict[str, Any]] = []
+    threaded: dict[str, Any] = {}
+    tuned_config = {**_FAST_BEST_CONFIG, "name": "hpo_tuned_lgbm"}
+
+    def _fake_run_hpo(**kwargs):
+        hpo_calls.append(kwargs)
+        return tuned_config
+
+    real_strip_private = run_benchmark_module.strip_private
+
+    def _capture_strip_private(config):
+        threaded["config"] = config
+        return real_strip_private(config)
+
+    monkeypatch.setattr(run_benchmark_module, "run_hpo", _fake_run_hpo)
+    monkeypatch.setattr(run_benchmark_module, "strip_private", _capture_strip_private)
+
+    result = run_benchmark(
+        data_dir=DATA_DIR,
+        horizon=3,
+        lead_time=2,
+        review_period=1,
+        decision_rounds=1,
+        delivery_weeks=1,
+        series_filter=_get_first_n_series(2),
+        results_dir=None,
+        verbose=False,
+        tune=True,
+        order_conformal_warmup_origins=1,
+    )
+
+    assert len(hpo_calls) == 1
+    assert threaded["config"] is tuned_config
+    assert not result.empty
+
+
+def test_run_from_config_threads_tune_flag_to_run_benchmark(monkeypatch) -> None:
+    """The run_from_config seam lock: the tune kwarg reaches run_benchmark in
+    both directions (the dead-knob class hardcoded tune=False regardless)."""
+    captured: dict[str, Any] = {}
+
+    def _fake_run_benchmark(**kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame({UNIQUE_ID: ["A"], "total_cost": [0.0]})
+
+    monkeypatch.setattr(run_benchmark_module, "run_benchmark", _fake_run_benchmark)
+    config = load_config_from_mapping(
+        {
+            "config_schema": "1.0",
+            "dataset": {"adapter": "vn2", "path": "data/vn2"},
+            "tasks": [{"model": "global_lgbm", "horizon": 3, "config": {"backend": "mlforecast"}}],
+            "origins": {"start": "2024-01-01", "end": "2024-01-01", "freq": "W-MON"},
+            "output": {"streaming": False},
+            "execution": {"backend": "local", "seed": 42},
+        }
+    )
+
+    run_from_config(config, tune=True)
+    assert captured["tune"] is True
+
+    run_from_config(config)
+    assert captured["tune"] is False
 
 
 def test_cached_replay_matches_run_benchmark_on_small_subset() -> None:

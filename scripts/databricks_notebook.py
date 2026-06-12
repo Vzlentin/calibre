@@ -81,9 +81,9 @@ print(f"Smoke test exit code: {result}")
 # MAGIC After the smoke test passes, run the VN2 winning benchmark:
 # MAGIC
 # MAGIC ```python
-# MAGIC from benchmarks.vn2.run_winning import run_winning
+# MAGIC from benchmarks.vn2.run_benchmark import run_benchmark
 # MAGIC
-# MAGIC summary = run_winning(
+# MAGIC summary = run_benchmark(
 # MAGIC     data_dir="/dbfs/mnt/calibre/vn2-fixture",
 # MAGIC     results_dir="/dbfs/mnt/calibre/results",
 # MAGIC     verbose=True,
