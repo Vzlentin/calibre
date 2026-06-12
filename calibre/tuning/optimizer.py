@@ -33,8 +33,8 @@ if TYPE_CHECKING:
     from ray import ObjectRef
     from ray.tune import Callback, Result, ResultGrid
 
-_OBJECTIVE_METRIC = "objective"
-_ORIGIN_INDEX = "origin_index"
+OBJECTIVE_METRIC = "objective"
+ORIGIN_INDEX = "origin_index"
 _DEFAULT_TUNE_RESULTS_SUBDIR = "ray_tune"
 _FORECAST_KEY_COLUMNS = [UNIQUE_ID, DS, FORECAST_ORIGIN, MODEL_NAME, H]
 
@@ -103,7 +103,7 @@ def _resolve_tune_storage_path(task: LocalTuningTask) -> str:
 
 
 @contextmanager
-def restore_cwd():
+def _restore_cwd():
     """Ray Tune trials chdir into a per-trial working dir and don't always restore it."""
     original = os.getcwd()
     try:
@@ -218,7 +218,7 @@ def _objective_contribution_with(
 def _best_result_config(
     results: ResultGrid,
     *,
-    metric: str = _OBJECTIVE_METRIC,
+    metric: str = OBJECTIVE_METRIC,
     mode: str = "min",
 ) -> dict[str, Any]:
     valid_results: list[Result] = [
@@ -258,9 +258,9 @@ def run_optuna_study(
     max_concurrent_trials: int,
     ray_address: str | None,
     tune_storage_path: str,
-    metric: str = _OBJECTIVE_METRIC,
+    metric: str = OBJECTIVE_METRIC,
     mode: str = "min",
-    time_attr: str = _ORIGIN_INDEX,
+    time_attr: str = ORIGIN_INDEX,
     experiment_name: str | None = None,
     callbacks: list[Callback] | None = None,
     trial_state: dict[str, Any] | None = None,
@@ -329,7 +329,7 @@ def run_optuna_study(
         if experiment_name is not None:
             run_config_kwargs["name"] = experiment_name
 
-        with _ray_tune_env(), restore_cwd():
+        with _ray_tune_env(), _restore_cwd():
             tuner = tune.Tuner(
                 trainable_with_resources,
                 tune_config=tune.TuneConfig(
@@ -462,11 +462,11 @@ def _score_forecast_task(
             if not isfinite(contribution):
                 total_cost = float("inf")
                 if report is not None:
-                    report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
+                    report({OBJECTIVE_METRIC: total_cost, ORIGIN_INDEX: origin_idx})
                 return total_cost
             total_cost += contribution
             if report is not None:
-                report({_OBJECTIVE_METRIC: total_cost, _ORIGIN_INDEX: origin_idx})
+                report({OBJECTIVE_METRIC: total_cost, ORIGIN_INDEX: origin_idx})
     return total_cost
 
 
@@ -501,7 +501,7 @@ def _score_candidate(
 ) -> float:
     """Build the trial's ForecastTask + objective and backtest it to an objective value.
 
-    Shared by sequential evaluation (:func:`_evaluate_candidate`) and the Ray Tune
+    Shared by sequential evaluation (:func:`evaluate_candidate`) and the Ray Tune
     trainable (:func:`_make_ray_trainable`).
     """
     study_config = task.study_config
@@ -523,11 +523,14 @@ def _score_candidate(
         )
 
 
-def _evaluate_candidate(
+def evaluate_candidate(
     task: LocalTuningTask,
     candidate: TuningCandidate,
     origins: list[pd.Timestamp],
 ) -> float:
+    """Evaluate one candidate over the given origins and return the aggregated
+    objective cost — the trial-evaluation seam shared by the Ray trainable and
+    the sequential fallback."""
     runtime_snapshot = _snapshot_conformal_runtime(task)
     conformal_options = _conformal_options(
         runtime_snapshot.config if runtime_snapshot is not None else None,
@@ -550,7 +553,7 @@ def _optimize_task_sequential(task: LocalTuningTask, origins: list[pd.Timestamp]
     def _objective(trial: optuna.Trial) -> float:
         candidate = _resolve_candidate(task.search_space(trial))
         trial.set_user_attr("resolved_config", dict(candidate.model_config))
-        return _evaluate_candidate(task, candidate, origins)
+        return evaluate_candidate(task, candidate, origins)
 
     study.optimize(_objective, n_trials=config.n_trials, gc_after_trial=True)
     if not study.trials or study.best_trial.value is None or not isfinite(study.best_trial.value):

@@ -44,6 +44,7 @@ from calibre.conformal.partitions import global_partition, series_partition
 from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
 from calibre.execution.data_loading import load_period
 from calibre.tuning import (
+    OBJECTIVE_METRIC,
     CumulativePinball,
     GlobalTuningTask,
     StudyConfig,
@@ -54,7 +55,6 @@ from calibre.tuning import (
 
 logger = logging.getLogger(__name__)
 
-OBJECTIVE_METRIC = "objective"
 TUNE_STEP_ATTR = "tune_step"
 
 

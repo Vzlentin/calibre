@@ -8,7 +8,7 @@ import pandas as pd
 
 import calibre.tuning.optimizer as optimizer
 from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, MODEL_NAME, UNIQUE_ID, Y_HAT, H, Y
-from calibre.tuning.optimizer import _OBJECTIVE_METRIC, _ORIGIN_INDEX, _evaluate_candidate
+from calibre.tuning.optimizer import OBJECTIVE_METRIC, ORIGIN_INDEX, evaluate_candidate
 from calibre.tuning.task import LocalTuningTask, StudyConfig, TuningCandidate
 
 
@@ -106,7 +106,7 @@ def test_total_cost_accumulates_across_origins(monkeypatch) -> None:
 
     # Focused unit on the across-origin cost accumulation; the public
     # optimize_local_task path is exercised by test_intermediate_metric_matches_final.
-    value = _evaluate_candidate(task, TuningCandidate(model_config={"season_length": 1}), origins)
+    value = evaluate_candidate(task, TuningCandidate(model_config={"season_length": 1}), origins)
 
     assert value == 30.0
 
@@ -165,6 +165,6 @@ def test_intermediate_metric_matches_final(monkeypatch, tmp_path) -> None:
     result = optimizer.optimize_local_task(task)
 
     assert result["season_length"] == 1
-    assert [report[_OBJECTIVE_METRIC] for report in reports] == [5.0, 12.0]
-    assert reports[-1][_OBJECTIVE_METRIC] == 12.0
-    assert reports[-1][_ORIGIN_INDEX] == 2
+    assert [report[OBJECTIVE_METRIC] for report in reports] == [5.0, 12.0]
+    assert reports[-1][OBJECTIVE_METRIC] == 12.0
+    assert reports[-1][ORIGIN_INDEX] == 2

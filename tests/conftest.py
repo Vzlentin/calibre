@@ -21,7 +21,7 @@ def _isolate_mlflow(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _restore_cwd():
-    from calibre.tuning.optimizer import restore_cwd
+    from tests.infra import restore_cwd
 
     with restore_cwd():
         yield
