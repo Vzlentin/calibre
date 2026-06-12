@@ -315,7 +315,8 @@ def test_run_benchmark_tune_true_runs_hpo_and_threads_its_config(monkeypatch) ->
 
 def test_run_from_config_threads_tune_flag_to_run_benchmark(monkeypatch) -> None:
     """The run_from_config seam lock: the tune kwarg reaches run_benchmark in
-    both directions (the dead-knob class hardcoded tune=False regardless)."""
+    both directions — a regression lock against the formerly hardcoded
+    tune=False that made the knob dead from the config entrypoint."""
     captured: dict[str, Any] = {}
 
     def _fake_run_benchmark(**kwargs):
