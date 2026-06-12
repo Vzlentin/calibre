@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from calibre.core.forecast_frame import UNIQUE_ID
 
@@ -120,6 +121,69 @@ class SummingMatrix:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class SparseSummingMatrix:
+    """A csr summing matrix plus the node/bottom labels that index it.
+
+    Same node layout and consumer interface as :class:`SummingMatrix`
+    (``bottom_ids``/``node_labels``/``n_bottom``/``n_nodes``/``total_index``/
+    ``subset()``), but ``S`` is a :class:`scipy.sparse.csr_array` so the full-M5
+    lattice costs megabytes instead of the ~7.6 GiB dense float64 matrix.
+    ``csr_array`` (not ``csr_matrix``) is load-bearing: ``csr_matrix.sum(axis=1)``
+    returns an ``np.matrix`` that breaks the boolean row mask in ``subset()``,
+    and ``csr_matrix @ vector`` loses plain-ndarray semantics downstream.
+
+    Attributes:
+        S: ``(n_nodes, n_bottom)`` float64 csr_array. Row order matches
+            ``node_labels``; column order matches ``bottom_ids``. Every stored
+            value is exactly 1.0, so structure alone determines the matrix.
+        bottom_ids: ordered bottom-level ``unique_id`` labels (S columns).
+        node_labels: ordered node labels (S rows): bottom identity block first,
+            then per-attribute aggregate rows, then the grand total.
+    """
+
+    S: sparse.csr_array
+    bottom_ids: tuple[str, ...]
+    node_labels: tuple[str, ...]
+
+    @property
+    def n_bottom(self) -> int:
+        return len(self.bottom_ids)
+
+    @property
+    def n_nodes(self) -> int:
+        return len(self.node_labels)
+
+    @property
+    def total_index(self) -> int:
+        return self.node_labels.index(TOTAL_LABEL)
+
+    def subset(self, present_ids: Sequence[str]) -> SparseSummingMatrix:
+        """Restrict S to ``present_ids``, mirroring ``SummingMatrix.subset``.
+
+        Same node-label filtering rules as the dense port: columns are sliced
+        to the present bottom ids in canonical order and any row left with no
+        present member is dropped, keeping the bottom identity block leading.
+        """
+        wanted = {str(uid) for uid in present_ids}
+        unknown = wanted - set(self.bottom_ids)
+        if unknown:
+            raise ValueError(f"present_ids not in summing matrix bottom ids: {sorted(unknown)}")
+        col_idx = [i for i, uid in enumerate(self.bottom_ids) if uid in wanted]
+        present = tuple(self.bottom_ids[i] for i in col_idx)
+        sub = self.S[:, col_idx]
+        keep = sub.sum(axis=1) > 0
+        return SparseSummingMatrix(
+            S=sub[keep],
+            bottom_ids=present,
+            node_labels=tuple(label for label, k in zip(self.node_labels, keep, strict=True) if k),
+        )
+
+
+SummingMatrixLike = SummingMatrix | SparseSummingMatrix
+"""Either summing-matrix representation behind the shared label interface."""
+
+
 def build_hierarchy_index(hierarchy: pd.DataFrame) -> HierarchyIndex:
     """Validate a hierarchy frame and derive its canonical node labels."""
     if UNIQUE_ID not in hierarchy.columns:
@@ -199,6 +263,56 @@ def summing_matrix_from_index(hierarchy_index: HierarchyIndex) -> SummingMatrix:
     return SummingMatrix(
         S=np.vstack(rows),
         bottom_ids=bottom_ids,
+        node_labels=hierarchy_index.node_labels,
+    )
+
+
+def sparse_summing_matrix_from_index(hierarchy_index: HierarchyIndex) -> SparseSummingMatrix:
+    """Build a :class:`SparseSummingMatrix` directly from prebuilt index facts.
+
+    Row/column coordinates come straight from the identity block, the
+    per-attribute memberships already stringified in the index frame, and the
+    total row — no dense intermediate, no per-value scans, no re-grouping of
+    the hierarchy frame. nnz is exactly ``n_bottom * (2 + n_attr_cols)`` (each
+    bottom id appears once in the identity block, once per attribute column,
+    and once in the total row), so the full-M5 lattice costs ~2.7 MB of csr
+    storage instead of the ~7.6 GiB dense matrix.
+
+    Row order matches :func:`summing_matrix_from_index` exactly: ``np.unique``
+    sorts the stringified attribute values lexicographically, the same order
+    ``build_hierarchy_index`` used for ``node_labels``.
+    """
+    frame = hierarchy_index.frame
+    n_bottom = len(hierarchy_index.bottom_ids)
+    n_nodes = len(hierarchy_index.node_labels)
+
+    bottom_positions = np.arange(n_bottom, dtype=np.int32)
+    row_parts: list[np.ndarray] = [bottom_positions]
+    next_row = n_bottom
+    for col in hierarchy_index.attr_cols:
+        values = frame[col].astype(str).to_numpy()
+        unique_values, codes = np.unique(values, return_inverse=True)
+        row_parts.append(np.asarray(next_row + codes, dtype=np.int32))
+        next_row += len(unique_values)
+    row_parts.append(np.full(n_bottom, next_row, dtype=np.int32))
+    if next_row + 1 != n_nodes:
+        raise ValueError(
+            "sparse summing-matrix row derivation drifted from the index node labels: "
+            f"derived {next_row + 1} rows, index has {n_nodes}"
+        )
+
+    rows = np.concatenate(row_parts)
+    cols = np.tile(bottom_positions, len(hierarchy_index.attr_cols) + 2)
+    data = np.ones(rows.size, dtype=np.float64)
+    S = sparse.csr_array((data, (rows, cols)), shape=(n_nodes, n_bottom))
+    # Duplicate (row, col) coordinates would have been summed into values > 1.0
+    # by the coo -> csr conversion; the structure-only cache digest downstream
+    # relies on every stored value being exactly 1.0.
+    if S.nnz != rows.size or not np.all(S.data == 1.0):
+        raise ValueError("sparse summing matrix produced duplicate membership coordinates")
+    return SparseSummingMatrix(
+        S=S,
+        bottom_ids=hierarchy_index.bottom_ids,
         node_labels=hierarchy_index.node_labels,
     )
 

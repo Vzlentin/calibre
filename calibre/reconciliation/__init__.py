@@ -24,8 +24,11 @@ from calibre.reconciliation.registry import (
 )
 from calibre.reconciliation.summing import (
     TOTAL_LABEL,
+    SparseSummingMatrix,
     SummingMatrix,
     build_summing_matrix,
+    sparse_summing_matrix_from_index,
+    summing_matrix_from_index,
 )
 
 __all__ = [
@@ -39,9 +42,12 @@ __all__ = [
     "HierarchicalIntervalPhase",
     "ReconciliationContext",
     "Reconciler",
+    "SparseSummingMatrix",
     "SummingMatrix",
     "VectorReconciler",
     "available_reconcilers",
     "build_summing_matrix",
     "resolve_reconciler",
+    "sparse_summing_matrix_from_index",
+    "summing_matrix_from_index",
 ]

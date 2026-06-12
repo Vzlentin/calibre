@@ -3,11 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 
 from calibre.reconciliation.summing import (
     TOTAL_LABEL,
+    SparseSummingMatrix,
     build_hierarchy_index,
     build_summing_matrix,
+    sparse_summing_matrix_from_index,
+    summing_matrix_from_index,
 )
 
 M5_COLUMNS = ["unique_id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
@@ -198,3 +202,110 @@ def test_missing_unique_id_column_raises() -> None:
     frame = pd.DataFrame({"store": ["S1", "S2"]})
     with pytest.raises(ValueError, match="missing required column: unique_id"):
         build_summing_matrix(frame)
+
+
+# ---------------------------------------------------------------------------
+# Sparse producer — csr built directly from index facts (#168).
+# ---------------------------------------------------------------------------
+
+
+def test_sparse_producer_matches_dense_matrix_exactly() -> None:
+    index = build_hierarchy_index(_two_attr_frame())
+    sparse_summing = sparse_summing_matrix_from_index(index)
+    dense = summing_matrix_from_index(index)
+
+    assert sparse_summing.bottom_ids == dense.bottom_ids
+    assert sparse_summing.node_labels == dense.node_labels
+    assert sparse_summing.n_bottom == dense.n_bottom
+    assert sparse_summing.n_nodes == dense.n_nodes
+    assert sparse_summing.total_index == dense.total_index
+    np.testing.assert_array_equal(sparse_summing.S.toarray(), dense.S)
+
+
+def test_sparse_producer_matches_dense_on_m5_shaped_frame() -> None:
+    frame = pd.DataFrame(
+        [
+            ["HOBBIES_1_001_CA_1", "HOBBIES_1_001", "HOBBIES_1", "HOBBIES", "CA_1", "CA"],
+            ["HOBBIES_1_001_CA_2", "HOBBIES_1_001", "HOBBIES_1", "HOBBIES", "CA_2", "CA"],
+            ["HOBBIES_2_001_TX_1", "HOBBIES_2_001", "HOBBIES_2", "HOBBIES", "TX_1", "TX"],
+            ["HOBBIES_2_001_TX_2", "HOBBIES_2_001", "HOBBIES_2", "HOBBIES", "TX_2", "TX"],
+        ],
+        columns=M5_COLUMNS,
+    )
+    index = build_hierarchy_index(frame)
+    sparse_summing = sparse_summing_matrix_from_index(index)
+    dense = summing_matrix_from_index(index)
+
+    assert sparse_summing.node_labels == dense.node_labels
+    np.testing.assert_array_equal(sparse_summing.S.toarray(), dense.S)
+
+
+def test_sparse_producer_nnz_matches_analytic_formula_with_unit_values() -> None:
+    index = build_hierarchy_index(_two_attr_frame())
+    summing = sparse_summing_matrix_from_index(index)
+
+    # Identity block + one membership per attribute column + total row.
+    expected_nnz = summing.n_bottom * (2 + len(index.attr_cols))
+    analytic_via_members = (
+        summing.n_bottom
+        + sum(int(counts.sum()) for counts in index.expected_members().values())
+        + summing.n_bottom
+    )
+    assert summing.S.nnz == expected_nnz == analytic_via_members
+    assert np.all(summing.S.data == 1.0)
+    assert summing.S.dtype == np.float64
+
+
+def test_sparse_producer_emits_csr_array_not_csr_matrix() -> None:
+    summing = sparse_summing_matrix_from_index(build_hierarchy_index(_two_attr_frame()))
+
+    assert isinstance(summing.S, sparse.csr_array)
+    # csr_array row sums are 1-D ndarrays; csr_matrix would return np.matrix
+    # and break the boolean row mask inside subset().
+    row_sums = summing.S.sum(axis=1)
+    assert isinstance(row_sums, np.ndarray)
+    assert row_sums.ndim == 1
+
+
+def test_sparse_subset_parity_with_dense() -> None:
+    index = build_hierarchy_index(_two_attr_frame())
+    sparse_sub = sparse_summing_matrix_from_index(index).subset(["a", "c"])
+    dense_sub = summing_matrix_from_index(index).subset(["a", "c"])
+
+    assert isinstance(sparse_sub, SparseSummingMatrix)
+    assert isinstance(sparse_sub.S, sparse.csr_array)
+    assert sparse_sub.bottom_ids == dense_sub.bottom_ids
+    assert sparse_sub.node_labels == dense_sub.node_labels
+    np.testing.assert_array_equal(sparse_sub.S.toarray(), dense_sub.S)
+    # Coherence holds on the sparse subset and matvec stays a plain ndarray.
+    b = np.array([2.0, 5.0])
+    agg = sparse_sub.S @ b
+    assert isinstance(agg, np.ndarray)
+    assert agg[sparse_sub.node_labels.index("store=S1")] == pytest.approx(7.0)
+    assert agg[sparse_sub.total_index] == pytest.approx(7.0)
+
+
+def test_sparse_subset_to_single_bottom_id_mirrors_dense() -> None:
+    index = build_hierarchy_index(_two_attr_frame())
+    sparse_sub = sparse_summing_matrix_from_index(index).subset(["b"])
+    dense_sub = summing_matrix_from_index(index).subset(["b"])
+
+    assert sparse_sub.bottom_ids == dense_sub.bottom_ids == ("b",)
+    assert sparse_sub.node_labels == dense_sub.node_labels
+    np.testing.assert_array_equal(sparse_sub.S.toarray(), dense_sub.S)
+
+
+def test_sparse_subset_rejects_unknown_ids() -> None:
+    summing = sparse_summing_matrix_from_index(build_hierarchy_index(_two_attr_frame()))
+    with pytest.raises(ValueError, match="not in summing matrix bottom ids"):
+        summing.subset(["a", "z"])
+
+
+def test_sparse_producer_single_attribute_single_bottom_matches_dense() -> None:
+    index = build_hierarchy_index(pd.DataFrame({"unique_id": ["only"], "store": ["S1"]}))
+    sparse_summing = sparse_summing_matrix_from_index(index)
+    dense = summing_matrix_from_index(index)
+
+    assert sparse_summing.node_labels == dense.node_labels
+    np.testing.assert_array_equal(sparse_summing.S.toarray(), dense.S)
+    np.testing.assert_array_equal(sparse_summing.S @ np.array([7.0]), np.array([7.0, 7.0, 7.0]))

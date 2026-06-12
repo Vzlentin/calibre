@@ -21,6 +21,7 @@ dependencies = [
     "alembic",
     "psycopg[binary]",
     "prometheus-client",
+    "scipy",
     "statsforecast",
     "optuna",
     "threadpoolctl",
