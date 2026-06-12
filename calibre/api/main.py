@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
+import numpy as np
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -182,27 +183,27 @@ def _actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
 
     Mirrors the lookup ``DecisionLoop.run`` constructs so the API observes
     through the same code path: ``(str, Timestamp)`` keys, dropping rows with no
-    actual ``y`` to record.
+    actual ``y`` to record. Vectorized (no per-row iteration) so the /observe
+    route can afford it synchronously; duplicate keys keep the last row, like
+    the dict build it replaces.
     """
-    cache = {
-        (str(row[UNIQUE_ID]), pd.Timestamp(row[DS])): float(row[Y])
-        for _, row in actuals.iterrows()
-        if not pd.isna(row[Y])
-    }
-    lookup = pd.Series(cache, dtype=float)
-    if not lookup.empty:
-        lookup.index = pd.MultiIndex.from_tuples(lookup.index)
-    return lookup
+    usable = actuals[actuals[Y].notna()]
+    if usable.empty:
+        return pd.Series(dtype=float)
+    keys = pd.MultiIndex.from_arrays([usable[UNIQUE_ID].astype(str), pd.to_datetime(usable[DS])])
+    lookup = pd.Series(usable[Y].astype(float).to_numpy(), index=keys, dtype=float)
+    return lookup[~keys.duplicated(keep="last")]
 
 
-def _has_usable_actuals(actual_records: list[dict]) -> bool:
-    """Whether posted actuals can produce at least one observation.
+def _usable_actuals_lookup(actual_records: list[dict]) -> pd.Series | None:
+    """Parse posted actuals into the observe lookup — the single source of
+    payload-shape truth shared by the /observe route and ``run_observe_job``.
 
-    Mirrors the job's two precondition checks so /observe can reject unusable
-    payloads synchronously (422): the frame must carry unique_id/ds/y, and at
-    least one row must have a non-null y to record. The stored-frame schema
-    checks (interval columns) stay job-only — they concern the calibrated frame,
-    not the request payload.
+    Returns None when the frame is empty or missing unique_id/ds/y (the
+    request-shape failure), else the ``(unique_id, ds) -> y`` lookup, which may
+    still be empty (no non-null y rows). The stored-frame schema checks
+    (interval columns) stay job-only — they concern the calibrated frame, not
+    the request payload.
     """
     actuals = frame_from_records(actual_records)
     if (
@@ -211,8 +212,8 @@ def _has_usable_actuals(actual_records: list[dict]) -> bool:
         or DS not in actuals.columns
         or Y not in actuals.columns
     ):
-        return False
-    return not _actuals_lookup(actuals).empty
+        return None
+    return _actuals_lookup(actuals)
 
 
 def _merge_future_x_override(
@@ -352,16 +353,11 @@ def run_observe_job(
         )
         return
 
-    actuals = frame_from_records(actual_records)
-    if (
-        actuals.empty
-        or UNIQUE_ID not in actuals.columns
-        or DS not in actuals.columns
-        or Y not in actuals.columns
-    ):
+    actuals_lookup = _usable_actuals_lookup(actual_records)
+    if actuals_lookup is None:
         logger.warning(
             "observe skipped: actuals empty or missing unique_id/ds/y",
-            extra={"session_id": session_id, "rows": len(actuals)},
+            extra={"session_id": session_id, "rows": len(actual_records)},
         )
         return
 
@@ -381,11 +377,10 @@ def run_observe_job(
         # exists rather than letting _fill_actuals raise KeyError.
         calibrated[Y] = float("nan")
 
-    actuals_lookup = _actuals_lookup(actuals)
     if actuals_lookup.empty:
         logger.warning(
             "observe skipped: no usable actuals (no non-null y rows)",
-            extra={"session_id": session_id, "rows": len(actuals)},
+            extra={"session_id": session_id, "rows": len(actual_records)},
         )
         return
 
@@ -664,22 +659,37 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="session not found")
         if record.conformal_config is None:
-            raise HTTPException(status_code=400, detail="session has no conformal config")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "session has no conformal config; POST /fit with a "
+                    "conformal_config to enable observation"
+                ),
+            )
         if record.last_calibrated is None or record.last_calibrated.empty:
             raise HTTPException(
                 status_code=409,
-                detail="no calibrated frame on the latest fit; call /calibrate first",
+                detail=(
+                    "no calibrated frame on the latest fit (a re-fit mints a "
+                    "fresh uncalibrated fit; prior conformal state is "
+                    "preserved); call /calibrate first"
+                ),
             )
         try:
-            usable = _has_usable_actuals(req.actuals)
+            lookup = _usable_actuals_lookup(req.actuals)
+            # Require a finite value: string "NaN"/"inf" y coerces to a
+            # non-finite float the job would accept-then-never-record — the
+            # same contract failure as no usable rows. Malformed values (e.g.
+            # non-numeric y) raise here and land on 422, never a bare 500.
+            usable = lookup is not None and bool(np.isfinite(lookup.to_numpy()).any())
         except (TypeError, ValueError):
-            # Malformed payload values (e.g. non-numeric y) are the same
-            # contract failure as no usable rows — 422, never a bare 500.
             usable = False
         if not usable:
             raise HTTPException(
                 status_code=422,
-                detail="actuals must be non-empty and include unique_id, ds, and a non-null y",
+                detail=(
+                    "actuals must be non-empty and include unique_id, ds, and at least one finite y"
+                ),
             )
         bg.add_task(run_observe_job, req.session_id, req.actuals, store=store, fit_id=record.fit_id)
         return ObserveResponse(session_id=req.session_id, status=RunStatus.QUEUED)

@@ -398,11 +398,15 @@ def test_observe_without_conformal_config_returns_400():
         [{UNIQUE_ID: "A", "ds": "2024-02-11"}],  # missing y column
         [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": None}],  # all-null y -> no usable row
         [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": "not-a-number"}],  # malformed y -> 422 not 500
+        [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": "NaN"}],  # parses to nan -> never recordable
+        [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": "inf"}],  # non-finite -> never recordable
     ],
 )
 def test_observe_unusable_actuals_returns_422(actuals):
-    """Empty, no-usable-row, or malformed actuals are rejected synchronously
-    (422) — a malformed y value must never surface as a bare 500."""
+    """Empty, no-usable-row, malformed, or non-finite actuals are rejected
+    synchronously (422) — a malformed y value must never surface as a bare 500,
+    and a y that parses to a non-finite float would be accepted-then-never-
+    recorded by the job (the #163 silent-drop symptom on a payload edge)."""
     store = LifecycleStore()
     session_id = _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=True))
     client = TestClient(create_app(lifecycle_store=store))
