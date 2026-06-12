@@ -22,6 +22,7 @@ from calibre.ordering.policy_config import (
     RsConfig,
     RssConfig,
     apply_order_policy,
+    build_order_policy,
 )
 from calibre.ordering.policy_protocols import DecisionRule, OrderingArithmetic
 from calibre.ordering.reorder_point import apply_rss_policy
@@ -43,6 +44,7 @@ __all__ = [
     "RssConfig",
     "NewsvendorConfig",
     "apply_order_policy",
+    "build_order_policy",
     "apply_newsvendor_policy",
     "apply_rs_policy",
     "apply_rss_policy",

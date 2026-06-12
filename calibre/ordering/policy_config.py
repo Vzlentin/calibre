@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import assert_never
+from typing import Any, assert_never
 
 import pandas as pd
 
@@ -74,6 +75,54 @@ class NewsvendorConfig:
 
 
 OrderPolicy = RsConfig | RssConfig | NewsvendorConfig
+
+
+def build_order_policy(ordering: Mapping[str, Any]) -> OrderPolicy:
+    """Build the per-policy order config from an untyped ordering mapping.
+
+    Single owner of untyped-input -> typed-config construction for both
+    callers: the API passes the ``/order`` request's ordering dict through
+    unchanged; the CLI passes ``OrderingConfig.model_dump()``. Recognized
+    keys: ``policy``, ``params``, ``coverage``, ``quantile``, ``period``.
+
+    ``params`` accepts a DataFrame (passed through), a list of dicts, or a
+    single dict (wrapped to a one-element list); missing or None ``params``
+    raises ``ValueError``. ``quantile`` is rejected for the rss and
+    newsvendor policies (where it does not apply); unrecognized knobs are
+    otherwise ignored.
+
+    Optional knobs are keyed on ``value is not None``, never key presence:
+    ``model_dump()`` always emits ``quantile``/``period`` (None when unset)
+    while a request dict may omit them entirely.
+    """
+    policy = ordering["policy"]
+    params = ordering.get("params")
+    if params is None:
+        raise ValueError("ordering.params is required")
+    if isinstance(params, pd.DataFrame):
+        params_frame = params
+    else:
+        params_frame = pd.DataFrame([params] if isinstance(params, dict) else params)
+    coverage = float(ordering.get("coverage", 0.9))
+    if policy == "rs":
+        quantile = ordering.get("quantile")
+        return RsConfig(
+            params=params_frame,
+            coverage=coverage,
+            quantile=None if quantile is None else float(quantile),
+        )
+    if policy == "rss":
+        if ordering.get("quantile") is not None:
+            raise ValueError("ordering.quantile is not a valid knob for the rss policy")
+        return RssConfig(params=params_frame, coverage=coverage)
+    if policy == "newsvendor":
+        if ordering.get("quantile") is not None:
+            raise ValueError("ordering.quantile is not a valid knob for the newsvendor policy")
+        period = ordering.get("period")
+        if period is None:
+            return NewsvendorConfig(params=params_frame, coverage=coverage)
+        return NewsvendorConfig(params=params_frame, coverage=coverage, period=int(period))
+    raise ValueError(f"unknown order policy: {policy!r}")
 
 
 def apply_order_policy(frame: pd.DataFrame, config: OrderPolicy) -> pd.DataFrame:
