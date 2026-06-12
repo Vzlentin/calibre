@@ -332,6 +332,13 @@ def run_observe_job(
     if record is None:
         logger.warning("observe skipped: no fit for session", extra={"session_id": session_id})
         return
+    if record.session_id != session_id:
+        # The public contract carries both keys; a mismatch would rehydrate one
+        # session's runtime and persist under another (split-brain state) —
+        # refuse loudly instead.
+        raise ValueError(
+            f"fit {fit_id!r} belongs to session {record.session_id!r}, not {session_id!r}"
+        )
     if record.conformal_config is None:
         logger.warning(
             "observe skipped: session has no conformal config",
@@ -462,6 +469,14 @@ def create_app(
     wants a specific wiring builds its own app rather than mutating module state.
     The module-level ``app = create_app()`` below preserves the
     ``calibre.api.main:app`` symbol uvicorn and Terraform import.
+
+    Boot contract: because the module-level app constructs at import,
+    ``import calibre.api.main`` under ``LIFECYCLE_STORE=sql`` with no
+    ``CALIBRE_DATABASE_URL`` raises immediately — a deliberate boot-time
+    fail-fast for a config that could never serve (the serving process
+    surfaces the misconfig at deploy instead of 500ing per request).
+    Engine construction itself never connects: a well-formed but unreachable
+    URL still constructs, and the connection failure lands on first use.
     """
     if db_factory is None:
         db_factory = _resolve_db_factory()
@@ -655,7 +670,13 @@ def create_app(
                 status_code=409,
                 detail="no calibrated frame on the latest fit; call /calibrate first",
             )
-        if not _has_usable_actuals(req.actuals):
+        try:
+            usable = _has_usable_actuals(req.actuals)
+        except (TypeError, ValueError):
+            # Malformed payload values (e.g. non-numeric y) are the same
+            # contract failure as no usable rows — 422, never a bare 500.
+            usable = False
+        if not usable:
             raise HTTPException(
                 status_code=422,
                 detail="actuals must be non-empty and include unique_id, ds, and a non-null y",

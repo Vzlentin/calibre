@@ -357,6 +357,38 @@ def test_observe_missing_session_returns_404():
     )
 
     assert resp.status_code == 404, resp.text
+    assert "session not found" in resp.json()["detail"].lower()
+
+
+def test_observe_without_conformal_config_returns_400():
+    """A session whose fit carries no conformal config is rejected at request
+    time with 400 — the fourth synchronous precondition code, pinned."""
+    store = LifecycleStore()
+    store.put_fit(
+        FitRecord(
+            fit_id="fit-nc",
+            session_id="sess-no-conformal",
+            tenant="acme",
+            sku_set=["A"],
+            forecaster_config={"backend": "statsforecast", "model": "Naive"},
+            horizon=3,
+            freq="W-SUN",
+            history=pd.DataFrame(),
+            future_x=None,
+            conformal_config=None,
+            status=RunStatus.SUCCEEDED,
+            last_calibrated=_calibrated_window(bounds_at_each_horizon=True),
+        )
+    )
+    client = TestClient(create_app(lifecycle_store=store))
+
+    resp = client.post(
+        "/observe",
+        json={"session_id": "sess-no-conformal", "actuals": _actual_records(WINDOW_DS)},
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert "conformal config" in resp.json()["detail"].lower()
 
 
 @pytest.mark.parametrize(
@@ -365,10 +397,12 @@ def test_observe_missing_session_returns_404():
         [],  # empty payload
         [{UNIQUE_ID: "A", "ds": "2024-02-11"}],  # missing y column
         [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": None}],  # all-null y -> no usable row
+        [{UNIQUE_ID: "A", "ds": "2024-02-11", "y": "not-a-number"}],  # malformed y -> 422 not 500
     ],
 )
 def test_observe_unusable_actuals_returns_422(actuals):
-    """Empty or no-usable-row actuals are rejected synchronously (422)."""
+    """Empty, no-usable-row, or malformed actuals are rejected synchronously
+    (422) — a malformed y value must never surface as a bare 500."""
     store = LifecycleStore()
     session_id = _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=True))
     client = TestClient(create_app(lifecycle_store=store))
@@ -376,6 +410,22 @@ def test_observe_unusable_actuals_returns_422(actuals):
     resp = client.post("/observe", json={"session_id": session_id, "actuals": actuals})
 
     assert resp.status_code == 422, resp.text
+
+
+def test_run_observe_job_rejects_fit_from_another_session():
+    """The public job contract carries both keys; a mismatched pair would
+    rehydrate one session's runtime and persist under another — it refuses
+    loudly instead of writing split-brain state."""
+    store = LifecycleStore()
+    _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=True))
+
+    with pytest.raises(ValueError, match="belongs to session"):
+        api_main.run_observe_job(
+            "some-other-session",
+            _actual_records(WINDOW_DS),
+            store=store,
+            fit_id="fit-1",
+        )
 
 
 def test_observe_happy_path_still_202_and_observes(monkeypatch):
