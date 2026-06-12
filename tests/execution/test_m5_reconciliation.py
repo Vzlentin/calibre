@@ -360,9 +360,7 @@ def test_point_min_trace_agrees_with_dense_closed_form(strategy: str) -> None:
     summing = build_summing_matrix(hierarchy)
     base = _divergent_node_values(summing)
     w_diag = (
-        np.ones(summing.n_nodes)
-        if strategy == "ols"
-        else summing.S @ np.ones(summing.n_bottom)
+        np.ones(summing.n_nodes) if strategy == "ols" else summing.S @ np.ones(summing.n_bottom)
     )
     expected = _closed_form_min_trace(summing.S, w_diag, base)
 
@@ -411,9 +409,7 @@ def test_fused_min_trace_point_output_agrees_with_dense_closed_form(strategy: st
     summing = build_summing_matrix(hierarchy)
     base = _divergent_node_values(summing)
     w_diag = (
-        np.ones(summing.n_nodes)
-        if strategy == "ols"
-        else summing.S @ np.ones(summing.n_bottom)
+        np.ones(summing.n_nodes) if strategy == "ols" else summing.S @ np.ones(summing.n_bottom)
     )
     expected = _closed_form_min_trace(summing.S, w_diag, base)
 

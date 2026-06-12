@@ -625,9 +625,7 @@ def test_sparse_layout_keeps_csr_and_identity_last_block() -> None:
     layout = _to_nixtla_layout(base, summing)
 
     assert isinstance(layout.S, sparse.csr_array)
-    np.testing.assert_array_equal(
-        layout.S[-summing.n_bottom :].toarray(), np.eye(summing.n_bottom)
-    )
+    np.testing.assert_array_equal(layout.S[-summing.n_bottom :].toarray(), np.eye(summing.n_bottom))
     np.testing.assert_array_equal(_from_nixtla_layout(layout.y_hat, layout), base)
 
 

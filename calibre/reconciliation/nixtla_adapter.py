@@ -262,9 +262,7 @@ def _cache_key(summing: SummingMatrixLike) -> _CacheKey:
         # the csr index arrays (~850 KB at full M5) instead of the dense
         # bytes (7.6 GiB) the dense branch below would hash.
         S = summing.S
-        digest = hashlib.blake2b(
-            S.indices.tobytes() + S.indptr.tobytes(), digest_size=16
-        ).digest()
+        digest = hashlib.blake2b(S.indices.tobytes() + S.indptr.tobytes(), digest_size=16).digest()
         shape = (int(S.shape[0]), int(S.shape[1]))
         return (tuple(summing.bottom_ids), tuple(summing.node_labels), shape, digest)
     dense = np.ascontiguousarray(summing.S, dtype=np.float64)
