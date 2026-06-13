@@ -67,6 +67,13 @@ NIXTLA_POINT_STRATEGIES = cast(
 NIXTLA_SPARSE_STRATEGIES: frozenset[NixtlaStrategy] = frozenset(
     {"bottom_up", "ols", "wls_struct", "wls_var"}
 )
+# The subset of the sparse roster served by ``MinTraceSparse`` specifically.
+# Kept separate from NIXTLA_SPARSE_STRATEGIES so the method factory never
+# depends on its bottom_up arm running first: ``MinTraceSparse`` rejects
+# ``method='bottom_up'`` at fit time.
+_MIN_TRACE_SPARSE_STRATEGIES: frozenset[NixtlaStrategy] = frozenset(
+    {"ols", "wls_struct", "wls_var"}
+)
 _SUPPORTED_STRATEGIES = frozenset(NIXTLA_POINT_STRATEGIES)
 _RESIDUAL_STRATEGIES = frozenset({"mint_shrink", "wls_var", "erm"})
 _UNSUPPORTED_STRATEGY_MESSAGES = {
@@ -214,7 +221,7 @@ def _default_method_factory(strategy: NixtlaStrategy) -> Callable[[], _NixtlaMet
             return cast(_NixtlaMethod, methods.BottomUpSparse())
         if strategy == "erm":
             return cast(_NixtlaMethod, methods.ERM(method="closed"))
-        if strategy in NIXTLA_SPARSE_STRATEGIES:
+        if strategy in _MIN_TRACE_SPARSE_STRATEGIES:
             return _make_checked_min_trace_sparse(strategy)
         # mint_shrink has no sparse implementation upstream; dense MinTrace stays.
         return cast(_NixtlaMethod, methods.MinTrace(method=strategy, num_threads=1))
@@ -364,7 +371,20 @@ class NixtlaReconciler(VectorReconciler):
 
     def reconcile_cross_section(self, cross_section: ReconciliationCrossSection) -> np.ndarray:
         if not self.requires_fitted_values:
-            return super().reconcile_cross_section(cross_section)
+            try:
+                return super().reconcile_cross_section(cross_section)
+            except RuntimeError as exc:
+                # The convergence guard raises without cross-section identity;
+                # at M5 scale (many models, h up to 28) the failing cross-section
+                # is unrecoverable from the phase/origin envelope alone.
+                group = cross_section.group
+                raise RuntimeError(
+                    "Nixtla reconciliation failed "
+                    f"for strategy={self.strategy!r}, "
+                    f"model_name={str(group[MODEL_NAME].iloc[0])!r}, "
+                    f"forecast_origin={group[FORECAST_ORIGIN].iloc[0]!r}, "
+                    f"h={int(group[H].iloc[0])}"
+                ) from exc
         if not isinstance(cross_section.state, _ResidualReconcileState):
             raise TypeError("Residual reconciliation state was not prepared")
         return self._reconcile_residual_cross_section(cross_section, cross_section.state)

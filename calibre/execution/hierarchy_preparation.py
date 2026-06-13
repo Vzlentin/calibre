@@ -179,13 +179,15 @@ def _summing_matrix_bytes(config: RunPreparationConfig, hierarchy_index: Hierarc
     (computable from index facts without building anything), the dense float64
     product only for the strategies with no upstream sparse implementation.
     """
-    strategy = (
-        config.hierarchical_intervals.strategy
-        if config.hierarchical_intervals is not None
-        else config.reconciliation.strategy
-        if config.reconciliation is not None
-        else "none"
-    )
+    if config.hierarchical_intervals is not None:
+        strategy = config.hierarchical_intervals.strategy
+    elif config.reconciliation is not None and config.reconciliation.strategy != "none":
+        strategy = config.reconciliation.strategy
+    else:
+        # _hierarchy_for_run returns no hierarchy for these configs, so the
+        # eager branch never calls this function; a silent dense estimate here
+        # would mask a wiring regression.
+        raise ValueError("_summing_matrix_bytes requires an active reconciliation strategy")
     n_bottom = len(hierarchy_index.bottom_ids)
     n_nodes = len(hierarchy_index.node_labels)
     if strategy in NIXTLA_SPARSE_STRATEGIES:
