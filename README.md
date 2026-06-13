@@ -258,6 +258,7 @@ calibre/                 # Python package
 │   └── features/        # Forecasting-specific feature transforms
 ├── ordering/            # Order policy protocols and implementations
 │   └── simulation/      # Inventory simulation (costs, rules, state)
+├── reconciliation/      # Reconciler protocol + strategy registry + summing matrix
 ├── storage/             # Postgres state store, Alembic migrations
 │   └── migrations/      # Alembic revision scripts
 └── tuning/              # Ray Tune + OptunaSearch hyper-parameter tuning
