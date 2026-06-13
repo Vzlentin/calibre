@@ -32,13 +32,16 @@ from calibre.core.forecast_frame import (
     validate_fitted_values_frame,
 )
 from calibre.reconciliation.nixtla_adapter import (
+    NIXTLA_SPARSE_STRATEGIES,
     NIXTLA_STRATEGIES,
     NixtlaStrategy,
     make_nixtla_method,
 )
 from calibre.reconciliation.summing import (
     HierarchyIndex,
-    SummingMatrix,
+    SparseSummingMatrix,
+    SummingMatrixLike,
+    sparse_summing_matrix_from_index,
     summing_matrix_from_index,
 )
 
@@ -131,7 +134,15 @@ class NixtlaHierarchicalIntervalPhase:
             return frame
         fitted = _validated_fitted_values(context)
         fitted_by_model = _fitted_values_by_model(fitted)
-        summing = summing_matrix_from_index(hierarchy_index)
+        # Producer-selection mirror of the point seam: the sparse-capable
+        # roster (bottom_up/ols/wls_struct/wls_var via BottomUpSparse /
+        # MinTraceSparse) never materializes the dense S; erm and mint_shrink
+        # have no upstream sparse variant and keep the dense build.
+        summing = (
+            sparse_summing_matrix_from_index(hierarchy_index)
+            if self.options.strategy in NIXTLA_SPARSE_STRATEGIES
+            else summing_matrix_from_index(hierarchy_index)
+        )
         parts = [
             self._apply_model_group(group, summing, fitted_by_model)
             for _, group in frame.groupby(_GROUP_KEYS, sort=False)
@@ -141,7 +152,7 @@ class NixtlaHierarchicalIntervalPhase:
     def _apply_model_group(
         self,
         group: pd.DataFrame,
-        summing: SummingMatrix,
+        summing: SummingMatrixLike,
         fitted_by_model: Mapping[str, pd.DataFrame],
     ) -> pd.DataFrame:
         model_name = str(group[MODEL_NAME].iloc[0])
@@ -193,7 +204,7 @@ def _fitted_values_by_model(fitted_values: pd.DataFrame) -> dict[str, pd.DataFra
     }
 
 
-def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMatrix:
+def _subset_for_group(group: pd.DataFrame, summing: SummingMatrixLike) -> SummingMatrixLike:
     keyed = group[[UNIQUE_ID, DS]].copy()
     keyed[UNIQUE_ID] = keyed[UNIQUE_ID].astype(str)
     keyed[DS] = pd.to_datetime(keyed[DS]).astype("datetime64[ns]")
@@ -245,18 +256,25 @@ def _subset_for_group(group: pd.DataFrame, summing: SummingMatrix) -> SummingMat
     return subset
 
 
-def _to_s_df(summing: SummingMatrix) -> pd.DataFrame:
+def _to_s_df(summing: SummingMatrixLike) -> pd.DataFrame:
     row_order = _nixtla_node_order(summing)
     index_by_label = {label: index for index, label in enumerate(summing.node_labels)}
-    matrix = pd.DataFrame(
-        summing.S[[index_by_label[label] for label in row_order]],
-        columns=list(summing.bottom_ids),
-    )
+    permutation = [index_by_label[label] for label in row_order]
+    if isinstance(summing, SparseSummingMatrix):
+        # Sparse[float64, 0] value columns are the zero-copy precondition for
+        # hierarchicalforecast's `.sparse.to_coo()` -> csr path; a plain dense
+        # DataFrame would silently densify the full S transiently before
+        # re-sparsifying — the exact allocation this path exists to avoid.
+        matrix = pd.DataFrame.sparse.from_spmatrix(
+            summing.S[permutation], columns=list(summing.bottom_ids)
+        )
+    else:
+        matrix = pd.DataFrame(summing.S[permutation], columns=list(summing.bottom_ids))
     matrix.insert(0, UNIQUE_ID, list(row_order))
     return matrix
 
 
-def _to_tags(summing: SummingMatrix) -> dict[str, np.ndarray]:
+def _to_tags(summing: SummingMatrixLike) -> dict[str, np.ndarray]:
     aggregate_labels = np.array(summing.node_labels[summing.n_bottom :], dtype=object)
     return {
         "aggregate": aggregate_labels,
@@ -264,12 +282,12 @@ def _to_tags(summing: SummingMatrix) -> dict[str, np.ndarray]:
     }
 
 
-def _nixtla_node_order(summing: SummingMatrix) -> tuple[str, ...]:
+def _nixtla_node_order(summing: SummingMatrixLike) -> tuple[str, ...]:
     """Return Nixtla's expected row order: aggregates first, bottom block last."""
     return (*summing.node_labels[summing.n_bottom :], *summing.bottom_ids)
 
 
-def _to_nixtla_forecast_df(group: pd.DataFrame, summing: SummingMatrix) -> pd.DataFrame:
+def _to_nixtla_forecast_df(group: pd.DataFrame, summing: SummingMatrixLike) -> pd.DataFrame:
     ordered = group.copy()
     ordered[UNIQUE_ID] = ordered[UNIQUE_ID].astype(str)
     ordered[DS] = pd.to_datetime(ordered[DS]).astype("datetime64[ns]")
@@ -281,7 +299,7 @@ def _to_nixtla_forecast_df(group: pd.DataFrame, summing: SummingMatrix) -> pd.Da
 
 def _to_nixtla_fitted_df(
     fitted_by_model: Mapping[str, pd.DataFrame],
-    summing: SummingMatrix,
+    summing: SummingMatrixLike,
     model_name: str,
 ) -> pd.DataFrame:
     subset = fitted_by_model.get(model_name)
@@ -312,7 +330,7 @@ def _to_nixtla_fitted_df(
 
 def _missing_fitted_keys(
     fitted_values: pd.DataFrame,
-    summing: SummingMatrix,
+    summing: SummingMatrixLike,
     model_name: str,
 ) -> list[tuple[str, str, str]]:
     fitted_values[DS] = pd.to_datetime(fitted_values[DS]).astype("datetime64[ns]")

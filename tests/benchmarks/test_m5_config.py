@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config
@@ -11,6 +12,7 @@ from calibre.core.forecast_frame import H
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SMOKE_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "smoke.yaml"
 _FULL_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "full.yaml"
+_FULL_WLS_STRUCT_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "full-wls-struct.yaml"
 _M5_README = _REPO_ROOT / "benchmarks" / "m5" / "README.md"
 
 
@@ -69,8 +71,29 @@ def test_m5_smoke_config_executes_source_run_path(tmp_path: Path) -> None:
     assert set(written[H]) == {1}
 
 
-def test_m5_full_origin_window_meets_mscp_horizon_invariant() -> None:
-    config = load_config(_FULL_CONFIG)
+def test_m5_full_wls_struct_config_uses_series_partition_handoff() -> None:
+    config = load_config(_FULL_WLS_STRUCT_CONFIG)
+
+    assert config.dataset.adapter == "m5"
+    assert config.dataset.path == "data/m5"
+    assert config.dataset.options["phase"] == "evaluation"
+    assert config.conformal is not None
+    assert config.conformal.method == "mscp"
+    assert config.conformal.mode == "perhorizon"
+    assert config.conformal.coverage == 0.9
+    assert config.conformal.calibration_window == 10
+    assert config.conformal.partition == "series"
+    assert config.conformal.max_partitions == 1_000_000
+    assert config.reconciliation is not None
+    assert config.reconciliation.strategy == "wls_struct"
+    assert config.output.ledger_path == "results/m5/full-mscp-wls-struct/forecast-ledger.parquet"
+    assert config.output.streaming is True
+    assert config.execution.backend == "auto"
+
+
+@pytest.mark.parametrize("config_path", [_FULL_CONFIG, _FULL_WLS_STRUCT_CONFIG])
+def test_m5_full_origin_window_meets_mscp_horizon_invariant(config_path: Path) -> None:
+    config = load_config(config_path)
     assert config.conformal is not None
 
     runtime_config = config.conformal.to_runtime_config()

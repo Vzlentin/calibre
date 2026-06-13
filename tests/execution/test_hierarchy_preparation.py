@@ -196,8 +196,9 @@ def test_hierarchy_guard_runs_before_node_history(
         prepare_run(_config(**config_override), _bundle(hierarchy=_hierarchy()))
 
 
-def test_densifying_preflight_accounts_dense_s_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The eager (densifying) branch sets dense_s_bytes = node_count x n_bottom x 8."""
+def test_dense_roster_preflight_accounts_dense_s_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """erm/mint_shrink have no upstream sparse variant: the eager branch keeps
+    the dense node_count x n_bottom x 8 term for them."""
     captured = {}
 
     def capture(estimate):
@@ -208,26 +209,77 @@ def test_densifying_preflight_accounts_dense_s_bytes(monkeypatch: pytest.MonkeyP
         capture,
     )
 
-    prepare_run(_config(reconciliation={"strategy": "ols"}), _bundle(hierarchy=_hierarchy()))
+    prepare_run(
+        _config(reconciliation={"strategy": "mint_shrink"}), _bundle(hierarchy=_hierarchy())
+    )
 
     # _hierarchy(): 2 bottom (a, b) + dept=D + __total__ = 4 nodes -> 4 * 2 * 8.
-    assert captured["estimate"].dense_s_bytes == 4 * 2 * 8
+    assert captured["estimate"].summing_matrix_bytes == 4 * 2 * 8
 
 
-def test_densifying_guard_message_includes_dense_s_line(monkeypatch: pytest.MonkeyPatch) -> None:
+def _csr_bytes_for_hierarchy() -> int:
+    """Analytic csr estimate for _hierarchy(): nnz*8 data + nnz*4 indices +
+    (n_nodes+1)*4 indptr, with nnz = n_bottom * (2 + n_attr_cols)."""
+    n_bottom, n_attr_cols, n_nodes = 2, 1, 4
+    nnz = n_bottom * (2 + n_attr_cols)
+    return nnz * 8 + nnz * 4 + (n_nodes + 1) * 4
+
+
+@pytest.mark.parametrize(
+    "config_override",
+    [
+        {"reconciliation": {"strategy": "wls_struct"}},
+        {"hierarchical_intervals": {"method": "nixtla_conformal", "strategy": "bottom_up"}},
+    ],
+)
+def test_sparse_roster_preflight_charges_csr_estimate(
+    monkeypatch: pytest.MonkeyPatch, config_override
+) -> None:
+    """Sparse-capable strategies (point wls_struct, fused bottom_up) charge the
+    analytic csr bytes instead of the dense product."""
+    captured = {}
+
+    def capture(estimate):
+        captured["estimate"] = estimate
+
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        capture,
+    )
+
+    prepare_run(_config(**config_override), _bundle(hierarchy=_hierarchy()))
+
+    # The analytic csr formula, not a magic number; csr undercuts the dense
+    # product only at scale (nnz grows linearly while dense grows
+    # quadratically), so the pin is the formula itself.
+    assert captured["estimate"].summing_matrix_bytes == _csr_bytes_for_hierarchy()
+
+
+def test_dense_roster_guard_message_names_dense_only_strategies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "calibre.execution.hierarchy_memory.read_effective_available_memory_bytes", lambda: 1
     )
 
-    with pytest.raises(ValueError, match="dense summing-matrix bytes"):
-        prepare_run(_config(reconciliation={"strategy": "ols"}), _bundle(hierarchy=_hierarchy()))
+    with pytest.raises(ValueError, match="summing-matrix bytes") as excinfo:
+        prepare_run(
+            _config(reconciliation={"strategy": "mint_shrink"}), _bundle(hierarchy=_hierarchy())
+        )
+
+    message = str(excinfo.value)
+    # The dense ceiling roster is documented where users hit it (R7)...
+    assert "erm" in message
+    assert "mint_shrink" in message
+    # ...and the pre-sparse hook string is retired (#168 delivered it).
+    assert "until sparse" not in message
 
 
-def test_bottom_up_preflight_never_accounts_dense_s_bytes(
+def test_bottom_up_preflight_never_accounts_summing_matrix_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Native bottom_up takes the bottom_only branch: it never builds the eager
-    expansion estimate, so the dense-S term never applies."""
+    expansion estimate, so no summing-matrix term applies."""
 
     def fail_enforce(*args, **kwargs):
         raise AssertionError("bottom_up must not run the eager expansion guard")
@@ -340,11 +392,12 @@ def test_eager_guard_and_partition_limit_consume_shared_expansion_facts(
         prepare_run(config, _bundle(hierarchy=_hierarchy()))
 
     # The guard receives the estimate run preparation computed, augmented only
-    # with the densifying dense-S term (node_count x n_bottom x 8); every other
-    # fact is carried through unchanged, so it is still one source of truth.
+    # with the strategy-conditional summing-matrix term (the csr estimate for
+    # ols, a sparse-capable strategy); every other fact is carried through
+    # unchanged, so it is still one source of truth.
     guard_estimate = captured["estimate"]
-    assert replace(guard_estimate, dense_s_bytes=0) == sentinel
-    assert guard_estimate.dense_s_bytes == sentinel.node_count * sentinel.bottom_unique_ids * 8
+    assert replace(guard_estimate, summing_matrix_bytes=0) == sentinel
+    assert guard_estimate.summing_matrix_bytes == _csr_bytes_for_hierarchy()
 
 
 def test_eager_hierarchy_partition_estimate_matches_materialized_nodes(

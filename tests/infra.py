@@ -5,6 +5,19 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
+import numpy as np
+
+
+def closed_form_min_trace(S: np.ndarray, w_diag: np.ndarray, base: np.ndarray) -> np.ndarray:
+    """Dense MinT projection with diagonal W: S (S' W^-1 S)^-1 S' W^-1 y.
+
+    Reference implementation for reconciliation agreement pins; deliberately
+    independent of the production solver path.
+    """
+    weighted = S.T / w_diag
+    bottom = np.linalg.solve(weighted @ S, weighted @ base)
+    return S @ bottom
+
 
 @contextmanager
 def restore_cwd():

@@ -103,6 +103,22 @@ lattice produces ill-conditioned covariance estimates. Reconciliation still
 applies only to point forecasts before conformal calibration; coherent interval
 or quantile reconciliation remains out of scope for this path.
 
+At full-M5 scale the summing matrix is the memory pivot. The sparse-capable
+strategies — point `ols`, `wls_struct`, `wls_var`, plus fused-path `bottom_up` —
+build a csr summing matrix directly from hierarchy index facts (~2.7 MB at full
+M5) and reconcile through `MinTraceSparse`/`BottomUpSparse`, so they run on
+commodity memory; their results match the dense closed form within iterative
+bicgstab solver tolerance, and Calibre raises loudly if a solve fails to
+converge. One sparse-path behavior difference: `wls_var` weights by the
+unbiased residual variance and requires it to be strictly positive for every
+node — a node with constant in-sample residuals (e.g. an all-zero series fit
+exactly) raises upstream's positive-definite error, where the dense path's
+jittered estimator tolerated it. `erm` and `mint_shrink` have no upstream sparse implementation and
+keep a dense memory ceiling (the dense S alone is ~7.6 GiB at full M5,
+33,563 x 30,490 float64); the hierarchy memory preflight charges the dense term
+for exactly those strategies and blocks runs that cannot fit in detected
+memory. Native point `bottom_up` needs no summing matrix at all.
+
 For interim hierarchy-aware intervals, use the separate fused phase:
 
 ```yaml

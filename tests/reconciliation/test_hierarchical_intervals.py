@@ -248,3 +248,63 @@ def test_horizonless_sidecar_is_reused_for_multiple_horizons(
     assert set(out[H]) == {1, 2}
     assert len(_FakeReconciliation.calls) == 1
     assert H not in _FakeReconciliation.calls[0]["Y_df"].columns
+
+
+# ---------------------------------------------------------------------------
+# Sparse S_df emission for the sparse-capable roster (#168). Sparse value
+# columns are the zero-copy precondition for hierarchicalforecast's
+# `.sparse.to_coo()` -> csr path: a plain dense DataFrame silently densifies
+# the full S transiently before re-sparsifying.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("strategy", ["bottom_up", "ols", "wls_struct", "wls_var"])
+def test_sparse_roster_emits_sparse_s_df_columns(
+    monkeypatch: pytest.MonkeyPatch, strategy: str
+) -> None:
+    _patch_fake_nixtla(monkeypatch)
+    phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions(strategy=strategy))
+
+    phase.apply(
+        _forecast_frame(),
+        build_hierarchy_index(_hierarchy()),
+        HierarchicalIntervalContext(fitted_values=_fitted_values()),
+    )
+
+    s_df = _FakeReconciliation.calls[0]["S_df"]
+    value_columns = [column for column in s_df.columns if column != UNIQUE_ID]
+    assert all(str(dtype).startswith("Sparse[float64") for dtype in s_df[value_columns].dtypes)
+    # The zero-copy precondition hierarchicalforecast checks before to_coo.
+    coo = s_df[value_columns].sparse.to_coo()
+    assert coo.shape == (4, 2)
+
+
+@pytest.mark.parametrize("strategy", ["mint_shrink", "erm"])
+def test_dense_roster_keeps_dense_s_df_columns(
+    monkeypatch: pytest.MonkeyPatch, strategy: str
+) -> None:
+    _patch_fake_nixtla(monkeypatch)
+    phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions(strategy=strategy))
+
+    phase.apply(
+        _forecast_frame(),
+        build_hierarchy_index(_hierarchy()),
+        HierarchicalIntervalContext(fitted_values=_fitted_values()),
+    )
+
+    s_df = _FakeReconciliation.calls[0]["S_df"]
+    value_columns = [column for column in s_df.columns if column != UNIQUE_ID]
+    assert all(str(dtype) == "float64" for dtype in s_df[value_columns].dtypes)
+
+
+def test_sparse_s_df_values_and_row_order_match_dense_emission() -> None:
+    index = build_hierarchy_index(_hierarchy())
+    dense_df = hi._to_s_df(hi.summing_matrix_from_index(index))
+    sparse_df = hi._to_s_df(hi.sparse_summing_matrix_from_index(index))
+
+    assert list(sparse_df[UNIQUE_ID]) == list(dense_df[UNIQUE_ID])
+    value_columns = [column for column in sparse_df.columns if column != UNIQUE_ID]
+    np.testing.assert_array_equal(
+        sparse_df[value_columns].to_numpy(dtype=np.float64),
+        dense_df[value_columns].to_numpy(dtype=np.float64),
+    )
