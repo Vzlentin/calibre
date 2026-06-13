@@ -11,14 +11,15 @@ canonical.
 
 ## Architecture
 
-Pipeline: load dataset → build `ForecastTask`s → fit model adapters → conformal
-calibration → ordering policy → ledger + metrics. Orchestrated by
-`execution/backend.py::BackendEngine`.
+Pipeline: load dataset → build `ForecastTask`s → fit model adapters →
+reconciliation (when hierarchical) → conformal calibration → ordering policy →
+ledger + metrics. Orchestrated by `execution/backend.py::BackendEngine`.
 
 | Module             | Responsibility                                              |
 | ------------------ | ----------------------------------------------------------- |
 | `core/`            | `ForecastFrame`, `ForecastTask`, metrics, logging/tracing   |
 | `forecasting/`     | Adapter registry + model adapters (`features/` for transforms) |
+| `reconciliation/`  | `Reconciler` protocol + strategy registry + summing matrix (point reconcile between predict and calibrate) |
 | `conformal/`       | Conformal calibration (see Gotchas re: stable interface)    |
 | `ordering/`        | Order policies + inventory `simulation/`                    |
 | `execution/`       | `BackendEngine`, ledger, dataset registry, I/O, task builder |
@@ -71,6 +72,9 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
   produces **~5011.20** — cross-arch LightGBM float divergence (SIMD/FMA/libm) plus
   Accelerate-vs-OpenBLAS, **not** a regression and **not** threading (single- and
   multi-thread agree bit-for-bit). Don't chase the macOS delta or loosen 4992.20.
+- Reconciliation strategy is an M5-coverage lever, not coverage-neutral: `wls_struct`
+  lands population coverage on-target (~90.97%) where `bottom_up` over-covers (~94.92%).
+  Weigh the reconciler choice, not just conformal knobs, on a coverage miss.
 
 ## Worktrees
 
@@ -98,9 +102,14 @@ non-trivial task. Hermes agents: use the `obsidian` skill instead.
 
 The vault root is `$OBSIDIAN_VAULT_PATH`. The project folder is
 `Projects/Calibre/`; canon files: `architecture.md`, `lessons.md`,
-`vision.md`, `ROADMAP.md`, plus `plans/` and `archive/`. If the env var is
-unset, plans fall back to repo-local `docs/plans/` while durable memory is
-skipped (per the skill).
+`vision.md`, `ROADMAP.md`, plus `plans/` and `archive/`. Reusable per-problem
+learnings live in `Projects/Calibre/solutions/` (knowledge-track docs by category —
+architecture-patterns, design-patterns, conventions, performance-issues, workflow,
+… — with `module`/`tags`/`applies_when` frontmatter), the shared domain vocabulary
+in `Projects/Calibre/CONCEPTS.md`, and postponed work in
+`Projects/Calibre/deferred-findings-register.md`; consult them when implementing or
+debugging in a documented area. If the env var is unset, plans fall back to
+repo-local `docs/plans/` while durable memory is skipped (per the skill).
 
 ### Roadmap: GitHub for status, vault for rationale
 
