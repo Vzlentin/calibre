@@ -690,3 +690,32 @@ def test_unstarved_checked_solve_converges_and_matches_closed_form() -> None:
     w_diag = dense.S @ np.ones(dense.n_bottom)
     expected = closed_form_min_trace(dense.S, w_diag, base)
     np.testing.assert_allclose(reconciled, expected, rtol=1e-3, atol=1e-6)
+
+
+class _PointPredictFailure(_CountingMethod):
+    """A non-residual sparse method whose predict raises like the KTD-4
+    convergence guard does (a bare RuntimeError without cross-section identity)."""
+
+    def predict(self, *, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
+        del S, y_hat
+        raise RuntimeError("bicgstab solve failed")
+
+
+def test_nonresidual_convergence_guard_is_wrapped_with_cross_section_identity() -> None:
+    """KTD-4 end-to-end: the inner guard raises a bare RuntimeError, and the
+    non-residual ``reconcile_cross_section`` wrapper must re-raise it enriched
+    with the failing cross-section's strategy/model/origin/h. Drives a full
+    ``NixtlaReconciler('wls_struct')`` through ``__call__`` so the production
+    enrichment wrapper is exercised, not just the inner guard in isolation."""
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Nixtla reconciliation failed for strategy='wls_struct'"
+            r".*model_name=.*forecast_origin=.*h="
+        ),
+    ):
+        NixtlaReconciler("wls_struct", method_factory=_PointPredictFailure)(
+            _coherent_tiny_forecast_frame(),
+            build_hierarchy_index(_tiny_hierarchy()),
+            ReconciliationContext(),
+        )

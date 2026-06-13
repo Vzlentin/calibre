@@ -394,6 +394,40 @@ def test_point_wls_var_agrees_with_dense_closed_form() -> None:
     np.testing.assert_allclose(values, expected, rtol=_SOLVER_RTOL, atol=_SOLVER_ATOL)
 
 
+def _zero_variance_node_fitted_frame(
+    node_labels: tuple[str, ...], periods: int = 10
+) -> pd.DataFrame:
+    """Like ``_node_fitted_frame`` but one node has CONSTANT in-sample residuals
+    (zero unbiased variance), the degenerate case the sparse ``wls_var`` rejects."""
+    frame = _node_fitted_frame(node_labels, periods)
+    degenerate = node_labels[0]
+    mask = frame[UNIQUE_ID] == degenerate
+    # A constant residual of 1.0 for every period -> nanvar(ddof=1) == 0.0.
+    frame.loc[mask, FITTED_Y_HAT] = frame.loc[mask, Y].to_numpy(dtype=np.float64) - 1.0
+    return frame
+
+
+def test_point_wls_var_rejects_zero_variance_node_the_dense_path_tolerated() -> None:
+    """Characterization (#168): sparse ``wls_var`` weights by unbiased residual
+    variance and requires it strictly positive per node, so a node with constant
+    in-sample residuals raises upstream's positive-definite error — surfaced WITH
+    cross-section identity. The old dense jittered estimator tolerated this; the
+    sparse path intentionally does not. This pins the documented divergence."""
+    pytest.importorskip("hierarchicalforecast.methods")
+    hierarchy = _m5_hierarchy_frame()
+    summing = build_summing_matrix(hierarchy)
+    base = _divergent_node_values(summing)
+
+    with pytest.raises(RuntimeError, match=r"strategy='wls_var'.*model_name="):
+        NixtlaReconciler("wls_var")(
+            _node_point_frame(summing.node_labels, base),
+            build_hierarchy_index(hierarchy),
+            ReconciliationContext(
+                fitted_values=_zero_variance_node_fitted_frame(summing.node_labels)
+            ),
+        )
+
+
 @pytest.mark.parametrize("strategy", ["ols", "wls_struct"])
 def test_fused_min_trace_point_output_agrees_with_dense_closed_form(strategy: str) -> None:
     """The fused phase's reconciled mean through MinTraceSparse + sparse S_df

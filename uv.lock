@@ -531,7 +531,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "s3fs", marker = "extra == 'cloud'" },
     { name = "s3fs", marker = "extra == 's3'" },
-    { name = "scipy" },
+    { name = "scipy", specifier = ">=1.12" },
     { name = "sqlalchemy" },
     { name = "statsforecast" },
     { name = "threadpoolctl" },
