@@ -47,5 +47,16 @@ WORKDIR=$(pwd)                               # absolute worktree path
 Per CLAUDE.md "Worktrees": a *warm* `uv sync` takes seconds; **never** copy the
 main `.venv` (it is non-relocatable), and **never** set `UV_LINK_MODE`.
 
+**Data provisioning.** `setup-worktree-unix` **copies** `data/vn2` (~4 MB) but
+**links** `data/m5` as an NTFS junction (`mklink /J`) — `data/m5` is ~466 MB
+(~116× vn2), so copying it into every worktree would bloat disk for no gain. The
+link is **read-only-safe**: M5 reads `data/m5` and writes the separate
+`results/m5`, so the worktree never mutates the linked source. Both data steps
+carry `test -d … || true`, which **swallows a failed link** — a data-less
+worktree then provisions "successfully", so the real catch is the **conditional
+`data/m5` presence check in SKILL.md's Stage 0d GATE** for M5-dependent items
+(the `import calibre` check passes without data).
+
 The real provisioning check is the venv import in SKILL.md's Stage 0.7 GATE
-(`cd "$WORKDIR" && uv run python -c "import calibre"`).
+(`cd "$WORKDIR" && uv run python -c "import calibre"`), plus that conditional
+`data/m5` presence check for M5-dependent items.

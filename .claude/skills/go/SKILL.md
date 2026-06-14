@@ -178,7 +178,16 @@ stages uses an explicit `cd "$WORKDIR" && …` in worktree mode (a
 `.worktrees/<slug>`) and its venv is usable
 (`cd "$WORKDIR" && uv run python -c "import calibre"`). If provisioning failed,
 stop and report — do **not** fall back to mutating the user's dirty checkout. In
-direct mode this gate is automatically satisfied.
+direct mode the worktree/venv part of this gate is automatically satisfied.
+
+**GATE (data presence — both modes, conditional).** When the work item declares
+an **M5 dependency** — its plan or issue references `data/m5` (e.g. its commands
+run a `benchmarks/m5/...` config) — additionally assert the data is present:
+`cd "$WORKDIR" && test -d data/m5` must pass. This catches the
+`|| true`-swallowed worktree link step (a failed `data/m5` junction leaves a
+data-less worktree that `import calibre` alone would not detect). If an
+M5-dependent item has no `data/m5` in `WORKDIR`, stop and report — do not run on
+into a later runtime failure. Non-M5 items impose no such requirement.
 
 ---
 
