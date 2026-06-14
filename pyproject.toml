@@ -96,11 +96,29 @@ select = [
     "B",     # flake8-bugbear
     "SIM",   # flake8-simplify
     "T20",   # flake8-print
+    # Minimal pydocstyle (D) subset: docstring presence + summary-line format.
+    # D102 (public methods) and D107 (__init__) are covered by the written
+    # convention in CLAUDE.md, not the gate, to keep the subset minimal.
+    "D100",  # public module has a docstring
+    "D104",  # public package (__init__.py) has a docstring
+    "D101",  # public class has a docstring
+    "D103",  # public function has a docstring
+    "D205",  # blank line between summary and description
+    "D212",  # multi-line summary starts on the first line
+    "D415",  # summary ends with '.', '?', or '!'
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "benchmarks/**" = ["E501"]
 "calibre/cli/**" = ["T20"]
+# Test modules carry only D100 (a module docstring). Per-function (D103),
+# grouping-class (D101), and package (D104) docstrings are not external-reader
+# API, so they are exempt to honor the minimal intent.
+"tests/**" = ["D103", "D101", "D104"]
+# Auto-generated Alembic revisions are not external-reader prose and are
+# regenerated on the next migration; exempt them from the docstring gate
+# (module/package docstrings and the generated upgrade/downgrade functions).
+"calibre/storage/migrations/versions/**" = ["D100", "D104", "D103"]
 
 [tool.ty.environment]
 python-version = "3.11"
