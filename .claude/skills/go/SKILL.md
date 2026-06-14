@@ -265,17 +265,47 @@ block the merge unless they flag a correctness risk — use judgment.
 
 ## Stage 5 — Loop on CI, then squash-merge on green
 
-Invoke `/loop-on-ci` from `WORKDIR` for this PR. It owns the CI loop: resolving
-the active PR, using `gh pr checks` as the source of truth, watching pending
-checks, pulling failed GitHub Actions logs when needed, applying scoped CI fixes,
-pushing, and re-checking until the PR check set is green.
+Stage 5 owns an **inline CI watch-and-autofix loop** — there is no external CI
+skill to delegate to. Capture the head SHA
+(`HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`) and poll the typed
+check-runs API, the only reliable CI source on this host — the local
+check-status wrapper is broken (see `references/environment.md`):
 
-`/go` still owns the outer guardrails: never weaken assertions, skip tests, touch
-the VN2 `4992.20` baseline, or make unrelated workflow changes to turn CI green.
-If `/loop-on-ci` reports unresolved failures, repeated failures, or a
-merge-blocking issue it cannot safely fix, append a `## CI Failures Unresolved`
-section to the PR body (`gh pr edit <PR> --body-file <tmp>`), do not merge red,
-and take the **preserve path** below.
+```bash
+gh api repos/Vzlentin/calibre/commits/$HEAD_SHA/check-runs \
+  --jq '.check_runs[] | {name, status, conclusion}'
+```
+
+Read the verdict from `status` **and** `conclusion` together. The
+`select(.conclusion=="failure")` filter in `ci-and-merge.md` is a failed-run
+**log filter**, not a verdict — using it as one reads a still-pending run as
+"no failures → green" and merges early. The verdict is:
+
+- **pending** — any run with `status != "completed"`: keep polling, do **not**
+  merge.
+- **green** — *every* run is `status == "completed"` **and**
+  `conclusion == "success"`: exit the loop and proceed to the on-green steps.
+- **failure** — any completed run with a non-`success` or unrecognized
+  conclusion (`failure`, `cancelled`, `timed_out`, `action_required`, …): enter
+  the autofix branch.
+
+**Autofix branch — the loop owns the cap and the stop.** For each failed run,
+pull `gh run view <run-id> --log-failed` (run-id parsed from its `details_url`;
+recipe in `references/ci-and-merge.md`), find and fix the **root cause** in
+`WORKDIR`, commit + push, recapture `HEAD_SHA`, and re-poll. Bounded by:
+
+- **Max 3 fix iterations.** After the 3rd failed cycle, stop — do not loop again.
+- **Repeated-signature stop.** If the same failure signature recurs across 2+
+  iterations (the PR #38 pattern), stop immediately — re-running an unchanged
+  failure is not progress.
+
+On either stop, append a `## CI Failures Unresolved` section to the PR body
+(`gh pr edit <PR> --body-file <tmp>`), do **not** merge red, and take the
+**preserve path** below.
+
+`/go` owns the outer guardrails throughout: never weaken assertions, skip tests,
+touch the VN2 `4992.20` baseline, or make unrelated workflow changes to turn CI
+green.
 
 **On green** (and Stage 4 gate satisfied), confirm the PR body carries `closes #N`
 — Stage 0c guarantees the issue exists, so verify only that the line is present.
@@ -299,8 +329,8 @@ fast-forward, drop the branch; in **worktree mode** remove the worktree and drop
 the branch **without** `git checkout main`/`git pull` in the main checkout —
 preserving the user's branch and dirty tree is the whole point.
 
-**Preserve path (failure / any short-stop).** If `/loop-on-ci` cannot get the PR
-green, or any stage stopped short of the mode's completion point, do **not** clean
+**Preserve path (failure / any short-stop).** If the inline CI loop cannot get
+the PR green, or any stage stopped short of the mode's completion point, do **not** clean
 up: leave the local `<type>/<slug>` branch and — in worktree mode — the
 `.worktrees/<slug>` working tree intact so the user can resume/debug, and surface
 the worktree path + branch in the final report. This short-stop **is** the

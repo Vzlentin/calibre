@@ -1,11 +1,16 @@
 # Stage 5 — CI log-pull and cleanup-by-mode bash
 
-SKILL.md keeps the autofix-loop shape, the max-3-iterations rule, the PR #38
-repeated-failure stop, the on-green merge decision, the merge-gated cleanup
-decision, and the GATE. This file holds the bash.
+Stage 5 in `SKILL.md` owns the CI verdict logic itself — the pending/green/failure
+read of `check-runs`, the autofix-loop shape, the max-3-iterations cap, the PR #38
+repeated-signature stop, the on-green merge decision, the merge-gated cleanup
+decision, and the GATE. This file holds only the supporting bash: the failed-run
+log-pull and the cleanup-by-mode commands.
 
-Poll CI status with the canonical `gh api`.
-In Stage 5 the SHA is `HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`.
+CI status is read via the canonical `gh api .../check-runs` (Stage 5 specifies the
+pending/green/failure verdict over its output); the broken local check-status
+wrapper and the other host-tooling traps are documented in
+`references/environment.md`. In Stage 5 the SHA is
+`HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`.
 
 ## Pull logs for failed runs
 
