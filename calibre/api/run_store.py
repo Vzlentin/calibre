@@ -1,3 +1,5 @@
+"""In-memory and SQL-backed stores for API run state."""
+
 from __future__ import annotations
 
 from typing import Protocol
@@ -21,6 +23,8 @@ from calibre.storage.state import SqlConformalStateStore
 
 
 class RunStore(Protocol):
+    """Interface for creating, fetching, and executing API backtest runs."""
+
     def create(self, config: dict, *, idempotency_key: str | None = None) -> RunResponse: ...
 
     def get(self, run_id: str) -> RunResponse | None: ...
@@ -44,6 +48,8 @@ def _result_rows(result) -> int:
 
 
 class MemoryRunStore:
+    """In-process run store for tests and single-host use."""
+
     def __init__(self) -> None:
         self._runs: dict[str, RunResponse] = {}
         self._configs: dict[str, dict] = {}
@@ -103,6 +109,8 @@ class MemoryRunStore:
 
 
 class SqlRunStore:
+    """Postgres-backed run store sharing the engine's session factory."""
+
     def __init__(self, factory: sessionmaker) -> None:
         self.factory = factory
 

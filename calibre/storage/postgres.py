@@ -1,3 +1,5 @@
+"""Postgres/SQLite engine helpers and per-table repository classes."""
+
 from __future__ import annotations
 
 import os
@@ -34,19 +36,23 @@ from calibre.storage.models import (
 
 
 def database_url() -> str | None:
+    """Return the configured database URL, or ``None`` when unset."""
     return os.environ.get("CALIBRE_DATABASE_URL")
 
 
 def make_engine(url: str, **kwargs) -> Engine:
+    """Create a SQLAlchemy engine for ``url`` in future (2.0) mode."""
     return create_engine(url, future=True, **kwargs)
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
+    """Build a session factory bound to ``engine`` that keeps objects live after commit."""
     return sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
 @contextmanager
 def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
+    """Yield a session that commits on success and rolls back on error."""
     session = factory()
     try:
         yield session
@@ -59,6 +65,8 @@ def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
 
 
 class RunRepo:
+    """CRUD access to backtest :class:`~calibre.storage.models.Run` rows."""
+
     def __init__(self, session: Session) -> None:
         self.session = session
 
@@ -98,6 +106,8 @@ class RunRepo:
 
 
 class ConformalStateRepo:
+    """Read/write conformal calibration state keyed by session and partition."""
+
     def __init__(self, session: Session) -> None:
         self.session = session
 
@@ -128,6 +138,8 @@ class ConformalStateRepo:
 
 
 class PendingObservationRepo:
+    """Store and resolve interval rows awaiting their realized actuals."""
+
     def __init__(self, session: Session) -> None:
         self.session = session
 
@@ -271,6 +283,8 @@ class PendingObservationRepo:
 
 
 class TuningRunRepo:
+    """Cache and look up per-series local HPO results."""
+
     def __init__(self, session: Session) -> None:
         self.session = session
 
@@ -311,6 +325,8 @@ class TuningRunRepo:
 
 
 class GlobalTuningRunRepo:
+    """Cache and look up per-session global/panel HPO results."""
+
     def __init__(self, session: Session) -> None:
         self.session = session
 
@@ -344,6 +360,8 @@ class GlobalTuningRunRepo:
 
 
 class ForecastPointerRepo:
+    """Persist and resolve object-store pointers to run artifact frames."""
+
     def __init__(self, session: Session) -> None:
         self.session = session
 

@@ -1,3 +1,5 @@
+"""StatsForecast (classical statistical) forecasting adapter."""
+
 from __future__ import annotations
 
 import contextlib
@@ -22,6 +24,8 @@ _RESERVED_KEYS = frozenset({"model", "name", "freq", "backend", "scope"})
 
 
 class StatsForecastAdapter(ModelAdapter):
+    """Adapter wrapping StatsForecast classical statistical models."""
+
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._sf: StatsForecast | None = None

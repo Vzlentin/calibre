@@ -1,3 +1,5 @@
+"""MLForecast (gradient-boosted) forecasting adapter."""
+
 from __future__ import annotations
 
 import importlib
@@ -148,6 +150,8 @@ def _point_quantile_name(name_to_quantile: dict[str, float]) -> str:
 
 
 class MLForecastAdapter(ModelAdapter):
+    """Adapter wrapping MLForecast gradient-boosted models with quantiles."""
+
     def __init__(self, model_config: dict) -> None:
         self._config = model_config
         self._mlf: Any | None = None

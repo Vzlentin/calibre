@@ -1,3 +1,5 @@
+"""SQLAlchemy ORM table models for the Postgres state store."""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -11,10 +13,14 @@ JsonDict = JSON().with_variant(JSONB(), "postgresql")
 
 
 class Base(DeclarativeBase):
+    """Declarative base for all ORM table models."""
+
     pass
 
 
 class Run(Base):
+    """A submitted backtest run and its lifecycle status."""
+
     __tablename__ = "runs"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -28,6 +34,8 @@ class Run(Base):
 
 
 class ConformalState(Base):
+    """Per-session conformal calibration state, keyed by session and partition."""
+
     __tablename__ = "conformal_state"
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -42,6 +50,8 @@ class ConformalState(Base):
 
 
 class PendingObservation(Base):
+    """An interval row awaiting its realized actual before it can be scored."""
+
     __tablename__ = "pending_observations"
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -56,6 +66,8 @@ class PendingObservation(Base):
 
 
 class TuningRun(Base):
+    """A per-series local HPO result, keyed by session and ``unique_id``."""
+
     __tablename__ = "tuning_runs"
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -94,6 +106,8 @@ class GlobalTuningRun(Base):
 
 
 class ForecastPointer(Base):
+    """Object-store pointer to a run's forecast/ledger artifact frames."""
+
     __tablename__ = "forecast_pointers"
 
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id"), primary_key=True)
@@ -103,8 +117,11 @@ class ForecastPointer(Base):
 
 
 class LifecycleFitRecord(Base):
-    """Fit lifecycle metadata. Data-plane frames live as parquet under
-    ``frame_uris`` (object store), never inline on this row."""
+    """Fit lifecycle metadata.
+
+    Data-plane frames live as parquet under ``frame_uris`` (object store),
+    never inline on this row.
+    """
 
     __tablename__ = "lifecycle_fit_records"
 
@@ -131,8 +148,11 @@ class LifecycleFitRecord(Base):
 
 
 class LifecycleConformalState(Base):
-    """Session-owned conformal state, keyed by ``(session_id, partition)`` and
-    referenced by fits rather than copied onto each fit row."""
+    """Session-owned conformal state.
+
+    Keyed by ``(session_id, partition)`` and referenced by fits rather than
+    copied onto each fit row.
+    """
 
     __tablename__ = "lifecycle_conformal_state"
 
@@ -147,6 +167,8 @@ class LifecycleConformalState(Base):
 
 
 class LifecycleTuneRecord(Base):
+    """Tuning study metadata and best candidates for a lifecycle session."""
+
     __tablename__ = "lifecycle_tune_records"
 
     study_id: Mapped[str] = mapped_column(String, primary_key=True)

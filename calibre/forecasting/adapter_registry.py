@@ -1,3 +1,5 @@
+"""Registry that resolves model names to forecasting adapters."""
+
 from __future__ import annotations
 
 import importlib

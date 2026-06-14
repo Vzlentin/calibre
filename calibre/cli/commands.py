@@ -1,3 +1,5 @@
+"""Implementations behind the CLI subcommands (run, validate, health, ...)."""
+
 from __future__ import annotations
 
 import logging
@@ -111,6 +113,7 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
 
 
 def run(config_path: str | Path, *, metrics_port: int | None = None) -> BackendResult:
+    """Load the config at ``config_path`` and execute a backtest run."""
     if metrics_port is not None:
         from calibre.core.metrics import serve
 
@@ -127,6 +130,7 @@ def run_config(
     initial_ledger: pd.DataFrame | None = None,
     max_unique_ids: int | None = None,
 ) -> BackendResult:
+    """Execute a backtest from an already-loaded :class:`BackendConfig`."""
     bundle = _load_dataset(config)
     _enforce_unique_id_limit(bundle, max_unique_ids)
     preparation = prepare_run(config, bundle)
@@ -186,6 +190,7 @@ def run_config(
 
 
 def validate(config_path: str | Path) -> BackendConfig:
+    """Load and validate a config file, logging a summary."""
     config = load_config(config_path)
     logger.info(
         "config valid",
@@ -201,6 +206,7 @@ def score_m5_coverage(
     output_dir: str | Path | None = None,
     thresholds: CoverageThresholds | None = None,
 ) -> M5CoverageArtifacts:
+    """Score M5 interval coverage from a resolved ledger and write artifacts."""
     artifacts = score_resolved_ledger(
         ledger_path,
         coverage=coverage,
@@ -220,6 +226,7 @@ def score_m5_coverage(
 
 
 def health() -> dict[str, Any]:
+    """Run a fixture backtest end-to-end and return a health payload."""
     import importlib.metadata
 
     try:
@@ -240,6 +247,7 @@ def health() -> dict[str, Any]:
 
 
 def run_sweep(configs_dir: str | Path) -> list[BackendResult]:
+    """Run every YAML config under ``configs_dir`` and return their results."""
     fs, root = open_fs(configs_dir)
     if not fs.exists(root):
         raise FileNotFoundError(f"Config directory not found: {configs_dir}")

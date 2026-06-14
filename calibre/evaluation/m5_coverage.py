@@ -1,3 +1,5 @@
+"""M5 interval-coverage scoring and acceptance gating."""
+
 from __future__ import annotations
 
 import json
@@ -29,6 +31,8 @@ UNKNOWN = "UNKNOWN"
 
 @dataclass(frozen=True, slots=True)
 class CoverageThresholds:
+    """Acceptance tolerances for the M5 coverage gate."""
+
     population_tolerance: float = 0.03
     level_tolerance: float = 0.05
     node_outlier_tolerance: float = 0.10
@@ -37,6 +41,8 @@ class CoverageThresholds:
 
 @dataclass(frozen=True, slots=True)
 class M5CoverageArtifacts:
+    """Coverage scoring outputs: written artifact paths plus the frames."""
+
     coverage_by_node_path: Path
     report_path: Path
     summary_path: Path
@@ -52,6 +58,7 @@ class M5CoverageArtifacts:
 
 
 def infer_m5_level(unique_id: object) -> str:
+    """Infer the M5 hierarchy level (total/<dim>/bottom) from a ``unique_id``."""
     label = str(unique_id)
     if label == TOTAL_LABEL:
         return "total"
@@ -67,6 +74,7 @@ def score_resolved_ledger(
     output_dir: str | Path | None = None,
     thresholds: CoverageThresholds | None = None,
 ) -> M5CoverageArtifacts:
+    """Score a resolved ledger parquet at ``ledger_path`` and write artifacts."""
     thresholds = thresholds or CoverageThresholds()
     path = Path(ledger_path)
     if not path.exists():
@@ -88,6 +96,7 @@ def write_coverage_artifacts(
     coverage: float = 0.9,
     thresholds: CoverageThresholds | None = None,
 ) -> M5CoverageArtifacts:
+    """Compute coverage frames from a ledger and write them to ``output_dir``."""
     thresholds = thresholds or CoverageThresholds()
     lower_col, upper_col = interval_column_names(coverage)
     required = _required_columns(lower_col=lower_col, upper_col=upper_col)

@@ -1,3 +1,5 @@
+"""Conformal state store protocol, SQL implementation, and compaction."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -13,6 +15,8 @@ RUNTIME_PARTITION = "__runtime__"
 
 
 class ConformalStateStore(Protocol):
+    """Read/write interface for per-session conformal calibration state."""
+
     def get(self, run_id: UUID, partition: str = RUNTIME_PARTITION) -> dict | None: ...
 
     def list_for_run(self, run_id: UUID) -> dict[str, dict]: ...
@@ -21,6 +25,8 @@ class ConformalStateStore(Protocol):
 
 
 class SqlConformalStateStore:
+    """SQL-backed conformal state store keyed by session (or legacy run id)."""
+
     def __init__(
         self,
         repo: ConformalStateRepo,
@@ -48,6 +54,11 @@ class SqlConformalStateStore:
 
 
 def compact_old_state(session_id: str, older_than_days: int) -> int:
+    """Delete conformal-state rows older than ``older_than_days`` for a session.
+
+    Returns the number of rows removed. Raises if ``older_than_days`` is
+    negative or ``CALIBRE_DATABASE_URL`` is unset.
+    """
     from calibre.storage.models import ConformalState
     from calibre.storage.postgres import database_url, make_engine, make_session_factory
 

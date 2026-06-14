@@ -50,18 +50,22 @@ _OBJECTIVES: dict[str, TuningObjective] = {}
 def register_tuning_search_space(
     name: str, search_space: Callable[[optuna.Trial], TuningCandidate]
 ) -> None:
+    """Register a named search space under ``name``."""
     _SEARCH_SPACES[name] = search_space
 
 
 def register_tuning_objective(name: str, objective: TuningObjective) -> None:
+    """Register a named tuning objective under ``name``."""
     _OBJECTIVES[name] = objective
 
 
 def has_search_space(name: str) -> bool:
+    """Return whether a search space is registered under ``name``."""
     return name in _SEARCH_SPACES
 
 
 def has_objective(name: str) -> bool:
+    """Return whether an objective is registered under ``name``."""
     return name in _OBJECTIVES
 
 
@@ -256,6 +260,7 @@ def run_tune_job(
     store: LifecycleStoreProtocol,
     factory: sessionmaker | None,
 ) -> None:
+    """Run an HPO study (local or global) and record its result on the store."""
     record = store.get_study(study_id)
     if record is None:
         return

@@ -1,3 +1,5 @@
+"""Per-product inventory state for the simulator."""
+
 from __future__ import annotations
 
 from collections import deque

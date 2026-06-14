@@ -1,3 +1,5 @@
+"""Lifecycle store wiring for the fit/predict/tune API surface."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -13,6 +15,8 @@ from calibre.core.serialization import frame_from_records, json_safe_records
 
 @dataclass
 class FitRecord:
+    """In-memory fit record holding history, config, and latest outputs."""
+
     fit_id: str
     session_id: str
     tenant: str
@@ -62,6 +66,8 @@ def order_pk(session_id: str, record: dict) -> OrderKey:
 
 @dataclass
 class TuneRecord:
+    """In-memory tuning-study record with status and best candidates."""
+
     study_id: str
     session_id: str
     tenant: str
@@ -72,6 +78,8 @@ class TuneRecord:
 
 
 class LifecycleStore:
+    """In-memory lifecycle store for fits, conformal state, studies, and orders."""
+
     def __init__(self) -> None:
         self._fits: dict[str, FitRecord] = {}
         self._conformal_state: dict[str, dict[str, dict]] = {}
