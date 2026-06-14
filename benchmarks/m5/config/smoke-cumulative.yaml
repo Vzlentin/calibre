@@ -1,0 +1,35 @@
+config_schema: "1.0"
+dataset:
+  adapter: m5
+  path: tests/fixtures/m5
+  phase: evaluation
+tasks:
+  - model: SeasonalNaive
+    horizon: 2
+    config:
+      backend: statsforecast
+      season_length: 2
+origins:
+  # Several daily origins so the per-series cumulative calibrator warms up and
+  # the later origins emit a populated terminal-H bound; the fixture history
+  # runs to 2011-02-13.
+  start: 2011-02-01
+  end: 2011-02-08
+  freq: D
+conformal:
+  method: mscp
+  # Engine-internal cumulative conformal mode: one terminal-H bound over the
+  # 2-step protection window per (uid, model, origin). coverage 0.5 keeps the
+  # higher-quantile calibrator ready after a couple of resolved windows on the
+  # tiny CI fixture (this is a smoke, not a coverage gate).
+  mode: cumulative
+  protection_period: 2
+  coverage: 0.5
+  calibration_window: 4
+  partition: series
+output:
+  ledger_path: results/m5/smoke-cumulative/forecast-ledger.parquet
+  streaming: false
+execution:
+  backend: local
+  seed: 42

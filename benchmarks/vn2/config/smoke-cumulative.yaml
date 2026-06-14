@@ -1,0 +1,34 @@
+config_schema: "1.0"
+dataset:
+  adapter: vn2
+  path: benchmarks/vn2/fixture
+  period: 0
+tasks:
+  - model: SeasonalNaive
+    horizon: 2
+    config:
+      backend: statsforecast
+      season_length: 2
+origins:
+  # Several weekly origins so the per-series cumulative calibrator warms up and
+  # later origins emit a populated terminal-H bound on the 6-week fixture.
+  start: 2024-01-08
+  end: 2024-01-29
+  freq: W-MON
+conformal:
+  method: mscp
+  # Engine-internal cumulative conformal mode: one terminal-H bound over the
+  # 2-step protection window per (uid, model, origin). coverage 0.5 keeps the
+  # higher-quantile calibrator ready after a couple of resolved windows on the
+  # tiny CI fixture (this is a smoke, not a coverage gate).
+  mode: cumulative
+  protection_period: 2
+  coverage: 0.5
+  calibration_window: 4
+  partition: series
+output:
+  ledger_path: results/vn2/smoke-cumulative-ledger.parquet
+  streaming: false
+execution:
+  backend: local
+  seed: 42
