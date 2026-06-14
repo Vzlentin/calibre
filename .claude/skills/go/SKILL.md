@@ -280,6 +280,19 @@ valid ones in `WORKDIR`, commits + pushes, then replies and resolves each thread
 `needs-human`. Surface any `needs-human` threads in the final report; they do not
 block the merge unless they flag a correctness risk — use judgment.
 
+**Capture deferred findings at deferral time (non-blocking, vault-only).** Stage 4
+is the deferral **decision point**, so it is the sole place that records them. For
+**each** thread it leaves `needs-human`, and each non-blocking finding it
+deliberately does not fix, append **one row now** to the rolling
+deferred-findings register **via `/project-memory`** (the register store
+contract), so closeout is a read, not a post-hoc scrape of PR bodies + plans. Use
+the register's existing `id | source | finding | disposition | suggested next
+action` schema, keyed by this PR/issue #, with a disposition from the existing
+vocabulary (`deferred-pre-existing` / `out-of-scope` / `named-follow-up` /
+`excluded-item`). Reach the register **only** through `/project-memory`;
+**vault-absent → skip the append and note it** (never write the public repo).
+**Non-blocking** — it never fails this GATE or the merge.
+
 ---
 
 ## Stage 5 — Loop on CI, then squash-merge on green
@@ -415,6 +428,12 @@ sub-step entirely — do not invoke `/ce-compound`** so no repo writes ever occu
 This fires **only on `shipped`** (never `failed` / `ready-for-external-gates`) and
 is **non-blocking** — a `Documentation skipped` return or any error does **not**
 fail the Stage-6 GATE.
+
+**Finalize deferred-findings rows (non-blocking, vault-only).** If Stage 4
+appended any deferred-findings rows this run, finalize them via `/project-memory`
+with the terminal PR URL + merged SHA (or, on `failed`, the preserved-branch
+reference), so closeout is a read of the rolling register, not a scrape.
+Vault-absent → skip + note. **Non-blocking** — never fails the Stage-6 GATE.
 
 **GATE:** the work item's plan reads exactly one of:
 
