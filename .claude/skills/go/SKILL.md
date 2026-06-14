@@ -220,14 +220,20 @@ yourself.
 
 Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — see Invocation
 model; it spawns its own subagents). Scope is the branch diff vs `main`. If it
-changes anything, it re-runs typecheck/lint/scoped tests itself; commit and push
-the result before moving on:
+changes anything, **rerun the quality gates in the foreground and commit + push
+only on green** — do not chain the commit unconditionally after the gate, or a
+simplify pass that broke a test lands anyway:
 
 ```bash
-cd "$WORKDIR" && git add -A && git commit -m "refactor: simplify <slug>" && git push
+cd "$WORKDIR" \
+  && uv run ty check calibre/ && uv run ruff check . && uv run pytest <scoped tests> \
+  && git add -A && git commit -m "refactor: simplify <slug>" && git push
 ```
 
-**GATE:** working tree clean (committed + pushed) before Stage 3.
+If the rerun is red, do **not** commit — fix or revert the simplify change first.
+
+**GATE:** working tree clean before Stage 3, with the commit landed only after a
+green rerun.
 
 ---
 
@@ -237,16 +243,20 @@ Invoke the `ce-code-review` skill from `WORKDIR` (inline — see Invocation mode
 it spawns its own subagents) against this PR. Ensure its **actionable findings
 land as inline PR review comments** (resolvable threads) so Stage 4 has something
 to resolve — pass the PR and have it post comments rather than only printing a
-report. Push any safe fixes it commits inline:
+report. If it commits safe fixes inline, **push them only after a green
+foreground rerun** — never push a red tree:
 
 ```bash
-cd "$WORKDIR" && git push
+cd "$WORKDIR" \
+  && uv run ty check calibre/ && uv run ruff check . && uv run pytest <scoped tests> \
+  && git push
 ```
 
 Findings that become PR review threads are handed to Stage 4. Zero findings is a
 valid outcome — Stage 4 then no-ops.
 
-**GATE:** review completed and any inline-applied fixes are pushed.
+**GATE:** review completed; any inline-applied fixes are pushed only after a green
+rerun.
 
 ---
 
