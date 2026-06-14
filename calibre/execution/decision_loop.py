@@ -98,12 +98,15 @@ def observe_cumulative(
 ) -> list[pd.DataFrame]:
     """Observe complete windows for cumulative-mode conformal; return pending.
 
-    A window is ready when every row in its ``(uid, model, origin)`` group has
-    a non-null actual; only then is the cumulative sum well-defined and the
-    window safe to score. Window-completeness semantics are siblings of the
-    runtime's :meth:`~calibre.conformal.runtime.ConformalRuntime._observe_cumulative`
-    and the engine's cumulative-window deferral
-    (:class:`~calibre.execution.backend.BackendEngine`) — keep the three in sync.
+    Conservative *outer* gate: a ``(uid, model, origin)`` group is handed to
+    :meth:`~calibre.conformal.runtime.ConformalRuntime.observe` only once every
+    row in it has a non-null actual. The runtime then applies the precise
+    *inner* rule (score only ``h <= protection_period``, ready once all of those
+    horizons are present and non-null), and the engine's
+    :class:`~calibre.execution.backend.BackendEngine` deferral enforces that same
+    inner rule on the streaming-ledger path. For contiguous ``h = 1..horizon``
+    the outer gate is a strict subset of the inner rule, so the three agree on
+    which windows score — keep them aligned.
     """
     still_pending: list[pd.DataFrame] = []
     for frame in pending:

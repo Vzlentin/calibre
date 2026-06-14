@@ -117,8 +117,10 @@ select = [
 "tests/**" = ["D103", "D101", "D104"]
 # Auto-generated Alembic revisions are not external-reader prose and are
 # regenerated on the next migration; exempt them from the docstring gate
-# (module/package docstrings and the generated upgrade/downgrade functions).
-"calibre/storage/migrations/versions/**" = ["D100", "D104", "D103"]
+# entirely. The whole ``D`` category is ignored (not just D100/D103/D104) so a
+# freshly generated revision docstring — whose summary has no trailing period —
+# does not trip the D205/D212/D415 summary-format rules.
+"calibre/storage/migrations/versions/**" = ["D"]
 
 [tool.ty.environment]
 python-version = "3.11"

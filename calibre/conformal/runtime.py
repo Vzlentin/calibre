@@ -546,13 +546,14 @@ class SymmetricIntervalRuntime:
     def _observe_cumulative(self, observed: pd.DataFrame) -> pd.DataFrame:
         """Score complete cumulative windows; leave incomplete ones pending.
 
-        A ``(uid, model, origin)`` window is ready only when it holds every
-        horizon up to ``protection_period`` with a non-null actual; the
-        cumulative sum is undefined until then. Sibling of
-        :func:`~calibre.execution.decision_loop.observe_cumulative` and the
-        engine's cumulative-window deferral
-        (:class:`~calibre.execution.backend.BackendEngine`) — keep the three
-        in sync.
+        Precise *inner* rule: within each ``(uid, model, origin)`` window only
+        horizons ``h <= protection_period`` are scored, and the window is ready
+        only once all of them are present (``len >= protection_period``) with a
+        non-null actual; the cumulative sum is undefined until then. The engine's
+        :class:`~calibre.execution.backend.BackendEngine` deferral enforces this
+        same rule on the streaming-ledger path, while
+        :func:`~calibre.execution.decision_loop.observe_cumulative` feeds it
+        through a conservative whole-group outer gate — keep the three aligned.
         """
         if self.config.protection_period is None:
             raise ValueError("cumulative mode requires config.protection_period")
