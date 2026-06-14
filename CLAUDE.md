@@ -64,27 +64,24 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
 
 ## Commenting & docstring convention
 
-- **House style.** Imperative one-line summary ending in `.`/`?`/`!`. Add
-  Google `Args:`/`Returns:`/`Raises:` sections only where a parameter or return
-  needs explanation. Cross-reference siblings with reST `:class:`/`:func:`/
-  `:meth:`. No NumPy-style `Parameters:`; no Sphinx/mkdocs build — docstrings are
-  read in source.
+- **House style.** Imperative one-line summary ending in `.`/`?`/`!`. Add Google
+  `Args:`/`Returns:`/`Raises:` only where a parameter or return needs it.
+  Cross-reference siblings with reST `:class:`/`:func:`/`:meth:`. No NumPy-style
+  `Parameters:` — docstrings are read in source, not built by Sphinx/mkdocs.
 - **Coverage bar.** Every public module, package, class, and function carries a
-  docstring. Methods are documented by convention (not gated). Private helpers
-  get one only when the intent is non-obvious.
+  docstring. Methods by convention (not gated). Private helpers only when the
+  intent is non-obvious.
 - **Comments explain *why*, not *what*.** Drop redundant, duplicated, or stale
   comments. **No private references** in shipped prose — no vault pointers
-  (`lessons.md`), dead roadmap phases (`P0.3`), plan/review thread IDs
-  (`FIX #N`, `REVIEW #N`), or bare `#N`. Inline the load-bearing substance in
-  1–2 lines; keep a public anchor (issue/PR/code path) only when it helps an
-  outsider.
-- **Enforced subset (ruff `D`).** `D100`, `D104` (module + package), `D101`,
-  `D103` (class + function), `D205`/`D212`/`D415` (summary format). `D102`
-  (methods) and `D107` (`__init__`) are convention-only, not gated. `tests/**`
-  carries `D100` plus the `D205`/`D212`/`D415` summary-format rules —
-  `D101`/`D103`/`D104` are exempt. `migrations/versions/` is exempt from all D
-  rules (per-file-ignores); `scripts/databricks_notebook.py` is excluded from
-  ruff entirely.
+  (`lessons.md`), dead roadmap phases (`P0.3`), or plan/review thread IDs (`FIX
+  #N`, `REVIEW #N`, bare `#N`). Inline the load-bearing substance in 1–2 lines;
+  keep a public anchor (issue/PR/code path) only when it helps an outsider.
+- **Enforced subset (ruff `D`).** Gated: `D100`/`D104` (module + package),
+  `D101`/`D103` (class + function), `D205`/`D212`/`D415` (summary format). `D102`
+  (methods) and `D107` (`__init__`) are convention-only. Per-file-ignores (in
+  `pyproject.toml`) relax this: `tests/**` keeps `D100` + summary format,
+  `migrations/versions/` is all-`D`-off, `scripts/databricks_notebook.py` is out
+  of ruff entirely.
 
 ## Gotchas
 
@@ -144,22 +141,20 @@ repo-local `docs/plans/` while durable memory is skipped (per the skill).
 
 ### Roadmap: GitHub for status, vault for rationale
 
-The roadmap is a hybrid with one source of truth per fact-type — don't mirror one
-into the other:
+Hybrid, one source of truth per fact-type — don't mirror one into the other:
 
 - **Live status + work orders = GitHub.** Each backlog item is an issue whose
-  body holds the full symptom/fix/files spec, and a merged `closes #N` PR updates
-  status for free. The current active milestone is named in `ROADMAP.md` (vault) —
-  don't hard-code it here; a renamed milestone is exactly the drift #89 fixed.
-  List open milestones and pull their issues with:
+  body holds the full symptom/fix/files spec; a merged `closes #N` PR updates
+  status for free. The active milestone is named in `ROADMAP.md` (vault) — don't
+  hard-code it here (a renamed milestone is the drift #89 fixed). List open
+  milestones and their issues:
 
   ```bash
   gh api repos/Vzlentin/calibre/milestones --jq '.[] | select(.state=="open") | .title'
   gh issue list --milestone "<title>"
   ```
 
-  Parked items carry `parked:phd` / `parked:saas` and are out of any milestone.
+  Parked items carry `parked:phd` / `parked:saas` and sit outside any milestone.
 - **Durable rationale = `ROADMAP.md`** (vault): mission, how-we-work
-  cadence/gates, root-issue analysis (R1–R5), dependency ordering, and parked
-  decisions. Read it for the *why*; it deliberately carries **no** issue-status
-  checklist.
+  cadence/gates, root-issue analysis (R1–R5), dependency ordering, parked
+  decisions. Read it for the *why*; it carries **no** issue-status checklist.
