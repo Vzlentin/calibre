@@ -409,7 +409,7 @@ def test_observe_without_conformal_config_returns_400():
     ],
 )
 def test_observe_unusable_actuals_returns_422(actuals):
-    """Empty, malformed, or non-finite actuals are rejected synchronously (422).
+    """Empty, all-null, malformed, or non-finite actuals are rejected synchronously (422).
 
     A malformed ``y`` value must never surface as a bare 500, and a ``y`` that
     parses to a non-finite float would otherwise be accepted-then-never-recorded

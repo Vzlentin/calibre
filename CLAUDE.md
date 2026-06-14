@@ -82,7 +82,8 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
   `D103` (class + function), `D205`/`D212`/`D415` (summary format). `D102`
   (methods) and `D107` (`__init__`) are convention-only, not gated. `tests/**`
   carries only `D100` — `D101`/`D103`/`D104` are exempt. `migrations/versions/`
-  and `scripts/databricks_notebook.py` are excluded.
+  is exempt from all D rules (per-file-ignores); `scripts/databricks_notebook.py`
+  is excluded from ruff entirely.
 
 ## Gotchas
 

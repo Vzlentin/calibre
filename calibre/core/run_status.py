@@ -6,7 +6,7 @@ from enum import StrEnum
 
 
 class RunStatus(StrEnum):
-    """Lifecycle state of a run: queued, running, succeeded, or failed."""
+    """Lifecycle state of a run, advancing queued → running → succeeded/failed."""
 
     QUEUED = "queued"
     RUNNING = "running"
