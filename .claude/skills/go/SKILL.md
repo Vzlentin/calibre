@@ -178,7 +178,16 @@ stages uses an explicit `cd "$WORKDIR" && …` in worktree mode (a
 `.worktrees/<slug>`) and its venv is usable
 (`cd "$WORKDIR" && uv run python -c "import calibre"`). If provisioning failed,
 stop and report — do **not** fall back to mutating the user's dirty checkout. In
-direct mode this gate is automatically satisfied.
+direct mode the worktree/venv part of this gate is automatically satisfied.
+
+**GATE (data presence — both modes, conditional).** When the work item declares
+an **M5 dependency** — its plan or issue references `data/m5` (e.g. its commands
+run a `benchmarks/m5/...` config) — additionally assert the data is present:
+`cd "$WORKDIR" && test -d data/m5` must pass. This catches the
+`|| true`-swallowed worktree link step (a failed `data/m5` junction leaves a
+data-less worktree that `import calibre` alone would not detect). If an
+M5-dependent item has no `data/m5` in `WORKDIR`, stop and report — do not run on
+into a later runtime failure. Non-M5 items impose no such requirement.
 
 ---
 
@@ -220,14 +229,20 @@ yourself.
 
 Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — see Invocation
 model; it spawns its own subagents). Scope is the branch diff vs `main`. If it
-changes anything, it re-runs typecheck/lint/scoped tests itself; commit and push
-the result before moving on:
+changes anything, **rerun the quality gates in the foreground and commit + push
+only on green** — do not chain the commit unconditionally after the gate, or a
+simplify pass that broke a test lands anyway:
 
 ```bash
-cd "$WORKDIR" && git add -A && git commit -m "refactor: simplify <slug>" && git push
+cd "$WORKDIR" \
+  && uv run ty check calibre/ && uv run ruff check . && uv run pytest <scoped tests> \
+  && git add -A && git commit -m "refactor: simplify <slug>" && git push
 ```
 
-**GATE:** working tree clean (committed + pushed) before Stage 3.
+If the rerun is red, do **not** commit — fix or revert the simplify change first.
+
+**GATE:** working tree clean before Stage 3, with the commit landed only after a
+green rerun.
 
 ---
 
@@ -237,16 +252,20 @@ Invoke the `ce-code-review` skill from `WORKDIR` (inline — see Invocation mode
 it spawns its own subagents) against this PR. Ensure its **actionable findings
 land as inline PR review comments** (resolvable threads) so Stage 4 has something
 to resolve — pass the PR and have it post comments rather than only printing a
-report. Push any safe fixes it commits inline:
+report. If it commits safe fixes inline, **push them only after a green
+foreground rerun** — never push a red tree:
 
 ```bash
-cd "$WORKDIR" && git push
+cd "$WORKDIR" \
+  && uv run ty check calibre/ && uv run ruff check . && uv run pytest <scoped tests> \
+  && git push
 ```
 
 Findings that become PR review threads are handed to Stage 4. Zero findings is a
 valid outcome — Stage 4 then no-ops.
 
-**GATE:** review completed and any inline-applied fixes are pushed.
+**GATE:** review completed; any inline-applied fixes are pushed only after a green
+rerun.
 
 ---
 
@@ -261,21 +280,64 @@ valid ones in `WORKDIR`, commits + pushes, then replies and resolves each thread
 `needs-human`. Surface any `needs-human` threads in the final report; they do not
 block the merge unless they flag a correctness risk — use judgment.
 
+**Capture deferred findings at deferral time (non-blocking, vault-only).** Stage 4
+is the deferral **decision point**, so it is the sole place that records them. For
+**each** thread it leaves `needs-human`, and each non-blocking finding it
+deliberately does not fix, append **one row now** to the rolling
+deferred-findings register **via `/project-memory`** (the register store
+contract), so closeout is a read, not a post-hoc scrape of PR bodies + plans. Use
+the register's existing `id | source | finding | disposition | suggested next
+action` schema, keyed by this PR/issue #, with a disposition from the existing
+vocabulary (`deferred-pre-existing` / `out-of-scope` / `named-follow-up` /
+`excluded-item`). Reach the register **only** through `/project-memory`;
+**vault-absent → skip the append and note it** (never write the public repo).
+**Non-blocking** — it never fails this GATE or the merge.
+
 ---
 
 ## Stage 5 — Loop on CI, then squash-merge on green
 
-Invoke `/loop-on-ci` from `WORKDIR` for this PR. It owns the CI loop: resolving
-the active PR, using `gh pr checks` as the source of truth, watching pending
-checks, pulling failed GitHub Actions logs when needed, applying scoped CI fixes,
-pushing, and re-checking until the PR check set is green.
+Stage 5 owns an **inline CI watch-and-autofix loop** — there is no external CI
+skill to delegate to. Capture the head SHA
+(`HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`) and poll the typed
+check-runs API, the only reliable CI source on this host — the local
+check-status wrapper is broken (see `references/environment.md`):
 
-`/go` still owns the outer guardrails: never weaken assertions, skip tests, touch
-the VN2 `4992.20` baseline, or make unrelated workflow changes to turn CI green.
-If `/loop-on-ci` reports unresolved failures, repeated failures, or a
-merge-blocking issue it cannot safely fix, append a `## CI Failures Unresolved`
-section to the PR body (`gh pr edit <PR> --body-file <tmp>`), do not merge red,
-and take the **preserve path** below.
+```bash
+gh api repos/Vzlentin/calibre/commits/$HEAD_SHA/check-runs \
+  --jq '.check_runs[] | {name, status, conclusion}'
+```
+
+Read the verdict from `status` **and** `conclusion` together. The
+`select(.conclusion=="failure")` filter in `ci-and-merge.md` is a failed-run
+**log filter**, not a verdict — using it as one reads a still-pending run as
+"no failures → green" and merges early. The verdict is:
+
+- **pending** — any run with `status != "completed"`: keep polling, do **not**
+  merge.
+- **green** — *every* run is `status == "completed"` **and**
+  `conclusion == "success"`: exit the loop and proceed to the on-green steps.
+- **failure** — any completed run with a non-`success` or unrecognized
+  conclusion (`failure`, `cancelled`, `timed_out`, `action_required`, …): enter
+  the autofix branch.
+
+**Autofix branch — the loop owns the cap and the stop.** For each failed run,
+pull `gh run view <run-id> --log-failed` (run-id parsed from its `details_url`;
+recipe in `references/ci-and-merge.md`), find and fix the **root cause** in
+`WORKDIR`, commit + push, recapture `HEAD_SHA`, and re-poll. Bounded by:
+
+- **Max 3 fix iterations.** After the 3rd failed cycle, stop — do not loop again.
+- **Repeated-signature stop.** If the same failure signature recurs across 2+
+  iterations (the PR #38 pattern), stop immediately — re-running an unchanged
+  failure is not progress.
+
+On either stop, append a `## CI Failures Unresolved` section to the PR body
+(`gh pr edit <PR> --body-file <tmp>`), do **not** merge red, and take the
+**preserve path** below.
+
+`/go` owns the outer guardrails throughout: never weaken assertions, skip tests,
+touch the VN2 `4992.20` baseline, or make unrelated workflow changes to turn CI
+green.
 
 **On green** (and Stage 4 gate satisfied), confirm the PR body carries `closes #N`
 — Stage 0c guarantees the issue exists, so verify only that the line is present.
@@ -299,8 +361,8 @@ fast-forward, drop the branch; in **worktree mode** remove the worktree and drop
 the branch **without** `git checkout main`/`git pull` in the main checkout —
 preserving the user's branch and dirty tree is the whole point.
 
-**Preserve path (failure / any short-stop).** If `/loop-on-ci` cannot get the PR
-green, or any stage stopped short of the mode's completion point, do **not** clean
+**Preserve path (failure / any short-stop).** If the inline CI loop cannot get
+the PR green, or any stage stopped short of the mode's completion point, do **not** clean
 up: leave the local `<type>/<slug>` branch and — in worktree mode — the
 `.worktrees/<slug>` working tree intact so the user can resume/debug, and surface
 the worktree path + branch in the final report. This short-stop **is** the
@@ -338,6 +400,41 @@ one outcome:
 - **Edge case — failure before a plan exists.** A short-stop in Stage 0a/0b has no
   plan to flip — just report `failed`.
 
+**Compound on `shipped` (non-blocking, vault-only).** When — and only when — the
+outcome is `shipped` **and** `OBSIDIAN_VAULT_PATH` is set, capture a durable
+learning routed to the **vault** solutions store (never the public repo).
+`/ce-compound mode:headless` writes **three** things straight into the repo with
+no suppress hook — a solution doc under `docs/solutions/<category>/`, a
+newly-created repo-root `CONCEPTS.md`, and a `CLAUDE.md`/`AGENTS.md`
+discoverability edit — and has zero vault awareness, so Stage 6 owns a post-run
+reconciliation:
+
+1. **Record pre-state** — which of `CLAUDE.md` / `AGENTS.md` / `CONCEPTS.md` /
+   `docs/solutions/` already exist on `$MAIN` (in this repo: `CLAUDE.md` +
+   `AGENTS.md` are tracked; `CONCEPTS.md` + `docs/solutions/` are absent).
+2. **Invoke `/ce-compound mode:headless`** — it self-gates (`Documentation
+   skipped` when nothing is worth recording).
+3. **Relocate** any solution doc it wrote to the vault via `/project-memory`
+   (rewrite frontmatter to the vault convention, write, verify, delete the repo
+   copy — the same shape as the `/ce-plan` relocation).
+4. **Revert its repo-root side-edits** — `git checkout -- CLAUDE.md AGENTS.md`
+   (tracked → restores committed) and `git clean -fd CONCEPTS.md docs/solutions/`
+   (untracked / newly-created → `checkout` would error on these).
+5. **Verify clean** — `git status --porcelain` on `$MAIN` must be empty before the
+   Stage-6 GATE.
+
+**Vault-absent ordering:** if `OBSIDIAN_VAULT_PATH` is unset/absent, **skip this
+sub-step entirely — do not invoke `/ce-compound`** so no repo writes ever occur.
+This fires **only on `shipped`** (never `failed` / `ready-for-external-gates`) and
+is **non-blocking** — a `Documentation skipped` return or any error does **not**
+fail the Stage-6 GATE.
+
+**Finalize deferred-findings rows (non-blocking, vault-only).** If Stage 4
+appended any deferred-findings rows this run, finalize them via `/project-memory`
+with the terminal PR URL + merged SHA (or, on `failed`, the preserved-branch
+reference), so closeout is a read of the rolling register, not a scrape.
+Vault-absent → skip + note. **Non-blocking** — never fails the Stage-6 GATE.
+
 **GATE:** the work item's plan reads exactly one of:
 
 - `status: shipped` with PR/SHA recorded;
@@ -356,4 +453,6 @@ report, in order: the resolved **input kind** (idea / issue / plan-file) and the
 **plan path** in the resolved store; the **execution mode** (direct / worktree,
 and any retained branch/worktree path); issue #N; PR URL; merged (yes + SHA, or
 no with reason); CI result; any `needs-human` review threads; and memory updates
-(plan status flip, handoff record, plus architecture/lessons or "skipped").
+(plan status flip, handoff record, the compound outcome on a `shipped` run —
+vault solution path / "no learning recorded" / "skipped — no vault" — plus
+architecture/lessons or "skipped").

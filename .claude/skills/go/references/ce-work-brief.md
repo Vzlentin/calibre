@@ -18,6 +18,12 @@ below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
 >   `<type>/<slug>` branch — do **not** create a branch, do **not** touch the
 >   main checkout.
 >
+> Run the `uv run` quality gates — `uv run pytest` (scoped), `uv run ruff check .`,
+> and `uv run ty check calibre/` — in the **FOREGROUND**, blocking on each gate's
+> exit before you report. Do **not** end your turn with any gate still running in
+> the background: there is no way to resume a backgrounded gate in this harness, so
+> a turn that ends mid-gate abandons it. Commit only after the gates pass green.
+>
 > Finish by pushing the branch and opening a PR whose body includes `closes #N`,
 > a <=70-char title, a 3-bullet summary, and a test-plan checklist.
 >
