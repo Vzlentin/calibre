@@ -123,7 +123,13 @@ Long-lived project memory lives in an Obsidian vault and is governed by
 `.claude/skills/project-memory/SKILL.md`. Read it at the start of any
 non-trivial task. Hermes agents: use the `obsidian` skill instead.
 
-The vault root is `$OBSIDIAN_VAULT_PATH`. The project folder is
+The vault root is `$OBSIDIAN_VAULT_PATH` — but **on this machine that variable
+is defined in the repo's `.env`, which is not auto-exported into your shell.** A
+bare `echo $OBSIDIAN_VAULT_PATH` (or `$env:OBSIDIAN_VAULT_PATH`) reads empty and
+will fool you into thinking the vault is absent and degrading to fallback mode.
+**Resolve the path from `.env` first** (e.g. `grep OBSIDIAN_VAULT_PATH .env`, or
+source `.env`) and use that value; treat the vault as truly unavailable only if
+`.env` has no such line. The project folder is
 `Projects/Calibre/`; canon files: `architecture.md`, `lessons.md`,
 `vision.md`, `ROADMAP.md`, plus `plans/` and `archive/`. Reusable per-problem
 learnings live in `Projects/Calibre/solutions/` (knowledge-track docs by category —
@@ -131,7 +137,8 @@ architecture-patterns, design-patterns, conventions, performance-issues, workflo
 … — with `module`/`tags`/`applies_when` frontmatter), the shared domain vocabulary
 in `Projects/Calibre/CONCEPTS.md`, and postponed work in
 `Projects/Calibre/deferred-findings-register.md`; consult them when implementing or
-debugging in a documented area. If the env var is unset, plans fall back to
+debugging in a documented area. If `.env` carries no `OBSIDIAN_VAULT_PATH` line
+(truly unset — not merely absent from the live shell), plans fall back to
 repo-local `docs/plans/` while durable memory is skipped (per the skill).
 
 ### Roadmap: GitHub for status, vault for rationale

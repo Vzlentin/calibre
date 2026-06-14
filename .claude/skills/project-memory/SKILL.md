@@ -16,10 +16,20 @@ The vault root is read from the `OBSIDIAN_VAULT_PATH` environment variable.
 - bash / zsh: `$OBSIDIAN_VAULT_PATH`
 - PowerShell: `$env:OBSIDIAN_VAULT_PATH`
 
+**Check the repo's `.env` too — don't trust an empty shell variable.** The
+variable is often defined in `.env` rather than exported into the agent's shell;
+many harnesses load `.env` for the app but not for your interactive shell, so
+the live variable reads empty even when a vault is configured. Before concluding
+the vault is unavailable, resolve the path from `.env`:
+`grep OBSIDIAN_VAULT_PATH .env` (bash) or
+`Select-String OBSIDIAN_VAULT_PATH .env` (PowerShell), and use that value as the
+vault root. Treat the vault as absent only if neither the shell nor `.env`
+provides a path.
+
 Rules:
 
-- **Optional but preferred.** If the variable is set, use the vault as the
-  source of truth for project memory.
+- **Optional but preferred.** If a path is resolved (from the shell or `.env`),
+  use the vault as the source of truth for project memory.
 - **Degrade gracefully, by surface.** If the vault is unset, empty, or absent,
   the fallback differs by what is being stored:
   - **Plans** fall back to the repo-relative `docs/plans/` store (see
