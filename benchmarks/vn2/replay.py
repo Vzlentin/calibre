@@ -70,6 +70,7 @@ def build_rs_params(
     lead_time: int,
     review_period: int,
 ) -> list[RsPolicyParameters]:
+    """Build per-series (R,S) policy params from the simulator's state."""
     return [
         RsPolicyParameters(
             unique_id=uid,
@@ -86,6 +87,7 @@ def round_actuals(
     round_num: int,
     state_keys: Mapping[str, object],
 ) -> dict[str, float]:
+    """Return per-series resolved actuals for a replay round."""
     # round_num indexes the resolved-actuals week directly: round 1's demand
     # is week_1_sales' last column. Earlier revisions used round_num + 1.
     try:
@@ -218,6 +220,7 @@ def order_conformal_warmup_frames(
 
 
 def summary_from_simulator(simulator: VN2Simulator) -> pd.DataFrame:
+    """Build a per-series summary frame from the simulator's end state."""
     rows = []
     for uid, state in simulator.states.items():
         rows.append(
@@ -233,6 +236,8 @@ def summary_from_simulator(simulator: VN2Simulator) -> pd.DataFrame:
 
 @dataclass
 class CachedRound:
+    """A cached replay round: its number, origin, and computed results."""
+
     round_num: int
     origin: pd.Timestamp
     frame: pd.DataFrame
@@ -258,6 +263,8 @@ class VN2ReplayCache:
 
 @dataclass
 class ReplayResult:
+    """The outcome of a full replay: summary and per-round orders."""
+
     summary: pd.DataFrame
     orders_by_round: dict[int, dict[str, float]]
     history: pd.DataFrame
@@ -282,6 +289,7 @@ def orders_from_policy_result(
     state_keys: Mapping[str, object],
     reorder_point_scale: float | None = None,
 ) -> dict[str, float]:
+    """Extract per-series order quantities from a policy result frame."""
     adjusted = order_result.copy()
     if reorder_point_scale is not None:
         reorder_point = adjusted["target_stock_level"].astype(float) * float(reorder_point_scale)

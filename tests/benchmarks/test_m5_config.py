@@ -1,3 +1,5 @@
+"""Tests for the committed M5 benchmark configs."""
+
 from __future__ import annotations
 
 from pathlib import Path

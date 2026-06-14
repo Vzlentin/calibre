@@ -1,3 +1,5 @@
+"""Base classes and the protocol shared by forecasting adapters."""
+
 from __future__ import annotations
 
 import hashlib
@@ -65,6 +67,8 @@ def build_fitted_values_frame(raw: pd.DataFrame, *, model_name: str) -> pd.DataF
 
 @dataclass(frozen=True)
 class PredictionResult:
+    """An adapter's prediction output: forecast, optional fitted values, key."""
+
     forecast: pd.DataFrame
     fitted_values: pd.DataFrame | None = None
     artifact_key: str | None = None
@@ -75,6 +79,8 @@ class AdapterCapabilityError(RuntimeError):
 
 
 class ModelAdapter(ABC):
+    """Abstract base for forecasting adapters over a backing model library."""
+
     def __init__(self, model_config: dict | None = None) -> None:
         self.model_config = model_config or {}
 

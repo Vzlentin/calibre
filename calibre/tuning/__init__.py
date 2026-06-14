@@ -1,3 +1,5 @@
+"""Hyperparameter tuning: objectives, the Optuna optimizer, and tuning tasks."""
+
 from calibre.tuning.objectives import Accuracy, Cost, CumulativePinball, Pareto, TuningObjective
 from calibre.tuning.optimizer import (
     OBJECTIVE_METRIC,

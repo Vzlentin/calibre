@@ -1,3 +1,5 @@
+"""NeuralForecast (deep-learning) forecasting adapter."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -28,6 +30,8 @@ _RESERVED_KEYS = frozenset({"model", "name", "freq", "input_size", "max_steps", 
 
 
 class NeuralForecastAdapter(ModelAdapter):
+    """Adapter wrapping NeuralForecast deep-learning models (optional extra)."""
+
     def __init__(self, model_config: dict) -> None:
         if not _NEURALFORECAST_AVAILABLE:
             raise RuntimeError(

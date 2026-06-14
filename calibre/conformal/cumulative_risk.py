@@ -1,3 +1,5 @@
+"""One-sided cumulative conformal risk control for inventory ordering."""
+
 from __future__ import annotations
 
 import math

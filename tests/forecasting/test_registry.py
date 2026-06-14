@@ -1,3 +1,5 @@
+"""Tests for the forecasting-adapter registry."""
+
 import importlib
 
 import pytest

@@ -1,3 +1,5 @@
+"""Periodic-review (R,S) ordering policy."""
+
 from __future__ import annotations
 
 import pandas as pd

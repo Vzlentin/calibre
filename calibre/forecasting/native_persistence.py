@@ -1,3 +1,5 @@
+"""Pack/unpack native model save directories for transport."""
+
 from __future__ import annotations
 
 import io

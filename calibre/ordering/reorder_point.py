@@ -1,3 +1,5 @@
+"""Continuous-review reorder-point (R,s,S) ordering policy."""
+
 from __future__ import annotations
 
 import pandas as pd

@@ -1,3 +1,5 @@
+"""Tests for applying a reconciler to forecasts."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -56,8 +58,10 @@ def _hierarchy(ids: list[str]) -> pd.DataFrame:
 
 
 def _index(ids: list[str]):
-    """Reconcilers now take the prebuilt index threaded by run preparation; build
-    it from the same fixture frame so the asserted outcomes are unchanged."""
+    """Reconcilers take the prebuilt index threaded by run preparation.
+
+    Build it from the same fixture frame so the asserted outcomes are unchanged.
+    """
     return build_hierarchy_index(_hierarchy(ids))
 
 

@@ -1,3 +1,5 @@
+"""Dataset adapter that loads the M5 competition sales/calendar into a bundle."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,6 +26,8 @@ def _resolve_sales_path(data_dir: str, *, phase: str) -> str:
 
 @register_dataset_adapter("m5")
 class M5DatasetAdapter(DatasetAdapter):
+    """Load M5 sales and calendar CSVs into a long-format :class:`DatasetBundle` with hierarchy."""
+
     def name(self) -> str:
         return "m5"
 

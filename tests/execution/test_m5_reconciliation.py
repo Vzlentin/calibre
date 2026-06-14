@@ -397,8 +397,10 @@ def test_point_wls_var_agrees_with_dense_closed_form() -> None:
 def _zero_variance_node_fitted_frame(
     node_labels: tuple[str, ...], periods: int = 10
 ) -> pd.DataFrame:
-    """Like ``_node_fitted_frame`` but one node has CONSTANT in-sample residuals
-    (zero unbiased variance), the degenerate case the sparse ``wls_var`` rejects."""
+    """Like ``_node_fitted_frame`` but one node has constant in-sample residuals.
+
+    Zero unbiased variance is the degenerate case the sparse ``wls_var`` rejects.
+    """
     frame = _node_fitted_frame(node_labels, periods)
     degenerate = node_labels[0]
     mask = frame[UNIQUE_ID] == degenerate
@@ -408,11 +410,13 @@ def _zero_variance_node_fitted_frame(
 
 
 def test_point_wls_var_rejects_zero_variance_node_the_dense_path_tolerated() -> None:
-    """Characterization (#168): sparse ``wls_var`` weights by unbiased residual
-    variance and requires it strictly positive per node, so a node with constant
-    in-sample residuals raises upstream's positive-definite error — surfaced WITH
-    cross-section identity. The old dense jittered estimator tolerated this; the
-    sparse path intentionally does not. This pins the documented divergence."""
+    """Sparse ``wls_var`` rejects a node with constant in-sample residuals.
+
+    It weights by unbiased residual variance and requires it strictly positive
+    per node, so such a node raises upstream's positive-definite error — surfaced
+    with cross-section identity. The old dense jittered estimator tolerated this;
+    the sparse path intentionally does not. This pins the documented divergence.
+    """
     pytest.importorskip("hierarchicalforecast.methods")
     hierarchy = _m5_hierarchy_frame()
     summing = build_summing_matrix(hierarchy)
@@ -430,8 +434,10 @@ def test_point_wls_var_rejects_zero_variance_node_the_dense_path_tolerated() -> 
 
 @pytest.mark.parametrize("strategy", ["ols", "wls_struct"])
 def test_fused_min_trace_point_output_agrees_with_dense_closed_form(strategy: str) -> None:
-    """The fused phase's reconciled mean through MinTraceSparse + sparse S_df
-    matches the dense MinT closed form within solver tolerance (#168)."""
+    """The fused phase's reconciled mean matches the dense MinT closed form.
+
+    MinTraceSparse + sparse S_df agree with the dense form within solver tolerance.
+    """
     pytest.importorskip("hierarchicalforecast.core")
     hierarchy = _m5_hierarchy_frame()
     summing = build_summing_matrix(hierarchy)
@@ -455,8 +461,11 @@ def test_fused_min_trace_point_output_agrees_with_dense_closed_form(strategy: st
 
 
 def test_fused_bottom_up_point_output_equals_bottom_sums() -> None:
-    """Fused bottom_up through BottomUpSparse + sparse S_df: the reconciled
-    mean is exactly the aggregated bottom block of the base forecasts."""
+    """Fused bottom_up reconciles to the aggregated bottom block.
+
+    Through BottomUpSparse + sparse S_df, the reconciled mean is exactly the
+    aggregated bottom block of the base forecasts.
+    """
     pytest.importorskip("hierarchicalforecast.core")
     hierarchy = _m5_hierarchy_frame()
     summing = build_summing_matrix(hierarchy)

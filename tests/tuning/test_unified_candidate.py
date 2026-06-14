@@ -1,3 +1,5 @@
+"""Tests for the unified tuning-candidate channels."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

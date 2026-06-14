@@ -1,3 +1,5 @@
+"""Tests that enforce the package import-layering rules."""
+
 from __future__ import annotations
 
 import ast

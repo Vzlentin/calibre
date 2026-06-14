@@ -1,3 +1,5 @@
+"""Reference-counted acquire/release of a local Ray runtime."""
+
 from __future__ import annotations
 
 import os
@@ -23,9 +25,12 @@ def prepare_ray_environment() -> None:
 
 @dataclass
 class RayRuntimeHandle:
+    """Handle to an acquired Ray runtime, tracking whether this caller owns the local one."""
+
     owns_local_runtime: bool = False
 
     def release(self) -> None:
+        """Release this handle's local runtime, if it owns one."""
         release_ray_runtime(self)
 
 

@@ -1,4 +1,4 @@
-"""Tests for the canonical thread-budget helpers (roadmap P1.2a).
+"""Tests for the canonical thread-budget helpers.
 
 ``cap_threaded_config`` / ``thread_budget`` previously existed as two verbatim
 private copies in backend.py and optimizer.py that could drift apart. These

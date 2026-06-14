@@ -1,3 +1,5 @@
+"""Tests for the local tuning task and trial scoring."""
+
 from __future__ import annotations
 
 import os
@@ -192,8 +194,10 @@ def test_resource_budget_does_not_add_threads_to_unthreaded_model():
 
 
 def test_score_forecast_task_caps_native_threads_via_threadpoolctl(monkeypatch):
-    """Scoring caps BLAS/OpenMP pools to the CPU budget via ``threadpool_limits``
-    without mutating the process-global thread-count env vars (REVIEW #7)."""
+    """Scoring caps BLAS/OpenMP pools to the CPU budget via ``threadpool_limits``.
+
+    The cap is applied without mutating the process-global thread-count env vars.
+    """
     recorded: list[int] = []
 
     @contextmanager

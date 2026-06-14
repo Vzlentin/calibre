@@ -1,3 +1,5 @@
+"""Tests for streaming ledger writes during a run."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -344,8 +346,11 @@ def test_streaming_finalize_missing_key_columns_raises(tmp_path) -> None:
 
 
 def _raw_stream_row(uid: str, h: int, *, score: float = np.nan, origin: str = "2024-01-01") -> dict:
-    """A raw (pending) ledger row as the engine appends it: y NaN, score column
-    present (NaN before resolution), no error columns yet."""
+    """A raw (pending) ledger row as the engine appends it.
+
+    y is NaN, the score column is present (NaN before resolution), and no error
+    columns exist yet.
+    """
     return {
         UNIQUE_ID: uid,
         DS: pd.Timestamp("2024-01-07") + pd.Timedelta(weeks=h - 1),
@@ -359,8 +364,11 @@ def _raw_stream_row(uid: str, h: int, *, score: float = np.nan, origin: str = "2
 
 
 def _update_row(raw: dict, *, y: float, score: float, error: float) -> dict:
-    """A resolved update row derived from a raw row: y filled, score made real,
-    error columns added (updates-only). Never nulls a column non-null in raw."""
+    """A resolved update row derived from a raw row.
+
+    y is filled, the score is made real, and error columns are added
+    (updates-only). It never nulls a column that was non-null in raw.
+    """
     row = dict(raw)
     row[Y] = y
     row[NONCONFORMITY_SCORE] = score
@@ -371,8 +379,10 @@ def _update_row(raw: dict, *, y: float, score: float, error: float) -> dict:
 
 
 def _reference_merge(raw: pd.DataFrame, updates: pd.DataFrame) -> pd.DataFrame:
-    """The OLD pandas combine_first merge — kept only in the test as the
-    byte-equivalence reference the new streamed finalize must reproduce."""
+    """The old pandas combine_first merge, kept only as a reference.
+
+    It is the byte-equivalence reference the new streamed finalize must reproduce.
+    """
     updates = updates.drop_duplicates(_KEY, keep="last")
     update_cols = [col for col in updates.columns if col not in _KEY]
     merged = raw.merge(

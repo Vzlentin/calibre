@@ -1,4 +1,4 @@
-"""Fit-time config validation (roadmap P0.3).
+"""Fit-time config validation.
 
 The ``/fit`` lifecycle job used to flip a record to SUCCEEDED without fitting
 anything, so a config incompatible with the data (unknown model/backend, bad

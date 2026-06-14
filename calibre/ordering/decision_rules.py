@@ -1,3 +1,5 @@
+"""Composable arithmetic rules shared by the ordering policies."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -46,6 +48,8 @@ def _validate_protection_horizons(ordered: pd.DataFrame, protection_period: int)
 
 @dataclass(frozen=True, slots=True)
 class UpperBoundRule:
+    """Order-up-to target from the upper interval bound (or a quantile)."""
+
     coverage: float = 0.9
     quantile: float | None = None
 
@@ -81,6 +85,8 @@ class UpperBoundRule:
 
 @dataclass(frozen=True, slots=True)
 class CumulativeBoundRule:
+    """Order-up-to target from the terminal-horizon cumulative upper bound."""
+
     coverage: float = 0.9
 
     def __call__(self, frame: pd.DataFrame, costs: CostStruct) -> float:
@@ -99,6 +105,8 @@ class CumulativeBoundRule:
 
 @dataclass(frozen=True, slots=True)
 class QuantileInterpolationRule:
+    """Newsvendor target interpolated between interval bounds by critical ratio."""
+
     coverage: float = 0.9
     period: int = 1
 
@@ -123,6 +131,8 @@ class QuantileInterpolationRule:
 
 @dataclass(frozen=True, slots=True)
 class RSArithmetic:
+    """(R,S) order quantity: raise the inventory position up to the target."""
+
     def __call__(self, target: float, ip: float, *, reorder_point=None) -> float:
         del reorder_point
         return max(float(target) - float(ip), 0.0)
@@ -130,6 +140,8 @@ class RSArithmetic:
 
 @dataclass(frozen=True, slots=True)
 class RSSArithmetic:
+    """(R,s,S) order quantity: order up to the target only below reorder point."""
+
     def __call__(self, target: float, ip: float, *, reorder_point=None) -> float:
         if reorder_point is None:
             raise ValueError("RSSArithmetic requires reorder_point")
@@ -139,6 +151,7 @@ class RSSArithmetic:
 
 
 def reorder_point_from_frame(frame: pd.DataFrame) -> float | None:
+    """Return the reorder point from ``frame``, or ``None`` if absent."""
     if REORDER_POINT not in frame.columns:
         return None
     return float(frame[REORDER_POINT].iloc[0])

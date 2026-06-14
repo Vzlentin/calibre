@@ -1,3 +1,5 @@
+"""Tests for the regret-based tuning objective."""
+
 from __future__ import annotations
 
 import pandas as pd

@@ -1,3 +1,5 @@
+"""Per-task and per-chunk fit/predict worker functions for the backend engine."""
+
 from __future__ import annotations
 
 import logging
@@ -50,6 +52,19 @@ def fit_predict_task(
     *,
     collect_fitted_values: bool = False,
 ) -> PredictionResult:
+    """Fit (or restore from cache) the task's adapter and predict its forecast horizon.
+
+    Args:
+        task: The forecast task carrying history, horizon, and model config.
+        cache: Optional artifact cache; a hit restores the fitted model instead
+            of refitting.
+        collect_fitted_values: When true, also return the adapter's in-sample
+            fitted values (needed by residual-based reconcilers).
+
+    Returns:
+        A :class:`PredictionResult` with the forecast frame, optional fitted
+        values, and the cache artifact key.
+    """
     adapter = resolve_adapter(task.model_config)
     model_name = task.model_name
     uid = task.unique_id

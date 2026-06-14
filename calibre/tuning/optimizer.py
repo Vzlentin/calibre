@@ -49,11 +49,14 @@ class _ConformalRuntimeSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class StudyOutcome:
+    """Result of a tuning study: the best config and the full result grid."""
+
     best_config: dict[str, Any]
     results: ResultGrid
 
 
 def create_tpe_sampler(seed: int | None) -> optuna.samplers.TPESampler:
+    """Create a seeded Optuna TPE sampler for reproducible search."""
     return optuna.samplers.TPESampler(seed=seed)
 
 
@@ -528,9 +531,11 @@ def evaluate_candidate(
     candidate: TuningCandidate,
     origins: list[pd.Timestamp],
 ) -> float:
-    """Evaluate one candidate over the given origins and return the aggregated
-    objective cost — the trial-evaluation seam shared by the Ray trainable and
-    the sequential fallback."""
+    """Evaluate one candidate over the given origins, returning the aggregated cost.
+
+    This is the trial-evaluation seam shared by the Ray trainable and the
+    sequential fallback.
+    """
     runtime_snapshot = _snapshot_conformal_runtime(task)
     conformal_options = _conformal_options(
         runtime_snapshot.config if runtime_snapshot is not None else None,

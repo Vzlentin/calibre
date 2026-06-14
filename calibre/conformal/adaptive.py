@@ -1,3 +1,5 @@
+"""Per-horizon adaptive conformal inference (ACI) controllers."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable

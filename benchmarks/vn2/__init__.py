@@ -1,1 +1,1 @@
-# benchmarks.vn2 package
+"""VN2 inventory benchmark harness."""

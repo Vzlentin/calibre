@@ -1,3 +1,5 @@
+"""Tuning candidate and the per-trial task it configures."""
+
 from __future__ import annotations
 
 from collections.abc import Callable

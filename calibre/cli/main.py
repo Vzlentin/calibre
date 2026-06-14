@@ -1,3 +1,5 @@
+"""CLI entry point: argparse wiring and the ``app`` dispatcher."""
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +43,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def app(argv: list[str] | None = None) -> int:
+    """Parse arguments, dispatch the chosen subcommand, and return an exit code."""
     parser = _parser()
     args = parser.parse_args(argv)
     setup_logging(args.log_level, format=args.log_format)

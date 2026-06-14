@@ -1,3 +1,5 @@
+"""Tests for the VN2 benchmark entry point."""
+
 from __future__ import annotations
 
 import pandas as pd

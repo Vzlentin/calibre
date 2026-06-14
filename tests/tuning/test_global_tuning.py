@@ -1,3 +1,5 @@
+"""Tests for global (panel) hyper-parameter tuning."""
+
 from __future__ import annotations
 
 import optuna

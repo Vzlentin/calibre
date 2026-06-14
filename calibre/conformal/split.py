@@ -1,3 +1,5 @@
+"""Cumulative split conformal inference over protection-period demand."""
+
 from __future__ import annotations
 
 from collections import deque

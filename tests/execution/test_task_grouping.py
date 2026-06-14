@@ -1,3 +1,5 @@
+"""Tests for task grouping in the execution pipeline."""
+
 from __future__ import annotations
 
 import math
@@ -59,8 +61,11 @@ def test_group_scheduling_preserves_results() -> None:
 
 
 def test_backend_consumes_partition_without_get_scope() -> None:
-    """The engine reads the pre-resolved partition; it must not import or call
-    ``get_scope`` (scope is resolved once, in task building)."""
+    """The engine reads the pre-resolved partition.
+
+    It must not import or call ``get_scope``; scope is resolved once, in task
+    building.
+    """
     import calibre.execution.backend as backend_module
 
     source = (backend_module.__file__ or "").rstrip("c")
@@ -71,8 +76,10 @@ def test_backend_consumes_partition_without_get_scope() -> None:
 
 
 def test_local_and_global_partition_routed_separately() -> None:
-    """A mixed batch partitions into the local and global groups by resolved
-    scope, and the engine runs both paths from the partition."""
+    """A mixed batch partitions into local and global groups by resolved scope.
+
+    The engine then runs both paths from the partition.
+    """
     panel = _panel()
     origins = [pd.Timestamp("2024-03-03")]
 
@@ -152,8 +159,11 @@ def test_duplicate_uid_config_tasks_collapse_to_first() -> None:
 
 
 def test_same_config_different_horizons_group_separately() -> None:
-    """Horizon is part of the chunk group key; the staged chunk applies one
-    horizon to every member, so mixed horizons must never co-chunk."""
+    """Horizon is part of the chunk group key.
+
+    The staged chunk applies one horizon to every member, so mixed horizons must
+    never co-chunk.
+    """
     groups = _group_local_tasks_by_config([_local_task("A"), replace(_local_task("B"), horizon=3)])
 
     assert len(groups) == 2
@@ -162,8 +172,10 @@ def test_same_config_different_horizons_group_separately() -> None:
 
 
 def test_duplicate_local_task_yields_same_ledger_as_single_copy() -> None:
-    """End-to-end lock for the doubled-history corruption: a duplicated
-    (uid, config) task produces exactly the ledger of a single copy."""
+    """End-to-end lock against doubled-history corruption.
+
+    A duplicated (uid, config) task produces exactly the ledger of a single copy.
+    """
     tasks = [_local_task("A"), _local_task("B")]
     panel = pd.concat([task.history for task in tasks], ignore_index=True)
     origins = [pd.Timestamp("2024-03-03")]

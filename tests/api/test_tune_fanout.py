@@ -1,3 +1,5 @@
+"""Tests for local/global tuning fan-out behind /tune."""
+
 from __future__ import annotations
 
 import pandas as pd

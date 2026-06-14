@@ -1,3 +1,5 @@
+"""Tests for M5 interval-coverage scoring and gating."""
+
 from __future__ import annotations
 
 import json

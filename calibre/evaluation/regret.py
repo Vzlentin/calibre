@@ -1,3 +1,5 @@
+"""Regret of a realized cost path against a perfect-foresight oracle."""
+
 from __future__ import annotations
 
 import pandas as pd

@@ -1,3 +1,9 @@
+"""FastAPI application: fit, predict, calibrate, order, observe, and tune routes.
+
+Wires the lifecycle and run stores into the request scope and exposes the
+demand-planning pipeline as HTTP endpoints, plus ``/healthz`` and ``/metrics``.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -190,8 +196,10 @@ def _actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
 
 
 def _usable_actuals_lookup(actual_records: list[dict]) -> pd.Series | None:
-    """Parse posted actuals into the observe lookup — the single source of
-    payload-shape truth shared by the /observe route and ``run_observe_job``.
+    """Parse posted actuals into the observe lookup.
+
+    This is the single source of payload-shape truth shared by the /observe
+    route and ``run_observe_job``.
 
     Returns None when the frame is empty or missing unique_id/ds/y (the
     request-shape failure), else the ``(unique_id, ds) -> y`` lookup, which may
@@ -319,6 +327,7 @@ def run_observe_job(
     store: LifecycleStoreProtocol,
     fit_id: str,
 ) -> None:
+    """Apply posted actuals to a fit's conformal runtime as a background job."""
     # Operate on exactly the fit the /observe route validated: it resolved and
     # passed the LAST fit's id, so the job never re-selects (no request/job
     # re-selection race). The guards below stay as loud-log defense for the
@@ -382,8 +391,8 @@ def run_observe_job(
     # bounds. Cumulative mode emits NaN bounds on a window's intermediate
     # horizons by construction, so dropping NaN-bound rows (the old behaviour)
     # discarded exactly the observations the cumulative runtime needs to
-    # complete a window (lessons.md §40). decision_loop owns the per-horizon vs
-    # cumulative readiness logic; route through it so the API cannot diverge.
+    # complete a window. decision_loop owns the per-horizon vs cumulative
+    # readiness logic; route through it so the API cannot diverge.
     try:
         observe_pending(runtime, [calibrated], actuals_lookup)
         store.upsert_conformal_state(session_id, runtime.get_partition_states())
@@ -451,10 +460,12 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
+        """Liveness probe; returns ``{"status": "ok"}`` when the app is up."""
         return {"status": "ok"}
 
     @app.get("/metrics")
     def metrics() -> Response:
+        """Expose Prometheus metrics in the text exposition format."""
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.post("/backtests", response_model=RunResponse, status_code=202)
@@ -464,6 +475,7 @@ def create_app(
         request: Request,
         idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     ) -> RunResponse:
+        """Queue a backtest run; idempotent on the ``Idempotency-Key`` header."""
         store = _stores(request).run_store
         run = store.create(req.config, idempotency_key=idempotency_key)
         if run.status == RunStatus.FAILED:
@@ -474,6 +486,7 @@ def create_app(
 
     @app.get("/runs/{run_id}", response_model=RunResponse)
     def get_run_status(run_id: str, request: Request) -> RunResponse:
+        """Return the status and result of a previously queued backtest run."""
         run = _stores(request).run_store.get(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
@@ -481,6 +494,7 @@ def create_app(
 
     @app.post("/fit", response_model=FitHandle, status_code=202)
     def fit(req: FitRequest, bg: BackgroundTasks, request: Request) -> FitHandle:
+        """Queue a model fit for a session and return its fit handle."""
         stores = _stores(request)
         if not req.sku_set:
             raise HTTPException(status_code=400, detail="sku_set must not be empty")
@@ -518,6 +532,7 @@ def create_app(
 
     @app.get("/fits/{fit_id}", response_model=FitHandle)
     def get_fit(fit_id: str, request: Request) -> FitHandle:
+        """Return a fit's status and artifact URLs by fit id."""
         record = _stores(request).lifecycle_store.get_fit(fit_id)
         if record is None:
             raise HTTPException(status_code=404, detail="fit not found")
@@ -531,6 +546,7 @@ def create_app(
 
     @app.post("/predict", response_model=PredictResponse)
     def predict(req: PredictRequest, request: Request) -> PredictResponse:
+        """Produce a forecast from a succeeded fit at the requested origin."""
         store = _stores(request).lifecycle_store
         record = store.get_fit(req.fit_id)
         if record is None:
@@ -573,6 +589,7 @@ def create_app(
 
     @app.post("/calibrate", response_model=CalibrateResponse)
     def calibrate(req: CalibrateRequest, request: Request) -> CalibrateResponse:
+        """Wrap a forecast in conformal intervals and persist the runtime state."""
         store = _stores(request).lifecycle_store
         record = store.last_fit_for_session(req.session_id)
         if record is None:
@@ -592,6 +609,7 @@ def create_app(
 
     @app.post("/order", response_model=OrderResponse)
     def order(req: OrderRequest, request: Request) -> OrderResponse:
+        """Apply an ordering policy to a calibrated frame and return the orders."""
         frame = _coerce_forecast_frame_dtypes(frame_from_records(req.calibrated))
         try:
             policy_config = build_order_policy(req.ordering)
@@ -611,12 +629,13 @@ def create_app(
 
     @app.post("/observe", response_model=ObserveResponse, status_code=202)
     def observe(req: ObserveRequest, bg: BackgroundTasks, request: Request) -> ObserveResponse:
+        """Queue resolved actuals for a session to update its conformal state."""
         store = _stores(request).lifecycle_store
         # Validate preconditions synchronously so a client learns at request time
         # that the observation can't be recorded, rather than getting a 202 and
-        # having the job silently drop it (the #163 symptom). The route resolves
-        # the LAST fit and passes its id into the job so both operate on the same
-        # fit (no re-selection race).
+        # having the job silently drop it. The route resolves the LAST fit and
+        # passes its id into the job so both operate on the same fit (no
+        # re-selection race).
         record = store.last_fit_for_session(req.session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="session not found")
@@ -658,6 +677,7 @@ def create_app(
 
     @app.post("/tune", response_model=TuneHandle, status_code=202)
     def tune(req: TuneRequest, bg: BackgroundTasks, request: Request) -> TuneHandle:
+        """Queue a hyperparameter tuning study and return its study handle."""
         stores = _stores(request)
         if not req.sku_set:
             raise HTTPException(status_code=400, detail="sku_set must not be empty")
@@ -720,6 +740,7 @@ def create_app(
 
     @app.get("/studies/{study_id}", response_model=TuneStudyResponse)
     def get_study(study_id: str, request: Request) -> TuneStudyResponse:
+        """Return a tuning study's status and best candidates per series."""
         record = _stores(request).lifecycle_store.get_study(study_id)
         if record is None:
             raise HTTPException(status_code=404, detail="study not found")
@@ -743,6 +764,7 @@ def create_app(
 
     @app.get("/sessions/{tenant}/{uid}", response_model=SessionStateResponse)
     def session_state(tenant: str, uid: str, request: Request) -> SessionStateResponse:
+        """Return the latest fit's session state for a tenant and series uid."""
         store = _stores(request).lifecycle_store
         fits = store.fits_for_tenant_uid(tenant, uid)
         if not fits:

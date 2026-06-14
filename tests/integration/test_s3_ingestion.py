@@ -1,3 +1,5 @@
+"""Integration tests for S3 dataset ingestion."""
+
 from __future__ import annotations
 
 import os

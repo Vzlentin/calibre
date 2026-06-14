@@ -1,3 +1,5 @@
+"""Tests for ordering-policy construction from /order requests."""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -113,10 +115,12 @@ class TestOrderEndpoint:
         assert "ordering.params is required" in resp.json()["detail"]
 
     def test_order_endpoint_newsvendor_explicit_null_period_uses_default(self) -> None:
-        """Explicit ``period: null`` is equivalent to omitting the knob: the
-        factory keys optional knobs on value-is-not-None, never key presence
+        """Explicit ``period: null`` is equivalent to omitting the knob.
+
+        The factory keys optional knobs on value-is-not-None, never key presence
         (the CLI's model_dump() always emits the key as None), so the request
-        succeeds with NewsvendorConfig's default period of 1."""
+        succeeds with NewsvendorConfig's default period of 1.
+        """
         client = TestClient(app)
         resp = client.post(
             "/order",

@@ -1,3 +1,5 @@
+"""Forecast and order ledger protocols plus in-memory and streaming parquet implementations."""
+
 from __future__ import annotations
 
 import contextlib
@@ -28,6 +30,8 @@ from calibre.core.io import exists, is_local_fs, join_uri, open_fs, rm, write_pa
 
 
 class LedgerSink(Protocol):
+    """Append-and-close write target for ledger row batches."""
+
     def append(self, df: pd.DataFrame) -> None: ...
 
     def close(self) -> None: ...
@@ -111,6 +115,7 @@ class _PartitionedParquetLedgerSink:
 
 
 def resolved_ledger_uri(path: str | Path) -> str:
+    """Derive the ``.resolved.parquet`` artifact URI alongside the stream ``path``."""
     text = str(path)
     if "://" not in text:
         return str(Path(text).with_suffix(".resolved.parquet"))
@@ -251,8 +256,7 @@ def _iter_row_group_tables(
 
 
 def _union_schema(raw_schema: pa.Schema, updates_schema: pa.Schema) -> pa.Schema:
-    """Union of the stream and updates schemas, with key columns pinned to the
-    canonical key types.
+    """Union the stream and updates schemas, pinning key columns to canonical types.
 
     The writer schema must carry every column present on either side: the raw
     stream lacks the updates-only ``error``/``abs_error``/``pct_error`` columns,
@@ -301,8 +305,10 @@ def _make_sink(path: str, partition_cols: list[str] | None) -> LedgerSink:
 
 @runtime_checkable
 class Ledger(Protocol):
-    """Forecast ledger interface. The construction site picks an adapter once;
-    no caller flips a mode after the fact.
+    """Forecast ledger interface.
+
+    The construction site picks an adapter once; no caller flips a mode after
+    the fact.
 
     The ledger owns the resolve contract: ``due_frame(origin)`` hands the engine
     only the rows due for resolution as of ``origin`` (a RangeIndex copy), and
@@ -408,9 +414,11 @@ class InMemoryLedger:
 
 
 class StreamingLedger:
-    """Forecast ledger that streams every append to a parquet sink and keeps
-    only the still-pending (unresolved) rows in memory. Resolved updates land in
-    a side file and are merged into the finalized artifact on ``close``."""
+    """Forecast ledger that streams appends to parquet, keeping only pending rows in memory.
+
+    Resolved updates land in a side file and are merged into the finalized
+    artifact on ``close``.
+    """
 
     def __init__(self, path: str | Path, *, partition_cols: list[str] | None = None) -> None:
         self._stream_path = str(path)
@@ -512,9 +520,9 @@ class StreamingLedger:
         self._resolved_update_sink.append(df)
 
     def _finalize_resolved_artifact(self) -> None:
-        """Write ``.resolved.parquet`` via the union-schema Arrow membership
-        algorithm, row-group at a time, and remove the updates side file.
+        """Write ``.resolved.parquet`` row-group at a time, then drop the updates side file.
 
+        Uses the union-schema Arrow membership algorithm.
         No full-frame pandas materialization happens here: the 60M-row stream is
         never read into memory at once. Resolved-row membership is decided by a
         key-only Arrow left-outer join; the raw and updates parquet files are
@@ -564,9 +572,10 @@ class StreamingLedger:
             rm(self._resolved_updates_path, recursive=False)
 
     def _materialize_streaming_frame(self) -> pd.DataFrame:
-        """In-memory equivalent of the finalize artifact, for ``to_df()`` before
-        ``close()`` has run. Applies the same union-schema membership semantics
-        as :meth:`_finalize_resolved_artifact`; only used at small (test) scale,
+        """In-memory equivalent of the finalize artifact, for ``to_df()`` before ``close()``.
+
+        Applies the same union-schema membership semantics as
+        :meth:`_finalize_resolved_artifact`; only used at small (test) scale,
         never on the M5 finalize path.
         """
         if not exists(self._stream_path):
@@ -578,9 +587,10 @@ class StreamingLedger:
         return pa.concat_tables(tables).to_pandas()
 
     def _stream_resolved(self, write_table: Callable[[pa.Table], None]) -> None:
-        """Drive the union-schema membership algorithm, calling ``write_table``
-        once per source row group (unresolved raw rows, then winning updates).
+        """Drive the union-schema membership algorithm one source row group at a time.
 
+        Calls ``write_table`` once per source row group (unresolved raw rows,
+        then winning updates).
         The membership join is key-only (constant per-row-group memory); the row
         data itself is copied a row group at a time, so neither the raw stream
         nor the updates file is ever held in memory in full. ``pyarrow.dataset``
@@ -705,8 +715,10 @@ class InMemoryOrderLedger:
 
 
 class StreamingOrderLedger:
-    """Order ledger that streams non-empty order frames straight to a parquet
-    sink; nothing accumulates in memory."""
+    """Order ledger that streams non-empty order frames straight to a parquet sink.
+
+    Nothing accumulates in memory.
+    """
 
     def __init__(self, path: str | Path, *, partition_cols: list[str] | None = None) -> None:
         self._stream_path = str(path)

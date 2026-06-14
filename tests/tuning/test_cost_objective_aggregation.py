@@ -1,3 +1,5 @@
+"""Tests for cost-objective aggregation across windows."""
+
 from __future__ import annotations
 
 from dataclasses import replace

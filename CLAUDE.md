@@ -62,6 +62,30 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
   aliases, or version-gated branches. Replace the old thing outright, update
   all callers, and delete the dead code.
 
+## Commenting & docstring convention
+
+- **House style.** Imperative one-line summary ending in `.`/`?`/`!`. Add
+  Google `Args:`/`Returns:`/`Raises:` sections only where a parameter or return
+  needs explanation. Cross-reference siblings with reST `:class:`/`:func:`/
+  `:meth:`. No NumPy-style `Parameters:`; no Sphinx/mkdocs build — docstrings are
+  read in source.
+- **Coverage bar.** Every public module, package, class, and function carries a
+  docstring. Methods are documented by convention (not gated). Private helpers
+  get one only when the intent is non-obvious.
+- **Comments explain *why*, not *what*.** Drop redundant, duplicated, or stale
+  comments. **No private references** in shipped prose — no vault pointers
+  (`lessons.md`), dead roadmap phases (`P0.3`), plan/review thread IDs
+  (`FIX #N`, `REVIEW #N`), or bare `#N`. Inline the load-bearing substance in
+  1–2 lines; keep a public anchor (issue/PR/code path) only when it helps an
+  outsider.
+- **Enforced subset (ruff `D`).** `D100`, `D104` (module + package), `D101`,
+  `D103` (class + function), `D205`/`D212`/`D415` (summary format). `D102`
+  (methods) and `D107` (`__init__`) are convention-only, not gated. `tests/**`
+  carries `D100` plus the `D205`/`D212`/`D415` summary-format rules —
+  `D101`/`D103`/`D104` are exempt. `migrations/versions/` is exempt from all D
+  rules (per-file-ignores); `scripts/databricks_notebook.py` is excluded from
+  ruff entirely.
+
 ## Gotchas
 
 - `conformal/` top-level exports are experimental low-level building blocks;

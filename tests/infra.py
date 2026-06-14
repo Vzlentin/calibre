@@ -21,8 +21,9 @@ def closed_form_min_trace(S: np.ndarray, w_diag: np.ndarray, base: np.ndarray) -
 
 @contextmanager
 def restore_cwd():
-    """Save the working directory and restore it on exit, even on error —
-    a ``chdir`` inside the block cannot leak to the caller.
+    """Save the working directory and restore it on exit, even on error.
+
+    A ``chdir`` inside the block cannot leak to the caller.
 
     Backs the autouse ``_restore_cwd`` fixture in ``tests/conftest.py``: some
     test dependencies (e.g. Ray Tune trials) chdir and don't always restore,

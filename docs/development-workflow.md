@@ -6,8 +6,6 @@ failed on first deployment: the suite built its schema with
 `Base.metadata.create_all()` and never ran `alembic upgrade head`, so a
 migration↔ORM mismatch (the ORM expected `*_ref` columns and a
 `fit_frame_artifacts` table that no migration created) shipped undetected.
-See `REVIEW-PR-38.md` / `FIX.md` on the abandoned `cardinal-improvements`
-branch for the full post-mortem.
 
 ## One small PR per roadmap item
 
@@ -33,6 +31,16 @@ path** — never by `grep` or `wc -l`. Specifically:
   breaks on first deploy / under concurrency / against untrusted input?"* — not
   "is CI green?". Any fix round is re-reviewed for **newly introduced** issues,
   not only whether the original list was addressed.
+  - *Narrow exception — verifiably behavior-neutral prose-only PRs.* A change
+    that touches only comments, docstrings, and strings has no production path to
+    assert, so it waives the new-behavioral-test requirement above **for that
+    change only** (not as precedent). The waiver is earned by a two-part
+    behavior-neutral proof in place of a new test: (1) the diff touches only
+    comment/docstring/string tokens, and (2) before/after snapshots show the
+    runtime-consumed prose surfaces are unchanged except for intended text —
+    `/openapi.json` differs only in additive schema/route `description` keys (no
+    path/type/required/enum/`$ref` change) and the `/metrics` `# HELP` lines are
+    byte-identical. The four gates below still apply.
 
 ## The four gates
 

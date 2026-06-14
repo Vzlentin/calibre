@@ -1,3 +1,5 @@
+"""Shared API error types and exception-to-HTTP mapping."""
+
 from __future__ import annotations
 
 import traceback

@@ -1,3 +1,5 @@
+"""Structural validation of dataset bundles and cost-file loading."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -45,6 +47,13 @@ def _validate_key_frame(df: pd.DataFrame, *, name: str) -> None:
 
 
 def validate_dataset_bundle(bundle: DatasetBundle) -> None:
+    """Validate a :class:`DatasetBundle`'s history, hierarchy, future_x, censoring, and costs.
+
+    Raises:
+        ValueError: If any frame violates its structural contract — e.g. null
+            actuals, non-monotonic dates, a hierarchy missing history series, or
+            costs missing a ``unique_id``.
+    """
     validate_actuals_frame(bundle.history)
     if bundle.history[Y].isna().any():
         raise ValueError("history.y must not contain nulls")
@@ -89,6 +98,12 @@ def _read_cost_frame(uri: str | Path) -> pd.DataFrame:
 
 
 def load_costs(uri: str | Path) -> dict[str, CostStruct]:
+    """Load a per-``unique_id`` cost table (CSV or parquet) into a :class:`CostStruct` map.
+
+    Raises:
+        ValueError: If required columns are missing or a ``unique_id`` is
+            duplicated.
+    """
     frame = _read_cost_frame(uri)
     required = {UNIQUE_ID, "underage_cost", "overage_cost"}
     missing = required - set(frame.columns)

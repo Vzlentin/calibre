@@ -87,9 +87,12 @@ def test_app_wired_to_migrated_db(migrated_app) -> None:
 
 
 def test_create_app_fails_fast_on_sql_store_without_db_url(monkeypatch) -> None:
-    """Boot contract: LIFECYCLE_STORE=sql with no DB URL cannot ever serve, so
-    construction raises immediately (deploy-time fail-fast) instead of booting
-    a service that 500s on every lifecycle request."""
+    """LIFECYCLE_STORE=sql with no DB URL fails fast at construction.
+
+    Such a service can never serve, so construction raises immediately
+    (deploy-time fail-fast) instead of booting a service that 500s on every
+    lifecycle request.
+    """
     monkeypatch.delenv("CALIBRE_DATABASE_URL", raising=False)
     monkeypatch.setenv("LIFECYCLE_STORE", "sql")
 
@@ -98,10 +101,12 @@ def test_create_app_fails_fast_on_sql_store_without_db_url(monkeypatch) -> None:
 
 
 def test_create_app_with_well_formed_db_url_constructs_lazily(tmp_path, monkeypatch) -> None:
-    """A well-formed URL constructs without touching the database: engines
-    never connect at build time, so reachability failures keep landing on
-    first store use — the pre-refactor failure timing is preserved. Proven
-    driver-free: the sqlite file must NOT exist after construction."""
+    """A well-formed URL constructs without touching the database.
+
+    Engines never connect at build time, so reachability failures keep landing on
+    first store use; the pre-refactor failure timing is preserved. Proven
+    driver-free: the sqlite file must NOT exist after construction.
+    """
     db_path = tmp_path / "never-touched.db"
     monkeypatch.setenv("CALIBRE_DATABASE_URL", f"sqlite+pysqlite:///{db_path.as_posix()}")
     monkeypatch.setenv("LIFECYCLE_STORE", "sql")

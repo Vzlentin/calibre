@@ -1,3 +1,5 @@
+"""Lightweight ``span`` context manager for timing and logging sub-steps."""
+
 from __future__ import annotations
 
 import logging

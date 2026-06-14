@@ -1,3 +1,5 @@
+"""Tests for the reconciliation strategy registry."""
+
 from __future__ import annotations
 
 import pandas as pd

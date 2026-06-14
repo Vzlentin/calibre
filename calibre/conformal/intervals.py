@@ -1,3 +1,5 @@
+"""Constructors for symmetric interval predictions around a point forecast."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -14,6 +16,7 @@ def symmetric_interval(
     issued_at: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> IntervalPrediction:
+    """Build a single ``[center - radius, center + radius]`` interval."""
     center = float(center)
     radius = float(radius)
     return IntervalPrediction(
@@ -34,6 +37,10 @@ def symmetric_intervals(
     issued_at: int,
     metadata: dict[str, Any] | None = None,
 ) -> MultiStepIntervalPrediction:
+    """Build a per-horizon symmetric interval from aligned 1D arrays.
+
+    ``center``, ``radius``, and ``alpha`` must share the same 1D shape.
+    """
     center = np.asarray(center, dtype=float)
     radius = np.asarray(radius, dtype=float)
     alpha = np.asarray(alpha, dtype=float)

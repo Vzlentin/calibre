@@ -1,3 +1,5 @@
+"""Tests for tuning-run persistence."""
+
 from __future__ import annotations
 
 from calibre.storage.models import Base

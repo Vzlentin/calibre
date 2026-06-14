@@ -1,3 +1,5 @@
+"""Cost models for the inventory simulator."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

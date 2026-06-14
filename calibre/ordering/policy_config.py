@@ -1,3 +1,5 @@
+"""Typed ordering-policy configs and the policy dispatcher."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping

@@ -1,3 +1,5 @@
+"""Tests for the ForecastFrame schema and helpers."""
+
 import numpy as np
 import pandas as pd
 import pytest

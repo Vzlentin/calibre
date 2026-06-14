@@ -1,3 +1,5 @@
+"""Deterministic session-id derivation for the lifecycle store."""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,6 +13,11 @@ def derive_session_id(
     model_config: dict,
     conformal_config: dict,
 ) -> str:
+    """Derive a stable session id from the tenant, SKUs, and configs.
+
+    The id is a SHA-256 hash of the canonicalized inputs, so identical
+    configurations map to the same session and can reuse cached state.
+    """
     payload = json.dumps(
         {
             "tenant": tenant,
@@ -25,4 +32,5 @@ def derive_session_id(
 
 
 def legacy_session_id(run_id: UUID) -> str:
+    """Return the legacy run-scoped session id for a pre-session-keying run."""
     return f"legacy-{run_id.hex}"

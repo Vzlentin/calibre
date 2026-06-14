@@ -1,3 +1,5 @@
+"""Tests for the fit/predict/calibrate/order/observe lifecycle endpoints."""
+
 from __future__ import annotations
 
 import json
@@ -263,8 +265,9 @@ def test_predict_requires_succeeded_fit(client, stub_adapter, monkeypatch, sales
 
 
 def test_multi_fit_selection_is_last_everywhere(client, store, stub_adapter, sales_uri):
-    """LAST-fit canonical (R3): with several fits in a session, /calibrate,
-    /observe, and /sessions all operate on the LAST (most-recent) fit.
+    """With several fits in a session, all routes operate on the last fit.
+
+    /calibrate, /observe, and /sessions all operate on the LAST (most-recent) fit.
 
     This is the flip of the former first/first/last split: writing calibration
     to the first fit while /sessions read the last diverged session state, since
@@ -319,12 +322,13 @@ def test_multi_fit_selection_is_last_everywhere(client, store, stub_adapter, sal
 
 
 def test_refit_then_observe_409_until_recalibrated(client, store, stub_adapter, sales_uri):
-    """Re-fit lifecycle ruling (R3): conformal state is session-owned and carries
-    across re-fits, but a re-fit creates a fresh LAST fit whose last_calibrated is
-    None — so /observe on it fails loudly (409, "call /calibrate first") until the
-    client calibrates the new fit, after which observation resumes against the
-    carried-forward session conformal state. A deliberate contract, not the old
-    silent no-op.
+    """A re-fit forces /observe to 409 until the new fit is recalibrated.
+
+    Conformal state is session-owned and carries across re-fits, but a re-fit
+    creates a fresh LAST fit whose last_calibrated is None — so /observe on it
+    fails loudly (409, "call /calibrate first") until the client calibrates the
+    new fit, after which observation resumes against the carried-forward session
+    conformal state. A deliberate contract, not the old silent no-op.
     """
     # First fit: predict -> calibrate -> observe so the session accrues conformal
     # state on the original fit.

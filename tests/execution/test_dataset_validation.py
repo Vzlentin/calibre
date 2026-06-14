@@ -1,3 +1,5 @@
+"""Tests for dataset loading and validation."""
+
 from __future__ import annotations
 
 import pandas as pd

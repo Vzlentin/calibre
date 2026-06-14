@@ -1,3 +1,5 @@
+"""Abstract base class for online conformal controllers."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -5,7 +7,11 @@ from typing import Any
 
 
 class OnlineConformalController(ABC):
-    """Protocol for online conformal controllers."""
+    """Interface contract for online conformal controllers.
+
+    Subclasses implement :meth:`predict_interval`, :meth:`observe`,
+    :meth:`update`, and :meth:`get_diagnostics`.
+    """
 
     @abstractmethod
     def predict_interval(self, point_forecast):

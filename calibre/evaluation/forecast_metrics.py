@@ -1,3 +1,5 @@
+"""Forecast-frame metrics: point accuracy and interval coverage."""
+
 from __future__ import annotations
 
 import functools

@@ -1,3 +1,5 @@
+"""Value types for single- and multi-step interval predictions."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,6 +10,8 @@ import numpy as np
 
 @dataclass(slots=True)
 class IntervalPrediction:
+    """A single-step interval with its center, bounds, radius, and ``alpha``."""
+
     center: float
     lower: float
     upper: float
@@ -22,6 +26,8 @@ class IntervalPrediction:
 
 @dataclass(slots=True)
 class MultiStepIntervalPrediction:
+    """A per-horizon stack of interval predictions held as aligned 1D arrays."""
+
     center: np.ndarray
     lower: np.ndarray
     upper: np.ndarray

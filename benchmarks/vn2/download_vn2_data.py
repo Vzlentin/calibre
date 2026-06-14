@@ -1,3 +1,5 @@
+"""Download the VN2 dataset CSVs into the local data directory."""
+
 import argparse
 import json
 import logging
@@ -19,6 +21,7 @@ def _join_uri(base: str, filename: str) -> str:
 
 
 def download_file(session: requests.Session, url: str, destination: str) -> None:
+    """Stream ``url`` to ``destination`` over an open session."""
     with session.get(url, stream=True, timeout=60) as response:
         response.raise_for_status()
         with fsspec.open(destination, "wb") as f:
@@ -28,6 +31,7 @@ def download_file(session: requests.Session, url: str, destination: str) -> None
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Download every VN2 data file into the target directory."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", default=str(OUT_DIR), help="Target directory URI")
     args = parser.parse_args(argv)

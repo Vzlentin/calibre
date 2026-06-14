@@ -1,4 +1,4 @@
-"""Tests for the PartitionedConformalRuntime protocol (roadmap P1.5).
+"""Tests for the PartitionedConformalRuntime protocol.
 
 The backend's _persist_conformal_state previously duck-typed
 ``getattr(runtime, "get_partition_states", None)``; it now gates on

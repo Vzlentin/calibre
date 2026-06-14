@@ -1,3 +1,5 @@
+"""Structured JSON logging setup for the engine."""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +12,12 @@ _RESERVED_ATTRS = set(logging.makeLogRecord({}).__dict__)
 
 
 class JsonFormatter(logging.Formatter):
+    """Formatter that renders each log record as a single JSON line.
+
+    Standard fields (timestamp, level, logger, message) are emitted alongside
+    any non-reserved ``extra`` attributes, each coerced to a JSON-safe value.
+    """
+
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
@@ -38,6 +46,10 @@ def setup_logging(
     format: str = "json",
     stream: TextIO | None = None,
 ) -> None:
+    """Configure root logging at ``level`` with a ``json`` or ``text`` formatter.
+
+    Raises ValueError for an unknown ``format``.
+    """
     handler = logging.StreamHandler(stream or sys.stderr)
     if format == "json":
         handler.setFormatter(JsonFormatter())

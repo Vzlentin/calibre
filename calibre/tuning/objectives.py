@@ -1,3 +1,5 @@
+"""Tuning objective definitions and their registry."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
@@ -23,6 +25,8 @@ from calibre.ordering.policy_protocols import DecisionRule, OrderingArithmetic
 
 
 class TuningObjective(Protocol):
+    """Scores a forecast frame against actuals; lower is better."""
+
     def evaluate(self, frame: pd.DataFrame, actuals: pd.Series) -> float: ...
 
 
@@ -37,6 +41,8 @@ def _metric_callable(metric: str | Callable[[np.ndarray, np.ndarray], float]):
 
 @dataclass(frozen=True, slots=True)
 class Accuracy:
+    """Point-accuracy objective driven by a named or callable metric."""
+
     metric: str | Callable[[np.ndarray, np.ndarray], float] = "mase"
 
     def evaluate(self, frame: pd.DataFrame, actuals: pd.Series) -> float:
@@ -53,6 +59,8 @@ class Accuracy:
 
 @dataclass(frozen=True, slots=True)
 class CumulativePinball:
+    """Pinball loss on cumulative per-window quantile sums."""
+
     quantile: float
     tau: float
 
@@ -91,6 +99,8 @@ class CumulativePinball:
 
 @dataclass(frozen=True, slots=True)
 class Cost:
+    """Inventory-cost objective: simulate ordering and sum over/underage cost."""
+
     decision_rule: DecisionRule
     arithmetic: OrderingArithmetic
     costs: CostStruct
@@ -155,6 +165,8 @@ class Cost:
 
 @dataclass(frozen=True, slots=True)
 class Pareto:
+    """Cost objective reduced over a grid of risk-tradeoff weights."""
+
     decision_rule_fn: Callable[[float], DecisionRule]
     arithmetic: OrderingArithmetic
     costs: CostStruct

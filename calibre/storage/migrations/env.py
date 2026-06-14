@@ -1,3 +1,5 @@
+"""Alembic migration environment for the Calibre storage schema."""
+
 from __future__ import annotations
 
 from alembic import context
@@ -20,6 +22,7 @@ def _database_url() -> str:
 
 
 def run_migrations_offline() -> None:
+    """Run migrations in offline mode, emitting SQL against a literal URL."""
     url = _database_url()
     context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
     with context.begin_transaction():
@@ -27,6 +30,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    """Run migrations online against a live connection from the config."""
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = _database_url()
     connectable = engine_from_config(

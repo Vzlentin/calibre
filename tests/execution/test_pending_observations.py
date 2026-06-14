@@ -1,3 +1,5 @@
+"""Tests for pending-observation deferral and resolution."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock

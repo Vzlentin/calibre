@@ -368,7 +368,8 @@ def test_multistep_horizon_1_matches_single_step_update():
 
 
 def test_multistep_delayed_feedback_horizon_alignment():
-    """
+    """Observation at t=2 resolves both horizons by issue time.
+
     For horizon=2, the observation at t=2 should update:
       - h=1: using prediction issued at t=1 (its 0th element)
       - h=2: using prediction issued at t=0 (its 1st element)
@@ -393,7 +394,8 @@ def test_multistep_delayed_feedback_horizon_alignment():
 
 
 def test_multistep_unobserved_steps_are_nan_in_error_history():
-    """
+    """Unobserved horizon steps stay NaN in the error history.
+
     When a horizon step has no resolved prediction, its entry in error_history
     should be np.nan, not the target_alpha float.
     """

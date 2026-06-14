@@ -1,3 +1,5 @@
+"""Typed YAML config schema (:class:`BackendConfig`) and its loaders."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -31,6 +33,8 @@ class _Section(BaseModel):
 
 
 class DatasetConfig(_Section):
+    """Dataset section: adapter, path, period, and adapter-specific options."""
+
     adapter: str
     path: str
     period: int | None = None
@@ -51,6 +55,8 @@ class DatasetConfig(_Section):
 
 
 class TaskConfig(_Section):
+    """A single forecast task: model name, horizon, and model config."""
+
     model: str
     horizon: int = Field(ge=1)
     config: dict[str, Any] = Field(default_factory=dict)
@@ -63,6 +69,8 @@ class TaskConfig(_Section):
 
 
 class ConformalConfig(_Section):
+    """Conformal calibration knobs, convertible to the runtime config."""
+
     method: Literal["mscp", "aci"]
     coverage: float = 0.9
     calibration_window: int = 100
@@ -129,6 +137,8 @@ class HierarchicalIntervalConfig(_Section):
 
 
 class OrderingConfig(_Section):
+    """Ordering section: policy choice, coverage, and policy parameters."""
+
     policy: str
     coverage: float = 0.9
     quantile: float | None = None
@@ -138,6 +148,8 @@ class OrderingConfig(_Section):
 
 
 class OriginsConfig(BaseModel):
+    """Backtest origin range (``start``/``end``/``freq``) as a timestamp list."""
+
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     start: pd.Timestamp
@@ -162,6 +174,8 @@ class OriginsConfig(BaseModel):
 
 
 class OutputConfig(_Section):
+    """Output section: ledger paths and streaming-write toggle."""
+
     ledger_path: str | None = None
     order_ledger_path: str | None = None
     streaming: bool = False
@@ -174,6 +188,8 @@ class OutputConfig(_Section):
 
 
 class ExecutionConfig(_Section):
+    """Execution backend section, convertible to :class:`ExecutionOptions`."""
+
     backend: Literal["local", "ray", "auto"] = "auto"
     seed: int | None = None
     ray_address: str | None = None
@@ -216,6 +232,8 @@ class ExecutionConfig(_Section):
 
 
 class BackendConfig(BaseModel):
+    """Top-level backtest config validated from a YAML mapping."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     config_schema: str
@@ -274,6 +292,7 @@ class BackendConfig(BaseModel):
 def load_config_from_mapping(
     data: dict[str, Any], *, source_path: str | Path | None = None
 ) -> BackendConfig:
+    """Validate a config mapping into a :class:`BackendConfig`."""
     if not isinstance(data, dict):
         raise ValueError("config must be a mapping")
     payload = dict(data)
@@ -283,6 +302,7 @@ def load_config_from_mapping(
 
 
 def load_config(path: str | Path) -> BackendConfig:
+    """Load and validate a :class:`BackendConfig` from a YAML file at ``path``."""
     source_path = str(path)
     with fsspec.open(source_path, "rt", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)

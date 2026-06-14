@@ -1,12 +1,12 @@
-"""SQL-backed lifecycle store (roadmap P0.2).
+"""SQL-backed lifecycle store.
 
 Persists fit/tune records and session-owned conformal state so the API survives
-restarts and multi-worker deployments. Per FIX #1, data-plane frames
-(history, future_x, last_forecast/calibrated) are written as parquet to the
-object store and referenced by URI — never stored inline on the fit row. Orders
-are durable rows in the ``orders`` table (issue #61), not a parquet frame. Per
-FIX #2, all SQL row mapping lives here in the storage layer; the typed records
-and the store contract stay at the API boundary (``calibre.api.lifecycle``).
+restarts and multi-worker deployments. Data-plane frames (history, future_x,
+last_forecast/calibrated) are written as parquet to the object store and
+referenced by URI — never stored inline on the fit row. Orders are durable rows
+in the ``orders`` table, not a parquet frame. All SQL row mapping lives here in
+the storage layer; the typed records and the store contract stay at the API
+boundary (``calibre.api.lifecycle``).
 """
 
 from __future__ import annotations
@@ -205,7 +205,7 @@ class SqlLifecycleStore:
                 .where(LifecycleFitRecord.tenant == tenant)
                 .order_by(LifecycleFitRecord.created_at, LifecycleFitRecord.fit_id)
             )
-            # REVIEW #14: push the sku-set membership into SQL on Postgres
+            # Push the sku-set membership into SQL on Postgres
             # (``sku_set @> '["uid"]'``) so this is a predicate, not a full
             # tenant scan filtered in Python. SQLite's JSON has no containment
             # operator, so keep the post-query filter there.

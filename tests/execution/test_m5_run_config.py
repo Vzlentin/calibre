@@ -1,3 +1,5 @@
+"""Tests for running a backtest from an M5 config."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -237,9 +239,11 @@ def test_estimated_node_history_peak_bounds_m5_fixture_expansion() -> None:
 
 
 def test_direct_call_estimate_leaves_summing_matrix_bytes_zero() -> None:
-    """estimate_hierarchical_expansion never sets the summing-matrix term
-    itself; only run preparation's eager matrix-requiring branch does (so
-    direct-call peaks are unchanged)."""
+    """estimate_hierarchical_expansion never sets the summing-matrix term itself.
+
+    Only run preparation's eager matrix-requiring branch does, so direct-call
+    peaks are unchanged.
+    """
     history = pd.DataFrame(
         {
             UNIQUE_ID: ["A", "B"],

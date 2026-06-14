@@ -1,3 +1,5 @@
+"""Tests for the fitted-model cache."""
+
 from __future__ import annotations
 
 import pickle

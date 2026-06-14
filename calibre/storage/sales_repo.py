@@ -1,4 +1,4 @@
-"""SQL-backed sales ingestion (roadmap P1.8, issue #61).
+"""SQL-backed sales ingestion.
 
 ``SqlSalesAdapter`` implements the ``SalesAdapter`` seam against the project's
 own Postgres ``sales`` table, mirroring ``SnapshotSalesAdapter`` (parquet) so

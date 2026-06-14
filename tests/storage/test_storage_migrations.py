@@ -1,3 +1,5 @@
+"""Tests for the Alembic storage migrations."""
+
 from __future__ import annotations
 
 from alembic import command

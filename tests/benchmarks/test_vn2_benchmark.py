@@ -282,8 +282,10 @@ def test_run_benchmark_defaults_to_committed_best_config(monkeypatch) -> None:
 
 
 def test_run_benchmark_tune_true_runs_hpo_and_threads_its_config(monkeypatch) -> None:
-    """tune=True liveness lock: run_hpo fires exactly once and its returned
-    config (not BEST_CONFIG) is the one threaded into the benchmark run."""
+    """tune=True is live: run_hpo fires exactly once and its config is used.
+
+    The returned config (not BEST_CONFIG) is the one threaded into the run.
+    """
     hpo_calls: list[dict[str, Any]] = []
     threaded: dict[str, Any] = {}
     tuned_config = {**_FAST_BEST_CONFIG, "name": "hpo_tuned_lgbm"}
@@ -327,9 +329,11 @@ def test_run_benchmark_tune_true_runs_hpo_and_threads_its_config(monkeypatch) ->
 
 
 def test_run_from_config_threads_tune_flag_to_run_benchmark(monkeypatch) -> None:
-    """The run_from_config seam lock: the tune kwarg reaches run_benchmark in
-    both directions — a regression lock against the formerly hardcoded
-    tune=False that made the knob dead from the config entrypoint."""
+    """The tune kwarg reaches run_benchmark from the run_from_config seam.
+
+    This locks against the formerly hardcoded tune=False that made the knob dead
+    from the config entrypoint.
+    """
     captured: dict[str, Any] = {}
 
     def _fake_run_benchmark(**kwargs):
@@ -406,7 +410,7 @@ def _raise_policy_error(*_args: Any, **_kwargs: Any) -> Any:
 
 
 def test_replay_policy_error_fails_fast(monkeypatch) -> None:
-    """P0.4: a policy failure aborts the replay by default — never zero orders."""
+    """A policy failure aborts the replay by default — never zero orders."""
     cache = _small_replay_cache()
     monkeypatch.setattr(replay_module, "apply_order_policy", _raise_policy_error)
 
@@ -456,7 +460,7 @@ def test_cost_search_smoke_runs_one_cached_trial() -> None:
 
 
 def test_cost_trial_failure_report_classifies_failures() -> None:
-    """P1.3: bad trials report inf; infra failures re-raise, never become inf."""
+    """Bad trials report inf; infra failures re-raise, never become inf."""
     pruned = search_module._cost_trial_failure_report(optuna.TrialPruned())
     assert pruned[search_module.OBJECTIVE_METRIC] == float("inf")
     assert pruned["pruned"] == 1

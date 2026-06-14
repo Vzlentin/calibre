@@ -1,3 +1,5 @@
+"""Rolling-window quantile calibrators for conformal radii."""
+
 from __future__ import annotations
 
 from collections import deque
@@ -10,6 +12,12 @@ from calibre.conformal.numerics import finite_sample_radius, validate_quantile_r
 
 
 class RollingQuantileCalibrator:
+    """Conformal radius from the (1-alpha) quantile of a rolling score window.
+
+    Keeps one bounded-length deque of nonconformity scores per partition and
+    returns the finite-sample radius for a requested ``alpha`` on demand.
+    """
+
     def __init__(
         self,
         *,

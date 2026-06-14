@@ -1,3 +1,5 @@
+"""Per-period result record for the inventory simulator."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
