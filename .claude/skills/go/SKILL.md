@@ -387,6 +387,35 @@ one outcome:
 - **Edge case — failure before a plan exists.** A short-stop in Stage 0a/0b has no
   plan to flip — just report `failed`.
 
+**Compound on `shipped` (non-blocking, vault-only).** When — and only when — the
+outcome is `shipped` **and** `OBSIDIAN_VAULT_PATH` is set, capture a durable
+learning routed to the **vault** solutions store (never the public repo).
+`/ce-compound mode:headless` writes **three** things straight into the repo with
+no suppress hook — a solution doc under `docs/solutions/<category>/`, a
+newly-created repo-root `CONCEPTS.md`, and a `CLAUDE.md`/`AGENTS.md`
+discoverability edit — and has zero vault awareness, so Stage 6 owns a post-run
+reconciliation:
+
+1. **Record pre-state** — which of `CLAUDE.md` / `AGENTS.md` / `CONCEPTS.md` /
+   `docs/solutions/` already exist on `$MAIN` (in this repo: `CLAUDE.md` +
+   `AGENTS.md` are tracked; `CONCEPTS.md` + `docs/solutions/` are absent).
+2. **Invoke `/ce-compound mode:headless`** — it self-gates (`Documentation
+   skipped` when nothing is worth recording).
+3. **Relocate** any solution doc it wrote to the vault via `/project-memory`
+   (rewrite frontmatter to the vault convention, write, verify, delete the repo
+   copy — the same shape as the `/ce-plan` relocation).
+4. **Revert its repo-root side-edits** — `git checkout -- CLAUDE.md AGENTS.md`
+   (tracked → restores committed) and `git clean -fd CONCEPTS.md docs/solutions/`
+   (untracked / newly-created → `checkout` would error on these).
+5. **Verify clean** — `git status --porcelain` on `$MAIN` must be empty before the
+   Stage-6 GATE.
+
+**Vault-absent ordering:** if `OBSIDIAN_VAULT_PATH` is unset/absent, **skip this
+sub-step entirely — do not invoke `/ce-compound`** so no repo writes ever occur.
+This fires **only on `shipped`** (never `failed` / `ready-for-external-gates`) and
+is **non-blocking** — a `Documentation skipped` return or any error does **not**
+fail the Stage-6 GATE.
+
 **GATE:** the work item's plan reads exactly one of:
 
 - `status: shipped` with PR/SHA recorded;
@@ -405,4 +434,6 @@ report, in order: the resolved **input kind** (idea / issue / plan-file) and the
 **plan path** in the resolved store; the **execution mode** (direct / worktree,
 and any retained branch/worktree path); issue #N; PR URL; merged (yes + SHA, or
 no with reason); CI result; any `needs-human` review threads; and memory updates
-(plan status flip, handoff record, plus architecture/lessons or "skipped").
+(plan status flip, handoff record, the compound outcome on a `shipped` run —
+vault solution path / "no learning recorded" / "skipped — no vault" — plus
+architecture/lessons or "skipped").
