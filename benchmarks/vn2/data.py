@@ -73,6 +73,7 @@ def prepare_cumulative_target_history(
 
 
 def load_instock(data_dir: str | Path, series_filter: list[str] | None) -> pd.DataFrame | None:
+    """Load the in-stock frame, or ``None`` when the file is absent."""
     instock_path = join_uri(data_dir, "week_0_in_stock.csv")
     if not exists(instock_path):
         return None
@@ -83,6 +84,7 @@ def load_instock(data_dir: str | Path, series_filter: list[str] | None) -> pd.Da
 
 
 def model_uses_cumulative_target(model_config: Mapping[str, Any]) -> bool:
+    """Return whether a model config requests the cumulative target mode."""
     return str(model_config.get("_target_mode", "")).lower() == "cumulative"
 
 
@@ -92,6 +94,7 @@ def prepare_model_history(
     protection_period: int,
     cumulative_target: bool,
 ) -> pd.DataFrame:
+    """Shape model-training history, branching on the cumulative-target mode."""
     if cumulative_target:
         return prepare_cumulative_target_history(sales, instock, protection_period)
     return _prepare_history(sales, instock)
@@ -132,6 +135,7 @@ def prepare_policy_forecast_frame(
     protection_period: int,
     cumulative_target: bool,
 ) -> pd.DataFrame:
+    """Shape a policy forecast frame, branching on the cumulative-target mode."""
     if cumulative_target:
         return as_cumulative_decision_frame(frame, protection_period)
     return frame

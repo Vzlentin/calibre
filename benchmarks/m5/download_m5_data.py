@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Download the M5 dataset into the target directory."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", default=str(OUT_DIR), help="Target directory")
     args = parser.parse_args(argv)

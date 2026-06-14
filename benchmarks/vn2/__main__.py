@@ -11,6 +11,7 @@ from calibre.cli.config import load_config
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Parse arguments and run the VN2 benchmark from a config."""
     parser = argparse.ArgumentParser(description="Run the VN2 benchmark harness")
     parser.add_argument(
         "--config",

@@ -79,6 +79,7 @@ def run_smoke(data_path: str, ledger_path: str) -> dict:
 
 
 def main() -> int:
+    """Run the Databricks smoke check and return a process exit code."""
     # Paths
     repo_root = Path(__file__).resolve().parent.parent
     local_fixture = str(repo_root / "benchmarks" / "vn2" / "fixture")

@@ -1,3 +1,5 @@
+"""Parity check: Calibre ACI vs the reference conformal-time-series repo."""
+
 from __future__ import annotations
 
 import argparse
@@ -47,6 +49,8 @@ from calibre.conformal.adaptive import AdaptiveConformalInference  # noqa: E402
 
 @dataclass(slots=True)
 class ThresholdPrediction:
+    """A one-sided threshold prediction with its alpha and center."""
+
     threshold: float
     alpha: float
     center: float = 0.0
@@ -56,10 +60,12 @@ class ThresholdPrediction:
 
 
 def raw_scalar_score(y_true: float, _center: float) -> float:
+    """Return the raw scalar score (the value itself)."""
     return float(y_true)
 
 
 def load_module(module_name: str, path: Path):
+    """Import a module by name from an explicit file ``path``."""
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Unable to load module {module_name} from {path}")
@@ -69,10 +75,12 @@ def load_module(module_name: str, path: Path):
 
 
 def slugify_lr(lr: float) -> str:
+    """Return a filesystem-safe slug for a learning-rate value."""
     return str(lr).replace("-", "neg_").replace(".", "p")
 
 
 def to_python(value: Any) -> Any:
+    """Recursively convert numpy scalars/containers to JSON-safe Python values."""
     if isinstance(value, dict):
         return {key: to_python(val) for key, val in value.items()}
     if isinstance(value, list | tuple):
@@ -92,6 +100,7 @@ def to_python(value: Any) -> Any:
 
 
 def get_reference_commit(reference_repo: Path) -> str:
+    """Return the HEAD commit hash of the reference repo."""
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=reference_repo,
@@ -103,6 +112,7 @@ def get_reference_commit(reference_repo: Path) -> str:
 
 
 def warmup_quantile(values: np.ndarray, alpha: float, t_pred: int) -> float:
+    """Return the warmup quantile, or +inf before enough samples accrue."""
     if t_pred > math.ceil(1.0 / alpha):
         return float(np.quantile(values[:t_pred], 1.0 - alpha))
     return math.inf
@@ -111,6 +121,7 @@ def warmup_quantile(values: np.ndarray, alpha: float, t_pred: int) -> float:
 def compare_numeric_arrays(
     reference: np.ndarray, local: np.ndarray, atol: float = FLOAT_ATOL
 ) -> dict[str, Any]:
+    """Compare two numeric arrays and summarize match/diff statistics."""
     reference = np.asarray(reference)
     local = np.asarray(local)
     matches = np.isclose(reference, local, atol=atol, rtol=0.0, equal_nan=True)
@@ -134,6 +145,7 @@ def compare_numeric_arrays(
 
 
 def compare_boolean_arrays(reference: np.ndarray, local: np.ndarray) -> dict[str, Any]:
+    """Compare two boolean arrays and summarize agreement."""
     reference = np.asarray(reference, dtype=bool)
     local = np.asarray(local, dtype=bool)
     matches = reference == local
@@ -154,6 +166,7 @@ def compare_boolean_arrays(reference: np.ndarray, local: np.ndarray) -> dict[str
 
 
 def summarize_metrics(interval_frame: pd.DataFrame, burnin: int) -> dict[str, Any]:
+    """Summarize coverage and width metrics after a burn-in period."""
     eval_mask = interval_frame["step"] > burnin
     finite_width_mask = eval_mask & np.isfinite(interval_frame["width"])
     coverage_eval = interval_frame.loc[eval_mask, "covered"].mean()
@@ -174,6 +187,7 @@ def summarize_metrics(interval_frame: pd.DataFrame, burnin: int) -> dict[str, An
 def choose_diagnosis(
     summary: dict[str, Any], reference_runs: dict[str, dict[str, np.ndarray]]
 ) -> str:
+    """Diagnose where reference and local runs first diverge."""
     q_firsts = []
     alpha_firsts = []
     for tail in ("lower", "upper"):
@@ -207,6 +221,7 @@ def choose_diagnosis(
 
 
 def verdict_from_summary(summary: dict[str, Any], metrics_match: bool) -> str:
+    """Derive a PASS/FAIL verdict from the comparison summary."""
     exact_fields = (
         summary["q_lower"]["exact_match"],
         summary["q_upper"]["exact_match"],
@@ -222,6 +237,7 @@ def verdict_from_summary(summary: dict[str, Any], metrics_match: bool) -> str:
 def build_signed_residual_scores(
     y: np.ndarray, forecast: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Build the signed-residual lower/upper score series."""
     lower = forecast - y
     upper = y - forecast
     return lower.astype(float), upper.astype(float)
@@ -235,6 +251,7 @@ def run_reference_tail_aci(
     window_length: int,
     burnin: int,
 ) -> dict[str, np.ndarray]:
+    """Run the reference tail-ACI implementation and return its outputs."""
     result = reference_aci(
         scores=np.asarray(scores, dtype=float),
         alpha=alpha,
@@ -262,6 +279,7 @@ def run_local_tail_aci(
     quantile_rule: str,
     alpha_bounds: tuple[float, float] | None,
 ) -> dict[str, np.ndarray]:
+    """Run the local Calibre tail-ACI implementation and return its outputs."""
     scores = np.asarray(scores, dtype=float)
     q = np.empty(scores.shape[0], dtype=float)
     alpha_trace = np.full(scores.shape[0], float(alpha), dtype=float)
@@ -311,6 +329,7 @@ def build_interval_frame(
     lower_run: dict[str, np.ndarray],
     upper_run: dict[str, np.ndarray],
 ) -> pd.DataFrame:
+    """Assemble a per-step interval frame from the lower/upper runs."""
     frame = base_frame.copy()
     frame["q_lower"] = lower_run["q"]
     frame["q_upper"] = upper_run["q"]
@@ -329,6 +348,8 @@ def build_interval_frame(
 def metrics_delta(
     reference_metrics: dict[str, Any], local_metrics: dict[str, Any]
 ) -> dict[str, Any]:
+    """Return per-metric reference-minus-local deltas."""
+
     def delta(lhs: Any, rhs: Any) -> Any:
         if isinstance(lhs, str) or isinstance(rhs, str):
             return "n/a"
@@ -355,6 +376,7 @@ def write_report(
     params: dict[str, Any],
     summaries: list[dict[str, Any]],
 ) -> None:
+    """Write the markdown parity report to ``output_dir``."""
     lines = [
         "# One-Step ACI Parity Report",
         "",
@@ -402,6 +424,7 @@ def write_report(
 
 
 def load_reference_dataset(load_dataset, dataset_name: str, reference_repo: Path) -> pd.DataFrame:
+    """Load a named dataset from the reference repo into a frame."""
     previous_cwd = Path.cwd()
     try:
         os.chdir(reference_repo / "tests")
@@ -411,6 +434,7 @@ def load_reference_dataset(load_dataset, dataset_name: str, reference_repo: Path
 
 
 def main() -> None:
+    """Run the ACI parity check end-to-end and write the report."""
     parser = argparse.ArgumentParser(
         description="Run one-step ACI parity against the conformal-time-series reference repo."
     )

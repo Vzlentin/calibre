@@ -212,6 +212,7 @@ def simulate_orders(
     decision_rounds: int,
     delivery_weeks: int,
 ) -> VN2Simulator:
+    """Replay orders through a fresh simulator and return its end state."""
     simulator = VN2Simulator(initial_states)
     for week in range(1, decision_rounds + delivery_weeks + 1):
         actuals = actuals_by_round.get(week, dict.fromkeys(initial_states, 0.0))
@@ -227,6 +228,7 @@ def cost_diagnostic_tables(
     oracle_summary: pd.DataFrame,
     oracle_history: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """Build actual-vs-oracle cost diagnostic tables and a cost summary."""
     actual_history = actual.history.rename(
         columns={
             "holding_cost": "actual_holding_cost",
