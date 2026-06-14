@@ -25,8 +25,9 @@ Rules:
   - **Plans** fall back to the repo-relative `docs/plans/` store (see
     [Plan store location](#plan-store-location)). Plans are work orders, not
     private context, so they may live in the repo.
-  - **Durable memory** (`architecture.md`, `vision.md`, `lessons.md`) is
-    skipped entirely — do not invent a path, fall back to a hardcoded
+  - **Durable memory** (`architecture.md`, `vision.md`, `lessons.md`,
+    `CONCEPTS.md`, `deferred-findings-register.md`, and the `solutions/` store)
+    is skipped entirely — do not invent a path, fall back to a hardcoded
     location, or write it into the repo. These carry private context that must
     stay out of a (possibly public) repo.
 - **No personal paths in the repo.** Never commit absolute vault paths into
@@ -42,12 +43,19 @@ $OBSIDIAN_VAULT_PATH/Projects/<project>/
 ├── architecture.md
 ├── vision.md
 ├── lessons.md
-└── plans/
+├── CONCEPTS.md                     # shared domain vocabulary
+├── deferred-findings-register.md   # append-only rolling deferral log
+├── plans/                          # one transient file per task
+└── solutions/<category>/           # per-problem knowledge-track docs
 ```
 
-Do not create any other permanent files or folders in the project memory
-surface. `plans/` may contain many transient files; the three top-level
-markdown files are the only durable ones.
+This is the **complete** durable surface — do not create any permanent file or
+folder outside this set. `plans/` may contain many transient files and
+`solutions/<category>/` many durable per-problem docs; everything else listed is
+a single top-level file. (`CONCEPTS.md`, `deferred-findings-register.md`, and
+`solutions/` already exist on disk and are referenced by the project's
+`CLAUDE.md`; this section documents them as owned surfaces rather than admitting
+new free-form folders.)
 
 ## Plan store location
 
@@ -90,6 +98,31 @@ store to `shipped` (merged) or `failed` (the run stopped short):
 - **Fallback mode:** set `status` on the `docs/plans/` plan — that file is the
   record. Do **not** write durable vault memory; there is no vault.
 
+## Solutions / deferred-findings store
+
+Two durable surfaces beyond plans resolve here, both **vault-only** — they carry
+private context and inherit the durable-memory degrade rule above (vault unset,
+empty, or absent → **skip and note it**, never write the repo). Callers (e.g.
+`/go`) delegate here rather than hardcoding a path, so there is one resolution
+point and one skip rule.
+
+- **Solutions store** — per-problem knowledge-track docs at
+  `$OBSIDIAN_VAULT_PATH/Projects/<project>/solutions/<category>/<slug>.md`
+  (`<category>` ∈ `architecture-patterns`, `design-patterns`, `conventions`,
+  `performance-issues`, `workflow`, …; each doc carries `module` / `tags` /
+  `applies_when` frontmatter). This is the landing target when a caller compounds
+  a learning on a shipped outcome: **relocate** the doc here using the same
+  rewrite-frontmatter → write → verify → delete-the-repo-copy shape as a plan
+  relocation, so no learning is left behind in the (possibly public) repo.
+- **Deferred-findings register** — one append-only rolling table at
+  `$OBSIDIAN_VAULT_PATH/Projects/<project>/deferred-findings-register.md`. This
+  is the landing target when a caller defers a finding (appending one row per
+  deferred thread, keyed by PR/issue #, in the file's existing schema). Append
+  only; never recreate, reorder, or rescope the file.
+
+Resolve `<project>` exactly as [Plan store location](#plan-store-location) does
+(case-insensitive match against `Projects/*`).
+
 ## File roles
 
 - **`architecture.md`** — durable system design: module boundaries, data
@@ -100,8 +133,16 @@ store to `shipped` (merged) or `failed` (the run stopped short):
 - **`lessons.md`** — append-only log of corrections, recurring pitfalls, and
   rules-for-self that prevent repeating mistakes. Append after every user
   correction.
+- **`CONCEPTS.md`** — the project's shared domain vocabulary. Edited when a term
+  is coined, sharpened, or retired.
+- **`deferred-findings-register.md`** — one append-only rolling table of
+  confirmed-but-deferred findings, keyed by PR/issue #. Rows are appended at
+  deferral time; the file is never reordered or rescoped.
 - **`plans/<slug>.md`** — one file per non-trivial task. Working memory:
   goal, plan, progress, outcomes. Update as the task evolves.
+- **`solutions/<category>/<slug>.md`** — durable per-problem learning, filed
+  under a knowledge-track category. Written when a reusable lesson is compounded
+  on a shipped outcome.
 
 ## When to read
 
