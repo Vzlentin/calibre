@@ -1,3 +1,5 @@
+"""Tests for the adaptive conformal interval controller."""
+
 from __future__ import annotations
 
 from calibre.conformal.controllers import AdaptiveAlphaController

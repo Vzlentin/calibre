@@ -1,3 +1,5 @@
+"""Tests for NeuralForecast native persistence round-trips."""
+
 from __future__ import annotations
 
 from pathlib import Path

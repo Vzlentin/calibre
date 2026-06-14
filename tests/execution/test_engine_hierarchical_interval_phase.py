@@ -1,3 +1,5 @@
+"""Tests for the hierarchical-interval phase of the engine."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager

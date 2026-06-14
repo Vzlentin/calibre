@@ -1,3 +1,5 @@
+"""Tests for per-partition conformal state storage."""
+
 from __future__ import annotations
 
 from calibre.storage.models import Base

@@ -245,8 +245,11 @@ def test_bottom_only_requests_skip_aggregate_work() -> None:
 
 
 def _resolve_sequence(source: HierarchyActualsSource, ledger: pd.DataFrame, origins) -> list:
-    """Resolve the same ledger across a sequence of origins, carrying forward the
-    updated frame (mirrors the engine's per-origin carry-forward)."""
+    """Resolve the same ledger across a sequence of origins.
+
+    The updated frame is carried forward, mirroring the engine's per-origin
+    carry-forward.
+    """
     outputs = []
     current = ledger
     for origin in origins:

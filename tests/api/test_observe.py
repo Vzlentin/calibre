@@ -1,6 +1,6 @@
-"""Behavioral tests for /observe conformal-mode dispatch (roadmap P0.1).
+"""Behavioral tests for /observe conformal-mode dispatch.
 
-Regression guard for lessons.md §40: the observe job used to drop rows with
+Regression guard: the observe job used to drop rows with
 NaN interval bounds before calling ``runtime.observe``. Cumulative mode emits
 NaN bounds on a window's intermediate horizons *by construction*, so that dropna
 silently killed online recalibration for cumulative deployments. These assert
@@ -197,9 +197,11 @@ def test_observe_perhorizon_drops_unresolved_rows(session):
 
 
 def test_observe_failure_is_logged_not_raised_and_state_not_persisted(session, caplog):
-    """A structurally bad window fails loudly in observe; the job boundary
-    records it with session context, does not re-raise, and durable conformal
-    state is untouched (upsert runs only on success)."""
+    """A structurally bad window fails loudly in observe.
+
+    The job boundary records it with session context, does not re-raise, and
+    durable conformal state is untouched (upsert runs only on success).
+    """
     import logging
 
     session_id, store, make = session
@@ -332,8 +334,10 @@ def _seed_fit(store: LifecycleStore, *, calibrated: pd.DataFrame | None) -> str:
 
 
 def test_observe_before_calibrate_returns_409():
-    """Observe on a fit with no calibrated frame fails loudly at request time —
-    no more 202-then-silent-drop."""
+    """Observe on a fit with no calibrated frame fails loudly at request time.
+
+    There is no 202-then-silent-drop.
+    """
     store = LifecycleStore()
     session_id = _seed_fit(store, calibrated=None)
     client = TestClient(create_app(lifecycle_store=store))
@@ -361,8 +365,10 @@ def test_observe_missing_session_returns_404():
 
 
 def test_observe_without_conformal_config_returns_400():
-    """A session whose fit carries no conformal config is rejected at request
-    time with 400 — the fourth synchronous precondition code, pinned."""
+    """A fit with no conformal config is rejected at request time with 400.
+
+    This is the fourth synchronous precondition code, pinned.
+    """
     store = LifecycleStore()
     store.put_fit(
         FitRecord(
@@ -403,10 +409,12 @@ def test_observe_without_conformal_config_returns_400():
     ],
 )
 def test_observe_unusable_actuals_returns_422(actuals):
-    """Empty, no-usable-row, malformed, or non-finite actuals are rejected
-    synchronously (422) — a malformed y value must never surface as a bare 500,
-    and a y that parses to a non-finite float would be accepted-then-never-
-    recorded by the job (the #163 silent-drop symptom on a payload edge)."""
+    """Empty, malformed, or non-finite actuals are rejected synchronously (422).
+
+    A malformed ``y`` value must never surface as a bare 500, and a ``y`` that
+    parses to a non-finite float would otherwise be accepted-then-never-recorded
+    by the job (a silent-drop symptom on a payload edge).
+    """
     store = LifecycleStore()
     session_id = _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=True))
     client = TestClient(create_app(lifecycle_store=store))
@@ -417,9 +425,11 @@ def test_observe_unusable_actuals_returns_422(actuals):
 
 
 def test_run_observe_job_rejects_fit_from_another_session():
-    """The public job contract carries both keys; a mismatched pair would
-    rehydrate one session's runtime and persist under another — it refuses
-    loudly instead of writing split-brain state."""
+    """The public job contract carries both keys.
+
+    A mismatched pair would rehydrate one session's runtime and persist under
+    another, so it refuses loudly instead of writing split-brain state.
+    """
     store = LifecycleStore()
     _seed_fit(store, calibrated=_calibrated_window(bounds_at_each_horizon=True))
 
@@ -452,9 +462,11 @@ def test_observe_happy_path_still_202_and_observes(monkeypatch):
 
 
 def test_observe_job_runtime_failure_leaves_durable_state_untouched(monkeypatch, caplog):
-    """A failure that slips past request-time validation still logs loudly at the
-    job boundary and leaves durable conformal state untouched (the existing
-    failure-path lock, now reached only by runtime — not precondition — failures)."""
+    """A failure past request-time validation still logs loudly at the job boundary.
+
+    Durable conformal state is left untouched. This failure-path lock is now
+    reached only by runtime failures, not precondition failures.
+    """
     import logging
 
     store = LifecycleStore()

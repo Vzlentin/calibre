@@ -1,3 +1,5 @@
+"""Tests for the Postgres state store repositories."""
+
 from __future__ import annotations
 
 import fsspec

@@ -1,3 +1,5 @@
+"""Tests for cost-objective mode dispatch (perhorizon vs cumulative)."""
+
 from __future__ import annotations
 
 import pandas as pd

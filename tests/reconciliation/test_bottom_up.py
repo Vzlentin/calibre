@@ -37,8 +37,10 @@ def _hierarchy() -> pd.DataFrame:
 
 
 def _index():
-    """The reconciler now takes the prebuilt index; build it from the same
-    fixture frame so the asserted outcomes are unchanged."""
+    """The reconciler takes the prebuilt index.
+
+    Build it from the same fixture frame so the asserted outcomes are unchanged.
+    """
     return build_hierarchy_index(_hierarchy())
 
 
@@ -179,9 +181,11 @@ def test_no_hierarchy_or_empty_frame_pass_through() -> None:
 
 
 def test_nan_bottom_counts_as_present_and_poisons_containing_aggregates() -> None:
-    """NaN propagation is carried by the explicit isnan counter, not skipna
-    arithmetic: a NaN member still counts toward completeness and forces NaN
-    on every aggregate that contains it."""
+    """NaN propagation is carried by the explicit isnan counter, not skipna.
+
+    A NaN member still counts toward completeness and forces NaN on every
+    aggregate that contains it.
+    """
     frame = _bottom_frame(y_hats=[1.0, float("nan"), 4.0])  # a_s2 is NaN
 
     result = BottomUpReconciler()(frame, _index(), _CONTEXT)

@@ -1,4 +1,4 @@
-"""/fit eagerly validates config compatibility (roadmap P0.3).
+"""/fit eagerly validates config compatibility.
 
 Before this, ``_run_fit_job`` flipped to SUCCEEDED without fitting, so a config
 incompatible with the data only failed lazily at /predict. These assert the

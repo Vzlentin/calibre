@@ -1,3 +1,5 @@
+"""Tests for conformal-state resume across runs."""
+
 from __future__ import annotations
 
 from uuid import UUID, uuid4
@@ -243,10 +245,12 @@ def test_backend_resumes_from_db_state_and_artifact_pointer(tmp_path) -> None:
 
 
 def test_backend_resumes_across_deferred_cumulative_window(tmp_path) -> None:
-    """A kill with a cumulative window mid-flight resumes to the exact
-    uninterrupted result: deferred y-NaN rows re-enter the open set via the
-    initial ledger, the window completes at its terminal origin, and it scores
-    exactly once (the restored calibrator state carries no score for it yet).
+    """A kill mid-flight resumes to the exact uninterrupted result.
+
+    With a cumulative window mid-flight, deferred y-NaN rows re-enter the open set
+    via the initial ledger, the window completes at its terminal origin, and it
+    scores exactly once (the restored calibrator state carries no score for it
+    yet).
     """
     dates = pd.date_range("2024-01-07", periods=20, freq="W")
     pattern = [10.0, 20.0, 30.0, 40.0] * 5

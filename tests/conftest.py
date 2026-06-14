@@ -1,3 +1,5 @@
+"""Shared pytest fixtures and configuration for the test suite."""
+
 import os
 
 # Disable Ray's built-in uv-run runtime env hook before any ray import. Under

@@ -1,3 +1,5 @@
+"""Tests for the M5 dataset adapter."""
+
 from __future__ import annotations
 
 from pathlib import Path

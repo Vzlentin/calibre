@@ -1,3 +1,5 @@
+"""Tests for the shared forecasting-adapter contract."""
+
 import pandas as pd
 import pytest
 

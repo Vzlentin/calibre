@@ -1,4 +1,4 @@
-"""SqlLifecycleStore round-trip + restart survival (roadmap P0.2).
+"""SqlLifecycleStore round-trip + restart survival.
 
 The in-memory store loses everything on restart and is invisible across
 workers. These tests assert the SQL store persists fit/tune records, frames
@@ -141,8 +141,10 @@ def test_study_round_trip_and_update(tmp_path):
 
 
 def test_last_fit_uses_creation_order_not_fit_id(tmp_path):
-    """A session can hold several fits; "last" must be the most recently created,
-    not the lexicographically largest (random) fit_id."""
+    """For several fits in a session, "last" is the most recently created.
+
+    It is not the lexicographically largest (random) fit_id.
+    """
     db_url = f"sqlite+pysqlite:///{(tmp_path / 'lc.db').as_posix()}"
     Base.metadata.create_all(make_engine(db_url))
     factory = make_session_factory(make_engine(db_url))
@@ -176,8 +178,10 @@ def test_last_fit_uses_creation_order_not_fit_id(tmp_path):
 
 
 def test_last_fit_sql_breaks_created_at_ties_by_fit_id(tmp_path):
-    """On equal created_at, the SQL store breaks the tie by fit_id desc, so the
-    selection is deterministic rather than insertion-arbitrary."""
+    """On equal created_at, the SQL store breaks the tie by fit_id desc.
+
+    The selection is deterministic rather than insertion-arbitrary.
+    """
     db_url = f"sqlite+pysqlite:///{(tmp_path / 'lc.db').as_posix()}"
     Base.metadata.create_all(make_engine(db_url))
     factory = make_session_factory(make_engine(db_url))
@@ -209,8 +213,10 @@ def test_last_fit_sql_breaks_created_at_ties_by_fit_id(tmp_path):
 
 
 def test_last_fit_in_memory_is_last_by_insertion_order():
-    """The in-memory store selects the most recently put fit for a session,
-    parity with the SQL store's most-recent selection."""
+    """The in-memory store selects the most recently put fit for a session.
+
+    This is parity with the SQL store's most-recent selection.
+    """
     store = LifecycleStore()
     for fit_id in ("first", "second", "third"):
         record = _fit_record()

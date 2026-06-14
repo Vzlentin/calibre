@@ -1,3 +1,5 @@
+"""Tests for logging, tracing, and metrics observability."""
+
 from __future__ import annotations
 
 import io

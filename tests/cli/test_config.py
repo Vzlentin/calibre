@@ -1,3 +1,5 @@
+"""Tests for CLI YAML config loading and validation."""
+
 from __future__ import annotations
 
 import copy

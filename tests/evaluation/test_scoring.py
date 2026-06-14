@@ -1,3 +1,5 @@
+"""Tests for forecast scoring and metric computation."""
+
 from functools import partial
 
 import numpy as np

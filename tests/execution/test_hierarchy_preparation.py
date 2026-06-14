@@ -1,3 +1,5 @@
+"""Tests for hierarchy preparation ahead of reconciliation."""
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -138,8 +140,11 @@ def test_bottom_up_preparation_builds_bottom_only_tasks_and_lazy_actuals(
 def test_prepare_run_threads_one_shared_hierarchy_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The lazy actuals source consumes the SAME index object run preparation
-    built and exposes (mirrors #147's shared-facts identity assertion)."""
+    """The lazy actuals source consumes the same index object run preparation built.
+
+    This mirrors the shared-facts identity assertion: the index is reused, not
+    rebuilt, between preparation and the actuals source.
+    """
     monkeypatch.setattr(
         "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
         lambda *args, **kwargs: None,
@@ -197,8 +202,10 @@ def test_hierarchy_guard_runs_before_node_history(
 
 
 def test_dense_roster_preflight_accounts_dense_s_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """erm/mint_shrink have no upstream sparse variant: the eager branch keeps
-    the dense node_count x n_bottom x 8 term for them."""
+    """erm/mint_shrink have no upstream sparse variant.
+
+    The eager branch keeps the dense ``node_count x n_bottom x 8`` term for them.
+    """
     captured = {}
 
     def capture(estimate):
@@ -218,8 +225,11 @@ def test_dense_roster_preflight_accounts_dense_s_bytes(monkeypatch: pytest.Monke
 
 
 def _csr_bytes_for_hierarchy() -> int:
-    """Analytic csr estimate for _hierarchy(): nnz*8 data + nnz*4 indices +
-    (n_nodes+1)*4 indptr, with nnz = n_bottom * (2 + n_attr_cols)."""
+    """Analytic CSR byte estimate for ``_hierarchy()``.
+
+    ``nnz*8`` data + ``nnz*4`` indices + ``(n_nodes+1)*4`` indptr, with
+    ``nnz = n_bottom * (2 + n_attr_cols)``.
+    """
     n_bottom, n_attr_cols, n_nodes = 2, 1, 4
     nnz = n_bottom * (2 + n_attr_cols)
     return nnz * 8 + nnz * 4 + (n_nodes + 1) * 4
@@ -235,8 +245,10 @@ def _csr_bytes_for_hierarchy() -> int:
 def test_sparse_roster_preflight_charges_csr_estimate(
     monkeypatch: pytest.MonkeyPatch, config_override
 ) -> None:
-    """Sparse-capable strategies (point wls_struct, fused bottom_up) charge the
-    analytic csr bytes instead of the dense product."""
+    """Sparse-capable strategies charge the analytic CSR bytes, not the dense product.
+
+    This covers point ``wls_struct`` and fused ``bottom_up``.
+    """
     captured = {}
 
     def capture(estimate):
@@ -278,8 +290,11 @@ def test_dense_roster_guard_message_names_dense_only_strategies(
 def test_bottom_up_preflight_never_accounts_summing_matrix_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Native bottom_up takes the bottom_only branch: it never builds the eager
-    expansion estimate, so no summing-matrix term applies."""
+    """Native bottom_up takes the bottom-only branch.
+
+    It never builds the eager expansion estimate, so no summing-matrix term
+    applies.
+    """
 
     def fail_enforce(*args, **kwargs):
         raise AssertionError("bottom_up must not run the eager expansion guard")
@@ -359,9 +374,12 @@ def test_series_partition_limit_counts_hierarchy_expanded_nodes(
 def test_eager_guard_and_partition_limit_consume_shared_expansion_facts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One source of truth: the memory guard receives the estimate computed by
-    run preparation, and the series-partition limit uses that same estimate's
-    forecast_partitions instead of recounting from built tasks."""
+    """The memory guard and partition limit share one estimate.
+
+    The memory guard receives the estimate computed by run preparation, and the
+    series-partition limit uses that same estimate's ``forecast_partitions``
+    instead of recounting from built tasks.
+    """
     from calibre.execution.hierarchy_memory import HierarchicalExpansionEstimate
 
     sentinel = HierarchicalExpansionEstimate(
@@ -403,8 +421,10 @@ def test_eager_guard_and_partition_limit_consume_shared_expansion_facts(
 def test_eager_hierarchy_partition_estimate_matches_materialized_nodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real (non-mocked) eager estimate reproduces the count the old
-    task-based recount produced: materialized node count x horizon x models."""
+    """The real (non-mocked) eager estimate reproduces the old task-based count.
+
+    The count is ``materialized node count x horizon x models``.
+    """
     monkeypatch.setattr(
         "calibre.execution.hierarchy_memory.read_effective_available_memory_bytes",
         lambda: 2**60,
@@ -434,10 +454,12 @@ def test_eager_hierarchy_partition_estimate_matches_materialized_nodes(
 
 
 def test_bottom_up_preparation_runs_end_to_end_through_engine() -> None:
-    """The shipped bottom-only wiring works as a whole: bottom tasks +
-    BottomUpReconciler + HierarchyActualsSource through BackendEngine, with
-    synthesized aggregate forecasts staying coherent with the bottom rows and
-    aggregate actuals resolving to the full member sums."""
+    """The shipped bottom-only wiring works end-to-end.
+
+    Bottom tasks + BottomUpReconciler + HierarchyActualsSource run through
+    BackendEngine, with synthesized aggregate forecasts staying coherent with the
+    bottom rows and aggregate actuals resolving to the full member sums.
+    """
     from calibre.execution.backend import (
         BackendEngine,
         ExecutionOptions,
@@ -501,9 +523,11 @@ def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
 
 
 def test_partition_limit_memo_is_clone_safe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The flat-panel partition memo keys on history content, not id(): two
-    cloned-but-equal histories collapse to one memo entry (#159). The estimate
-    is the same either way; the spy proves the count is computed once."""
+    """The flat-panel partition memo keys on history content, not ``id()``.
+
+    Two cloned-but-equal histories collapse to one memo entry. The estimate is
+    the same either way; the spy proves the count is computed once.
+    """
     from calibre.core.forecast_task import ForecastTask, TaskGroups
     from calibre.execution.hierarchy_preparation import _enforce_conformal_partition_limit
 

@@ -1,3 +1,5 @@
+"""Tests for ordering-policy dispatch."""
+
 from __future__ import annotations
 
 from dataclasses import fields

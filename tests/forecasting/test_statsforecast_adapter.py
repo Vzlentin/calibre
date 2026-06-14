@@ -1,3 +1,5 @@
+"""Tests for the StatsForecast adapter."""
+
 from unittest.mock import MagicMock
 
 import numpy as np

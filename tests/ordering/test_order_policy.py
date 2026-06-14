@@ -1,3 +1,5 @@
+"""Tests for the ordering policies end-to-end."""
+
 from __future__ import annotations
 
 import numpy as np

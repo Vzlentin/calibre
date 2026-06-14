@@ -1,3 +1,5 @@
+"""Tests for the ForecastTask data structure."""
+
 import pandas as pd
 import pytest
 

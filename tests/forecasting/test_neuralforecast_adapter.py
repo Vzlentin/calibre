@@ -1,3 +1,5 @@
+"""Tests for the NeuralForecast adapter."""
+
 from unittest.mock import MagicMock
 
 import numpy as np

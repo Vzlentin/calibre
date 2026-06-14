@@ -1,3 +1,5 @@
+"""Tests for the calibre CLI subcommands."""
+
 from __future__ import annotations
 
 import socket

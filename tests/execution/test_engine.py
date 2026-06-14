@@ -1,3 +1,5 @@
+"""Tests for the BackendEngine pipeline orchestration."""
+
 import pickle
 
 import fsspec
@@ -516,9 +518,11 @@ def test_cumulative_deferral_open_set_invariant_streaming(tmp_path):
 
 
 def test_cumulative_protection_period_exceeding_horizon_raises():
-    """protection_period > horizon means no window can ever complete: the run
-    fails loudly at start instead of silently deferring every in-window row
-    forever (total silent data loss)."""
+    """protection_period > horizon means no window can ever complete.
+
+    The run fails loudly at start instead of silently deferring every in-window
+    row forever (total silent data loss).
+    """
     task, actuals, origins, _config = _cumulative_split_window_setup()
     config = SymmetricIntervalConfig(
         method="mscp",

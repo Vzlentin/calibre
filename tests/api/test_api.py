@@ -1,3 +1,5 @@
+"""Tests for the core FastAPI backtest endpoints."""
+
 from __future__ import annotations
 
 import copy
@@ -92,8 +94,10 @@ def _payload(adapter: str = "unit_api") -> dict:
 
 
 def test_module_app_symbol_is_a_fastapi_instance() -> None:
-    """``calibre.api.main:app`` is the uvicorn + Terraform import target; it must
-    survive the factory cutover as a module-level FastAPI instance."""
+    """``calibre.api.main:app`` is the uvicorn + Terraform import target.
+
+    It must survive the factory cutover as a module-level FastAPI instance.
+    """
     from fastapi import FastAPI
 
     from calibre.api.main import app as module_app

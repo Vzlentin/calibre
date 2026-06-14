@@ -92,10 +92,11 @@ def test_seasonal_warmup_runs_through_observe_pending() -> None:
 
 
 def test_seasonal_warmup_accumulates_calibration_across_origins() -> None:
-    """With two warmup origins, round 2 observes round-1 frames via the
-    dispatcher and the calibrator accumulates scores.
+    """With two warmup origins, round 2 observes round-1 frames and accumulates scores.
 
-    Locks the folded warmup observe path against a silent no-op regression:
+    Round 2 observes round-1 frames via the dispatcher and the calibrator
+    accumulates scores. Locks the folded warmup observe path against a silent
+    no-op regression:
     at warmup_origins=1 the loop runs once with empty pending and never
     reaches observe, so the smoke test alone cannot catch a warmup that
     stopped calibrating.

@@ -346,12 +346,16 @@ class TestBuildTasksOverrides:
 
 
 class TestGlobalDedupContentKey:
-    """The content key (uid-set + config JSON + horizon), not ``id(history)``,
-    drives global dedup. These lock the de-fragilized behaviour."""
+    """The content key, not ``id(history)``, drives global dedup.
+
+    The key is uid-set + config JSON + horizon. These lock the de-fragilized
+    behaviour.
+    """
 
     def test_key_is_stable_across_defensive_copy_of_history(self, sample_sales, global_configs):
-        """``_global_dedup_key`` is keyed on content, not object identity: a
-        defensive ``.copy()`` of the history frame (distinct ``id()``, identical
+        """``_global_dedup_key`` is keyed on content, not object identity.
+
+        A defensive ``.copy()`` of the history frame (distinct ``id()``, identical
         content) yields the same key, so the two tasks dedup. Under the old
         ``id(history)`` key the clone produced a different key and slipped
         through as a duplicate global task.

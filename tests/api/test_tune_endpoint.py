@@ -1,3 +1,5 @@
+"""Tests for the /tune endpoint and study lifecycle."""
+
 from __future__ import annotations
 
 import pandas as pd

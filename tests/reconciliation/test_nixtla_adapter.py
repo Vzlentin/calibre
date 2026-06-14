@@ -1,3 +1,5 @@
+"""Tests for the Nixtla reconciliation adapter."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -115,9 +117,11 @@ def test_s_layout_conversion_round_trips_to_identity_first_order() -> None:
 def test_sparse_roster_factory_constructs_checked_min_trace_sparse(
     monkeypatch: pytest.MonkeyPatch, strategy: str
 ) -> None:
-    """ols/wls_struct are sparse-capable: the factory builds the Calibre-owned
-    checked subclass of ``MinTraceSparse`` (method, num_threads=1), never the
-    dense ``MinTrace``."""
+    """ols/wls_struct are sparse-capable.
+
+    The factory builds the Calibre-owned checked subclass of ``MinTraceSparse``
+    (method, num_threads=1), never the dense ``MinTrace``.
+    """
     captured: list[tuple[str, int]] = []
 
     class _FakeMinTraceSparse(_CountingMethod):
@@ -162,8 +166,10 @@ def test_sparse_roster_factory_constructs_checked_min_trace_sparse(
 def test_residual_factory_splits_dense_and_sparse_min_trace(
     monkeypatch: pytest.MonkeyPatch, strategy: str, expected_constructor: str
 ) -> None:
-    """wls_var has an upstream sparse variant; mint_shrink does not and keeps
-    the dense ``MinTrace`` path unchanged."""
+    """wls_var has an upstream sparse variant; mint_shrink does not.
+
+    mint_shrink keeps the dense ``MinTrace`` path unchanged.
+    """
     captured: list[tuple[str, str, int]] = []
 
     class _FakeMinTrace(_ResidualMethod):
@@ -662,9 +668,12 @@ def test_sparse_cache_key_is_deterministic_across_construction_orders() -> None:
 
 
 def test_starved_bicgstab_solve_raises_convergence_guard() -> None:
-    """KTD-4: hierarchicalforecast silently returns the best-effort iterate and
-    the output is S-coherent by construction, so the Calibre-owned checked
-    method is the only convergence signal — a starved solve must raise."""
+    """A starved solve must raise through the checked method.
+
+    hierarchicalforecast silently returns the best-effort iterate and the output
+    is S-coherent by construction, so the Calibre-owned checked method is the
+    only convergence signal.
+    """
     _require_hierarchy_extra()
     summing = sparse_summing_matrix_from_index(build_hierarchy_index(_four_bottom_hierarchy()))
     base = np.arange(1.0, summing.n_nodes + 1.0, dtype=np.float64)
@@ -677,8 +686,11 @@ def test_starved_bicgstab_solve_raises_convergence_guard() -> None:
 
 
 def test_unstarved_checked_solve_converges_and_matches_closed_form() -> None:
-    """The checked variant changes nothing on a healthy solve: it agrees with
-    the dense closed form S (S' W^-1 S)^-1 S' W^-1 y within solver tolerance."""
+    """The checked variant changes nothing on a healthy solve.
+
+    It agrees with the dense closed form ``S (S' W^-1 S)^-1 S' W^-1 y`` within
+    solver tolerance.
+    """
     _require_hierarchy_extra()
     index = build_hierarchy_index(_four_bottom_hierarchy())
     summing = sparse_summing_matrix_from_index(index)
@@ -693,8 +705,10 @@ def test_unstarved_checked_solve_converges_and_matches_closed_form() -> None:
 
 
 class _PointPredictFailure(_CountingMethod):
-    """A non-residual sparse method whose predict raises like the KTD-4
-    convergence guard does (a bare RuntimeError without cross-section identity)."""
+    """A non-residual sparse method whose predict raises like the convergence guard.
+
+    It raises a bare ``RuntimeError`` without cross-section identity.
+    """
 
     def predict(self, *, S: np.ndarray, y_hat: np.ndarray) -> dict[str, np.ndarray]:
         del S, y_hat
@@ -702,11 +716,14 @@ class _PointPredictFailure(_CountingMethod):
 
 
 def test_nonresidual_convergence_guard_is_wrapped_with_cross_section_identity() -> None:
-    """KTD-4 end-to-end: the inner guard raises a bare RuntimeError, and the
-    non-residual ``reconcile_cross_section`` wrapper must re-raise it enriched
-    with the failing cross-section's strategy/model/origin/h. Drives a full
+    """A bare inner RuntimeError is re-raised enriched, end-to-end.
+
+    The inner guard raises a bare ``RuntimeError``, and the non-residual
+    ``reconcile_cross_section`` wrapper must re-raise it enriched with the
+    failing cross-section's strategy/model/origin/h. Drives a full
     ``NixtlaReconciler('wls_struct')`` through ``__call__`` so the production
-    enrichment wrapper is exercised, not just the inner guard in isolation."""
+    enrichment wrapper is exercised, not just the inner guard in isolation.
+    """
     with pytest.raises(
         RuntimeError,
         match=(

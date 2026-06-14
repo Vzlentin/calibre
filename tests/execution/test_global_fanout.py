@@ -1,3 +1,5 @@
+"""Tests for global (panel) task fan-out in the engine."""
+
 from __future__ import annotations
 
 import pandas as pd

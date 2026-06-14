@@ -1,3 +1,5 @@
+"""Tests for the reconciliation section of the CLI config."""
+
 from __future__ import annotations
 
 import copy

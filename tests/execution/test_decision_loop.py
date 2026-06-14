@@ -316,8 +316,10 @@ class TestObservePending:
         return rt
 
     def test_cumulative_mode_routes_to_cumulative_helper(self) -> None:
-        """mode="cumulative" applies window-completeness: a partial window
-        stays pending and observe is never called."""
+        """mode="cumulative" applies window-completeness.
+
+        A partial window stays pending and observe is never called.
+        """
         frame = _make_frame("A", _ORIGIN, horizon=2)
         # Only h=1 resolved → window incomplete under cumulative semantics.
         lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 3.0)])
@@ -330,8 +332,10 @@ class TestObservePending:
         assert len(remaining[0]) == 2  # whole window retained, not split per-row
 
     def test_perhorizon_mode_routes_with_columns_from_interval_columns(self) -> None:
-        """mode="perhorizon" applies per-row readiness using the bound columns
-        derived from runtime.interval_columns."""
+        """mode="perhorizon" applies per-row readiness.
+
+        Readiness uses the bound columns derived from ``runtime.interval_columns``.
+        """
         lo_col, hi_col = interval_column_names(0.9)
         frame = _make_frame("A", _ORIGIN, horizon=2, lower=[10.0, 11.0], upper=[20.0, 21.0])
         # Only h=1 resolved → that single row is observed; h=2 stays pending.
@@ -347,8 +351,10 @@ class TestObservePending:
         assert len(remaining[0]) == 1  # only the h=2 row stays pending
 
     def test_pending_passed_through_untouched(self, monkeypatch) -> None:
-        """The dispatcher must not re-group/re-sort/pre-process pending before
-        delegating: the helper receives the exact list object and lookup."""
+        """The dispatcher delegates pending without re-grouping or re-sorting.
+
+        The helper receives the exact list object and lookup.
+        """
         frame = _make_frame("A", _ORIGIN, horizon=2)
         pending = [frame]
         lookup = _actuals_lookup([("A", _ORIGIN + pd.Timedelta(weeks=1), 3.0)])
@@ -369,9 +375,9 @@ class TestObservePending:
 
 
 class TestColdStartDeadlock:
-    """#157: a cold unseeded mscp per-horizon runtime must reach its first
-    observation through the dispatcher; pending must not grow unboundedly.
+    """A cold unseeded mscp per-horizon runtime reaches its first observation.
 
+    The dispatcher must deliver it, and pending must not grow unboundedly.
     A fresh mscp runtime emits NaN bounds until its first score. The old
     per-horizon filter required finite bounds, so NaN-bound rows never reached
     observe, the calibrator never scored, and pending grew without bound — a
@@ -439,8 +445,10 @@ class TestColdStartDeadlock:
 
 
 class TestObserveRaisesLoudly:
-    """#158: a structurally malformed window must raise through the dispatcher
-    rather than being silently swallowed (the removed suppress(ValueError))."""
+    """A structurally malformed window raises through the dispatcher.
+
+    It is not silently swallowed (the removed ``suppress(ValueError)``).
+    """
 
     @staticmethod
     def _duplicate_h_window(uid: str, origin: pd.Timestamp, extra_cols: dict) -> pd.DataFrame:

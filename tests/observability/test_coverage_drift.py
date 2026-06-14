@@ -1,3 +1,5 @@
+"""Tests for coverage-drift observability metrics."""
+
 from __future__ import annotations
 
 import pandas as pd
