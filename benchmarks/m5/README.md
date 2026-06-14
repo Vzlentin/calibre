@@ -26,6 +26,14 @@ coverage scoring is a post-run artifact command over a resolved ledger.
   guard. The full config streams ledger output and uses `execution.backend:
   auto`, but streaming only reduces output buffering; it does not avoid the
   input-side node-history materialization needed for hierarchical actuals.
+- `config/full-cumulative.yaml` mirrors `full.yaml` but selects the
+  engine-internal cumulative conformal mode (`conformal.mode: cumulative`,
+  `protection_period: 28`): MSCP emits a single cumulative bound over the 28-day
+  protection window per `(uid, model, origin)` instead of per-horizon intervals.
+  It exists to measure the cumulative apply/observe path at full M5 scale (its
+  per-group loop is an O(batch) constant factor). It is a local at-scale
+  measurement run, not a coverage-acceptance config, and is not part of the
+  `score-m5-coverage` statistical gate.
 
 For full-M5 work with hierarchy-aware reconciliation installed:
 
