@@ -9,9 +9,6 @@ from calibre.cli.config import load_config
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import (
     CONFORMAL_MODE,
-    FORECAST_ORIGIN,
-    MODEL_NAME,
-    UNIQUE_ID,
     H,
     interval_column_names,
 )
@@ -27,14 +24,17 @@ def test_vn2_cumulative_config_selects_engine_internal_cumulative_mode() -> None
 
     assert config.dataset.adapter == "vn2"
     assert config.dataset.path == "data/vn2"
+    assert config.dataset.period == 8
     assert config.conformal is not None
     assert config.conformal.method == "mscp"
     assert config.conformal.mode == "cumulative"
     assert config.conformal.protection_period == 3
     assert config.conformal.coverage == 0.9
+    assert config.conformal.calibration_window == 10
     assert config.conformal.partition == "series"
     assert config.tasks[0].horizon == 3
     assert config.output.ledger_path == "results/vn2/cumulative-ledger.parquet"
+    assert config.execution.backend == "auto"
 
     runtime_config = config.conformal.to_runtime_config()
     # Constructing the runtime config proves the cumulative mscp + protection
@@ -111,10 +111,6 @@ def test_vn2_smoke_cumulative_config_executes_cumulative_path(tmp_path: Path) ->
     for _, row in populated.iterrows():
         assert row[lower_col] <= row[upper_col]
 
-    # Edge: a group whose protection window is incomplete (fewer than
-    # protection_period horizons) yields no bound.
-    grouped = ledger.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False)
-    for _, group in grouped:
-        window = group[group[H] <= protection_period]
-        if len(window) < protection_period:
-            assert group[lower_col].isna().all()
+    # The incomplete-window deferral contract is not reproducible at smoke shape
+    # (horizon == protection_period makes every window complete); it is covered
+    # by the runtime's own unit tests, not asserted here.

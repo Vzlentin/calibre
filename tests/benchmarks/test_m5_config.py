@@ -10,9 +10,6 @@ from calibre.cli.config import load_config
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import (
     CONFORMAL_MODE,
-    FORECAST_ORIGIN,
-    MODEL_NAME,
-    UNIQUE_ID,
     H,
     interval_column_names,
 )
@@ -151,6 +148,7 @@ def test_m5_full_cumulative_config_selects_engine_internal_cumulative_mode() -> 
     assert config.reconciliation.strategy == "bottom_up"
     assert config.tasks[0].horizon == 28
     assert config.output.ledger_path == "results/m5/full-mscp-cumulative/forecast-ledger.parquet"
+    assert config.output.streaming is True
     assert config.execution.backend == "auto"
 
     runtime_config = config.conformal.to_runtime_config()
@@ -210,11 +208,7 @@ def test_m5_smoke_cumulative_config_executes_cumulative_path(tmp_path: Path) -> 
     for _, row in populated.iterrows():
         assert row[lower_col] <= row[upper_col]
 
-    # Edge: a group whose protection window is incomplete (fewer than
-    # protection_period resolved horizons) yields no bound. Every populated
-    # bound therefore sits on a group that has a full window.
-    grouped = ledger.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False)
-    for _, group in grouped:
-        window = group[group[H] <= protection_period]
-        if len(window) < protection_period:
-            assert group[lower_col].isna().all()
+    # The incomplete-window deferral contract (a group with fewer than
+    # protection_period resolved horizons gets no bound) is not reproducible at
+    # smoke shape — horizon == protection_period makes every window complete — so
+    # it is covered by the runtime's own unit tests, not asserted here.
