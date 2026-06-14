@@ -27,7 +27,7 @@ def test_melt_m5_sales_shapes_and_values(fixture_dir: Path) -> None:
     calendar = pd.read_csv(fixture_dir / "calendar.csv")
     history = melt_m5_sales(sales, calendar)
     assert list(history.columns) == [UNIQUE_ID, DS, Y]
-    assert len(history) == 12
+    assert len(history) == 64  # 4 series x 16 fixture days (d_1..d_16)
     assert history[Y].dtype == "float64"
     assert pd.api.types.is_datetime64_any_dtype(history[DS])
 
