@@ -1,0 +1,33 @@
+config_schema: "1.0"
+dataset:
+  adapter: vn2
+  path: data/vn2
+  period: 8
+tasks:
+  - model: global_lgbm_qq_0p59
+    horizon: 3
+    config:
+      backend: mlforecast
+      scope: global
+      model: lightgbm.LGBMRegressor
+conformal:
+  method: mscp
+  # Engine-internal cumulative conformal mode driven through `calibre run`: one
+  # terminal-H bound over the protection window (lead_time 2 + review_period 1 =
+  # 3, the VN2 domain constant) per (uid, model, origin). This config measures
+  # the cumulative apply/observe path at VN2 shape. It is separate from the VN2
+  # HPO order-conformal path and does not touch the winning.yaml baseline.
+  mode: cumulative
+  protection_period: 3
+  coverage: 0.9
+  calibration_window: 10
+  partition: series
+origins:
+  start: 2024-01-01
+  end: 2024-01-01
+  freq: W-MON
+output:
+  ledger_path: results/vn2/cumulative-ledger.parquet
+execution:
+  backend: auto
+  seed: 42
