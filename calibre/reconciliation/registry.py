@@ -1,3 +1,5 @@
+"""Name-to-builder registry resolving reconciliation strategy names to instances."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -38,4 +40,5 @@ def resolve_reconciler(name: str) -> Reconciler:
 
 
 def available_reconcilers() -> list[str]:
+    """List the names of all registered reconciliation strategies, sorted."""
     return sorted(_REGISTRY)

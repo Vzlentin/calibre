@@ -30,6 +30,8 @@ _DEFAULT_METRICS: list[Callable] = [mae, rmse, smape, wape]
 
 @dataclass(frozen=True)
 class PipelineResult:
+    """Outputs of a backtest run: the forecast ledger, scores, sales, and optional order ledger."""
+
     ledger: Ledger
     scores: pd.DataFrame
     sales: pd.DataFrame

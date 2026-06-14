@@ -11,6 +11,7 @@ ArrayLike = float | Iterable[float] | np.ndarray
 
 
 def as_scalar_score(score: ArrayLike) -> float:
+    """Coerce a score to a single float, rejecting non-scalar inputs."""
     arr = np.asarray(score, dtype=float).reshape(-1)
     if arr.size != 1:
         raise ValueError("Expected Score to return a scalar score")
@@ -18,6 +19,18 @@ def as_scalar_score(score: ArrayLike) -> float:
 
 
 def as_1d_array(values: ArrayLike, name: str, length: int | None = None) -> np.ndarray:
+    """Coerce ``values`` to a 1D float array, broadcasting scalars to ``length``.
+
+    Args:
+        values: A scalar or 1D array-like of floats.
+        name: Label used in the raised error messages.
+        length: Required length; a scalar is repeated to fill it, and a 1D
+            input of the wrong length is rejected.
+
+    Raises:
+        ValueError: If ``values`` is not 1D, or its length does not match
+            ``length``.
+    """
     arr = np.asarray(values, dtype=float)
     if arr.ndim == 0:
         if length is None:
@@ -31,6 +44,10 @@ def as_1d_array(values: ArrayLike, name: str, length: int | None = None) -> np.n
 
 
 def validate_bounds(bounds: tuple[float, float] | None) -> tuple[float, float] | None:
+    """Validate and float-cast an ``(lower, upper)`` alpha-bounds pair.
+
+    Returns ``None`` unchanged; raises if ``lower > upper``.
+    """
     if bounds is None:
         return None
     lower, upper = bounds
@@ -44,6 +61,10 @@ def clip_alpha(alpha: float, bounds: tuple[float, float] | None) -> float: ...
 @overload
 def clip_alpha(alpha: np.ndarray, bounds: tuple[float, float] | None) -> np.ndarray: ...
 def clip_alpha(alpha: float | np.ndarray, bounds: tuple[float, float] | None) -> float | np.ndarray:
+    """Clip ``alpha`` into ``bounds``, preserving scalar-vs-array shape.
+
+    With ``bounds=None`` the value passes through unchanged (still float-cast).
+    """
     if bounds is None:
         arr = np.asarray(alpha, dtype=float)
         if arr.ndim == 0:
@@ -57,6 +78,7 @@ def clip_alpha(alpha: float | np.ndarray, bounds: tuple[float, float] | None) ->
 
 
 def validate_quantile_rule(quantile_rule: str) -> Literal["conformal", "higher"]:
+    """Validate that ``quantile_rule`` is ``"conformal"`` or ``"higher"``."""
     if quantile_rule not in {"conformal", "higher"}:
         raise ValueError("quantile_rule must be 'conformal' or 'higher'")
     return cast(Literal["conformal", "higher"], quantile_rule)

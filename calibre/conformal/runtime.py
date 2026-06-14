@@ -1,3 +1,9 @@
+"""Stable, pipeline-facing conformal runtime: apply, observe, and persist.
+
+This is the interface the backend calibration step depends on; the rest of
+:mod:`calibre.conformal` is experimental low-level building blocks.
+"""
+
 from __future__ import annotations
 
 import json
@@ -58,6 +64,8 @@ def to_json_safe_state(state: dict[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class StateRef:
+    """Parsed components of a calibration-state reference string."""
+
     method: str
     mode: str
     issued_count: int
@@ -65,10 +73,12 @@ class StateRef:
 
 
 def state_ref_value(method: str, mode: str, issued_count: int, partition: str) -> str:
+    """Encode a calibration-state reference as ``method:mode:issued_count:partition``."""
     return f"{method}:{mode}:{issued_count}:{partition}"
 
 
 def parse_state_ref(text: str) -> StateRef | None:
+    """Parse a state-reference string, returning ``None`` if it is malformed."""
     parts = text.split(":", 3)
     if len(parts) != 4:
         return None
@@ -80,6 +90,14 @@ def parse_state_ref(text: str) -> StateRef | None:
 
 
 class ConformalRuntime(Protocol):
+    """Pipeline-facing conformal runtime the backend calibration step depends on.
+
+    Defines the apply/observe/persist surface every conformal runtime exposes:
+    :meth:`apply` wraps forecasts in intervals, :meth:`observe` feeds resolved
+    actuals back into calibration, and :meth:`get_resume_state` snapshots state
+    for persistence.
+    """
+
     @property
     def interval_columns(self) -> tuple[str, str]: ...
 
@@ -102,8 +120,9 @@ class PartitionedConformalRuntime(Protocol):
     The backend uses this to persist one row per ``(uid, model)`` partition
     instead of a single blob. Restoration is factory-only — see
     ``SymmetricIntervalRuntime.from_partition_states`` — so this protocol has no
-    in-place state setter by design (avoiding the mutate-existing-instance
-    pattern that FIX #6 called out).
+    in-place state setter by design, avoiding the mutate-existing-instance
+    pattern (a restored instance must be a fresh object, never a mutated live
+    one, so persistence and the running runtime can never alias).
     """
 
     def get_partition_states(self) -> dict[str, dict[str, Any]]: ...
@@ -113,6 +132,12 @@ class PartitionedConformalRuntime(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class SymmetricIntervalConfig:
+    """Validated configuration for a symmetric interval conformal runtime.
+
+    Selects the controller method (``mscp``/``aci``), target coverage,
+    calibration window, partition key, and per-horizon vs. cumulative mode.
+    """
+
     method: ConformalMethod
     coverage: float = 0.9
     calibration_window: int = 100
@@ -189,6 +214,12 @@ def _hashable(value: Hashable) -> Hashable:
 
 
 class SymmetricIntervalRuntime:
+    """Conformal runtime that wraps point forecasts in symmetric intervals.
+
+    Composes a score, calibrator, and controller to apply calibrated radii to
+    a forecast frame, observe resolved actuals, and emit resumable state.
+    """
+
     def __init__(
         self,
         config: SymmetricIntervalConfig,
@@ -513,6 +544,16 @@ class SymmetricIntervalRuntime:
         return observed
 
     def _observe_cumulative(self, observed: pd.DataFrame) -> pd.DataFrame:
+        """Score complete cumulative windows; leave incomplete ones pending.
+
+        A ``(uid, model, origin)`` window is ready only when it holds every
+        horizon up to ``protection_period`` with a non-null actual; the
+        cumulative sum is undefined until then. Sibling of
+        :func:`~calibre.execution.decision_loop.observe_cumulative` and the
+        engine's cumulative-window deferral
+        (:class:`~calibre.execution.backend.BackendEngine`) — keep the three
+        in sync.
+        """
         if self.config.protection_period is None:
             raise ValueError("cumulative mode requires config.protection_period")
         protection_period = int(self.config.protection_period)
@@ -652,6 +693,7 @@ def _components_from_config(
 
 
 def build_symmetric_interval_runtime(config: SymmetricIntervalConfig) -> SymmetricIntervalRuntime:
+    """Build a :class:`SymmetricIntervalRuntime` from a validated config."""
     score, calibrator, controller = _components_from_config(config)
     return SymmetricIntervalRuntime(
         config=config,

@@ -1,3 +1,5 @@
+"""Cost structures and per-policy order-parameter value types and normalizers."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -46,6 +48,8 @@ class CostStruct:
 
 @dataclass(frozen=True, slots=True)
 class RsPolicyParameters:
+    """Per-series parameters for an (R, S) periodic-review order policy."""
+
     unique_id: str
     inventory_position: float
     lead_time: int
@@ -65,6 +69,8 @@ class RsPolicyParameters:
 
 @dataclass(frozen=True, slots=True)
 class RssPolicyParameters:
+    """Per-series parameters for an (R, s, S) reorder-point order policy."""
+
     unique_id: str
     inventory_position: float
     reorder_point: float
@@ -87,6 +93,8 @@ class RssPolicyParameters:
 
 @dataclass(frozen=True, slots=True)
 class NewsvendorPolicyParameters:
+    """Per-series parameters for a single-period newsvendor order policy."""
+
     unique_id: str
     underage_cost: float
     overage_cost: float
@@ -107,6 +115,14 @@ class NewsvendorPolicyParameters:
 def normalize_rs_policy_parameters(
     params: pd.DataFrame | Iterable[RsPolicyParameters],
 ) -> pd.DataFrame:
+    """Validate and dtype-normalize (R, S) policy parameters into a DataFrame.
+
+    Accepts either a DataFrame or an iterable of :class:`RsPolicyParameters`.
+
+    Raises:
+        ValueError: If required columns are missing, a ``unique_id`` is
+            duplicated, or a value violates its non-negativity/minimum bound.
+    """
     if isinstance(params, pd.DataFrame):
         params_frame = params.copy()
     else:
@@ -137,6 +153,14 @@ def normalize_rs_policy_parameters(
 def normalize_rss_policy_parameters(
     params: pd.DataFrame | Iterable[RssPolicyParameters],
 ) -> pd.DataFrame:
+    """Validate and dtype-normalize (R, s, S) policy parameters into a DataFrame.
+
+    Accepts either a DataFrame or an iterable of :class:`RssPolicyParameters`.
+
+    Raises:
+        ValueError: If required columns are missing, a ``unique_id`` is
+            duplicated, or a value violates its non-negativity/minimum bound.
+    """
     if isinstance(params, pd.DataFrame):
         params_frame = params.copy()
     else:
@@ -170,6 +194,15 @@ def normalize_rss_policy_parameters(
 def normalize_newsvendor_policy_parameters(
     params: pd.DataFrame | Iterable[NewsvendorPolicyParameters],
 ) -> pd.DataFrame:
+    """Validate and dtype-normalize newsvendor policy parameters into a DataFrame.
+
+    Accepts either a DataFrame or an iterable of
+    :class:`NewsvendorPolicyParameters`.
+
+    Raises:
+        ValueError: If required columns are missing, a ``unique_id`` is
+            duplicated, or an underage/overage cost is not positive.
+    """
     if isinstance(params, pd.DataFrame):
         params_frame = params.copy()
     else:

@@ -1,4 +1,4 @@
-"""Tuning orchestration for the ``/tune`` route (issue #70).
+"""Tuning orchestration for the ``/tune`` route.
 
 This is route orchestration extracted from [calibre/api/main.py](calibre/api/main.py):
 it consumes a ``TuneRequest``, runs per-series or panel HPO via

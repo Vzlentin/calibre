@@ -1,3 +1,5 @@
+"""Reconciler protocol and the per-origin context threaded into reconciliation."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

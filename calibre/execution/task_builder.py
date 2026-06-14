@@ -82,7 +82,7 @@ def build_node_history(sales: pd.DataFrame, hierarchy_index: HierarchyIndex | No
     aggregate_rows: list[pd.DataFrame] = []
     for col in hierarchy_index.attr_cols:
         # Group on the stringified attribute column so the completeness check
-        # reads the single stringified counting authority (#148): str-colliding
+        # reads the single stringified counting authority: str-colliding
         # values merge into one coherent node instead of silently duplicating.
         col_str = joined[col].astype(str)
         grouped = (

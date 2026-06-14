@@ -1,3 +1,5 @@
+"""Column-name contract and validation for the canonical forecast frame."""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -65,14 +67,17 @@ def _format_coverage_suffix(coverage: float) -> str:
 
 
 def lower_interval_column(coverage: float) -> str:
+    """Lower-bound column name for a coverage level (e.g. 0.9 -> ``lo_0p9``)."""
     return f"lo_{_format_coverage_suffix(coverage)}"
 
 
 def upper_interval_column(coverage: float) -> str:
+    """Upper-bound column name for a coverage level (e.g. 0.9 -> ``hi_0p9``)."""
     return f"hi_{_format_coverage_suffix(coverage)}"
 
 
 def interval_column_names(coverage: float) -> tuple[str, str]:
+    """Return the ``(lower, upper)`` interval column names for a coverage level."""
     return lower_interval_column(coverage), upper_interval_column(coverage)
 
 
@@ -126,6 +131,11 @@ def validate_forecast_frame(df: pd.DataFrame) -> None:
 
 
 def validate_actuals_frame(df: pd.DataFrame) -> None:
+    """Validate an actuals frame (``unique_id``/``ds``/``y`` columns and dtypes).
+
+    Raises ValueError if a required column is missing, ``ds`` is not datetime,
+    ``y`` is not numeric, or any key column holds nulls.
+    """
     missing = {UNIQUE_ID, DS, Y} - set(df.columns)
     if missing:
         raise ValueError(f"Missing required actuals columns: {missing}")

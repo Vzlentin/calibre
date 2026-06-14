@@ -1,3 +1,5 @@
+"""Dataset adapter that loads the VN2 challenge period data into a bundle."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,6 +17,8 @@ SHORTAGE_COST_RATE: float = 1.0
 
 @register_dataset_adapter("vn2")
 class VN2DatasetAdapter(DatasetAdapter):
+    """Load VN2 period sales, master hierarchy, and in-stock censoring into a bundle."""
+
     def name(self) -> str:
         return "vn2"
 

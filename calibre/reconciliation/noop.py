@@ -1,3 +1,5 @@
+"""Identity (pass-through) reconciler — the default ``none`` strategy."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

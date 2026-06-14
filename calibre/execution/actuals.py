@@ -103,7 +103,7 @@ class HierarchyActualsSource:
         self._bottom_ids = set(self._index.bottom_ids)
         # The single stringified counting authority — keys match the stringified
         # attribute values used everywhere aggregate labels are produced, so the
-        # completeness check below groups on the stringified column too (#148).
+        # completeness check below groups on the stringified column too.
         self._members_by_attr = self._index.expected_members()
         # Per-run cache of *complete* (node, ds) -> y sums. Bottom history is
         # fixed at construction, so completeness per (node, ds) is fixed for the
@@ -197,9 +197,11 @@ class HierarchyActualsSource:
         )
 
     def _compute_lookup(self, uids: pd.Series, ds_values: pd.Series) -> pd.Series:
-        """Compute ``(unique_id, ds) -> y`` for the requested rows from bottom
-        history (window scan + attribute merge + completeness-gated group-bys).
-        Returns only complete entries; no caching."""
+        """Compute ``(unique_id, ds) -> y`` for the requested rows from bottom history.
+
+        Runs a window scan, an attribute merge, and completeness-gated group-bys.
+        Returns only complete entries; no caching.
+        """
         requested_ds = set(ds_values.unique())
         window = self._bottom[self._bottom[DS].isin(requested_ds)]
         requested = set(uids.unique())

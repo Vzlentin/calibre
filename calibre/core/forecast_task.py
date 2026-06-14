@@ -1,3 +1,5 @@
+"""Forecast task value types and their URI-backed serialized references."""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -19,6 +21,12 @@ def _read_parquet_cached(uri: str) -> pd.DataFrame:
 
 @dataclass(frozen=True)
 class ForecastTask:
+    """One fit-and-predict unit: history plus the model config and horizon.
+
+    Bundles the input history, the model configuration, and the forecast
+    horizon for a single series (or global config) that an adapter fits.
+    """
+
     history: pd.DataFrame
     horizon: int
     model_config: dict
@@ -88,6 +96,12 @@ class TaskGroups:
 
 @dataclass(frozen=True)
 class ForecastTaskRef:
+    """A lightweight, serializable handle to a :class:`ForecastTask`.
+
+    Stores the task's history (and optional future regressors) as parquet URIs
+    so tasks can cross process boundaries; :meth:`materialize` reloads them.
+    """
+
     unique_id: str
     model_config: dict[str, Any]
     horizon: int

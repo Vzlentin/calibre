@@ -1,3 +1,5 @@
+"""Alpha-adjustment controllers that drive conformal coverage online."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -9,6 +11,8 @@ from calibre.conformal.types import IntervalPrediction
 
 
 class FixedAlphaController:
+    """Controller that holds ``alpha`` constant regardless of observed errors."""
+
     def __init__(self, alpha: float) -> None:
         self._alpha = float(alpha)
         self._observations = 0
@@ -34,6 +38,12 @@ class FixedAlphaController:
 
 
 class AdaptiveAlphaController:
+    """ACI controller that nudges ``alpha`` toward the target coverage.
+
+    Each observed miss/hit shifts the working ``alpha`` by a ``gamma`` step
+    (clipped to ``alpha_bounds``) so realized coverage tracks ``1 - alpha``.
+    """
+
     def __init__(
         self,
         *,

@@ -1,3 +1,10 @@
+"""Backtesting execution engine: fit, reconcile, calibrate, order, ledger.
+
+:class:`BackendEngine` orchestrates the per-origin pipeline (model fit →
+reconciliation → conformal calibration → ordering → ledger), dispatching work
+locally or onto Ray, and is the central entry point for backtest runs.
+"""
+
 from __future__ import annotations
 
 import json
@@ -91,6 +98,8 @@ class BackendResult:
 
 @dataclass(frozen=True)
 class ExecutionOptions:
+    """Backend dispatch settings: frequency, local/Ray backend, and chunking."""
+
     freq: str = "W"
     backend: Literal["local", "ray", "auto"] = "auto"
     ray_address: str | None = None
@@ -126,6 +135,8 @@ class ExecutionOptions:
 
 @dataclass(frozen=True)
 class LedgerOutputOptions:
+    """Output sinks for the forecast and order ledgers (optional, streamed or not)."""
+
     forecast_path: str | None = None
     order_path: str | None = None
     streaming: bool = False
@@ -133,6 +144,8 @@ class LedgerOutputOptions:
 
 @dataclass(frozen=True)
 class ConformalOptions:
+    """Conformal calibration inputs: a runtime or a config, plus persistence state."""
+
     runtime: ConformalRuntime | None = None
     config: SymmetricIntervalConfig | None = None
     run_id: UUID | None = None
@@ -173,6 +186,13 @@ _DEFAULT_HIERARCHICAL_INTERVALS = HierarchicalIntervalEngineOptions()
 
 
 class BackendEngine:
+    """Orchestrate the per-origin backtest pipeline across local or Ray backends.
+
+    Threads the model, conformal, reconciliation, and ordering options through
+    each rolling origin: fit forecasts, reconcile hierarchies, calibrate
+    intervals, place orders, and write the ledger.
+    """
+
     def __init__(
         self,
         *,

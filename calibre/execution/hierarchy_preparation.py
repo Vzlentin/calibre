@@ -59,6 +59,8 @@ class _HierarchicalIntervalConfig(Protocol):
 
 
 class RunPreparationConfig(Protocol):
+    """Structural view of the run config :func:`prepare_run` reads."""
+
     @property
     def tasks(self) -> Sequence[_TaskConfig]: ...
 
@@ -77,6 +79,11 @@ class RunPreparationConfig(Protocol):
 
 @dataclass(frozen=True)
 class RunPreparation:
+    """Resolved engine inputs for one run.
+
+    Carries tasks, actuals, origins, the reconciler, and conformal config.
+    """
+
     tasks: TaskGroups
     actuals: pd.DataFrame | ActualsSource
     origins: list[pd.Timestamp]
@@ -105,7 +112,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         # Native point bottom_up consumes bottom-only forecasts and synthesizes
         # aggregate node rows itself, so the run never materializes the eager
         # node-history frame: tasks come from bottom history and actuals
-        # resolve lazily. The #136 expansion guard targets exactly that
+        # resolve lazily. The expansion guard targets exactly that
         # materialization, so it does not apply here. Ledger partitions still
         # span the full hierarchy node set once aggregates are synthesized.
         assert reconciliation_hierarchy is not None and hierarchy_index is not None

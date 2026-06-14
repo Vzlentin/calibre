@@ -21,6 +21,8 @@ _CGROUP_UNLIMITED_BYTES = 1 << 60
 
 @dataclass(frozen=True, slots=True)
 class HierarchicalExpansionEstimate:
+    """Projected cardinalities for a hierarchical run, used to size the memory preflight."""
+
     bottom_unique_ids: int
     aggregate_nodes: int
     node_count: int
@@ -87,7 +89,7 @@ def estimate_hierarchical_expansion(
     expected_members = hierarchy_index.expected_members()
     for col in hierarchy_index.attr_cols:
         # Group on the stringified attribute column so the projection reads the
-        # single stringified counting authority (#148), matching expansion.
+        # single stringified counting authority, matching expansion.
         col_str = joined[col].astype(str)
         grouped = (
             joined.assign(**{col: col_str})
@@ -122,6 +124,7 @@ def estimate_hierarchical_expansion(
 
 
 def read_linux_available_memory_bytes() -> int | None:
+    """Read ``MemAvailable`` from ``/proc/meminfo`` in bytes, or ``None`` off Linux."""
     try:
         lines = Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -196,6 +199,7 @@ def read_cgroup_available_memory_bytes(
     cgroup_root: Path = Path("/sys/fs/cgroup"),
     self_cgroup: Path = Path("/proc/self/cgroup"),
 ) -> int | None:
+    """Read the tightest cgroup (v1 or v2) ``limit - usage`` headroom in bytes, or ``None``."""
     remaining_values: list[int] = []
     for candidate in _cgroup_candidate_dirs(cgroup_root, self_cgroup):
         for limit_name, usage_name in (
@@ -216,6 +220,7 @@ def effective_available_memory_bytes(
     host_available: int | None,
     cgroup_available: int | None,
 ) -> int | None:
+    """Combine host and cgroup memory estimates into the tighter bound, ignoring ``None``."""
     values = [value for value in (host_available, cgroup_available) if value is not None]
     if not values:
         return None
@@ -223,6 +228,7 @@ def effective_available_memory_bytes(
 
 
 def read_effective_available_memory_bytes() -> int | None:
+    """Detect available memory as the tighter of host ``MemAvailable`` and cgroup headroom."""
     return effective_available_memory_bytes(
         read_linux_available_memory_bytes(),
         read_cgroup_available_memory_bytes(),
@@ -256,6 +262,7 @@ def estimated_node_history_peak_bytes(estimate: HierarchicalExpansionEstimate) -
 
 
 def format_bytes(value: int) -> str:
+    """Format a byte count as a human-readable GiB string."""
     return f"{value / 1024**3:.2f} GiB"
 
 

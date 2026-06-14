@@ -1,8 +1,8 @@
 """Rolling decision-loop orchestrator for Calibre benchmarks.
 
-Encodes the correct ``ConformalRuntime.observe()`` dispatch (lessons.md §40)
-so individual benchmarks don't have to re-implement the pending-forecast
-bookkeeping or the per-horizon vs cumulative split logic.
+Encodes the correct ``ConformalRuntime.observe()`` dispatch so individual
+benchmarks don't have to re-implement the pending-forecast bookkeeping or the
+per-horizon vs cumulative split logic.
 """
 
 from __future__ import annotations
@@ -73,8 +73,8 @@ def observe_per_horizon(
     forecast (``Y_HAT``) — the runtime's own readiness rule
     (``runtime._observe_perhorizon``). Bounds may be NaN: a cold non-ACI
     runtime emits NaN bounds until its first score, and filtering those rows
-    out would deadlock its calibration (#157). The structural interval-column
-    guard lives in ``runtime.observe``, which raises if the columns are absent.
+    out would deadlock its calibration. The structural interval-column guard
+    lives in ``runtime.observe``, which raises if the columns are absent.
     """
     still_pending: list[pd.DataFrame] = []
     for frame in pending:
@@ -98,12 +98,12 @@ def observe_cumulative(
 ) -> list[pd.DataFrame]:
     """Observe complete windows for cumulative-mode conformal; return pending.
 
-    A window is ready when every row in its ``(uid, model, origin)`` group
-    has a non-null actual. Implements the dispatch rule from lessons.md §40
-    for cumulative mode. Window-completeness semantics are siblings of the
-    runtime's ``_observe_cumulative`` (calibre/conformal/runtime.py) and the
-    engine's cumulative-window deferral (calibre/execution/backend.py) —
-    keep the three in sync.
+    A window is ready when every row in its ``(uid, model, origin)`` group has
+    a non-null actual; only then is the cumulative sum well-defined and the
+    window safe to score. Window-completeness semantics are siblings of the
+    runtime's :meth:`~calibre.conformal.runtime.ConformalRuntime._observe_cumulative`
+    and the engine's cumulative-window deferral
+    (:class:`~calibre.execution.backend.BackendEngine`) — keep the three in sync.
     """
     still_pending: list[pd.DataFrame] = []
     for frame in pending:

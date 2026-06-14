@@ -1,3 +1,5 @@
+"""Dataset/inventory/sales ingestion seams and their built-in adapters."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +16,12 @@ from calibre.ordering.simulation.state import ProductState, make_pipeline
 
 @dataclass(frozen=True, slots=True)
 class DatasetBundle:
+    """All inputs a dataset adapter resolves for a run.
+
+    Carries history, future regressors, costs, and optional hierarchy/censoring
+    frames.
+    """
+
     history: pd.DataFrame
     future_x: pd.DataFrame | None
     costs: CostStruct | dict[str, CostStruct]
@@ -22,18 +30,24 @@ class DatasetBundle:
 
 
 class DatasetAdapter(Protocol):
+    """Load a named dataset into a :class:`DatasetBundle`."""
+
     def load(self, path: str | Path, **kwargs) -> DatasetBundle: ...
 
     def name(self) -> str: ...
 
 
 class InventoryAdapter(Protocol):
+    """Supply per-SKU inventory state and lead times to the ordering simulation."""
+
     def load_state(self, unique_id: str, at_origin: pd.Timestamp) -> ProductState: ...
 
     def load_lead_times(self) -> dict[str, int]: ...
 
 
 class SyntheticInventoryAdapter:
+    """In-memory inventory state for tests, keyed by ``unique_id``."""
+
     def __init__(
         self,
         states: dict[str, ProductState],
@@ -59,6 +73,8 @@ class SyntheticInventoryAdapter:
 
 
 class SnapshotInventoryAdapter:
+    """Parquet/fsspec-backed inventory state with optional point-in-time ``as_of`` selection."""
+
     def __init__(self, snapshot_uri: str | Path, *, default_lead_time: int = 0) -> None:
         self.snapshot_uri = str(snapshot_uri)
         self.default_lead_time = int(default_lead_time)
@@ -112,6 +128,8 @@ class SnapshotInventoryAdapter:
 
 
 class ErpInventoryAdapter:
+    """Placeholder ERP inventory seam — client code implements the lookups."""
+
     def load_state(self, unique_id: str, at_origin: pd.Timestamp) -> ProductState:
         raise NotImplementedError("Implement ERP inventory state loading in client code")
 
