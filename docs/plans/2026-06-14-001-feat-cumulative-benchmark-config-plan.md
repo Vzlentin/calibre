@@ -1,7 +1,7 @@
 ---
 title: "feat: Committed cumulative-mode benchmark configs (M5 + VN2)"
 type: feat
-status: active
+status: shipped
 date: 2026-06-14
 origin: "GitHub issue #198 — Add a committed cumulative-mode benchmark config"
 ---
@@ -327,3 +327,18 @@ Per CLAUDE.md ("verify before done", `uv run` prefix):
   `benchmarks/m5/README.md`.
 - Out-of-scope reference (the *other* cumulative path): `calibre/conformal/cumulative_risk.py`,
   `benchmarks/vn2/config.py` (`CUMULATIVE_BEST_CONFIG`), `benchmarks/vn2/run_benchmark.py`.
+
+---
+
+## Outcome — shipped 2026-06-14
+
+- **PR:** https://github.com/Vzlentin/calibre/pull/202 (squash-merged)
+- **Merged SHA:** `fff96519586a45d271c83897c7238aa096f44cd0`
+- **Issue:** #198 closed via `closes #198`.
+- **Delivered:** all four committed configs (M5 `full-cumulative.yaml` + `smoke-cumulative.yaml`; VN2 `cumulative.yaml` + `smoke-cumulative.yaml`), parse + CI-execute tests (`tests/benchmarks/test_m5_config.py`, new `tests/benchmarks/test_vn2_config.py`), and the M5 README entry. The engine-internal cumulative path now executes in CI via both smokes.
+- **Key decisions confirmed at execution time:**
+  - Both committed configs drive the same engine-internal `SymmetricIntervalRuntime._apply_cumulative` via `calibre run --config` (KTD1) — the VN2 HPO `CumulativeRiskRuntime` path was left untouched.
+  - R1 materialized: the shared M5 fixture was extended (3 → 16 days, strictly additive). This rippled to `tests/execution/test_m5_loading.py::test_melt_m5_sales_shapes_and_values` (exact row-count `12 → 64`), caught by CI and fixed — a reminder that extending a shared fixture has cross-suite blast radius.
+  - Smoke configs use `coverage: 0.5` (not 0.9) so the higher-quantile calibrator reaches readiness on the tiny CI fixture; smokes are not coverage gates (KTD3).
+  - VN2 `total_cost=4992.20` baseline untouched; `winning.yaml` unchanged, guarded by a dedicated test.
+- **Review fixes applied (PR #202):** dropped a vacuous incomplete-window edge assertion from both smoke execute tests; tightened parse-test assertion symmetry (VN2 `calibration_window`/`execution.backend`/`period`, M5 `output.streaming`). One review finding (missing `phase`) was a verified false positive.
