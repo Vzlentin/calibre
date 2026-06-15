@@ -339,6 +339,11 @@ def _missing_fitted_keys(
     # the normal case. A vectorized distinct-pair count proves completeness and
     # skips both the full-frame ``itertuples`` set-build and the O(nodes x ds)
     # Python cartesian scan below — the dominant per-origin cost at M5 scale.
+    # Precondition: every ``unique_id`` is a known node label. The sole caller
+    # (:func:`_to_nixtla_fitted_df`) rejects unknown nodes before this call, so an
+    # unknown id cannot pad the count to mask a genuinely missing ``(node, ds)``.
+    # Keep that guard ahead of any future caller, or this count check can
+    # false-complete.
     distinct_pairs = fitted_values.loc[fitted_values[DS].notna(), [UNIQUE_ID, DS]].drop_duplicates()
     if len(distinct_pairs) == len(summing.node_labels) * len(observed_ds):
         return []
