@@ -307,7 +307,7 @@ def _to_nixtla_fitted_df(
         raise ValueError(f"Missing fitted values for model_name={model_name!r}")
     subset = subset.copy()
     subset[UNIQUE_ID] = subset[UNIQUE_ID].astype(str)
-    unknown = set(subset[UNIQUE_ID]) - set(summing.node_labels)
+    unknown = set(subset[UNIQUE_ID].unique()) - set(summing.node_labels)
     if unknown:
         raise ValueError(
             "Fitted-value sidecar contains hierarchy node(s) not present in the "
@@ -335,6 +335,18 @@ def _missing_fitted_keys(
 ) -> list[tuple[str, str, str]]:
     fitted_values[DS] = pd.to_datetime(fitted_values[DS]).astype("datetime64[ns]")
     observed_ds = sorted(fitted_values[DS].dropna().unique())
+    # Fast path: complete coverage (every node present for every observed ds) is
+    # the normal case. A vectorized distinct-pair count proves completeness and
+    # skips both the full-frame ``itertuples`` set-build and the O(nodes x ds)
+    # Python cartesian scan below — the dominant per-origin cost at M5 scale.
+    # Precondition: every ``unique_id`` is a known node label. The sole caller
+    # (:func:`_to_nixtla_fitted_df`) rejects unknown nodes before this call, so an
+    # unknown id cannot pad the count to mask a genuinely missing ``(node, ds)``.
+    # Keep that guard ahead of any future caller, or this count check can
+    # false-complete.
+    distinct_pairs = fitted_values.loc[fitted_values[DS].notna(), [UNIQUE_ID, DS]].drop_duplicates()
+    if len(distinct_pairs) == len(summing.node_labels) * len(observed_ds):
+        return []
     observed = {
         (str(row.unique_id), pd.Timestamp(str(row.ds)))
         for row in fitted_values[[UNIQUE_ID, DS]].itertuples(index=False)
