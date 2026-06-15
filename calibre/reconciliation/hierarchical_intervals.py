@@ -339,9 +339,7 @@ def _missing_fitted_keys(
     # the normal case. A vectorized distinct-pair count proves completeness and
     # skips both the full-frame ``itertuples`` set-build and the O(nodes x ds)
     # Python cartesian scan below — the dominant per-origin cost at M5 scale.
-    distinct_pairs = fitted_values.loc[
-        fitted_values[DS].notna(), [UNIQUE_ID, DS]
-    ].drop_duplicates()
+    distinct_pairs = fitted_values.loc[fitted_values[DS].notna(), [UNIQUE_ID, DS]].drop_duplicates()
     if len(distinct_pairs) == len(summing.node_labels) * len(observed_ds):
         return []
     observed = {
