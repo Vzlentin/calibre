@@ -34,11 +34,14 @@ from calibre.evaluation.forecast_metrics import compute_metrics, resolve_actuals
 from calibre.evaluation.point_metrics import mae
 from calibre.execution.backend import (
     BackendEngine,
+    BackendResult,
     ConformalOptions,
     ExecutionOptions,
     HierarchicalIntervalEngineOptions,
+    LedgerOutputOptions,
     ReconciliationOptions,
 )
+from calibre.execution.ledger import resolved_ledger_uri
 from calibre.execution.task_builder import build_node_history, build_tasks
 from calibre.forecasting.adapter_base import ModelAdapter, build_fitted_values_frame
 from calibre.ordering.policy_config import RsConfig
@@ -141,9 +144,33 @@ def _run_m5_hierarchical_intervals(
     origins,
     *,
     strategy: str = "bottom_up",
-) -> pd.DataFrame:
+    backend: str = "local",
+    max_concurrency: int | None = None,
+    cpu_per_task: float | None = None,
+    output_path: Path | None = None,
+) -> BackendResult:
+    """Run the fused hierarchical-interval phase and return the ``BackendResult``.
+
+    ``backend``/``max_concurrency``/``cpu_per_task`` drive serial-vs-parallel
+    dispatch; ``output_path`` enables the streaming sink so a finalized
+    ``.resolved.parquet`` artifact is produced. Returns the ``BackendResult`` so
+    tests reach ``.ledger.to_df()`` explicitly.
+    """
+    output = (
+        LedgerOutputOptions(forecast_path=str(output_path), streaming=True)
+        if output_path is not None
+        else LedgerOutputOptions()
+    )
     engine = BackendEngine(
-        execution=ExecutionOptions(freq="D", backend="local", seed=42),
+        execution=ExecutionOptions(
+            freq="D",
+            backend=backend,
+            seed=42,
+            max_concurrency=max_concurrency,
+            cpu_per_task=cpu_per_task,
+            ray_threshold=1,
+        ),
+        output=output,
         reconciliation=ReconciliationOptions(
             reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
         ),
@@ -158,10 +185,9 @@ def _run_m5_hierarchical_intervals(
         ),
     )
     try:
-        result = engine.execute(tasks, actuals, origins)
+        return engine.execute(tasks, actuals, origins)
     finally:
         engine.close()
-    return result.ledger.to_df()
 
 
 def _assert_node_rows_coherent(frame: pd.DataFrame, hierarchy: pd.DataFrame) -> None:
@@ -612,7 +638,7 @@ def test_m5_hierarchical_conformal_intervals_emit_node_bounds_and_metrics(
     origins = [pd.Timestamp("2011-03-15"), pd.Timestamp("2011-03-16")]
     lower_col, upper_col = interval_column_names(0.9)
 
-    ledger = _run_m5_hierarchical_intervals(bundle, node_history, tasks, origins)
+    ledger = _run_m5_hierarchical_intervals(bundle, node_history, tasks, origins).ledger.to_df()
 
     assert {lower_col, upper_col}.issubset(ledger.columns)
     summing = build_summing_matrix(bundle.hierarchy)
@@ -675,6 +701,509 @@ def test_hierarchical_interval_ordering_uses_bottom_rows_only(
         engine.close()
 
     assert seen["uids"] == list(build_summing_matrix(bundle.hierarchy).bottom_ids)
+
+
+# ---------------------------------------------------------------------------
+# Fused hierarchical-interval parallelization byte-identity gate (#219).
+#
+# The parallel path (Ray bounded sliding window over origins) MUST produce
+# byte-for-byte identical ledger output to the serial path. The serial baseline
+# is pinned to ``backend="ray", max_concurrency=1`` (window-of-1), NOT
+# ``backend="local"`` — so the no-resort ``check_exact=True`` gate isolates the
+# interval-dispatch window as the only variable and does not inherit a latent
+# local-vs-ray Predict concat-order delta. The gate is parametrized over
+# ``{bottom_up, wls_struct}``: ``wls_struct`` is dense BLAS, whose reductions are
+# thread-count sensitive, so it exercises the serial-vs-worker thread-symmetry
+# vector that ``bottom_up`` (sparse-sum, thread-invariant) would mask.
+# ---------------------------------------------------------------------------
+
+_FUSED_BYTE_STRATEGIES = ["bottom_up", "wls_struct"]
+# Three consecutive origins at horizon 2 give a multi-origin due-window overlap:
+# each origin's h=2 row becomes due one origin later, so ``_resolve_due``
+# carry-forward (not just append order) is exercised across the window.
+_FUSED_ORIGINS = [
+    pd.Timestamp("2011-03-15"),
+    pd.Timestamp("2011-03-16"),
+    pd.Timestamp("2011-03-17"),
+]
+
+
+def _ca_subset_hierarchy(hierarchy: pd.DataFrame) -> pd.DataFrame:
+    """CA-only bottom rows — a smaller real-attribute hierarchy for the byte gate."""
+    subset = hierarchy[hierarchy["state_id"] == "CA"].reset_index(drop=True)
+    assert not subset.empty
+    return subset
+
+
+class _FusedBundle:
+    """Minimal bundle stand-in exposing the ``.hierarchy`` the helper reads."""
+
+    def __init__(self, hierarchy: pd.DataFrame) -> None:
+        self.hierarchy = hierarchy
+
+
+def _fused_residual_fixture():
+    """CA-subset hierarchy + real-adapter tasks for the fused byte gate.
+
+    The real statsforecast SeasonalNaive (no monkeypatched stub) is used so the
+    Predict phase computes byte-identically on both the driver (``backend=local``)
+    and a Ray worker — a driver-only ``resolve_adapter`` monkeypatch is invisible
+    to the worker process and would make local and ray diverge. SeasonalNaive
+    supplies the in-sample fitted values the fused phase requires natively.
+    """
+    full_hierarchy = _m5_hierarchy_frame()
+    hierarchy = _ca_subset_hierarchy(full_hierarchy)
+    bundle = _FusedBundle(hierarchy)
+    node_history = _synthetic_m5_node_history(hierarchy)
+    tasks = _synthetic_residual_tasks(node_history, horizon=2)
+    return bundle, node_history, tasks
+
+
+def _ledger_sha256(frame: pd.DataFrame) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        pd.util.hash_pandas_object(frame, index=True).values.tobytes()
+    ).hexdigest()
+
+
+def _run_m5_hierarchical_intervals_resumed(
+    bundle,
+    actuals,
+    tasks,
+    initial_ledger: pd.DataFrame,
+    *,
+    strategy: str,
+    max_concurrency: int,
+) -> pd.DataFrame:
+    """Resume a fused run from ``initial_ledger`` over the full origin set."""
+    engine = BackendEngine(
+        execution=ExecutionOptions(
+            freq="D",
+            backend="ray",
+            seed=42,
+            ray_threshold=1,
+            max_concurrency=max_concurrency,
+            cpu_per_task=1.0,
+        ),
+        reconciliation=ReconciliationOptions(
+            reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
+        hierarchical_intervals=HierarchicalIntervalEngineOptions(
+            phase=NixtlaHierarchicalIntervalPhase(
+                HierarchicalIntervalOptions(
+                    method="nixtla_conformal", coverage=0.9, strategy=strategy
+                )
+            )
+        ),
+        conformal=ConformalOptions(initial_ledger=initial_ledger),
+    )
+    try:
+        return engine.execute(tasks, actuals, _FUSED_ORIGINS).ledger.to_df()
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("strategy", _FUSED_BYTE_STRATEGIES)
+def test_fused_parallel_ledger_byte_identical_to_serial(strategy: str) -> None:
+    """T1: N=2 parallel ledger is byte-identical to the window-of-1 serial baseline."""
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    serial = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy=strategy,
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+    parallel = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy=strategy,
+        backend="ray",
+        max_concurrency=2,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    pd.testing.assert_frame_equal(serial, parallel, check_exact=True)
+    assert _ledger_sha256(serial) == _ledger_sha256(parallel)
+    lower_col, upper_col = interval_column_names(0.9)
+    np.testing.assert_array_equal(
+        serial[[lower_col, upper_col]].to_numpy(), parallel[[lower_col, upper_col]].to_numpy()
+    )
+
+
+def test_fused_local_vs_ray_sorted_sanity() -> None:
+    """T1b: local-vs-(ray window-of-1) equality up to a sort (separate concern)."""
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+    keys = [UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME, H]
+
+    local = _run_m5_hierarchical_intervals(
+        bundle, node_history, tasks, _FUSED_ORIGINS, strategy="wls_struct", backend="local"
+    ).ledger.to_df()
+    ray_serial = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    pd.testing.assert_frame_equal(
+        local.sort_values(keys).reset_index(drop=True),
+        ray_serial.sort_values(keys).reset_index(drop=True),
+    )
+
+
+@pytest.mark.parametrize("strategy", _FUSED_BYTE_STRATEGIES)
+def test_fused_parallel_resolved_parquet_byte_identical(strategy: str, tmp_path: Path) -> None:
+    """T2: finalized streamed ``.resolved.parquet`` is byte-identical serial-vs-parallel."""
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+    serial_path = tmp_path / "serial.parquet"
+    parallel_path = tmp_path / "parallel.parquet"
+
+    _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy=strategy,
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=1.0,
+        output_path=serial_path,
+    )
+    _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy=strategy,
+        backend="ray",
+        max_concurrency=2,
+        cpu_per_task=1.0,
+        output_path=parallel_path,
+    )
+
+    serial_resolved = resolved_ledger_uri(serial_path)
+    parallel_resolved = resolved_ledger_uri(parallel_path)
+    assert Path(serial_resolved).read_bytes() == Path(parallel_resolved).read_bytes()
+
+
+def test_fused_parallel_vs_parallel_determinism() -> None:
+    """T3: two independent N=2 wls_struct runs are byte-identical (dense BLAS)."""
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    first = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=2,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+    second = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=2,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    pd.testing.assert_frame_equal(first, second, check_exact=True)
+    assert _ledger_sha256(first) == _ledger_sha256(second)
+
+
+def test_fused_window_commits_in_origin_order_under_out_of_order_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T4: consumer commits head-first even when workers finish out of order.
+
+    Stub ``_dispatch_origin_intervals`` to return refs whose ``ray.get`` would
+    "complete" in reverse order; the consumer must still append origins in
+    origins-list order, and origin t+1's due frame must contain exactly origin
+    t's appended-then-due rows (carry-forward), not just final-frame order.
+    """
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    serial = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="bottom_up",
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    committed_origins: list[pd.Timestamp] = []
+    real_finish = BackendEngine._finish_origin
+
+    def _spy_finish(self, ledger, order_ledger, actuals, origin, origin_preds, runtime):
+        committed_origins.append(pd.Timestamp(origin))
+        return real_finish(self, ledger, order_ledger, actuals, origin, origin_preds, runtime)
+
+    monkeypatch.setattr(BackendEngine, "_finish_origin", _spy_finish)
+    parallel = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="bottom_up",
+        backend="ray",
+        max_concurrency=3,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    # Commits fire strictly in origins-list order regardless of worker completion.
+    assert committed_origins == _FUSED_ORIGINS
+    # And carry-forward state is identical to the serial path.
+    pd.testing.assert_frame_equal(serial, parallel, check_exact=True)
+
+
+def test_fused_resume_happy_path_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T5: resumed origins are never dispatched; resumed parallel == resumed serial."""
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    # Build the initial ledger covering the first two origins (the "done" prefix).
+    prefix = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS[:2],
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    dispatched: list[pd.Timestamp] = []
+    real_dispatch = BackendEngine._dispatch_origin_intervals
+
+    def _spy_dispatch(self, origin_preds, context):
+        # Record the origin via the predictions' forecast_origin column.
+        dispatched.append(pd.Timestamp(origin_preds[FORECAST_ORIGIN].iloc[0]))
+        return real_dispatch(self, origin_preds, context)
+
+    def _run_resumed(backend_kwargs: dict) -> pd.DataFrame:
+        engine = BackendEngine(
+            execution=ExecutionOptions(
+                freq="D", backend="ray", seed=42, ray_threshold=1, **backend_kwargs
+            ),
+            reconciliation=ReconciliationOptions(
+                reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+            ),
+            hierarchical_intervals=HierarchicalIntervalEngineOptions(
+                phase=NixtlaHierarchicalIntervalPhase(
+                    HierarchicalIntervalOptions(
+                        method="nixtla_conformal", coverage=0.9, strategy="wls_struct"
+                    )
+                )
+            ),
+            conformal=ConformalOptions(initial_ledger=prefix),
+        )
+        try:
+            return engine.execute(tasks, node_history, _FUSED_ORIGINS).ledger.to_df()
+        finally:
+            engine.close()
+
+    resumed_serial = _run_resumed({"max_concurrency": 1, "cpu_per_task": 1.0})
+    monkeypatch.setattr(BackendEngine, "_dispatch_origin_intervals", _spy_dispatch)
+    resumed_parallel = _run_resumed({"max_concurrency": 2, "cpu_per_task": 1.0})
+
+    # Completed origins (the first two) are never dispatched — only the third.
+    assert _FUSED_ORIGINS[0] not in dispatched
+    assert _FUSED_ORIGINS[1] not in dispatched
+    assert _FUSED_ORIGINS[2] in dispatched
+    pd.testing.assert_frame_equal(resumed_serial, resumed_parallel, check_exact=True)
+
+
+def test_fused_max_concurrency_one_collapses_to_serial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T6: ``max_concurrency=1`` fused-ray run takes the serial path (window-of-1)."""
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    # The window-of-1 collapse: _fused_parallel_window returns None at N==1, so the
+    # serial generator drives the loop (no interval task is ever dispatched).
+    dispatched = 0
+    real_dispatch = BackendEngine._dispatch_origin_intervals
+
+    def _counting_dispatch(self, origin_preds, context):
+        nonlocal dispatched
+        dispatched += 1
+        return real_dispatch(self, origin_preds, context)
+
+    monkeypatch.setattr(BackendEngine, "_dispatch_origin_intervals", _counting_dispatch)
+    serial_local = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    assert dispatched == 0  # N==1 path never dispatches an interval task
+    assert not serial_local.empty
+
+
+def test_fused_producer_failure_resumes_byte_identically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T7: a worker failing on origin i commits 0..i-1, re-raises named, resumes clean."""
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+    fail_origin = _FUSED_ORIGINS[1]
+
+    # Fail the SECOND origin's interval task. Origin 0 must commit first; origin 1's
+    # ray.get raises, surfaced named-by-origin via the HierarchicalIntervals _phase.
+    real_dispatch = BackendEngine._dispatch_origin_intervals
+
+    def _maybe_failing_dispatch(self, origin_preds, context):
+        origin = pd.Timestamp(origin_preds[FORECAST_ORIGIN].iloc[0])
+        if origin == fail_origin:
+            import ray
+
+            @ray.remote
+            def _boom() -> pd.DataFrame:
+                raise RuntimeError("injected interval failure")
+
+            return _boom.remote()
+        return real_dispatch(self, origin_preds, context)
+
+    monkeypatch.setattr(BackendEngine, "_dispatch_origin_intervals", _maybe_failing_dispatch)
+
+    engine = BackendEngine(
+        execution=ExecutionOptions(
+            freq="D", backend="ray", seed=42, ray_threshold=1, max_concurrency=3, cpu_per_task=1.0
+        ),
+        reconciliation=ReconciliationOptions(
+            reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
+        hierarchical_intervals=HierarchicalIntervalEngineOptions(
+            phase=NixtlaHierarchicalIntervalPhase(
+                HierarchicalIntervalOptions(
+                    method="nixtla_conformal", coverage=0.9, strategy="wls_struct"
+                )
+            )
+        ),
+    )
+    last_ledger: pd.DataFrame | None = None
+    try:
+        with pytest.raises(RuntimeError, match=r"HierarchicalIntervals phase failed at origin"):
+            for result in engine.iter_origins(tasks, node_history, _FUSED_ORIGINS):
+                # Each yield carries the cumulative ledger; the last one before the
+                # raise is origin 0's committed state.
+                last_ledger = result.ledger.to_df()
+    finally:
+        engine.close()
+
+    assert last_ledger is not None
+    committed = {pd.Timestamp(o) for o in last_ledger[FORECAST_ORIGIN].unique()}
+    # Origin 0 committed; the failing origin and beyond never reached the ledger.
+    assert _FUSED_ORIGINS[0] in committed
+    assert fail_origin not in committed
+    assert _FUSED_ORIGINS[2] not in committed
+
+    # A resumed run (with origin 0 done) completes byte-identically to a clean run.
+    # Undo the failing-dispatch patch so the resume uses the real worker path.
+    monkeypatch.undo()
+    resumed = _run_m5_hierarchical_intervals_resumed(
+        bundle, node_history, tasks, last_ledger, strategy="wls_struct", max_concurrency=2
+    )
+    clean = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+    keys = [UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME, H]
+    pd.testing.assert_frame_equal(
+        resumed.sort_values(keys).reset_index(drop=True),
+        clean.sort_values(keys).reset_index(drop=True),
+    )
+
+
+def test_fused_cache_and_ref_rebuild_after_owned_runtime_shutdown() -> None:
+    """T8: a fresh runtime re-``ray.put``s the index and rebuilds the remote handle."""
+    ray = pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    if ray.is_initialized():
+        ray.shutdown()
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    results: list[pd.DataFrame] = []
+    for _ in range(2):
+        engine = BackendEngine(
+            execution=ExecutionOptions(
+                freq="D",
+                backend="ray",
+                seed=42,
+                ray_threshold=1,
+                max_concurrency=2,
+                cpu_per_task=1.0,
+            ),
+            reconciliation=ReconciliationOptions(
+                reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+            ),
+            hierarchical_intervals=HierarchicalIntervalEngineOptions(
+                phase=NixtlaHierarchicalIntervalPhase(
+                    HierarchicalIntervalOptions(
+                        method="nixtla_conformal", coverage=0.9, strategy="wls_struct"
+                    )
+                )
+            ),
+        )
+        try:
+            result = engine.execute(tasks, node_history, _FUSED_ORIGINS)
+            # The owned runtime cached a fresh index ref this acquisition.
+            assert engine._hierarchy_index_ref is not None  # noqa: SLF001
+            results.append(result.ledger.to_df())
+        finally:
+            engine.close()
+            # Shutdown nulls the cached ref/handle so the next run rebuilds them.
+            assert engine._hierarchy_index_ref is None  # noqa: SLF001
+            assert engine._remote_compute_origin_intervals is None  # noqa: SLF001
+        if ray.is_initialized():
+            ray.shutdown()
+
+    pd.testing.assert_frame_equal(results[0], results[1], check_exact=True)
 
 
 def test_reconcile_byte_identical_when_hierarchy_none() -> None:
