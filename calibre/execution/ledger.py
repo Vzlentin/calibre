@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 from urllib.parse import quote
 
 import fsspec
@@ -134,6 +134,12 @@ def _resolved_updates_uri(path: str | Path) -> str:
 
 
 _FORECAST_KEY_COLUMNS = [UNIQUE_ID, DS, FORECAST_ORIGIN, MODEL_NAME, H]
+
+# Private monotonic append-order stamp on each ds-bucket frame. It reconstructs
+# the single-``pd.concat`` append order once pending rows are fragmented across
+# per-``ds`` buckets, and is dropped before any frame leaves the store — it never
+# reaches the stream sink, the updates side-file, or the conformal observe path.
+_APPEND_SEQ = "_append_seq"
 
 # The Arrow membership join hard-raises on any key-dtype divergence (string vs
 # large_string, ns vs us timestamps, int vs float, null-typed key columns), so
@@ -429,71 +435,169 @@ class StreamingLedger:
             with contextlib.suppress(FileNotFoundError):
                 fs.rm(fs_path)
         self._sink = _make_sink(self._stream_path, partition_cols)
-        self._pending: pd.DataFrame | None = None
+        # Pending rows bucketed by ``ds`` (each bucket a key-indexed frame
+        # carrying the private ``_APPEND_SEQ`` column). Due-ness is ``ds <=
+        # origin``, so a per-origin resolve touches only the due buckets — never
+        # the future-dated ones. The store is empty iff this dict is empty.
+        self._buckets: dict[pd.Timestamp, pd.DataFrame] = {}
+        self._seq: int = 0  # monotonic append-seq counter
         self._resolved_update_sink: LedgerSink | None = None
 
     def append(self, df: pd.DataFrame) -> None:
         validate_forecast_frame(df)
+        # Stream the full RAW batch first — the seq is stamped only on the
+        # bucketed copy below, so the sink (and thus the stream parquet) never
+        # sees ``_APPEND_SEQ``.
         self._sink.append(df)
         pending = df[df[Y].isna()].copy()
         if pending.empty:
             return
-        pending.index = _key_index(pending)
-        if self._pending is None:
-            self._pending = pending
-            return
-        # Probe the 26M-row open set against the small new batch (cheap hash of
-        # the new keys) — isin(self._pending.index) would rebuild an O(pending)
-        # hash table on every append.
-        dup_mask = self._pending.index.isin(pending.index)
-        if dup_mask.any():
-            duplicates = self._pending.index[dup_mask]
-            raise ValueError(f"duplicate forecast keys appended to ledger: {list(duplicates)[:10]}")
-        self._pending = pd.concat([self._pending, pending])
+        # Stamp the append-seq while ``ds`` is still a plain column and before the
+        # key index is set. Positional assignment preserves the row order
+        # ``df[df[Y].isna()]`` produced, which equals the single-``pd.concat``
+        # order the old store materialised.
+        pending[_APPEND_SEQ] = range(self._seq, self._seq + len(pending))
+        self._seq += len(pending)
+        # Split by ``ds`` on the COLUMN-indexed frame (``ds`` is still a plain
+        # column here). Setting the key index first would make ``ds`` both an
+        # index level and a column, and ``groupby(DS)`` would then raise the
+        # "both an index level and a column label" ambiguity. Split first,
+        # key-index each group second.
+        # dropna=False keeps a NaT-ds group as its own bucket. The old single
+        # frame retained NaT-ds rows in the open set (their ``ds <= origin`` was
+        # simply always False); dropping the NaT group here would silently lose
+        # them from the open set while still streaming them to the raw sink.
+        for ds_raw, group in pending.groupby(DS, sort=False, dropna=False):
+            # The DS column is datetime64[ns], so each group key is a Timestamp
+            # (or NaT); cast narrows the broad groupby-key type without a runtime
+            # coercion. A NaT key is dict-hashable and never satisfies
+            # ``ds <= origin``, so its bucket is reachable but never due.
+            ds_value = cast(pd.Timestamp, ds_raw)
+            sub = group.copy()
+            sub.index = _key_index(sub)
+            existing = self._buckets.get(ds_value)
+            if existing is None:
+                self._buckets[ds_value] = sub
+                continue
+            # Duplicate keys share the full 5-tuple ⇒ share ``ds`` ⇒ land in this
+            # bucket, so the duplicate probe is per-bucket. Hash the small new
+            # batch against the existing bucket index.
+            dup_mask = existing.index.isin(sub.index)
+            if dup_mask.any():
+                duplicates = existing.index[dup_mask]
+                raise ValueError(
+                    f"duplicate forecast keys appended to ledger: {list(duplicates)[:10]}"
+                )
+            self._buckets[ds_value] = pd.concat([existing, sub])
+
+    def _gather_ordered(self, ds_keys: list[pd.Timestamp]) -> pd.DataFrame:
+        """Concat the named buckets, restore append order, and drop the seq.
+
+        Shared by :meth:`due_frame` (due subset) and :meth:`to_df` branch 3 (all
+        buckets) so the re-sort logic cannot drift between them. The stable sort
+        on the strictly-increasing ``_APPEND_SEQ`` reproduces the single-concat
+        append order exactly; the seq column is dropped so it never leaves the
+        store, and the index is reset to a clean ``RangeIndex``.
+        """
+        gathered = pd.concat([self._buckets[ds] for ds in ds_keys])
+        gathered = gathered.sort_values(_APPEND_SEQ, kind="stable")
+        return gathered.drop(columns=[_APPEND_SEQ]).reset_index(drop=True)
 
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
-        if self._pending is None:
+        if not self._buckets:
             return pd.DataFrame(columns=REQUIRED_COLUMNS)
         # Pending rows all have y NaN by construction, so due = ds <= origin.
-        due = self._pending.loc[self._pending[DS] <= origin]
-        return due.reset_index(drop=True)
+        # Iterate the bucket KEYS only (O(#buckets)); future-dated buckets are
+        # never read or copied.
+        due_keys = [ds for ds in self._buckets if ds <= origin]
+        if not due_keys:
+            # Populated store, nothing due: preserve the FULL appended column set
+            # (interval/quantile columns beyond REQUIRED_COLUMNS), matching the
+            # old ``self._pending.loc[mask]`` empty slice — NOT a
+            # REQUIRED_COLUMNS-only frame. The old store was a single concat, so
+            # the empty slice carried the UNION of columns across every append;
+            # buckets may carry differing column sets (some appends added
+            # interval columns, others did not), so take the ordered union across
+            # all buckets, not one arbitrary bucket's columns.
+            return pd.DataFrame(columns=self._appended_columns())
+        return self._gather_ordered(due_keys)
+
+    def _appended_columns(self) -> list[str]:
+        """The ordered union of bucket columns (minus ``_APPEND_SEQ``).
+
+        Recovers the column set the old single-frame store exposed on its empty
+        slice. Through :meth:`append` the raw stream sink is schema-locked to the
+        first batch, so every bucket shares one schema and this union is exact;
+        differing-column buckets arise only in the direct-``_buckets`` test, where
+        the order is first-seen across buckets in insertion order.
+        """
+        columns: list[str] = []
+        for bucket in self._buckets.values():
+            for col in bucket.columns:
+                if col != _APPEND_SEQ and col not in columns:
+                    columns.append(col)
+        return columns
 
     def apply_resolutions(self, df: pd.DataFrame) -> None:
         if df.empty:
             return
-        keys = _key_index(df)
-        if self._pending is None:
+        if not self._buckets:
+            # "pending append" is deliberately distinct from InMemoryLedger's
+            # "before any append" — per-implementation guards; do not normalise
+            # the two into one shared message.
             raise ValueError("apply_resolutions called before any pending append")
-        # Same probe-direction rule as append: hash the small key batch, scan
-        # the open set once. The open-set index is unique, so a matched-count
-        # equality proves every input key is known.
-        known_mask = self._pending.index.isin(keys)
-        if int(known_mask.sum()) != len(keys):
-            known = self._pending.index[known_mask]
-            unknown = keys[~keys.isin(known)]
-            raise ValueError(
-                f"apply_resolutions for keys not in the open set: {list(unknown)[:10]}"
-            )
+        # Known-key validation, bucket by bucket: probe only the buckets the
+        # resolution ``df`` names (O(resolved buckets), never the open set). A
+        # ``ds`` absent from ``self._buckets`` contributes zero matches, so its
+        # keys count as unknown. Open-set keys are globally unique, so the summed
+        # matched count equalling ``len(keys)`` proves every input key is known.
+        matched = 0
+        for ds_raw, group in df.groupby(DS, sort=False, dropna=False):
+            bucket = self._buckets.get(cast(pd.Timestamp, ds_raw))
+            if bucket is None:
+                continue
+            matched += int(bucket.index.isin(_key_index(group)).sum())
+        # ``len(_key_index(df)) == len(df)`` (one key tuple per row), so the
+        # success path needs only the count; build the full key index lazily in
+        # the error branch where it is actually scanned.
+        if matched != len(df):
+            unknown = [key for key in _key_index(df) if not self._key_known(key)]
+            raise ValueError(f"apply_resolutions for keys not in the open set: {unknown[:10]}")
         resolved = df[df[Y].notna()].copy()
         if not resolved.empty:
             self._append_resolved_updates(resolved)
             # Keyed upsert: resolved rows leave the open set; still-pending due
-            # rows (y still NaN, e.g. incomplete aggregates) stay, and rows that
-            # were never in the due frame are untouched (not a wholesale replace).
-            resolved_keys = _key_index(resolved)
-            # isin keeps this O(pending) hash-probe instead of drop()'s
-            # super-linear MultiIndex path — the open set is ~26M rows at M5.
-            self._pending = self._pending[~self._pending.index.isin(resolved_keys)]
-            if self._pending.empty:
-                self._pending = None
+            # rows (y still NaN, e.g. incomplete aggregates) stay, never-due
+            # buckets are untouched (not a wholesale replace). Filter only the
+            # buckets the resolution touches; drop a bucket once it empties.
+            for ds_raw, group in resolved.groupby(DS, sort=False, dropna=False):
+                ds_value = cast(pd.Timestamp, ds_raw)
+                bucket = self._buckets.get(ds_value)
+                if bucket is None:
+                    continue
+                bucket = bucket[~bucket.index.isin(_key_index(group))]
+                if bucket.empty:
+                    del self._buckets[ds_value]
+                else:
+                    self._buckets[ds_value] = bucket
+
+    def _key_known(self, key: tuple) -> bool:
+        """Whether a 5-tuple forecast ``key`` is in the open set (its ds bucket)."""
+        ds_value = pd.Timestamp(key[_FORECAST_KEY_COLUMNS.index(DS)])
+        bucket = self._buckets.get(ds_value)
+        return bucket is not None and key in bucket.index
 
     def to_df(self) -> pd.DataFrame:
         if exists(self._resolved_path):
             return pd.read_parquet(self._resolved_path)
         if exists(self._stream_path):
             return self._materialize_streaming_frame()
-        if self._pending is not None:
-            return self._pending.reset_index(drop=True)
+        # Synthetic-test-only branch: ``append`` always writes the stream sink
+        # first, so in production the stream path exists after any append and
+        # branch 2 above is taken. Reuse the shared gather helper so the bucket
+        # re-sort cannot diverge from ``due_frame``.
+        if self._buckets:
+            return self._gather_ordered(list(self._buckets.keys()))
         return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
     def to_parquet(self, path: str | Path) -> None:
