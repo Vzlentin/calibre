@@ -138,6 +138,11 @@ class NixtlaHierarchicalIntervalPhase:
         phase carries one strategy (options are frozen), so the sparse/dense
         representation is fixed and need not enter the key.
 
+        The memo is process-local instance state with no serial-origin
+        assumption: if the per-origin loop is ever fanned out to separate
+        workers, each worker rebuilds S once (a correct cache miss, never a
+        shared hit) — so cross-process ``is``-identity is never relied upon.
+
         Producer-selection mirror of the point seam: the sparse-capable roster
         (bottom_up/ols/wls_struct/wls_var via BottomUpSparse / MinTraceSparse)
         never materializes the dense S; erm and mint_shrink have no upstream

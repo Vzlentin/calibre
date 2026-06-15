@@ -637,6 +637,9 @@ def test_cached_summing_built_once_and_not_mutated_across_origins(
         )
 
     # Two origins on one phase ran reconcile twice but built S exactly once.
+    # Exact `==` is the load-bearing sentinel: a silently-disabled cache builds
+    # twice and still passes every parity/coherence oracle -- only this count
+    # catches it. Do not weaken to `>=`.
     assert counts[kind] == 1
     assert counts["sparse" if kind == "dense" else "dense"] == 0
     assert len(_FakeReconciliation.calls) == 2
@@ -673,7 +676,7 @@ def test_fused_phase_input_identical_with_summing_cache_on_off(
         off_phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions(strategy=strategy))
         _apply(off_phase, origin)
         off_calls.append(_FakeReconciliation.calls[-1])
-    assert counts_off[kind] == 2
+    assert counts_off[kind] == 2  # exact: cache-off rebuilds once per phase
 
     # Cache ON: one phase across both origins builds S once.
     _patch_fake_nixtla(monkeypatch)
@@ -683,7 +686,7 @@ def test_fused_phase_input_identical_with_summing_cache_on_off(
     for origin in _CACHE_ORIGINS:
         _apply(on_phase, origin)
         on_calls.append(_FakeReconciliation.calls[-1])
-    assert counts_on[kind] == 1
+    assert counts_on[kind] == 1  # exact sentinel: a disabled cache would build twice
 
     # Origin 2 reads the sliced cache; its four summing-derived inputs are
     # byte-identical to the cache-off arm that rebuilt S from scratch.
@@ -695,3 +698,48 @@ def test_fused_phase_input_identical_with_summing_cache_on_off(
     assert on_call["tags"]["bottom"].dtype == object
     pd.testing.assert_frame_equal(on_call["Y_hat_df"], off_call["Y_hat_df"])
     pd.testing.assert_frame_equal(on_call["Y_df"], off_call["Y_df"])
+
+
+def test_cached_summing_rebuilds_on_distinct_index_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The is-key's rebuild branch: handed a DIFFERENT HierarchyIndex object
+    # (even a structurally identical one), the phase must rebuild S and advance
+    # the key, then re-hit on that same object. A run always threads one index,
+    # so this guards a foreseeable phase-reuse refactor, not a path reachable
+    # today -- and it kills the two key mutations the on-run build-count alone
+    # misses: flipping `is not` -> `is` (would serve stale S; count stays 1) and
+    # dropping the `_summing_index =` reassignment (would rebuild forever; the
+    # re-hit count hits 3).
+    _patch_fake_nixtla(monkeypatch)
+    index_a = build_hierarchy_index(_cache_hierarchy())
+    index_b = build_hierarchy_index(_cache_hierarchy())  # distinct object, same structure
+    assert index_a is not index_b
+    origin = _CACHE_ORIGINS[0]
+
+    def _apply(phase: NixtlaHierarchicalIntervalPhase, index: HierarchyIndex) -> None:
+        phase.apply(
+            _cache_forecast_frame(origin),
+            index,
+            HierarchicalIntervalContext(fitted_values=_cache_fitted_values(origin)),
+        )
+
+    counts = _counting_builder_spies(monkeypatch)
+    phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions(strategy="bottom_up"))
+
+    _apply(phase, index_a)
+    first = phase._summing
+    assert counts["sparse"] == 1
+    assert phase._summing_index is index_a
+
+    # Distinct index object -> key miss -> rebuild + key advances.
+    _apply(phase, index_b)
+    assert counts["sparse"] == 2
+    assert phase._summing is not first
+    assert phase._summing_index is index_b
+    # The rebuilt S is correct (matches a fresh build), not garbage.
+    np.testing.assert_array_equal(_s_data(phase._summing), _s_data(first))
+
+    # Re-hit on index_b does not rebuild (kills a dropped key reassignment).
+    _apply(phase, index_b)
+    assert counts["sparse"] == 2
