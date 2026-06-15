@@ -24,7 +24,12 @@ from calibre.core.forecast_frame import (
 from calibre.reconciliation import HierarchicalIntervalContext, HierarchicalIntervalOptions
 from calibre.reconciliation import hierarchical_intervals as hi
 from calibre.reconciliation.hierarchical_intervals import NixtlaHierarchicalIntervalPhase
-from calibre.reconciliation.summing import build_hierarchy_index, build_summing_matrix
+from calibre.reconciliation.summing import (
+    HierarchyIndex,
+    SparseSummingMatrix,
+    build_hierarchy_index,
+    build_summing_matrix,
+)
 
 
 class _FakeReconciliation:
@@ -492,3 +497,201 @@ def test_fused_phase_input_identical_across_completeness_paths(
     fast_y_df = _run(force_slow=False)
     slow_y_df = _run(force_slow=True)
     pd.testing.assert_frame_equal(fast_y_df, slow_y_df)
+
+
+# ---------------------------------------------------------------------------
+# Run-invariant summing-matrix cache (#218). The phase is a run-singleton the
+# engine drives once per origin; S is a pure function of the run-constant
+# HierarchyIndex + the frozen strategy, so it is built once on the phase
+# instance and reused. Origin 2 forecasts a different present-bottom
+# cross-section (drops one bottom id), so the cached S is sliced two ways
+# across origins. The per-origin fitted sidecar matches each origin's
+# cross-section, mirroring the engine's per-origin ``prediction.fitted_values``.
+# ---------------------------------------------------------------------------
+
+_CACHE_ORIGINS = ("2024-01-02", "2024-01-09")
+# Origin 1 forecasts the full {a, b, c}; origin 2 drops c. The cached full-S is
+# therefore sliced to {a,b,c} then to {a,b}.
+_CACHE_PRESENT_BY_ORIGIN = {
+    _CACHE_ORIGINS[0]: ("a", "b", "c"),
+    _CACHE_ORIGINS[1]: ("a", "b"),
+}
+
+
+def _cache_hierarchy() -> pd.DataFrame:
+    """Three bottoms under one dept, so origin 2 can drop one and stay valid."""
+    return pd.DataFrame({UNIQUE_ID: ["a", "b", "c"], "dept": ["D", "D", "D"]})
+
+
+def _cache_forecast_frame(origin: str) -> pd.DataFrame:
+    """A single-origin frame whose present-bottom cross-section may drop ``c``.
+
+    Built inline rather than re-parametrizing the shared single-origin
+    ``_forecast_frame`` (it is hard-coded to one origin and shared by ~15
+    tests). Aggregates are summed over the present bottom cross-section only,
+    so the cross-section stays coherent when a bottom id is dropped.
+    """
+    base_y = {"a": 2.0, "b": 3.0, "c": 4.0}
+    present_bottom = _CACHE_PRESENT_BY_ORIGIN[origin]
+    ds = pd.Timestamp(origin) + pd.Timedelta(days=1)
+    agg = float(sum(base_y[uid] for uid in present_bottom))
+    y_hat_by_node = {uid: base_y[uid] for uid in present_bottom}
+    y_hat_by_node["dept=D"] = agg
+    y_hat_by_node["__total__"] = agg
+    nodes = [*present_bottom, "dept=D", "__total__"]
+    return pd.DataFrame(
+        {
+            MODEL_NAME: pd.Series(["m"] * len(nodes), dtype="object"),
+            UNIQUE_ID: pd.Series(nodes, dtype="object"),
+            DS: pd.to_datetime([ds] * len(nodes)),
+            Y: np.array([np.nan] * len(nodes), dtype=np.float64),
+            Y_HAT: np.array([y_hat_by_node[uid] for uid in nodes], dtype=np.float64),
+            H: np.array([1] * len(nodes), dtype=np.int64),
+            FORECAST_ORIGIN: pd.to_datetime([origin] * len(nodes)),
+        }
+    )
+
+
+def _cache_fitted_values(origin: str) -> pd.DataFrame:
+    """Fitted-value sidecar matching ``origin``'s present-bottom cross-section.
+
+    The per-origin subset's node_labels gate which nodes the sidecar may carry
+    (:func:`_to_nixtla_fitted_df`'s unknown-node guard), so origin 2 — which
+    drops ``c`` — must also drop ``c`` from its in-sample sidecar. This mirrors
+    the engine handing each origin its own ``prediction.fitted_values``.
+    """
+    present_bottom = _CACHE_PRESENT_BY_ORIGIN[origin]
+    base_by_ds = {
+        "2024-01-01": {"a": 1.0, "b": 2.0, "c": 3.0},
+        "2024-01-02": {"a": 2.0, "b": 3.0, "c": 4.0},
+    }
+    rows = []
+    for ds, base in base_by_ds.items():
+        agg = float(sum(base[uid] for uid in present_bottom))
+        values = {uid: base[uid] for uid in present_bottom}
+        values["dept=D"] = agg
+        values["__total__"] = agg
+        for uid, y in values.items():
+            rows.append(
+                {
+                    UNIQUE_ID: uid,
+                    DS: pd.Timestamp(ds),
+                    Y: y,
+                    MODEL_NAME: "m",
+                    FITTED_Y_HAT: y - 0.25,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _s_data(summing: Any) -> np.ndarray:
+    """Return S as a dense float64 array for both representations."""
+    if isinstance(summing, SparseSummingMatrix):
+        return summing.S.toarray()
+    return np.asarray(summing.S, dtype=np.float64)
+
+
+def _counting_builder_spies(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Wrap both S builders in counting spies; return a shared call counter."""
+    counts = {"sparse": 0, "dense": 0}
+    real_sparse = hi.sparse_summing_matrix_from_index
+    real_dense = hi.summing_matrix_from_index
+
+    def _sparse_spy(index: HierarchyIndex) -> Any:
+        counts["sparse"] += 1
+        return real_sparse(index)
+
+    def _dense_spy(index: HierarchyIndex) -> Any:
+        counts["dense"] += 1
+        return real_dense(index)
+
+    monkeypatch.setattr(hi, "sparse_summing_matrix_from_index", _sparse_spy)
+    monkeypatch.setattr(hi, "summing_matrix_from_index", _dense_spy)
+    return counts
+
+
+@pytest.mark.parametrize(
+    ("strategy", "kind"),
+    [("bottom_up", "sparse"), ("mint_shrink", "dense")],
+)
+def test_cached_summing_built_once_and_not_mutated_across_origins(
+    monkeypatch: pytest.MonkeyPatch, strategy: str, kind: str
+) -> None:
+    _patch_fake_nixtla(monkeypatch)
+    index = build_hierarchy_index(_cache_hierarchy())
+
+    # Snapshot the expected structure before the run so a later mutation shows up.
+    expected = (
+        hi.sparse_summing_matrix_from_index(index)
+        if kind == "sparse"
+        else hi.summing_matrix_from_index(index)
+    )
+
+    counts = _counting_builder_spies(monkeypatch)
+    phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions(strategy=strategy))
+    for origin in _CACHE_ORIGINS:
+        phase.apply(
+            _cache_forecast_frame(origin),
+            index,
+            HierarchicalIntervalContext(fitted_values=_cache_fitted_values(origin)),
+        )
+
+    # Two origins on one phase ran reconcile twice but built S exactly once.
+    assert counts[kind] == 1
+    assert counts["sparse" if kind == "dense" else "dense"] == 0
+    assert len(_FakeReconciliation.calls) == 2
+
+    cached = phase._summing
+    assert cached is not None
+    # The cached index is the same instance the first origin keyed on (`is`).
+    assert phase._summing_index is index
+    # Structure is unchanged after slicing the cache two ways across origins.
+    assert cached.node_labels == expected.node_labels
+    assert cached.bottom_ids == expected.bottom_ids
+    np.testing.assert_array_equal(_s_data(cached), _s_data(expected))
+
+
+@pytest.mark.parametrize("strategy", ["bottom_up", "mint_shrink"])
+def test_fused_phase_input_identical_with_summing_cache_on_off(
+    monkeypatch: pytest.MonkeyPatch, strategy: str
+) -> None:
+    index = build_hierarchy_index(_cache_hierarchy())
+    kind = "sparse" if strategy == "bottom_up" else "dense"
+
+    def _apply(phase: NixtlaHierarchicalIntervalPhase, origin: str) -> None:
+        phase.apply(
+            _cache_forecast_frame(origin),
+            index,
+            HierarchicalIntervalContext(fitted_values=_cache_fitted_values(origin)),
+        )
+
+    # Cache OFF: a separate phase per origin, each builds its own S (2 builds).
+    _patch_fake_nixtla(monkeypatch)
+    counts_off = _counting_builder_spies(monkeypatch)
+    off_calls = []
+    for origin in _CACHE_ORIGINS:
+        off_phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions(strategy=strategy))
+        _apply(off_phase, origin)
+        off_calls.append(_FakeReconciliation.calls[-1])
+    assert counts_off[kind] == 2
+
+    # Cache ON: one phase across both origins builds S once.
+    _patch_fake_nixtla(monkeypatch)
+    counts_on = _counting_builder_spies(monkeypatch)
+    on_phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions(strategy=strategy))
+    on_calls = []
+    for origin in _CACHE_ORIGINS:
+        _apply(on_phase, origin)
+        on_calls.append(_FakeReconciliation.calls[-1])
+    assert counts_on[kind] == 1
+
+    # Origin 2 reads the sliced cache; its four summing-derived inputs are
+    # byte-identical to the cache-off arm that rebuilt S from scratch.
+    on_call, off_call = on_calls[1], off_calls[1]
+    pd.testing.assert_frame_equal(on_call["S_df"], off_call["S_df"])
+    np.testing.assert_array_equal(on_call["tags"]["aggregate"], off_call["tags"]["aggregate"])
+    np.testing.assert_array_equal(on_call["tags"]["bottom"], off_call["tags"]["bottom"])
+    assert on_call["tags"]["aggregate"].dtype == object
+    assert on_call["tags"]["bottom"].dtype == object
+    pd.testing.assert_frame_equal(on_call["Y_hat_df"], off_call["Y_hat_df"])
+    pd.testing.assert_frame_equal(on_call["Y_df"], off_call["Y_df"])

@@ -607,7 +607,9 @@ def test_m5_hierarchical_conformal_intervals_emit_node_bounds_and_metrics(
     bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
     node_history = _synthetic_m5_node_history(bundle.hierarchy)
     tasks = _synthetic_residual_tasks(node_history, horizon=2)
-    origins = [pd.Timestamp("2011-03-15")]
+    # Two origins exercise the cross-origin summing-matrix cache READ (#218)
+    # through the real 1e-10 coherence oracle below.
+    origins = [pd.Timestamp("2011-03-15"), pd.Timestamp("2011-03-16")]
     lower_col, upper_col = interval_column_names(0.9)
 
     ledger = _run_m5_hierarchical_intervals(bundle, node_history, tasks, origins)

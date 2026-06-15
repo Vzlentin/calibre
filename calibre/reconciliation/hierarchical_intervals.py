@@ -123,6 +123,34 @@ class NixtlaHierarchicalIntervalPhase:
 
     def __init__(self, options: HierarchicalIntervalOptions) -> None:
         self.options = options
+        self._summing_index: HierarchyIndex | None = None
+        self._summing: SummingMatrixLike | None = None
+
+    def _summing_for(self, hierarchy_index: HierarchyIndex) -> SummingMatrixLike:
+        """Memoize the run-invariant summing matrix S across origins.
+
+        The phase is a run-singleton called once per origin, but S is a pure
+        function of the run-constant :class:`HierarchyIndex` and the frozen
+        ``self.options.strategy`` — so it is built once and reused. The memo is
+        keyed on the stored index REFERENCE compared with ``is`` (not
+        ``id()``): holding the reference keeps the keyed index alive, so an
+        ``id()`` reuse-after-GC stale-S hit is impossible by construction. One
+        phase carries one strategy (options are frozen), so the sparse/dense
+        representation is fixed and need not enter the key.
+
+        Producer-selection mirror of the point seam: the sparse-capable roster
+        (bottom_up/ols/wls_struct/wls_var via BottomUpSparse / MinTraceSparse)
+        never materializes the dense S; erm and mint_shrink have no upstream
+        sparse variant and keep the dense build.
+        """
+        if self._summing is None or self._summing_index is not hierarchy_index:
+            self._summing = (
+                sparse_summing_matrix_from_index(hierarchy_index)
+                if self.options.strategy in NIXTLA_SPARSE_STRATEGIES
+                else summing_matrix_from_index(hierarchy_index)
+            )
+            self._summing_index = hierarchy_index
+        return self._summing
 
     def apply(
         self,
@@ -134,15 +162,7 @@ class NixtlaHierarchicalIntervalPhase:
             return frame
         fitted = _validated_fitted_values(context)
         fitted_by_model = _fitted_values_by_model(fitted)
-        # Producer-selection mirror of the point seam: the sparse-capable
-        # roster (bottom_up/ols/wls_struct/wls_var via BottomUpSparse /
-        # MinTraceSparse) never materializes the dense S; erm and mint_shrink
-        # have no upstream sparse variant and keep the dense build.
-        summing = (
-            sparse_summing_matrix_from_index(hierarchy_index)
-            if self.options.strategy in NIXTLA_SPARSE_STRATEGIES
-            else summing_matrix_from_index(hierarchy_index)
-        )
+        summing = self._summing_for(hierarchy_index)
         parts = [
             self._apply_model_group(group, summing, fitted_by_model)
             for _, group in frame.groupby(_GROUP_KEYS, sort=False)
