@@ -538,7 +538,6 @@ class StreamingLedger:
     def apply_resolutions(self, df: pd.DataFrame) -> None:
         if df.empty:
             return
-        keys = _key_index(df)
         if not self._buckets:
             raise ValueError("apply_resolutions called before any pending append")
         # Known-key validation, bucket by bucket: probe only the buckets the
@@ -552,8 +551,11 @@ class StreamingLedger:
             if bucket is None:
                 continue
             matched += int(bucket.index.isin(_key_index(group)).sum())
-        if matched != len(keys):
-            unknown = [key for key in keys if not self._key_known(key)]
+        # ``len(_key_index(df)) == len(df)`` (one key tuple per row), so the
+        # success path needs only the count; build the full key index lazily in
+        # the error branch where it is actually scanned.
+        if matched != len(df):
+            unknown = [key for key in _key_index(df) if not self._key_known(key)]
             raise ValueError(f"apply_resolutions for keys not in the open set: {unknown[:10]}")
         resolved = df[df[Y].notna()].copy()
         if not resolved.empty:
