@@ -1,0 +1,54 @@
+config_schema: "1.0"
+# CA-subset streaming byte-check acceptance surface for the StreamingLedger
+# ds-bucketing refactor (#211). DERIVED from full-wls-struct.yaml with explicit
+# deviations (KTD8); it is NOT a coverage-acceptance config — coverage is not a
+# goal here. Its sole purpose is the scenario-2 RUNBOOK byte-check: the
+# post-refactor forecast-ledger.resolved.parquet must be byte/row-order identical
+# to a baseline captured from ada263c (+ this config) before the refactor commit.
+# The CA-subset data dir (data/m5-ca/) is built locally and is NOT committed; see
+# benchmarks/m5/README.md "CA-Subset Streaming Byte-Check" for the prep + gate.
+dataset:
+  adapter: m5
+  # Pre-filtered local dir: state_id == "CA" rows of sales_train_evaluation.csv
+  # plus calendar.csv copied unchanged. Built by the runbook, never committed.
+  path: data/m5-ca
+  phase: evaluation
+tasks:
+  - model: SeasonalNaive
+    horizon: 28
+    config:
+      backend: statsforecast
+      season_length: 7
+      scope: global
+reconciliation:
+  # Lightest reconcile path (grouped member sums, no S matrix) — minimises
+  # everything orthogonal to the change under test. Overrides the basis's
+  # wls_struct (KTD8).
+  strategy: bottom_up
+conformal:
+  method: mscp
+  # CUMULATIVE (overriding the basis's perhorizon) so the byte-check exercises
+  # cross-origin pending-row fragmentation: the incomplete-cumulative-window
+  # deferral (backend.py) keeps a window's early rows y-NaN in the open set
+  # across several origins, then resolves them late — the exact fragmentation the
+  # append-seq re-sort exists to protect (KTD10). protection_period is shortened
+  # from the basis's 28 to the smallest window that still defers-then-late-resolves.
+  mode: cumulative
+  protection_period: 7
+  coverage: 0.9
+  calibration_window: 10
+  partition: series
+  max_partitions: 1000000
+origins:
+  # Shortened daily window (runbook sizing decision, KTD10/U7): long enough that
+  # cumulative windows defer across origins and then resolve late, short enough
+  # that the local byte-check run stays cheap. NOT a coverage window.
+  start: 2016-03-20
+  end: 2016-04-10
+  freq: D
+output:
+  ledger_path: results/m5/ca-subset-streaming/forecast-ledger.parquet
+  streaming: true
+execution:
+  backend: auto
+  seed: 42

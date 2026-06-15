@@ -34,6 +34,14 @@ coverage scoring is a post-run artifact command over a resolved ledger.
   per-group loop is an O(batch) constant factor). It is a local at-scale
   measurement run, not a coverage-acceptance config, and is not part of the
   `score-m5-coverage` statistical gate.
+- `config/ca-subset-streaming.yaml` is the CA-subset streaming byte-check
+  acceptance surface for the `StreamingLedger` ds-bucketing refactor (#211).
+  It is derived from `full-wls-struct.yaml` with explicit deviations:
+  `dataset.path: data/m5-ca`, `reconciliation.strategy: bottom_up` (lightest
+  reconcile), `conformal.mode: cumulative` with `protection_period: 7`, and a
+  shortened daily origin window. Coverage is explicitly NOT a goal; the config
+  exists only for the manual byte-check gate below. See "CA-Subset Streaming
+  Byte-Check".
 
 For full-M5 work with hierarchy-aware reconciliation installed:
 
@@ -186,3 +194,88 @@ When a full local run is used as the handoff surface for #85, record:
 - Produced artifact paths under `results/m5/<run-name>/`, including the resolved
   ledger path for streaming runs, `coverage-by-node.parquet`,
   `coverage-summary.json`, and `report.md`.
+
+## CA-Subset Streaming Byte-Check
+
+`config/ca-subset-streaming.yaml` backs the scenario-2 byte-check for the
+`StreamingLedger` ds-bucketing refactor (#211). This is a **manual equivalence
+gate**, matching the existing manual M5-gate convention; it is intentionally NOT
+a collected pytest test, because the baseline is a local-only CA-subset M5
+artifact never present in CI. The refactor is a container-private data-structure
+swap; the gate proves the finalized `forecast-ledger.resolved.parquet` is
+byte/row-order identical before and after.
+
+### 1. Build the CA-subset data dir (local only, not committed)
+
+Pre-filter the full M5 sales file to California stores and copy the calendar
+unchanged into the ignored `data/m5-ca/` directory:
+
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+import shutil
+import pandas as pd
+
+src = Path("data/m5")
+dst = Path("data/m5-ca")
+dst.mkdir(parents=True, exist_ok=True)
+
+sales = pd.read_csv(src / "sales_train_evaluation.csv")
+ca = sales[sales["state_id"] == "CA"]
+ca.to_csv(dst / "sales_train_evaluation.csv", index=False)
+shutil.copy(src / "calendar.csv", dst / "calendar.csv")
+
+print(f"CA bottom rows: {len(ca)}")  # 3,049 items x 4 CA stores = 12,196
+PY
+```
+
+There is no adapter subset lever — the pre-filtered data dir is the only
+supported path (config-only harness rule; do not add an adapter store-filter
+kwarg).
+
+### 2. Capture the pre-refactor baseline (from ada263c, BEFORE the refactor commit)
+
+The byte-check baseline MUST be captured from as-merged `main` (ada263c) plus
+the `ca-subset-streaming.yaml` config commit, before any refactor code lands. In
+a detached `ada263c` worktree that carries only this config addition:
+
+```bash
+uv run calibre run --config benchmarks/m5/config/ca-subset-streaming.yaml
+cp results/m5/ca-subset-streaming/forecast-ledger.resolved.parquet \
+   results/m5/ca-subset-streaming/baseline-ada263c.resolved.parquet
+```
+
+The artifact is on the order of millions of rows (CA ~12,196 bottom series plus
+reconciliation aggregate nodes over h=28) — far too large to commit. It lives at
+a local-only pinned path and the gate consumes it by path.
+
+**Binding stop condition:** if the baseline parquet cannot be captured from
+ada263c (+ this config) before the refactor commit, the byte-check is
+**non-binding** — STOP, do not infer equivalence. (This is a manual/runbook
+decision; it is never expressed as a collected-but-skipped pytest test, which
+would hard-trip CI.)
+
+### 3. Run the byte-check gate (after the refactor lands)
+
+Re-run the same config on the refactor branch, then compare **without sorting**
+(raw row order, not key-sorted-equal):
+
+```bash
+uv run calibre run --config benchmarks/m5/config/ca-subset-streaming.yaml
+uv run python - <<'PY'
+import pandas as pd
+
+base = pd.read_parquet("results/m5/ca-subset-streaming/baseline-ada263c.resolved.parquet")
+post = pd.read_parquet("results/m5/ca-subset-streaming/forecast-ledger.resolved.parquet")
+# No .sort_values(_KEY): the byte-check asserts physical row order, which the
+# append-seq re-sort is designed to hold fixed.
+pd.testing.assert_frame_equal(post, base)
+print("PASS: post-refactor resolved ledger is byte/row-order identical to baseline")
+PY
+```
+
+The unresolved-raw portion of the resolved artifact is byte-invariant by
+construction (it is the raw stream in stream order, untouched by this refactor),
+so any mismatch isolates to the within-origin update-portion order or a changed
+resolved set — both of which the append-seq mechanism and the matched-count
+known-key proof hold fixed.
