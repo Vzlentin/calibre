@@ -355,6 +355,79 @@ def test_missing_fitted_keys_fast_path_matches_slow_path() -> None:
     assert hi._missing_fitted_keys(incomplete.copy(), summing, "m") == expected
     assert _slow_missing_fitted_keys(incomplete.copy(), summing, "m") == expected
 
+    # Multi-missing: drop a bottom node and an aggregate across both ds. Pins the
+    # cartesian fall-through's node_labels x observed_ds ordering, not just that
+    # the one expected key is present.
+    multi = complete[
+        ~(
+            ((complete[UNIQUE_ID] == "a") & (complete[DS] == pd.Timestamp("2024-01-01")))
+            | ((complete[UNIQUE_ID] == "dept=D") & (complete[DS] == pd.Timestamp("2024-01-02")))
+        )
+    ]
+    multi_expected = [
+        ("a", "2024-01-01 00:00:00", "m"),
+        ("dept=D", "2024-01-02 00:00:00", "m"),
+    ]
+    assert hi._missing_fitted_keys(multi.copy(), summing, "m") == multi_expected
+    assert _slow_missing_fitted_keys(multi.copy(), summing, "m") == multi_expected
+
+    # Over-count + incomplete: duplicate rows push the count ABOVE the grid while
+    # a key is genuinely missing. The fast-path's `==` must fall through to the
+    # cartesian path here -- a relaxed `>=` would wrongly early-return [].
+    over_incomplete = pd.concat([incomplete, complete.iloc[[0, 0]]], ignore_index=True)
+    assert int(over_incomplete[DS].notna().sum()) > len(summing.node_labels) * 2
+    assert (
+        hi._missing_fitted_keys(over_incomplete.copy(), summing, "m")
+        == _slow_missing_fitted_keys(over_incomplete.copy(), summing, "m")
+        == expected
+    )
+
+
+def test_duplicate_masking_missing_key_rejected_before_nixtla(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The one frame shape the count-based fast-path cannot distinguish from
+    # complete: drop a real (node, ds), then duplicate a different existing row so
+    # the row count == nodes x ds again. The fast-path would false-complete (return
+    # [] and feed a silently-truncated grid to nixtla). validate_fitted_values_frame
+    # must reject the duplicate BEFORE the fast-path runs -- this test pins that
+    # load-bearing ordering, so removing the dedup guard fails loudly here.
+    _patch_fake_nixtla(monkeypatch)
+    fitted = _fitted_values()
+    fitted = fitted[~((fitted[UNIQUE_ID] == "dept=D") & (fitted[DS] == pd.Timestamp("2024-01-02")))]
+    fitted = pd.concat([fitted, _fitted_values().iloc[[0]]], ignore_index=True)
+    summing = build_summing_matrix(_hierarchy())
+    # Precondition: a pure cardinality check alone would call this frame complete.
+    assert int(fitted[DS].notna().sum()) == len(summing.node_labels) * 2
+    phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions())
+
+    with pytest.raises(ValueError, match="Duplicate fitted-value rows"):
+        phase.apply(
+            _forecast_frame(),
+            build_hierarchy_index(_hierarchy()),
+            HierarchicalIntervalContext(fitted),
+        )
+
+    assert _FakeReconciliation.calls == []
+
+
+def test_multi_model_complete_sidecar_takes_fast_path_per_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two complete model groups: each per-model subset hits the fast-path
+    # independently, so the (uid, ds, model) -> (uid, ds) dedup equivalence the
+    # count relies on holds under per-model grouping. reconcile runs once per model.
+    _patch_fake_nixtla(monkeypatch)
+    phase = NixtlaHierarchicalIntervalPhase(HierarchicalIntervalOptions())
+
+    phase.apply(
+        _forecast_frame(models=("m1", "m2")),
+        build_hierarchy_index(_hierarchy()),
+        HierarchicalIntervalContext(_fitted_values(models=("m1", "m2"))),
+    )
+
+    assert len(_FakeReconciliation.calls) == 2
+
 
 def test_to_nixtla_fitted_df_rejects_unknown_node_before_completeness(
     monkeypatch: pytest.MonkeyPatch,
