@@ -28,6 +28,7 @@ from calibre.execution.ledger import (
     InMemoryLedger,
     StreamingLedger,
     StreamingOrderLedger,
+    _key_index,
     resolved_ledger_uri,
 )
 from calibre.execution.task_builder import partition_tasks
@@ -35,6 +36,7 @@ from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import NewsvendorConfig
 
 _KEY = _FORECAST_KEY_COLUMNS
+_KEY_INDEX = _key_index
 
 # Committed pre-refactor due_frame(origin) pin captured at ada263c (scenario 3).
 _PRE_REFACTOR_DUE_FRAME_FIXTURE = (
@@ -449,6 +451,55 @@ def test_streaming_due_frame_empty_due_preserves_appended_columns(tmp_path) -> N
     assert "y_hat_lower" in none_due.columns
     assert "y_hat_upper" in none_due.columns
     assert _APPEND_SEQ not in none_due.columns
+    ledger.close()
+
+
+def test_streaming_due_frame_empty_due_unions_columns_across_buckets(tmp_path) -> None:
+    # KTD9 edge: buckets carry DIFFERING column sets (a base-only bucket and an
+    # interval-bearing one). The old single-concat store exposed the column
+    # UNION on an empty slice; the empty-due frame must too — taking one
+    # arbitrary bucket's columns would drop the interval columns when the
+    # base-only bucket is iterated first. Populate the bucket store directly:
+    # the raw stream sink is schema-locked to the first batch, so appending
+    # differing-column batches through append() is not the engine's contract;
+    # the bucket-store column union is what is under test here.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    base_only = _pending_frame(1, origin="2024-05-01")  # no interval columns
+    base_only[DS] = [pd.Timestamp("2024-06-01")]
+    base_only[_APPEND_SEQ] = [0]
+    base_only.index = _KEY_INDEX(base_only)
+    interval = _interval_batch("SKU_002", ["2024-06-08"], origin="2024-05-02")
+    interval[_APPEND_SEQ] = [1]
+    interval.index = _KEY_INDEX(interval)
+    # base-only bucket inserted first → it would be the arbitrary sample.
+    ledger._buckets = {
+        pd.Timestamp("2024-06-01"): base_only,
+        pd.Timestamp("2024-06-08"): interval,
+    }
+
+    none_due = ledger.due_frame(pd.Timestamp("2024-01-01"))  # everything future
+    assert none_due.empty
+    # The union must carry the interval columns even though the first-iterated
+    # bucket lacks them.
+    assert "y_hat_lower" in none_due.columns
+    assert "y_hat_upper" in none_due.columns
+    assert _APPEND_SEQ not in none_due.columns
+
+
+def test_streaming_due_frame_nat_ds_row_stays_in_open_set(tmp_path) -> None:
+    # NaT-ds rows must stay in the open set (their ds <= origin is always False),
+    # exactly as the old single-frame store retained them. groupby's default
+    # dropna=True would silently drop the NaT bucket; dropna=False keeps it.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    batch = _pending_frame(2, origin="2024-01-01")
+    batch[DS] = [pd.Timestamp("2024-01-07"), pd.NaT]  # one real ds, one NaT
+    ledger.append(batch)
+    # The NaT-ds row is retained as its own bucket, not dropped from the store.
+    assert any(pd.isna(ds) for ds in ledger._buckets)
+    # Far-future origin: the real-ds row is due, the NaT-ds row is never due.
+    due = ledger.due_frame(pd.Timestamp("2999-01-01"))
+    assert due[DS].notna().all()
+    assert len(due) == 1  # only the real-ds row is ever due
     ledger.close()
 
 

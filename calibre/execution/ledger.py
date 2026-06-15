@@ -463,9 +463,15 @@ class StreamingLedger:
         # index level and a column, and ``groupby(DS)`` would then raise the
         # "both an index level and a column label" ambiguity. Split first,
         # key-index each group second.
-        for ds_raw, group in pending.groupby(DS, sort=False):
-            # The DS column is datetime64[ns], so each group key is a Timestamp;
-            # cast narrows the broad groupby-key type without a runtime coercion.
+        # dropna=False keeps a NaT-ds group as its own bucket. The old single
+        # frame retained NaT-ds rows in the open set (their ``ds <= origin`` was
+        # simply always False); dropping the NaT group here would silently lose
+        # them from the open set while still streaming them to the raw sink.
+        for ds_raw, group in pending.groupby(DS, sort=False, dropna=False):
+            # The DS column is datetime64[ns], so each group key is a Timestamp
+            # (or NaT); cast narrows the broad groupby-key type without a runtime
+            # coercion. A NaT key is dict-hashable and never satisfies
+            # ``ds <= origin``, so its bucket is reachable but never due.
             ds_value = cast(pd.Timestamp, ds_raw)
             sub = group.copy()
             sub.index = _key_index(sub)
@@ -508,12 +514,26 @@ class StreamingLedger:
             # Populated store, nothing due: preserve the FULL appended column set
             # (interval/quantile columns beyond REQUIRED_COLUMNS), matching the
             # old ``self._pending.loc[mask]`` empty slice — NOT a
-            # REQUIRED_COLUMNS-only frame. Build the empty frame from any
-            # bucket's columns minus the private seq.
-            sample = next(iter(self._buckets.values()))
-            columns = [col for col in sample.columns if col != _APPEND_SEQ]
-            return pd.DataFrame(columns=columns)
+            # REQUIRED_COLUMNS-only frame. The old store was a single concat, so
+            # the empty slice carried the UNION of columns across every append;
+            # buckets may carry differing column sets (some appends added
+            # interval columns, others did not), so take the ordered union across
+            # all buckets, not one arbitrary bucket's columns.
+            return pd.DataFrame(columns=self._appended_columns())
         return self._gather_ordered(due_keys)
+
+    def _appended_columns(self) -> list[str]:
+        """The ordered union of bucket columns (minus ``_APPEND_SEQ``).
+
+        Reproduces the column set the old single-frame ``pd.concat`` store
+        exposed: first-seen order across buckets, with the private seq excluded.
+        """
+        columns: list[str] = []
+        for bucket in self._buckets.values():
+            for col in bucket.columns:
+                if col != _APPEND_SEQ and col not in columns:
+                    columns.append(col)
+        return columns
 
     def apply_resolutions(self, df: pd.DataFrame) -> None:
         if df.empty:
@@ -527,7 +547,7 @@ class StreamingLedger:
         # keys count as unknown. Open-set keys are globally unique, so the summed
         # matched count equalling ``len(keys)`` proves every input key is known.
         matched = 0
-        for ds_raw, group in df.groupby(DS, sort=False):
+        for ds_raw, group in df.groupby(DS, sort=False, dropna=False):
             bucket = self._buckets.get(cast(pd.Timestamp, ds_raw))
             if bucket is None:
                 continue
@@ -542,7 +562,7 @@ class StreamingLedger:
             # rows (y still NaN, e.g. incomplete aggregates) stay, never-due
             # buckets are untouched (not a wholesale replace). Filter only the
             # buckets the resolution touches; drop a bucket once it empties.
-            for ds_raw, group in resolved.groupby(DS, sort=False):
+            for ds_raw, group in resolved.groupby(DS, sort=False, dropna=False):
                 ds_value = cast(pd.Timestamp, ds_raw)
                 bucket = self._buckets.get(ds_value)
                 if bucket is None:
