@@ -307,7 +307,7 @@ def _to_nixtla_fitted_df(
         raise ValueError(f"Missing fitted values for model_name={model_name!r}")
     subset = subset.copy()
     subset[UNIQUE_ID] = subset[UNIQUE_ID].astype(str)
-    unknown = set(subset[UNIQUE_ID]) - set(summing.node_labels)
+    unknown = set(subset[UNIQUE_ID].unique()) - set(summing.node_labels)
     if unknown:
         raise ValueError(
             "Fitted-value sidecar contains hierarchy node(s) not present in the "
@@ -335,6 +335,21 @@ def _missing_fitted_keys(
 ) -> list[tuple[str, str, str]]:
     fitted_values[DS] = pd.to_datetime(fitted_values[DS]).astype("datetime64[ns]")
     observed_ds = sorted(fitted_values[DS].dropna().unique())
+    # Fast-path completeness check. Each non-null-ds row is one (unique_id, ds)
+    # observation, so counting them against the full node_labels x observed_ds
+    # grid is sound because two upstream guarantees hold by the time we run:
+    #   1. every unique_id is a known node -- the unknown-node guard in
+    #      _to_nixtla_fitted_df (the `unknown` check just above this call,
+    #      against THIS subset's node_labels) raises first; and
+    #   2. no duplicate (unique_id, ds) rows -- validate_fitted_values_frame
+    #      rejects them before the phase groups, pinned by
+    #      test_duplicate_fitted_keys_fail_before_nixtla.
+    # Given both, observed pairs are a deduplicated subset of the grid, so
+    # equal cardinality == complete. Keep both guards ahead of any future
+    # caller or this can false-complete.
+    n_observed_pairs = int(fitted_values[DS].notna().sum())
+    if n_observed_pairs == len(summing.node_labels) * len(observed_ds):
+        return []
     observed = {
         (str(row.unique_id), pd.Timestamp(str(row.ds)))
         for row in fitted_values[[UNIQUE_ID, DS]].itertuples(index=False)
