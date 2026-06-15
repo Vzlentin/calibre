@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -21,6 +23,7 @@ from calibre.core.forecast_task import ForecastTask
 from calibre.core.order_types import NewsvendorPolicyParameters
 from calibre.execution.backend import BackendEngine, ConformalOptions, LedgerOutputOptions
 from calibre.execution.ledger import (
+    _APPEND_SEQ,
     _FORECAST_KEY_COLUMNS,
     InMemoryLedger,
     StreamingLedger,
@@ -32,6 +35,46 @@ from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import NewsvendorConfig
 
 _KEY = _FORECAST_KEY_COLUMNS
+
+# Committed pre-refactor due_frame(origin) pin captured at ada263c (scenario 3).
+_PRE_REFACTOR_DUE_FRAME_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "streaming_ledger_pre_refactor_due_frame.parquet"
+)
+# ORIGIN and the synthetic input below reproduce the capture exactly so the
+# post-refactor due_frame output can be asserted byte-equal against the pin.
+_PRE_REFACTOR_ORIGIN = pd.Timestamp("2024-02-15")
+
+
+def _interval_batch(
+    uid: str, ds_values: list[str], origin: str, *, start_seq: int = 0
+) -> pd.DataFrame:
+    """A pending (NaN-y) batch with genuinely distinct ds + appended interval cols.
+
+    Unlike :func:`_pending_frame` (which hardcodes the same ds range for every
+    batch), the ds values are caller-supplied so two batches can interleave
+    across ds buckets — exercising the cross-bucket append-seq re-sort. The
+    ``y_hat_lower``/``y_hat_upper`` columns sit beyond ``REQUIRED_COLUMNS`` so
+    they also pin the full-appended-column-set contract.
+
+    ``start_seq`` only shifts the y_hat values so distinct batches stay
+    value-distinguishable; it is not the ledger's private append-seq.
+    """
+    n = len(ds_values)
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: [uid] * n,
+            DS: [pd.Timestamp(d) for d in ds_values],
+            Y: [np.nan] * n,
+            Y_HAT: [10.0 * (start_seq + i + 1) for i in range(n)],
+            H: list(range(1, n + 1)),
+            FORECAST_ORIGIN: pd.Timestamp(origin),
+            MODEL_NAME: ["SeasonalNaive"] * n,
+            "y_hat_lower": [5.0 * (i + 1) for i in range(n)],
+            "y_hat_upper": [15.0 * (i + 1) for i in range(n)],
+        }
+    )
 
 
 class _StubAdapter(ModelAdapter):
@@ -321,6 +364,165 @@ def test_streaming_apply_resolutions_empty_is_noop(tmp_path) -> None:
     ledger.apply_resolutions(_pending_frame(2).iloc[0:0])
     assert len(ledger.due_frame(pd.Timestamp("2999-01-01"))) == before
     assert not (tmp_path / "ledger.resolved-updates.parquet").exists()
+    ledger.close()
+
+
+# ---------------------------------------------------------------------------
+# ds-bucketing refactor (#211): the pending store buckets by ds with a private
+# append-seq stamp, so due_frame/apply_resolutions are O(due), not O(open set).
+# These pin the load-bearing equivalences: append-order re-sort, no seq leak,
+# cross-origin fragmentation, the empty-due column set, and bucket bookkeeping.
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_due_frame_returns_append_order_across_interleaved_ds(tmp_path) -> None:
+    # Scenario 1 (happy path). Two batches whose ds buckets interleave: batch B's
+    # earliest ds (2024-01-14) < batch A's latest ds (2024-03-03). due_frame must
+    # return APPEND order (all of A's due rows, then B's), NOT ds order.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    batch_a = _interval_batch(
+        "SKU_001", ["2024-01-07", "2024-02-04", "2024-03-03"], origin="2024-01-01"
+    )
+    batch_b = _interval_batch(
+        "SKU_002", ["2024-01-14", "2024-02-11", "2024-02-25"], origin="2024-01-08", start_seq=10
+    )
+    ledger.append(batch_a)
+    ledger.append(batch_b)
+
+    due = ledger.due_frame(pd.Timestamp("2024-02-15"))
+    # ds <= 2024-02-15: A@01-07, A@02-04, B@01-14, B@02-11 (A's 03-03 and B's
+    # 02-25 are future-dated and excluded).
+    assert due[DS].tolist() == [
+        pd.Timestamp("2024-01-07"),
+        pd.Timestamp("2024-02-04"),
+        pd.Timestamp("2024-01-14"),
+        pd.Timestamp("2024-02-11"),
+    ]
+    assert due[UNIQUE_ID].tolist() == ["SKU_001", "SKU_001", "SKU_002", "SKU_002"]
+    assert list(due.index) == [0, 1, 2, 3]  # clean RangeIndex
+    assert _APPEND_SEQ not in due.columns  # private seq never leaks into output
+
+    # Liveness: the future-dated bucket's rows never appear and its bucket object
+    # is not mutated by the due-path gather.
+    future_bucket_before = ledger._buckets[pd.Timestamp("2024-03-03")].copy()
+    _ = ledger.due_frame(pd.Timestamp("2024-02-15"))
+    pd.testing.assert_frame_equal(ledger._buckets[pd.Timestamp("2024-03-03")], future_bucket_before)
+    ledger.close()
+
+
+def test_streaming_due_frame_matches_pre_refactor_fixture(tmp_path) -> None:
+    # Scenario 3 (characterization anchor on the changed surface). The
+    # post-refactor due_frame(origin) output must equal a pre-refactor pin
+    # captured at ada263c — same synthetic input, same origin, no re-sort.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    batch_a = _interval_batch(
+        "SKU_001", ["2024-01-07", "2024-02-04", "2024-03-03"], origin="2024-01-01"
+    )
+    batch_b = _interval_batch(
+        "SKU_002", ["2024-01-14", "2024-02-11", "2024-02-25"], origin="2024-01-08"
+    )
+    ledger.append(batch_a)
+    ledger.append(batch_b)
+    due = ledger.due_frame(_PRE_REFACTOR_ORIGIN)
+    ledger.close()
+
+    # The fixture was captured via to_parquet at ada263c, so round-trip the
+    # post-refactor frame through the same serialization before comparing — this
+    # pins the captured artifact byte-for-byte and neutralises parquet's
+    # timestamp-resolution round-trip (datetime64[s] in-memory vs [ms] on read),
+    # which is an I/O artifact, not a due_frame behaviour change.
+    due_path = tmp_path / "post_refactor_due_frame.parquet"
+    due.to_parquet(due_path)
+    actual = pd.read_parquet(due_path)
+    expected = pd.read_parquet(_PRE_REFACTOR_DUE_FRAME_FIXTURE)
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_streaming_due_frame_empty_due_preserves_appended_columns(tmp_path) -> None:
+    # KTD9: a populated store with zero due rows returns an empty frame that
+    # preserves the FULL appended column set (interval columns beyond
+    # REQUIRED_COLUMNS), not a REQUIRED_COLUMNS-only frame.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_interval_batch("SKU_001", ["2024-06-01", "2024-06-08"], origin="2024-05-01"))
+    none_due = ledger.due_frame(pd.Timestamp("2024-01-01"))  # everything future
+    assert none_due.empty
+    assert "y_hat_lower" in none_due.columns
+    assert "y_hat_upper" in none_due.columns
+    assert _APPEND_SEQ not in none_due.columns
+    ledger.close()
+
+
+def test_streaming_apply_resolutions_drops_emptied_bucket_keeps_others(tmp_path) -> None:
+    # Scenario 5: keys spanning two ds buckets; resolving all keys in one bucket
+    # del's that bucket key and leaves the other bucket's keys intact.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_interval_batch("SKU_001", ["2024-01-07", "2024-01-14"], origin="2024-01-01"))
+    due = ledger.due_frame(pd.Timestamp("2024-01-07"))  # only the 01-07 bucket
+    assert due[DS].tolist() == [pd.Timestamp("2024-01-07")]
+    due[Y] = [99.0]
+    ledger.apply_resolutions(due)
+
+    assert pd.Timestamp("2024-01-07") not in ledger._buckets  # emptied bucket dropped
+    assert pd.Timestamp("2024-01-14") in ledger._buckets  # other bucket kept
+    remaining = ledger.due_frame(pd.Timestamp("2999-01-01"))
+    assert remaining[DS].tolist() == [pd.Timestamp("2024-01-14")]
+    ledger.close()
+
+
+def test_streaming_apply_resolutions_multi_origin_straggler_reorders_by_seq(tmp_path) -> None:
+    # Scenario 5 (primary fragmentation gate): a key appended at an early origin
+    # resolves LATER than later-appended keys, so the append-seq re-sort — not ds
+    # order or resolution order — drives due_frame's row order.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    # Append order: early straggler first (origin 2024-01-01), then a later batch
+    # (origin 2024-01-08). The straggler's ds is the LATEST, so ds order would put
+    # it last; append (seq) order keeps it first.
+    straggler = _interval_batch("SKU_001", ["2024-03-01"], origin="2024-01-01")
+    later = _interval_batch("SKU_002", ["2024-02-01", "2024-02-08"], origin="2024-01-08")
+    ledger.append(straggler)
+    ledger.append(later)
+
+    due = ledger.due_frame(pd.Timestamp("2024-03-15"))
+    # Append/seq order: straggler (seq 0) first, then later's two rows — NOT ds
+    # order (which would be 2024-02-01, 2024-02-08, 2024-03-01).
+    assert due[DS].tolist() == [
+        pd.Timestamp("2024-03-01"),
+        pd.Timestamp("2024-02-01"),
+        pd.Timestamp("2024-02-08"),
+    ]
+    assert due[UNIQUE_ID].tolist() == ["SKU_001", "SKU_002", "SKU_002"]
+
+    # Resolve the later-appended keys first; the straggler stays pending. The
+    # remaining due frame still leads with the straggler.
+    resolve_later = due[due[UNIQUE_ID] == "SKU_002"].copy()
+    resolve_later[Y] = [1.0, 2.0]
+    ledger.apply_resolutions(resolve_later)
+    remaining = ledger.due_frame(pd.Timestamp("2024-03-15"))
+    assert remaining[DS].tolist() == [pd.Timestamp("2024-03-01")]
+    assert remaining[UNIQUE_ID].tolist() == ["SKU_001"]
+    ledger.close()
+
+
+def test_streaming_apply_resolutions_unknown_key_across_buckets_raises(tmp_path) -> None:
+    # Scenario 6 (bucket-spanning variant): an unknown resolution key whose ds
+    # bucket is absent still raises with the exact open-set string.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_interval_batch("SKU_001", ["2024-01-07", "2024-01-14"], origin="2024-01-01"))
+    rogue = _interval_batch("SKU_999", ["2099-01-01"], origin="2024-01-01")  # absent ds bucket
+    rogue[Y] = [1.0]
+    with pytest.raises(ValueError, match="not in the open set"):
+        ledger.apply_resolutions(rogue)
+    ledger.close()
+
+
+def test_streaming_append_duplicate_key_across_buckets_raises(tmp_path) -> None:
+    # Scenario 6 (bucket-spanning variant): a duplicate 5-tuple lands in the same
+    # ds bucket and the per-bucket duplicate probe rejects it.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    batch = _interval_batch("SKU_001", ["2024-01-07", "2024-02-04"], origin="2024-01-01")
+    ledger.append(batch)
+    with pytest.raises(ValueError, match="duplicate forecast keys"):
+        ledger.append(batch)  # identical 5-tuples across two ds buckets
     ledger.close()
 
 
