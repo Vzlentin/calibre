@@ -525,8 +525,11 @@ class StreamingLedger:
     def _appended_columns(self) -> list[str]:
         """The ordered union of bucket columns (minus ``_APPEND_SEQ``).
 
-        Reproduces the column set the old single-frame ``pd.concat`` store
-        exposed: first-seen order across buckets, with the private seq excluded.
+        Recovers the column set the old single-frame store exposed on its empty
+        slice. Through :meth:`append` the raw stream sink is schema-locked to the
+        first batch, so every bucket shares one schema and this union is exact;
+        differing-column buckets arise only in the direct-``_buckets`` test, where
+        the order is first-seen across buckets in insertion order.
         """
         columns: list[str] = []
         for bucket in self._buckets.values():
@@ -539,6 +542,9 @@ class StreamingLedger:
         if df.empty:
             return
         if not self._buckets:
+            # "pending append" is deliberately distinct from InMemoryLedger's
+            # "before any append" — per-implementation guards; do not normalise
+            # the two into one shared message.
             raise ValueError("apply_resolutions called before any pending append")
         # Known-key validation, bucket by bucket: probe only the buckets the
         # resolution ``df`` names (O(resolved buckets), never the open set). A

@@ -441,7 +441,7 @@ def test_streaming_due_frame_matches_pre_refactor_fixture(tmp_path) -> None:
 
 
 def test_streaming_due_frame_empty_due_preserves_appended_columns(tmp_path) -> None:
-    # KTD9: a populated store with zero due rows returns an empty frame that
+    # A populated store with zero due rows returns an empty frame that
     # preserves the FULL appended column set (interval columns beyond
     # REQUIRED_COLUMNS), not a REQUIRED_COLUMNS-only frame.
     ledger = StreamingLedger(tmp_path / "ledger.parquet")
@@ -455,7 +455,7 @@ def test_streaming_due_frame_empty_due_preserves_appended_columns(tmp_path) -> N
 
 
 def test_streaming_due_frame_empty_due_unions_columns_across_buckets(tmp_path) -> None:
-    # KTD9 edge: buckets carry DIFFERING column sets (a base-only bucket and an
+    # Edge case: buckets carry DIFFERING column sets (a base-only bucket and an
     # interval-bearing one). The old single-concat store exposed the column
     # UNION on an empty slice; the empty-due frame must too — taking one
     # arbitrary bucket's columns would drop the interval columns when the
@@ -500,6 +500,27 @@ def test_streaming_due_frame_nat_ds_row_stays_in_open_set(tmp_path) -> None:
     due = ledger.due_frame(pd.Timestamp("2999-01-01"))
     assert due[DS].notna().all()
     assert len(due) == 1  # only the real-ds row is ever due
+    ledger.close()
+
+
+def test_streaming_due_frame_resorts_noncontiguous_appends_to_one_bucket(tmp_path) -> None:
+    # The append-seq re-sort is load-bearing only when a single ds bucket
+    # accumulates rows from NON-CONTIGUOUS appends: bucket-dict insertion order
+    # then no longer equals append order, so _gather_ordered must restore append
+    # order (the byte-identity contract) rather than emit buckets in insertion
+    # order. Append the SAME ds in two non-adjacent batches, straddling a second
+    # bucket, so the middle seq lands in the other bucket.
+    ledger = StreamingLedger(tmp_path / "ledger.parquet")
+    ledger.append(_interval_batch("SKU_A", ["2024-01-07"], origin="2024-01-01"))  # seq 0
+    ledger.append(_interval_batch("SKU_B", ["2024-01-14"], origin="2024-01-08"))  # seq 1
+    ledger.append(_interval_batch("SKU_C", ["2024-01-07"], origin="2024-01-15"))  # seq 2
+    # Bucket 2024-01-07 holds seqs [0, 2]; bucket 2024-01-14 holds seq [1].
+    # Concatenating buckets in insertion order yields [A(0), C(2), B(1)] — only
+    # the seq re-sort restores append order [A, B, C]. (Dropping the sort makes
+    # this assert fail with [A, C, B].)
+    due = ledger.due_frame(pd.Timestamp("2024-03-01"))  # everything due
+    assert due[UNIQUE_ID].tolist() == ["SKU_A", "SKU_B", "SKU_C"]
+    assert _APPEND_SEQ not in due.columns
     ledger.close()
 
 
