@@ -1,4 +1,4 @@
-"""Structural protocols for conformal scores, calibrators, and controllers."""
+"""Structural protocols for conformal spreads, scores, calibrators, and controllers."""
 
 from __future__ import annotations
 
@@ -6,6 +6,24 @@ from collections.abc import Sequence
 from typing import Protocol
 
 import numpy as np
+
+
+class Spread(Protocol):
+    """Turns per-origin centers and calibrated radii into interval bounds.
+
+    The fourth interchangeable part of the conformal runtime, alongside
+    :class:`Score`, :class:`Calibrator`, and :class:`Controller`. It owns the
+    final step of "what form the predictive uncertainty takes": mapping
+    ``(center, radius)`` into ``(lower, upper)``. The interface is vectorised;
+    the cumulative call site passes length-1 arrays.
+    """
+
+    def to_interval(
+        self,
+        centers: np.ndarray,
+        radii: np.ndarray,
+        issue: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]: ...
 
 
 class Score(Protocol):

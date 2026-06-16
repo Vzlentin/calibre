@@ -20,8 +20,9 @@ import pandas as pd
 from calibre.conformal.calibrators import RollingQuantileCalibrator
 from calibre.conformal.controllers import AdaptiveAlphaController, FixedAlphaController
 from calibre.conformal.partitions import GLOBAL_PARTITION, global_partition, series_partition
-from calibre.conformal.protocols import Calibrator, Controller, Score
+from calibre.conformal.protocols import Calibrator, Controller, Score, Spread
 from calibre.conformal.scores import absolute_error_score
+from calibre.conformal.spread import AnalyticRadius
 from calibre.conformal.types import IntervalPrediction
 from calibre.core.forecast_frame import (
     CALIBRATION_STATE_REF,
@@ -235,6 +236,10 @@ class SymmetricIntervalRuntime:
         self.score = score
         self.calibrator = calibrator
         self.controller = controller
+        # The point-forecast spread is the only adapter today; it carries no
+        # state, so it is owned by the runtime rather than threaded through the
+        # resume-state plumbing. A config selector arrives with the next adapter.
+        self.spread: Spread = AnalyticRadius()
         self.method_name = method_name or config.method
         self._issued_count = 0
 
@@ -382,9 +387,7 @@ class SymmetricIntervalRuntime:
         radii, ready = self.calibrator.predict_batch(alpha, partitions)
         issue = ready & np.isfinite(radii)
         centers = result[Y_HAT].to_numpy(dtype=float)
-        with np.errstate(invalid="ignore"):
-            lower_values = np.where(issue, centers - radii, np.nan)
-            upper_values = np.where(issue, centers + radii, np.nan)
+        lower_values, upper_values = self.spread.to_interval(centers, radii, issue)
 
         # Mirror the per-group accounting of the row-wise path: groups are
         # numbered in first-occurrence order and every row of a group shares
@@ -442,8 +445,16 @@ class SymmetricIntervalRuntime:
             radius = self.calibrator.predict(alpha, partition)
             if self.calibrator.ready(partition, alpha) and np.isfinite(radius):
                 center = float(window[Y_HAT].sum())
-                result.loc[terminal_idx, lower_col] = center - float(radius)
-                result.loc[terminal_idx, upper_col] = center + float(radius)
+                # The terminal cumulative row is the length-1 case of the
+                # vectorised spread: the ``ready & isfinite`` guard above is the
+                # scalar form of the per-horizon ``issue`` mask.
+                lower, upper = self.spread.to_interval(
+                    np.array([center]),
+                    np.array([float(radius)]),
+                    np.array([True]),
+                )
+                result.loc[terminal_idx, lower_col] = lower[0]
+                result.loc[terminal_idx, upper_col] = upper[0]
             result.loc[terminal_idx, CALIBRATION_STATE_REF] = self._state_ref(partition)
             result.loc[terminal_idx, CONFORMAL_PARTITION] = partition
             self._issued_count += 1
