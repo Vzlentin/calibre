@@ -29,6 +29,12 @@ class SpreadContext:
     per-origin and depends on accumulated out-of-sample state, so it threads
     through context rather than construction; ``None`` leaves the in-sample draw
     geometry unscaled.
+
+    ``joint_inflation`` maps the same per-node keys to a joint/simultaneous
+    coverage factor ``kappa >= 1`` applied *after* the held-out factor clears the
+    ``MAX_HELD_OUT_FACTOR`` clamp, so it can only ever widen a node and never flip
+    a clamped node back to unscaled. ``None`` (the un-inflated / default behaviour) leaves
+    the held-out width un-inflated.
     """
 
     frame: pd.DataFrame
@@ -37,6 +43,7 @@ class SpreadContext:
     seed: int = 0
     protection_period: int | None = None
     held_out_half_width: dict[str, float] | None = None
+    joint_inflation: dict[str, float] | None = None
 
 
 class Spread(Protocol):

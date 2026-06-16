@@ -778,3 +778,218 @@ def test_held_out_none_is_byte_identical_to_unscaled():
     )
     np.testing.assert_array_equal(none_lo, base_lo)
     np.testing.assert_array_equal(none_hi, base_hi)
+
+
+# --- joint/simultaneous inflation (spread level) -------------------------
+
+
+def _joint_context(
+    frame: pd.DataFrame,
+    fitted: pd.DataFrame,
+    held_out: dict[str, float],
+    joint_inflation: dict[str, float] | None,
+    *,
+    alpha: float = 0.1,
+    seed: int = 7,
+) -> SpreadContext:
+    return SpreadContext(
+        frame=frame,
+        alpha=alpha,
+        fitted_values=fitted,
+        seed=seed,
+        held_out_half_width=held_out,
+        joint_inflation=joint_inflation,
+    )
+
+
+def test_joint_inflated_draws_stay_coherent():
+    # Coherence under a non-trivial kappa > 1: each aggregate node's (lower, upper)
+    # equals the exact sum of its members' jointly-scaled draw quantiles, because
+    # kappa is a pre-S scalar on bottom deviations and quantiles are read after S.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=512)
+    fitted = _fitted([2.0, -3.0, 5.0, -4.0, 1.0], [1.0, -1.0, 4.0, -2.0, 0.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 9.0, "SeasonalNaive:h1:B": 2.5}
+    kappa = 1.7
+    joint = {"SeasonalNaive:h1:A": kappa, "SeasonalNaive:h1:B": kappa}
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, joint)
+    )
+
+    raw = _reconstruct_draws(
+        summing,
+        ["A", "B"],
+        {"A": 10.0, "B": 20.0},
+        {"A": fitted_resid(fitted, "A"), "B": fitted_resid(fitted, "B")},
+        draw_count=512,
+        seed=7,
+    )
+    centers_b = np.array([10.0, 20.0])
+    factor_a = (held_out["SeasonalNaive:h1:A"] / _raw_half_width(raw[0], 0.1)) * kappa
+    factor_b = (held_out["SeasonalNaive:h1:B"] / _raw_half_width(raw[1], 0.1)) * kappa
+    scaled = centers_b[:, None] + (raw - centers_b[:, None]) * np.array([[factor_a], [factor_b]])
+    total = scaled.sum(axis=0)
+    exp_lo, exp_hi = np.quantile(total, [0.05, 0.95])
+    np.testing.assert_allclose((lower[3], upper[3]), (exp_lo, exp_hi))
+    np.testing.assert_allclose((lower[2], upper[2]), (exp_lo, exp_hi))
+    np.testing.assert_allclose(np.quantile(scaled[0], [0.05, 0.95]), (lower[0], upper[0]))
+
+
+def test_kappa_widens_every_node_relative_to_held_out_only():
+    # kappa >= 1 only widens: every bottom node's emitted width is >= its held-out-only
+    # (kappa-disabled) width, and strictly wider when kappa > 1.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=2000)
+    resid = list(np.linspace(-15.0, 15.0, 61))
+    fitted = _fitted(resid, resid)
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 8.0, "SeasonalNaive:h1:B": 6.0}
+    joint = {"SeasonalNaive:h1:A": 1.5, "SeasonalNaive:h1:B": 1.5}
+
+    u4_lo, u4_hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, None)
+    )
+    lo, hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, joint)
+    )
+    for i in (0, 1):
+        assert (hi[i] - lo[i]) >= (u4_hi[i] - u4_lo[i]) - 1e-9
+        assert (hi[i] - lo[i]) > (u4_hi[i] - u4_lo[i])
+    # The joint-widened bottom width equals the held-out target * kappa exactly.
+    np.testing.assert_allclose((hi[0] - lo[0]) / 2.0, held_out["SeasonalNaive:h1:A"] * 1.5)
+
+
+def test_kappa_one_is_byte_identical_to_held_out_only():
+    # kappa == 1.0 (cold start) must leave the held-out geometry byte-identical: the joint
+    # correction is a strict no-op until the held-out max-quantile exceeds 1.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=256)
+    fitted = _fitted([2.0, -3.0, 5.0, -1.0], [1.0, -2.0, 3.0, -4.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 9.0, "SeasonalNaive:h1:B": 2.5}
+    one = {"SeasonalNaive:h1:A": 1.0, "SeasonalNaive:h1:B": 1.0}
+
+    u4_lo, u4_hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, None)
+    )
+    lo, hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, one)
+    )
+    np.testing.assert_array_equal(lo, u4_lo)
+    np.testing.assert_array_equal(hi, u4_hi)
+
+
+def test_kappa_never_narrower_at_clamp_boundary():
+    # A node whose raw inner-window is tiny against its held-out target is clamped to
+    # factor 1.0 (un-inflated width = in-sample). Applying kappa to that clamped node
+    # must never make it NARROWER than the un-inflated width — the clamp-order fix.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=256)
+    # A: tiny-but-nonzero spread -> implied held-out factor far above MAX_HELD_OUT_FACTOR.
+    fitted = _fitted([1e-6, -1e-6, 1e-6, -1e-6], [3.0, -3.0, 6.0, -6.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 9.0, "SeasonalNaive:h1:B": 9.0}
+    joint = {"SeasonalNaive:h1:A": 2.0, "SeasonalNaive:h1:B": 2.0}
+
+    base_lo, base_hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, None)
+    )
+    lo, hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, joint)
+    )
+    # A (clamped to factor 1.0) must be STRICTLY ~2x its un-inflated width: kappa rides
+    # the surviving factor AFTER the clamp, so it widens even a clamped node exactly.
+    # A "kappa-before-clamp" or "drop-kappa-on-clamped-node" mutation goes red here.
+    np.testing.assert_allclose((hi[0] - lo[0]), (base_hi[0] - base_lo[0]) * 2.0)
+    # B (un-clamped) is widened past its un-inflated width too.
+    assert (hi[1] - lo[1]) > (base_hi[1] - base_lo[1])
+
+
+def test_joint_aggregate_is_member_sum_not_independently_calibrated():
+    # With kappa > 1, each aggregate width still equals the quantile of the summed
+    # jointly-scaled member draws (coherence) — NOT an independent per-aggregate
+    # calibrated band (which would add the per-node radii).
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=1024)
+    fitted = _fitted([2.0, -3.0, 5.0, -4.0, 1.0], [1.0, -1.0, 4.0, -2.0, 0.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 7.0, "SeasonalNaive:h1:B": 3.0}
+    kappa = 1.4
+    joint = {"SeasonalNaive:h1:A": kappa, "SeasonalNaive:h1:B": kappa}
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, joint)
+    )
+    raw = _reconstruct_draws(
+        summing,
+        ["A", "B"],
+        {"A": 10.0, "B": 20.0},
+        {"A": fitted_resid(fitted, "A"), "B": fitted_resid(fitted, "B")},
+        draw_count=1024,
+        seed=7,
+    )
+    centers_b = np.array([10.0, 20.0])
+    factor_a = (held_out["SeasonalNaive:h1:A"] / _raw_half_width(raw[0], 0.1)) * kappa
+    factor_b = (held_out["SeasonalNaive:h1:B"] / _raw_half_width(raw[1], 0.1)) * kappa
+    scaled = centers_b[:, None] + (raw - centers_b[:, None]) * np.array([[factor_a], [factor_b]])
+    exp_lo, exp_hi = np.quantile(scaled.sum(axis=0), [0.05, 0.95])
+    np.testing.assert_allclose((lower[3], upper[3]), (exp_lo, exp_hi))
+    # Sub-additive: the coherent aggregate half-width is strictly below the naive
+    # sum of the two jointly-scaled per-node radii.
+    naive_band = (held_out["SeasonalNaive:h1:A"] + held_out["SeasonalNaive:h1:B"]) * kappa
+    assert (upper[3] - lower[3]) / 2.0 < naive_band
+
+
+def test_cumulative_joint_inflated_window_stays_coherent():
+    # The same coherence-under-kappa property on the cumulative window-sum path.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=512)
+    fitted = _fitted([2.0, -3.0, 5.0, -4.0, 1.0], [1.0, -1.0, 4.0, -2.0, 0.0])
+    protection = 3
+    centers_by_node = {"A": 30.0, "B": 60.0}
+    held_out = {"SeasonalNaive:cumulative:A": 12.0, "SeasonalNaive:cumulative:B": 4.0}
+    kappa = 1.6
+    joint = {"SeasonalNaive:cumulative:A": kappa, "SeasonalNaive:cumulative:B": kappa}
+    context = SpreadContext(
+        frame=_cumulative_frame(ORIGIN, protection=protection),
+        alpha=0.1,
+        fitted_values=fitted,
+        seed=7,
+        protection_period=protection,
+        held_out_half_width=held_out,
+        joint_inflation=joint,
+    )
+
+    bounds = spread.cumulative_interval(
+        context, present_bottom=["A", "B"], centers_by_node=centers_by_node, alpha=0.1
+    )
+
+    window = _reconstruct_window_draws(
+        summing,
+        ["A", "B"],
+        centers_by_node,
+        {"A": fitted_resid(fitted, "A"), "B": fitted_resid(fitted, "B")},
+        draw_count=512,
+        seed=7,
+        protection=protection,
+    )
+    centers_b = np.array([30.0, 60.0])
+    factor_a = (held_out["SeasonalNaive:cumulative:A"] / _raw_half_width(window[0], 0.1)) * kappa
+    factor_b = (held_out["SeasonalNaive:cumulative:B"] / _raw_half_width(window[1], 0.1)) * kappa
+    scaled = centers_b[:, None] + (window - centers_b[:, None]) * np.array([[factor_a], [factor_b]])
+    exp_lo, exp_hi = np.quantile(scaled.sum(axis=0), [0.05, 0.95])
+    np.testing.assert_allclose(bounds["__total__"], (exp_lo, exp_hi))
+    np.testing.assert_allclose(bounds["group=g"], (exp_lo, exp_hi))
+    np.testing.assert_allclose(bounds["A"], np.quantile(scaled[0], [0.05, 0.95]))

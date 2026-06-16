@@ -66,6 +66,102 @@ def _frame(origin: pd.Timestamp, y_hat: float, y: float | None = None) -> pd.Dat
     )
 
 
+def _coherent_index():
+    from calibre.reconciliation.summing import build_hierarchy_index
+
+    return build_hierarchy_index(pd.DataFrame({"unique_id": ["A", "B"], "group": ["g", "g"]}))
+
+
+def _coherent_apply_frame(origin: pd.Timestamp) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            "ds": [origin + pd.Timedelta(weeks=1)] * 2,
+            Y: [np.nan, np.nan],
+            Y_HAT: [50.0, 80.0],
+            H: [1, 1],
+            FORECAST_ORIGIN: [origin, origin],
+            MODEL_NAME: ["model", "model"],
+        }
+    )
+
+
+def _coherent_fitted(origin: pd.Timestamp, rng) -> pd.DataFrame:
+    from calibre.core.forecast_frame import DS, FITTED_Y_HAT
+
+    dates = pd.date_range("2022-01-01", periods=30, freq="W")
+    rows = []
+    for node in ("A", "B"):
+        for ds, resid in zip(dates, rng.normal(0.0, 2.0, size=30), strict=True):
+            rows.append(
+                {UNIQUE_ID: node, DS: ds, Y: float(resid), MODEL_NAME: "model", FITTED_Y_HAT: 0.0}
+            )
+    return pd.DataFrame(rows)
+
+
+def test_coherent_joint_store_round_trips_through_json_safe_partition_store() -> None:
+    """The co-located joint store survives the backend's JSON-safe per-partition store.
+
+    Exercises the exact persistence shape the backend uses — ``get_partition_states``
+    -> ``to_json_safe_state`` per partition -> store -> ``from_partition_states`` — to
+    prove the node-vector joint state co-locates on the marginal rows, round-trips
+    through strict-JSON serialization, and reattaches with byte-identical emitted
+    coherent bounds. No reconciliation pipeline is needed: this is the conformal
+    surface the backend's upsert loop drives.
+    """
+    from calibre.conformal.partitions import series_partition
+    from calibre.conformal.runtime import to_json_safe_state
+    from calibre.core.forecast_frame import interval_column_names
+
+    index = _coherent_index()
+    config = SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=40,
+        spread="coherent_draws",
+        draw_count=300,
+        draw_seed=11,
+        partition_key=series_partition,
+    )
+    lower_col, upper_col = interval_column_names(0.9)
+
+    def run(split_at: int | None) -> list:
+        runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+        rng = np.random.default_rng(7)
+        origin = pd.Timestamp("2023-01-01")
+        captured = []
+        for step in range(20):
+            origin = origin + pd.Timedelta(weeks=1)
+            if split_at is not None and step == split_at:
+                # Mirror the backend: serialize every partition row JSON-safe, then
+                # rehydrate from those exact stored payloads.
+                stored = {
+                    key: to_json_safe_state(state)
+                    for key, state in runtime.get_partition_states().items()
+                }
+                runtime = SymmetricIntervalRuntime.from_partition_states(
+                    config, stored, hierarchy_index=index
+                )
+            runtime.set_fitted_values(_coherent_fitted(origin, rng))
+            applied = runtime.apply(_coherent_apply_frame(origin))
+            ordered = applied.sort_values(UNIQUE_ID)
+            captured.append(ordered[[lower_col, upper_col]].to_numpy(dtype=float))
+            resolved = applied.copy()
+            resolved[Y] = resolved[UNIQUE_ID].map(
+                {n: c + rng.normal(0.0, 4.0) for n, c in (("A", 50.0), ("B", 80.0))}
+            )
+            runtime.observe(resolved)
+        return captured
+
+    single = run(None)
+    resumed = run(12)
+    saw_finite = False
+    for one, two in zip(single, resumed, strict=True):
+        np.testing.assert_array_equal(one, two)
+        saw_finite = saw_finite or bool(np.isfinite(one).any())
+    assert saw_finite
+
+
 def test_symmetric_runtime_from_state_restores_calibrator_and_controller() -> None:
     config = SymmetricIntervalConfig(
         method="aci",
