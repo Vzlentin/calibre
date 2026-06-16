@@ -524,3 +524,57 @@ def test_precompute_empty_inputs_are_noops() -> None:
     assert source._lookup_cache.empty
     source.precompute(index.node_labels, [])
     assert source._lookup_cache.empty
+
+
+def test_under_seeded_precompute_falls_through_to_lazy_byte_identically() -> None:
+    """An out-of-seed ``(node, ds)`` resolves via lazy, byte-identical to never-seeded.
+
+    The lazy fallback is the design's load-bearing safety net: a pair the
+    Cartesian seed missed (here an omitted ds — exactly what a freq mismatch
+    would yield) must still resolve through :meth:`_compute_lookup` and append to
+    the *non-empty* pre-seeded cache (the concat arm in :meth:`_lookup_for`) with
+    no duplicate-index / bad-``get_indexer`` hazard. The fully-lazy source that
+    never had ``precompute`` called is the oracle: identical rows prove the
+    fallback's value, complete-set membership, and pending-row behaviour.
+    """
+    history = _bottom_history()
+    hierarchy = _hierarchy()
+    window = _window_ds()
+    # UNDER-seed: warm only the first three window dates, omitting the last one.
+    seeded_dates = window[:-1]
+    omitted = window[-1]
+    assert omitted not in seeded_dates
+
+    ledger = _ledger(
+        [
+            # In-seed pair: makes the pre-seeded cache genuinely non-empty before
+            # the lazy miss appends, so the concat arm runs with a populated cache.
+            ("item_id=item_a", "2024-01-02"),
+            # Out-of-seed pairs on the omitted last date: must fall through to lazy.
+            ("item_id=item_a", "2024-01-04"),
+            ("store_id=s1", "2024-01-04"),
+            (TOTAL_LABEL, "2024-01-04"),
+            ("item_a_s1", "2024-01-04"),
+            # Incomplete aggregate on the omitted date: stays pending either way.
+            ("item_id=item_b", "2024-01-04"),
+        ]
+    )
+    origins = [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-04")]
+
+    index = build_hierarchy_index(hierarchy)
+    under_seeded = HierarchyActualsSource(history, index)
+    under_seeded.precompute(index.node_labels, seeded_dates)
+    seeded = _resolve_sequence(under_seeded, ledger, origins)
+
+    # A fresh-per-origin lazy source never serves a precompute hit — the oracle.
+    fresh = []
+    current = ledger
+    for origin in origins:
+        current, new = HierarchyActualsSource(history, build_hierarchy_index(hierarchy)).resolve(
+            current, origin
+        )
+        fresh.append((current.copy(), new.copy()))
+
+    for (s_updated, s_new), (f_updated, f_new) in zip(seeded, fresh, strict=True):
+        pd.testing.assert_frame_equal(s_updated, f_updated, check_exact=True)
+        pd.testing.assert_frame_equal(s_new, f_new, check_exact=True)
