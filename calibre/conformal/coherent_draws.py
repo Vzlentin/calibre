@@ -36,6 +36,13 @@ from calibre.reconciliation.summing import SparseSummingMatrix
 
 DEFAULT_DRAW_COUNT = 200
 
+# Cap the held-out width re-anchoring: a target/raw-half-width ratio above this
+# means the raw inner-quantile window is degenerate relative to the held-out
+# radius (a heavy-tailed node), so scaling would explode outlier draws instead
+# of faithfully re-anchoring the width. Such nodes fall back to in-sample
+# geometry rather than distort the reconciled aggregate.
+MAX_HELD_OUT_FACTOR = 1.0e3
+
 
 @dataclass(frozen=True, slots=True)
 class CoherentDraws:
@@ -73,9 +80,11 @@ class CoherentDraws:
 
         ``centers``/``radii``/``issue`` align positionally with ``context.frame``
         rows. The marginal calibrator's ``issue`` gate is honoured unchanged —
-        rows it has not made ready stay ``NaN`` — but the bounds themselves come
-        from the reconciled draw quantiles, not from ``radii``. ``radii`` is
-        accepted for interface parity and is otherwise unused on this path.
+        rows it has not made ready stay ``NaN`` — and the bounds come from the
+        reconciled draw quantiles, with each bottom node's draw spread re-anchored
+        to the held-out half-width in ``context.held_out_half_width`` (see
+        :meth:`_fill_section`). ``radii`` is accepted for interface parity and is
+        otherwise unused on this path; the held-out width threads via ``context``.
         """
         if context is None:
             raise ValueError(
@@ -90,6 +99,7 @@ class CoherentDraws:
             return lower, upper
 
         residuals = self._bottom_residuals(context)
+        held_out = context.held_out_half_width
         centers = np.asarray(centers, dtype=float)
         issue = np.asarray(issue, dtype=bool)
 
@@ -115,6 +125,7 @@ class CoherentDraws:
                 centers=centers,
                 issue=issue,
                 residuals=residuals,
+                held_out=held_out,
                 base_seed=int(context.seed),
                 alpha=float(context.alpha),
                 lower=lower,
@@ -133,12 +144,32 @@ class CoherentDraws:
         centers: np.ndarray,
         issue: np.ndarray,
         residuals: dict[tuple[str, str], np.ndarray],
+        held_out: dict[str, float] | None,
         base_seed: int,
         alpha: float,
         lower: np.ndarray,
         upper: np.ndarray,
     ) -> None:
-        """Reconcile one cross-section's draws and write its per-node bounds."""
+        """Reconcile one cross-section's draws and write its per-node bounds.
+
+        The ``issue`` gate and the width come from the *same* per-partition
+        marginal calibrator but answer different questions: ``issue`` is its
+        readiness (rows stay ``NaN`` until it has held-out history), while the
+        width is its ``(1-alpha)`` radius re-anchoring the in-sample draw spread.
+        Each bottom node's deviations-from-center are scaled by
+        ``held_out_half_width / raw_draw_half_width`` — both measured at the same
+        ``[alpha/2, 1-alpha/2]`` endpoints :meth:`_reconcile_quantiles` reads — so
+        held-out calibration owns the width while the bootstrap carries the draw
+        *shape* (asymmetry, intermittency, zero-collapse). The single symmetric
+        scalar scales both tails: it is a deliberate simplification, not a unit
+        mismatch — the numerator is the held-out absolute-error radius and the
+        denominator the in-sample bootstrap spread, different populations by
+        design. Scaling is applied **before** ``S @ bottom_draws`` and quantiles
+        are read **after**, so ``y_draw = S @ b_draw`` stays exact; held-out
+        ownership is therefore **bottom-level** only — aggregate nodes are the
+        coherent sum-of-member quantile, not an independently calibrated band.
+        Degenerate or thin-history nodes fall back to factor 1.0 (unscaled).
+        """
         row_by_label = {uids[i]: i for i in sel}
         present_bottom = [b for b in self.summing.bottom_ids if b in row_by_label]
         if not present_bottom:
@@ -146,9 +177,10 @@ class CoherentDraws:
         subset = self.summing.subset(present_bottom)
 
         section_model = str(models[sel[0]])
+        section_horizon = int(horizons[sel[0]])
         centers_b = np.array([centers[row_by_label[b]] for b in subset.bottom_ids], dtype=float)
         rng = np.random.default_rng(
-            _section_seed(base_seed, section_model, origins[sel[0]], int(horizons[sel[0]]))
+            _section_seed(base_seed, section_model, origins[sel[0]], section_horizon)
         )
         draws = centers_b[:, None] + _bootstrap(
             [
@@ -158,6 +190,8 @@ class CoherentDraws:
             self.draw_count,
             rng,
         )
+        keys = [f"{section_model}:h{section_horizon}:{b}" for b in subset.bottom_ids]
+        draws = _rescale_to_held_out(draws, centers_b, held_out, keys, alpha)
         lo, hi = self._reconcile_quantiles(subset, draws, alpha)
 
         label_to_index = {label: idx for idx, label in enumerate(subset.node_labels)}
@@ -196,7 +230,11 @@ class CoherentDraws:
         Draws are summed over ``h <= protection_period`` per bottom node, then
         reconciled once through ``S`` so the window-sum interval is coherent at
         every node. Returns ``{node_label: (lower, upper)}`` for the present
-        cross-section; the runtime keys these onto the terminal-``h`` rows.
+        cross-section; the runtime keys these onto the terminal-``h`` rows. The
+        window-sum deviations are re-anchored to the cumulative partition's
+        held-out radius (the complete-window residual distribution) the same way
+        the per-horizon path is — pre-``S``, deviations-only, with the
+        degenerate/thin-history fallback — so window-sum coherence stays exact.
         """
         if context.protection_period is None:
             raise ValueError("cumulative_interval requires context.protection_period")
@@ -221,6 +259,8 @@ class CoherentDraws:
                 rng,
             )
         window += centers_b[:, None]
+        keys = [f"{model}:cumulative:{b}" for b in subset.bottom_ids]
+        window = _rescale_to_held_out(window, centers_b, context.held_out_half_width, keys, alpha)
         lo, hi = self._reconcile_quantiles(subset, window, alpha)
         return {
             label: (float(lo[idx]), float(hi[idx])) for idx, label in enumerate(subset.node_labels)
@@ -254,6 +294,49 @@ class CoherentDraws:
         for (model, uid), group in keyed.groupby(["__model__", "__uid__"], sort=False):
             residuals[(str(model), str(uid))] = group["__resid__"].to_numpy()
         return residuals
+
+
+def _rescale_to_held_out(
+    draws: np.ndarray,
+    centers_b: np.ndarray,
+    held_out: dict[str, float] | None,
+    keys: list[str],
+    alpha: float,
+) -> np.ndarray:
+    """Scale each bottom node's deviations-from-center to its held-out half-width.
+
+    ``draws`` is ``(n_bottom, B)`` of ``center + bootstrap`` samples and ``keys``
+    holds the marginal partition key per bottom row. The per-node factor is
+    ``held_out_half_width / raw_draw_half_width``, both at ``[alpha/2,
+    1-alpha/2]``; the deviations ``draws - center`` are scaled and the center is
+    added back, so the draw *shape* is preserved and only the width is re-anchored
+    to the held-out radius. Returns a new array, leaving ``draws`` untouched.
+
+    Falls back to factor 1.0 (unscaled, never ``NaN``) whenever the raw spread is
+    degenerate (non-positive half-width) or the held-out radius is missing,
+    ``NaN``, or non-finite — the marginal calibrator returns ``+inf`` under the
+    ``higher`` rule on thin history, which degrades to today's in-sample geometry
+    rather than blowing the width to infinity. It also falls back when the implied
+    factor exceeds :data:`MAX_HELD_OUT_FACTOR`: a raw inner-window that small
+    relative to the target means a heavy-tailed node the ``[alpha/2, 1-alpha/2]``
+    half-width misrepresents, so re-anchoring would explode the node's outlier
+    draws into the reconciled aggregate quantiles rather than re-scale faithfully.
+    """
+    if held_out is None:
+        return draws
+    deviations = draws - centers_b[:, None]
+    lo_raw, hi_raw = np.quantile(draws, [alpha / 2.0, 1.0 - alpha / 2.0], axis=1)
+    raw_half_width = (hi_raw - lo_raw) / 2.0
+    factors = np.ones(len(keys), dtype=float)
+    for i, key in enumerate(keys):
+        target = held_out.get(key)
+        if target is None or not np.isfinite(target) or raw_half_width[i] <= 0.0:
+            continue
+        factor = float(target) / raw_half_width[i]
+        if factor > MAX_HELD_OUT_FACTOR:
+            continue
+        factors[i] = factor
+    return centers_b[:, None] + deviations * factors[:, None]
 
 
 def _bootstrap(

@@ -547,8 +547,9 @@ class SymmetricIntervalRuntime:
 
         Carries the frame slice (positionally aligned with the centers/radii
         arrays), the working ``alpha``, the staged fitted-value sidecar, the base
-        draw seed, and the cumulative protection period. The point adapter
-        ignores it; only :class:`CoherentDraws` reads it.
+        draw seed, the cumulative protection period, and — only for the coherent
+        spread — the held-out half-widths that re-anchor each bottom node's draw
+        spread. The point adapter ignores it; only :class:`CoherentDraws` reads it.
         """
         return SpreadContext(
             frame=frame,
@@ -556,7 +557,47 @@ class SymmetricIntervalRuntime:
             fitted_values=self._fitted_values,
             seed=int(self.config.draw_seed),
             protection_period=self.config.protection_period,
+            held_out_half_width=self._held_out_half_widths(frame, alpha),
         )
+
+    def _held_out_half_widths(self, frame: pd.DataFrame, alpha: float) -> dict[str, float] | None:
+        """Map each bottom node's lookup key to its held-out ``(1-alpha)`` radius.
+
+        Keys are the spread's per-bottom-node lookup keys
+        (``"{model}:h{h}:{node}"`` / ``"{model}:cumulative:{node}"``); each value
+        is the existing marginal calibrator's held-out radius for that node's
+        *actual* partition. Under per-series partitioning a node's partition is
+        itself, so each node carries its own radius; under global partitioning
+        every node maps to the single pooled radius. Keying by the node but
+        valuing by the real partition is what lets the held-out width engage
+        under either partition instead of silently missing when the calibrator
+        pools series. Returns ``None`` for the point spread (which ignores
+        context), so the default path allocates nothing new.
+        """
+        if not isinstance(self.spread, CoherentDraws):
+            return None
+        models = frame[MODEL_NAME].to_numpy()
+        nodes = frame[UNIQUE_ID].astype(str).to_numpy()
+        base = self._base_partition_values(frame)
+        if self.config.mode == "cumulative":
+            spread_keys = [
+                f"{model}:cumulative:{node}" for model, node in zip(models, nodes, strict=True)
+            ]
+            real_keys = [f"{model}:cumulative:{b}" for model, b in zip(models, base, strict=True)]
+        else:
+            horizons = frame[H].to_numpy()
+            spread_keys = [
+                f"{model}:h{int(horizon)}:{node}"
+                for model, horizon, node in zip(models, horizons, nodes, strict=True)
+            ]
+            real_keys = self._partition_values(frame)
+        partitions = sorted(set(real_keys))
+        radii, _ = self.calibrator.predict_batch(float(alpha), partitions)
+        radius_by_partition = dict(zip(partitions, radii, strict=True))
+        return {
+            spread_key: float(radius_by_partition[real_key])
+            for spread_key, real_key in zip(spread_keys, real_keys, strict=True)
+        }
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
         started = time.perf_counter()
