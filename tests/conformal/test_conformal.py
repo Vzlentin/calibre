@@ -1273,3 +1273,452 @@ def test_analytic_resume_state_unchanged():
     for state in runtime.get_partition_states().values():
         assert "held_out_half_width" not in state
         assert "held_out_half_width" not in state.get("calibrator", {})
+
+
+# --- U5 joint/simultaneous coverage (end-to-end reduced lattice) -------------
+
+
+def _u5_runtime(window: int = 80, *, joint_enabled: bool = True):
+    from calibre.conformal.runtime import SymmetricIntervalRuntime
+
+    index = _coherent_hierarchy_index()
+    runtime = SymmetricIntervalRuntime(_u4_config(window), hierarchy_index=index)
+    if not joint_enabled:
+        # The kappa=1 baseline: never inflate, so simultaneous coverage reflects the
+        # uncorrected coherent sum-of-member band (the Bonferroni-degrading regime).
+        runtime._joint_inflation_map = lambda frame, alpha, held_out: None  # type: ignore[method-assign]
+    return runtime
+
+
+def _run_lattice(runtime, *, steps=400, warm=200, oos_scale, rho=0.5, seed=2024):
+    """Drive apply->observe over origins; return per-node and simultaneous coverage.
+
+    Cross-node-dependent OOS errors (shared common shock, coefficient ``rho``) so the
+    joint correction has a realised dependence to learn. Coverage is scored on the
+    warm tail only, using the lagged estimator the runtime applies.
+    """
+    from calibre.core.forecast_frame import UNIQUE_ID, Y, interval_column_names
+
+    lower_col, upper_col = interval_column_names(0.9)
+    rng = np.random.default_rng(seed)
+    centers = {"A": 50.0, "B": 80.0}
+    inside = {"A": 0, "B": 0}
+    total = {"A": 0, "B": 0}
+    simultaneous_inside = 0
+    simultaneous_total = 0
+    origin = pd.Timestamp("2023-01-01")
+    for step in range(steps):
+        origin = origin + pd.Timedelta(weeks=1)
+        fitted = _u4_fitted(
+            origin, {n: rng.normal(0.0, 2.0, size=40) for n in ("A", "B")}, periods=40
+        )
+        runtime.set_fitted_values(fitted)
+        applied = runtime.apply(_u4_apply_frame(origin, dict(centers)))
+
+        common = rng.normal(0.0, 1.0)
+        actuals = {}
+        for n in ("A", "B"):
+            idio = rng.normal(0.0, 1.0)
+            shock = (rho * common + np.sqrt(1.0 - rho**2) * idio) * oos_scale[n]
+            actuals[n] = centers[n] + shock
+        resolved = applied.copy()
+        resolved[Y] = resolved[UNIQUE_ID].map(actuals)
+        if step >= warm:
+            covered_all = True
+            scored_any = False
+            for _, row in resolved.iterrows():
+                node = row[UNIQUE_ID]
+                lo, hi = row[lower_col], row[upper_col]
+                if np.isnan(lo) or np.isnan(hi):
+                    covered_all = False
+                    continue
+                scored_any = True
+                total[node] += 1
+                ok = lo <= actuals[node] <= hi
+                if ok:
+                    inside[node] += 1
+                else:
+                    covered_all = False
+            if scored_any:
+                simultaneous_total += 1
+                if covered_all:
+                    simultaneous_inside += 1
+        runtime.observe(resolved)
+    return inside, total, simultaneous_inside, simultaneous_total
+
+
+def test_simultaneous_coverage_two_sided_on_reduced_lattice():
+    # On a small cross-node-dependent hierarchy, the joint correction lifts realised
+    # SIMULTANEOUS coverage (all bottom nodes covered at the same origin) toward the
+    # 1-alpha target where the kappa=1 baseline under-covers (Bonferroni-degraded).
+    # The lagged finite-sample estimator approaches but need not perfectly hit the
+    # nominal, so the band is two-sided: meaningfully above the baseline, close to
+    # the target, and bounded above (never grossly over). Per-LEVEL (bottom)
+    # marginal coverage is reported too.
+    oos_scale = {"A": 6.0, "B": 1.5}
+
+    inside_j, total_j, sim_in_j, sim_tot_j = _run_lattice(_u5_runtime(), oos_scale=oos_scale)
+    _, _, sim_in_b, sim_tot_b = _run_lattice(_u5_runtime(joint_enabled=False), oos_scale=oos_scale)
+
+    assert sim_tot_j > 100 and sim_tot_b > 100
+    joint_sim = sim_in_j / sim_tot_j
+    baseline_sim = sim_in_b / sim_tot_b
+    # The correction strictly and materially helps vs the uncorrected coherent band.
+    assert joint_sim >= baseline_sim + 0.03
+    # Bounded two-sided: approaches the 1-alpha target from a lagged estimator, and
+    # never over-covers grossly (an unbounded kappa would blow past this).
+    assert 0.85 <= joint_sim <= 0.99
+    # The uncorrected baseline visibly under-covers simultaneously (the gap U5 closes).
+    assert baseline_sim < 0.85
+    # Per-LEVEL bottom marginal coverage stays valid after the (only-widening) joint
+    # inflation.
+    for node in ("A", "B"):
+        assert inside_j[node] / total_j[node] >= 0.88
+
+
+def test_per_node_marginal_validity_preserved_under_joint():
+    # The joint inflation only widens, so each bottom node's realised marginal
+    # coverage stays >= 1-alpha (here >= 0.88 on the finite warm tail).
+    oos_scale = {"A": 5.0, "B": 5.0}
+    inside, total, _, _ = _run_lattice(_u5_runtime(), oos_scale=oos_scale, rho=0.6)
+    for node in ("A", "B"):
+        assert total[node] > 30
+        assert inside[node] / total[node] >= 0.88
+
+
+def test_standardisation_balances_scale_per_series():
+    # Under per-series partitioning a large-scale node must not dominate kappa: with
+    # each node carrying its own sigma_i, the cross-node max of r_i/sigma_i is scale
+    # free. Companion: under global partitioning the standardisation collapses
+    # (every node shares the pooled sigma), the documented degeneracy.
+    from calibre.conformal.partitions import global_partition, series_partition
+    from calibre.conformal.runtime import (
+        SymmetricIntervalConfig,
+        SymmetricIntervalRuntime,
+        joint_key,
+    )
+    from calibre.core.forecast_frame import UNIQUE_ID, Y
+
+    index = _coherent_hierarchy_index()
+
+    def warm_and_kappa(partition_key):
+        config = SymmetricIntervalConfig(
+            method="mscp",
+            coverage=0.9,
+            calibration_window=40,
+            spread="coherent_draws",
+            draw_count=200,
+            draw_seed=11,
+            partition_key=partition_key,
+        )
+        runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+        rng = np.random.default_rng(5)
+        origin = pd.Timestamp("2023-01-01")
+        # A is ~50x B's scale: a raw-residual max would be dominated by A.
+        scale = {"A": 50.0, "B": 1.0}
+        for _ in range(60):
+            origin = origin + pd.Timedelta(weeks=1)
+            runtime.set_fitted_values(
+                _u4_fitted(origin, {n: rng.normal(0.0, scale[n], size=30) for n in ("A", "B")})
+            )
+            applied = runtime.apply(_u4_apply_frame(origin, {"A": 50.0, "B": 80.0}))
+            resolved = applied.copy()
+            resolved[Y] = resolved[UNIQUE_ID].map(
+                {n: c + rng.normal(0.0, scale[n]) for n, c in (("A", 50.0), ("B", 80.0))}
+            )
+            runtime.observe(resolved)
+        frame = _u4_apply_frame(origin, {"A": 50.0, "B": 80.0})
+        held = runtime._held_out_half_widths(frame, 0.1)
+        sigma_by_node = {"A": held[f"{_U4_MODEL}:h1:A"], "B": held[f"{_U4_MODEL}:h1:B"]}
+        jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+        # Inspect each node's contribution to the per-origin max under this sigma.
+        a_dominates = 0
+        b_dominates = 0
+        for labels, scores in runtime._joint_history[jkey]:
+            std = {
+                str(lbl): float(s) / sigma_by_node[str(lbl)]
+                for lbl, s in zip(labels, scores, strict=True)
+            }
+            if std["A"] >= std["B"]:
+                a_dominates += 1
+            else:
+                b_dominates += 1
+        return a_dominates, b_dominates
+
+    a_series, b_series = warm_and_kappa(series_partition)
+    # Per-series standardisation balances scale: B drives the max a real fraction of
+    # the time, not ~never as it would under a raw-residual max.
+    assert b_series > 0.20 * (a_series + b_series)
+
+    a_global, b_global = warm_and_kappa(global_partition)
+    # Global degeneracy: one pooled sigma, so the max collapses to the raw-residual
+    # max and the large-scale node A dominates nearly always.
+    assert a_global > b_global
+
+
+def test_thin_history_and_missing_sigma_fall_back_kappa_one():
+    # A too-thin joint window yields kappa = 1.0 (no widening); a node whose sigma_i
+    # is +inf/missing is excluded from the max and never produces NaN/inf.
+    from calibre.conformal.runtime import joint_key
+
+    runtime = _u5_runtime(window=40)
+    jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+
+    # Empty store -> cold-start kappa of exactly 1.0.
+    assert runtime._joint_kappa(jkey, 0.1, {"A": 2.0, "B": 3.0}) == 1.0
+
+    # Seed one origin's raw scores, then a missing/inf sigma must drop that node.
+    import numpy as _np
+
+    runtime._append_joint_scores(
+        jkey, _np.asarray(["A", "B"], dtype=object), _np.asarray([4.0, 9.0], dtype=float)
+    )
+    # B excluded (inf sigma) -> kappa from A alone = max(4/2, 1) = 2.0, finite.
+    kappa = runtime._joint_kappa(jkey, 0.1, {"A": 2.0, "B": _np.inf})
+    assert _np.isfinite(kappa) and kappa == pytest.approx(2.0)
+    # Both sigmas missing -> no node survives -> kappa falls back to 1.0.
+    assert runtime._joint_kappa(jkey, 0.1, {}) == 1.0
+
+
+# --- U5 node-vector store + persistence/resume -------------------------------
+
+
+def _warm_coherent_runtime(steps=18, *, split_at=None, window=40):
+    """Warm a coherent per-series runtime over origins, optionally persist/restore.
+
+    Returns the (possibly resumed) runtime plus the captured per-origin bounds so
+    callers can assert byte-identity across the persisted boundary.
+    """
+    from calibre.conformal.runtime import SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import UNIQUE_ID, Y, interval_column_names
+
+    index = _coherent_hierarchy_index()
+    config = _u4_config(window)
+    lower_col, upper_col = interval_column_names(0.9)
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    rng = np.random.default_rng(7)
+    origin = pd.Timestamp("2023-01-01")
+    captured = []
+    for step in range(steps):
+        origin = origin + pd.Timedelta(weeks=1)
+        if split_at is not None and step == split_at:
+            states = runtime.get_partition_states()
+            runtime = SymmetricIntervalRuntime.from_partition_states(
+                config, states, hierarchy_index=index
+            )
+        runtime.set_fitted_values(
+            _u4_fitted(origin, {n: rng.normal(0.0, 2.0, size=30) for n in ("A", "B")})
+        )
+        applied = runtime.apply(_u4_apply_frame(origin, {"A": 50.0, "B": 80.0}))
+        ordered = applied.sort_values(UNIQUE_ID)
+        captured.append(ordered[[lower_col, upper_col]].to_numpy(dtype=float))
+        resolved = applied.copy()
+        resolved[Y] = resolved[UNIQUE_ID].map(
+            {n: c + rng.normal(0.0, 4.0) for n, c in (("A", 50.0), ("B", 80.0))}
+        )
+        runtime.observe(resolved)
+    return runtime, captured
+
+
+def test_joint_store_round_trips_with_byte_identical_kappa_and_bounds():
+    # Run N origins single-pass; run the same with persist/restore across the
+    # partitioned surface mid-stream. The joint store rehydrates and the emitted
+    # coherent bounds are byte-identical across the boundary.
+    _, single = _warm_coherent_runtime(steps=18, split_at=None)
+    _, resumed = _warm_coherent_runtime(steps=18, split_at=10)
+    saw_finite = False
+    for one, two in zip(single, resumed, strict=True):
+        np.testing.assert_array_equal(one, two)
+        saw_finite = saw_finite or bool(np.isfinite(one).any())
+    assert saw_finite
+
+
+def test_joint_store_is_ragged_no_nan_pad():
+    # With varying present-node sets the store stays ragged (present nodes only), so
+    # the serialized state is strict-JSON-parseable (no NaN/Infinity tokens).
+    import json
+
+    from calibre.conformal.runtime import SymmetricIntervalRuntime, joint_key
+    from calibre.core.forecast_frame import UNIQUE_ID, Y
+
+    index = _coherent_hierarchy_index()
+    config = _u4_config()
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    rng = np.random.default_rng(3)
+    origin = pd.Timestamp("2023-01-01")
+    for step in range(12):
+        origin = origin + pd.Timedelta(weeks=1)
+        present = ["A", "B"] if step % 2 == 0 else ["A"]  # B absent on odd origins
+        runtime.set_fitted_values(
+            _u4_fitted(origin, {n: rng.normal(0.0, 2.0, size=30) for n in present})
+        )
+        applied = runtime.apply(_u4_apply_frame(origin, {n: 50.0 for n in present}))
+        resolved = applied.copy()
+        resolved[Y] = resolved[UNIQUE_ID].map({n: 50.0 + rng.normal(0.0, 4.0) for n in present})
+        runtime.observe(resolved)
+
+    jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+    lengths = {len(labels) for labels, _ in runtime._joint_history[jkey]}
+    assert lengths == {1, 2}  # ragged: present-node-only vectors, no NaN pad
+    serialized = runtime._serialized_joint_history()
+    text = json.dumps(serialized)  # default allow_nan=True would still emit tokens
+    # A strict parse rejects NaN/Infinity tokens; the ragged invariant guarantees none.
+    json.loads(text, parse_constant=_reject_constant)
+
+
+def _reject_constant(token):
+    raise ValueError(f"non-finite JSON token: {token}")
+
+
+def test_resume_leaves_marginal_keyset_byte_identical():
+    # After get_partition_states -> from_partition_states, the rehydrated marginal
+    # score_history keyset carries NO ::joint:: key (no phantom marginal partition).
+    runtime, _ = _warm_coherent_runtime(steps=14, split_at=None)
+    states = runtime.get_partition_states()
+    from calibre.conformal.runtime import (
+        JOINT_KEY_INFIX,
+        SymmetricIntervalRuntime,
+    )
+
+    index = _coherent_hierarchy_index()
+    rebuilt = SymmetricIntervalRuntime.from_partition_states(
+        _u4_config(), states, hierarchy_index=index
+    )
+    marginal_keys = rebuilt.calibrator.get_state()["score_history"].keys()
+    assert all(JOINT_KEY_INFIX not in key for key in marginal_keys)
+    assert marginal_keys  # non-empty: the marginal store survived the round-trip
+
+
+def test_unique_id_lookalike_does_not_collide_with_joint_key():
+    # A unique_id literally named to mimic a joint key cannot collide: marginal keys
+    # are single-colon, joint keys carry the reserved double-colon infix.
+    from calibre.conformal.runtime import JOINT_KEY_INFIX, joint_key
+
+    lookalike = "model::joint::h1"  # a data-controlled node id forging the infix
+    marginal_partition = f"model:h1:{lookalike}"  # how it enters the marginal keyspace
+    jkey = joint_key("model", "perhorizon", 1)
+    assert jkey == "model::joint::h1"
+    # The marginal partition key never equals a joint key, and the joint infix never
+    # appears as the WHOLE marginal key (only nested inside the node-id segment).
+    assert marginal_partition != jkey
+    assert not marginal_partition.startswith(f"model{JOINT_KEY_INFIX}")
+
+
+def test_old_rows_without_joint_key_rehydrate_empty():
+    # A persisted state lacking the joint_history key rehydrates to an empty joint
+    # store (kappa = 1 until refill) — backward compatibility with pre-U5 rows.
+    from calibre.conformal.runtime import (
+        JOINT_HISTORY_KEY,
+        SymmetricIntervalRuntime,
+        joint_key,
+    )
+
+    runtime, _ = _warm_coherent_runtime(steps=12, split_at=None)
+    states = runtime.get_partition_states()
+    stripped = {
+        key: {k: v for k, v in state.items() if k != JOINT_HISTORY_KEY}
+        for key, state in states.items()
+    }
+    index = _coherent_hierarchy_index()
+    rebuilt = SymmetricIntervalRuntime.from_partition_states(
+        _u4_config(), stripped, hierarchy_index=index
+    )
+    assert rebuilt._joint_history == {}
+    jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+    assert rebuilt._joint_kappa(jkey, 0.1, {"A": 2.0, "B": 3.0}) == 1.0
+
+
+def test_joint_store_respects_window_maxlen():
+    # The joint deque is bounded by calibration_window: more origins than the window
+    # never grows the store past maxlen.
+    from calibre.conformal.runtime import joint_key
+
+    window = 6
+    runtime, _ = _warm_coherent_runtime(steps=20, window=window)
+    jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+    assert len(runtime._joint_history[jkey]) == window
+
+
+def test_marginal_observe_stream_byte_identical():
+    # A coherent apply/observe round-trip produces identical marginal score_history
+    # and NONCONFORMITY_SCORE to a kappa-disabled baseline: the joint pass is purely
+    # additive and never perturbs the marginal stream.
+    from calibre.conformal.runtime import SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import NONCONFORMITY_SCORE, UNIQUE_ID, Y
+
+    index = _coherent_hierarchy_index()
+
+    def run(joint_enabled):
+        config = _u4_config()
+        runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+        if not joint_enabled:
+            runtime._joint_inflation_map = lambda frame, alpha, held_out: None  # type: ignore[method-assign]
+        rng = np.random.default_rng(7)
+        origin = pd.Timestamp("2023-01-01")
+        scores = []
+        for _ in range(16):
+            origin = origin + pd.Timedelta(weeks=1)
+            runtime.set_fitted_values(
+                _u4_fitted(origin, {n: rng.normal(0.0, 2.0, size=30) for n in ("A", "B")})
+            )
+            applied = runtime.apply(_u4_apply_frame(origin, {"A": 50.0, "B": 80.0}))
+            resolved = applied.copy()
+            resolved[Y] = resolved[UNIQUE_ID].map(
+                {n: c + rng.normal(0.0, 4.0) for n, c in (("A", 50.0), ("B", 80.0))}
+            )
+            observed = runtime.observe(resolved)
+            scores.append(observed[NONCONFORMITY_SCORE].to_numpy(dtype=float))
+        return scores, runtime.calibrator.get_state()["score_history"]
+
+    scores_joint, hist_joint = run(True)
+    scores_base, hist_base = run(False)
+    for one, two in zip(scores_joint, scores_base, strict=True):
+        np.testing.assert_array_equal(one, two)
+    assert set(hist_joint) == set(hist_base)
+    for key in hist_joint:
+        np.testing.assert_array_equal(hist_joint[key], hist_base[key])
+
+
+def test_analytic_runtime_never_allocates_joint_store():
+    # The analytic path's joint store is None and stays None through apply/observe,
+    # and its partition states carry no joint_history key (byte-identical default).
+    from calibre.conformal.partitions import series_partition
+    from calibre.conformal.runtime import (
+        JOINT_HISTORY_KEY,
+        SymmetricIntervalConfig,
+        SymmetricIntervalRuntime,
+    )
+    from calibre.core.forecast_frame import (
+        DS,
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        UNIQUE_ID,
+        Y_HAT,
+        H,
+        Y,
+    )
+
+    config = SymmetricIntervalConfig(
+        method="mscp", coverage=0.9, calibration_window=8, partition_key=series_partition
+    )
+    runtime = SymmetricIntervalRuntime(config)
+    assert runtime._joint_history is None
+    origin = pd.Timestamp("2023-01-01")
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            DS: [origin + pd.Timedelta(weeks=1)] * 2,
+            Y: [np.nan, np.nan],
+            Y_HAT: [10.0, 20.0],
+            H: [1, 1],
+            FORECAST_ORIGIN: [origin, origin],
+            MODEL_NAME: ["model", "model"],
+        }
+    )
+    applied = runtime.apply(frame)
+    resolved = applied.copy()
+    resolved[Y] = [12.0, 17.0]
+    runtime.observe(resolved)
+    assert runtime._joint_history is None
+    for state in runtime.get_partition_states().values():
+        assert JOINT_HISTORY_KEY not in state
