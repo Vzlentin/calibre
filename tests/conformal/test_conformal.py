@@ -846,13 +846,13 @@ def test_cumulative_apply_delegates_terminal_arithmetic_to_spread():
         origin=fresh_origin,
         y_hats=[10.0, 20.0],
     )
-    # Ground truth: the inline ``center ∓ radius`` at the terminal row.
+    # Ground truth: the inline ``center +/- radius`` at the terminal row.
     partition = runtime._partition_for_row(frame.iloc[-1], cumulative=True)
     radius = runtime.calibrator.predict(runtime.controller.get_alpha(), partition)
     assert np.isfinite(radius), "fixture must issue the terminal row to anchor the mutation check"
 
     enriched = runtime.apply(frame)
-    # h=1 (non-terminal) stays NaN; h=2 (terminal) carries center ∓ radius.
+    # h=1 (non-terminal) stays NaN; h=2 (terminal) carries center +/- radius.
     assert pd.isna(enriched[lower_col].iloc[0])
     assert pd.isna(enriched[upper_col].iloc[0])
     assert enriched[lower_col].iloc[1] == pytest.approx(center - float(radius))
