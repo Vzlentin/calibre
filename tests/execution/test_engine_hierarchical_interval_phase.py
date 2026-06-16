@@ -172,8 +172,13 @@ def test_default_route_still_calls_reconcile_and_calibrate(monkeypatch: pytest.M
     )
     calls = {"calibrate": 0}
 
-    def _calibrate(self: BackendEngine, origin_preds: pd.DataFrame, conformal_runtime: Any):
-        del self, conformal_runtime
+    def _calibrate(
+        self: BackendEngine,
+        origin_preds: pd.DataFrame,
+        conformal_runtime: Any,
+        fitted_context: Any,
+    ):
+        del self, conformal_runtime, fitted_context
         calls["calibrate"] += 1
         return origin_preds
 

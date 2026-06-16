@@ -725,15 +725,14 @@ def test_m5_coherent_draws_emit_finite_node_bounds_end_to_end(
     assert (issued[upper_col] >= issued[lower_col]).all()
 
 
-def test_m5_coherent_draws_aggregate_interval_is_sum_of_member_draws(
+def test_m5_coherent_draws_aggregate_brackets_member_center_sum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # R3 coherence on a real run: an aggregate node's bounds equal the empirical
-    # quantiles of the summed member draws. With centers fixed and the same
-    # per-cross-section seed, the aggregate row's hi/lo reproduce the quantile of
-    # the summed bottom-node draw set. We verify the structural consequence: the
-    # aggregate interval brackets the sum of member centers and is no narrower
-    # than additive independence would wrongly suggest is required.
+    # Real-data smoke (NOT the coherence pin — that is the exact quantile-of-
+    # summed-member-draws assertion in tests/conformal/test_coherent_draws.py):
+    # on a real M5 run every aggregate node's emitted interval brackets the sum
+    # of its member centers, the necessary consequence of reconciled draws being
+    # centered on the summed member centers.
     monkeypatch.setattr(
         "calibre.execution.prediction.resolve_adapter",
         lambda model_config: _ResidualAdapter(model_config),

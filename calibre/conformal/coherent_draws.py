@@ -132,7 +132,7 @@ class CoherentDraws:
         horizons: np.ndarray,
         centers: np.ndarray,
         issue: np.ndarray,
-        residuals: dict[str, np.ndarray],
+        residuals: dict[tuple[str, str], np.ndarray],
         base_seed: int,
         alpha: float,
         lower: np.ndarray,
@@ -145,19 +145,20 @@ class CoherentDraws:
             return
         subset = self.summing.subset(present_bottom)
 
+        section_model = str(models[sel[0]])
         centers_b = np.array([centers[row_by_label[b]] for b in subset.bottom_ids], dtype=float)
         rng = np.random.default_rng(
-            _section_seed(base_seed, models[sel[0]], origins[sel[0]], int(horizons[sel[0]]))
+            _section_seed(base_seed, section_model, origins[sel[0]], int(horizons[sel[0]]))
         )
         draws = centers_b[:, None] + _bootstrap(
-            [residuals.get(b, np.zeros(1, dtype=float)) for b in subset.bottom_ids],
+            [
+                residuals.get((section_model, b), np.zeros(1, dtype=float))
+                for b in subset.bottom_ids
+            ],
             self.draw_count,
             rng,
         )
-        # One sparse matmul; coherent[n_bottom:] is literally S_agg @ draws, the
-        # sum of member bottom draws, so any quantile read is aggregate-consistent.
-        coherent = subset.S @ draws
-        lo, hi = np.quantile(coherent, [alpha / 2.0, 1.0 - alpha / 2.0], axis=1)
+        lo, hi = self._reconcile_quantiles(subset, draws, alpha)
 
         label_to_index = {label: idx for idx, label in enumerate(subset.node_labels)}
         for i in sel:
@@ -167,6 +168,20 @@ class CoherentDraws:
                 continue
             lower[i] = lo[node_idx]
             upper[i] = hi[node_idx]
+
+    def _reconcile_quantiles(
+        self, subset: SparseSummingMatrix, bottom_draws: np.ndarray, alpha: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Reconcile bottom draws through ``S`` and read per-node quantiles.
+
+        One sparse matmul: ``subset.S @ bottom_draws`` makes every aggregate row
+        the exact sum of its member bottom draws, so each per-node quantile read
+        off the result is aggregate-consistent. Returns ``(lower, upper)`` aligned
+        positionally to ``subset.node_labels``.
+        """
+        coherent = subset.S @ bottom_draws
+        lo, hi = np.quantile(coherent, [alpha / 2.0, 1.0 - alpha / 2.0], axis=1)
+        return lo, hi
 
     def cumulative_interval(
         self,
@@ -188,31 +203,37 @@ class CoherentDraws:
         residuals = self._bottom_residuals(context)
         subset = self.summing.subset(present_bottom)
         protection = int(context.protection_period)
+        model = str(context.frame[MODEL_NAME].iloc[0])
+        origin = context.frame[FORECAST_ORIGIN].iloc[0]
 
+        # ``centers_by_node`` is already the window-sum point forecast
+        # (sum of ``y_hat`` over ``h <= protection_period``), so the center is
+        # added once; only the residual draws accumulate per horizon.
         centers_b = np.array([centers_by_node[b] for b in subset.bottom_ids], dtype=float)
-        rng = np.random.default_rng(_cumulative_seed(int(context.seed), subset.bottom_ids))
-        # Each of the ``protection`` horizons draws independently, then the
-        # window-sum per bottom node sums those draws; reconciling the summed
-        # bottom draws keeps the window-sum coherent (sum of members == aggregate).
+        rng = np.random.default_rng(
+            _cumulative_seed(int(context.seed), model, origin, subset.bottom_ids)
+        )
         window = np.zeros((len(subset.bottom_ids), self.draw_count), dtype=float)
         for _ in range(protection):
-            window += centers_b[:, None] + _bootstrap(
-                [residuals.get(b, np.zeros(1, dtype=float)) for b in subset.bottom_ids],
+            window += _bootstrap(
+                [residuals.get((model, b), np.zeros(1, dtype=float)) for b in subset.bottom_ids],
                 self.draw_count,
                 rng,
             )
-        coherent = subset.S @ window
-        lo, hi = np.quantile(coherent, [alpha / 2.0, 1.0 - alpha / 2.0], axis=1)
+        window += centers_b[:, None]
+        lo, hi = self._reconcile_quantiles(subset, window, alpha)
         return {
             label: (float(lo[idx]), float(hi[idx])) for idx, label in enumerate(subset.node_labels)
         }
 
-    def _bottom_residuals(self, context: SpreadContext) -> dict[str, np.ndarray]:
-        """Per-bottom-node in-sample residuals ``y - fitted_y_hat`` (per-series).
+    def _bottom_residuals(self, context: SpreadContext) -> dict[tuple[str, str], np.ndarray]:
+        """Per-``(model, node)`` in-sample residuals ``y - fitted_y_hat``.
 
-        Pooling is deliberately avoided: each bottom node keeps its own
-        residual vector so per-series scale and intermittency survive into the
-        reconciled aggregates.
+        Pooling is deliberately avoided on two axes: each bottom node keeps its
+        own residual vector (so per-series scale and intermittency survive into
+        the reconciled aggregates), and residuals are partitioned by model so a
+        multi-model run never bootstraps one model's draws from another model's
+        error distribution.
         """
         fitted = context.fitted_values
         if fitted is None or fitted.empty:
@@ -221,11 +242,17 @@ class CoherentDraws:
                 "none was staged for this origin."
             )
         validate_fitted_values_frame(fitted)
-        uids = fitted[UNIQUE_ID].astype(str).to_numpy()
-        resid = fitted[Y].to_numpy(dtype=float) - fitted[FITTED_Y_HAT].to_numpy(dtype=float)
-        residuals: dict[str, np.ndarray] = {}
-        for uid in np.unique(uids):
-            residuals[str(uid)] = resid[uids == uid]
+        keyed = pd.DataFrame(
+            {
+                "__model__": fitted[MODEL_NAME].astype(str).to_numpy(),
+                "__uid__": fitted[UNIQUE_ID].astype(str).to_numpy(),
+                "__resid__": fitted[Y].to_numpy(dtype=float)
+                - fitted[FITTED_Y_HAT].to_numpy(dtype=float),
+            }
+        )
+        residuals: dict[tuple[str, str], np.ndarray] = {}
+        for (model, uid), group in keyed.groupby(["__model__", "__uid__"], sort=False):
+            residuals[(str(model), str(uid))] = group["__resid__"].to_numpy()
         return residuals
 
 
@@ -259,10 +286,11 @@ def _section_seed(base_seed: int, model: Any, origin: Any, horizon: int) -> int:
     return int.from_bytes(digest, "big")
 
 
-def _cumulative_seed(base_seed: int, bottom_ids: tuple[str, ...]) -> int:
-    """Derive a deterministic per-window seed for a cumulative cross-section."""
+def _cumulative_seed(base_seed: int, model: Any, origin: Any, bottom_ids: tuple[str, ...]) -> int:
+    """Derive a deterministic per-``(model, origin, window)`` cumulative seed."""
+    origin_ns = pd.Timestamp(origin).value
     digest = hashlib.blake2b(
-        f"{base_seed}|cumulative|{'|'.join(bottom_ids)}".encode(),
+        f"{base_seed}|cumulative|{model}|{origin_ns}|{'|'.join(bottom_ids)}".encode(),
         digest_size=8,
     ).digest()
     return int.from_bytes(digest, "big")
