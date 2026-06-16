@@ -840,6 +840,42 @@ def test_fused_parallel_ledger_byte_identical_to_serial(strategy: str) -> None:
     )
 
 
+def test_fused_parallel_ledger_byte_identical_with_default_cpu_per_task() -> None:
+    """T1c: byte-identity holds at the production default ``cpu_per_task=None``.
+
+    The #133 run leaves ``cpu_per_task=None`` (so ``thread_budget(None) == 1``),
+    unlike the other byte gates that pin ``cpu_per_task=1.0``. Gate the default so
+    a regression in the unpinned BLAS-budget path can't slip the byte guarantee.
+    """
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    serial = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=1,
+        cpu_per_task=None,
+    ).ledger.to_df()
+    parallel = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=2,
+        cpu_per_task=None,
+    ).ledger.to_df()
+
+    pd.testing.assert_frame_equal(serial, parallel, check_exact=True)
+    assert _ledger_sha256(serial) == _ledger_sha256(parallel)
+
+
 def test_fused_local_vs_ray_sorted_sanity() -> None:
     """T1b: local-vs-(ray window-of-1) equality up to a sort (separate concern)."""
     pytest.importorskip("ray")
@@ -1078,7 +1114,62 @@ def test_fused_max_concurrency_one_collapses_to_serial(
     assert not serial_local.empty
 
 
-def test_fused_producer_failure_resumes_byte_identically(
+def test_fused_window_holds_more_than_one_task_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T6b: an N=2 run over 3 origins genuinely keeps >1 interval task in flight.
+
+    Positive proof the bounded window is NOT silently degenerating to serial: the
+    byte gates would all still pass at peak-in-flight==1. Track the live count of
+    tasks dispatched-but-not-yet-consumed (the in-flight deque depth) by
+    incrementing on :meth:`_dispatch_origin_intervals` and decrementing on
+    :meth:`_get_origin_intervals`, and assert the high-water mark reaches the
+    window depth. Forcing the window to serial drops the peak to 0 and fails this.
+    """
+    pytest.importorskip("ray")
+    pytest.importorskip("hierarchicalforecast.core")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    in_flight = 0
+    peak_in_flight = 0
+    real_dispatch = BackendEngine._dispatch_origin_intervals
+    real_get = BackendEngine._get_origin_intervals  # already a plain function (staticmethod)
+
+    def _tracking_dispatch(self, origin_preds, context):
+        nonlocal in_flight, peak_in_flight
+        ref = real_dispatch(self, origin_preds, context)
+        in_flight += 1
+        peak_in_flight = max(peak_in_flight, in_flight)
+        return ref
+
+    def _tracking_get(ref):
+        nonlocal in_flight
+        try:
+            return real_get(ref)
+        finally:
+            in_flight -= 1
+
+    monkeypatch.setattr(BackendEngine, "_dispatch_origin_intervals", _tracking_dispatch)
+    monkeypatch.setattr(BackendEngine, "_get_origin_intervals", staticmethod(_tracking_get))
+
+    ledger = _run_m5_hierarchical_intervals(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        strategy="wls_struct",
+        backend="ray",
+        max_concurrency=2,
+        cpu_per_task=1.0,
+    ).ledger.to_df()
+
+    assert not ledger.empty
+    # Window depth is 2 and there are 3 origins, so the producer fills the window
+    # before the first drain — the deque must hold 2 tasks at peak.
+    assert peak_in_flight >= 2
+
+
+def test_fused_producer_failure_resumes_with_identical_rowset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """T7: a worker failing on origin i commits 0..i-1, re-raises named, resumes clean."""
@@ -1153,11 +1244,42 @@ def test_fused_producer_failure_resumes_byte_identically(
         max_concurrency=1,
         cpu_per_task=1.0,
     ).ledger.to_df()
+    # Sort is structural, not a loosened byte gate: resume prepends initial_ledger
+    # (origin 0's committed rows) so the resumed frame's row ORDER differs from a
+    # clean run. This asserts the resumed run reproduces the same ROWSET; the
+    # window-vs-serial byte-identity guarantee is pinned by the T1/T4/T5 sha256
+    # gates, not here.
     keys = [UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME, H]
     pd.testing.assert_frame_equal(
         resumed.sort_values(keys).reset_index(drop=True),
         clean.sort_values(keys).reset_index(drop=True),
     )
+
+
+def test_get_origin_intervals_reraises_wrapper_when_cause_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T7b: a RayTaskError with no ``cause`` is re-raised intact, not unwrapped.
+
+    The unwrap path re-raises ``exc.cause`` so ``_phase`` can name the origin, but
+    a wrapper with ``cause is None`` has nothing to unwrap — assert the original
+    ``RayTaskError`` propagates unchanged (the :func:`backend._get_origin_intervals`
+    fallback ``raise``).
+    """
+    ray = pytest.importorskip("ray")
+    from ray.exceptions import RayTaskError
+
+    # A RayTaskError whose .cause we force to None (the unwrappable-cause branch).
+    wrapper = RayTaskError("compute_origin_intervals", "traceback-string", cause=RuntimeError("x"))
+    wrapper.cause = None
+
+    def _raise_wrapper(_ref: object) -> object:
+        raise wrapper
+
+    monkeypatch.setattr(ray, "get", _raise_wrapper)
+    with pytest.raises(RayTaskError) as excinfo:
+        BackendEngine._get_origin_intervals(object())
+    assert excinfo.value is wrapper
 
 
 def test_fused_cache_and_ref_rebuild_after_owned_runtime_shutdown() -> None:

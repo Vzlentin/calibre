@@ -15,7 +15,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import numpy as np
@@ -402,9 +402,9 @@ class BackendEngine:
         The parallel branch is hard-gated: it runs only on the fused path
         (``hierarchical_interval_phase is not None``) with Ray selected and an
         effective window ``N > 1``. ``max_concurrency`` defaults to ``None`` (the
-        M5 helper sets none), so coerce explicitly to the D3 default of 2 — never
-        Predict's ``or len(...)`` coercion, which would unbound the window and
-        break the peak-N resident-frame bound. Returns ``None`` (collapse to the
+        M5 helper sets none), so coerce explicitly to a default window of 2 —
+        never Predict's ``or len(...)`` coercion, which would unbound the window
+        and break the peak-N resident-frame bound. Returns ``None`` (collapse to the
         serial path) when fused intervals are off, Ray is not selected, or N == 1.
         """
         if self.hierarchical_interval_phase is None:
@@ -514,9 +514,13 @@ class BackendEngine:
                 try:
                     with self._phase("HierarchicalIntervals", origin):
                         origin_preds = self._get_origin_intervals(ref)
-                        self._finish_origin(
-                            ledger, order_ledger, actuals_source, origin, origin_preds, None
-                        )
+                    # _finish_origin runs AFTER the HierarchicalIntervals span closes
+                    # (its Order/Commit open their own spans) to match serial's phase
+                    # attribution; it stays inside the try so a Order/Commit failure
+                    # still drains the remaining in-flight refs.
+                    self._finish_origin(
+                        ledger, order_ledger, actuals_source, origin, origin_preds, None
+                    )
                 except Exception:
                     self._drain_in_flight(in_flight)
                     raise
@@ -1330,9 +1334,13 @@ class BackendEngine:
             self._remote_compute_origin_intervals = self._build_remote(compute_origin_intervals)
         if self._hierarchy_index_ref is None:
             self._hierarchy_index_ref = ray.put(self.hierarchy_index)
-        options: HierarchicalIntervalOptions = cast(
-            NixtlaHierarchicalIntervalPhase, self.hierarchical_interval_phase
-        ).options
+        # The stored phase is the HierarchicalIntervalPhase Protocol, which has no
+        # `.options`; the worker target needs the frozen options off the only
+        # concrete implementor. The isinstance narrows safely AND guards at runtime,
+        # so the access can't silently lie if a second implementor is ever threaded
+        # through — no unchecked cast past the Protocol boundary.
+        assert isinstance(self.hierarchical_interval_phase, NixtlaHierarchicalIntervalPhase)
+        options: HierarchicalIntervalOptions = self.hierarchical_interval_phase.options
         return self._remote_compute_origin_intervals.remote(
             origin_preds,
             self._hierarchy_index_ref,
