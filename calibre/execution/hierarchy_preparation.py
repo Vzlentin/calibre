@@ -44,6 +44,9 @@ class _ConformalConfig(Protocol):
     @property
     def max_partitions(self) -> int | None: ...
 
+    @property
+    def spread(self) -> str: ...
+
     def to_runtime_config(self) -> SymmetricIntervalConfig: ...
 
 
@@ -223,17 +226,22 @@ def _summing_matrix_bytes(config: RunPreparationConfig, hierarchy_index: Hierarc
     (computable from index facts without building anything), the dense float64
     product only for the strategies with no upstream sparse implementation.
     """
+    n_bottom = len(hierarchy_index.bottom_ids)
+    n_nodes = len(hierarchy_index.node_labels)
     if config.hierarchical_intervals is not None:
         strategy = config.hierarchical_intervals.strategy
     elif config.reconciliation is not None and config.reconciliation.strategy != "none":
         strategy = config.reconciliation.strategy
+    elif _coherent_spread_active(config):
+        # The coherent-draws spread builds the sparse csr S at runtime
+        # construction; charge the same csr estimate the sparse roster does.
+        nnz = n_bottom * (2 + len(hierarchy_index.attr_cols))
+        return nnz * 8 + nnz * 4 + (n_nodes + 1) * 4
     else:
         # _hierarchy_for_run returns no hierarchy for these configs, so the
         # eager branch never calls this function; a silent dense estimate here
         # would mask a wiring regression.
         raise ValueError("_summing_matrix_bytes requires an active reconciliation strategy")
-    n_bottom = len(hierarchy_index.bottom_ids)
-    n_nodes = len(hierarchy_index.node_labels)
     if strategy in NIXTLA_SPARSE_STRATEGIES:
         # Identity block + one membership per attribute column + total row.
         nnz = n_bottom * (2 + len(hierarchy_index.attr_cols))
@@ -249,10 +257,21 @@ def _is_point_bottom_up(config: RunPreparationConfig) -> bool:
     )
 
 
+def _coherent_spread_active(config: RunPreparationConfig) -> bool:
+    """Whether the conformal config selects the coherent-draws spread."""
+    return config.conformal is not None and config.conformal.spread == "coherent_draws"
+
+
 def _hierarchy_for_run(config: RunPreparationConfig, bundle: DatasetBundle) -> pd.DataFrame | None:
     if config.hierarchical_intervals is not None:
         if bundle.hierarchy is None:
             raise ValueError("hierarchical_intervals requires a dataset hierarchy")
+        return bundle.hierarchy
+    if _coherent_spread_active(config):
+        # The coherent-draws spread needs S even though point reconciliation is
+        # none; supply the hierarchy so the runtime builder can fold S in.
+        if bundle.hierarchy is None:
+            raise ValueError("conformal spread='coherent_draws' requires a dataset hierarchy")
         return bundle.hierarchy
     if config.reconciliation is None or config.reconciliation.strategy == "none":
         return None

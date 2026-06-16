@@ -73,6 +73,39 @@ def test_invalid_partition_raises_at_parse_time() -> None:
         load_config_from_mapping(_config(conformal={"method": "mscp", "partition": "bogus"}))
 
 
+def test_coherent_draws_spread_threads_to_runtime_config() -> None:
+    config = load_config_from_mapping(
+        _config(
+            conformal={
+                "method": "aci",
+                "spread": "coherent_draws",
+                "draw_count": 64,
+                "draw_seed": 5,
+            }
+        )
+    )
+    assert config.conformal is not None
+    runtime_config = config.conformal.to_runtime_config()
+    assert runtime_config.spread == "coherent_draws"
+    assert runtime_config.draw_count == 64
+    assert runtime_config.draw_seed == 5
+
+
+def test_coherent_draws_spread_rejects_non_none_reconciliation() -> None:
+    with pytest.raises(ValidationError, match="coherent_draws"):
+        load_config_from_mapping(
+            _config(
+                conformal={"method": "aci", "spread": "coherent_draws"},
+                reconciliation={"strategy": "wls_struct"},
+            )
+        )
+
+
+def test_invalid_spread_raises_at_parse_time() -> None:
+    with pytest.raises(ValidationError, match="spread"):
+        load_config_from_mapping(_config(conformal={"method": "mscp", "spread": "bogus"}))
+
+
 def test_unknown_key_raises_at_parse_time() -> None:
     with pytest.raises(ValidationError, match="conformal_window"):
         load_config_from_mapping(_config(conformal={"method": "mscp", "conformal_window": 10}))

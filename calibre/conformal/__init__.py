@@ -10,6 +10,7 @@ from calibre.conformal.adaptive import (
     AdaptiveConformalInference,
     MultiStepAdaptiveConformalInference,
 )
+from calibre.conformal.coherent_draws import CoherentDraws
 from calibre.conformal.cumulative_risk import (
     CumulativeConformalRiskConfig,
     CumulativeRiskRuntime,
@@ -45,6 +46,7 @@ from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPredict
 __all__ = [
     "AdaptiveConformalInference",
     "AnalyticRadius",
+    "CoherentDraws",
     "ConformalRuntime",
     "CumulativeConformalRiskConfig",
     "CumulativeRiskRuntime",

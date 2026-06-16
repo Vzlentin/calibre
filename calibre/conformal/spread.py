@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from calibre.conformal.protocols import SpreadContext
+
 
 @dataclass(frozen=True, slots=True)
 class AnalyticRadius:
@@ -28,8 +30,15 @@ class AnalyticRadius:
         centers: np.ndarray,
         radii: np.ndarray,
         issue: np.ndarray,
+        *,
+        context: SpreadContext | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(lower, upper)`` as ``centers +/- radii`` gated by ``issue``."""
+        """Return ``(lower, upper)`` as ``centers +/- radii`` gated by ``issue``.
+
+        ``context`` is accepted to satisfy the widened :class:`Spread` interface
+        and is deliberately ignored — the point path takes no per-origin frame —
+        so the bounds stay bit-identical to the runtime's original arithmetic.
+        """
         with np.errstate(invalid="ignore"):
             lower = np.where(issue, centers - radii, np.nan)
             upper = np.where(issue, centers + radii, np.nan)

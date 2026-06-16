@@ -3,9 +3,31 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
+import pandas as pd
+
+
+@dataclass(frozen=True)
+class SpreadContext:
+    """Per-origin context a draws-based spread reads; ``None`` for the point path.
+
+    Carries the slice of the origin frame whose rows align positionally with the
+    ``centers``/``radii``/``issue`` arrays passed to :meth:`Spread.to_interval`,
+    the working ``alpha``, the in-sample fitted-value sidecar (``unique_id``,
+    ``ds``, ``y``, ``model_name``, ``fitted_y_hat``) the residual bootstrap reads,
+    a base seed for per-cross-section RNG derivation, and the cumulative
+    protection period (``None`` in per-horizon mode). :class:`AnalyticRadius`
+    ignores it entirely, so the default path never constructs one.
+    """
+
+    frame: pd.DataFrame
+    alpha: float
+    fitted_values: pd.DataFrame | None = None
+    seed: int = 0
+    protection_period: int | None = None
 
 
 class Spread(Protocol):
@@ -16,6 +38,11 @@ class Spread(Protocol):
     final step of "what form the predictive uncertainty takes": mapping
     ``(center, radius)`` into ``(lower, upper)``. The interface is vectorised;
     the cumulative call site passes length-1 arrays.
+
+    ``context`` is a keyword-only, defaulted :class:`SpreadContext` carrying the
+    per-origin frame slice a draws-based adapter needs. It defaults to ``None``
+    so the point adapter (:class:`~calibre.conformal.spread.AnalyticRadius`) is
+    unchanged and the default path stays byte-identical.
     """
 
     def to_interval(
@@ -23,6 +50,8 @@ class Spread(Protocol):
         centers: np.ndarray,
         radii: np.ndarray,
         issue: np.ndarray,
+        *,
+        context: SpreadContext | None = None,
     ) -> tuple[np.ndarray, np.ndarray]: ...
 
 

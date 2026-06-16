@@ -18,9 +18,10 @@ import numpy as np
 import pandas as pd
 
 from calibre.conformal.calibrators import RollingQuantileCalibrator
+from calibre.conformal.coherent_draws import DEFAULT_DRAW_COUNT, CoherentDraws
 from calibre.conformal.controllers import AdaptiveAlphaController, FixedAlphaController
 from calibre.conformal.partitions import GLOBAL_PARTITION, global_partition, series_partition
-from calibre.conformal.protocols import Calibrator, Controller, Score, Spread
+from calibre.conformal.protocols import Calibrator, Controller, Score, Spread, SpreadContext
 from calibre.conformal.scores import absolute_error_score
 from calibre.conformal.spread import AnalyticRadius
 from calibre.conformal.types import IntervalPrediction
@@ -40,12 +41,14 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
+from calibre.reconciliation.summing import HierarchyIndex, sparse_summing_matrix_from_index
 
 logger = logging.getLogger(__name__)
 
 ConformalMethod = Literal["mscp", "aci"]
 ConformalMode = Literal["perhorizon", "cumulative"]
 QuantileRule = Literal["conformal", "higher"]
+SpreadKind = Literal["analytic", "coherent_draws"]
 
 
 def _json_default(value: Any) -> Any:
@@ -147,6 +150,9 @@ class SymmetricIntervalConfig:
     quantile_rule: QuantileRule | None = None
     mode: ConformalMode = "perhorizon"
     protection_period: int | None = None
+    spread: SpreadKind = "analytic"
+    draw_count: int = DEFAULT_DRAW_COUNT
+    draw_seed: int = 0
 
     def __post_init__(self) -> None:
         if self.method not in {"mscp", "aci"}:
@@ -168,6 +174,10 @@ class SymmetricIntervalConfig:
                 raise ValueError("cumulative mode currently supports only method='mscp'")
             if self.protection_period is None or int(self.protection_period) < 1:
                 raise ValueError("cumulative mode requires protection_period >= 1")
+        if self.spread not in {"analytic", "coherent_draws"}:
+            raise ValueError("spread must be 'analytic' or 'coherent_draws'")
+        if int(self.draw_count) < 1:
+            raise ValueError("draw_count must be at least 1")
 
     @property
     def alpha(self) -> float:
@@ -229,6 +239,8 @@ class SymmetricIntervalRuntime:
         controller: Controller | None = None,
         *,
         method_name: str | None = None,
+        spread: Spread | None = None,
+        hierarchy_index: HierarchyIndex | None = None,
     ) -> None:
         if score is None or calibrator is None or controller is None:
             score, calibrator, controller = _components_from_config(config)
@@ -236,22 +248,42 @@ class SymmetricIntervalRuntime:
         self.score = score
         self.calibrator = calibrator
         self.controller = controller
-        # The point-forecast spread is the only adapter today; it carries no
-        # state, so it is owned by the runtime rather than threaded through the
-        # resume-state plumbing. A config selector arrives with the next adapter.
-        self.spread: Spread = AnalyticRadius()
+        # The spread is selector-driven: ``analytic`` -> the stateless
+        # AnalyticRadius (byte-identical default path), ``coherent_draws`` ->
+        # CoherentDraws built with the run-constant summing matrix folded in at
+        # construction (the stable apply(frame) signature is untouched).
+        self.spread: Spread = spread or _spread_from_config(config, hierarchy_index)
+        # Per-origin fitted-value sidecar a draws-based spread reads; the backend
+        # sets it before each apply and clears it after, so it never aliases
+        # across origins. None for the point path.
+        self._fitted_values: pd.DataFrame | None = None
         self.method_name = method_name or config.method
         self._issued_count = 0
+
+    @property
+    def requires_fitted_values(self) -> bool:
+        """Whether the active spread reads the in-sample fitted-value sidecar."""
+        return isinstance(self.spread, CoherentDraws)
+
+    def set_fitted_values(self, fitted_values: pd.DataFrame | None) -> None:
+        """Stage this origin's fitted-value sidecar for a draws-based spread."""
+        self._fitted_values = fitted_values
 
     @classmethod
     def from_state(
         cls,
         config: SymmetricIntervalConfig,
         state: dict[str, Any] | None,
+        *,
+        hierarchy_index: HierarchyIndex | None = None,
     ) -> SymmetricIntervalRuntime:
         """Rehydrate a runtime from a calibration-state snapshot."""
         state = state or {}
-        runtime = cls(config, method_name=state.get("method", config.method))
+        runtime = cls(
+            config,
+            method_name=state.get("method", config.method),
+            hierarchy_index=hierarchy_index,
+        )
         runtime.restore_issued_count(int(state.get("issued_count", 0)))
         if "calibrator" in state:
             runtime.calibrator.set_state(state["calibrator"])
@@ -387,7 +419,8 @@ class SymmetricIntervalRuntime:
         radii, ready = self.calibrator.predict_batch(alpha, partitions)
         issue = ready & np.isfinite(radii)
         centers = result[Y_HAT].to_numpy(dtype=float)
-        lower_values, upper_values = self.spread.to_interval(centers, radii, issue)
+        context = self._spread_context(result, alpha)
+        lower_values, upper_values = self.spread.to_interval(centers, radii, issue, context=context)
 
         # Mirror the per-group accounting of the row-wise path: groups are
         # numbered in first-occurrence order and every row of a group shares
@@ -428,6 +461,8 @@ class SymmetricIntervalRuntime:
         if NONCONFORMITY_SCORE not in result.columns:
             result[NONCONFORMITY_SCORE] = np.nan
 
+        coherent_bounds = self._coherent_cumulative_bounds(result, protection_period)
+
         for _, group in result.groupby([UNIQUE_ID, MODEL_NAME, FORECAST_ORIGIN], sort=False):
             ordered = group.sort_values(H)
             if int(ordered[H].max()) < protection_period:
@@ -444,22 +479,84 @@ class SymmetricIntervalRuntime:
             partition = self._partition_for_row(row, cumulative=True)
             radius = self.calibrator.predict(alpha, partition)
             if self.calibrator.ready(partition, alpha) and np.isfinite(radius):
-                center = float(window[Y_HAT].sum())
-                # The terminal cumulative row is the length-1 case of the
-                # vectorised spread: the ``ready & isfinite`` guard above is the
-                # scalar form of the per-horizon ``issue`` mask.
-                lower, upper = self.spread.to_interval(
-                    np.array([center]),
-                    np.array([float(radius)]),
-                    np.array([True]),
-                )
-                result.loc[terminal_idx, lower_col] = lower[0]
-                result.loc[terminal_idx, upper_col] = upper[0]
+                if coherent_bounds is not None:
+                    # Coherent window-sum bounds were reconciled per cross-section
+                    # up front; the calibrator ready/finite gate is reused here.
+                    bound = coherent_bounds.get(
+                        (str(row[MODEL_NAME]), row[FORECAST_ORIGIN], str(row[UNIQUE_ID]))
+                    )
+                    if bound is not None:
+                        result.loc[terminal_idx, lower_col] = bound[0]
+                        result.loc[terminal_idx, upper_col] = bound[1]
+                else:
+                    center = float(window[Y_HAT].sum())
+                    # The terminal cumulative row is the length-1 case of the
+                    # vectorised spread: the ``ready & isfinite`` guard above is the
+                    # scalar form of the per-horizon ``issue`` mask.
+                    lower, upper = self.spread.to_interval(
+                        np.array([center]),
+                        np.array([float(radius)]),
+                        np.array([True]),
+                    )
+                    result.loc[terminal_idx, lower_col] = lower[0]
+                    result.loc[terminal_idx, upper_col] = upper[0]
             result.loc[terminal_idx, CALIBRATION_STATE_REF] = self._state_ref(partition)
             result.loc[terminal_idx, CONFORMAL_PARTITION] = partition
             self._issued_count += 1
 
         return result
+
+    def _coherent_cumulative_bounds(
+        self, frame: pd.DataFrame, protection_period: int
+    ) -> dict[tuple[str, Any, str], tuple[float, float]] | None:
+        """Reconcile coherent window-sum bounds per ``(model, origin)`` cross-section.
+
+        Returns ``None`` for the point spread (the per-group AnalyticRadius path
+        stays byte-identical). For :class:`CoherentDraws` it returns
+        ``{(model, origin, node): (lower, upper)}`` for every node whose complete
+        protection window is present, reconciled once through ``S`` per
+        cross-section so the window-sum interval is coherent across nodes.
+        """
+        if not isinstance(self.spread, CoherentDraws):
+            return None
+        alpha = float(self.controller.get_alpha())
+        bounds: dict[tuple[str, Any, str], tuple[float, float]] = {}
+        for (model, origin), section in frame.groupby([MODEL_NAME, FORECAST_ORIGIN], sort=False):
+            centers_by_node: dict[str, float] = {}
+            for node, node_group in section.groupby(UNIQUE_ID, sort=False):
+                window = node_group[node_group[H] <= protection_period]
+                if len(window) < protection_period or window[H].duplicated().any():
+                    continue
+                centers_by_node[str(node)] = float(window[Y_HAT].sum())
+            present_bottom = [b for b in self.spread.summing.bottom_ids if b in centers_by_node]
+            if not present_bottom:
+                continue
+            context = self._spread_context(section, alpha)
+            node_bounds = self.spread.cumulative_interval(
+                context,
+                present_bottom=present_bottom,
+                centers_by_node=centers_by_node,
+                alpha=alpha,
+            )
+            for node, bound in node_bounds.items():
+                bounds[(str(model), origin, node)] = bound
+        return bounds
+
+    def _spread_context(self, frame: pd.DataFrame, alpha: float) -> SpreadContext:
+        """Build the per-origin context the active spread reads.
+
+        Carries the frame slice (positionally aligned with the centers/radii
+        arrays), the working ``alpha``, the staged fitted-value sidecar, the base
+        draw seed, and the cumulative protection period. The point adapter
+        ignores it; only :class:`CoherentDraws` reads it.
+        """
+        return SpreadContext(
+            frame=frame,
+            alpha=alpha,
+            fitted_values=self._fitted_values,
+            seed=int(self.config.draw_seed),
+            protection_period=self.config.protection_period,
+        )
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
         started = time.perf_counter()
@@ -657,9 +754,11 @@ class SymmetricIntervalRuntime:
         cls,
         config: SymmetricIntervalConfig,
         partition_states: Mapping[str, dict[str, Any]],
+        *,
+        hierarchy_index: HierarchyIndex | None = None,
     ) -> SymmetricIntervalRuntime:
         if not partition_states:
-            return cls(config)
+            return cls(config, hierarchy_index=hierarchy_index)
 
         merged_state: dict[str, Any] | None = None
         score_history: dict[str, Any] = {}
@@ -686,7 +785,7 @@ class SymmetricIntervalRuntime:
         merged_state["issued_count"] = max_issued_count
         merged_state.setdefault("calibrator", {})
         merged_state["calibrator"]["score_history"] = score_history
-        return cls.from_state(config, merged_state)
+        return cls.from_state(config, merged_state, hierarchy_index=hierarchy_index)
 
 
 def _components_from_config(
@@ -704,7 +803,35 @@ def _components_from_config(
     return absolute_error_score, calibrator, controller
 
 
-def build_symmetric_interval_runtime(config: SymmetricIntervalConfig) -> SymmetricIntervalRuntime:
+def _spread_from_config(
+    config: SymmetricIntervalConfig,
+    hierarchy_index: HierarchyIndex | None,
+) -> Spread:
+    """Build the configured spread, folding ``S`` in at construction for draws.
+
+    ``analytic`` returns the stateless point adapter (the byte-identical default).
+    ``coherent_draws`` builds :class:`~calibre.conformal.coherent_draws.CoherentDraws`
+    from the run-constant sparse summing matrix; it requires a hierarchy index to
+    supply ``S`` even though the run sets ``reconciliation: none``.
+    """
+    if config.spread == "analytic":
+        return AnalyticRadius()
+    if hierarchy_index is None:
+        raise ValueError(
+            "spread='coherent_draws' requires a hierarchy_index to supply the "
+            "summing matrix S; none was threaded into the runtime builder"
+        )
+    return CoherentDraws(
+        summing=sparse_summing_matrix_from_index(hierarchy_index),
+        draw_count=config.draw_count,
+    )
+
+
+def build_symmetric_interval_runtime(
+    config: SymmetricIntervalConfig,
+    *,
+    hierarchy_index: HierarchyIndex | None = None,
+) -> SymmetricIntervalRuntime:
     """Build a :class:`SymmetricIntervalRuntime` from a validated config."""
     score, calibrator, controller = _components_from_config(config)
     return SymmetricIntervalRuntime(
@@ -713,4 +840,5 @@ def build_symmetric_interval_runtime(config: SymmetricIntervalConfig) -> Symmetr
         calibrator=calibrator,
         controller=controller,
         method_name=config.method,
+        hierarchy_index=hierarchy_index,
     )

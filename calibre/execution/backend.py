@@ -225,6 +225,27 @@ class BackendEngine:
                 raise ValueError(
                     "hierarchical intervals cannot be combined with point reconciliation"
                 )
+        self._order_bottom_ids = (
+            frozenset(self.hierarchy_index.bottom_ids)
+            if self.hierarchy_index is not None and order is not None
+            else None
+        )
+        self.order_config = order
+        self.freq = execution.freq
+        self.seed: Seed | None = set_seed(execution.seed) if execution.seed is not None else None
+        self.conformal_config = conformal.config
+        # The coherent-draws spread needs the run-constant summing matrix folded
+        # in at construction, so the hierarchy index is threaded into the builder
+        # here even though the coherent config sets reconciliation: none.
+        self.conformal_runtime = (
+            conformal.runtime
+            if conformal.runtime is not None
+            else build_symmetric_interval_runtime(
+                conformal.config, hierarchy_index=self.hierarchy_index
+            )
+            if conformal.config is not None
+            else None
+        )
         self._requires_fitted_values = bool(
             (
                 reconciliation.hierarchy_index is not None
@@ -235,22 +256,10 @@ class BackendEngine:
                 self.hierarchical_interval_phase is not None
                 and self.hierarchical_interval_phase.requires_fitted_values
             )
-        )
-        self._order_bottom_ids = (
-            frozenset(self.hierarchy_index.bottom_ids)
-            if self.hierarchy_index is not None and order is not None
-            else None
-        )
-        self.order_config = order
-        self.freq = execution.freq
-        self.seed: Seed | None = set_seed(execution.seed) if execution.seed is not None else None
-        self.conformal_config = conformal.config
-        self.conformal_runtime = (
-            conformal.runtime
-            if conformal.runtime is not None
-            else build_symmetric_interval_runtime(conformal.config)
-            if conformal.config is not None
-            else None
+            or (
+                isinstance(self.conformal_runtime, SymmetricIntervalRuntime)
+                and self.conformal_runtime.requires_fitted_values
+            )
         )
         self.streaming_output = output.forecast_path if output.streaming else None
         self.streaming_order_output = output.order_path if output.streaming else None
@@ -651,7 +660,9 @@ class BackendEngine:
                     ReconciliationContext(fitted_values=fitted_context.fitted_values),
                 )
             with self._phase("Calibrate", origin):
-                origin_preds = self._calibrate(origin_preds, active_conformal_runtime)
+                origin_preds = self._calibrate(
+                    origin_preds, active_conformal_runtime, fitted_context
+                )
         self._finish_origin(
             ledger, order_ledger, actuals, origin, origin_preds, active_conformal_runtime
         )
@@ -817,14 +828,26 @@ class BackendEngine:
         self,
         origin_preds: pd.DataFrame,
         conformal_runtime: ConformalRuntime | None,
+        fitted_context: HierarchicalIntervalContext,
     ) -> pd.DataFrame:
         """Calibrate phase — apply conformal intervals to this origin's preds.
 
         No-op (returns the input unchanged) when the runtime is None or the
-        predictions are empty.
+        predictions are empty. A draws-based spread reads the in-sample
+        fitted-value sidecar, so it is staged onto the runtime for this origin
+        and cleared afterwards (it must never alias across origins).
         """
         if conformal_runtime is None or origin_preds.empty:
             return origin_preds
+        if (
+            isinstance(conformal_runtime, SymmetricIntervalRuntime)
+            and conformal_runtime.requires_fitted_values
+        ):
+            conformal_runtime.set_fitted_values(fitted_context.fitted_values)
+            try:
+                return conformal_runtime.apply(origin_preds)
+            finally:
+                conformal_runtime.set_fitted_values(None)
         return conformal_runtime.apply(origin_preds)
 
     def _order(
@@ -1009,12 +1032,15 @@ class BackendEngine:
             self.conformal_runtime = SymmetricIntervalRuntime.from_partition_states(
                 self.conformal_config,
                 partition_states,
+                hierarchy_index=self.hierarchy_index,
             )
             return
         state = self.conformal_state_store.get(self.run_id, RUNTIME_PARTITION)
         if state is None:
             return
-        self.conformal_runtime = SymmetricIntervalRuntime.from_state(self.conformal_config, state)
+        self.conformal_runtime = SymmetricIntervalRuntime.from_state(
+            self.conformal_config, state, hierarchy_index=self.hierarchy_index
+        )
 
     def _persist_conformal_state(self, conformal_runtime: ConformalRuntime | None) -> None:
         if self.run_id is None or self.conformal_state_store is None or conformal_runtime is None:
