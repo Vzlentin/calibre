@@ -137,6 +137,77 @@ def test_bottom_up_preparation_builds_bottom_only_tasks_and_lazy_actuals(
     assert preparation.tasks.global_ == []
 
 
+def test_bottom_up_preparation_precomputes_window_actuals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bottom_only branch warms the actuals cache for node x (origins x horizon).
+
+    The seeded ds set is a superset of the per-origin prediction span and the
+    seeded values match the lazy compute, so a later resolve over that window is
+    a pure cache hit.
+    """
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        lambda *args, **kwargs: None,
+    )
+    calls: list[tuple] = []
+    real_precompute = HierarchyActualsSource.precompute
+
+    def _spy(self, node_labels, ds_values):
+        calls.append((tuple(node_labels), list(pd.to_datetime(pd.Index(ds_values)))))
+        return real_precompute(self, node_labels, ds_values)
+
+    monkeypatch.setattr(HierarchyActualsSource, "precompute", _spy)
+
+    # origins 2024-01-02..03 at horizon 2 -> per-origin span starts at the origin.
+    config = _config(
+        reconciliation={"strategy": "bottom_up"},
+        origins={"start": "2024-01-02", "end": "2024-01-03", "freq": "D"},
+    )
+    preparation = prepare_run(config, _bundle(hierarchy=_hierarchy()))
+
+    assert len(calls) == 1
+    node_labels, ds_values = calls[0]
+    assert preparation.hierarchy_index is not None
+    assert node_labels == preparation.hierarchy_index.node_labels
+    # Span starts at each origin and runs one step past horizon (brackets the
+    # adapter h=1 anchor); union over both origins, deduped.
+    assert set(ds_values) == {
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-03"),
+        pd.Timestamp("2024-01-04"),
+        pd.Timestamp("2024-01-05"),
+    }
+
+
+def test_eager_preparation_never_precomputes_actuals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The else/FrameActualsSource branch never constructs or warms a lazy source."""
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
+        lambda *args, **kwargs: None,
+    )
+
+    def fail_precompute(*args, **kwargs):
+        raise AssertionError("eager (fused/point-recon) preparation must not precompute actuals")
+
+    def fail_construct(*args, **kwargs):
+        raise AssertionError("eager preparation must not construct HierarchyActualsSource")
+
+    monkeypatch.setattr(HierarchyActualsSource, "precompute", fail_precompute)
+    monkeypatch.setattr(
+        "calibre.execution.hierarchy_preparation.HierarchyActualsSource", fail_construct
+    )
+
+    for override in (
+        {"reconciliation": {"strategy": "ols"}},
+        {"hierarchical_intervals": {"method": "nixtla_conformal"}},
+    ):
+        preparation = prepare_run(_config(**override), _bundle(hierarchy=_hierarchy()))
+        assert isinstance(preparation.actuals, pd.DataFrame)
+
+
 def test_prepare_run_threads_one_shared_hierarchy_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -414,3 +414,167 @@ def test_cache_recomputes_only_new_ds_values(monkeypatch) -> None:
     )
     assert seen_ds[0] == {pd.Timestamp("2024-01-02")}
     assert seen_ds[1] == {pd.Timestamp("2024-01-03")}  # cached ds not recomputed
+
+
+# ---------------------------------------------------------------------------
+# #210: precompute warms the window cache once, then resolve is a pure hit.
+# ---------------------------------------------------------------------------
+
+
+def _window_ds() -> list[pd.Timestamp]:
+    """All four dates the bottom history spans."""
+    return list(pd.date_range("2024-01-01", periods=4, freq="D"))
+
+
+def test_precompute_warms_cache_no_recompute_per_origin(monkeypatch) -> None:
+    """T3: after precompute, in-window resolve never re-enters ``_compute_lookup``."""
+    index = build_hierarchy_index(_hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), index)
+    source.precompute(index.node_labels, _window_ds())
+
+    calls: list[set] = []
+    real_compute = source._compute_lookup
+
+    def _spy(uids: pd.Series, ds_values: pd.Series) -> pd.Series:
+        calls.append(set(zip(uids, ds_values, strict=True)))
+        return real_compute(uids, ds_values)
+
+    monkeypatch.setattr(source, "_compute_lookup", _spy)
+
+    ledger = _ledger(
+        [
+            ("item_id=item_a", "2024-01-02"),
+            ("store_id=s1", "2024-01-03"),
+            (TOTAL_LABEL, "2024-01-02"),
+            ("item_b_s1", "2024-01-03"),
+        ]
+    )
+    for origin in (pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")):
+        ledger, _ = source.resolve(ledger, origin)
+
+    # Every requested (node, ds) was seeded by precompute, so the per-origin
+    # resolve serves pure cache hits and never re-runs the window scan.
+    assert calls == []
+    assert ledger.loc[0, Y] == pytest.approx(12.0)
+
+
+def test_precompute_matches_fresh_per_origin_lazy() -> None:
+    """T4: precomputed source equals a fresh-per-origin lazy source row-for-row.
+
+    Proves value AND complete-set-membership identity, including the
+    incomplete-aggregate-stays-pending case (``item_id=item_b`` on the last day,
+    whose member ``item_b_s2`` is unobserved).
+    """
+    history = _bottom_history()
+    hierarchy = _hierarchy()
+    ledger = _ledger(
+        [
+            ("item_id=item_a", "2024-01-02"),
+            ("store_id=s1", "2024-01-02"),
+            (TOTAL_LABEL, "2024-01-02"),
+            ("item_id=item_a", "2024-01-03"),
+            ("item_b_s1", "2024-01-03"),
+            ("item_id=item_b", "2024-01-04"),  # incomplete on last day, stays pending
+        ]
+    )
+    origins = [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-04")]
+
+    index = build_hierarchy_index(hierarchy)
+    precomputed = HierarchyActualsSource(history, index)
+    precomputed.precompute(index.node_labels, _window_ds())
+    seeded = _resolve_sequence(precomputed, ledger, origins)
+
+    # A fresh instance per origin never serves a cache hit — the uncached oracle.
+    fresh = []
+    current = ledger
+    for origin in origins:
+        current, new = HierarchyActualsSource(history, build_hierarchy_index(hierarchy)).resolve(
+            current, origin
+        )
+        fresh.append((current.copy(), new.copy()))
+
+    for (s_updated, s_new), (f_updated, f_new) in zip(seeded, fresh, strict=True):
+        pd.testing.assert_frame_equal(s_updated, f_updated)
+        pd.testing.assert_frame_equal(s_new, f_new)
+
+
+def test_precompute_seeds_only_complete_pairs() -> None:
+    """An incomplete aggregate is never seeded, so its ledger row stays pending."""
+    index = build_hierarchy_index(_hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), index)
+    source.precompute(index.node_labels, _window_ds())
+
+    # item_id=item_b is incomplete on 2024-01-04 (item_b_s2 unobserved): it must
+    # not have been seeded as a complete value, so the row stays pending.
+    last_day = pd.Timestamp("2024-01-04")
+    key = pd.MultiIndex.from_tuples([("item_id=item_b", last_day)], names=[UNIQUE_ID, DS])
+    assert source._lookup_cache.index.get_indexer(key)[0] < 0
+
+    updated, new = source.resolve(_ledger([("item_id=item_b", "2024-01-04")]), last_day)
+    assert pd.isna(updated.loc[0, Y])
+    assert new.empty
+
+
+def test_precompute_empty_inputs_are_noops() -> None:
+    """Empty node or ds inputs leave the cache empty (lazy path unchanged)."""
+    index = build_hierarchy_index(_hierarchy())
+    source = HierarchyActualsSource(_bottom_history(), index)
+
+    source.precompute([], _window_ds())
+    assert source._lookup_cache.empty
+    source.precompute(index.node_labels, [])
+    assert source._lookup_cache.empty
+
+
+def test_under_seeded_precompute_falls_through_to_lazy_byte_identically() -> None:
+    """An out-of-seed ``(node, ds)`` resolves via lazy, byte-identical to never-seeded.
+
+    The lazy fallback is the design's load-bearing safety net: a pair the
+    Cartesian seed missed (here an omitted ds — exactly what a freq mismatch
+    would yield) must still resolve through :meth:`_compute_lookup` and append to
+    the *non-empty* pre-seeded cache (the concat arm in :meth:`_lookup_for`) with
+    no duplicate-index / bad-``get_indexer`` hazard. The fully-lazy source that
+    never had ``precompute`` called is the oracle: identical rows prove the
+    fallback's value, complete-set membership, and pending-row behaviour.
+    """
+    history = _bottom_history()
+    hierarchy = _hierarchy()
+    window = _window_ds()
+    # UNDER-seed: warm only the first three window dates, omitting the last one.
+    seeded_dates = window[:-1]
+    omitted = window[-1]
+    assert omitted not in seeded_dates
+
+    ledger = _ledger(
+        [
+            # In-seed pair: makes the pre-seeded cache genuinely non-empty before
+            # the lazy miss appends, so the concat arm runs with a populated cache.
+            ("item_id=item_a", "2024-01-02"),
+            # Out-of-seed pairs on the omitted last date: must fall through to lazy.
+            ("item_id=item_a", "2024-01-04"),
+            ("store_id=s1", "2024-01-04"),
+            (TOTAL_LABEL, "2024-01-04"),
+            ("item_a_s1", "2024-01-04"),
+            # Incomplete aggregate on the omitted date: stays pending either way.
+            ("item_id=item_b", "2024-01-04"),
+        ]
+    )
+    origins = [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-04")]
+
+    index = build_hierarchy_index(hierarchy)
+    under_seeded = HierarchyActualsSource(history, index)
+    under_seeded.precompute(index.node_labels, seeded_dates)
+    seeded = _resolve_sequence(under_seeded, ledger, origins)
+
+    # A fresh-per-origin lazy source never serves a precompute hit — the oracle.
+    fresh = []
+    current = ledger
+    for origin in origins:
+        current, new = HierarchyActualsSource(history, build_hierarchy_index(hierarchy)).resolve(
+            current, origin
+        )
+        fresh.append((current.copy(), new.copy()))
+
+    for (s_updated, s_new), (f_updated, f_new) in zip(seeded, fresh, strict=True):
+        pd.testing.assert_frame_equal(s_updated, f_updated, check_exact=True)
+        pd.testing.assert_frame_equal(s_new, f_new, check_exact=True)
