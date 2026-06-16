@@ -12,7 +12,7 @@ import logging
 import tempfile
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
@@ -1235,6 +1235,20 @@ class BackendEngine:
         self._hierarchy_index_ref = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
 
+    def _build_remote(self, fn: Callable[..., Any]) -> Any:
+        """Build a ``ray.remote`` handle, applying ``num_cpus`` admission when set.
+
+        ``cpu_per_task`` maps to ``num_cpus`` only when configured; otherwise
+        Ray's auto-detected CPU count governs admission. Shared by the Predict
+        runners and the fused-interval dispatch so the admission rule lives once.
+        """
+        import ray
+
+        remote_fn = ray.remote(fn)
+        if self.execution.cpu_per_task is not None:
+            remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
+        return remote_fn
+
     def _run_global_groups_on_ray(
         self,
         groups: list[tuple[dict, list[ForecastTaskRef]]],
@@ -1244,10 +1258,7 @@ class BackendEngine:
         import ray
 
         if self._remote_process_global_panel is None:
-            remote_fn = ray.remote(_process_global_panel)
-            if self.execution.cpu_per_task is not None:
-                remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
-            self._remote_process_global_panel = remote_fn
+            self._remote_process_global_panel = self._build_remote(_process_global_panel)
         remote_process = self._remote_process_global_panel
         concurrency = self.execution.max_concurrency or len(groups)
         results: list[PredictionResult] = []
@@ -1276,10 +1287,7 @@ class BackendEngine:
         import ray
 
         if self._remote_process_local_chunk is None:
-            remote_fn = ray.remote(_process_local_chunk)
-            if self.execution.cpu_per_task is not None:
-                remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
-            self._remote_process_local_chunk = remote_fn
+            self._remote_process_local_chunk = self._build_remote(_process_local_chunk)
         remote_process = self._remote_process_local_chunk
         concurrency = self.execution.max_concurrency or len(chunk_refs)
         results: list[PredictionResult] = []
@@ -1319,10 +1327,7 @@ class BackendEngine:
         import ray
 
         if self._remote_compute_origin_intervals is None:
-            remote_fn = ray.remote(compute_origin_intervals)
-            if self.execution.cpu_per_task is not None:
-                remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
-            self._remote_compute_origin_intervals = remote_fn
+            self._remote_compute_origin_intervals = self._build_remote(compute_origin_intervals)
         if self._hierarchy_index_ref is None:
             self._hierarchy_index_ref = ray.put(self.hierarchy_index)
         options: HierarchicalIntervalOptions = cast(
