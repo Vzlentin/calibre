@@ -780,7 +780,7 @@ def test_held_out_none_is_byte_identical_to_unscaled():
     np.testing.assert_array_equal(none_hi, base_hi)
 
 
-# --- U5 joint/simultaneous inflation (spread level) -------------------------
+# --- joint/simultaneous inflation (spread level) -------------------------
 
 
 def _joint_context(
@@ -839,8 +839,8 @@ def test_joint_inflated_draws_stay_coherent():
     np.testing.assert_allclose(np.quantile(scaled[0], [0.05, 0.95]), (lower[0], upper[0]))
 
 
-def test_kappa_widens_every_node_relative_to_u4_only():
-    # kappa >= 1 only widens: every bottom node's emitted width is >= its U4-only
+def test_kappa_widens_every_node_relative_to_held_out_only():
+    # kappa >= 1 only widens: every bottom node's emitted width is >= its held-out-only
     # (kappa-disabled) width, and strictly wider when kappa > 1.
     summing = _summing()
     spread = CoherentDraws(summing=summing, draw_count=2000)
@@ -861,12 +861,12 @@ def test_kappa_widens_every_node_relative_to_u4_only():
     for i in (0, 1):
         assert (hi[i] - lo[i]) >= (u4_hi[i] - u4_lo[i]) - 1e-9
         assert (hi[i] - lo[i]) > (u4_hi[i] - u4_lo[i])
-    # The joint-widened bottom width equals the U4 target * kappa exactly.
+    # The joint-widened bottom width equals the held-out target * kappa exactly.
     np.testing.assert_allclose((hi[0] - lo[0]) / 2.0, held_out["SeasonalNaive:h1:A"] * 1.5)
 
 
-def test_kappa_one_is_byte_identical_to_u4_only():
-    # kappa == 1.0 (cold start) must leave the U4 geometry byte-identical: the joint
+def test_kappa_one_is_byte_identical_to_held_out_only():
+    # kappa == 1.0 (cold start) must leave the held-out geometry byte-identical: the joint
     # correction is a strict no-op until the held-out max-quantile exceeds 1.
     summing = _summing()
     spread = CoherentDraws(summing=summing, draw_count=256)
@@ -889,11 +889,11 @@ def test_kappa_one_is_byte_identical_to_u4_only():
 
 def test_kappa_never_narrower_at_clamp_boundary():
     # A node whose raw inner-window is tiny against its held-out target is clamped to
-    # factor 1.0 (U4-only width = in-sample). Applying kappa to that clamped node
-    # must never make it NARROWER than the U4-only width — the clamp-order fix.
+    # factor 1.0 (un-inflated width = in-sample). Applying kappa to that clamped node
+    # must never make it NARROWER than the un-inflated width — the clamp-order fix.
     summing = _summing()
     spread = CoherentDraws(summing=summing, draw_count=256)
-    # A: tiny-but-nonzero spread -> implied U4 factor far above MAX_HELD_OUT_FACTOR.
+    # A: tiny-but-nonzero spread -> implied held-out factor far above MAX_HELD_OUT_FACTOR.
     fitted = _fitted([1e-6, -1e-6, 1e-6, -1e-6], [3.0, -3.0, 6.0, -6.0])
     frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
     centers = np.array([10.0, 20.0, 30.0, 30.0])
@@ -901,16 +901,18 @@ def test_kappa_never_narrower_at_clamp_boundary():
     held_out = {"SeasonalNaive:h1:A": 9.0, "SeasonalNaive:h1:B": 9.0}
     joint = {"SeasonalNaive:h1:A": 2.0, "SeasonalNaive:h1:B": 2.0}
 
-    u4_lo, u4_hi = spread.to_interval(
+    base_lo, base_hi = spread.to_interval(
         centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, None)
     )
     lo, hi = spread.to_interval(
         centers, np.zeros(4), issue, context=_joint_context(frame, fitted, held_out, joint)
     )
-    # A (clamped) is widened by kappa from its in-sample width, never narrower.
-    assert (hi[0] - lo[0]) >= (u4_hi[0] - u4_lo[0]) - 1e-12
-    # B (un-clamped) is widened past its U4 width too.
-    assert (hi[1] - lo[1]) > (u4_hi[1] - u4_lo[1])
+    # A (clamped to factor 1.0) must be STRICTLY ~2x its un-inflated width: kappa rides
+    # the surviving factor AFTER the clamp, so it widens even a clamped node exactly.
+    # A "kappa-before-clamp" or "drop-kappa-on-clamped-node" mutation goes red here.
+    np.testing.assert_allclose((hi[0] - lo[0]), (base_hi[0] - base_lo[0]) * 2.0)
+    # B (un-clamped) is widened past its un-inflated width too.
+    assert (hi[1] - lo[1]) > (base_hi[1] - base_lo[1])
 
 
 def test_joint_aggregate_is_member_sum_not_independently_calibrated():

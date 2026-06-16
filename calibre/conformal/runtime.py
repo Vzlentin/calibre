@@ -59,9 +59,18 @@ SpreadKind = Literal["analytic", "coherent_draws"]
 JOINT_KEY_INFIX = "::joint::"
 
 # State key co-locating the joint store on the marginal partition rows. Read with
-# a default-empty fallback so pre-U5 rows (and the analytic path) rehydrate to an
-# empty joint store rather than failing.
+# a default-empty fallback so rows persisted before the joint store existed (and the
+# analytic path) rehydrate to an empty joint store rather than failing.
 JOINT_HISTORY_KEY = "joint_history"
+
+# Upper bound on the joint inflation ``kappa``, mirroring ``MAX_HELD_OUT_FACTOR``'s
+# philosophy: a degenerate input must not let one node grossly distort the band.
+# ``kappa`` is the cross-node max of ``r_i / sigma_i``, so a warm node whose *current*
+# held-out sigma is tiny-but-positive while its stored raw scores are O(1) yields an
+# exploded ratio that, broadcast to every node and multiplied after the
+# ``MAX_HELD_OUT_FACTOR`` clamp, would over-widen the whole hierarchy with no re-clamp.
+# Cap ``kappa`` so a single degenerate current sigma can't blow the simultaneous band.
+MAX_JOINT_INFLATION = 1.0e2
 
 
 def joint_key(model: str, mode: str, horizon: int | None) -> str:
@@ -345,6 +354,11 @@ class SymmetricIntervalRuntime:
         rebuilt into bounded deques (``maxlen = calibration_window``). A ``::joint::``
         key never reaches the marginal ``score_history`` merge — the store is a
         separate field entirely.
+
+        Each entry is validated before it is trusted: an entry missing ``labels`` or
+        ``scores``, or whose two arrays disagree in length, is dropped (the window
+        degrades to its valid prefix) rather than left to surface as a delayed
+        ``zip(strict=True)`` desync inside :meth:`_joint_kappa`.
         """
         if self._joint_history is None or not serialized:
             return
@@ -354,8 +368,19 @@ class SymmetricIntervalRuntime:
                 maxlen=self.config.calibration_window
             )
             for entry in origins:
+                if "labels" not in entry or "scores" not in entry:
+                    logger.warning("dropping corrupt joint-store entry: missing labels/scores")
+                    continue
                 labels = np.asarray(entry["labels"], dtype=object)
                 scores = np.asarray(entry["scores"], dtype=float)
+                if labels.shape != scores.shape:
+                    logger.warning(
+                        "dropping corrupt joint-store entry: labels/scores length mismatch "
+                        "(%d vs %d)",
+                        labels.size,
+                        scores.size,
+                    )
+                    continue
                 bucket.append((labels, scores))
             store[str(jkey)] = bucket
         self._joint_history = store
@@ -364,9 +389,11 @@ class SymmetricIntervalRuntime:
         """Serialize the node-vector joint store into a JSON-safe nested structure.
 
         Returns ``{joint_key: [{"labels": [...], "scores": [...]}, ...]}`` — ragged,
-        present-node-only entries, so no ``NaN``/``Inf`` is ever produced to
-        serialize (the sole guard against the serializer, which does not reject
-        non-finite tokens). Empty (the analytic path or a cold-start coherent run).
+        present-node-only entries. Two store invariants keep this serializer (which
+        does not reject non-finite tokens) strict-JSON-safe: the ragged shape guards
+        against ``NaN``-padding absent nodes, and :meth:`_append_joint_scores`'s
+        finite-filter guards the score *values*. Empty (the analytic path or a
+        cold-start coherent run).
         """
         if not self._joint_history:
             return {}
@@ -658,8 +685,8 @@ class SymmetricIntervalRuntime:
         is the existing marginal calibrator's held-out radius (``sigma_i``) for
         that node's *actual* partition — **un-inflated**. The joint/simultaneous
         inflation ``kappa`` rides a parallel map (:meth:`_joint_inflation_map`) so
-        the ``MAX_HELD_OUT_FACTOR`` clamp decides factor-1.0-vs-scaled on the U4
-        ratio before ``kappa`` widens it (the clamp-order invariant).
+        the ``MAX_HELD_OUT_FACTOR`` clamp decides factor-1.0-vs-scaled on the
+        un-inflated held-out ratio before ``kappa`` widens it (the clamp-order invariant).
 
         Under per-series partitioning a node's partition is itself, so each node
         carries its own radius; under global partitioning every node maps to the
@@ -752,12 +779,15 @@ class SymmetricIntervalRuntime:
         present-node raw scores by each node's marginal held-out radius
         (``sigma_i``, read at apply time) and take the cross-node max; ``kappa`` is
         the ``(1-alpha)`` empirical quantile of those per-origin maxima, clamped to
-        ``>= 1.0``. By construction ``P(max_i r_i/sigma_i <= kappa) >= 1-alpha``, so
-        widening every bottom band by ``kappa`` lifts simultaneous coverage to the
-        bounded ``>= 1-alpha`` target. Nodes whose ``sigma_i`` is missing,
-        non-finite, or non-positive are excluded from the max (never ``NaN``); a
-        degenerate or thin window — no stored origins, or every origin emptied by
-        the sigma filter — returns ``1.0`` (the cold-start no-op).
+        ``[1.0, MAX_JOINT_INFLATION]``. By construction
+        ``P(max_i r_i/sigma_i <= kappa) >= 1-alpha``, so widening every bottom band by
+        ``kappa`` lifts simultaneous coverage to the bounded ``>= 1-alpha`` target. The
+        upper clamp keeps a degenerate *current* sigma (tiny-but-positive against O(1)
+        stored scores) from exploding ``r_i/sigma_i`` and over-widening the hierarchy.
+        Nodes whose ``sigma_i`` is missing, non-finite, or non-positive are excluded
+        from the max (never ``NaN``); a degenerate or thin window — no stored origins,
+        or every origin emptied by the sigma filter — returns ``1.0`` (the cold-start
+        no-op).
         """
         history = self._joint_history.get(jkey) if self._joint_history is not None else None
         if not history:
@@ -779,18 +809,27 @@ class SymmetricIntervalRuntime:
         if not per_origin_max:
             return 1.0
         quantile = float(np.quantile(np.asarray(per_origin_max, dtype=float), 1.0 - alpha))
-        return max(quantile, 1.0)
+        return min(max(quantile, 1.0), MAX_JOINT_INFLATION)
 
     def _append_joint_scores(self, jkey: str, labels: np.ndarray, scores: np.ndarray) -> None:
         """Append one origin's ragged, node-label-sorted raw score vector.
 
         Stores ``(labels, raw_scores)`` so standardisation (which needs the
-        apply-time ``sigma_i``) is deferred to :meth:`_joint_kappa`. The store is
-        ragged — present nodes only — so no NaN/Inf is ever materialised to
-        serialize. Gated on the coherent spread by the ``None`` store guard.
+        apply-time ``sigma_i``) is deferred to :meth:`_joint_kappa`. Two invariants
+        keep the serialized store strict-JSON-safe: the ragged shape (present nodes
+        only) guards against NaN-padding absent nodes, and the finite-filter here
+        drops any ``(label, score)`` whose score is non-finite (an ``inf`` ``y_hat``
+        would otherwise store an ``inf`` score that survives :meth:`_joint_kappa`'s
+        sigma-only finite filter and serializes to a JSON ``Infinity`` token). Gated
+        on the coherent spread by the ``None`` store guard.
         """
         if self._joint_history is None or labels.size == 0:
             return
+        finite = np.isfinite(scores)
+        if not bool(finite.any()):
+            return
+        labels = labels[finite]
+        scores = scores[finite]
         bucket = self._joint_history.setdefault(jkey, deque(maxlen=self.config.calibration_window))
         bucket.append((labels, scores))
 
@@ -903,6 +942,14 @@ class SymmetricIntervalRuntime:
         """
         if self._joint_history is None:
             return
+        n = len(resolved)
+        # Fail loud on a scores/order/resolved desync rather than tearing the joint
+        # pass silently against the already-committed marginal stream.
+        if scores.shape[0] != n or order.shape[0] != n:
+            raise ValueError(
+                "joint observe pass desync: "
+                f"scores={scores.shape[0]} order={order.shape[0]} resolved={n} must align"
+            )
         models = resolved[MODEL_NAME].astype(str).to_numpy()
         nodes = resolved[UNIQUE_ID].astype(str).to_numpy()
         horizons = resolved[H].to_numpy()
@@ -1033,7 +1080,8 @@ class SymmetricIntervalRuntime:
         # Co-locate the node-vector joint store on the marginal partition rows
         # under the additive ``joint_history`` key (no joint-only row, so the merge
         # loop can never mis-file a phantom marginal partition). Empty on the
-        # analytic path, leaving those rows byte-identical to the pre-U5 shape.
+        # analytic path, leaving those rows byte-identical to the shape before the
+        # joint store was added.
         joint_history = self._serialized_joint_history()
 
         partition_states: dict[str, dict[str, Any]] = {}

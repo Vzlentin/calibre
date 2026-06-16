@@ -1275,7 +1275,7 @@ def test_analytic_resume_state_unchanged():
         assert "held_out_half_width" not in state.get("calibrator", {})
 
 
-# --- U5 joint/simultaneous coverage (end-to-end reduced lattice) -------------
+# --- joint/simultaneous coverage (end-to-end reduced lattice) -------------
 
 
 def _u5_runtime(window: int = 80, *, joint_enabled: bool = True):
@@ -1368,7 +1368,8 @@ def test_simultaneous_coverage_two_sided_on_reduced_lattice():
     # Bounded two-sided: approaches the 1-alpha target from a lagged estimator, and
     # never over-covers grossly (an unbounded kappa would blow past this).
     assert 0.85 <= joint_sim <= 0.99
-    # The uncorrected baseline visibly under-covers simultaneously (the gap U5 closes).
+    # The uncorrected baseline visibly under-covers simultaneously (the gap the joint
+    # correction closes).
     assert baseline_sim < 0.85
     # Per-LEVEL bottom marginal coverage stays valid after the (only-widening) joint
     # inflation.
@@ -1480,16 +1481,114 @@ def test_thin_history_and_missing_sigma_fall_back_kappa_one():
     assert runtime._joint_kappa(jkey, 0.1, {}) == 1.0
 
 
-# --- U5 node-vector store + persistence/resume -------------------------------
+def test_tiny_current_sigma_caps_kappa_and_bounds_emitted_widths():
+    # A warm node whose CURRENT held-out sigma is tiny-but-positive while its stored
+    # joint scores are O(1) yields a huge r/sigma. Without the cap that explodes kappa
+    # and, broadcast to every node after the clamp, over-widens the whole hierarchy.
+    # The MAX_JOINT_INFLATION clamp keeps both kappa and the emitted bottom/aggregate
+    # widths bounded (in the cap regime), not exploded.
+    import numpy as _np
+
+    from calibre.conformal.runtime import (
+        MAX_JOINT_INFLATION,
+        SymmetricIntervalRuntime,
+        joint_key,
+    )
+    from calibre.core.forecast_frame import UNIQUE_ID, interval_column_names
+
+    index = _coherent_hierarchy_index()
+    config = _u4_config(window=40)
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+
+    # O(1) stored scores against a tiny-but-positive current sigma -> r/sigma ~ 1e3.
+    for _ in range(20):
+        runtime._append_joint_scores(
+            jkey, _np.asarray(["A", "B"], dtype=object), _np.asarray([1.0, 1.0], dtype=float)
+        )
+    tiny = 1e-3
+    kappa = runtime._joint_kappa(jkey, 0.1, {"A": tiny, "B": tiny})
+    # Un-capped this would be ~1000; the cap holds it at MAX_JOINT_INFLATION.
+    assert _np.isfinite(kappa)
+    assert kappa == pytest.approx(MAX_JOINT_INFLATION)
+
+    # The emitted widths must stay in the cap regime: bound each bottom width by the
+    # un-inflated held-out radius * MAX_JOINT_INFLATION (kappa only ever widens, and
+    # never past the cap), not blown up by an unbounded ratio.
+    origin = pd.Timestamp("2023-02-01")
+    runtime.set_fitted_values(
+        _u4_fitted(origin, {n: np.full(30, s) for n, s in (("A", tiny), ("B", tiny))})
+    )
+    frame = _u4_apply_frame(origin, {"A": 50.0, "B": 80.0})
+    held = runtime._held_out_half_widths(frame, float(config.alpha))
+    applied = runtime.apply(frame)
+    lower_col, upper_col = interval_column_names(0.9)
+    ordered = applied.sort_values(UNIQUE_ID)
+    for _, row in ordered.iterrows():
+        lo, hi = row[lower_col], row[upper_col]
+        if np.isnan(lo) or np.isnan(hi):
+            continue
+        sigma = held[f"{_U4_MODEL}:h1:{row[UNIQUE_ID]}"]
+        # half-width bounded by sigma * cap (plus a small numerical margin).
+        assert (hi - lo) / 2.0 <= sigma * MAX_JOINT_INFLATION + 1e-6
+
+
+def test_inf_y_hat_score_filtered_keeps_blob_strict_json_and_kappa_finite():
+    # An inf y_hat -> inf raw score must NOT enter the joint store: the finite-filter
+    # at the append seam drops it, so the serialized blob is strict-JSON-parseable
+    # (no Infinity token) and the recomputed kappa stays finite.
+    import json
+
+    import numpy as _np
+
+    from calibre.conformal.runtime import SymmetricIntervalRuntime, joint_key
+    from calibre.core.forecast_frame import UNIQUE_ID, Y_HAT, Y
+
+    index = _coherent_hierarchy_index()
+    config = _u4_config(window=40)
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    rng = np.random.default_rng(11)
+    origin = pd.Timestamp("2023-01-01")
+    for step in range(8):
+        origin = origin + pd.Timedelta(weeks=1)
+        runtime.set_fitted_values(
+            _u4_fitted(origin, {n: rng.normal(0.0, 2.0, size=30) for n in ("A", "B")})
+        )
+        applied = runtime.apply(_u4_apply_frame(origin, {"A": 50.0, "B": 80.0}))
+        resolved = applied.copy()
+        resolved[Y] = resolved[UNIQUE_ID].map({"A": 52.0, "B": 83.0})
+        if step == 4:
+            # Inject an inf forecast for A -> inf raw score on this origin.
+            resolved.loc[resolved[UNIQUE_ID] == "A", Y_HAT] = _np.inf
+        runtime.observe(resolved)
+
+    jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+    # No stored score is non-finite (the inf was filtered at append).
+    for _labels, scores in runtime._joint_history[jkey]:
+        assert _np.isfinite(scores).all()
+
+    serialized = runtime._serialized_joint_history()
+    text = json.dumps(serialized)
+    # Strict parse rejects Infinity/NaN tokens; the finite-filter guarantees none.
+    json.loads(text, parse_constant=_reject_constant)
+
+    kappa = runtime._joint_kappa(jkey, 0.1, {"A": 2.0, "B": 3.0})
+    assert _np.isfinite(kappa)
+
+
+# --- node-vector store + persistence/resume -------------------------------
 
 
 def _warm_coherent_runtime(steps=18, *, split_at=None, window=40):
     """Warm a coherent per-series runtime over origins, optionally persist/restore.
 
-    Returns the (possibly resumed) runtime plus the captured per-origin bounds so
-    callers can assert byte-identity across the persisted boundary.
+    Returns the (possibly resumed) runtime, the captured per-origin bounds so callers
+    can assert byte-identity across the persisted boundary, and a resume-boundary probe
+    (``(joint_store_nonempty, kappa_at_resume)`` or ``None`` when no split happened) so
+    callers can assert the rehydrated store actually engages a ``kappa > 1`` band
+    rather than vacuously satisfying byte-identity on the un-inflated path.
     """
-    from calibre.conformal.runtime import SymmetricIntervalRuntime
+    from calibre.conformal.runtime import SymmetricIntervalRuntime, joint_key
     from calibre.core.forecast_frame import UNIQUE_ID, Y, interval_column_names
 
     index = _coherent_hierarchy_index()
@@ -1499,6 +1598,7 @@ def _warm_coherent_runtime(steps=18, *, split_at=None, window=40):
     rng = np.random.default_rng(7)
     origin = pd.Timestamp("2023-01-01")
     captured = []
+    resume_probe = None
     for step in range(steps):
         origin = origin + pd.Timedelta(weeks=1)
         if split_at is not None and step == split_at:
@@ -1506,6 +1606,15 @@ def _warm_coherent_runtime(steps=18, *, split_at=None, window=40):
             runtime = SymmetricIntervalRuntime.from_partition_states(
                 config, states, hierarchy_index=index
             )
+            # Probe the rehydrated store at the resume boundary: it must be non-empty
+            # AND yield kappa > 1 under this origin's held-out sigmas, so byte-identity
+            # below is an inflated-path equality, not the un-inflated no-op.
+            probe_frame = _u4_apply_frame(origin, {"A": 50.0, "B": 80.0})
+            held = runtime._held_out_half_widths(probe_frame, float(config.alpha))
+            jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+            sigma_by_node = {n: held[f"{_U4_MODEL}:h1:{n}"] for n in ("A", "B")}
+            kappa_at_resume = runtime._joint_kappa(jkey, float(config.alpha), sigma_by_node)
+            resume_probe = (bool(runtime._joint_history.get(jkey)), kappa_at_resume)
         runtime.set_fitted_values(
             _u4_fitted(origin, {n: rng.normal(0.0, 2.0, size=30) for n in ("A", "B")})
         )
@@ -1517,20 +1626,29 @@ def _warm_coherent_runtime(steps=18, *, split_at=None, window=40):
             {n: c + rng.normal(0.0, 4.0) for n, c in (("A", 50.0), ("B", 80.0))}
         )
         runtime.observe(resolved)
-    return runtime, captured
+    return runtime, captured, resume_probe
 
 
 def test_joint_store_round_trips_with_byte_identical_kappa_and_bounds():
     # Run N origins single-pass; run the same with persist/restore across the
     # partitioned surface mid-stream. The joint store rehydrates and the emitted
     # coherent bounds are byte-identical across the boundary.
-    _, single = _warm_coherent_runtime(steps=18, split_at=None)
-    _, resumed = _warm_coherent_runtime(steps=18, split_at=10)
+    # Split late enough that the held-out calibrator is warm (the ``higher`` rule
+    # returns +inf on thin history, pinning kappa to 1.0 until ~window-fill), so the
+    # resume-boundary probe lands on an engaged kappa > 1 rather than the no-op.
+    _, single, _ = _warm_coherent_runtime(steps=22, split_at=None)
+    _, resumed, resume_probe = _warm_coherent_runtime(steps=22, split_at=14)
     saw_finite = False
     for one, two in zip(single, resumed, strict=True):
         np.testing.assert_array_equal(one, two)
         saw_finite = saw_finite or bool(np.isfinite(one).any())
     assert saw_finite
+    # The byte-identity above must not be vacuously satisfied by the un-inflated path:
+    # at the resume boundary the joint store rehydrated non-empty AND kappa engaged.
+    assert resume_probe is not None
+    store_nonempty, kappa_at_resume = resume_probe
+    assert store_nonempty
+    assert kappa_at_resume > 1.0
 
 
 def test_joint_store_is_ragged_no_nan_pad():
@@ -1573,7 +1691,7 @@ def _reject_constant(token):
 def test_resume_leaves_marginal_keyset_byte_identical():
     # After get_partition_states -> from_partition_states, the rehydrated marginal
     # score_history keyset carries NO ::joint:: key (no phantom marginal partition).
-    runtime, _ = _warm_coherent_runtime(steps=14, split_at=None)
+    runtime, _, _ = _warm_coherent_runtime(steps=14, split_at=None)
     states = runtime.get_partition_states()
     from calibre.conformal.runtime import (
         JOINT_KEY_INFIX,
@@ -1606,14 +1724,15 @@ def test_unique_id_lookalike_does_not_collide_with_joint_key():
 
 def test_old_rows_without_joint_key_rehydrate_empty():
     # A persisted state lacking the joint_history key rehydrates to an empty joint
-    # store (kappa = 1 until refill) — backward compatibility with pre-U5 rows.
+    # store (kappa = 1 until refill) — forward-safe rehydration of rows persisted
+    # before the joint store existed.
     from calibre.conformal.runtime import (
         JOINT_HISTORY_KEY,
         SymmetricIntervalRuntime,
         joint_key,
     )
 
-    runtime, _ = _warm_coherent_runtime(steps=12, split_at=None)
+    runtime, _, _ = _warm_coherent_runtime(steps=12, split_at=None)
     states = runtime.get_partition_states()
     stripped = {
         key: {k: v for k, v in state.items() if k != JOINT_HISTORY_KEY}
@@ -1628,13 +1747,45 @@ def test_old_rows_without_joint_key_rehydrate_empty():
     assert rebuilt._joint_kappa(jkey, 0.1, {"A": 2.0, "B": 3.0}) == 1.0
 
 
+def test_corrupt_joint_blob_entry_rehydrates_degraded_not_crashing():
+    # A malformed serialized entry (missing a key, or labels/scores length mismatch)
+    # must be dropped on restore so the window degrades to its valid prefix, instead
+    # of surfacing later as a zip(strict=True) desync inside _joint_kappa.
+    import numpy as _np
+
+    from calibre.conformal.runtime import SymmetricIntervalRuntime, joint_key
+
+    index = _coherent_hierarchy_index()
+    config = _u4_config(window=40)
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    jkey = joint_key(_U4_MODEL, "perhorizon", 1)
+    corrupt = {
+        jkey: [
+            {"labels": ["A", "B"], "scores": [4.0, 9.0]},  # valid
+            {"labels": ["A", "B"]},  # missing "scores"
+            {"labels": ["A", "B", "C"], "scores": [1.0, 2.0]},  # length mismatch
+            {"labels": ["A"], "scores": [3.0]},  # valid (ragged)
+        ]
+    }
+    runtime._restore_joint_history(corrupt)
+
+    # Only the two well-formed entries survived; the corrupt ones were dropped.
+    bucket = runtime._joint_history[jkey]
+    assert len(bucket) == 2
+    for labels, scores in bucket:
+        assert labels.shape == scores.shape
+    # kappa is computable (no delayed zip-strict crash from a torn entry).
+    kappa = runtime._joint_kappa(jkey, 0.1, {"A": 2.0, "B": 3.0})
+    assert _np.isfinite(kappa) and kappa >= 1.0
+
+
 def test_joint_store_respects_window_maxlen():
     # The joint deque is bounded by calibration_window: more origins than the window
     # never grows the store past maxlen.
     from calibre.conformal.runtime import joint_key
 
     window = 6
-    runtime, _ = _warm_coherent_runtime(steps=20, window=window)
+    runtime, _, _ = _warm_coherent_runtime(steps=20, window=window)
     jkey = joint_key(_U4_MODEL, "perhorizon", 1)
     assert len(runtime._joint_history[jkey]) == window
 

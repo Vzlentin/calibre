@@ -33,7 +33,7 @@ class SpreadContext:
     ``joint_inflation`` maps the same per-node keys to a joint/simultaneous
     coverage factor ``kappa >= 1`` applied *after* the held-out factor clears the
     ``MAX_HELD_OUT_FACTOR`` clamp, so it can only ever widen a node and never flip
-    a clamped node back to unscaled. ``None`` (the U4 / default behaviour) leaves
+    a clamped node back to unscaled. ``None`` (the un-inflated / default behaviour) leaves
     the held-out width un-inflated.
     """
 

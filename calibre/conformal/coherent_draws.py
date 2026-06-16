@@ -181,16 +181,18 @@ class CoherentDraws:
         probability that **all** bottom nodes are simultaneously covered to
         ``>= 1-alpha`` — a bounded, Bonferroni-free band. ``kappa`` is applied
         *after* the ``MAX_HELD_OUT_FACTOR`` clamp decision and is ``>= 1``, so it
-        composes multiplicatively with the U4 factor and only ever widens (per-node
-        marginal validity preserved). It is a pre-``S`` scalar on bottom targets,
+        composes multiplicatively with the held-out (un-inflated) factor and only
+        ever widens (per-node marginal validity preserved). It is a pre-``S`` scalar
+        on bottom targets,
         so coherence stays exact. The simultaneous bound is **bottom-level by
         construction**; aggregate simultaneous coverage is a coherent, empirically
         validated consequence of widening members, not a closed-form guarantee.
 
         Two named tradeoffs: (1) the over-determination fact — ``N_bottom`` pre-``S``
         knobs cannot independently set ``N_total > N_bottom`` aggregate widths, so
-        U5 chooses one conservative simultaneous inflation over per-aggregate-exact
-        (incoherent) widths; (2) aggregate over-coverage — ``kappa`` is driven by
+        the joint correction chooses one conservative simultaneous inflation over
+        per-aggregate-exact (incoherent) widths; (2) aggregate over-coverage —
+        ``kappa`` is driven by
         the worst bottom node and applied uniformly, so already sub-additive deep
         aggregates push further above target. Under **global** partitioning every
         node shares the pooled radius, so ``r_i/sigma_i`` standardisation collapses
@@ -359,10 +361,10 @@ def _rescale_to_held_out(
 
     ``joint_inflation`` carries the per-node joint/simultaneous factor
     ``kappa >= 1``. It is applied **after** the ``MAX_HELD_OUT_FACTOR`` clamp
-    decides factor-1.0-vs-scaled on the un-inflated U4 ratio, so inflating the
+    decides factor-1.0-vs-scaled on the un-inflated held-out ratio, so inflating the
     target can never push a scaled node past the threshold and silently revert it
     to in-sample geometry — a ``kappa``-widened node is never narrower than its
-    U4-only width. ``None`` (the U4 / default behaviour) leaves the held-out width
+    un-inflated width. ``None`` (the un-inflated / default behaviour) leaves the held-out width
     un-inflated.
     """
     if held_out is None:
