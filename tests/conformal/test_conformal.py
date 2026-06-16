@@ -855,5 +855,8 @@ def test_cumulative_apply_delegates_terminal_arithmetic_to_spread():
     # h=1 (non-terminal) stays NaN; h=2 (terminal) carries center +/- radius.
     assert pd.isna(enriched[lower_col].iloc[0])
     assert pd.isna(enriched[upper_col].iloc[0])
-    assert enriched[lower_col].iloc[1] == pytest.approx(center - float(radius))
-    assert enriched[upper_col].iloc[1] == pytest.approx(center + float(radius))
+    # Exact equality (not approx): this is a byte-identical refactor, so the
+    # delegated cumulative path must reproduce the inline scalar arithmetic to
+    # the bit — a 1-ULP drift must fail here.
+    assert enriched[lower_col].iloc[1] == center - float(radius)
+    assert enriched[upper_col].iloc[1] == center + float(radius)

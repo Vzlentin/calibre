@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+import warnings
+
 import numpy as np
 
 from calibre.conformal.spread import AnalyticRadius
@@ -51,6 +54,24 @@ def test_analytic_radius_non_finite_radius_propagates_to_nan():
     assert np.isnan(upper).all()
 
 
+def test_analytic_radius_issued_invalid_op_silent_under_errstate():
+    spread = AnalyticRadius()
+    # An issued row whose center and radius are both infinite makes
+    # ``center - radius`` an *invalid* float op (inf - inf -> nan). The runtime
+    # relied on ``np.errstate(invalid="ignore")`` to keep that silent; removing
+    # the guard would emit a RuntimeWarning, so this pins the guard.
+    centers = np.array([np.inf])
+    radii = np.array([np.inf])
+    issue = np.array([True])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any RuntimeWarning becomes a failure
+        lower, upper = spread.to_interval(centers, radii, issue)
+
+    assert np.isnan(lower[0])  # inf - inf -> nan, silenced by the guard
+    assert upper[0] == np.inf  # inf + inf -> inf
+
+
 def test_analytic_radius_length_one_arrays_match_cumulative_shape():
     spread = AnalyticRadius()
     centers = np.array([42.0])
@@ -74,3 +95,6 @@ def test_analytic_radius_is_stateless():
 
     np.testing.assert_array_equal(first[0], second[0])
     np.testing.assert_array_equal(first[1], second[1])
+    # Stateless by construction: the frozen dataclass declares no fields, so it
+    # can hold no per-call state.
+    assert dataclasses.fields(spread) == ()
