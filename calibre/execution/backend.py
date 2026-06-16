@@ -11,7 +11,8 @@ import json
 import logging
 import tempfile
 import time
-from collections.abc import Iterator
+from collections import deque
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -19,6 +20,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
+from threadpoolctl import threadpool_limits
 
 from calibre.conformal.runtime import (
     ConformalRuntime,
@@ -66,6 +68,7 @@ from calibre.execution.ledger import (
     StreamingLedger,
     StreamingOrderLedger,
 )
+from calibre.execution.origin_compute import compute_origin_intervals
 from calibre.execution.prediction import (
     _coerce_forecast_frame_dtypes,
     _concat_prediction_results,
@@ -74,12 +77,14 @@ from calibre.execution.prediction import (
     _process_local_chunk,
 )
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
-from calibre.execution.threading import cap_threaded_config
+from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.forecasting.adapter_base import PredictionResult
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
 from calibre.reconciliation.hierarchical_intervals import (
     HierarchicalIntervalContext,
+    HierarchicalIntervalOptions,
     HierarchicalIntervalPhase,
+    NixtlaHierarchicalIntervalPhase,
 )
 from calibre.reconciliation.protocols import Reconciler, ReconciliationContext
 from calibre.reconciliation.summing import HierarchyIndex
@@ -259,6 +264,11 @@ class BackendEngine:
         # would force positional-only .remote() calls; not worth it for this slice.
         self._remote_process_local_chunk: Any | None = None
         self._remote_process_global_panel: Any | None = None
+        # Fused-interval Ray dispatch state. The remote handle is rebuilt and the
+        # hierarchy index re-``ray.put``'d only on a fresh runtime; both persist
+        # across origins on a stable runtime so the index is plasma-stored once.
+        self._remote_compute_origin_intervals: Any | None = None
+        self._hierarchy_index_ref: Any | None = None
 
     def __enter__(self) -> BackendEngine:
         return self
@@ -355,9 +365,128 @@ class BackendEngine:
                     )
 
                 completed_origins = self._completed_initial_origins()
-                for origin in origins:
+                window = self._fused_parallel_window()
+                if window is not None:
+                    yield from self._iter_origins_parallel(
+                        ledger=ledger,
+                        order_ledger=order_ledger,
+                        actuals_source=actuals_source,
+                        origins=origins,
+                        completed_origins=completed_origins,
+                        conformal_runtime=conformal_runtime,
+                        chunk_refs=chunk_refs,
+                        direct_refs=direct_refs,
+                        window=window,
+                    )
+                else:
+                    yield from self._iter_origins_serial(
+                        ledger=ledger,
+                        order_ledger=order_ledger,
+                        actuals_source=actuals_source,
+                        origins=origins,
+                        completed_origins=completed_origins,
+                        conformal_runtime=conformal_runtime,
+                        chunk_refs=chunk_refs,
+                        direct_refs=direct_refs,
+                    )
+        finally:
+            with span("ledger_close"):
+                ledger.close()
+            if order_ledger is not None:
+                with span("order_ledger_close"):
+                    order_ledger.close()
+
+    def _fused_parallel_window(self) -> int | None:
+        """Effective sliding-window depth N for fused-parallel dispatch, or None.
+
+        The parallel branch is hard-gated: it runs only on the fused path
+        (``hierarchical_interval_phase is not None``) with Ray selected and an
+        effective window ``N > 1``. ``max_concurrency`` defaults to ``None`` (the
+        M5 helper sets none), so coerce explicitly to a default window of 2 —
+        never Predict's ``or len(...)`` coercion, which would unbound the window
+        and break the peak-N resident-frame bound. Returns ``None`` (collapse to the
+        serial path) when fused intervals are off, Ray is not selected, or N == 1.
+        """
+        if self.hierarchical_interval_phase is None:
+            return None
+        if not self._should_use_ray(1):
+            return None
+        window = self.execution.max_concurrency or 2
+        assert window >= 1
+        return window if window > 1 else None
+
+    def _iter_origins_serial(
+        self,
+        *,
+        ledger: Ledger,
+        order_ledger: OrderLedger | None,
+        actuals_source: ActualsSource,
+        origins: list[pd.Timestamp],
+        completed_origins: set[pd.Timestamp],
+        conformal_runtime: ConformalRuntime | None,
+        chunk_refs: list[ChunkTaskRef],
+        direct_refs: list[ForecastTaskRef],
+    ) -> Iterator[BackendResult]:
+        """Drive origins one at a time — the exact inline path (serial default)."""
+        for origin in origins:
+            origin = pd.Timestamp(origin)
+            if origin in completed_origins:
+                logger.info(
+                    "skipping resumed origin",
+                    extra={"origin": origin, "phase": "resume"},
+                )
+                yield BackendResult(ledger=ledger, order_ledger=order_ledger)
+                continue
+            origin_started = time.perf_counter()
+            self.run_origin(
+                ledger=ledger,
+                order_ledger=order_ledger,
+                actuals=actuals_source,
+                origin=origin,
+                conformal_runtime=conformal_runtime,
+                chunk_refs=chunk_refs,
+                direct_refs=direct_refs,
+            )
+            yield self._emit_completed_origin(ledger, order_ledger, origin, origin_started)
+
+    def _iter_origins_parallel(
+        self,
+        *,
+        ledger: Ledger,
+        order_ledger: OrderLedger | None,
+        actuals_source: ActualsSource,
+        origins: list[pd.Timestamp],
+        completed_origins: set[pd.Timestamp],
+        conformal_runtime: ConformalRuntime | None,
+        chunk_refs: list[ChunkTaskRef],
+        direct_refs: list[ForecastTaskRef],
+        window: int,
+    ) -> Iterator[BackendResult]:
+        """Drive the fused path as a bounded producer→consumer sliding window.
+
+        Predict runs on the driver per origin (fanning out to Ray as today); each
+        origin's interval task is then submitted and at most ``window`` tasks are
+        kept in flight. The consumer drains the in-flight deque strictly head-first
+        (origins-list order) — never ``as-completed`` — so the serial
+        ``ledger.append`` order, the per-origin ``yield``, the ``_phase`` spans,
+        the timing log, and crash-resume are all byte-identical to the serial
+        path. Peak resident interval frames is ``window``.
+        """
+        # Ordered in-flight tasks: (origin, ObjectRef, origin_started). The head is
+        # always the lowest origins-list index still in flight, so popleft drains in
+        # origins-list order regardless of worker completion order.
+        in_flight: deque[tuple[pd.Timestamp, Any, float]] = deque()
+        producible = iter(origins)
+        try:
+            while True:
+                while len(in_flight) < window:
+                    origin = next(producible, None)
+                    if origin is None:
+                        break
                     origin = pd.Timestamp(origin)
                     if origin in completed_origins:
+                        # Resumed origins are NEVER dispatched — yield the resume
+                        # result exactly as the serial path does.
                         logger.info(
                             "skipping resumed origin",
                             extra={"origin": origin, "phase": "resume"},
@@ -365,32 +494,91 @@ class BackendEngine:
                         yield BackendResult(ledger=ledger, order_ledger=order_ledger)
                         continue
                     origin_started = time.perf_counter()
-                    self.run_origin(
-                        ledger=ledger,
-                        order_ledger=order_ledger,
-                        actuals=actuals_source,
-                        origin=origin,
-                        conformal_runtime=conformal_runtime,
-                        chunk_refs=chunk_refs,
-                        direct_refs=direct_refs,
+                    origin_preds, fitted_context = self._run_origin_predict(
+                        ledger,
+                        actuals_source,
+                        origin,
+                        conformal_runtime,
+                        chunk_refs,
+                        direct_refs,
                     )
-                    duration = time.perf_counter() - origin_started
-                    observe_forecast_duration("mixed", "origin", duration)
-                    logger.info(
-                        "completed origin",
-                        extra={
-                            "origin": origin,
-                            "phase": "origin",
-                            "duration_ms": round(duration * 1000.0, 3),
-                        },
+                    ref = self._dispatch_origin_intervals(origin_preds, fitted_context)
+                    in_flight.append((origin, ref, origin_started))
+                if not in_flight:
+                    break
+                origin, ref, origin_started = in_flight.popleft()
+                # Drain-in-order up to the first failure: origins before this one are
+                # already committed/streamed. On failure, drop the remaining in-flight
+                # refs (dereference abandoned worker frames promptly) before the named
+                # re-raise propagates through the _phase context.
+                try:
+                    with self._phase("HierarchicalIntervals", origin):
+                        origin_preds = self._get_origin_intervals(ref)
+                    # _finish_origin runs AFTER the HierarchicalIntervals span closes
+                    # (its Order/Commit open their own spans) to match serial's phase
+                    # attribution; it stays inside the try so a Order/Commit failure
+                    # still drains the remaining in-flight refs.
+                    self._finish_origin(
+                        ledger, order_ledger, actuals_source, origin, origin_preds, None
                     )
-                    yield BackendResult(ledger=ledger, order_ledger=order_ledger)
+                except Exception:
+                    self._drain_in_flight(in_flight)
+                    raise
+                yield self._emit_completed_origin(ledger, order_ledger, origin, origin_started)
         finally:
-            with span("ledger_close"):
-                ledger.close()
-            if order_ledger is not None:
-                with span("order_ledger_close"):
-                    order_ledger.close()
+            self._drain_in_flight(in_flight)
+
+    @staticmethod
+    def _get_origin_intervals(ref: Any) -> pd.DataFrame:
+        """Block on a worker interval ref, unwrapping a Ray failure to its cause.
+
+        ``ray.get`` wraps a worker exception in a ``RayTaskError`` whose ``str``
+        reproduces the worker traceback and ignores any rewrap message, so it
+        would defeat the ``_phase`` origin-naming. Re-raise the underlying cause
+        (a plain exception) so ``_phase`` can attribute it to the origin.
+        """
+        import ray
+        from ray.exceptions import RayTaskError
+
+        try:
+            return ray.get(ref)
+        except RayTaskError as exc:
+            cause = exc.cause
+            if cause is None:
+                raise
+            raise cause from exc
+
+    @staticmethod
+    def _drain_in_flight(in_flight: deque[tuple[pd.Timestamp, Any, float]]) -> None:
+        """Cancel and drop any still-in-flight interval refs (best-effort)."""
+        if not in_flight:
+            return
+        import ray
+
+        while in_flight:
+            _origin, ref, _started = in_flight.popleft()
+            with suppress(Exception):
+                ray.cancel(ref, force=True)
+
+    def _emit_completed_origin(
+        self,
+        ledger: Ledger,
+        order_ledger: OrderLedger | None,
+        origin: pd.Timestamp,
+        origin_started: float,
+    ) -> BackendResult:
+        """Record the per-origin timing, log completion, and build the yield result."""
+        duration = time.perf_counter() - origin_started
+        observe_forecast_duration("mixed", "origin", duration)
+        logger.info(
+            "completed origin",
+            extra={
+                "origin": origin,
+                "phase": "origin",
+                "duration_ms": round(duration * 1000.0, 3),
+            },
+        )
+        return BackendResult(ledger=ledger, order_ledger=order_ledger)
 
     def shutdown_owned_ray(self) -> None:
         """Shutdown a local Ray runtime this engine started."""
@@ -399,6 +587,11 @@ class BackendEngine:
         self._ray_runtime = None
         self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
+        # The cached index ref is DATA (a ``ray.put`` ObjectRef), not just a
+        # handle: a stale ref from a released runtime points at an object the new
+        # runtime never plasma-stored, so null it alongside the remote handle.
+        self._remote_compute_origin_intervals = None
+        self._hierarchy_index_ref = None
 
     def close(self) -> None:
         self.shutdown_owned_ray()
@@ -445,25 +638,66 @@ class BackendEngine:
         """
         fused_phase_active = self.hierarchical_interval_phase is not None
         active_conformal_runtime = None if fused_phase_active else conformal_runtime
-        with self._phase("ResolveOpen", origin):
-            self._resolve_open(ledger, actuals, origin, active_conformal_runtime)
-        with self._phase("Predict", origin):
-            prediction = self._predict(chunk_refs, direct_refs, origin)
-            origin_preds = prediction.forecast
+        origin_preds, fitted_context = self._run_origin_predict(
+            ledger, actuals, origin, conformal_runtime, chunk_refs, direct_refs
+        )
         if fused_phase_active:
             with self._phase("HierarchicalIntervals", origin):
-                origin_preds = self._hierarchical_intervals(
-                    origin_preds,
-                    HierarchicalIntervalContext(fitted_values=prediction.fitted_values),
-                )
+                origin_preds = self._hierarchical_intervals(origin_preds, fitted_context)
         else:
             with self._phase("Reconcile", origin):
                 origin_preds = self._reconcile(
                     origin_preds,
-                    ReconciliationContext(fitted_values=prediction.fitted_values),
+                    ReconciliationContext(fitted_values=fitted_context.fitted_values),
                 )
             with self._phase("Calibrate", origin):
                 origin_preds = self._calibrate(origin_preds, active_conformal_runtime)
+        self._finish_origin(
+            ledger, order_ledger, actuals, origin, origin_preds, active_conformal_runtime
+        )
+
+    def _run_origin_predict(
+        self,
+        ledger: Ledger,
+        actuals: ActualsSource,
+        origin: pd.Timestamp,
+        conformal_runtime: ConformalRuntime | None,
+        chunk_refs: list[ChunkTaskRef],
+        direct_refs: list[ForecastTaskRef],
+    ) -> tuple[pd.DataFrame, HierarchicalIntervalContext]:
+        """Run ResolveOpen + Predict on the driver, returning preds + fitted sidecar.
+
+        The shared front half of every origin: it carries forward prior origins'
+        resolutions (no-op on the fused path, where the conformal runtime
+        collapses to ``None``) and produces this origin's point forecasts. The
+        returned :class:`HierarchicalIntervalContext` carries the fitted-value
+        sidecar both the fused and non-fused tails consume.
+        """
+        fused_phase_active = self.hierarchical_interval_phase is not None
+        active_conformal_runtime = None if fused_phase_active else conformal_runtime
+        with self._phase("ResolveOpen", origin):
+            self._resolve_open(ledger, actuals, origin, active_conformal_runtime)
+        with self._phase("Predict", origin):
+            prediction = self._predict(chunk_refs, direct_refs, origin)
+        return prediction.forecast, HierarchicalIntervalContext(
+            fitted_values=prediction.fitted_values
+        )
+
+    def _finish_origin(
+        self,
+        ledger: Ledger,
+        order_ledger: OrderLedger | None,
+        actuals: ActualsSource,
+        origin: pd.Timestamp,
+        origin_preds: pd.DataFrame,
+        active_conformal_runtime: ConformalRuntime | None,
+    ) -> None:
+        """Run the shared serial tail Order + Commit for one origin.
+
+        This is the tail both the fused and non-fused branches reach (it sits
+        outside the branch in ``run_origin``); extracting it keeps the
+        append-then-resolve order identical across serial and parallel dispatch.
+        """
         with self._phase("Order", origin):
             self._order(origin_preds, order_ledger)
         with self._phase("Commit", origin):
@@ -564,11 +798,20 @@ class BackendEngine:
         origin_preds: pd.DataFrame,
         context: HierarchicalIntervalContext,
     ) -> pd.DataFrame:
-        """Fused hierarchical conformal phase — replace Reconcile + Calibrate."""
+        """Fused hierarchical conformal phase — replace Reconcile + Calibrate.
+
+        The ``apply`` runs under the same ``threadpool_limits`` budget the Ray
+        worker uses (:func:`~calibre.execution.origin_compute.compute_origin_intervals`),
+        so the BLAS thread count is held constant serial-vs-parallel — a
+        thread-count asymmetry would break byte-identity on dense-BLAS strategies.
+        """
         if self.hierarchical_interval_phase is None or origin_preds.empty:
             return origin_preds
         assert self.hierarchy_index is not None  # checked at construction
-        return self.hierarchical_interval_phase.apply(origin_preds, self.hierarchy_index, context)
+        with threadpool_limits(limits=thread_budget(self.execution.cpu_per_task)):
+            return self.hierarchical_interval_phase.apply(
+                origin_preds, self.hierarchy_index, context
+            )
 
     def _calibrate(
         self,
@@ -984,11 +1227,31 @@ class BackendEngine:
 
         if self._ray_runtime is not None and ray.is_initialized():
             return
-        # Acquiring a fresh runtime invalidates any cached remote-function handles;
-        # drop them so the callers rebuild them against the new runtime.
+        # Acquiring a fresh runtime invalidates any cached remote-function handles
+        # and the ``ray.put`` index ref; drop them so the callers rebuild them
+        # against the new runtime. These resets stay on the re-acquisition path
+        # (after the warm early-return) so the index ref and handle persist across
+        # origins on a stable runtime — re-putting the index every origin would be
+        # needless overhead.
         self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
+        self._remote_compute_origin_intervals = None
+        self._hierarchy_index_ref = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
+
+    def _build_remote(self, fn: Callable[..., Any]) -> Any:
+        """Build a ``ray.remote`` handle, applying ``num_cpus`` admission when set.
+
+        ``cpu_per_task`` maps to ``num_cpus`` only when configured; otherwise
+        Ray's auto-detected CPU count governs admission. Shared by the Predict
+        runners and the fused-interval dispatch so the admission rule lives once.
+        """
+        import ray
+
+        remote_fn = ray.remote(fn)
+        if self.execution.cpu_per_task is not None:
+            remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
+        return remote_fn
 
     def _run_global_groups_on_ray(
         self,
@@ -999,10 +1262,7 @@ class BackendEngine:
         import ray
 
         if self._remote_process_global_panel is None:
-            remote_fn = ray.remote(_process_global_panel)
-            if self.execution.cpu_per_task is not None:
-                remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
-            self._remote_process_global_panel = remote_fn
+            self._remote_process_global_panel = self._build_remote(_process_global_panel)
         remote_process = self._remote_process_global_panel
         concurrency = self.execution.max_concurrency or len(groups)
         results: list[PredictionResult] = []
@@ -1031,10 +1291,7 @@ class BackendEngine:
         import ray
 
         if self._remote_process_local_chunk is None:
-            remote_fn = ray.remote(_process_local_chunk)
-            if self.execution.cpu_per_task is not None:
-                remote_fn = remote_fn.options(num_cpus=float(self.execution.cpu_per_task))
-            self._remote_process_local_chunk = remote_fn
+            self._remote_process_local_chunk = self._build_remote(_process_local_chunk)
         remote_process = self._remote_process_local_chunk
         concurrency = self.execution.max_concurrency or len(chunk_refs)
         results: list[PredictionResult] = []
@@ -1052,6 +1309,45 @@ class BackendEngine:
             results.extend(ray.get(object_refs))
 
         return _concat_prediction_results(results)
+
+    def _dispatch_origin_intervals(
+        self,
+        origin_preds: pd.DataFrame,
+        context: HierarchicalIntervalContext,
+    ) -> Any:
+        """Submit one origin's fused interval task to Ray and return its ObjectRef.
+
+        Lazily builds and caches the ``ray.remote`` handle and a single
+        ``ray.put`` of the run-constant hierarchy index (reused by every task on
+        a stable runtime); applies ``num_cpus`` admission only when
+        ``cpu_per_task`` is set, mirroring the Predict runners. Dispatch is one
+        task per origin — it never traverses the ``max_concurrency`` batching
+        loop; ``max_concurrency`` is reused only as the window depth in
+        :meth:`iter_origins`.
+        """
+        assert self.hierarchical_interval_phase is not None  # gated by the caller
+        assert self.hierarchy_index is not None  # checked at construction
+        self._ensure_ray()
+        import ray
+
+        if self._remote_compute_origin_intervals is None:
+            self._remote_compute_origin_intervals = self._build_remote(compute_origin_intervals)
+        if self._hierarchy_index_ref is None:
+            self._hierarchy_index_ref = ray.put(self.hierarchy_index)
+        # The stored phase is the HierarchicalIntervalPhase Protocol, which has no
+        # `.options`; the worker target needs the frozen options off the only
+        # concrete implementor. The isinstance narrows safely AND guards at runtime,
+        # so the access can't silently lie if a second implementor is ever threaded
+        # through — no unchecked cast past the Protocol boundary.
+        assert isinstance(self.hierarchical_interval_phase, NixtlaHierarchicalIntervalPhase)
+        options: HierarchicalIntervalOptions = self.hierarchical_interval_phase.options
+        return self._remote_compute_origin_intervals.remote(
+            origin_preds,
+            self._hierarchy_index_ref,
+            context,
+            options,
+            self.execution.cpu_per_task,
+        )
 
 
 def _with_group_tag(task: ForecastTask) -> ForecastTask:
