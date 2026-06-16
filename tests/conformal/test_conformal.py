@@ -860,3 +860,89 @@ def test_cumulative_apply_delegates_terminal_arithmetic_to_spread():
     # the bit — a 1-ULP drift must fail here.
     assert enriched[lower_col].iloc[1] == center - float(radius)
     assert enriched[upper_col].iloc[1] == center + float(radius)
+
+
+def _coherent_hierarchy_index():
+    from calibre.reconciliation.summing import build_hierarchy_index
+
+    return build_hierarchy_index(pd.DataFrame({"unique_id": ["A", "B"], "group": ["g", "g"]}))
+
+
+def test_coherent_draws_selector_composes_coherent_spread_with_s_at_construction():
+    from calibre.conformal.coherent_draws import CoherentDraws
+    from calibre.conformal.runtime import (
+        SymmetricIntervalConfig,
+        build_symmetric_interval_runtime,
+    )
+
+    config = SymmetricIntervalConfig(
+        method="aci", coverage=0.9, calibration_window=5, spread="coherent_draws", draw_count=64
+    )
+    index = _coherent_hierarchy_index()
+    runtime = build_symmetric_interval_runtime(config, hierarchy_index=index)
+
+    assert isinstance(runtime.spread, CoherentDraws)
+    # S is folded in at construction, keyed to the index node labels.
+    assert runtime.spread.summing.node_labels == index.node_labels
+    assert runtime.spread.draw_count == 64
+    assert runtime.requires_fitted_values is True
+
+
+def test_analytic_selector_default_does_not_require_fitted_values():
+    from calibre.conformal.runtime import (
+        SymmetricIntervalConfig,
+        build_symmetric_interval_runtime,
+    )
+    from calibre.conformal.spread import AnalyticRadius
+
+    config = SymmetricIntervalConfig(method="mscp", coverage=0.9, calibration_window=5)
+    runtime = build_symmetric_interval_runtime(config)
+    assert isinstance(runtime.spread, AnalyticRadius)
+    assert runtime.requires_fitted_values is False
+
+
+def test_coherent_draws_without_hierarchy_index_fails_fast():
+    from calibre.conformal.runtime import (
+        SymmetricIntervalConfig,
+        build_symmetric_interval_runtime,
+    )
+
+    config = SymmetricIntervalConfig(
+        method="aci", coverage=0.9, calibration_window=5, spread="coherent_draws"
+    )
+    with pytest.raises(ValueError, match="hierarchy_index"):
+        build_symmetric_interval_runtime(config)
+
+
+def test_coherent_draws_runtime_round_trips_resume_state():
+    from calibre.conformal.coherent_draws import CoherentDraws
+    from calibre.conformal.runtime import (
+        SymmetricIntervalConfig,
+        SymmetricIntervalRuntime,
+    )
+
+    config = SymmetricIntervalConfig(
+        method="aci", coverage=0.9, calibration_window=5, spread="coherent_draws"
+    )
+    index = _coherent_hierarchy_index()
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    state = runtime.get_resume_state()
+
+    restored = SymmetricIntervalRuntime.from_state(config, state, hierarchy_index=index)
+    assert isinstance(restored.spread, CoherentDraws)
+    assert restored.spread.summing.node_labels == index.node_labels
+
+    partition_states = runtime.get_partition_states()
+    restored_partitioned = SymmetricIntervalRuntime.from_partition_states(
+        config, partition_states, hierarchy_index=index
+    )
+    assert isinstance(restored_partitioned.spread, CoherentDraws)
+
+
+def test_config_rejects_unknown_spread_and_nonpositive_draw_count():
+    from calibre.conformal.runtime import SymmetricIntervalConfig
+
+    with pytest.raises(ValueError, match="spread"):
+        SymmetricIntervalConfig(method="mscp", spread="bogus")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="draw_count"):
+        SymmetricIntervalConfig(method="mscp", spread="coherent_draws", draw_count=0)

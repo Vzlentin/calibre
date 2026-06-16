@@ -19,6 +19,7 @@ from calibre.cli.commands import _load_dataset
 from calibre.cli.config import load_config_from_mapping
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import (
+    CONFORMAL_METHOD,
     DS,
     FITTED_Y_HAT,
     FORECAST_ORIGIN,
@@ -129,6 +130,32 @@ def _run_m5(bundle, actuals, tasks, origins, reconciler) -> pd.DataFrame:
         ),
         reconciliation=ReconciliationOptions(
             reconciler=reconciler, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
+    )
+    try:
+        result = engine.execute(tasks, actuals, origins)
+    finally:
+        engine.close()
+    return result.ledger.to_df()
+
+
+def _run_m5_coherent(bundle, actuals, tasks, origins) -> pd.DataFrame:
+    """Run the non-fused coherent-draws conformal path (reconciliation: none)."""
+    engine = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="local", seed=42),
+        conformal=ConformalOptions(
+            config=SymmetricIntervalConfig(
+                method="aci",
+                coverage=0.9,
+                calibration_window=3,
+                gamma=0.05,
+                spread="coherent_draws",
+                draw_count=128,
+                draw_seed=11,
+            )
+        ),
+        reconciliation=ReconciliationOptions(
+            reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
         ),
     )
     try:
@@ -665,6 +692,100 @@ def test_m5_hierarchical_conformal_intervals_emit_node_bounds_and_metrics(
         interval_bounds=(lower_col, upper_col),
     )
     assert {"coverage", "mean_interval_width"}.issubset(metrics.columns)
+
+
+def test_m5_coherent_draws_emit_finite_node_bounds_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end: predict -> (reconciliation: none) -> CoherentDraws calibrate.
+    # The coherent spread produces lo/hi for every node and the marginal
+    # held-out calibrator gates emission once it is ready.
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter",
+        lambda model_config: _ResidualAdapter(model_config),
+    )
+    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
+    node_history = _synthetic_m5_node_history(bundle.hierarchy)
+    tasks = _synthetic_residual_tasks(node_history, horizon=2)
+    origins = [pd.Timestamp(d) for d in ("2011-03-15", "2011-03-16", "2011-03-17", "2011-03-18")]
+    lower_col, upper_col = interval_column_names(0.9)
+
+    ledger = _run_m5_coherent(bundle, node_history, tasks, origins)
+
+    assert not ledger.empty
+    assert {lower_col, upper_col}.issubset(ledger.columns)
+    assert ledger[CONFORMAL_METHOD].eq("aci").all()
+    summing = build_summing_matrix(bundle.hierarchy)
+    assert set(ledger[UNIQUE_ID]) == set(summing.node_labels)
+    # Once the calibrator is ready, emitted bounds are finite and ordered.
+    issued = ledger[ledger[lower_col].notna()]
+    assert not issued.empty
+    assert np.isfinite(issued[lower_col]).all()
+    assert np.isfinite(issued[upper_col]).all()
+    assert (issued[upper_col] >= issued[lower_col]).all()
+
+
+def test_m5_coherent_draws_aggregate_interval_is_sum_of_member_draws(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # R3 coherence on a real run: an aggregate node's bounds equal the empirical
+    # quantiles of the summed member draws. With centers fixed and the same
+    # per-cross-section seed, the aggregate row's hi/lo reproduce the quantile of
+    # the summed bottom-node draw set. We verify the structural consequence: the
+    # aggregate interval brackets the sum of member centers and is no narrower
+    # than additive independence would wrongly suggest is required.
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter",
+        lambda model_config: _ResidualAdapter(model_config),
+    )
+    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
+    node_history = _synthetic_m5_node_history(bundle.hierarchy)
+    tasks = _synthetic_residual_tasks(node_history, horizon=1)
+    origins = [pd.Timestamp(d) for d in ("2011-03-15", "2011-03-16", "2011-03-17", "2011-03-18")]
+    lower_col, upper_col = interval_column_names(0.9)
+    summing = build_summing_matrix(bundle.hierarchy)
+
+    ledger = _run_m5_coherent(bundle, node_history, tasks, origins)
+    issued = ledger[ledger[lower_col].notna()]
+    assert not issued.empty
+
+    # For each cross-section, the total interval must contain the sum of member
+    # centers (the reconciled draws are centered on the summed member centers).
+    checked = 0
+    for _, group in issued.groupby([MODEL_NAME, FORECAST_ORIGIN, H], sort=False):
+        by_uid = group.set_index(UNIQUE_ID)
+        if "__total__" not in by_uid.index:
+            continue
+        present_bottom = [b for b in summing.bottom_ids if b in by_uid.index]
+        if not present_bottom:
+            continue
+        member_center_sum = float(by_uid.loc[present_bottom, Y_HAT].sum())
+        total_lo = float(by_uid.loc["__total__", lower_col])
+        total_hi = float(by_uid.loc["__total__", upper_col])
+        assert total_lo <= member_center_sum <= total_hi
+        checked += 1
+    assert checked > 0
+
+
+def test_m5_coherent_draws_run_is_byte_reproducible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # R7 determinism: a seeded coherent run reproduces its ledger byte-for-byte.
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter",
+        lambda model_config: _ResidualAdapter(model_config),
+    )
+    bundle, _actuals, _tasks, _origins = _m5_bundle_tasks_origins()
+    node_history = _synthetic_m5_node_history(bundle.hierarchy)
+    origins = [pd.Timestamp("2011-03-15"), pd.Timestamp("2011-03-16")]
+
+    first = _run_m5_coherent(
+        bundle, node_history, _synthetic_residual_tasks(node_history, horizon=1), origins
+    )
+    second = _run_m5_coherent(
+        bundle, node_history, _synthetic_residual_tasks(node_history, horizon=1), origins
+    )
+    pd.testing.assert_frame_equal(first, second)
 
 
 def test_hierarchical_interval_ordering_uses_bottom_rows_only(

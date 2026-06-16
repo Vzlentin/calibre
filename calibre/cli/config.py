@@ -79,6 +79,9 @@ class ConformalConfig(_Section):
     partition: Literal["global", "series"] = "global"
     protection_period: int | None = None
     max_partitions: int | None = Field(default=None, ge=1)
+    spread: Literal["analytic", "coherent_draws"] = "analytic"
+    draw_count: int = Field(default=200, ge=1)
+    draw_seed: int = 0
 
     def to_runtime_config(self) -> SymmetricIntervalConfig:
         partition_key = {
@@ -93,6 +96,9 @@ class ConformalConfig(_Section):
             partition_key=partition_key,
             mode=self.mode,
             protection_period=self.protection_period,
+            spread=self.spread,
+            draw_count=self.draw_count,
+            draw_seed=self.draw_seed,
         )
 
 
@@ -266,6 +272,19 @@ class BackendConfig(BaseModel):
     def _single_horizon(self) -> BackendConfig:
         if len({task.horizon for task in self.tasks}) != 1:
             raise ValueError("all tasks in a single CLI run must use the same horizon")
+        return self
+
+    @model_validator(mode="after")
+    def _coherent_spread_requires_no_reconciliation(self) -> BackendConfig:
+        if self.conformal is None or self.conformal.spread != "coherent_draws":
+            return self
+        # The coherent-draws spread owns reconciliation-of-uncertainty; the point
+        # Reconcile phase must stay a no-op while the hierarchy still supplies S.
+        if self.reconciliation is not None and self.reconciliation.strategy != "none":
+            raise ValueError(
+                "conformal spread='coherent_draws' requires reconciliation strategy "
+                "'none' (the coherent method owns reconciliation-of-uncertainty)"
+            )
         return self
 
     @model_validator(mode="after")

@@ -6,7 +6,9 @@ import dataclasses
 import warnings
 
 import numpy as np
+import pandas as pd
 
+from calibre.conformal.protocols import SpreadContext
 from calibre.conformal.spread import AnalyticRadius
 
 
@@ -22,6 +24,25 @@ def test_analytic_radius_happy_path_is_center_minus_plus_radius():
     # (e.g. ``centers + radii + 1.0`` or a sign flip) must fail here.
     np.testing.assert_array_equal(lower, centers - radii)
     np.testing.assert_array_equal(upper, centers + radii)
+
+
+def test_analytic_radius_ignores_defaulted_and_supplied_context():
+    # The widened Spread interface gained a keyword-only ``context``; for the
+    # point adapter it must be a true no-op. Defaulted (None) and an explicit
+    # context must both return exactly today's ``centers +/- radii``.
+    spread = AnalyticRadius()
+    centers = np.array([10.0, 20.0, 30.0])
+    radii = np.array([1.0, 2.5, 4.0])
+    issue = np.array([True, True, True])
+
+    baseline = spread.to_interval(centers, radii, issue)
+    context = SpreadContext(frame=pd.DataFrame(), alpha=0.1)
+    with_context = spread.to_interval(centers, radii, issue, context=context)
+
+    np.testing.assert_array_equal(baseline[0], centers - radii)
+    np.testing.assert_array_equal(baseline[1], centers + radii)
+    np.testing.assert_array_equal(with_context[0], baseline[0])
+    np.testing.assert_array_equal(with_context[1], baseline[1])
 
 
 def test_analytic_radius_not_issued_rows_are_nan():
