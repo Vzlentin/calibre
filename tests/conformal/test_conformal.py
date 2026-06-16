@@ -762,3 +762,101 @@ def test_predict_batch_matches_per_row_predict_across_window_lengths():
                     assert bool(ready[position] and np.isfinite(radii[position])) == bool(
                         expected_issue
                     ), (rule, ready_on_empty, alpha, partition)
+
+
+def test_default_runtime_composes_analytic_radius_spread():
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+    from calibre.conformal.spread import AnalyticRadius
+
+    config = SymmetricIntervalConfig(method="mscp", coverage=0.9, calibration_window=5)
+    runtime = SymmetricIntervalRuntime(config)
+    # The seam is wired, not bypassed by a surviving inline copy.
+    assert isinstance(runtime.spread, AnalyticRadius)
+
+
+def test_perhorizon_apply_delegates_interval_arithmetic_to_spread():
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import (
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        UNIQUE_ID,
+        Y_HAT,
+        H,
+        Y,
+    )
+
+    config = SymmetricIntervalConfig(method="mscp", coverage=0.5, calibration_window=10)
+    runtime = SymmetricIntervalRuntime(config)
+    origin = pd.Timestamp("2024-01-07")
+    centers = [10.0, 20.0]
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["SKU_001", "SKU_001"],
+            "ds": pd.date_range("2024-01-14", periods=2, freq="W"),
+            Y: [np.nan, np.nan],
+            Y_HAT: centers,
+            H: [1, 2],
+            FORECAST_ORIGIN: [origin, origin],
+            MODEL_NAME: ["SeasonalNaive", "SeasonalNaive"],
+        }
+    )
+    # Seed only h=1's partition so it issues a finite bound while h=2 stays in
+    # warmup (NaN) — exercises the issued + not-yet-ready split in one fixture.
+    h1_partition = runtime._partition_values(frame)[0]
+    for score in (1.0, 2.0, 3.0, 4.0, 5.0):
+        runtime.calibrator.update(score, h1_partition)
+
+    alpha = float(runtime.controller.get_alpha())
+    radii, ready = runtime.calibrator.predict_batch(alpha, runtime._partition_values(frame))
+    issue = ready & np.isfinite(radii)
+    # Ground truth = the pre-refactor inline arithmetic, computed here directly.
+    with np.errstate(invalid="ignore"):
+        expected_lower = np.where(issue, np.asarray(centers) - radii, np.nan)
+        expected_upper = np.where(issue, np.asarray(centers) + radii, np.nan)
+
+    enriched = runtime.apply(frame)
+    lower_col, upper_col = config.interval_columns
+
+    assert np.isfinite(expected_lower[0]), "fixture must issue h=1 to anchor the mutation check"
+    assert np.isnan(expected_upper[1]), "fixture must leave h=2 in warmup"
+    np.testing.assert_array_equal(enriched[lower_col].to_numpy(dtype=float), expected_lower)
+    np.testing.assert_array_equal(enriched[upper_col].to_numpy(dtype=float), expected_upper)
+
+
+def test_cumulative_apply_delegates_terminal_arithmetic_to_spread():
+    runtime, config = _build_cumulative_runtime(protection_period=2, calibration_window=5)
+    lower_col, upper_col = config.interval_columns
+
+    # Warm the cumulative partition so the terminal row issues a finite bound.
+    origin = pd.Timestamp("2024-01-07")
+    for week in range(5):
+        warm_origin = origin + pd.Timedelta(weeks=week)
+        warm = _cumulative_frame(
+            unique_id="SKU_001",
+            origin=warm_origin,
+            y_hats=[10.0, 20.0],
+            y_actuals=[11.0, 22.0],
+        )
+        runtime.observe(runtime.apply(warm))
+
+    center = 10.0 + 20.0
+    fresh_origin = origin + pd.Timedelta(weeks=10)
+    frame = _cumulative_frame(
+        unique_id="SKU_001",
+        origin=fresh_origin,
+        y_hats=[10.0, 20.0],
+    )
+    # Ground truth: the inline ``center +/- radius`` at the terminal row.
+    partition = runtime._partition_for_row(frame.iloc[-1], cumulative=True)
+    radius = runtime.calibrator.predict(runtime.controller.get_alpha(), partition)
+    assert np.isfinite(radius), "fixture must issue the terminal row to anchor the mutation check"
+
+    enriched = runtime.apply(frame)
+    # h=1 (non-terminal) stays NaN; h=2 (terminal) carries center +/- radius.
+    assert pd.isna(enriched[lower_col].iloc[0])
+    assert pd.isna(enriched[upper_col].iloc[0])
+    # Exact equality (not approx): this is a byte-identical refactor, so the
+    # delegated cumulative path must reproduce the inline scalar arithmetic to
+    # the bit — a 1-ULP drift must fail here.
+    assert enriched[lower_col].iloc[1] == center - float(radius)
+    assert enriched[upper_col].iloc[1] == center + float(radius)

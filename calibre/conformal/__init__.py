@@ -39,10 +39,12 @@ from calibre.conformal.split import (
     CumulativeSplitConformalInference,
     MultiStepSplitConformalInference,
 )
+from calibre.conformal.spread import AnalyticRadius
 from calibre.conformal.types import IntervalPrediction, MultiStepIntervalPrediction
 
 __all__ = [
     "AdaptiveConformalInference",
+    "AnalyticRadius",
     "ConformalRuntime",
     "CumulativeConformalRiskConfig",
     "CumulativeRiskRuntime",
