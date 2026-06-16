@@ -378,11 +378,8 @@ def _rescale_to_held_out(
             # a node with missing/non-finite sigma is excluded from the joint band.
             continue
         factor = float(target) / raw_half_width[i]
-        # The clamp decides factor-1.0-vs-scaled on the *un-inflated* U4 ratio.
         if factor > MAX_HELD_OUT_FACTOR:
             factor = 1.0
-        # The joint inflation composes *after* that decision, on the surviving
-        # factor, so it can only widen — never flip a node back below its U4 width.
         if joint_inflation is not None:
             kappa = joint_inflation.get(key)
             if kappa is not None and np.isfinite(kappa) and kappa > 1.0:

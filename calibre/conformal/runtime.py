@@ -723,13 +723,13 @@ class SymmetricIntervalRuntime:
         cumulative = self.config.mode == "cumulative"
         models = frame[MODEL_NAME].astype(str).to_numpy()
         nodes = frame[UNIQUE_ID].astype(str).to_numpy()
-        horizons = np.full(len(frame), -1, dtype=int) if cumulative else frame[H].to_numpy()
+        horizons = [None] * len(frame) if cumulative else [int(h) for h in frame[H].to_numpy()]
         spread_keys, _ = self._spread_and_real_keys(frame)
 
         jkey_per_row: list[str] = []
         sigma_by_node_by_jkey: dict[str, dict[str, float]] = {}
         for spread_key, model, node, h in zip(spread_keys, models, nodes, horizons, strict=True):
-            jkey = joint_key(model, self.config.mode, None if cumulative else int(h))
+            jkey = joint_key(model, self.config.mode, h)
             jkey_per_row.append(jkey)
             sigma = held_out.get(spread_key)
             if sigma is not None:
