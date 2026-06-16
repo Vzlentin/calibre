@@ -217,8 +217,8 @@ class CoherentDraws:
         fitted = context.fitted_values
         if fitted is None or fitted.empty:
             raise ValueError(
-                "CoherentDraws requires the in-sample fitted-value sidecar; none "
-                "was provided. Set _requires_fitted_values for coherent configs."
+                "CoherentDraws requires the in-sample fitted-value sidecar, but "
+                "none was staged for this origin."
             )
         validate_fitted_values_frame(fitted)
         uids = fitted[UNIQUE_ID].astype(str).to_numpy()

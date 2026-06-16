@@ -256,7 +256,10 @@ class BackendEngine:
                 self.hierarchical_interval_phase is not None
                 and self.hierarchical_interval_phase.requires_fitted_values
             )
-            or getattr(self.conformal_runtime, "requires_fitted_values", False)
+            or (
+                isinstance(self.conformal_runtime, SymmetricIntervalRuntime)
+                and self.conformal_runtime.requires_fitted_values
+            )
         )
         self.streaming_output = output.forecast_path if output.streaming else None
         self.streaming_order_output = output.order_path if output.streaming else None
@@ -836,8 +839,10 @@ class BackendEngine:
         """
         if conformal_runtime is None or origin_preds.empty:
             return origin_preds
-        if getattr(conformal_runtime, "requires_fitted_values", False):
-            assert isinstance(conformal_runtime, SymmetricIntervalRuntime)
+        if (
+            isinstance(conformal_runtime, SymmetricIntervalRuntime)
+            and conformal_runtime.requires_fitted_values
+        ):
             conformal_runtime.set_fitted_values(fitted_context.fitted_values)
             try:
                 return conformal_runtime.apply(origin_preds)
