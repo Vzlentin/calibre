@@ -547,8 +547,9 @@ class SymmetricIntervalRuntime:
 
         Carries the frame slice (positionally aligned with the centers/radii
         arrays), the working ``alpha``, the staged fitted-value sidecar, the base
-        draw seed, and the cumulative protection period. The point adapter
-        ignores it; only :class:`CoherentDraws` reads it.
+        draw seed, the cumulative protection period, and — only for the coherent
+        spread — the held-out half-widths that re-anchor each bottom node's draw
+        spread. The point adapter ignores it; only :class:`CoherentDraws` reads it.
         """
         return SpreadContext(
             frame=frame,
@@ -556,7 +557,38 @@ class SymmetricIntervalRuntime:
             fitted_values=self._fitted_values,
             seed=int(self.config.draw_seed),
             protection_period=self.config.protection_period,
+            held_out_half_width=self._held_out_half_widths(frame, alpha),
         )
+
+    def _held_out_half_widths(self, frame: pd.DataFrame, alpha: float) -> dict[str, float] | None:
+        """Held-out ``(1-alpha)`` radii per partition for the coherent spread.
+
+        Reads the existing per-partition marginal calibrator — the same surface
+        :meth:`_apply_perhorizon` already calls — so the held-out radii a coherent
+        draw spread re-anchors its width to are bit-consistent with the marginal
+        path. Returns ``None`` for the point spread (which ignores context), so
+        the default path allocates nothing new. Both the per-horizon
+        ``"{model}:h{h}:{node}"`` and cumulative ``"{model}:cumulative:{node}"``
+        keys present in the frame are populated, so per-horizon and window-sum
+        lookups both resolve against the calibrator's stored keys.
+        """
+        if not isinstance(self.spread, CoherentDraws):
+            return None
+        base = self._base_partition_values(frame)
+        models = frame[MODEL_NAME].to_numpy()
+        horizons = frame[H].to_numpy()
+        perhorizon = {
+            f"{model}:h{int(horizon)}:{node}"
+            for model, horizon, node in zip(models, horizons, base, strict=True)
+        }
+        cumulative = {
+            f"{model}:cumulative:{node}" for model, node in zip(models, base, strict=True)
+        }
+        partitions = sorted(perhorizon | cumulative)
+        radii, _ = self.calibrator.predict_batch(float(alpha), partitions)
+        return {
+            partition: float(radius) for partition, radius in zip(partitions, radii, strict=True)
+        }
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame:
         started = time.perf_counter()

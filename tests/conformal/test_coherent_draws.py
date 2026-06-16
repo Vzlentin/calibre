@@ -500,3 +500,253 @@ def fitted_resid(fitted: pd.DataFrame, uid: str) -> list[float]:
     """Extract a node's residual vector (y - fitted_y_hat) from the sidecar."""
     sub = fitted[fitted[UNIQUE_ID] == uid]
     return list(sub[Y].to_numpy() - sub[FITTED_Y_HAT].to_numpy())
+
+
+def _held_out_context(
+    frame: pd.DataFrame,
+    fitted: pd.DataFrame,
+    held_out: dict[str, float],
+    *,
+    alpha: float = 0.1,
+    seed: int = 7,
+) -> SpreadContext:
+    return SpreadContext(
+        frame=frame,
+        alpha=alpha,
+        fitted_values=fitted,
+        seed=seed,
+        held_out_half_width=held_out,
+    )
+
+
+def _raw_half_width(node_draws: np.ndarray, alpha: float) -> float:
+    lo, hi = np.quantile(node_draws, [alpha / 2.0, 1.0 - alpha / 2.0])
+    return float((hi - lo) / 2.0)
+
+
+def test_held_out_scaled_draws_stay_coherent():
+    # Coherence under held-out scaling: each aggregate node's (lower, upper) is the
+    # exact sum of its members' bounds, because scaling is applied pre-S (to bottom
+    # deviations) and quantiles are read after the single S @ bottom_draws matmul.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=512)
+    fitted = _fitted([2.0, -3.0, 5.0, -4.0, 1.0], [1.0, -1.0, 4.0, -2.0, 0.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 9.0, "SeasonalNaive:h1:B": 2.5}
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_held_out_context(frame, fitted, held_out)
+    )
+
+    # Replay the scaled bottom draws, reconcile, and assert the emitted aggregate
+    # endpoints equal the quantiles of the summed scaled member draws.
+    raw = _reconstruct_draws(
+        summing,
+        ["A", "B"],
+        {"A": 10.0, "B": 20.0},
+        {"A": fitted_resid(fitted, "A"), "B": fitted_resid(fitted, "B")},
+        draw_count=512,
+        seed=7,
+    )
+    centers_b = np.array([10.0, 20.0])
+    factor_a = held_out["SeasonalNaive:h1:A"] / _raw_half_width(raw[0], 0.1)
+    factor_b = held_out["SeasonalNaive:h1:B"] / _raw_half_width(raw[1], 0.1)
+    scaled = centers_b[:, None] + (raw - centers_b[:, None]) * np.array([[factor_a], [factor_b]])
+    total = scaled.sum(axis=0)
+    exp_lo, exp_hi = np.quantile(total, [0.05, 0.95])
+    # Aggregate == exact sum-of-scaled-member quantile (group=g and __total__ share
+    # members here) and bottom rows track their own scaled draws.
+    np.testing.assert_allclose((lower[3], upper[3]), (exp_lo, exp_hi))
+    np.testing.assert_allclose((lower[2], upper[2]), (exp_lo, exp_hi))
+    np.testing.assert_allclose(np.quantile(scaled[0], [0.05, 0.95]), (lower[0], upper[0]))
+
+
+def test_bottom_width_tracks_held_out_not_in_sample():
+    # The bottom-node width is owned by the held-out half-width, not the in-sample
+    # bootstrap spread — verified both when held-out is materially wider and tighter.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=4000)
+    resid = list(np.linspace(-20.0, 20.0, 81))
+    fitted = _fitted(resid, resid)
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+
+    raw = _reconstruct_draws(
+        summing,
+        ["A", "B"],
+        {"A": 10.0, "B": 20.0},
+        {"A": resid, "B": resid},
+        draw_count=4000,
+        seed=7,
+    )
+    raw_hw_a = _raw_half_width(raw[0], 0.1)
+    raw_hw_b = _raw_half_width(raw[1], 0.1)
+    # A widened well above its in-sample spread; B tightened well below it.
+    held_out = {"SeasonalNaive:h1:A": raw_hw_a * 3.0, "SeasonalNaive:h1:B": raw_hw_b * 0.25}
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_held_out_context(frame, fitted, held_out)
+    )
+
+    # Each bottom node's emitted half-width equals its held-out target (the scale
+    # makes the [alpha/2, 1-alpha/2] half-width match the held-out radius exactly).
+    np.testing.assert_allclose((upper[0] - lower[0]) / 2.0, raw_hw_a * 3.0)
+    np.testing.assert_allclose((upper[1] - lower[1]) / 2.0, raw_hw_b * 0.25)
+    # And these are not the in-sample widths.
+    assert (upper[0] - lower[0]) / 2.0 > raw_hw_a
+    assert (upper[1] - lower[1]) / 2.0 < raw_hw_b
+
+
+def test_aggregate_width_is_exact_member_sum_not_calibrated():
+    # An aggregate node's bounds equal the quantile of the summed SCALED member
+    # draws (coherence) — deliberately NOT a 1-alpha calibrated band on the
+    # aggregate, which is U5 work.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=1024)
+    fitted = _fitted([2.0, -3.0, 5.0, -4.0, 1.0], [1.0, -1.0, 4.0, -2.0, 0.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 7.0, "SeasonalNaive:h1:B": 3.0}
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_held_out_context(frame, fitted, held_out)
+    )
+
+    raw = _reconstruct_draws(
+        summing,
+        ["A", "B"],
+        {"A": 10.0, "B": 20.0},
+        {"A": fitted_resid(fitted, "A"), "B": fitted_resid(fitted, "B")},
+        draw_count=1024,
+        seed=7,
+    )
+    centers_b = np.array([10.0, 20.0])
+    factor_a = held_out["SeasonalNaive:h1:A"] / _raw_half_width(raw[0], 0.1)
+    factor_b = held_out["SeasonalNaive:h1:B"] / _raw_half_width(raw[1], 0.1)
+    scaled = centers_b[:, None] + (raw - centers_b[:, None]) * np.array([[factor_a], [factor_b]])
+    exp_lo, exp_hi = np.quantile(scaled.sum(axis=0), [0.05, 0.95])
+    np.testing.assert_allclose((lower[3], upper[3]), (exp_lo, exp_hi))
+    # The aggregate width is NOT the sum of the two held-out radii (that would be a
+    # naive independent-calibration band); cross-node draw structure makes them differ.
+    naive_band = held_out["SeasonalNaive:h1:A"] + held_out["SeasonalNaive:h1:B"]
+    assert abs((upper[3] - lower[3]) / 2.0 - naive_band) > 1e-6
+
+
+def test_cumulative_held_out_scaled_window_stays_coherent():
+    # Same coherence-under-scaling property on the cumulative window-sum path,
+    # keyed by the cumulative partition.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=512)
+    fitted = _fitted([2.0, -3.0, 5.0, -4.0, 1.0], [1.0, -1.0, 4.0, -2.0, 0.0])
+    protection = 3
+    centers_by_node = {"A": 30.0, "B": 60.0}
+    held_out = {"SeasonalNaive:cumulative:A": 12.0, "SeasonalNaive:cumulative:B": 4.0}
+    context = SpreadContext(
+        frame=_cumulative_frame(ORIGIN, protection=protection),
+        alpha=0.1,
+        fitted_values=fitted,
+        seed=7,
+        protection_period=protection,
+        held_out_half_width=held_out,
+    )
+
+    bounds = spread.cumulative_interval(
+        context, present_bottom=["A", "B"], centers_by_node=centers_by_node, alpha=0.1
+    )
+
+    window = _reconstruct_window_draws(
+        summing,
+        ["A", "B"],
+        centers_by_node,
+        {"A": fitted_resid(fitted, "A"), "B": fitted_resid(fitted, "B")},
+        draw_count=512,
+        seed=7,
+        protection=protection,
+    )
+    centers_b = np.array([30.0, 60.0])
+    factor_a = held_out["SeasonalNaive:cumulative:A"] / _raw_half_width(window[0], 0.1)
+    factor_b = held_out["SeasonalNaive:cumulative:B"] / _raw_half_width(window[1], 0.1)
+    scaled = centers_b[:, None] + (window - centers_b[:, None]) * np.array([[factor_a], [factor_b]])
+    exp_lo, exp_hi = np.quantile(scaled.sum(axis=0), [0.05, 0.95])
+    np.testing.assert_allclose(bounds["__total__"], (exp_lo, exp_hi))
+    np.testing.assert_allclose(bounds["group=g"], (exp_lo, exp_hi))
+    # Bottom node A tracks its own scaled window draws.
+    np.testing.assert_allclose(bounds["A"], np.quantile(scaled[0], [0.05, 0.95]))
+
+
+def test_degenerate_and_thin_history_fall_back_unscaled():
+    # Two fallback paths to factor 1.0 (never NaN/inf): a node with zero raw spread
+    # (degenerate residuals) and a node whose held-out radius is +inf (thin history)
+    # or missing both keep today's in-sample geometry.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=256)
+    # A has a real spread; B is degenerate (all-zero residuals).
+    fitted = _fitted([3.0, -3.0, 6.0, -6.0], [0.0, 0.0, 0.0, 0.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    # A: thin-history +inf -> fall back unscaled. B: a finite target, but B is
+    # degenerate (zero raw spread) -> also unscaled.
+    held_out = {"SeasonalNaive:h1:A": np.inf, "SeasonalNaive:h1:B": 5.0}
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_held_out_context(frame, fitted, held_out)
+    )
+
+    # Compare against the unscaled (held_out=None) baseline: byte-identical.
+    base_lo, base_hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_context(frame, fitted)
+    )
+    assert np.isfinite(lower).all() and np.isfinite(upper).all()
+    np.testing.assert_array_equal(lower, base_lo)
+    np.testing.assert_array_equal(upper, base_hi)
+    # B stayed a point (degenerate) and A kept its in-sample width.
+    np.testing.assert_allclose((lower[1], upper[1]), (20.0, 20.0))
+
+
+def test_missing_held_out_key_falls_back_unscaled():
+    # A held-out map missing a node's key leaves that node unscaled (factor 1.0).
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=256)
+    fitted = _fitted([3.0, -3.0, 6.0, -6.0], [1.0, -1.0, 2.0, -2.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 9.0}  # B missing on purpose
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_held_out_context(frame, fitted, held_out)
+    )
+    base_lo, base_hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_context(frame, fitted)
+    )
+    # B (missing key) matches the unscaled baseline; A (present key) does not.
+    np.testing.assert_allclose((lower[1], upper[1]), (base_lo[1], base_hi[1]))
+    assert not np.isclose(upper[0] - lower[0], base_hi[0] - base_lo[0])
+
+
+def test_held_out_none_is_byte_identical_to_unscaled():
+    # held_out_half_width=None must leave the in-sample geometry byte-identical to
+    # the pre-U4 path (the analytic/default-path guard at the spread level).
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=256)
+    fitted = _fitted([2.0, -3.0, 5.0, -1.0], [1.0, -2.0, 3.0, -4.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+
+    none_lo, none_hi = spread.to_interval(
+        centers,
+        np.zeros(4),
+        issue,
+        context=SpreadContext(frame=frame, alpha=0.1, fitted_values=fitted, seed=7),
+    )
+    base_lo, base_hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_context(frame, fitted)
+    )
+    np.testing.assert_array_equal(none_lo, base_lo)
+    np.testing.assert_array_equal(none_hi, base_hi)

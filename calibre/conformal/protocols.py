@@ -18,9 +18,17 @@ class SpreadContext:
     ``centers``/``radii``/``issue`` arrays passed to :meth:`Spread.to_interval`,
     the working ``alpha``, the in-sample fitted-value sidecar (``unique_id``,
     ``ds``, ``y``, ``model_name``, ``fitted_y_hat``) the residual bootstrap reads,
-    a base seed for per-cross-section RNG derivation, and the cumulative
-    protection period (``None`` in per-horizon mode). :class:`AnalyticRadius`
-    ignores it entirely, so the default path never constructs one.
+    a base seed for per-cross-section RNG derivation, the cumulative protection
+    period (``None`` in per-horizon mode), and the held-out half-widths a coherent
+    spread re-anchors its draw spread to. :class:`AnalyticRadius` ignores it
+    entirely, so the default path never constructs one.
+
+    ``held_out_half_width`` maps ``"{model}:h{h}:{node}"`` (and the cumulative
+    ``"{model}:cumulative:{node}"``) to the held-out ``(1-alpha)`` radius the
+    per-partition marginal calibrator already tracks for that partition. It is
+    per-origin and depends on accumulated out-of-sample state, so it threads
+    through context rather than construction; ``None`` leaves the in-sample draw
+    geometry unscaled.
     """
 
     frame: pd.DataFrame
@@ -28,6 +36,7 @@ class SpreadContext:
     fitted_values: pd.DataFrame | None = None
     seed: int = 0
     protection_period: int | None = None
+    held_out_half_width: dict[str, float] | None = None
 
 
 class Spread(Protocol):

@@ -946,3 +946,288 @@ def test_config_rejects_unknown_spread_and_nonpositive_draw_count():
         SymmetricIntervalConfig(method="mscp", spread="bogus")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="draw_count"):
         SymmetricIntervalConfig(method="mscp", spread="coherent_draws", draw_count=0)
+
+
+# --- U4: held-out width ownership (end-to-end reduced-lattice) ----------------
+
+_U4_MODEL = "model"
+
+
+def _u4_config(window: int = 40):
+    from calibre.conformal.partitions import series_partition
+    from calibre.conformal.runtime import SymmetricIntervalConfig
+
+    # series_partition keys the per-partition calibrator on the node id, so the
+    # held-out radius is per (model, horizon, node) — the key the coherent spread
+    # re-anchors each bottom node's width to.
+    return SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=window,
+        spread="coherent_draws",
+        draw_count=400,
+        draw_seed=11,
+        partition_key=series_partition,
+    )
+
+
+def _u4_fitted(origin, residuals_by_node, *, periods=30):
+    from calibre.core.forecast_frame import (
+        DS,
+        FITTED_Y_HAT,
+        MODEL_NAME,
+        UNIQUE_ID,
+        Y,
+    )
+
+    dates = pd.date_range("2022-01-01", periods=periods, freq="W")
+    rows = []
+    for node, resid in residuals_by_node.items():
+        for ds, r in zip(dates, resid, strict=True):
+            rows.append(
+                {UNIQUE_ID: node, DS: ds, Y: float(r), MODEL_NAME: _U4_MODEL, FITTED_Y_HAT: 0.0}
+            )
+    return pd.DataFrame(rows)
+
+
+def _u4_apply_frame(origin, centers_by_node):
+    from calibre.core.forecast_frame import (
+        DS,
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        UNIQUE_ID,
+        Y_HAT,
+        H,
+        Y,
+    )
+
+    nodes = list(centers_by_node)
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: nodes,
+            DS: [origin + pd.Timedelta(weeks=1)] * len(nodes),
+            Y: [np.nan] * len(nodes),
+            Y_HAT: [centers_by_node[n] for n in nodes],
+            H: [1] * len(nodes),
+            FORECAST_ORIGIN: [origin] * len(nodes),
+            MODEL_NAME: [_U4_MODEL] * len(nodes),
+        }
+    )
+
+
+def test_per_node_held_out_coverage_on_reduced_lattice():
+    from calibre.conformal.runtime import SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import UNIQUE_ID, Y, interval_column_names
+
+    index = _coherent_hierarchy_index()  # nodes A, B + group=g + total
+    config = _u4_config()
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    lower_col, upper_col = interval_column_names(0.9)
+
+    rng = np.random.default_rng(2024)
+    # True OOS errors: A wide, B tight. The in-sample residuals deliberately have a
+    # DIFFERENT scale, so held-out width ownership is what closes coverage.
+    oos_scale = {"A": 6.0, "B": 1.5}
+    in_sample_scale = {"A": 1.0, "B": 4.0}
+    centers = {"A": 50.0, "B": 80.0}
+
+    inside = {"A": 0, "B": 0}
+    total = {"A": 0, "B": 0}
+    origin = pd.Timestamp("2023-01-01")
+    for step in range(160):
+        origin = origin + pd.Timedelta(weeks=1)
+        fitted = _u4_fitted(
+            origin,
+            {n: rng.normal(0.0, in_sample_scale[n], size=30) for n in ("A", "B")},
+        )
+        runtime.set_fitted_values(fitted)
+        applied = runtime.apply(_u4_apply_frame(origin, {"A": centers["A"], "B": centers["B"]}))
+
+        actuals = {n: centers[n] + rng.normal(0.0, oos_scale[n]) for n in ("A", "B")}
+        resolved = applied.copy()
+        resolved[Y] = resolved[UNIQUE_ID].map(actuals)
+        # Score realized coverage on the warmed-up tail only (post-warmup rows).
+        if step >= 80:
+            for _, row in resolved.iterrows():
+                node = row[UNIQUE_ID]
+                lo, hi = row[lower_col], row[upper_col]
+                if np.isnan(lo) or np.isnan(hi):
+                    continue
+                total[node] += 1
+                if lo <= actuals[node] <= hi:
+                    inside[node] += 1
+        runtime.observe(resolved)
+
+    # Both bottom nodes must accumulate evaluated rows and land near 90% coverage —
+    # achievable only because the width is held-out-owned, not in-sample-shaped.
+    assert total["A"] > 30 and total["B"] > 30
+    for node in ("A", "B"):
+        realized = inside[node] / total[node]
+        assert 0.80 <= realized <= 0.99, (node, realized)
+
+
+def test_resume_reproduces_held_out_bounds_byte_for_byte():
+    from calibre.conformal.runtime import SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import UNIQUE_ID, Y, interval_column_names
+
+    index = _coherent_hierarchy_index()
+    lower_col, upper_col = interval_column_names(0.9)
+    rng_seed = 7
+
+    def run(split_at):
+        config = _u4_config()
+        runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+        rng = np.random.default_rng(rng_seed)
+        captured = []
+        origin = pd.Timestamp("2023-01-01")
+        for step in range(24):
+            origin = origin + pd.Timedelta(weeks=1)
+            # Persist/restore across the partitioned surface at the split boundary.
+            if split_at is not None and step == split_at:
+                states = runtime.get_partition_states()
+                runtime = SymmetricIntervalRuntime.from_partition_states(
+                    config, states, hierarchy_index=index
+                )
+            fitted = _u4_fitted(origin, {n: rng.normal(0.0, 2.0, size=30) for n in ("A", "B")})
+            runtime.set_fitted_values(fitted)
+            applied = runtime.apply(_u4_apply_frame(origin, {"A": 50.0, "B": 80.0}))
+            ordered = applied.sort_values(UNIQUE_ID)
+            captured.append(
+                (
+                    tuple(ordered[UNIQUE_ID]),
+                    ordered[[lower_col, upper_col]].to_numpy(dtype=float),
+                )
+            )
+            actuals = {n: c + rng.normal(0.0, 3.0) for n, c in (("A", 50.0), ("B", 80.0))}
+            resolved = applied.copy()
+            resolved[Y] = resolved[UNIQUE_ID].map(actuals)
+            runtime.observe(resolved)
+        return captured
+
+    single = run(None)
+    resumed = run(12)
+    saw_finite = False
+    for (nodes_one, bounds_one), (nodes_two, bounds_two) in zip(single, resumed, strict=True):
+        assert nodes_one == nodes_two
+        np.testing.assert_array_equal(bounds_one, bounds_two)  # NaN positions match too
+        saw_finite = saw_finite or bool(np.isfinite(bounds_one).any())
+    # Guard against a vacuous all-NaN pass: warmed-up origins must emit real bounds.
+    assert saw_finite
+
+
+def test_analytic_apply_observe_unchanged():
+    # The default analytic path ignores SpreadContext entirely; widening the
+    # context with held_out_half_width must not perturb its bounds or scores.
+    from calibre.conformal.partitions import series_partition
+    from calibre.conformal.runtime import SymmetricIntervalConfig, SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import (
+        DS,
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        NONCONFORMITY_SCORE,
+        UNIQUE_ID,
+        Y_HAT,
+        H,
+        Y,
+        interval_column_names,
+    )
+
+    lower_col, upper_col = interval_column_names(0.9)
+
+    def run():
+        config = SymmetricIntervalConfig(
+            method="mscp",
+            coverage=0.9,
+            calibration_window=10,
+            partition_key=series_partition,
+        )
+        runtime = SymmetricIntervalRuntime(config)
+        bounds = []
+        scores = []
+        origin = pd.Timestamp("2023-01-01")
+        for step in range(12):
+            origin = origin + pd.Timedelta(weeks=1)
+            frame = pd.DataFrame(
+                {
+                    UNIQUE_ID: ["A", "B"],
+                    DS: [origin + pd.Timedelta(weeks=1)] * 2,
+                    Y: [np.nan, np.nan],
+                    Y_HAT: [10.0, 20.0],
+                    H: [1, 1],
+                    FORECAST_ORIGIN: [origin, origin],
+                    MODEL_NAME: ["model", "model"],
+                }
+            )
+            applied = runtime.apply(frame)
+            bounds.append(applied[[lower_col, upper_col]].to_numpy())
+            resolved = applied.copy()
+            resolved[Y] = [11.0 + step, 18.0 - step]
+            observed = runtime.observe(resolved)
+            scores.append(observed[NONCONFORMITY_SCORE].to_numpy())
+        return bounds, scores, runtime.get_resume_state()
+
+    bounds_a, scores_a, state_a = run()
+    bounds_b, scores_b, state_b = run()
+    for one, two in zip(bounds_a, bounds_b, strict=True):
+        np.testing.assert_array_equal(one, two)
+    for one, two in zip(scores_a, scores_b, strict=True):
+        np.testing.assert_array_equal(one, two)
+    # The analytic resume state carries no held-out-width key (nothing new persisted).
+    assert "held_out_half_width" not in state_a
+    assert state_a.keys() == state_b.keys()
+
+
+def test_analytic_resume_state_unchanged():
+    # get_resume_state / get_partition_states for an analytic runtime gain no new
+    # key under U4 — the held-out width is read live, never serialized.
+    from calibre.conformal.partitions import series_partition
+    from calibre.conformal.runtime import SymmetricIntervalConfig, SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import (
+        DS,
+        FORECAST_ORIGIN,
+        MODEL_NAME,
+        UNIQUE_ID,
+        Y_HAT,
+        H,
+        Y,
+        interval_column_names,
+    )
+
+    lower_col, upper_col = interval_column_names(0.9)
+    config = SymmetricIntervalConfig(
+        method="mscp", coverage=0.9, calibration_window=8, partition_key=series_partition
+    )
+    runtime = SymmetricIntervalRuntime(config)
+    origin = pd.Timestamp("2023-01-01")
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: ["A", "B"],
+            DS: [origin + pd.Timedelta(weeks=1)] * 2,
+            Y: [np.nan, np.nan],
+            Y_HAT: [10.0, 20.0],
+            H: [1, 1],
+            FORECAST_ORIGIN: [origin, origin],
+            MODEL_NAME: ["model", "model"],
+        }
+    )
+    applied = runtime.apply(frame)
+    resolved = applied.copy()
+    resolved[Y] = [12.0, 17.0]
+    runtime.observe(resolved)
+
+    expected_keys = {
+        "method",
+        "mode",
+        "coverage",
+        "calibration_window",
+        "gamma",
+        "quantile_rule",
+        "protection_period",
+        "issued_count",
+        "controller",
+        "calibrator",
+    }
+    assert set(runtime.get_resume_state()) == expected_keys
+    for state in runtime.get_partition_states().values():
+        assert "held_out_half_width" not in state
+        assert "held_out_half_width" not in state.get("calibrator", {})
