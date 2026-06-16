@@ -31,6 +31,9 @@ class _TaskConfig(Protocol):
 
 
 class _OriginsConfig(Protocol):
+    @property
+    def freq(self) -> str: ...
+
     def to_list(self) -> list[pd.Timestamp]: ...
 
 
@@ -106,6 +109,13 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
     )
     bottom_only = hierarchy_index is not None and _is_point_bottom_up(config)
 
+    # Resolved before the bottom_only branch so its actuals precompute can derive
+    # the evaluation window from the origins; to_list() depends only on
+    # config.origins, so the hoist is independent of the tasks/actuals built below.
+    origins = config.origins.to_list()
+    if not origins:
+        raise ValueError("origins resolved to an empty list")
+
     actuals: pd.DataFrame | ActualsSource
     hierarchy_partitions: int | None = None
     if bottom_only:
@@ -117,6 +127,14 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         # span the full hierarchy node set once aggregates are synthesized.
         assert reconciliation_hierarchy is not None and hierarchy_index is not None
         actuals = HierarchyActualsSource(bundle.history, hierarchy_index)
+        # Warm the aggregate-actuals cache for the whole window up front: the
+        # window-sliding group-bys move out of the per-origin resolve hot path,
+        # making the actuals lookup O(due). The ds set is a best-effort superset
+        # of the dates the ledger requests (the model adapter's future-frame freq
+        # is configured independently of OriginsConfig.freq), so a missed pair
+        # falls through to the unchanged lazy compute byte-identically.
+        ds_values = _evaluation_window_ds(origins, config.origins.freq, horizon)
+        actuals.precompute(hierarchy_index.node_labels, ds_values)
         tasks = build_tasks(bundle.history, model_configs, horizon)
         hierarchy_partitions = len(hierarchy_index.node_labels) * horizon * len(config.tasks)
     else:
@@ -149,9 +167,6 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         horizon,
         hierarchy_partitions=hierarchy_partitions,
     )
-    origins = config.origins.to_list()
-    if not origins:
-        raise ValueError("origins resolved to an empty list")
 
     conformal_config: SymmetricIntervalConfig | None = (
         config.conformal.to_runtime_config() if config.conformal is not None else None
@@ -176,6 +191,28 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         ),
         conformal_partition_estimate=conformal_partition_estimate,
     )
+
+
+def _evaluation_window_ds(
+    origins: Sequence[pd.Timestamp], freq: str, horizon: int
+) -> list[pd.Timestamp]:
+    """Derive the best-effort ``ds`` superset for the bottom_up actuals precompute.
+
+    Unions, per origin, the prediction-date span ``date_range(origin, periods=
+    horizon + 1, freq=freq)`` and dedups. The run ``freq`` is the same one
+    ``OriginsConfig.to_list`` steps origins by; the model adapter's future-frame
+    freq and its h=1 anchor (origin vs origin+1) are configured independently, so
+    the span starts at the origin and runs one step past ``horizon`` to bracket
+    both anchoring conventions — a *superset* of the dates the ledger requests,
+    not an engine-canonical reconstruction. A pair the ledger requests but this
+    misses falls through to the lazy compute, so seed coverage — never
+    correctness — is what depends on ``freq`` matching; extra seeded dates are
+    harmless dead cache entries.
+    """
+    dates: pd.DatetimeIndex = pd.DatetimeIndex([])
+    for origin in origins:
+        dates = dates.union(pd.date_range(pd.Timestamp(origin), periods=horizon + 1, freq=freq))
+    return list(dates)
 
 
 def _summing_matrix_bytes(config: RunPreparationConfig, hierarchy_index: HierarchyIndex) -> int:

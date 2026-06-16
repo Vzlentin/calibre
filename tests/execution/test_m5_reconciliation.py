@@ -32,6 +32,7 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import ForecastTask
 from calibre.evaluation.forecast_metrics import compute_metrics, resolve_actuals
 from calibre.evaluation.point_metrics import mae
+from calibre.execution.actuals import HierarchyActualsSource
 from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
@@ -1326,6 +1327,162 @@ def test_fused_cache_and_ref_rebuild_after_owned_runtime_shutdown() -> None:
             ray.shutdown()
 
     pd.testing.assert_frame_equal(results[0], results[1], check_exact=True)
+
+
+# ---------------------------------------------------------------------------
+# #210: point bottom_up aggregate-actuals precompute byte-identity gate.
+#
+# Warming HierarchyActualsSource._lookup_cache for the whole window up front must
+# be a pure performance change: the resolved ledger (y values + complete-set
+# membership of (node, ds) pairs) must be byte-for-byte identical to the lazy
+# (unseeded) run. These gates run the *point bottom_up* path (the only place
+# HierarchyActualsSource is live) on a CA-subset hierarchy, NOT the fused
+# FrameActualsSource fixtures.
+# ---------------------------------------------------------------------------
+
+_PRECOMPUTE_ORIGINS = [
+    pd.Timestamp("2011-03-15"),
+    pd.Timestamp("2011-03-16"),
+    pd.Timestamp("2011-03-17"),
+]
+_PRECOMPUTE_HORIZON = 2
+
+
+def _ca_subset_bottom_history(hierarchy: pd.DataFrame) -> pd.DataFrame:
+    """Bottom-level history for the CA-subset hierarchy (no aggregate rows)."""
+    bottom_ids = hierarchy[UNIQUE_ID].astype(str).tolist()
+    dates = pd.date_range("2011-01-01", periods=80, freq="D")
+    rows = [
+        {
+            UNIQUE_ID: uid,
+            DS: ds,
+            Y: float((idx + 1) * 2 + (step % 7) + 0.1 * step),
+        }
+        for idx, uid in enumerate(bottom_ids)
+        for step, ds in enumerate(dates)
+    ]
+    return pd.DataFrame(rows)
+
+
+def _precompute_window_ds() -> list[pd.Timestamp]:
+    """The (origins x horizon) prediction-date superset the run resolves.
+
+    Mirrors ``hierarchy_preparation._evaluation_window_ds``: the span starts at
+    each origin and runs one step past the horizon, bracketing the adapter's h=1
+    anchor (here h=1 lands on the origin itself).
+    """
+    dates: pd.DatetimeIndex = pd.DatetimeIndex([])
+    for origin in _PRECOMPUTE_ORIGINS:
+        dates = dates.union(pd.date_range(origin, periods=_PRECOMPUTE_HORIZON + 1, freq="D"))
+    return list(dates)
+
+
+def _run_point_bottom_up(
+    hierarchy: pd.DataFrame,
+    bottom_history: pd.DataFrame,
+    *,
+    precompute: bool,
+    output_path: Path | None = None,
+) -> BackendResult:
+    """Run the point bottom_up path; optionally pre-seed the actuals window cache.
+
+    Builds bottom-only tasks + a lazy ``HierarchyActualsSource`` + a
+    ``BottomUpReconciler`` (the live ``full.yaml`` shape) and runs three
+    consecutive origins at horizon 2 with conformal on, so ``_resolve_due`` fires
+    at both ResolveOpen and Commit and new ``(node, ds)`` pairs enter per origin.
+    """
+    index = build_hierarchy_index(hierarchy)
+    tasks = build_tasks(
+        bottom_history,
+        [
+            {
+                "backend": "statsforecast",
+                "model": "SeasonalNaive",
+                "name": "SeasonalNaive",
+                "season_length": 7,
+            }
+        ],
+        _PRECOMPUTE_HORIZON,
+    )
+    actuals = HierarchyActualsSource(bottom_history, index)
+    if precompute:
+        actuals.precompute(index.node_labels, _precompute_window_ds())
+
+    output = (
+        LedgerOutputOptions(forecast_path=str(output_path), streaming=True)
+        if output_path is not None
+        else LedgerOutputOptions()
+    )
+    engine = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="local", seed=42),
+        output=output,
+        conformal=ConformalOptions(
+            config=SymmetricIntervalConfig(
+                method="aci", coverage=0.9, calibration_window=4, gamma=0.05
+            )
+        ),
+        reconciliation=ReconciliationOptions(
+            reconciler=BottomUpReconciler(), hierarchy_index=index
+        ),
+    )
+    try:
+        return engine.execute(tasks, actuals, _PRECOMPUTE_ORIGINS)
+    finally:
+        engine.close()
+
+
+def test_precompute_on_vs_off_ledger_byte_identical() -> None:
+    """T1: precompute-ON ledger is byte-identical to the lazy (OFF) run."""
+    hierarchy = _ca_subset_hierarchy(_m5_hierarchy_frame())
+    bottom_history = _ca_subset_bottom_history(hierarchy)
+
+    off = _run_point_bottom_up(hierarchy, bottom_history, precompute=False).ledger.to_df()
+    on = _run_point_bottom_up(hierarchy, bottom_history, precompute=True).ledger.to_df()
+
+    pd.testing.assert_frame_equal(off, on, check_exact=True)
+    assert _ledger_sha256(off) == _ledger_sha256(on)
+
+
+def test_precompute_seeds_superset_of_due_ds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T1 guard: the seeded ds set is a superset of the ds the resolve actually requests.
+
+    Spies on the pending ``ds`` each ``resolve`` is asked to fill (what
+    ``due_frame`` produces), not the whole ledger. A future freq/adapter change
+    that breaks the superset property fails loudly here rather than silently
+    falling back to lazy (byte-identical but a perf regression).
+    """
+    hierarchy = _ca_subset_hierarchy(_m5_hierarchy_frame())
+    bottom_history = _ca_subset_bottom_history(hierarchy)
+
+    requested_ds: set[pd.Timestamp] = set()
+    real_resolve = HierarchyActualsSource.resolve
+
+    def _spy_resolve(self, ledger_df, current_origin):
+        pending = ledger_df[ledger_df[Y].isna() & (ledger_df[DS] <= current_origin)]
+        requested_ds.update(pd.to_datetime(pending[DS]).unique())
+        return real_resolve(self, ledger_df, current_origin)
+
+    monkeypatch.setattr(HierarchyActualsSource, "resolve", _spy_resolve)
+    _run_point_bottom_up(hierarchy, bottom_history, precompute=False)
+
+    seeded_ds = set(pd.to_datetime(pd.Index(_precompute_window_ds())))
+    assert requested_ds
+    assert requested_ds <= seeded_ds
+
+
+def test_precompute_on_vs_off_resolved_parquet_byte_identical(tmp_path: Path) -> None:
+    """T2: finalized streamed ``.resolved.parquet`` is byte-identical ON vs OFF."""
+    hierarchy = _ca_subset_hierarchy(_m5_hierarchy_frame())
+    bottom_history = _ca_subset_bottom_history(hierarchy)
+    off_path = tmp_path / "off.parquet"
+    on_path = tmp_path / "on.parquet"
+
+    _run_point_bottom_up(hierarchy, bottom_history, precompute=False, output_path=off_path)
+    _run_point_bottom_up(hierarchy, bottom_history, precompute=True, output_path=on_path)
+
+    off_resolved = resolved_ledger_uri(off_path)
+    on_resolved = resolved_ledger_uri(on_path)
+    assert Path(off_resolved).read_bytes() == Path(on_resolved).read_bytes()
 
 
 def test_reconcile_byte_identical_when_hierarchy_none() -> None:

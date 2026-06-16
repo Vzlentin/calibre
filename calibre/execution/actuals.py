@@ -18,6 +18,7 @@ which pending ledger rows are due at the current origin); an
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol
 
 import pandas as pd
@@ -68,6 +69,14 @@ class HierarchyActualsSource:
     requested ``(node, ds)`` pairs, with the same all-members-present
     completeness rule as ``build_node_history`` — so resolution parity with the
     eager node-history frame holds row-for-row.
+
+    The complete-sum cache may be pre-seeded for the whole fixed evaluation
+    window in one batch via :meth:`precompute`, front-loading the window-sliding
+    group-bys out of the per-origin :meth:`resolve` hot path. Seeding changes
+    only the *timing* of the sums, not their values or complete-set membership:
+    :meth:`precompute` runs the same :meth:`_compute_lookup`, so any pair it does
+    not seed (a streaming-history shape, or a ``ds`` outside the seeded window)
+    still falls through to the unchanged lazy miss path byte-identically.
     """
 
     def __init__(self, bottom_history: pd.DataFrame, hierarchy_index: HierarchyIndex) -> None:
@@ -112,13 +121,51 @@ class HierarchyActualsSource:
         # invariant silently, so it is asserted here in prose. Only complete
         # aggregates are cached; incomplete ones are absent (never cached as
         # absent-forever facts) and recomputed on the fixed-history complete-set
-        # check the next time their (node, ds) is requested.
+        # check the next time their (node, ds) is requested. The cache may be
+        # warmed for the full evaluation window up front via precompute(); an
+        # unseeded pair still misses and computes lazily, byte-identically.
         # Stored as a float64 Series keyed by a (unique_id, ds) MultiIndex so
         # the hit path serves ~10^6 rows via one C-level get_indexer instead of
         # per-element dict probes (the index engine is cached between hit-only
         # origins; it rebuilds only when a miss extends the cache).
         self._lookup_cache: pd.Series = pd.Series(
             dtype="float64", index=pd.MultiIndex.from_arrays([[], []], names=[UNIQUE_ID, DS])
+        )
+
+    def precompute(self, node_labels: Sequence[str], ds_values: Sequence[pd.Timestamp]) -> None:
+        """Warm the complete-sum cache for the whole evaluation window in one batch.
+
+        Computes every ``(node, ds)`` pair over the Cartesian product of
+        ``node_labels`` (all hierarchy nodes) and ``ds_values`` (the window dates)
+        with a single :meth:`_compute_lookup` and seeds ``_lookup_cache`` exactly
+        as the lazy miss path does, so subsequent per-origin :meth:`resolve` calls
+        for in-window pairs are pure cache hits — the window-sliding group-bys move
+        out of the per-origin hot path. Reuses the same summation and completeness
+        gate as the lazy path, so seeded values and the complete-set membership are
+        identical to resolving lazily; only complete pairs are seeded, so incomplete
+        aggregates stay absent (their ledger rows stay pending) just as before.
+
+        Args:
+            node_labels: The full hierarchy node set (bottom + aggregate + TOTAL).
+            ds_values: The evaluation-window dates to warm.
+        """
+        labels = [str(label) for label in node_labels]
+        dates = pd.DatetimeIndex(pd.to_datetime(pd.Index(ds_values))).unique()
+        if not labels or len(dates) == 0:
+            return
+
+        # Cartesian product as two aligned Series, matching the (uids, ds) shape
+        # _compute_lookup consumes on the lazy path: each label repeated across
+        # every date, dates tiled per label.
+        uids = pd.Series(pd.Index(labels).repeat(len(dates)).to_numpy(), dtype="object")
+        ds = pd.Series(pd.DatetimeIndex(list(dates) * len(labels)), dtype="datetime64[ns]")
+
+        computed = self._compute_lookup(uids, ds)
+        if computed.empty:
+            return
+        computed = computed.astype("float64")
+        self._lookup_cache = (
+            computed if self._lookup_cache.empty else pd.concat([self._lookup_cache, computed])
         )
 
     def resolve(
