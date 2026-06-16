@@ -603,7 +603,7 @@ def test_bottom_width_tracks_held_out_not_in_sample():
 def test_aggregate_width_is_exact_member_sum_not_calibrated():
     # An aggregate node's bounds equal the quantile of the summed SCALED member
     # draws (coherence) — deliberately NOT a 1-alpha calibrated band on the
-    # aggregate, which is U5 work.
+    # aggregate, whose independent held-out calibration is deferred (out of scope here).
     summing = _summing()
     spread = CoherentDraws(summing=summing, draw_count=1024)
     fitted = _fitted([2.0, -3.0, 5.0, -4.0, 1.0], [1.0, -1.0, 4.0, -2.0, 0.0])
@@ -630,10 +630,12 @@ def test_aggregate_width_is_exact_member_sum_not_calibrated():
     scaled = centers_b[:, None] + (raw - centers_b[:, None]) * np.array([[factor_a], [factor_b]])
     exp_lo, exp_hi = np.quantile(scaled.sum(axis=0), [0.05, 0.95])
     np.testing.assert_allclose((lower[3], upper[3]), (exp_lo, exp_hi))
-    # The aggregate width is NOT the sum of the two held-out radii (that would be a
-    # naive independent-calibration band); cross-node draw structure makes them differ.
+    # The aggregate width is strictly SMALLER than the sum of the two held-out
+    # radii: a naive independent-calibration band would add them, but the coherent
+    # aggregate reads the quantile of the summed (cross-node) scaled draws, which
+    # is sub-additive under independent draw structure.
     naive_band = held_out["SeasonalNaive:h1:A"] + held_out["SeasonalNaive:h1:B"]
-    assert abs((upper[3] - lower[3]) / 2.0 - naive_band) > 1e-6
+    assert (upper[3] - lower[3]) / 2.0 < naive_band
 
 
 def test_cumulative_held_out_scaled_window_stays_coherent():
@@ -729,9 +731,35 @@ def test_missing_held_out_key_falls_back_unscaled():
     assert not np.isclose(upper[0] - lower[0], base_hi[0] - base_lo[0])
 
 
+def test_pathological_factor_falls_back_unscaled():
+    # A node whose raw inner-quantile half-width is tiny-but-nonzero against a large
+    # held-out target implies a factor above MAX_HELD_OUT_FACTOR; it falls back to
+    # in-sample geometry rather than exploding its outlier draws into the aggregate.
+    summing = _summing()
+    spread = CoherentDraws(summing=summing, draw_count=256)
+    # A: a tiny-but-nonzero spread (implied factor ~9e6). B: a normal spread.
+    fitted = _fitted([1e-6, -1e-6, 1e-6, -1e-6], [3.0, -3.0, 6.0, -6.0])
+    frame = _frame(["A", "B", "group=g", "__total__"], [10.0, 20.0, 30.0, 30.0])
+    centers = np.array([10.0, 20.0, 30.0, 30.0])
+    issue = np.array([True, True, True, True])
+    held_out = {"SeasonalNaive:h1:A": 9.0, "SeasonalNaive:h1:B": 9.0}
+
+    lower, upper = spread.to_interval(
+        centers, np.zeros(4), issue, context=_held_out_context(frame, fitted, held_out)
+    )
+    base_lo, base_hi = spread.to_interval(
+        centers, np.zeros(4), issue, context=_context(frame, fitted)
+    )
+    # A (capped) keeps its tiny in-sample width — not exploded toward the target.
+    np.testing.assert_allclose((lower[0], upper[0]), (base_lo[0], base_hi[0]))
+    assert (upper[0] - lower[0]) < 1.0
+    # B (factor 1.5, within the cap) DID engage — differs from the unscaled baseline.
+    assert not np.isclose(upper[1] - lower[1], base_hi[1] - base_lo[1])
+
+
 def test_held_out_none_is_byte_identical_to_unscaled():
     # held_out_half_width=None must leave the in-sample geometry byte-identical to
-    # the pre-U4 path (the analytic/default-path guard at the spread level).
+    # the pre-held-out path (the analytic/default-path guard at the spread level).
     summing = _summing()
     spread = CoherentDraws(summing=summing, draw_count=256)
     fitted = _fitted([2.0, -3.0, 5.0, -1.0], [1.0, -2.0, 3.0, -4.0])

@@ -36,6 +36,13 @@ from calibre.reconciliation.summing import SparseSummingMatrix
 
 DEFAULT_DRAW_COUNT = 200
 
+# Cap the held-out width re-anchoring: a target/raw-half-width ratio above this
+# means the raw inner-quantile window is degenerate relative to the held-out
+# radius (a heavy-tailed node), so scaling would explode outlier draws instead
+# of faithfully re-anchoring the width. Such nodes fall back to in-sample
+# geometry rather than distort the reconciled aggregate.
+MAX_HELD_OUT_FACTOR = 1.0e3
+
 
 @dataclass(frozen=True, slots=True)
 class CoherentDraws:
@@ -306,10 +313,14 @@ def _rescale_to_held_out(
     to the held-out radius. Returns a new array, leaving ``draws`` untouched.
 
     Falls back to factor 1.0 (unscaled, never ``NaN``) whenever the raw spread is
-    degenerate (zero half-width) or the held-out radius is missing, ``NaN``, or
-    non-finite — the marginal calibrator returns ``+inf`` under the ``higher``
-    rule on thin history, which degrades to today's in-sample geometry rather
-    than blowing the width to infinity.
+    degenerate (non-positive half-width) or the held-out radius is missing,
+    ``NaN``, or non-finite — the marginal calibrator returns ``+inf`` under the
+    ``higher`` rule on thin history, which degrades to today's in-sample geometry
+    rather than blowing the width to infinity. It also falls back when the implied
+    factor exceeds :data:`MAX_HELD_OUT_FACTOR`: a raw inner-window that small
+    relative to the target means a heavy-tailed node the ``[alpha/2, 1-alpha/2]``
+    half-width misrepresents, so re-anchoring would explode the node's outlier
+    draws into the reconciled aggregate quantiles rather than re-scale faithfully.
     """
     if held_out is None:
         return draws
@@ -319,9 +330,12 @@ def _rescale_to_held_out(
     factors = np.ones(len(keys), dtype=float)
     for i, key in enumerate(keys):
         target = held_out.get(key)
-        if target is None or not np.isfinite(target) or raw_half_width[i] == 0.0:
+        if target is None or not np.isfinite(target) or raw_half_width[i] <= 0.0:
             continue
-        factors[i] = float(target) / raw_half_width[i]
+        factor = float(target) / raw_half_width[i]
+        if factor > MAX_HELD_OUT_FACTOR:
+            continue
+        factors[i] = factor
     return centers_b[:, None] + deviations * factors[:, None]
 
 

@@ -948,7 +948,7 @@ def test_config_rejects_unknown_spread_and_nonpositive_draw_count():
         SymmetricIntervalConfig(method="mscp", spread="coherent_draws", draw_count=0)
 
 
-# --- U4: held-out width ownership (end-to-end reduced-lattice) ----------------
+# --- Held-out width ownership (end-to-end reduced-lattice) -------------------
 
 _U4_MODEL = "model"
 
@@ -1066,6 +1066,48 @@ def test_per_node_held_out_coverage_on_reduced_lattice():
         assert 0.80 <= realized <= 0.99, (node, realized)
 
 
+def test_held_out_half_widths_engage_under_default_global_partition():
+    # Under the DEFAULT global partition the calibrator pools every series into one
+    # radius, but the held-out dict must still key by the per-node spread keys (NOT
+    # the pooled "__global__" key) so CoherentDraws' per-bottom-node lookups hit,
+    # with every node mapping to the single pooled radius. Regression guard: keying
+    # by the raw partition base made the per-node lookup miss and silently no-op.
+    from calibre.conformal.partitions import global_partition
+    from calibre.conformal.runtime import SymmetricIntervalConfig, SymmetricIntervalRuntime
+    from calibre.core.forecast_frame import UNIQUE_ID, Y
+
+    index = _coherent_hierarchy_index()
+    config = SymmetricIntervalConfig(
+        method="mscp",
+        coverage=0.9,
+        calibration_window=40,
+        spread="coherent_draws",
+        draw_count=200,
+        draw_seed=11,
+        partition_key=global_partition,
+    )
+    runtime = SymmetricIntervalRuntime(config, hierarchy_index=index)
+    rng = np.random.default_rng(7)
+    origin = pd.Timestamp("2023-01-01")
+    for _ in range(30):
+        origin = origin + pd.Timedelta(weeks=1)
+        runtime.set_fitted_values(
+            _u4_fitted(origin, {n: rng.normal(0.0, 2.0, size=30) for n in ("A", "B")})
+        )
+        applied = runtime.apply(_u4_apply_frame(origin, {"A": 50.0, "B": 80.0}))
+        resolved = applied.copy()
+        resolved[Y] = resolved[UNIQUE_ID].map(
+            {"A": 50.0 + rng.normal(0.0, 5.0), "B": 80.0 + rng.normal(0.0, 5.0)}
+        )
+        runtime.observe(resolved)
+
+    held = runtime._held_out_half_widths(_u4_apply_frame(origin, {"A": 50.0, "B": 80.0}), 0.1)
+    assert set(held) == {f"{_U4_MODEL}:h1:A", f"{_U4_MODEL}:h1:B"}
+    pooled = held[f"{_U4_MODEL}:h1:A"]
+    assert held[f"{_U4_MODEL}:h1:B"] == pooled
+    assert np.isfinite(pooled) and pooled > 0.0
+
+
 def test_resume_reproduces_held_out_bounds_byte_for_byte():
     from calibre.conformal.runtime import SymmetricIntervalRuntime
     from calibre.core.forecast_frame import UNIQUE_ID, Y, interval_column_names
@@ -1179,7 +1221,7 @@ def test_analytic_apply_observe_unchanged():
 
 def test_analytic_resume_state_unchanged():
     # get_resume_state / get_partition_states for an analytic runtime gain no new
-    # key under U4 — the held-out width is read live, never serialized.
+    # key for held-out width — it is read live, never serialized.
     from calibre.conformal.partitions import series_partition
     from calibre.conformal.runtime import SymmetricIntervalConfig, SymmetricIntervalRuntime
     from calibre.core.forecast_frame import (
