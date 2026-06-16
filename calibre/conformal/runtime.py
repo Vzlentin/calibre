@@ -564,27 +564,25 @@ class SymmetricIntervalRuntime:
         """Held-out ``(1-alpha)`` radii per partition for the coherent spread.
 
         Reads the existing per-partition marginal calibrator — the same surface
-        :meth:`_apply_perhorizon` already calls — so the held-out radii a coherent
-        draw spread re-anchors its width to are bit-consistent with the marginal
-        path. Returns ``None`` for the point spread (which ignores context), so
-        the default path allocates nothing new. Both the per-horizon
-        ``"{model}:h{h}:{node}"`` and cumulative ``"{model}:cumulative:{node}"``
-        keys present in the frame are populated, so per-horizon and window-sum
-        lookups both resolve against the calibrator's stored keys.
+        :meth:`_apply_perhorizon` already calls (via :meth:`_partition_values`) —
+        so the held-out radii a coherent draw spread re-anchors its width to are
+        bit-consistent with the marginal path. Returns ``None`` for the point
+        spread (which ignores context), so the default path allocates nothing new.
+        Only the active mode's keys are populated — per-horizon
+        ``"{model}:h{h}:{node}"`` or cumulative ``"{model}:cumulative:{node}"`` —
+        since the two interval paths are mutually exclusive; both resolve against
+        the calibrator's stored keys.
         """
         if not isinstance(self.spread, CoherentDraws):
             return None
-        base = self._base_partition_values(frame)
-        models = frame[MODEL_NAME].to_numpy()
-        horizons = frame[H].to_numpy()
-        perhorizon = {
-            f"{model}:h{int(horizon)}:{node}"
-            for model, horizon, node in zip(models, horizons, base, strict=True)
-        }
-        cumulative = {
-            f"{model}:cumulative:{node}" for model, node in zip(models, base, strict=True)
-        }
-        partitions = sorted(perhorizon | cumulative)
+        if self.config.mode == "cumulative":
+            base = self._base_partition_values(frame)
+            models = frame[MODEL_NAME].to_numpy()
+            partitions = sorted(
+                {f"{model}:cumulative:{node}" for model, node in zip(models, base, strict=True)}
+            )
+        else:
+            partitions = sorted(set(self._partition_values(frame)))
         radii, _ = self.calibrator.predict_batch(float(alpha), partitions)
         return {
             partition: float(radius) for partition, radius in zip(partitions, radii, strict=True)
