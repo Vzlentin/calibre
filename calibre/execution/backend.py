@@ -746,7 +746,7 @@ class BackendEngine:
         actuals: ActualsSource,
         origin: pd.Timestamp,
         origin_preds: pd.DataFrame,
-        active_conformal_runtime: ConformalRuntime | None,
+        conformal_runtime: ConformalRuntime | None,
     ) -> None:
         """Run the shared serial tail Order + Commit for one origin.
 
@@ -757,7 +757,7 @@ class BackendEngine:
         with self._phase("Order", origin):
             self._order(origin_preds, order_ledger)
         with self._phase("Commit", origin):
-            self._commit(ledger, origin_preds, actuals, origin, active_conformal_runtime)
+            self._commit(ledger, origin_preds, actuals, origin, conformal_runtime)
 
     @contextmanager
     def _phase(self, name: str, origin: pd.Timestamp) -> Iterator[None]:
