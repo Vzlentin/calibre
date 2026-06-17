@@ -373,8 +373,7 @@ def test_default_route_still_calls_reconcile_and_calibrate(monkeypatch) -> None:
     """The default route runs both Reconcile and Calibrate exactly once per origin.
 
     End-to-end through ``run_origin``: the configured reconciler fires once and the
-    (stubbed) Calibrate phase fires once, confirming the fixed Predict -> Reconcile
-    -> Calibrate sequence reaches both phases.
+    (stubbed) Calibrate phase fires once.
     """
     task, dates, pattern = _periodic_task(horizon=1)
     monkeypatch.setattr(

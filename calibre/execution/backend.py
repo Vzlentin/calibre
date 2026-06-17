@@ -615,20 +615,14 @@ class BackendEngine:
 
     @staticmethod
     def _drain_in_flight(in_flight: deque[tuple[pd.Timestamp, Any, float]]) -> None:
-        """Drop any still-in-flight payloads, cancelling the ones that are Ray refs.
+        """Drop any still-in-flight driver-side predict frames.
 
-        The in-flight payload is a driver-side predict frame whose slab has not yet
-        dispatched, so ``ray.cancel`` on a non-ref is a swallowed no-op — dropping
-        the deque entry is the actual cleanup. Best-effort.
+        Their slab has not dispatched, so dropping the deque entries is the entire
+        cleanup. Best-effort.
         """
         if not in_flight:
             return
-        import ray
-
-        while in_flight:
-            _origin, ref, _started = in_flight.popleft()
-            with suppress(Exception):
-                ray.cancel(ref, force=True)
+        in_flight.clear()
 
     def _emit_completed_origin(
         self,
@@ -701,8 +695,8 @@ class BackendEngine:
         ``Reconcile`` (point → coherent point) → ``Calibrate`` → ``Order`` →
         ``Commit`` (append + final resolve + persist). Each phase is a small method
         that takes/returns the next phase's input so it can be driven independently
-        in a test. This is a plain method-call sequence, not a dispatch framework
-        (KTD6). A failure in any phase is re-raised naming the phase and origin so
+        in a test. This is a plain method-call sequence, not a dispatch framework.
+        A failure in any phase is re-raised naming the phase and origin so
         the fragile sequencing the seam exposes is debuggable.
         """
         origin_preds, fitted_context = self._run_origin_predict(
