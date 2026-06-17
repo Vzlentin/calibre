@@ -104,9 +104,9 @@ applies only to point forecasts before conformal calibration; coherent interval
 or quantile reconciliation remains out of scope for this path.
 
 At full-M5 scale the summing matrix is the memory pivot. The sparse-capable
-strategies — point `ols`, `wls_struct`, `wls_var`, plus fused-path `bottom_up` —
+point strategies — `ols`, `wls_struct`, `wls_var` —
 build a csr summing matrix directly from hierarchy index facts (~2.7 MB at full
-M5) and reconcile through `MinTraceSparse`/`BottomUpSparse`, so they run on
+M5) and reconcile through `MinTraceSparse`, so they run on
 commodity memory; their results match the dense closed form within iterative
 bicgstab solver tolerance, and Calibre raises loudly if a solve fails to
 converge. One sparse-path behavior difference: `wls_var` weights by the
@@ -118,29 +118,6 @@ keep a dense memory ceiling (the dense S alone is ~7.6 GiB at full M5,
 33,563 x 30,490 float64); the hierarchy memory preflight charges the dense term
 for exactly those strategies and blocks runs that cannot fit in detected
 memory. Native point `bottom_up` needs no summing matrix at all.
-
-For interim hierarchy-aware intervals, use the separate fused phase:
-
-```yaml
-hierarchical_intervals:
-  method: nixtla_conformal
-  coverage: 0.9
-  strategy: bottom_up  # bottom_up, ols, wls_struct, mint_shrink, wls_var, erm
-```
-
-Install the optional hierarchy dependency before using this path:
-`uv sync --extra hierarchy`.
-
-This path requires a dataset `hierarchy`, requests horizonless fitted values
-keyed by `(unique_id, ds, model_name)`, and runs as
-`Predict -> HierarchicalIntervals -> Order -> Commit`. It is mutually exclusive
-with `conformal` and non-`none` point `reconciliation`, because Nixtla owns both
-the coherent point output and the marginal conformal interval columns for that
-run. The emitted bounds use Calibre's normal `lo_<coverage>` / `hi_<coverage>`
-column contract for bottom and aggregate node rows. These are marginal
-hierarchical conformal intervals: point forecasts are coherent, but published
-per-node interval boxes are not additive bands and should not be described as
-conditional coverage at a chosen hierarchy level.
 
 ### Benchmarks
 

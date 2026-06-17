@@ -32,9 +32,9 @@ class HierarchicalExpansionEstimate:
     forecast_partitions: int
     model_count: int
     # Summing-matrix bytes a matrix-requiring strategy must allocate per
-    # origin: the csr estimate for the sparse-capable roster (bottom_up fused,
-    # ols, wls_struct, wls_var), the dense node_count x n_bottom x 8 product
-    # only for erm/mint_shrink, which have no upstream sparse implementation.
+    # origin: the csr estimate for the sparse-capable roster (ols, wls_struct,
+    # wls_var), the dense node_count x n_bottom x 8 product only for
+    # erm/mint_shrink, which have no upstream sparse implementation.
     # Zero unless run preparation sets it in the eager branch — native
     # bottom_up and strategy="none" never build S, so the term never applies
     # to them. Defaults to 0 so direct-call estimates are unaffected.

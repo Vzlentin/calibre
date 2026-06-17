@@ -12,13 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import SymmetricIntervalConfig
-from calibre.reconciliation import (
-    HierarchicalIntervalOptions,
-    NixtlaHierarchicalIntervalPhase,
-    Reconciler,
-    resolve_reconciler,
-)
-from calibre.reconciliation.nixtla_adapter import NixtlaStrategy
+from calibre.reconciliation import Reconciler, resolve_reconciler
 
 CONFIG_SCHEMA = "1.0"
 
@@ -121,25 +115,6 @@ class ReconciliationConfig(_Section):
 
     def to_reconciler(self) -> Reconciler:
         return resolve_reconciler(self.strategy)
-
-
-class HierarchicalIntervalConfig(_Section):
-    """Fused hierarchy + marginal interval path, off by default."""
-
-    method: Literal["nixtla_conformal"]
-    coverage: float = Field(default=0.9, gt=0.0, lt=1.0)
-    strategy: NixtlaStrategy = "bottom_up"
-    seed: int = 0
-
-    def to_phase(self) -> NixtlaHierarchicalIntervalPhase:
-        return NixtlaHierarchicalIntervalPhase(
-            HierarchicalIntervalOptions(
-                method=self.method,
-                coverage=self.coverage,
-                strategy=self.strategy,
-                seed=self.seed,
-            )
-        )
 
 
 class OrderingConfig(_Section):
@@ -249,7 +224,6 @@ class BackendConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     conformal: ConformalConfig | None = None
     reconciliation: ReconciliationConfig | None = None
-    hierarchical_intervals: HierarchicalIntervalConfig | None = None
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     source_path: str | None = None
@@ -284,26 +258,6 @@ class BackendConfig(BaseModel):
             raise ValueError(
                 "conformal spread='coherent_draws' requires reconciliation strategy "
                 "'none' (the coherent method owns reconciliation-of-uncertainty)"
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _hierarchical_intervals_are_exclusive(self) -> BackendConfig:
-        if self.hierarchical_intervals is None:
-            return self
-        if self.conformal is not None:
-            raise ValueError("hierarchical_intervals cannot be combined with conformal")
-        if self.reconciliation is not None and self.reconciliation.strategy != "none":
-            raise ValueError(
-                "hierarchical_intervals cannot be combined with non-none reconciliation"
-            )
-        model_names = [str(task.resolved_model_config()["name"]) for task in self.tasks]
-        duplicate_names = sorted({name for name in model_names if model_names.count(name) > 1})
-        if duplicate_names:
-            raise ValueError(
-                "hierarchical_intervals requires unique task model names; "
-                f"duplicate name(s): {duplicate_names}. Set tasks[].config.name "
-                "for distinct hierarchical interval models."
             )
         return self
 

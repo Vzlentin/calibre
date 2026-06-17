@@ -7,6 +7,7 @@ and pin the three no-op guards plus the before-Calibrate ordering.
 """
 
 from contextlib import contextmanager
+from types import MethodType
 
 import pandas as pd
 import pytest
@@ -22,6 +23,7 @@ from calibre.execution.backend import (
     _with_group_tag,
 )
 from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
+from calibre.execution.prediction_context import FittedValueContext
 from calibre.execution.task_builder import build_node_history, partition_tasks
 from calibre.forecasting.adapter_base import ModelAdapter
 from calibre.ordering.policy_config import RsConfig
@@ -85,10 +87,11 @@ class _NoFittedRequestAdapter(ModelAdapter):
 
 
 class _SpyReconciler:
-    """Records the frame it was handed, then returns it unchanged."""
+    """Records the frame it was handed and a call count, then returns it unchanged."""
 
     def __init__(self) -> None:
         self.seen: pd.DataFrame | None = None
+        self.calls = 0
 
     requires_fitted_values = False
 
@@ -100,6 +103,7 @@ class _SpyReconciler:
     ) -> pd.DataFrame:
         del hierarchy, context
         self.seen = frame.copy()
+        self.calls += 1
         return frame
 
 
@@ -363,3 +367,50 @@ def test_order_phase_filters_aggregate_rows_when_hierarchy_present(monkeypatch) 
     engine._order(frame, InMemoryOrderLedger())
 
     assert seen["uids"] == ["A", "B"]
+
+
+def test_default_route_still_calls_reconcile_and_calibrate(monkeypatch) -> None:
+    """The default route runs both Reconcile and Calibrate exactly once per origin.
+
+    End-to-end through ``run_origin``: the configured reconciler fires once and the
+    (stubbed) Calibrate phase fires once.
+    """
+    task, dates, pattern = _periodic_task(horizon=1)
+    monkeypatch.setattr(
+        "calibre.execution.prediction.resolve_adapter",
+        lambda model_config: _NoFittedRequestAdapter(model_config),
+    )
+    reconciler = _SpyReconciler()
+    engine = BackendEngine(
+        reconciliation=ReconciliationOptions(
+            reconciler=reconciler, hierarchy_index=build_hierarchy_index(_hierarchy())
+        )
+    )
+    calls = {"calibrate": 0}
+
+    def _calibrate(
+        self: BackendEngine,
+        origin_preds: pd.DataFrame,
+        conformal_runtime: object,
+        fitted_context: FittedValueContext,
+    ) -> pd.DataFrame:
+        del self, conformal_runtime, fitted_context
+        calls["calibrate"] += 1
+        return origin_preds
+
+    engine._calibrate = MethodType(_calibrate, engine)
+    actuals = pd.DataFrame({"unique_id": "SKU_001", "ds": dates, "y": pattern})
+
+    with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
+        engine.run_origin(
+            ledger=InMemoryLedger(),
+            order_ledger=None,
+            actuals=FrameActualsSource(actuals),
+            origin=dates[11],
+            conformal_runtime=None,
+            chunk_refs=chunk_refs,
+            direct_refs=direct_refs,
+        )
+
+    assert reconciler.calls == 1
+    assert calls["calibrate"] == 1

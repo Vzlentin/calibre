@@ -26,7 +26,6 @@ from calibre.execution.backend import (
     BackendEngine,
     BackendResult,
     ConformalOptions,
-    HierarchicalIntervalEngineOptions,
     LedgerOutputOptions,
     ReconciliationOptions,
 )
@@ -153,9 +152,6 @@ def run_config(
         reconciliation=ReconciliationOptions(
             reconciler=preparation.reconciler,
             hierarchy_index=preparation.hierarchy_index,
-        ),
-        hierarchical_intervals=HierarchicalIntervalEngineOptions(
-            phase=preparation.hierarchical_interval_phase
         ),
         order=_build_order_config(config),
     )
