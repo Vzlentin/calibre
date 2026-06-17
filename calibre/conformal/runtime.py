@@ -42,7 +42,11 @@ from calibre.core.forecast_frame import (
     Y,
     interval_column_names,
 )
-from calibre.reconciliation.summing import HierarchyIndex, sparse_summing_matrix_from_index
+from calibre.reconciliation.summing import (
+    HierarchyIndex,
+    SparseSummingMatrix,
+    sparse_summing_matrix_from_index,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +340,7 @@ class SymmetricIntervalRuntime:
         return isinstance(self.spread, CoherentDraws)
 
     @property
-    def coherent_summing(self) -> Any:
+    def coherent_summing(self) -> SparseSummingMatrix:
         """The coherent spread's run-constant sparse summing matrix ``S``.
 
         Exposed so the across-origin parallel harness can rebuild the

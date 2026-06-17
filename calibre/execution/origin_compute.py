@@ -74,6 +74,8 @@ class CoherentOriginInputs:
     sidecar all ride inside ``context`` (a frozen
     :class:`~calibre.conformal.protocols.SpreadContext`). Disjoint from
     :class:`~calibre.reconciliation.hierarchical_intervals.HierarchicalIntervalContext`.
+    The run-constant summing matrix ``S`` is NOT carried here — it is ``ray.put``
+    once and passed to the worker out-of-band so it is not re-serialized per origin.
 
     Attributes:
         centers: Per-row point forecasts (the ``y_hat`` column).
@@ -83,8 +85,6 @@ class CoherentOriginInputs:
             stay ``NaN``.
         context: Frozen per-origin spread context (frame slice, alpha, fitted
             residual sidecar, base seed, held-out half-width + kappa maps).
-        summing: The run-constant sparse summing matrix ``S`` the slab reconciles
-            through; a ``scipy.sparse`` array that pickles cleanly.
         draw_count: ``B``, the bootstrap draw count, to rebuild the spread.
     """
 
@@ -92,18 +92,20 @@ class CoherentOriginInputs:
     radii: np.ndarray
     issue: np.ndarray
     context: SpreadContext
-    summing: SparseSummingMatrix
     draw_count: int
 
 
 def compute_origin_coherent(
     inputs: CoherentOriginInputs,
+    summing: SparseSummingMatrix,
     cpu_per_task: float | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run the coherent draw+reconcile slab for one origin in a Ray worker.
 
     Rebuilds :class:`~calibre.conformal.coherent_draws.CoherentDraws` from the
-    by-value snapshot and runs the pure slab — residual bootstrap →
+    by-value snapshot (plus the run-constant ``summing`` matrix ``S`` passed
+    out-of-band, Ray-dereferenced from a one-time ``ray.put``) and runs the pure
+    slab — residual bootstrap →
     ``centers + draws`` → PRE-``S`` held-out/kappa-aware deviations-only rescale →
     ``S @ bottom_draws`` reconcile → per-node ``np.quantile`` — under the **same**
     ``threadpool_limits`` budget the serial coherent apply uses, so the dense
@@ -119,7 +121,7 @@ def compute_origin_coherent(
     Returns the per-node ``(lower, upper)`` arrays positionally aligned to
     ``inputs.context.frame`` rows; the driver writes them into the issued band.
     """
-    spread = CoherentDraws(summing=inputs.summing, draw_count=inputs.draw_count)
+    spread = CoherentDraws(summing=summing, draw_count=inputs.draw_count)
     with threadpool_limits(limits=thread_budget(cpu_per_task)):
         return spread.to_interval(
             inputs.centers, inputs.radii, inputs.issue, context=inputs.context

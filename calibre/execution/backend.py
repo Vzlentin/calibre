@@ -250,6 +250,22 @@ class BackendEngine:
             if conformal.config is not None
             else None
         )
+        # The coherent-draws spread owns reconciliation-of-uncertainty, so the point
+        # Reconcile phase must stay a no-op while the hierarchy still supplies S. The
+        # serial non-fused path reconciles centers BEFORE Calibrate, but the parallel
+        # coherent drain feeds raw centers into the draw slab — so a configured point
+        # reconciler would diverge serial-vs-parallel. Reject the combo at the engine
+        # boundary (the CLI validator already does the same), mirroring the fused
+        # guard above and keeping the supported coherent config at reconciler=None.
+        if (
+            isinstance(self.conformal_runtime, SymmetricIntervalRuntime)
+            and self.conformal_runtime.requires_fitted_values
+            and reconciliation.reconciler is not None
+        ):
+            raise ValueError(
+                "coherent-draws conformal cannot be combined with point reconciliation "
+                "(the coherent method owns reconciliation-of-uncertainty)"
+            )
         self._requires_fitted_values = bool(
             (
                 reconciliation.hierarchy_index is not None
@@ -278,13 +294,15 @@ class BackendEngine:
         self._remote_process_local_chunk: Any | None = None
         self._remote_process_global_panel: Any | None = None
         # Per-origin Ray dispatch state. The remote handle is rebuilt and the
-        # hierarchy index re-``ray.put``'d only on a fresh runtime; both persist
-        # across origins on a stable runtime so the index is plasma-stored once.
-        # The coherent worker rides its own lazily-built handle alongside the fused
-        # one; the snapshot it consumes carries ``S`` by value (no shared index ref).
+        # run-constant data (the fused hierarchy index, the coherent summing matrix
+        # S) re-``ray.put``'d only on a fresh runtime; both persist across origins on
+        # a stable runtime so each is plasma-stored once. The coherent worker rides
+        # its own lazily-built handle alongside the fused one and reuses a single
+        # ``S`` ref rather than embedding it per-origin in the snapshot payload.
         self._remote_compute_origin_intervals: Any | None = None
         self._remote_compute_origin_coherent: Any | None = None
         self._hierarchy_index_ref: Any | None = None
+        self._summing_ref: Any | None = None
 
     def __enter__(self) -> BackendEngine:
         return self
@@ -510,8 +528,11 @@ class BackendEngine:
         Predict runs on the driver per origin (fanning out to Ray as today). The
         consumer drains the in-flight deque strictly head-first (origins-list
         order) — never ``as-completed`` — so the serial ``ledger.append`` order,
-        the per-origin ``yield``, the ``_phase`` spans, the timing log, and
-        crash-resume are all byte-identical to the serial path.
+        the per-origin ``yield``, the timing log, and crash-resume are all
+        byte-identical to the serial path. The ``_phase`` spans match too, with one
+        observability-only exception: the coherent drain elides the no-op Reconcile
+        span the serial non-fused else-branch emits (the point Reconcile phase is a
+        no-op under the coherent config; the ledger is unaffected).
 
         Two compute targets share this window with different overlap shapes:
 
@@ -525,7 +546,7 @@ class BackendEngine:
           metadata writes, and observe MUST all run head-first at the drain, after
           the prior origin commits, or a producer-ahead calibrator mutation
           reorders against the serial ``resolve_open(N) → apply(N) → commit(N) →
-          resolve_open(N+1)`` sequence and breaks byte-identity (§2a). The producer
+          resolve_open(N+1)`` sequence and breaks byte-identity. The producer
           therefore runs **only Predict** (independent of conformal state); the
           ResolveOpen→snapshot→slab→write→observe chain is synchronous and in-order
           at the drain. Only Predict(N+1) overlaps slab(N).
@@ -593,8 +614,9 @@ class BackendEngine:
                                 payload, conformal_runtime
                             )
                         # observe runs on the driver via the LIVE runtime threaded
-                        # into _finish_origin's Commit — the U5 one-origin sigma lag
-                        # depends on observe running AFTER the worker returns.
+                        # into _finish_origin's Commit, AFTER the worker returns, so
+                        # the one-origin sigma lag (sigma read at apply, raw scores
+                        # stored at observe) is preserved.
                         self._finish_origin(
                             ledger,
                             order_ledger,
@@ -653,10 +675,11 @@ class BackendEngine:
             radii=snapshot.radii,
             issue=snapshot.issue,
             context=snapshot.context,
-            summing=conformal_runtime.coherent_summing,
             draw_count=conformal_runtime.coherent_draw_count,
         )
-        ref = self._dispatch_origin_coherent(inputs)
+        # ``S`` is run-constant, so it is passed out-of-band for a one-time ``ray.put``
+        # rather than embedded in the per-origin snapshot (re-serialized every origin).
+        ref = self._dispatch_origin_coherent(inputs, conformal_runtime.coherent_summing)
         lower_values, upper_values = self._get_origin_coherent(ref)
         return conformal_runtime.write_perhorizon_intervals(snapshot, lower_values, upper_values)
 
@@ -682,7 +705,14 @@ class BackendEngine:
 
     @staticmethod
     def _drain_in_flight(in_flight: deque[tuple[pd.Timestamp, Any, float]]) -> None:
-        """Cancel and drop any still-in-flight interval refs (best-effort)."""
+        """Drop any still-in-flight payloads, cancelling the ones that are Ray refs.
+
+        The payload shape is method-dependent: the fused path holds interval
+        ``ObjectRef``s (the ``ray.cancel`` aborts a running worker task), whereas
+        the coherent path holds driver-side predict frames whose slab has not yet
+        dispatched, so ``ray.cancel`` on a non-ref is a swallowed no-op — dropping
+        the deque entry is the actual cleanup. Best-effort either way.
+        """
         if not in_flight:
             return
         import ray
@@ -719,12 +749,13 @@ class BackendEngine:
         self._ray_runtime = None
         self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
-        # The cached index ref is DATA (a ``ray.put`` ObjectRef), not just a
-        # handle: a stale ref from a released runtime points at an object the new
-        # runtime never plasma-stored, so null it alongside the remote handles.
+        # The cached index/summing refs are DATA (``ray.put`` ObjectRefs), not just
+        # handles: a stale ref from a released runtime points at an object the new
+        # runtime never plasma-stored, so null them alongside the remote handles.
         self._remote_compute_origin_intervals = None
         self._remote_compute_origin_coherent = None
         self._hierarchy_index_ref = None
+        self._summing_ref = None
 
     def close(self) -> None:
         self.shutdown_owned_ray()
@@ -1394,6 +1425,7 @@ class BackendEngine:
         self._remote_compute_origin_intervals = None
         self._remote_compute_origin_coherent = None
         self._hierarchy_index_ref = None
+        self._summing_ref = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
 
     def _build_remote(self, fn: Callable[..., Any]) -> Any:
@@ -1506,23 +1538,29 @@ class BackendEngine:
             self.execution.cpu_per_task,
         )
 
-    def _dispatch_origin_coherent(self, inputs: CoherentOriginInputs) -> Any:
+    def _dispatch_origin_coherent(self, inputs: CoherentOriginInputs, summing: Any) -> Any:
         """Submit one origin's coherent draw+reconcile slab to Ray, return its ObjectRef.
 
         The method-agnostic counterpart to :meth:`_dispatch_origin_intervals` for
         the coherent target. Dispatch is synchronous within the in-order drain
         (snapshot → ``remote`` → ``ray.get``), so the live-calibrator read and the
-        slab compute never reorder against the head-first commit. The frozen
-        :class:`CoherentOriginInputs` snapshot carries ``S`` by value, so — unlike
-        the fused path — no run-constant hierarchy index is ``ray.put``; only this
-        per-origin payload crosses the wire. The remote handle is lazily built and
-        cached alongside the fused handle, with the same ``num_cpus`` admission.
+        slab compute never reorder against the head-first commit. The run-constant
+        summing matrix ``S`` is ``ray.put`` once and the cached ref reused every
+        origin (mirroring the fused hierarchy index), so only the per-origin snapshot
+        crosses the wire afresh; Ray auto-dereferences the passed ref to ``S`` by
+        value in the worker. The remote handle is lazily built and cached alongside
+        the fused handle, with the same ``num_cpus`` admission.
         """
         self._ensure_ray()
+        import ray
 
         if self._remote_compute_origin_coherent is None:
             self._remote_compute_origin_coherent = self._build_remote(compute_origin_coherent)
-        return self._remote_compute_origin_coherent.remote(inputs, self.execution.cpu_per_task)
+        if self._summing_ref is None:
+            self._summing_ref = ray.put(summing)
+        return self._remote_compute_origin_coherent.remote(
+            inputs, self._summing_ref, self.execution.cpu_per_task
+        )
 
     @staticmethod
     def _get_origin_coherent(ref: Any) -> tuple[np.ndarray, np.ndarray]:
