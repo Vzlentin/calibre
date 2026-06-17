@@ -808,8 +808,9 @@ def test_coherent_runtime_rejects_point_reconciler_at_construction() -> None:
     coherent drain feeds raw centers into the draw slab, so a configured reconciler
     would diverge serial-vs-parallel. The CLI validator already rejects this combo;
     the engine boundary must too. Constructing the engine with a coherent config and
-    a non-None reconciler raises, keeping the supported coherent config at
-    ``reconciler=None``.
+    a center-rewriting point reconciler raises; the ``none`` strategy (a NoOp
+    pass-through) is allowed (see
+    :func:`test_coherent_runtime_accepts_noop_reconciler_at_construction`).
     """
     bundle, _node_history, _tasks = _fused_residual_fixture()
     with pytest.raises(ValueError, match="coherent-draws conformal cannot be combined"):
@@ -821,6 +822,28 @@ def test_coherent_runtime_rejects_point_reconciler_at_construction() -> None:
                 hierarchy_index=build_hierarchy_index(bundle.hierarchy),
             ),
         )
+
+
+def test_coherent_runtime_accepts_noop_reconciler_at_construction() -> None:
+    """T0b: coherent-draws conformal + the ``none`` (NoOp) reconciler is allowed.
+
+    ``reconciliation: strategy: none`` resolves to a NoOpReconciler — a non-None
+    pass-through that leaves centers untouched — which is the supported coherent
+    wiring (the hierarchy still supplies S). The engine boundary must NOT reject it;
+    the guard rejects only a center-rewriting point reconciler. This pins against the
+    over-broad ``reconciler is not None`` check, which rejected the real CLI coherent
+    config (``strategy: none`` never produces a literal ``None`` reconciler).
+    """
+    bundle, _node_history, _tasks = _fused_residual_fixture()
+    engine = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="local", seed=42),
+        conformal=ConformalOptions(config=_coherent_config()),
+        reconciliation=ReconciliationOptions(
+            reconciler=NoOpReconciler(),
+            hierarchy_index=build_hierarchy_index(bundle.hierarchy),
+        ),
+    )
+    assert isinstance(engine.reconciler, NoOpReconciler)
 
 
 @pytest.mark.parametrize("cpu_per_task", [None, 1.0])
