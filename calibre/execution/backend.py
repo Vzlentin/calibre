@@ -68,7 +68,11 @@ from calibre.execution.ledger import (
     StreamingLedger,
     StreamingOrderLedger,
 )
-from calibre.execution.origin_compute import compute_origin_intervals
+from calibre.execution.origin_compute import (
+    CoherentOriginInputs,
+    compute_origin_coherent,
+    compute_origin_intervals,
+)
 from calibre.execution.prediction import (
     _coerce_forecast_frame_dtypes,
     _concat_prediction_results,
@@ -273,10 +277,13 @@ class BackendEngine:
         # would force positional-only .remote() calls; not worth it for this slice.
         self._remote_process_local_chunk: Any | None = None
         self._remote_process_global_panel: Any | None = None
-        # Fused-interval Ray dispatch state. The remote handle is rebuilt and the
+        # Per-origin Ray dispatch state. The remote handle is rebuilt and the
         # hierarchy index re-``ray.put``'d only on a fresh runtime; both persist
         # across origins on a stable runtime so the index is plasma-stored once.
+        # The coherent worker rides its own lazily-built handle alongside the fused
+        # one; the snapshot it consumes carries ``S`` by value (no shared index ref).
         self._remote_compute_origin_intervals: Any | None = None
+        self._remote_compute_origin_coherent: Any | None = None
         self._hierarchy_index_ref: Any | None = None
 
     def __enter__(self) -> BackendEngine:
@@ -374,7 +381,7 @@ class BackendEngine:
                     )
 
                 completed_origins = self._completed_initial_origins()
-                window = self._fused_parallel_window()
+                window = self._parallel_origin_window()
                 if window is not None:
                     yield from self._iter_origins_parallel(
                         ledger=ledger,
@@ -405,24 +412,51 @@ class BackendEngine:
                 with span("order_ledger_close"):
                     order_ledger.close()
 
-    def _fused_parallel_window(self) -> int | None:
-        """Effective sliding-window depth N for fused-parallel dispatch, or None.
+    def _parallel_origin_window(self) -> int | None:
+        """Effective sliding-window depth N for across-origin parallel dispatch, or None.
 
-        The parallel branch is hard-gated: it runs only on the fused path
-        (``hierarchical_interval_phase is not None``) with Ray selected and an
-        effective window ``N > 1``. ``max_concurrency`` defaults to ``None`` (the
-        M5 helper sets none), so coerce explicitly to a default window of 2 —
-        never Predict's ``or len(...)`` coercion, which would unbound the window
-        and break the peak-N resident-frame bound. Returns ``None`` (collapse to the
-        serial path) when fused intervals are off, Ray is not selected, or N == 1.
+        The parallel branch is gated on a **method-agnostic** predicate — a
+        per-origin compute target exists (:meth:`_origin_compute_target` is not
+        ``None``: the fused Nixtla phase OR the coherent draw+reconcile slab) — with
+        Ray selected and an effective window ``N > 1``. ``max_concurrency`` defaults
+        to ``None`` (the M5 helper sets none), so coerce explicitly to a default
+        window of 2 — never Predict's ``or len(...)`` coercion, which would unbound
+        the window and break the peak-N resident-frame bound. Returns ``None``
+        (collapse to the serial path) when no compute target is set (the
+        analytic/cumulative path), Ray is not selected, or N == 1.
         """
-        if self.hierarchical_interval_phase is None:
+        if self._origin_compute_target is None:
             return None
         if not self._should_use_ray(1):
             return None
         window = self.execution.max_concurrency or 2
         assert window >= 1
         return window if window > 1 else None
+
+    @property
+    def _origin_compute_target(self) -> Literal["fused", "coherent"] | None:
+        """Which per-origin compute the parallel harness fans out, or ``None``.
+
+        ``"fused"`` when the rented fused interval phase is set; ``"coherent"`` when
+        the live conformal runtime is a per-horizon coherent-draws
+        :class:`~calibre.conformal.runtime.SymmetricIntervalRuntime` (its
+        ``requires_fitted_values`` is the ``CoherentDraws`` discriminator); ``None``
+        otherwise — the analytic/symmetric path AND **any** ``mode="cumulative"``
+        config. VN2 (``spread="analytic"``, ``mode="cumulative"``) and
+        cumulative-coherent therefore both stay serial: the cumulative ``apply`` has
+        its own seed/kappa read and is not covered by the per-horizon byte gate, so
+        routing it serial keeps it off the untested worker path.
+        """
+        if self.hierarchical_interval_phase is not None:
+            return "fused"
+        runtime = self.conformal_runtime
+        if (
+            isinstance(runtime, SymmetricIntervalRuntime)
+            and runtime.requires_fitted_values
+            and runtime.config.mode != "cumulative"
+        ):
+            return "coherent"
+        return None
 
     def _iter_origins_serial(
         self,
@@ -471,19 +505,37 @@ class BackendEngine:
         direct_refs: list[ForecastTaskRef],
         window: int,
     ) -> Iterator[BackendResult]:
-        """Drive the fused path as a bounded producer→consumer sliding window.
+        """Drive a method-agnostic bounded producer→consumer sliding window.
 
-        Predict runs on the driver per origin (fanning out to Ray as today); each
-        origin's interval task is then submitted and at most ``window`` tasks are
-        kept in flight. The consumer drains the in-flight deque strictly head-first
-        (origins-list order) — never ``as-completed`` — so the serial
-        ``ledger.append`` order, the per-origin ``yield``, the ``_phase`` spans,
-        the timing log, and crash-resume are all byte-identical to the serial
-        path. Peak resident interval frames is ``window``.
+        Predict runs on the driver per origin (fanning out to Ray as today). The
+        consumer drains the in-flight deque strictly head-first (origins-list
+        order) — never ``as-completed`` — so the serial ``ledger.append`` order,
+        the per-origin ``yield``, the ``_phase`` spans, the timing log, and
+        crash-resume are all byte-identical to the serial path.
+
+        Two compute targets share this window with different overlap shapes:
+
+        * **fused** — the live runtime collapses to ``None``, so ResolveOpen is a
+          no-op and the RNG-free interval task is submitted in the producer; at most
+          ``window`` interval frames are in flight, and the drain only ``ray.get``s
+          the result.
+        * **coherent** — the live runtime does NOT collapse, so the calibrator is
+          live online state. ResolveOpen (which mutates the calibrator), the
+          state-reading snapshot, the draw-slab dispatch, the ``issued_count`` bump +
+          metadata writes, and observe MUST all run head-first at the drain, after
+          the prior origin commits, or a producer-ahead calibrator mutation
+          reorders against the serial ``resolve_open(N) → apply(N) → commit(N) →
+          resolve_open(N+1)`` sequence and breaks byte-identity (§2a). The producer
+          therefore runs **only Predict** (independent of conformal state); the
+          ResolveOpen→snapshot→slab→write→observe chain is synchronous and in-order
+          at the drain. Only Predict(N+1) overlaps slab(N).
         """
-        # Ordered in-flight tasks: (origin, ObjectRef, origin_started). The head is
+        coherent = self._origin_compute_target == "coherent"
+        # Ordered in-flight items: (origin, payload, origin_started). The head is
         # always the lowest origins-list index still in flight, so popleft drains in
-        # origins-list order regardless of worker completion order.
+        # origins-list order regardless of worker completion order. ``payload`` is
+        # the interval ObjectRef (fused) or the produced predict frame + fitted
+        # sidecar (coherent: ResolveOpen + the slab dispatch run at the drain).
         in_flight: deque[tuple[pd.Timestamp, Any, float]] = deque()
         producible = iter(origins)
         try:
@@ -503,39 +555,110 @@ class BackendEngine:
                         yield BackendResult(ledger=ledger, order_ledger=order_ledger)
                         continue
                     origin_started = time.perf_counter()
-                    origin_preds, fitted_context = self._run_origin_predict(
-                        ledger,
-                        actuals_source,
-                        origin,
-                        conformal_runtime,
-                        chunk_refs,
-                        direct_refs,
-                    )
-                    ref = self._dispatch_origin_intervals(origin_preds, fitted_context)
-                    in_flight.append((origin, ref, origin_started))
+                    if coherent:
+                        # Predict-only ahead of the window: ResolveOpen mutates the
+                        # live calibrator and so must wait for the in-order drain.
+                        # Predict is independent of conformal state, so it overlaps
+                        # slab(N) safely.
+                        with self._phase("Predict", origin):
+                            prediction = self._predict(chunk_refs, direct_refs, origin)
+                        payload: Any = prediction
+                    else:
+                        origin_preds, fitted_context = self._run_origin_predict(
+                            ledger,
+                            actuals_source,
+                            origin,
+                            conformal_runtime,
+                            chunk_refs,
+                            direct_refs,
+                        )
+                        payload = self._dispatch_origin_intervals(origin_preds, fitted_context)
+                    in_flight.append((origin, payload, origin_started))
                 if not in_flight:
                     break
-                origin, ref, origin_started = in_flight.popleft()
+                origin, payload, origin_started = in_flight.popleft()
                 # Drain-in-order up to the first failure: origins before this one are
                 # already committed/streamed. On failure, drop the remaining in-flight
                 # refs (dereference abandoned worker frames promptly) before the named
                 # re-raise propagates through the _phase context.
                 try:
-                    with self._phase("HierarchicalIntervals", origin):
-                        origin_preds = self._get_origin_intervals(ref)
-                    # _finish_origin runs AFTER the HierarchicalIntervals span closes
-                    # (its Order/Commit open their own spans) to match serial's phase
-                    # attribution; it stays inside the try so a Order/Commit failure
-                    # still drains the remaining in-flight refs.
-                    self._finish_origin(
-                        ledger, order_ledger, actuals_source, origin, origin_preds, None
-                    )
+                    if coherent:
+                        # ResolveOpen → Calibrate(snapshot → slab → write) →
+                        # Order + Commit(observe), all head-first in-order on the
+                        # driver, so the live calibrator state matches serial exactly.
+                        with self._phase("ResolveOpen", origin):
+                            self._resolve_open(ledger, actuals_source, origin, conformal_runtime)
+                        with self._phase("Calibrate", origin):
+                            origin_preds = self._calibrate_coherent_parallel(
+                                payload, conformal_runtime
+                            )
+                        # observe runs on the driver via the LIVE runtime threaded
+                        # into _finish_origin's Commit — the U5 one-origin sigma lag
+                        # depends on observe running AFTER the worker returns.
+                        self._finish_origin(
+                            ledger,
+                            order_ledger,
+                            actuals_source,
+                            origin,
+                            origin_preds,
+                            conformal_runtime,
+                        )
+                    else:
+                        with self._phase("HierarchicalIntervals", origin):
+                            origin_preds = self._get_origin_intervals(payload)
+                        # _finish_origin runs AFTER the HierarchicalIntervals span
+                        # closes (its Order/Commit open their own spans) to match
+                        # serial's phase attribution; it stays inside the try so an
+                        # Order/Commit failure still drains the remaining in-flight refs.
+                        self._finish_origin(
+                            ledger, order_ledger, actuals_source, origin, origin_preds, None
+                        )
                 except Exception:
                     self._drain_in_flight(in_flight)
                     raise
                 yield self._emit_completed_origin(ledger, order_ledger, origin, origin_started)
         finally:
             self._drain_in_flight(in_flight)
+
+    def _calibrate_coherent_parallel(
+        self,
+        prediction: PredictionResult,
+        conformal_runtime: ConformalRuntime | None,
+    ) -> pd.DataFrame:
+        """Run the coherent Calibrate phase split across driver-read + worker slab.
+
+        The atomic ``runtime.apply`` is split for the parallel path: the driver
+        reads the per-horizon snapshot against the live calibrator/controller/joint
+        store (the SINGLE read path the serial apply also calls — read AFTER the
+        drain's in-order ResolveOpen so the calibrator state matches serial), the
+        RNG-seeded draw+reconcile slab runs in a Ray worker, and the driver writes
+        the returned lo/hi + metadata and bumps ``issued_count``. The live runtime is
+        never shipped — only the frozen :class:`CoherentOriginInputs` snapshot
+        crosses the wire. Empty predictions short-circuit (no snapshot, no dispatch).
+        """
+        origin_preds = prediction.forecast
+        if origin_preds.empty:
+            return origin_preds
+        assert isinstance(conformal_runtime, SymmetricIntervalRuntime)  # gated by the target
+        # Stage the fitted-value sidecar for the driver-side read only, then clear it
+        # in finally — it is read into the snapshot by value, never aliased across
+        # origins (the snapshot carries the residuals it needs).
+        conformal_runtime.set_fitted_values(prediction.fitted_values)
+        try:
+            snapshot = conformal_runtime.read_perhorizon_snapshot(origin_preds)
+        finally:
+            conformal_runtime.set_fitted_values(None)
+        inputs = CoherentOriginInputs(
+            centers=snapshot.centers,
+            radii=snapshot.radii,
+            issue=snapshot.issue,
+            context=snapshot.context,
+            summing=conformal_runtime.coherent_summing,
+            draw_count=conformal_runtime.coherent_draw_count,
+        )
+        ref = self._dispatch_origin_coherent(inputs)
+        lower_values, upper_values = self._get_origin_coherent(ref)
+        return conformal_runtime.write_perhorizon_intervals(snapshot, lower_values, upper_values)
 
     @staticmethod
     def _get_origin_intervals(ref: Any) -> pd.DataFrame:
@@ -598,8 +721,9 @@ class BackendEngine:
         self._remote_process_global_panel = None
         # The cached index ref is DATA (a ``ray.put`` ObjectRef), not just a
         # handle: a stale ref from a released runtime points at an object the new
-        # runtime never plasma-stored, so null it alongside the remote handle.
+        # runtime never plasma-stored, so null it alongside the remote handles.
         self._remote_compute_origin_intervals = None
+        self._remote_compute_origin_coherent = None
         self._hierarchy_index_ref = None
 
     def close(self) -> None:
@@ -845,7 +969,13 @@ class BackendEngine:
         ):
             conformal_runtime.set_fitted_values(fitted_context.fitted_values)
             try:
-                return conformal_runtime.apply(origin_preds)
+                # The coherent slab runs the same dense ``S @ draws`` / ``np.quantile``
+                # the across-origin worker runs, so the serial apply must share the
+                # worker's ``threadpool_limits`` budget or the float result diverges
+                # serial-vs-parallel (same class as the cross-arch LightGBM
+                # thread-asymmetry). The analytic path never reaches here.
+                with threadpool_limits(limits=thread_budget(self.execution.cpu_per_task)):
+                    return conformal_runtime.apply(origin_preds)
             finally:
                 conformal_runtime.set_fitted_values(None)
         return conformal_runtime.apply(origin_preds)
@@ -1262,6 +1392,7 @@ class BackendEngine:
         self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
         self._remote_compute_origin_intervals = None
+        self._remote_compute_origin_coherent = None
         self._hierarchy_index_ref = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
 
@@ -1374,6 +1505,44 @@ class BackendEngine:
             options,
             self.execution.cpu_per_task,
         )
+
+    def _dispatch_origin_coherent(self, inputs: CoherentOriginInputs) -> Any:
+        """Submit one origin's coherent draw+reconcile slab to Ray, return its ObjectRef.
+
+        The method-agnostic counterpart to :meth:`_dispatch_origin_intervals` for
+        the coherent target. Dispatch is synchronous within the in-order drain
+        (snapshot → ``remote`` → ``ray.get``), so the live-calibrator read and the
+        slab compute never reorder against the head-first commit. The frozen
+        :class:`CoherentOriginInputs` snapshot carries ``S`` by value, so — unlike
+        the fused path — no run-constant hierarchy index is ``ray.put``; only this
+        per-origin payload crosses the wire. The remote handle is lazily built and
+        cached alongside the fused handle, with the same ``num_cpus`` admission.
+        """
+        self._ensure_ray()
+
+        if self._remote_compute_origin_coherent is None:
+            self._remote_compute_origin_coherent = self._build_remote(compute_origin_coherent)
+        return self._remote_compute_origin_coherent.remote(inputs, self.execution.cpu_per_task)
+
+    @staticmethod
+    def _get_origin_coherent(ref: Any) -> tuple[np.ndarray, np.ndarray]:
+        """Block on a coherent-slab ref, unwrapping a Ray failure to its cause.
+
+        Mirrors :meth:`_get_origin_intervals` — ``ray.get`` wraps a worker
+        exception in a ``RayTaskError`` whose ``str`` defeats the ``_phase``
+        origin-naming, so re-raise the underlying cause. Returns the worker's
+        ``(lower, upper)`` arrays for the driver to write into the issued band.
+        """
+        import ray
+        from ray.exceptions import RayTaskError
+
+        try:
+            return ray.get(ref)
+        except RayTaskError as exc:
+            cause = exc.cause
+            if cause is None:
+                raise
+            raise cause from exc
 
 
 def _with_group_tag(task: ForecastTask) -> ForecastTask:

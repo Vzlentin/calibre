@@ -112,6 +112,31 @@ class StateRef:
     partition: str
 
 
+@dataclass(frozen=True, slots=True)
+class PerHorizonSnapshot:
+    """Driver-read per-horizon apply state shared by serial and parallel paths.
+
+    The pure-read snapshot :meth:`SymmetricIntervalRuntime.read_perhorizon_snapshot`
+    returns: the result frame copy plus everything the spread slab and the
+    interval/metadata writer need (``centers``/``radii``/``issue`` align
+    positionally with ``result`` rows; ``context`` carries the per-origin spread
+    inputs read against the live calibrator/controller/joint store). It carries no
+    live runtime reference, so the across-origin worker receives only data. The
+    ``issued_count`` bump rides ``group_codes``/``group_count`` but is applied by
+    :meth:`SymmetricIntervalRuntime.write_perhorizon_intervals`, never here.
+    """
+
+    result: pd.DataFrame
+    partitions: list[str]
+    alpha: float
+    radii: np.ndarray
+    issue: np.ndarray
+    centers: np.ndarray
+    context: SpreadContext
+    group_codes: np.ndarray
+    group_count: int
+
+
 def state_ref_value(method: str, mode: str, issued_count: int, partition: str) -> str:
     """Encode a calibration-state reference as ``method:mode:issued_count:partition``."""
     return f"{method}:{mode}:{issued_count}:{partition}"
@@ -309,6 +334,28 @@ class SymmetricIntervalRuntime:
     def requires_fitted_values(self) -> bool:
         """Whether the active spread reads the in-sample fitted-value sidecar."""
         return isinstance(self.spread, CoherentDraws)
+
+    @property
+    def coherent_summing(self) -> Any:
+        """The coherent spread's run-constant sparse summing matrix ``S``.
+
+        Exposed so the across-origin parallel harness can rebuild the
+        :class:`~calibre.conformal.coherent_draws.CoherentDraws` slab in a worker
+        from a by-value snapshot without shipping the live runtime. Raises on the
+        analytic path, which carries no summing matrix.
+        """
+        if not isinstance(self.spread, CoherentDraws):
+            raise AttributeError("coherent_summing is only defined for the coherent-draws spread")
+        return self.spread.summing
+
+    @property
+    def coherent_draw_count(self) -> int:
+        """The coherent spread's bootstrap draw count ``B`` (worker reconstruction)."""
+        if not isinstance(self.spread, CoherentDraws):
+            raise AttributeError(
+                "coherent_draw_count is only defined for the coherent-draws spread"
+            )
+        return self.spread.draw_count
 
     def set_fitted_values(self, fitted_values: pd.DataFrame | None) -> None:
         """Stage this origin's fitted-value sidecar for a draws-based spread."""
@@ -515,9 +562,27 @@ class SymmetricIntervalRuntime:
         ]
 
     def _apply_perhorizon(self, frame: pd.DataFrame) -> pd.DataFrame:
-        lower_col, upper_col = self.config.interval_columns
-        result = frame.copy()
+        snapshot = self.read_perhorizon_snapshot(frame)
+        lower_values, upper_values = self.spread.to_interval(
+            snapshot.centers, snapshot.radii, snapshot.issue, context=snapshot.context
+        )
+        return self.write_perhorizon_intervals(snapshot, lower_values, upper_values)
 
+    def read_perhorizon_snapshot(self, frame: pd.DataFrame) -> PerHorizonSnapshot:
+        """Read the per-horizon apply state on the driver — the single read path.
+
+        Resolves the state-reading preamble of the atomic ``apply``
+        (``controller.get_alpha``, ``calibrator.predict_batch`` radii/readiness,
+        the issue gate, centers, partitions, and the
+        :meth:`_spread_context` reads — held-out half-widths, joint kappa) into one
+        frozen :class:`PerHorizonSnapshot`. Both the serial atomic
+        :meth:`_apply_perhorizon` and the across-origin parallel coherent worker
+        consume this **same** snapshot, so serial and parallel read identical state
+        (no two read paths that can drift). It is read-only on
+        calibrator/controller/joint state and advances no window — the
+        ``issued_count`` bump lives in :meth:`write_perhorizon_intervals`.
+        """
+        result = frame.copy()
         group_keys = pd.MultiIndex.from_arrays(
             [
                 result[UNIQUE_ID].to_numpy(),
@@ -534,29 +599,56 @@ class SymmetricIntervalRuntime:
         issue = ready & np.isfinite(radii)
         centers = result[Y_HAT].to_numpy(dtype=float)
         context = self._spread_context(result, alpha)
-        lower_values, upper_values = self.spread.to_interval(centers, radii, issue, context=context)
+        return PerHorizonSnapshot(
+            result=result,
+            partitions=partitions,
+            alpha=alpha,
+            radii=radii,
+            issue=issue,
+            centers=centers,
+            context=context,
+            group_codes=group_codes,
+            group_count=len(uniques),
+        )
 
+    def write_perhorizon_intervals(
+        self,
+        snapshot: PerHorizonSnapshot,
+        lower_values: np.ndarray,
+        upper_values: np.ndarray,
+    ) -> pd.DataFrame:
+        """Write the worker's bounds + metadata and bump ``issued_count`` on the driver.
+
+        The back half of the atomic ``apply``: it writes ``lower``/``upper`` and
+        ALL metadata columns (``CONFORMAL_*``, ``CALIBRATION_STATE_REF`` built from
+        ``issued_count``, the ``NONCONFORMITY_SCORE`` init) and advances
+        ``issued_count`` — none of which ever cross the worker wire. Called inline
+        by the serial atomic path and head-first in-order at the parallel drain, so
+        the state-ref accounting is identical either way.
+        """
+        lower_col, upper_col = self.config.interval_columns
+        result = snapshot.result
         # Mirror the per-group accounting of the row-wise path: groups are
         # numbered in first-occurrence order and every row of a group shares
         # the issued count its group was processed at.
-        issued = self._issued_count + group_codes
+        issued = self._issued_count + snapshot.group_codes
         method = self.method_name
         mode = self.config.mode
         state_refs = [
             f"{method}:{mode}:{count}:{partition}"
-            for count, partition in zip(issued, partitions, strict=True)
+            for count, partition in zip(issued, snapshot.partitions, strict=True)
         ]
 
         result[lower_col] = lower_values
         result[upper_col] = upper_values
         result[CONFORMAL_METHOD] = method
         result[CONFORMAL_MODE] = mode
-        result[CONFORMAL_ALPHA] = alpha
+        result[CONFORMAL_ALPHA] = snapshot.alpha
         result[CALIBRATION_STATE_REF] = state_refs
-        result[CONFORMAL_PARTITION] = partitions
+        result[CONFORMAL_PARTITION] = snapshot.partitions
         if NONCONFORMITY_SCORE not in result.columns:
             result[NONCONFORMITY_SCORE] = np.nan
-        self._issued_count += len(uniques)
+        self._issued_count += snapshot.group_count
         return result.sort_index()
 
     def _apply_cumulative(self, frame: pd.DataFrame) -> pd.DataFrame:

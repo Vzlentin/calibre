@@ -1450,6 +1450,609 @@ def test_fused_cache_and_ref_rebuild_after_owned_runtime_shutdown() -> None:
 
 
 # ---------------------------------------------------------------------------
+# U2: coherent across-origin parallel harness byte-identity gate (#233).
+#
+# The #219 acceptance suite, re-targeted from the fused phase to the coherent
+# (SymmetricIntervalRuntime + CoherentDraws) path now that the harness is method-
+# agnostic. Both A/B sides are TWO ``ray`` runs — ``max_concurrency=1`` (serial,
+# window-of-1 collapse) vs ``max_concurrency=2`` (parallel) — both driven by a
+# WORKER-IMPORTABLE real adapter (real ``SeasonalNaive``), never a
+# ``backend="local"`` + monkeypatched side: a driver-only ``resolve_adapter``
+# patch is invisible to ray Predict workers and would silently force a sort. The
+# coherent slab is the RNG-seeded draw+reconcile compute (no model fit), so the
+# tier is cheap despite covering ledger sha256 + ``.resolved.parquet`` bytes +
+# resume + the U5 joint-store/sigma-lag resume surface.
+# ---------------------------------------------------------------------------
+
+
+def _coherent_config() -> SymmetricIntervalConfig:
+    """The per-horizon coherent-draws config the byte gate drives (the IN path)."""
+    return SymmetricIntervalConfig(
+        method="aci",
+        coverage=0.9,
+        calibration_window=3,
+        gamma=0.05,
+        spread="coherent_draws",
+        draw_count=128,
+        draw_seed=11,
+    )
+
+
+def _run_coherent_parallel(
+    bundle,
+    actuals,
+    tasks,
+    origins,
+    *,
+    backend: str = "ray",
+    max_concurrency: int | None = None,
+    cpu_per_task: float | None = None,
+    output_path: Path | None = None,
+    initial_ledger: pd.DataFrame | None = None,
+) -> BackendResult:
+    """Run the coherent path through the method-agnostic harness (no fused phase).
+
+    The coherent analogue of :func:`_run_m5_hierarchical_intervals`: it threads the
+    coherent-draws conformal config + the hierarchy index (which supplies ``S``)
+    with ``reconciler=None`` and no fused phase, so the new ``_origin_compute_target``
+    routes it onto the coherent worker. The worker-importable real ``SeasonalNaive``
+    in ``tasks`` natively supplies the fitted-value sidecar, so a ``ray`` run is
+    byte-identical to a window-of-1 ``ray`` run (no monkeypatch).
+    """
+    output = (
+        LedgerOutputOptions(forecast_path=str(output_path), streaming=True)
+        if output_path is not None
+        else LedgerOutputOptions()
+    )
+    engine = BackendEngine(
+        execution=ExecutionOptions(
+            freq="D",
+            backend=backend,
+            seed=42,
+            max_concurrency=max_concurrency,
+            cpu_per_task=cpu_per_task,
+            ray_threshold=1,
+        ),
+        output=output,
+        conformal=ConformalOptions(config=_coherent_config(), initial_ledger=initial_ledger),
+        reconciliation=ReconciliationOptions(
+            reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
+    )
+    try:
+        return engine.execute(tasks, actuals, origins)
+    finally:
+        engine.close()
+
+
+def _assert_coherent_spread_engaged(ledger: pd.DataFrame, hierarchy: pd.DataFrame) -> None:
+    """Fail a green-but-hollow gate: the coherent draw spread must actually engage.
+
+    Asserts at least one issued cross-section is non-degenerate (positive total
+    width) AND non-additive (the total band width differs from the sum of member
+    band widths) — the property only reconciled draw quantiles produce. A silent
+    fall-back to additive/``SeasonalNaive`` point geometry would have an additive
+    total width and would slip a byte gate that only checks serial==parallel.
+    """
+    lower_col, upper_col = interval_column_names(0.9)
+    summing = build_summing_matrix(hierarchy)
+    issued = ledger[ledger[lower_col].notna()]
+    assert not issued.empty
+    non_degenerate = False
+    non_additive = False
+    for _, group in issued.groupby([MODEL_NAME, FORECAST_ORIGIN, H], sort=False):
+        by_uid = group.set_index(UNIQUE_ID)
+        if "__total__" not in by_uid.index:
+            continue
+        total_width = float(by_uid.loc["__total__", upper_col] - by_uid.loc["__total__", lower_col])
+        present_bottom = [b for b in summing.bottom_ids if b in by_uid.index]
+        if not present_bottom:
+            continue
+        child_width_sum = float(
+            (by_uid.loc[present_bottom, upper_col] - by_uid.loc[present_bottom, lower_col]).sum()
+        )
+        if total_width > 1e-9:
+            non_degenerate = True
+        if abs(total_width - child_width_sum) > 1e-9:
+            non_additive = True
+    assert non_degenerate, "coherent intervals degenerate to a point — spread not engaged"
+    assert non_additive, "coherent total width is additive — reconciled draws not engaged"
+
+
+@pytest.mark.parametrize("cpu_per_task", [None, 1.0])
+def test_coherent_parallel_ledger_byte_identical_to_serial(cpu_per_task: float | None) -> None:
+    """T1: N=2 coherent parallel ledger is byte-identical to the window-of-1 serial.
+
+    Both sides are ``ray`` runs (worker-side real adapter). The explicit
+    ``cpu_per_task=1.0`` variant exercises the thread-symmetry budget the serial
+    apply and the coherent worker must share; the ``None`` variant pins the
+    production default (``thread_budget(None) == 1``).
+    """
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    serial = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=1, cpu_per_task=cpu_per_task
+    ).ledger.to_df()
+    parallel = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=2, cpu_per_task=cpu_per_task
+    ).ledger.to_df()
+
+    pd.testing.assert_frame_equal(serial, parallel, check_exact=True)
+    assert _ledger_sha256(serial) == _ledger_sha256(parallel)
+    lower_col, upper_col = interval_column_names(0.9)
+    np.testing.assert_array_equal(
+        serial[[lower_col, upper_col]].to_numpy(), parallel[[lower_col, upper_col]].to_numpy()
+    )
+    # The gate is not green-but-hollow: the coherent draw spread genuinely engages.
+    _assert_coherent_spread_engaged(serial, bundle.hierarchy)
+
+
+def test_coherent_mid_stream_calibrator_update_is_real() -> None:
+    """T1b: a prior-origin row resolves mid-stream, so the byte gate is a real guard.
+
+    If no due rows resolved between consecutive origins, no ``calibrator.update``
+    would fire mid-stream and every byte gate would pass even with the drain-time
+    ordering wrong (no calibrator mutation to reorder). Spy ``calibrator.update``
+    and assert at least one fires inside a ``_resolve_open`` that PRECEDES a later
+    origin's apply in the 3-origin/horizon-2 fixture — pinning T1 as a genuine
+    state-ordering guard, not a coincidence.
+    """
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    from calibre.conformal.calibrators import RollingQuantileCalibrator
+
+    updates_in_resolve_open = 0
+    in_resolve_open = False
+    real_update = RollingQuantileCalibrator.update
+    real_resolve_open = BackendEngine._resolve_open
+
+    def _spy_update(self, *args, **kwargs):
+        nonlocal updates_in_resolve_open
+        if in_resolve_open:
+            updates_in_resolve_open += 1
+        return real_update(self, *args, **kwargs)
+
+    def _spy_resolve_open(self, ledger, actuals, origin, runtime):
+        nonlocal in_resolve_open
+        in_resolve_open = True
+        try:
+            return real_resolve_open(self, ledger, actuals, origin, runtime)
+        finally:
+            in_resolve_open = False
+
+    import unittest.mock as mock
+
+    with (
+        mock.patch.object(RollingQuantileCalibrator, "update", _spy_update),
+        mock.patch.object(BackendEngine, "_resolve_open", _spy_resolve_open),
+    ):
+        _run_coherent_parallel(
+            bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=2, cpu_per_task=1.0
+        )
+
+    assert updates_in_resolve_open > 0, (
+        "no calibrator.update fired during a ResolveOpen — the fixture never resolves a "
+        "prior-origin row mid-stream, so T1 would be green for the wrong reason"
+    )
+
+
+def test_coherent_parallel_resolved_parquet_byte_identical(tmp_path: Path) -> None:
+    """T2: finalized streamed ``.resolved.parquet`` is byte-identical serial-vs-parallel."""
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+    serial_path = tmp_path / "serial.parquet"
+    parallel_path = tmp_path / "parallel.parquet"
+
+    _run_coherent_parallel(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        max_concurrency=1,
+        cpu_per_task=1.0,
+        output_path=serial_path,
+    )
+    _run_coherent_parallel(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        max_concurrency=2,
+        cpu_per_task=1.0,
+        output_path=parallel_path,
+    )
+
+    serial_resolved = resolved_ledger_uri(serial_path)
+    parallel_resolved = resolved_ledger_uri(parallel_path)
+    assert Path(serial_resolved).read_bytes() == Path(parallel_resolved).read_bytes()
+
+
+def test_coherent_max_concurrency_one_takes_serial_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T3a: ``max_concurrency=1`` coherent run takes the serial path (no dispatch).
+
+    The window-of-1 collapse: ``_parallel_origin_window`` returns ``None`` at N==1,
+    so the serial generator drives the loop and the coherent slab is never
+    dispatched to a worker.
+    """
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    coherent_dispatched = 0
+    real_dispatch = BackendEngine._dispatch_origin_coherent
+
+    def _counting_dispatch(self, inputs):
+        nonlocal coherent_dispatched
+        coherent_dispatched += 1
+        return real_dispatch(self, inputs)
+
+    monkeypatch.setattr(BackendEngine, "_dispatch_origin_coherent", _counting_dispatch)
+    ledger = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=1, cpu_per_task=1.0
+    ).ledger.to_df()
+
+    assert coherent_dispatched == 0  # N==1 collapses to serial; no worker dispatch
+    assert not ledger.empty
+
+
+def test_coherent_predict_overlaps_draw_slab(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T3b: Predict(N+1) is dispatched before slab(N) is consumed.
+
+    Drain-time dispatch makes the *draw-slab* peak-in-flight 1 by construction, so
+    the genuine overlap to prove is that the next origin's Predict fires before the
+    current origin's slab is drained — NOT a ``slab_in_flight >= 2`` assertion,
+    which is unsatisfiable under the byte-safe design and would pressure the
+    implementation back toward the unsafe eager-producer shape. Record the event
+    order of Predict-dispatch and slab-``ray.get`` and assert origin N+1's Predict
+    precedes origin N's slab consumption.
+    """
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    events: list[str] = []
+    real_predict = BackendEngine._predict
+    real_get = BackendEngine._get_origin_coherent
+
+    def _spy_predict(self, chunk_refs, direct_refs, origin):
+        events.append(f"predict:{pd.Timestamp(origin)}")
+        return real_predict(self, chunk_refs, direct_refs, origin)
+
+    def _spy_get(ref):
+        events.append("slab_get")
+        return real_get(ref)
+
+    monkeypatch.setattr(BackendEngine, "_predict", _spy_predict)
+    monkeypatch.setattr(BackendEngine, "_get_origin_coherent", staticmethod(_spy_get))
+    _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=2, cpu_per_task=1.0
+    )
+
+    # With a window of 2 the producer runs Predict for origins 0 and 1 before
+    # draining origin 0's slab: the second Predict must precede the first slab_get.
+    first_slab = events.index("slab_get")
+    predicts_before_first_slab = [e for e in events[:first_slab] if e.startswith("predict:")]
+    assert len(predicts_before_first_slab) >= 2, (
+        f"Predict(N+1) did not overlap slab(N): events={events}"
+    )
+
+
+def test_coherent_window_commits_in_origin_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T4: the coherent consumer commits head-first in origins-list order.
+
+    Spy ``_finish_origin``; assert commits fire in origins-list order regardless of
+    worker completion order, and that the carry-forward state is byte-identical to
+    the window-of-1 serial baseline. Proves the ``_APPEND_SEQ`` head-first drain
+    holds for the coherent path.
+    """
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    serial = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=1, cpu_per_task=1.0
+    ).ledger.to_df()
+
+    committed_origins: list[pd.Timestamp] = []
+    real_finish = BackendEngine._finish_origin
+
+    def _spy_finish(self, ledger, order_ledger, actuals, origin, origin_preds, runtime):
+        committed_origins.append(pd.Timestamp(origin))
+        return real_finish(self, ledger, order_ledger, actuals, origin, origin_preds, runtime)
+
+    monkeypatch.setattr(BackendEngine, "_finish_origin", _spy_finish)
+    parallel = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=3, cpu_per_task=1.0
+    ).ledger.to_df()
+
+    assert committed_origins == _FUSED_ORIGINS
+    pd.testing.assert_frame_equal(serial, parallel, check_exact=True)
+
+
+def test_coherent_parallel_vs_parallel_determinism() -> None:
+    """T5: two independent N=2 coherent runs are byte-identical (seeded slab)."""
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    first = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=2, cpu_per_task=1.0
+    ).ledger.to_df()
+    second = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=2, cpu_per_task=1.0
+    ).ledger.to_df()
+
+    pd.testing.assert_frame_equal(first, second, check_exact=True)
+    assert _ledger_sha256(first) == _ledger_sha256(second)
+
+
+def test_coherent_resume_happy_path_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T6a: resumed origins are never re-dispatched; resumed parallel == resumed serial.
+
+    Build an ``initial_ledger`` prefix over the first origins, spy the coherent
+    dispatch to assert resumed origins are NEVER re-dispatched, and assert the
+    resumed serial and resumed parallel runs are byte-identical (this half stays
+    exact, no sort).
+    """
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+
+    prefix = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS[:2], max_concurrency=1, cpu_per_task=1.0
+    ).ledger.to_df()
+
+    dispatched: list[pd.Timestamp] = []
+    real_dispatch = BackendEngine._dispatch_origin_coherent
+
+    def _spy_dispatch(self, inputs):
+        dispatched.append(pd.Timestamp(inputs.context.frame[FORECAST_ORIGIN].iloc[0]))
+        return real_dispatch(self, inputs)
+
+    resumed_serial = _run_coherent_parallel(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        max_concurrency=1,
+        cpu_per_task=1.0,
+        initial_ledger=prefix,
+    ).ledger.to_df()
+    monkeypatch.setattr(BackendEngine, "_dispatch_origin_coherent", _spy_dispatch)
+    resumed_parallel = _run_coherent_parallel(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        max_concurrency=2,
+        cpu_per_task=1.0,
+        initial_ledger=prefix,
+    ).ledger.to_df()
+
+    assert _FUSED_ORIGINS[0] not in dispatched
+    assert _FUSED_ORIGINS[1] not in dispatched
+    assert _FUSED_ORIGINS[2] in dispatched
+    pd.testing.assert_frame_equal(resumed_serial, resumed_parallel, check_exact=True)
+
+
+def test_coherent_resume_joint_store_and_sigma_lag_survive(tmp_path: Path) -> None:
+    """T6b: the U5 ``::joint::`` store + one-origin sigma lag survive resume byte-identically.
+
+    Persist coherent state through the SQL state store across a split run
+    (origins[:2] then origins[2:]) and assert the resumed final origin reproduces
+    the uninterrupted run's rows exactly. This rehydrates the calibrator + the
+    ``::joint::`` node-vector store via ``from_partition_states`` and reproduces the
+    same kappa — a surface the fused resume never covered (the fused path collapses
+    the runtime). The state-store path runs ``backend="local"`` (the persistence
+    surface, not the ray window) so the joint-store rehydration is the variable.
+    """
+    pytest.importorskip("ray")
+    from calibre.storage.models import Base
+    from calibre.storage.postgres import (
+        ConformalStateRepo,
+        RunRepo,
+        make_engine,
+        make_session_factory,
+        session_scope,
+    )
+    from calibre.storage.session import derive_session_id
+    from calibre.storage.state import SqlConformalStateStore
+
+    bundle, node_history, tasks = _fused_residual_fixture()
+    config = _coherent_config()
+    hierarchy_index = build_hierarchy_index(bundle.hierarchy)
+
+    def _engine(conformal: ConformalOptions) -> BackendEngine:
+        return BackendEngine(
+            execution=ExecutionOptions(freq="D", backend="local", seed=42),
+            conformal=conformal,
+            reconciliation=ReconciliationOptions(reconciler=None, hierarchy_index=hierarchy_index),
+        )
+
+    uninterrupted = _engine(ConformalOptions(config=config)).execute(
+        tasks, node_history, _FUSED_ORIGINS
+    )
+
+    db_engine = make_engine(f"sqlite+pysqlite:///{(tmp_path / 'resume.db').as_posix()}")
+    Base.metadata.create_all(db_engine)
+    factory = make_session_factory(db_engine)
+    session_id = derive_session_id(
+        "tenant",
+        ["coherent"],
+        {"model": "SeasonalNaive"},
+        {
+            "method": config.method,
+            "coverage": config.coverage,
+            "calibration_window": config.calibration_window,
+            "gamma": config.gamma,
+            "spread": config.spread,
+        },
+    )
+
+    with session_scope(factory) as session:
+        first_run = RunRepo(session).create(config={"run": 1})
+        _engine(
+            ConformalOptions(
+                config=config,
+                run_id=first_run.id,
+                state_store=SqlConformalStateStore(
+                    ConformalStateRepo(session), session_id=session_id
+                ),
+            )
+        ).execute(tasks, node_history, _FUSED_ORIGINS[:2])
+
+    with session_scope(factory) as session:
+        second_run = RunRepo(session).create(config={"run": 2})
+        resumed = _engine(
+            ConformalOptions(
+                config=config,
+                run_id=second_run.id,
+                state_store=SqlConformalStateStore(
+                    ConformalStateRepo(session), session_id=session_id
+                ),
+            )
+        ).execute(tasks, node_history, _FUSED_ORIGINS[2:])
+
+    sort_cols = [UNIQUE_ID, FORECAST_ORIGIN, H]
+    lower_col, upper_col = interval_column_names(0.9)
+    expected = uninterrupted.ledger.to_df()
+    expected = expected[expected[FORECAST_ORIGIN] == _FUSED_ORIGINS[2]]
+    expected = expected.sort_values(sort_cols).reset_index(drop=True)
+    actual = resumed.ledger.to_df().sort_values(sort_cols).reset_index(drop=True)
+    # The resumed final origin reproduces the uninterrupted run: same kappa-widened
+    # bounds prove the joint store + sigma lag rehydrated correctly.
+    pd.testing.assert_frame_equal(actual[[lower_col, upper_col]], expected[[lower_col, upper_col]])
+
+
+def test_coherent_producer_failure_resumes_with_identical_rowset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T6c: a worker failing on origin 1 commits origin 0; a resumed run reproduces the rowset.
+
+    Inject a coherent-slab worker failure at origin 1; assert origin 0 committed and
+    the failing origin + beyond never reached the ledger. The resumed run reproduces
+    the same rowset. The crash-resume rowset compare is sorted on BOTH sides
+    symmetrically (post-crash rowset-equivalence only) — acceptable ONLY because
+    T1/T2/T5 pin the byte guarantee on a worker-side adapter; not a loosened gate.
+    """
+    pytest.importorskip("ray")
+    bundle, node_history, tasks = _fused_residual_fixture()
+    fail_origin = _FUSED_ORIGINS[1]
+
+    real_dispatch = BackendEngine._dispatch_origin_coherent
+
+    def _maybe_failing_dispatch(self, inputs):
+        origin = pd.Timestamp(inputs.context.frame[FORECAST_ORIGIN].iloc[0])
+        if origin == fail_origin:
+            import ray
+
+            @ray.remote
+            def _boom():
+                raise RuntimeError("injected coherent slab failure")
+
+            return _boom.remote()
+        return real_dispatch(self, inputs)
+
+    monkeypatch.setattr(BackendEngine, "_dispatch_origin_coherent", _maybe_failing_dispatch)
+
+    engine = BackendEngine(
+        execution=ExecutionOptions(
+            freq="D", backend="ray", seed=42, ray_threshold=1, max_concurrency=3, cpu_per_task=1.0
+        ),
+        conformal=ConformalOptions(config=_coherent_config()),
+        reconciliation=ReconciliationOptions(
+            reconciler=None, hierarchy_index=build_hierarchy_index(bundle.hierarchy)
+        ),
+    )
+    last_ledger: pd.DataFrame | None = None
+    try:
+        with pytest.raises(RuntimeError, match=r"Calibrate phase failed at origin"):
+            for result in engine.iter_origins(tasks, node_history, _FUSED_ORIGINS):
+                last_ledger = result.ledger.to_df()
+    finally:
+        engine.close()
+
+    assert last_ledger is not None
+    committed = {pd.Timestamp(o) for o in last_ledger[FORECAST_ORIGIN].unique()}
+    assert _FUSED_ORIGINS[0] in committed
+    assert fail_origin not in committed
+    assert _FUSED_ORIGINS[2] not in committed
+
+    monkeypatch.undo()
+    resumed = _run_coherent_parallel(
+        bundle,
+        node_history,
+        tasks,
+        _FUSED_ORIGINS,
+        max_concurrency=2,
+        cpu_per_task=1.0,
+        initial_ledger=last_ledger,
+    ).ledger.to_df()
+    clean = _run_coherent_parallel(
+        bundle, node_history, tasks, _FUSED_ORIGINS, max_concurrency=1, cpu_per_task=1.0
+    ).ledger.to_df()
+    # The post-crash check is ROWSET equivalence on the calibrator-INDEPENDENT
+    # structural columns (keys + centers + actuals), sorted on both sides
+    # symmetrically. The interval VALUES legitimately differ: this resume carries no
+    # state store, so the resumed run rebuilds the online calibrator cold from the
+    # prefix ledger and reaches a different (warm-vs-cold) radius than the clean run.
+    # The serial==parallel byte guarantee is pinned by T1/T2/T5 on a worker-side
+    # adapter; T6b separately proves the joint-store + sigma lag survive a *stateful*
+    # resume byte-identically. This half asserts only that the same rows reach the
+    # ledger after a crash + resume.
+    keys = [UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME, H]
+    structural = [UNIQUE_ID, FORECAST_ORIGIN, MODEL_NAME, H, Y_HAT, Y]
+    pd.testing.assert_frame_equal(
+        resumed.sort_values(keys).reset_index(drop=True)[structural],
+        clean.sort_values(keys).reset_index(drop=True)[structural],
+    )
+
+
+def test_analytic_and_cumulative_configs_never_take_parallel_path() -> None:
+    """T8: analytic-spread + cumulative-coherent configs route serial (isolation lock).
+
+    Structural VN2-class isolation, independent of which backend VN2 runs: assert
+    ``_parallel_origin_window`` / ``_origin_compute_target`` return ``None`` for an
+    analytic-spread ``backend="ray"`` config (so VN2's atomic apply is untouched)
+    AND for a cumulative-mode coherent config (so cumulative-coherent never reaches
+    the per-horizon-only worker).
+    """
+    hierarchy = _ca_subset_hierarchy(_m5_hierarchy_frame())
+    hierarchy_index = build_hierarchy_index(hierarchy)
+
+    analytic = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="ray", seed=42, ray_threshold=1),
+        conformal=ConformalOptions(
+            config=SymmetricIntervalConfig(method="aci", coverage=0.9, spread="analytic")
+        ),
+    )
+    try:
+        assert analytic._origin_compute_target is None  # noqa: SLF001
+        assert analytic._parallel_origin_window() is None  # noqa: SLF001
+    finally:
+        analytic.close()
+
+    cumulative = BackendEngine(
+        execution=ExecutionOptions(freq="D", backend="ray", seed=42, ray_threshold=1),
+        conformal=ConformalOptions(
+            config=SymmetricIntervalConfig(
+                method="mscp",
+                coverage=0.9,
+                mode="cumulative",
+                protection_period=2,
+                spread="coherent_draws",
+                draw_count=64,
+            )
+        ),
+        reconciliation=ReconciliationOptions(reconciler=None, hierarchy_index=hierarchy_index),
+    )
+    try:
+        # Cumulative-coherent is OUT of the parallel path — it must route serial so a
+        # mscp+coherent+ray run never hits the per-horizon-only worker.
+        assert cumulative._origin_compute_target is None  # noqa: SLF001
+        assert cumulative._parallel_origin_window() is None  # noqa: SLF001
+    finally:
+        cumulative.close()
+
+
+# ---------------------------------------------------------------------------
 # #210: point bottom_up aggregate-actuals precompute byte-identity gate.
 #
 # Warming HierarchyActualsSource._lookup_cache for the whole window up front must
