@@ -71,7 +71,6 @@ from calibre.execution.ledger import (
 from calibre.execution.origin_compute import (
     CoherentOriginInputs,
     compute_origin_coherent,
-    compute_origin_intervals,
 )
 from calibre.execution.prediction import (
     _coerce_forecast_frame_dtypes,
@@ -80,16 +79,11 @@ from calibre.execution.prediction import (
     _process_global_panel,
     _process_local_chunk,
 )
+from calibre.execution.prediction_context import FittedValueContext
 from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.forecasting.adapter_base import PredictionResult
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
-from calibre.reconciliation.hierarchical_intervals import (
-    HierarchicalIntervalContext,
-    HierarchicalIntervalOptions,
-    HierarchicalIntervalPhase,
-    NixtlaHierarchicalIntervalPhase,
-)
 from calibre.reconciliation.protocols import Reconciler, ReconciliationContext
 from calibre.reconciliation.summing import HierarchyIndex
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
@@ -180,18 +174,10 @@ class ReconciliationOptions:
     hierarchy_index: HierarchyIndex | None = None
 
 
-@dataclass(frozen=True)
-class HierarchicalIntervalEngineOptions:
-    """Fused hierarchy + interval phase threaded independently of Reconciler."""
-
-    phase: HierarchicalIntervalPhase | None = None
-
-
 _DEFAULT_EXECUTION = ExecutionOptions()
 _DEFAULT_OUTPUT = LedgerOutputOptions()
 _DEFAULT_CONFORMAL = ConformalOptions()
 _DEFAULT_RECONCILIATION = ReconciliationOptions()
-_DEFAULT_HIERARCHICAL_INTERVALS = HierarchicalIntervalEngineOptions()
 
 
 class BackendEngine:
@@ -209,9 +195,6 @@ class BackendEngine:
         output: LedgerOutputOptions = _DEFAULT_OUTPUT,
         conformal: ConformalOptions = _DEFAULT_CONFORMAL,
         reconciliation: ReconciliationOptions = _DEFAULT_RECONCILIATION,
-        hierarchical_intervals: HierarchicalIntervalEngineOptions = (
-            _DEFAULT_HIERARCHICAL_INTERVALS
-        ),
         order: OrderPolicy | None = None,
     ) -> None:
         self.execution = execution
@@ -219,16 +202,6 @@ class BackendEngine:
         self.conformal = conformal
         self.reconciler = reconciliation.reconciler
         self.hierarchy_index = reconciliation.hierarchy_index
-        self.hierarchical_interval_phase = hierarchical_intervals.phase
-        if self.hierarchical_interval_phase is not None:
-            if self.hierarchy_index is None:
-                raise ValueError("hierarchical intervals require a hierarchy")
-            if conformal.runtime is not None or conformal.config is not None:
-                raise ValueError("hierarchical intervals cannot be combined with conformal runtime")
-            if reconciliation.reconciler is not None:
-                raise ValueError(
-                    "hierarchical intervals cannot be combined with point reconciliation"
-                )
         self._order_bottom_ids = (
             frozenset(self.hierarchy_index.bottom_ids)
             if self.hierarchy_index is not None and order is not None
@@ -252,11 +225,11 @@ class BackendEngine:
         )
         # The coherent-draws spread owns reconciliation-of-uncertainty, so the point
         # Reconcile phase must stay a no-op while the hierarchy still supplies S. The
-        # serial non-fused path reconciles centers BEFORE Calibrate, but the parallel
-        # coherent drain feeds raw centers into the draw slab — so a configured point
-        # reconciler would diverge serial-vs-parallel. Reject the combo at the engine
-        # boundary (the CLI validator already does the same), mirroring the fused
-        # guard above and keeping the supported coherent config at reconciler=None.
+        # serial path reconciles centers BEFORE Calibrate, but the parallel coherent
+        # drain feeds raw centers into the draw slab — so a configured point reconciler
+        # would diverge serial-vs-parallel. Reject the combo at the engine boundary
+        # (the CLI validator already does the same), keeping the supported coherent
+        # config at reconciler=None.
         if (
             isinstance(self.conformal_runtime, SymmetricIntervalRuntime)
             and self.conformal_runtime.requires_fitted_values
@@ -271,10 +244,6 @@ class BackendEngine:
                 reconciliation.hierarchy_index is not None
                 and reconciliation.reconciler is not None
                 and reconciliation.reconciler.requires_fitted_values
-            )
-            or (
-                self.hierarchical_interval_phase is not None
-                and self.hierarchical_interval_phase.requires_fitted_values
             )
             or (
                 isinstance(self.conformal_runtime, SymmetricIntervalRuntime)
@@ -293,15 +262,12 @@ class BackendEngine:
         # would force positional-only .remote() calls; not worth it for this slice.
         self._remote_process_local_chunk: Any | None = None
         self._remote_process_global_panel: Any | None = None
-        # Per-origin Ray dispatch state. The remote handle is rebuilt and the
-        # run-constant data (the fused hierarchy index, the coherent summing matrix
-        # S) re-``ray.put``'d only on a fresh runtime; both persist across origins on
-        # a stable runtime so each is plasma-stored once. The coherent worker rides
-        # its own lazily-built handle alongside the fused one and reuses a single
-        # ``S`` ref rather than embedding it per-origin in the snapshot payload.
-        self._remote_compute_origin_intervals: Any | None = None
+        # Per-origin Ray dispatch state for the coherent draw+reconcile slab. The
+        # remote handle is rebuilt and the run-constant summing matrix S
+        # re-``ray.put``'d only on a fresh runtime; both persist across origins on a
+        # stable runtime so S is plasma-stored once and reused rather than embedded
+        # per-origin in the snapshot payload.
         self._remote_compute_origin_coherent: Any | None = None
-        self._hierarchy_index_ref: Any | None = None
         self._summing_ref: Any | None = None
 
     def __enter__(self) -> BackendEngine:
@@ -435,7 +401,7 @@ class BackendEngine:
 
         The parallel branch is gated on a **method-agnostic** predicate — a
         per-origin compute target exists (:meth:`_origin_compute_target` is not
-        ``None``: the fused Nixtla phase OR the coherent draw+reconcile slab) — with
+        ``None``: the coherent draw+reconcile slab) — with
         Ray selected and an effective window ``N > 1``. ``max_concurrency`` defaults
         to ``None`` (the M5 helper sets none), so coerce explicitly to a default
         window of 2 — never Predict's ``or len(...)`` coercion, which would unbound
@@ -452,21 +418,19 @@ class BackendEngine:
         return window if window > 1 else None
 
     @property
-    def _origin_compute_target(self) -> Literal["fused", "coherent"] | None:
+    def _origin_compute_target(self) -> Literal["coherent"] | None:
         """Which per-origin compute the parallel harness fans out, or ``None``.
 
-        ``"fused"`` when the rented fused interval phase is set; ``"coherent"`` when
-        the live conformal runtime is a per-horizon coherent-draws
-        :class:`~calibre.conformal.runtime.SymmetricIntervalRuntime` (its
-        ``requires_fitted_values`` is the ``CoherentDraws`` discriminator); ``None``
-        otherwise — the analytic/symmetric path AND **any** ``mode="cumulative"``
-        config. VN2 (``spread="analytic"``, ``mode="cumulative"``) and
-        cumulative-coherent therefore both stay serial: the cumulative ``apply`` has
-        its own seed/kappa read and is not covered by the per-horizon byte gate, so
-        routing it serial keeps it off the untested worker path.
+        ``"coherent"`` when the live conformal runtime is a per-horizon
+        coherent-draws :class:`~calibre.conformal.runtime.SymmetricIntervalRuntime`
+        (its ``requires_fitted_values`` is the ``CoherentDraws`` discriminator);
+        ``None`` otherwise — the analytic/symmetric path AND **any**
+        ``mode="cumulative"`` config. VN2 (``spread="analytic"``,
+        ``mode="cumulative"``) and cumulative-coherent therefore both stay serial:
+        the cumulative ``apply`` has its own seed/kappa read and is not covered by
+        the per-horizon byte gate, so routing it serial keeps it off the untested
+        worker path.
         """
-        if self.hierarchical_interval_phase is not None:
-            return "fused"
         runtime = self.conformal_runtime
         if (
             isinstance(runtime, SymmetricIntervalRuntime)
@@ -523,7 +487,7 @@ class BackendEngine:
         direct_refs: list[ForecastTaskRef],
         window: int,
     ) -> Iterator[BackendResult]:
-        """Drive a method-agnostic bounded producer→consumer sliding window.
+        """Drive the coherent bounded producer→consumer sliding window.
 
         Predict runs on the driver per origin (fanning out to Ray as today). The
         consumer drains the in-flight deque strictly head-first (origins-list
@@ -531,32 +495,24 @@ class BackendEngine:
         the per-origin ``yield``, the timing log, and crash-resume are all
         byte-identical to the serial path. The ``_phase`` spans match too, with one
         observability-only exception: the coherent drain elides the no-op Reconcile
-        span the serial non-fused else-branch emits (the point Reconcile phase is a
-        no-op under the coherent config; the ledger is unaffected).
+        span the serial path emits (the point Reconcile phase is a no-op under the
+        coherent config; the ledger is unaffected).
 
-        Two compute targets share this window with different overlap shapes:
-
-        * **fused** — the live runtime collapses to ``None``, so ResolveOpen is a
-          no-op and the RNG-free interval task is submitted in the producer; at most
-          ``window`` interval frames are in flight, and the drain only ``ray.get``s
-          the result.
-        * **coherent** — the live runtime does NOT collapse, so the calibrator is
-          live online state. ResolveOpen (which mutates the calibrator), the
-          state-reading snapshot, the draw-slab dispatch, the ``issued_count`` bump +
-          metadata writes, and observe MUST all run head-first at the drain, after
-          the prior origin commits, or a producer-ahead calibrator mutation
-          reorders against the serial ``resolve_open(N) → apply(N) → commit(N) →
-          resolve_open(N+1)`` sequence and breaks byte-identity. The producer
-          therefore runs **only Predict** (independent of conformal state); the
-          ResolveOpen→snapshot→slab→write→observe chain is synchronous and in-order
-          at the drain. Only Predict(N+1) overlaps slab(N).
+        The live runtime is online calibrator state, so ResolveOpen (which mutates
+        the calibrator), the state-reading snapshot, the draw-slab dispatch, the
+        ``issued_count`` bump + metadata writes, and observe MUST all run head-first
+        at the drain, after the prior origin commits, or a producer-ahead calibrator
+        mutation reorders against the serial ``resolve_open(N) → apply(N) →
+        commit(N) → resolve_open(N+1)`` sequence and breaks byte-identity. The
+        producer therefore runs **only Predict** (independent of conformal state);
+        the ResolveOpen→snapshot→slab→write→observe chain is synchronous and
+        in-order at the drain. Only Predict(N+1) overlaps slab(N).
         """
-        coherent = self._origin_compute_target == "coherent"
         # Ordered in-flight items: (origin, payload, origin_started). The head is
         # always the lowest origins-list index still in flight, so popleft drains in
-        # origins-list order regardless of worker completion order. ``payload`` is
-        # the interval ObjectRef (fused) or the produced predict frame + fitted
-        # sidecar (coherent: ResolveOpen + the slab dispatch run at the drain).
+        # origins-list order regardless of worker completion order. ``payload`` is the
+        # produced predict frame + fitted sidecar (ResolveOpen + the slab dispatch run
+        # at the drain).
         in_flight: deque[tuple[pd.Timestamp, Any, float]] = deque()
         producible = iter(origins)
         try:
@@ -576,25 +532,12 @@ class BackendEngine:
                         yield BackendResult(ledger=ledger, order_ledger=order_ledger)
                         continue
                     origin_started = time.perf_counter()
-                    if coherent:
-                        # Predict-only ahead of the window: ResolveOpen mutates the
-                        # live calibrator and so must wait for the in-order drain.
-                        # Predict is independent of conformal state, so it overlaps
-                        # slab(N) safely.
-                        with self._phase("Predict", origin):
-                            prediction = self._predict(chunk_refs, direct_refs, origin)
-                        payload: Any = prediction
-                    else:
-                        origin_preds, fitted_context = self._run_origin_predict(
-                            ledger,
-                            actuals_source,
-                            origin,
-                            conformal_runtime,
-                            chunk_refs,
-                            direct_refs,
-                        )
-                        payload = self._dispatch_origin_intervals(origin_preds, fitted_context)
-                    in_flight.append((origin, payload, origin_started))
+                    # Predict-only ahead of the window: ResolveOpen mutates the live
+                    # calibrator and so must wait for the in-order drain. Predict is
+                    # independent of conformal state, so it overlaps slab(N) safely.
+                    with self._phase("Predict", origin):
+                        prediction = self._predict(chunk_refs, direct_refs, origin)
+                    in_flight.append((origin, prediction, origin_started))
                 if not in_flight:
                     break
                 origin, payload, origin_started = in_flight.popleft()
@@ -603,38 +546,25 @@ class BackendEngine:
                 # refs (dereference abandoned worker frames promptly) before the named
                 # re-raise propagates through the _phase context.
                 try:
-                    if coherent:
-                        # ResolveOpen → Calibrate(snapshot → slab → write) →
-                        # Order + Commit(observe), all head-first in-order on the
-                        # driver, so the live calibrator state matches serial exactly.
-                        with self._phase("ResolveOpen", origin):
-                            self._resolve_open(ledger, actuals_source, origin, conformal_runtime)
-                        with self._phase("Calibrate", origin):
-                            origin_preds = self._calibrate_coherent_parallel(
-                                payload, conformal_runtime
-                            )
-                        # observe runs on the driver via the LIVE runtime threaded
-                        # into _finish_origin's Commit, AFTER the worker returns, so
-                        # the one-origin sigma lag (sigma read at apply, raw scores
-                        # stored at observe) is preserved.
-                        self._finish_origin(
-                            ledger,
-                            order_ledger,
-                            actuals_source,
-                            origin,
-                            origin_preds,
-                            conformal_runtime,
-                        )
-                    else:
-                        with self._phase("HierarchicalIntervals", origin):
-                            origin_preds = self._get_origin_intervals(payload)
-                        # _finish_origin runs AFTER the HierarchicalIntervals span
-                        # closes (its Order/Commit open their own spans) to match
-                        # serial's phase attribution; it stays inside the try so an
-                        # Order/Commit failure still drains the remaining in-flight refs.
-                        self._finish_origin(
-                            ledger, order_ledger, actuals_source, origin, origin_preds, None
-                        )
+                    # ResolveOpen → Calibrate(snapshot → slab → write) →
+                    # Order + Commit(observe), all head-first in-order on the
+                    # driver, so the live calibrator state matches serial exactly.
+                    with self._phase("ResolveOpen", origin):
+                        self._resolve_open(ledger, actuals_source, origin, conformal_runtime)
+                    with self._phase("Calibrate", origin):
+                        origin_preds = self._calibrate_coherent_parallel(payload, conformal_runtime)
+                    # observe runs on the driver via the LIVE runtime threaded
+                    # into _finish_origin's Commit, AFTER the worker returns, so
+                    # the one-origin sigma lag (sigma read at apply, raw scores
+                    # stored at observe) is preserved.
+                    self._finish_origin(
+                        ledger,
+                        order_ledger,
+                        actuals_source,
+                        origin,
+                        origin_preds,
+                        conformal_runtime,
+                    )
                 except Exception:
                     self._drain_in_flight(in_flight)
                     raise
@@ -684,34 +614,12 @@ class BackendEngine:
         return conformal_runtime.write_perhorizon_intervals(snapshot, lower_values, upper_values)
 
     @staticmethod
-    def _get_origin_intervals(ref: Any) -> pd.DataFrame:
-        """Block on a worker interval ref, unwrapping a Ray failure to its cause.
-
-        ``ray.get`` wraps a worker exception in a ``RayTaskError`` whose ``str``
-        reproduces the worker traceback and ignores any rewrap message, so it
-        would defeat the ``_phase`` origin-naming. Re-raise the underlying cause
-        (a plain exception) so ``_phase`` can attribute it to the origin.
-        """
-        import ray
-        from ray.exceptions import RayTaskError
-
-        try:
-            return ray.get(ref)
-        except RayTaskError as exc:
-            cause = exc.cause
-            if cause is None:
-                raise
-            raise cause from exc
-
-    @staticmethod
     def _drain_in_flight(in_flight: deque[tuple[pd.Timestamp, Any, float]]) -> None:
         """Drop any still-in-flight payloads, cancelling the ones that are Ray refs.
 
-        The payload shape is method-dependent: the fused path holds interval
-        ``ObjectRef``s (the ``ray.cancel`` aborts a running worker task), whereas
-        the coherent path holds driver-side predict frames whose slab has not yet
+        The in-flight payload is a driver-side predict frame whose slab has not yet
         dispatched, so ``ray.cancel`` on a non-ref is a swallowed no-op — dropping
-        the deque entry is the actual cleanup. Best-effort either way.
+        the deque entry is the actual cleanup. Best-effort.
         """
         if not in_flight:
             return
@@ -749,12 +657,10 @@ class BackendEngine:
         self._ray_runtime = None
         self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
-        # The cached index/summing refs are DATA (``ray.put`` ObjectRefs), not just
-        # handles: a stale ref from a released runtime points at an object the new
-        # runtime never plasma-stored, so null them alongside the remote handles.
-        self._remote_compute_origin_intervals = None
+        # The cached summing ref is DATA (a ``ray.put`` ObjectRef), not just a
+        # handle: a stale ref from a released runtime points at an object the new
+        # runtime never plasma-stored, so null it alongside the remote handle.
         self._remote_compute_origin_coherent = None
-        self._hierarchy_index_ref = None
         self._summing_ref = None
 
     def close(self) -> None:
@@ -791,36 +697,25 @@ class BackendEngine:
         """Run one origin through the ordered per-origin phases.
 
         The phases run in a fixed order and thread explicit state between them:
-        ``ResolveOpen`` (carry-forward prior origins) → ``Predict`` → either
-        ``Reconcile`` (point → coherent point) → ``Calibrate`` or the fused
-        ``HierarchicalIntervals`` phase → ``Order`` → ``Commit`` (append +
-        final resolve + persist). Each phase is a small method that takes/returns the next
-        phase's input so it can be driven independently in a test. This is a
-        plain method-call sequence, not a dispatch framework (KTD6). A failure
-        in any phase is re-raised naming the phase and origin so the fragile
-        sequencing the seam exposes is debuggable.
+        ``ResolveOpen`` (carry-forward prior origins) → ``Predict`` →
+        ``Reconcile`` (point → coherent point) → ``Calibrate`` → ``Order`` →
+        ``Commit`` (append + final resolve + persist). Each phase is a small method
+        that takes/returns the next phase's input so it can be driven independently
+        in a test. This is a plain method-call sequence, not a dispatch framework
+        (KTD6). A failure in any phase is re-raised naming the phase and origin so
+        the fragile sequencing the seam exposes is debuggable.
         """
-        fused_phase_active = self.hierarchical_interval_phase is not None
-        active_conformal_runtime = None if fused_phase_active else conformal_runtime
         origin_preds, fitted_context = self._run_origin_predict(
             ledger, actuals, origin, conformal_runtime, chunk_refs, direct_refs
         )
-        if fused_phase_active:
-            with self._phase("HierarchicalIntervals", origin):
-                origin_preds = self._hierarchical_intervals(origin_preds, fitted_context)
-        else:
-            with self._phase("Reconcile", origin):
-                origin_preds = self._reconcile(
-                    origin_preds,
-                    ReconciliationContext(fitted_values=fitted_context.fitted_values),
-                )
-            with self._phase("Calibrate", origin):
-                origin_preds = self._calibrate(
-                    origin_preds, active_conformal_runtime, fitted_context
-                )
-        self._finish_origin(
-            ledger, order_ledger, actuals, origin, origin_preds, active_conformal_runtime
-        )
+        with self._phase("Reconcile", origin):
+            origin_preds = self._reconcile(
+                origin_preds,
+                ReconciliationContext(fitted_values=fitted_context.fitted_values),
+            )
+        with self._phase("Calibrate", origin):
+            origin_preds = self._calibrate(origin_preds, conformal_runtime, fitted_context)
+        self._finish_origin(ledger, order_ledger, actuals, origin, origin_preds, conformal_runtime)
 
     def _run_origin_predict(
         self,
@@ -830,24 +725,19 @@ class BackendEngine:
         conformal_runtime: ConformalRuntime | None,
         chunk_refs: list[ChunkTaskRef],
         direct_refs: list[ForecastTaskRef],
-    ) -> tuple[pd.DataFrame, HierarchicalIntervalContext]:
+    ) -> tuple[pd.DataFrame, FittedValueContext]:
         """Run ResolveOpen + Predict on the driver, returning preds + fitted sidecar.
 
         The shared front half of every origin: it carries forward prior origins'
-        resolutions (no-op on the fused path, where the conformal runtime
-        collapses to ``None``) and produces this origin's point forecasts. The
-        returned :class:`HierarchicalIntervalContext` carries the fitted-value
-        sidecar both the fused and non-fused tails consume.
+        resolutions and produces this origin's point forecasts. The returned
+        :class:`FittedValueContext` carries the fitted-value sidecar the Reconcile
+        and Calibrate tails consume.
         """
-        fused_phase_active = self.hierarchical_interval_phase is not None
-        active_conformal_runtime = None if fused_phase_active else conformal_runtime
         with self._phase("ResolveOpen", origin):
-            self._resolve_open(ledger, actuals, origin, active_conformal_runtime)
+            self._resolve_open(ledger, actuals, origin, conformal_runtime)
         with self._phase("Predict", origin):
             prediction = self._predict(chunk_refs, direct_refs, origin)
-        return prediction.forecast, HierarchicalIntervalContext(
-            fitted_values=prediction.fitted_values
-        )
+        return prediction.forecast, FittedValueContext(fitted_values=prediction.fitted_values)
 
     def _finish_origin(
         self,
@@ -860,9 +750,9 @@ class BackendEngine:
     ) -> None:
         """Run the shared serial tail Order + Commit for one origin.
 
-        This is the tail both the fused and non-fused branches reach (it sits
-        outside the branch in ``run_origin``); extracting it keeps the
-        append-then-resolve order identical across serial and parallel dispatch.
+        Extracting this tail (it sits after the Calibrate branch in ``run_origin``)
+        keeps the append-then-resolve order identical across serial and parallel
+        dispatch.
         """
         with self._phase("Order", origin):
             self._order(origin_preds, order_ledger)
@@ -959,31 +849,11 @@ class BackendEngine:
             context,
         )
 
-    def _hierarchical_intervals(
-        self,
-        origin_preds: pd.DataFrame,
-        context: HierarchicalIntervalContext,
-    ) -> pd.DataFrame:
-        """Fused hierarchical conformal phase — replace Reconcile + Calibrate.
-
-        The ``apply`` runs under the same ``threadpool_limits`` budget the Ray
-        worker uses (:func:`~calibre.execution.origin_compute.compute_origin_intervals`),
-        so the BLAS thread count is held constant serial-vs-parallel — a
-        thread-count asymmetry would break byte-identity on dense-BLAS strategies.
-        """
-        if self.hierarchical_interval_phase is None or origin_preds.empty:
-            return origin_preds
-        assert self.hierarchy_index is not None  # checked at construction
-        with threadpool_limits(limits=thread_budget(self.execution.cpu_per_task)):
-            return self.hierarchical_interval_phase.apply(
-                origin_preds, self.hierarchy_index, context
-            )
-
     def _calibrate(
         self,
         origin_preds: pd.DataFrame,
         conformal_runtime: ConformalRuntime | None,
-        fitted_context: HierarchicalIntervalContext,
+        fitted_context: FittedValueContext,
     ) -> pd.DataFrame:
         """Calibrate phase — apply conformal intervals to this origin's preds.
 
@@ -1415,16 +1285,14 @@ class BackendEngine:
         if self._ray_runtime is not None and ray.is_initialized():
             return
         # Acquiring a fresh runtime invalidates any cached remote-function handles
-        # and the ``ray.put`` index ref; drop them so the callers rebuild them
+        # and the ``ray.put`` summing ref; drop them so the callers rebuild them
         # against the new runtime. These resets stay on the re-acquisition path
-        # (after the warm early-return) so the index ref and handle persist across
-        # origins on a stable runtime — re-putting the index every origin would be
-        # needless overhead.
+        # (after the warm early-return) so the summing ref and handle persist across
+        # origins on a stable runtime — re-putting S every origin would be needless
+        # overhead.
         self._remote_process_local_chunk = None
         self._remote_process_global_panel = None
-        self._remote_compute_origin_intervals = None
         self._remote_compute_origin_coherent = None
-        self._hierarchy_index_ref = None
         self._summing_ref = None
         self._ray_runtime = acquire_ray_runtime(address=self.execution.ray_address)
 
@@ -1433,7 +1301,7 @@ class BackendEngine:
 
         ``cpu_per_task`` maps to ``num_cpus`` only when configured; otherwise
         Ray's auto-detected CPU count governs admission. Shared by the Predict
-        runners and the fused-interval dispatch so the admission rule lives once.
+        runners and the coherent-slab dispatch so the admission rule lives once.
         """
         import ray
 
@@ -1499,57 +1367,17 @@ class BackendEngine:
 
         return _concat_prediction_results(results)
 
-    def _dispatch_origin_intervals(
-        self,
-        origin_preds: pd.DataFrame,
-        context: HierarchicalIntervalContext,
-    ) -> Any:
-        """Submit one origin's fused interval task to Ray and return its ObjectRef.
-
-        Lazily builds and caches the ``ray.remote`` handle and a single
-        ``ray.put`` of the run-constant hierarchy index (reused by every task on
-        a stable runtime); applies ``num_cpus`` admission only when
-        ``cpu_per_task`` is set, mirroring the Predict runners. Dispatch is one
-        task per origin — it never traverses the ``max_concurrency`` batching
-        loop; ``max_concurrency`` is reused only as the window depth in
-        :meth:`iter_origins`.
-        """
-        assert self.hierarchical_interval_phase is not None  # gated by the caller
-        assert self.hierarchy_index is not None  # checked at construction
-        self._ensure_ray()
-        import ray
-
-        if self._remote_compute_origin_intervals is None:
-            self._remote_compute_origin_intervals = self._build_remote(compute_origin_intervals)
-        if self._hierarchy_index_ref is None:
-            self._hierarchy_index_ref = ray.put(self.hierarchy_index)
-        # The stored phase is the HierarchicalIntervalPhase Protocol, which has no
-        # `.options`; the worker target needs the frozen options off the only
-        # concrete implementor. The isinstance narrows safely AND guards at runtime,
-        # so the access can't silently lie if a second implementor is ever threaded
-        # through — no unchecked cast past the Protocol boundary.
-        assert isinstance(self.hierarchical_interval_phase, NixtlaHierarchicalIntervalPhase)
-        options: HierarchicalIntervalOptions = self.hierarchical_interval_phase.options
-        return self._remote_compute_origin_intervals.remote(
-            origin_preds,
-            self._hierarchy_index_ref,
-            context,
-            options,
-            self.execution.cpu_per_task,
-        )
-
     def _dispatch_origin_coherent(self, inputs: CoherentOriginInputs, summing: Any) -> Any:
         """Submit one origin's coherent draw+reconcile slab to Ray, return its ObjectRef.
 
-        The method-agnostic counterpart to :meth:`_dispatch_origin_intervals` for
-        the coherent target. Dispatch is synchronous within the in-order drain
-        (snapshot → ``remote`` → ``ray.get``), so the live-calibrator read and the
-        slab compute never reorder against the head-first commit. The run-constant
-        summing matrix ``S`` is ``ray.put`` once and the cached ref reused every
-        origin (mirroring the fused hierarchy index), so only the per-origin snapshot
-        crosses the wire afresh; Ray auto-dereferences the passed ref to ``S`` by
-        value in the worker. The remote handle is lazily built and cached alongside
-        the fused handle, with the same ``num_cpus`` admission.
+        Dispatch is synchronous within the in-order drain (snapshot → ``remote`` →
+        ``ray.get``), so the live-calibrator read and the slab compute never reorder
+        against the head-first commit. The run-constant summing matrix ``S`` is
+        ``ray.put`` once and the cached ref reused every origin, so only the
+        per-origin snapshot crosses the wire afresh; Ray auto-dereferences the
+        passed ref to ``S`` by value in the worker. The remote handle is lazily
+        built and cached, with ``num_cpus`` admission only when ``cpu_per_task`` is
+        set (mirroring the Predict runners).
         """
         self._ensure_ray()
         import ray
@@ -1566,10 +1394,10 @@ class BackendEngine:
     def _get_origin_coherent(ref: Any) -> tuple[np.ndarray, np.ndarray]:
         """Block on a coherent-slab ref, unwrapping a Ray failure to its cause.
 
-        Mirrors :meth:`_get_origin_intervals` — ``ray.get`` wraps a worker
-        exception in a ``RayTaskError`` whose ``str`` defeats the ``_phase``
-        origin-naming, so re-raise the underlying cause. Returns the worker's
-        ``(lower, upper)`` arrays for the driver to write into the issued band.
+        ``ray.get`` wraps a worker exception in a ``RayTaskError`` whose ``str``
+        defeats the ``_phase`` origin-naming, so re-raise the underlying cause.
+        Returns the worker's ``(lower, upper)`` arrays for the driver to write into
+        the issued band.
         """
         import ray
         from ray.exceptions import RayTaskError

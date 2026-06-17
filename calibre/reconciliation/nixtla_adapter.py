@@ -47,23 +47,22 @@ NixtlaStrategy = Literal[
 ]
 
 NIXTLA_STRATEGIES = cast(tuple[NixtlaStrategy, ...], get_args(NixtlaStrategy))
-# Point reconciliation strategies served by Nixtla. ``bottom_up`` stays in
-# ``NIXTLA_STRATEGIES`` for the fused hierarchical-interval phase, but point
-# bottom_up is Calibre's native ``BottomUpReconciler`` — it needs no aggregate
-# base forecasts, so routing it through this harness would silently re-impose
-# the eager node-history/task cost.
+# Point reconciliation strategies served by Nixtla. ``bottom_up`` is excluded:
+# point bottom_up is Calibre's native ``BottomUpReconciler`` — it needs no
+# aggregate base forecasts, so routing it through this harness would silently
+# re-impose the eager node-history/task cost.
 NIXTLA_POINT_STRATEGIES = cast(
     tuple[NixtlaStrategy, ...],
     tuple(strategy for strategy in NIXTLA_STRATEGIES if strategy != "bottom_up"),
 )
-# Strategies with an upstream sparse implementation: ``BottomUpSparse`` serves
-# the fused bottom_up path (the point adapter never requests bottom_up — the
-# native BottomUpReconciler owns that), and ``MinTraceSparse`` serves exactly
-# its allowed-method set ols/wls_struct/wls_var. ``erm`` and ``mint_shrink``
-# have no sparse variant upstream, so they keep the dense path and its
-# documented memory ceiling. Single source of truth consumed by the point
-# producer-selection seam (``NixtlaReconciler.build_summing``), the fused
-# phase's S build, and the preflight memory estimate.
+# Strategies with an upstream sparse implementation: ``MinTraceSparse`` serves
+# exactly its allowed-method set ols/wls_struct/wls_var. ``erm`` and
+# ``mint_shrink`` have no sparse variant upstream, so they keep the dense path
+# and its documented memory ceiling. ``bottom_up``'s membership is now inert for
+# the live point path (the native ``BottomUpReconciler`` serves point bottom_up
+# and the harness rejects it before any S build). Single source of truth
+# consumed by the point producer-selection seam
+# (``NixtlaReconciler.build_summing``) and the preflight memory estimate.
 NIXTLA_SPARSE_STRATEGIES: frozenset[NixtlaStrategy] = frozenset(
     {"bottom_up", "ols", "wls_struct", "wls_var"}
 )
@@ -84,7 +83,7 @@ _UNSUPPORTED_STRATEGY_MESSAGES = {
     "bottom_up": (
         "point bottom_up reconciliation is served by Calibre's native "
         "BottomUpReconciler (resolve_reconciler('bottom_up')), not the Nixtla "
-        "harness; hierarchical_intervals.strategy='bottom_up' remains a Nixtla path"
+        "harness"
     ),
 }
 _COHERENCE_RTOL = 1e-6
@@ -214,11 +213,6 @@ def _make_checked_min_trace_sparse(
 def _default_method_factory(strategy: NixtlaStrategy) -> Callable[[], _NixtlaMethod]:
     def _make_method() -> _NixtlaMethod:
         methods = _load_methods_module()
-        if strategy == "bottom_up":
-            # Fused-phase-only mapping: NIXTLA_POINT_STRATEGIES excludes
-            # bottom_up, so the sparse variant here affects only the fused
-            # interval caller.
-            return cast(_NixtlaMethod, methods.BottomUpSparse())
         if strategy == "erm":
             return cast(_NixtlaMethod, methods.ERM(method="closed"))
         if strategy in _MIN_TRACE_SPARSE_STRATEGIES:
@@ -227,12 +221,6 @@ def _default_method_factory(strategy: NixtlaStrategy) -> Callable[[], _NixtlaMet
         return cast(_NixtlaMethod, methods.MinTrace(method=strategy, num_threads=1))
 
     return _make_method
-
-
-def make_nixtla_method(strategy: NixtlaStrategy) -> _NixtlaMethod:
-    """Build the Nixtla method object for Calibre's supported strategy names."""
-
-    return _default_method_factory(strategy)()
 
 
 def _to_nixtla_layout(base: np.ndarray, summing: SummingMatrixLike) -> _NixtlaLayout:

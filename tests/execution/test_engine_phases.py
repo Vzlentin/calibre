@@ -34,10 +34,10 @@ from calibre.execution.backend import (
     _with_group_tag,
 )
 from calibre.execution.ledger import InMemoryLedger, InMemoryOrderLedger
+from calibre.execution.prediction_context import FittedValueContext
 from calibre.execution.task_builder import partition_tasks
 from calibre.forecasting.adapter_base import PredictionResult
 from calibre.ordering.policy_config import RsConfig
-from calibre.reconciliation.hierarchical_intervals import HierarchicalIntervalContext
 
 
 @contextmanager
@@ -146,7 +146,7 @@ def test_calibrate_phase_applies_intervals():
     lower_col, upper_col = runtime.interval_columns
     assert lower_col not in raw.columns
 
-    calibrated = engine._calibrate(raw, runtime, HierarchicalIntervalContext())
+    calibrated = engine._calibrate(raw, runtime, FittedValueContext())
     assert lower_col in calibrated.columns
     assert upper_col in calibrated.columns
     assert CONFORMAL_METHOD in calibrated.columns
@@ -156,7 +156,7 @@ def test_calibrate_phase_noop_without_runtime():
     """Calibrate returns the frame unchanged when there is no runtime."""
     engine = BackendEngine()
     frame = pd.DataFrame({UNIQUE_ID: ["A"], Y_HAT: [1.0]})
-    out = engine._calibrate(frame, None, HierarchicalIntervalContext())
+    out = engine._calibrate(frame, None, FittedValueContext())
     pd.testing.assert_frame_equal(out, frame)
 
 
@@ -167,7 +167,7 @@ def test_calibrate_phase_noop_on_empty_preds():
     )
     engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
     empty = pd.DataFrame(columns=[UNIQUE_ID, Y_HAT])
-    out = engine._calibrate(empty, runtime, HierarchicalIntervalContext())
+    out = engine._calibrate(empty, runtime, FittedValueContext())
     assert out.empty
 
 
@@ -201,7 +201,7 @@ def test_order_phase_appends_to_order_ledger():
     engine = _rs_engine()
     with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
         preds = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
-    preds = engine._calibrate(preds, engine.conformal_runtime, HierarchicalIntervalContext())
+    preds = engine._calibrate(preds, engine.conformal_runtime, FittedValueContext())
 
     order_ledger = InMemoryOrderLedger()
     engine._order(preds, order_ledger)
@@ -276,7 +276,7 @@ def test_commit_phase_validates_appends_and_persists_once_per_call():
     engine, store = _engine_with_state_store()
     with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
         preds = _predict_frame(engine, chunk_refs, direct_refs, dates[11])
-    preds = engine._calibrate(preds, engine.conformal_runtime, HierarchicalIntervalContext())
+    preds = engine._calibrate(preds, engine.conformal_runtime, FittedValueContext())
 
     persist_calls = {"n": 0}
     original_persist = engine._persist_conformal_state
@@ -359,7 +359,7 @@ def test_resolve_open_carries_forward_prior_origin_before_predict():
     ledger = InMemoryLedger()
     with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
         prior = _predict_frame(engine, chunk_refs, direct_refs, dates[7])
-    prior = engine._calibrate(prior, runtime, HierarchicalIntervalContext())
+    prior = engine._calibrate(prior, runtime, FittedValueContext())
     ledger.append(prior)
     assert ledger.to_df()[Y].isna().all()  # unresolved before carry-forward
     rows_before = len(ledger.to_df())
@@ -404,7 +404,7 @@ def test_commit_appends_then_resolves_after_origin():
     ledger = InMemoryLedger()
     with _materialize_refs_for(engine, [task]) as (chunk_refs, direct_refs):
         preds = _predict_frame(engine, chunk_refs, direct_refs, dates[7])
-    preds = engine._calibrate(preds, runtime, HierarchicalIntervalContext())
+    preds = engine._calibrate(preds, runtime, FittedValueContext())
 
     engine._commit(ledger, preds, FrameActualsSource(actuals), dates[7], runtime)
     df = ledger.to_df()

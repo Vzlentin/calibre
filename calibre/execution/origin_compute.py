@@ -1,12 +1,10 @@
-"""Picklable Ray worker targets for the across-origin parallel harness.
+"""Picklable Ray worker target for the across-origin parallel harness.
 
-Each per-origin compute target is a module-level free function (not a bound
+The per-origin compute target is a module-level free function (not a bound
 method) so Ray can pickle it without dragging the whole engine across the wire,
 and a pure function of by-value inputs so it can be fanned out one origin at a
-time. Two targets live here:
+time:
 
-* :func:`compute_origin_intervals` — the fused ``HierarchicalIntervals`` phase
-  (RNG-free; rebuilds the phase in-worker).
 * :func:`compute_origin_coherent` — the coherent draw+reconcile slab
   (RNG-*seeded* via :class:`~calibre.conformal.coherent_draws.CoherentDraws`'
   per-section seed, NOT RNG-free; the seed is the reproducibility guarantee, so a
@@ -18,46 +16,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-import pandas as pd
 from threadpoolctl import threadpool_limits
 
 from calibre.conformal.coherent_draws import CoherentDraws
 from calibre.conformal.protocols import SpreadContext
 from calibre.execution.threading import thread_budget
-from calibre.reconciliation.hierarchical_intervals import (
-    HierarchicalIntervalContext,
-    HierarchicalIntervalOptions,
-    NixtlaHierarchicalIntervalPhase,
-)
-from calibre.reconciliation.summing import HierarchyIndex, SparseSummingMatrix
-
-
-def compute_origin_intervals(
-    origin_preds: pd.DataFrame,
-    hierarchy_index: HierarchyIndex,
-    context: HierarchicalIntervalContext,
-    options: HierarchicalIntervalOptions,
-    cpu_per_task: float | None,
-) -> pd.DataFrame:
-    """Apply the fused hierarchical-interval phase in a Ray worker.
-
-    Rebuilds the phase in-worker (its summing-matrix memo starts empty — a
-    correct per-worker cache miss) and runs ``apply`` under the same
-    ``threadpool_limits`` budget the driver's serial path uses, so the BLAS
-    thread count is symmetric serial-vs-parallel and the output stays
-    byte-identical (a thread-count asymmetry breaks dense-BLAS reductions).
-
-    Args:
-        origin_preds: This origin's point forecasts across the hierarchy.
-        hierarchy_index: The run-constant hierarchy index (one ``ray.put`` ref
-            reused by every task).
-        context: Per-origin sidecar carrying the in-sample fitted values.
-        options: The frozen interval options the driver phase was built with.
-        cpu_per_task: Per-worker CPU budget mapped to the BLAS thread budget.
-    """
-    phase = NixtlaHierarchicalIntervalPhase(options)
-    with threadpool_limits(limits=thread_budget(cpu_per_task)):
-        return phase.apply(origin_preds, hierarchy_index, context)
+from calibre.reconciliation.summing import SparseSummingMatrix
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,8 +36,8 @@ class CoherentOriginInputs:
     rows; ``draw_count`` reconstructs the :class:`CoherentDraws` spread in-worker.
     The held-out half-width map, kappa map, base seed, and fitted-value residual
     sidecar all ride inside ``context`` (a frozen
-    :class:`~calibre.conformal.protocols.SpreadContext`). Disjoint from
-    :class:`~calibre.reconciliation.hierarchical_intervals.HierarchicalIntervalContext`.
+    :class:`~calibre.conformal.protocols.SpreadContext`). Disjoint from the
+    predict-seam :class:`~calibre.execution.prediction_context.FittedValueContext`.
     The run-constant summing matrix ``S`` is NOT carried here — it is ``ray.put``
     once and passed to the worker out-of-band so it is not re-serialized per origin.
 

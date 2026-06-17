@@ -18,7 +18,7 @@ from calibre.execution.hierarchy_memory import (
     estimate_hierarchical_expansion,
 )
 from calibre.execution.task_builder import build_node_history, build_tasks
-from calibre.reconciliation import HierarchicalIntervalPhase, Reconciler, resolve_reconciler
+from calibre.reconciliation import Reconciler, resolve_reconciler
 from calibre.reconciliation.nixtla_adapter import NIXTLA_SPARSE_STRATEGIES
 from calibre.reconciliation.summing import HierarchyIndex, build_hierarchy_index
 
@@ -57,13 +57,6 @@ class _ReconciliationConfig(Protocol):
     def to_reconciler(self) -> Reconciler: ...
 
 
-class _HierarchicalIntervalConfig(Protocol):
-    @property
-    def strategy(self) -> str: ...
-
-    def to_phase(self) -> HierarchicalIntervalPhase: ...
-
-
 class RunPreparationConfig(Protocol):
     """Structural view of the run config :func:`prepare_run` reads."""
 
@@ -79,9 +72,6 @@ class RunPreparationConfig(Protocol):
     @property
     def reconciliation(self) -> _ReconciliationConfig | None: ...
 
-    @property
-    def hierarchical_intervals(self) -> _HierarchicalIntervalConfig | None: ...
-
 
 @dataclass(frozen=True)
 class RunPreparation:
@@ -96,7 +86,6 @@ class RunPreparation:
     conformal_config: SymmetricIntervalConfig | None
     hierarchy_index: HierarchyIndex | None
     reconciler: Reconciler | None
-    hierarchical_interval_phase: HierarchicalIntervalPhase | None
     conformal_partition_estimate: int | None
 
 
@@ -149,9 +138,9 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
                 model_count=len(config.tasks),
             )
             # This branch is the matrix-requiring path (the Nixtla point
-            # reconcilers and the fused interval phase build S per origin);
-            # native bottom_up takes the bottom_only branch and never reaches
-            # here. The S term is strategy-conditional: the sparse-capable
+            # reconcilers build S per origin); native bottom_up takes the
+            # bottom_only branch and never reaches here. The S term is
+            # strategy-conditional: the sparse-capable
             # roster builds a csr (nnz*8 data + nnz*4 indices + (rows+1)*4
             # indptr, nnz analytic from index facts), while erm/mint_shrink
             # have no upstream sparse implementation and keep the dense
@@ -181,16 +170,9 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         conformal_config=conformal_config,
         hierarchy_index=hierarchy_index,
         reconciler=(
-            None
-            if config.hierarchical_intervals is not None
-            else config.reconciliation.to_reconciler()
+            config.reconciliation.to_reconciler()
             if config.reconciliation is not None
             else resolve_reconciler("none")
-        ),
-        hierarchical_interval_phase=(
-            config.hierarchical_intervals.to_phase()
-            if config.hierarchical_intervals is not None
-            else None
         ),
         conformal_partition_estimate=conformal_partition_estimate,
     )
@@ -228,9 +210,7 @@ def _summing_matrix_bytes(config: RunPreparationConfig, hierarchy_index: Hierarc
     """
     n_bottom = len(hierarchy_index.bottom_ids)
     n_nodes = len(hierarchy_index.node_labels)
-    if config.hierarchical_intervals is not None:
-        strategy = config.hierarchical_intervals.strategy
-    elif config.reconciliation is not None and config.reconciliation.strategy != "none":
+    if config.reconciliation is not None and config.reconciliation.strategy != "none":
         strategy = config.reconciliation.strategy
     elif _coherent_spread_active(config):
         # The coherent-draws spread builds the sparse csr S at runtime
@@ -250,11 +230,7 @@ def _summing_matrix_bytes(config: RunPreparationConfig, hierarchy_index: Hierarc
 
 
 def _is_point_bottom_up(config: RunPreparationConfig) -> bool:
-    return (
-        config.hierarchical_intervals is None
-        and config.reconciliation is not None
-        and config.reconciliation.strategy == "bottom_up"
-    )
+    return config.reconciliation is not None and config.reconciliation.strategy == "bottom_up"
 
 
 def _coherent_spread_active(config: RunPreparationConfig) -> bool:
@@ -263,10 +239,6 @@ def _coherent_spread_active(config: RunPreparationConfig) -> bool:
 
 
 def _hierarchy_for_run(config: RunPreparationConfig, bundle: DatasetBundle) -> pd.DataFrame | None:
-    if config.hierarchical_intervals is not None:
-        if bundle.hierarchy is None:
-            raise ValueError("hierarchical_intervals requires a dataset hierarchy")
-        return bundle.hierarchy
     if _coherent_spread_active(config):
         # The coherent-draws spread needs S even though point reconciliation is
         # none; supply the hierarchy so the runtime builder can fold S in.

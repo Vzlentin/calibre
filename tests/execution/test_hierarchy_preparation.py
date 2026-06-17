@@ -190,7 +190,7 @@ def test_eager_preparation_never_precomputes_actuals(
     )
 
     def fail_precompute(*args, **kwargs):
-        raise AssertionError("eager (fused/point-recon) preparation must not precompute actuals")
+        raise AssertionError("eager (point-recon) preparation must not precompute actuals")
 
     def fail_construct(*args, **kwargs):
         raise AssertionError("eager preparation must not construct HierarchyActualsSource")
@@ -200,12 +200,10 @@ def test_eager_preparation_never_precomputes_actuals(
         "calibre.execution.hierarchy_preparation.HierarchyActualsSource", fail_construct
     )
 
-    for override in (
-        {"reconciliation": {"strategy": "ols"}},
-        {"hierarchical_intervals": {"method": "nixtla_conformal"}},
-    ):
-        preparation = prepare_run(_config(**override), _bundle(hierarchy=_hierarchy()))
-        assert isinstance(preparation.actuals, pd.DataFrame)
+    preparation = prepare_run(
+        _config(reconciliation={"strategy": "ols"}), _bundle(hierarchy=_hierarchy())
+    )
+    assert isinstance(preparation.actuals, pd.DataFrame)
 
 
 def test_prepare_run_threads_one_shared_hierarchy_index(
@@ -249,7 +247,6 @@ def test_empty_origins_raise_clear_error() -> None:
     "config_override",
     [
         {"reconciliation": {"strategy": "ols"}},
-        {"hierarchical_intervals": {"method": "nixtla_conformal"}},
     ],
 )
 def test_hierarchy_guard_runs_before_node_history(
@@ -310,7 +307,6 @@ def _csr_bytes_for_hierarchy() -> int:
     "config_override",
     [
         {"reconciliation": {"strategy": "wls_struct"}},
-        {"hierarchical_intervals": {"method": "nixtla_conformal", "strategy": "bottom_up"}},
     ],
 )
 def test_sparse_roster_preflight_charges_csr_estimate(
@@ -318,7 +314,8 @@ def test_sparse_roster_preflight_charges_csr_estimate(
 ) -> None:
     """Sparse-capable strategies charge the analytic CSR bytes, not the dense product.
 
-    This covers point ``wls_struct`` and fused ``bottom_up``.
+    This covers point ``wls_struct`` (the live eager matrix-requiring path; point
+    ``bottom_up`` takes the bottom-only branch and never calls ``_summing_matrix_bytes``).
     """
     captured = {}
 
@@ -377,25 +374,6 @@ def test_bottom_up_preflight_never_accounts_summing_matrix_bytes(
 
     # No AssertionError raised: the guard (and its dense-S term) is never reached.
     prepare_run(_config(reconciliation={"strategy": "bottom_up"}), _bundle(hierarchy=_hierarchy()))
-
-
-def test_hierarchical_interval_preparation_uses_fused_phase_without_point_reconciler(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "calibre.execution.hierarchy_preparation.enforce_hierarchical_expansion_memory_limit",
-        lambda *args, **kwargs: None,
-    )
-
-    preparation = prepare_run(
-        _config(hierarchical_intervals={"method": "nixtla_conformal"}),
-        _bundle(hierarchy=_hierarchy()),
-    )
-
-    assert preparation.hierarchy_index is not None
-    assert preparation.reconciler is None
-    assert preparation.hierarchical_interval_phase is not None
-    assert preparation.conformal_config is None
 
 
 def test_series_partition_limit_uses_prepared_task_estimate() -> None:
