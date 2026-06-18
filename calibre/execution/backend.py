@@ -84,6 +84,7 @@ from calibre.execution.ray_runtime import RayRuntimeHandle, acquire_ray_runtime
 from calibre.execution.threading import cap_threaded_config, thread_budget
 from calibre.forecasting.adapter_base import PredictionResult
 from calibre.ordering.policy_config import OrderPolicy, apply_order_policy
+from calibre.reconciliation.noop import NoOpReconciler
 from calibre.reconciliation.protocols import Reconciler, ReconciliationContext
 from calibre.reconciliation.summing import HierarchyIndex
 from calibre.storage.state import RUNTIME_PARTITION, ConformalStateStore
@@ -223,17 +224,19 @@ class BackendEngine:
             if conformal.config is not None
             else None
         )
-        # The coherent-draws spread owns reconciliation-of-uncertainty, so the point
-        # Reconcile phase must stay a no-op while the hierarchy still supplies S. The
-        # serial path reconciles centers BEFORE Calibrate, but the parallel coherent
-        # drain feeds raw centers into the draw slab — so a configured point reconciler
-        # would diverge serial-vs-parallel. Reject the combo at the engine boundary
-        # (the CLI validator already does the same), keeping the supported coherent
-        # config at reconciler=None.
+        # The coherent-draws spread owns reconciliation-of-uncertainty, so a point
+        # Reconcile phase that rewrites centers must not run: the serial path
+        # reconciles centers BEFORE Calibrate, but the parallel coherent drain feeds
+        # raw centers into the draw slab, so a configured point reconciler would
+        # diverge serial-vs-parallel. Reject the combo at the engine boundary (the CLI
+        # validator does the same via ``strategy != "none"``). The ``none`` strategy
+        # resolves to a NoOpReconciler — a non-None pass-through that leaves centers
+        # untouched — which IS the supported coherent config and must be allowed.
         if (
             isinstance(self.conformal_runtime, SymmetricIntervalRuntime)
             and self.conformal_runtime.requires_fitted_values
             and reconciliation.reconciler is not None
+            and not isinstance(reconciliation.reconciler, NoOpReconciler)
         ):
             raise ValueError(
                 "coherent-draws conformal cannot be combined with point reconciliation "

@@ -1,0 +1,37 @@
+config_schema: "1.0"
+dataset:
+  adapter: m5
+  path: data/m5
+  phase: evaluation
+tasks:
+  - model: SeasonalNaive
+    horizon: 28
+    config:
+      backend: statsforecast
+      season_length: 7
+      scope: global
+reconciliation:
+  strategy: none
+conformal:
+  # Adaptive conformal inference head-to-head vs the mscp anchor: the controller
+  # adjusts alpha online (gamma step) to hold coverage on non-exchangeable M5.
+  method: aci
+  mode: perhorizon
+  gamma: 0.05
+  spread: coherent_draws
+  draw_count: 200
+  draw_seed: 0
+  coverage: 0.9
+  calibration_window: 10
+  partition: series
+  max_partitions: 1000000
+origins:
+  start: 2016-03-20
+  end: 2016-05-22
+  freq: D
+output:
+  ledger_path: results/m5/full-coherent-aci-perhorizon/forecast-ledger.parquet
+  streaming: true
+execution:
+  backend: auto
+  seed: 42

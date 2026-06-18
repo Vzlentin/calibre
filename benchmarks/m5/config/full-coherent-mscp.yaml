@@ -1,0 +1,40 @@
+config_schema: "1.0"
+dataset:
+  adapter: m5
+  path: data/m5
+  phase: evaluation
+tasks:
+  - model: SeasonalNaive
+    horizon: 28
+    config:
+      backend: statsforecast
+      season_length: 7
+      # Global scope: one vectorized statsforecast panel call per origin
+      # (local scope drowns in per-series dispatch at M5 scale; forecasts identical).
+      scope: global
+reconciliation:
+  # Coherent draws own reconciliation-of-uncertainty: the summing matrix S is
+  # sourced from the dataset hierarchy and applied to the draws, so the point
+  # Reconcile phase stays a no-op.
+  strategy: none
+conformal:
+  method: mscp
+  mode: perhorizon
+  spread: coherent_draws
+  draw_count: 200
+  draw_seed: 0
+  coverage: 0.9
+  calibration_window: 10
+  partition: series
+  max_partitions: 1000000
+origins:
+  # 64 daily origins = 37 origins for finite h=28 MSCP + 27-day settlement.
+  start: 2016-03-20
+  end: 2016-05-22
+  freq: D
+output:
+  ledger_path: results/m5/full-coherent-mscp-perhorizon/forecast-ledger.parquet
+  streaming: true
+execution:
+  backend: auto
+  seed: 42
