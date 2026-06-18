@@ -20,6 +20,7 @@ from calibre.execution.decision_loop import (
     DecisionLoop,
     DecisionLoopConfig,
     RoundResult,
+    actuals_lookup_from_cache,
     build_actuals_lookup,
     observe_cumulative,
     observe_pending,
@@ -580,8 +581,8 @@ class TestBuildActualsLookup:
         assert len(lookup) == 1
         assert lookup.loc[("A", ds)] == 9.0
 
-    def test_equivalent_to_dict_cache_build(self) -> None:
-        """Factory-via-frame matches the old pd.Series(cache) + from_tuples build."""
+    def test_from_cache_equivalent_to_old_dict_build(self) -> None:
+        """``actuals_lookup_from_cache`` matches the old pd.Series(cache) + from_tuples build."""
         cache: dict[tuple[str, pd.Timestamp], float] = {
             ("A", _ORIGIN + pd.Timedelta(weeks=1)): 12.0,
             ("B", _ORIGIN + pd.Timedelta(weeks=1)): 4.0,
@@ -591,17 +592,18 @@ class TestBuildActualsLookup:
         old = pd.Series(cache, dtype=float)
         old.index = pd.MultiIndex.from_tuples(old.index)
 
-        cache_frame = pd.DataFrame(
-            {
-                UNIQUE_ID: [uid for uid, _ in cache],
-                DS: [d for _, d in cache],
-                Y: list(cache.values()),
-            }
-        )
-        new = build_actuals_lookup(cache_frame)
+        # Route through the adapter the drivers actually use, not a hand-built
+        # frame — so the test fails if the adapter's dict->frame unpack drifts.
+        new = actuals_lookup_from_cache(cache)
 
         # The factory carries column names onto the MultiIndex; the old
         # ``from_tuples`` build left them None. Names are not part of the
         # ``_fill_actuals.reindex`` contract — it aligns on key tuples — so the
         # fill result is byte-identical.
         pd.testing.assert_series_equal(new, old, check_index_type=True, check_names=False)
+
+    def test_from_cache_empty_dict(self) -> None:
+        """An empty cache yields an empty float Series."""
+        lookup = actuals_lookup_from_cache({})
+        assert lookup.empty
+        assert lookup.dtype == float
