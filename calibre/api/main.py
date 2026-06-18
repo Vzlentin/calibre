@@ -49,7 +49,7 @@ from calibre.core.io import join_uri, read_parquet
 from calibre.core.run_status import RunStatus
 from calibre.core.serialization import frame_from_records, json_safe_records
 from calibre.execution.dataset import SalesAdapter, SnapshotSalesAdapter
-from calibre.execution.decision_loop import observe_pending
+from calibre.execution.decision_loop import build_actuals_lookup, observe_pending
 from calibre.execution.fit_validation import validate_fit_config
 from calibre.execution.prediction import (
     _coerce_forecast_frame_dtypes,
@@ -178,23 +178,6 @@ def _load_sales(
     return history
 
 
-def _actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
-    """Build a ``(unique_id, ds) -> y`` Series for the decision-loop observe fns.
-
-    Mirrors the lookup ``DecisionLoop.run`` constructs so the API observes
-    through the same code path: ``(str, Timestamp)`` keys, dropping rows with no
-    actual ``y`` to record. Vectorized (no per-row iteration) so the /observe
-    route can afford it synchronously; duplicate keys keep the last row, like
-    the dict build it replaces.
-    """
-    usable = actuals[actuals[Y].notna()]
-    if usable.empty:
-        return pd.Series(dtype=float)
-    keys = pd.MultiIndex.from_arrays([usable[UNIQUE_ID].astype(str), pd.to_datetime(usable[DS])])
-    lookup = pd.Series(usable[Y].astype(float).to_numpy(), index=keys, dtype=float)
-    return lookup[~keys.duplicated(keep="last")]
-
-
 def _usable_actuals_lookup(actual_records: list[dict]) -> pd.Series | None:
     """Parse posted actuals into the observe lookup.
 
@@ -215,7 +198,7 @@ def _usable_actuals_lookup(actual_records: list[dict]) -> pd.Series | None:
         or Y not in actuals.columns
     ):
         return None
-    return _actuals_lookup(actuals)
+    return build_actuals_lookup(actuals)
 
 
 def _merge_future_x_override(
