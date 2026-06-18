@@ -600,9 +600,8 @@ class TestBuildActualsLookup:
         )
         new = build_actuals_lookup(cache_frame)
 
-        # Values and index dtypes are identical; only the level names differ
-        # (the factory carries the column names onto the MultiIndex, the old
-        # ``from_tuples`` build left them None). Names are not part of the
-        # contract ``_fill_actuals.reindex`` consumes — it aligns on key tuples
-        # via ``from_arrays([...values])`` — so the fill result is byte-identical.
+        # The factory carries column names onto the MultiIndex; the old
+        # ``from_tuples`` build left them None. Names are not part of the
+        # ``_fill_actuals.reindex`` contract — it aligns on key tuples — so the
+        # fill result is byte-identical.
         pd.testing.assert_series_equal(new, old, check_index_type=True, check_names=False)

@@ -73,6 +73,24 @@ def build_actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
     return lookup[~keys.duplicated(keep="last")]
 
 
+def actuals_lookup_from_cache(cache: dict[tuple[str, pd.Timestamp], float]) -> pd.Series:
+    """Build the observe lookup from a driver's rolling ``(uid, ds) -> demand`` cache.
+
+    Thin adapter so the decision-loop drivers that accumulate actuals in a dict
+    (``DecisionLoop.run``, the VN2 replay harness) reach the lookup through the
+    same :func:`build_actuals_lookup` path — one construction, one dtype, no
+    drift. An empty cache yields an empty float Series.
+    """
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: [uid for uid, _ in cache],
+            DS: [ds for _, ds in cache],
+            Y: list(cache.values()),
+        }
+    )
+    return build_actuals_lookup(frame)
+
+
 def _fill_actuals(frame: pd.DataFrame, lookup: pd.Series) -> pd.DataFrame:
     """Fill NaN y values from a ``(uid, ds) → float`` lookup Series."""
     if frame.empty or not frame[Y].isna().any():
@@ -291,14 +309,7 @@ class DecisionLoop:
                 actuals_ds = origin + freq_offset
                 for uid, demand in actual_demand.items():
                     actuals_cache[(uid, actuals_ds)] = demand
-                cache_frame = pd.DataFrame(
-                    {
-                        UNIQUE_ID: [uid for uid, _ in actuals_cache],
-                        DS: [ds for _, ds in actuals_cache],
-                        Y: list(actuals_cache.values()),
-                    }
-                )
-                lookup = build_actuals_lookup(cache_frame)
+                lookup = actuals_lookup_from_cache(actuals_cache)
                 if self._pending_observation_repo is not None:
                     pending_frames = self._pending_observation_repo.to_frames(
                         self._session_id or "",
