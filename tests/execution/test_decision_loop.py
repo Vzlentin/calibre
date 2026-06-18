@@ -20,6 +20,8 @@ from calibre.execution.decision_loop import (
     DecisionLoop,
     DecisionLoopConfig,
     RoundResult,
+    actuals_lookup_from_cache,
+    build_actuals_lookup,
     observe_cumulative,
     observe_pending,
     observe_per_horizon,
@@ -526,3 +528,82 @@ class TestObserveRaisesLoudly:
             ValueError, match="Duplicate H values in cumulative conformal order window"
         ):
             observe_pending(runtime, [frame], lookup)
+
+
+class TestBuildActualsLookup:
+    def test_happy_path_typed_multiindex(self) -> None:
+        """A 2-row frame yields a (object, datetime64[ns]) MultiIndex Series."""
+        frame = pd.DataFrame(
+            {
+                UNIQUE_ID: ["A", "B"],
+                DS: [_ORIGIN + pd.Timedelta(weeks=1), _ORIGIN + pd.Timedelta(weeks=2)],
+                Y: [12.0, 7.0],
+            }
+        )
+        lookup = build_actuals_lookup(frame)
+
+        assert isinstance(lookup.index, pd.MultiIndex)
+        assert lookup.index.levels[0].dtype == object
+        assert lookup.index.levels[1].dtype == "datetime64[ns]"
+        assert lookup.dtype == float
+        assert lookup.loc[("A", _ORIGIN + pd.Timedelta(weeks=1))] == 12.0
+        assert lookup.loc[("B", _ORIGIN + pd.Timedelta(weeks=2))] == 7.0
+
+    def test_drops_nan_y_rows(self) -> None:
+        """Rows with no actual y are dropped; an all-NaN-y frame is empty."""
+        frame = pd.DataFrame(
+            {
+                UNIQUE_ID: ["A", "B"],
+                DS: [_ORIGIN + pd.Timedelta(weeks=1), _ORIGIN + pd.Timedelta(weeks=2)],
+                Y: [12.0, None],
+            }
+        )
+        lookup = build_actuals_lookup(frame)
+        assert len(lookup) == 1
+        assert lookup.loc[("A", _ORIGIN + pd.Timedelta(weeks=1))] == 12.0
+
+        all_nan = pd.DataFrame({UNIQUE_ID: ["A"], DS: [_ORIGIN], Y: [None]})
+        empty = build_actuals_lookup(all_nan)
+        assert empty.empty
+        assert empty.dtype == float
+
+    def test_dedup_keeps_last(self) -> None:
+        """A duplicate (uid, ds) key keeps the last row's value."""
+        ds = _ORIGIN + pd.Timedelta(weeks=1)
+        frame = pd.DataFrame(
+            {
+                UNIQUE_ID: ["A", "A"],
+                DS: [ds, ds],
+                Y: [3.0, 9.0],
+            }
+        )
+        lookup = build_actuals_lookup(frame)
+        assert len(lookup) == 1
+        assert lookup.loc[("A", ds)] == 9.0
+
+    def test_from_cache_equivalent_to_old_dict_build(self) -> None:
+        """``actuals_lookup_from_cache`` matches the old pd.Series(cache) + from_tuples build."""
+        cache: dict[tuple[str, pd.Timestamp], float] = {
+            ("A", _ORIGIN + pd.Timedelta(weeks=1)): 12.0,
+            ("B", _ORIGIN + pd.Timedelta(weeks=1)): 4.0,
+            ("A", _ORIGIN + pd.Timedelta(weeks=2)): 8.0,
+        }
+
+        old = pd.Series(cache, dtype=float)
+        old.index = pd.MultiIndex.from_tuples(old.index)
+
+        # Route through the adapter the drivers actually use, not a hand-built
+        # frame — so the test fails if the adapter's dict->frame unpack drifts.
+        new = actuals_lookup_from_cache(cache)
+
+        # The factory carries column names onto the MultiIndex; the old
+        # ``from_tuples`` build left them None. Names are not part of the
+        # ``_fill_actuals.reindex`` contract — it aligns on key tuples — so the
+        # fill result is byte-identical.
+        pd.testing.assert_series_equal(new, old, check_index_type=True, check_names=False)
+
+    def test_from_cache_empty_dict(self) -> None:
+        """An empty cache yields an empty float Series."""
+        lookup = actuals_lookup_from_cache({})
+        assert lookup.empty
+        assert lookup.dtype == float

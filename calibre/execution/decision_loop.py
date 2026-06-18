@@ -48,6 +48,49 @@ class DecisionLoopConfig:
     on_round: Callable[[RoundResult], None] | None = field(default=None, compare=False)
 
 
+def build_actuals_lookup(actuals: pd.DataFrame) -> pd.Series:
+    """Build the ``(unique_id, ds) -> y`` observe lookup from an actuals frame.
+
+    The canonical constructor for the Series that :func:`_fill_actuals` and the
+    ``observe_*`` functions consume: ``(str, Timestamp)`` keys, dropping rows
+    with no actual ``y`` to record. Vectorized (no per-row iteration); duplicate
+    keys keep the last row. An empty (or all-NaN-y) frame yields an empty float
+    Series.
+
+    Args:
+        actuals: Frame carrying ``UNIQUE_ID``/``DS``/``Y`` columns; may hold
+            NaN-y or duplicate keys.
+
+    Returns:
+        A ``(object, datetime64[ns]) -> float`` Series for order-independent
+        ``reindex`` lookup.
+    """
+    usable = actuals[actuals[Y].notna()]
+    if usable.empty:
+        return pd.Series(dtype=float)
+    keys = pd.MultiIndex.from_arrays([usable[UNIQUE_ID].astype(str), pd.to_datetime(usable[DS])])
+    lookup = pd.Series(usable[Y].astype(float).to_numpy(), index=keys, dtype=float)
+    return lookup[~keys.duplicated(keep="last")]
+
+
+def actuals_lookup_from_cache(cache: dict[tuple[str, pd.Timestamp], float]) -> pd.Series:
+    """Build the observe lookup from a driver's rolling ``(uid, ds) -> demand`` cache.
+
+    Thin adapter so the decision-loop drivers that accumulate actuals in a dict
+    (``DecisionLoop.run``, the VN2 replay harness) reach the lookup through the
+    same :func:`build_actuals_lookup` path — one construction, one dtype, no
+    drift. An empty cache yields an empty float Series.
+    """
+    frame = pd.DataFrame(
+        {
+            UNIQUE_ID: [uid for uid, _ in cache],
+            DS: [ds for _, ds in cache],
+            Y: list(cache.values()),
+        }
+    )
+    return build_actuals_lookup(frame)
+
+
 def _fill_actuals(frame: pd.DataFrame, lookup: pd.Series) -> pd.DataFrame:
     """Fill NaN y values from a ``(uid, ds) → float`` lookup Series."""
     if frame.empty or not frame[Y].isna().any():
@@ -266,9 +309,7 @@ class DecisionLoop:
                 actuals_ds = origin + freq_offset
                 for uid, demand in actual_demand.items():
                     actuals_cache[(uid, actuals_ds)] = demand
-                lookup = pd.Series(actuals_cache, dtype=float)
-                if not lookup.empty:
-                    lookup.index = pd.MultiIndex.from_tuples(lookup.index)
+                lookup = actuals_lookup_from_cache(actuals_cache)
                 if self._pending_observation_repo is not None:
                     pending_frames = self._pending_observation_repo.to_frames(
                         self._session_id or "",
