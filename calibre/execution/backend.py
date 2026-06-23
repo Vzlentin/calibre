@@ -194,8 +194,11 @@ def _cumulative_protection_period(runtime: ConformalRuntime) -> int | None:
     gets the same defer→complete→score lifecycle the symmetric one does. Returns
     ``None`` for perhorizon runtimes and anything lacking the configured period.
     """
-    if getattr(runtime, "mode", None) != "cumulative":
+    if runtime.mode != "cumulative":
         return None
+    # ``config``/``protection_period`` are off-protocol (each concrete runtime
+    # carries its own config type), so read them structurally; ``mode`` is a
+    # declared ConformalRuntime protocol member and is read directly.
     config = getattr(runtime, "config", None)
     protection_period = getattr(config, "protection_period", None)
     if protection_period is None:

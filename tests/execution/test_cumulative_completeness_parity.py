@@ -247,14 +247,18 @@ def test_engine_gate_is_not_stricter_than_runtime_readiness(equal_horizon_window
 
     A stricter engine gate would hold back a window the runtime is ready to score,
     starving a cold calibrator forever. Equality is asserted above; this pins the
-    one-directional safety invariant explicitly so a future drift that makes the
-    engine stricter fails here with an unambiguous message.
+    one-directional safety invariant explicitly — for BOTH the symmetric and the
+    one-sided runtime (the latter is the one this slice exists to drive through the
+    engine deferral) — so a future drift that makes the engine stricter fails here
+    with an unambiguous message.
     """
     frame, _ = equal_horizon_windows
     engine_keys = _engine_complete_keys(frame)
     symmetric_keys = _runtime_complete_keys(frame, _symmetric_runtime())
-    # Every window the runtime is ready to score, the engine also lets through.
+    one_sided_keys = _runtime_complete_keys(frame, _one_sided_runtime())
+    # Every window either runtime is ready to score, the engine also lets through.
     assert symmetric_keys <= engine_keys
+    assert one_sided_keys <= engine_keys
 
 
 def test_engine_and_runtime_agree_on_over_horizon_boundary() -> None:

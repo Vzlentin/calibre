@@ -1,9 +1,9 @@
 """Engine-internal deferral coverage for the one-sided ``order_conformal`` runtime.
 
 VN2's external-conformal gate does not exercise the engine-internal
-defer→complete→score path for the one-sided :class:`CumulativeRiskRuntime`
-(lessons.md 2026-06-05), so this is the load-bearing engine-internal gate that
-U1's capability gate actually drives that runtime end-to-end:
+defer→complete→score path for the one-sided :class:`CumulativeRiskRuntime`, so
+this is the load-bearing engine-internal gate that the capability gate actually
+drives that runtime end-to-end:
 
 * a cumulative window spanning more than one origin is DEFERRED while incomplete
   (its rows stay pending, ``y`` reverted to NaN in the open set), then COMPLETED
@@ -76,9 +76,9 @@ def _runtime(protection_period: int = _PROTECTION_PERIOD) -> CumulativeRiskRunti
 def test_one_sided_runtime_defers_then_scores_split_window() -> None:
     """A window spanning 3 origins defers while incomplete, scores at the terminal.
 
-    Post-U1 the capability gate drives the one-sided runtime through the engine
-    deferral, so the split window is held open (rows pending, ``y`` NaN) until its
-    terminal horizon lands, then scored once.
+    The capability gate drives the one-sided runtime through the engine deferral,
+    so the split window is held open (rows pending, ``y`` NaN) until its terminal
+    horizon lands, then scored once.
     """
     task, actuals, origins, _dates = _split_window_setup()
     runtime = _runtime()
@@ -131,7 +131,7 @@ def test_one_sided_runtime_scores_each_window_exactly_once() -> None:
 def test_one_sided_runtime_protection_period_exceeding_horizon_raises() -> None:
     """``protection_period > min(horizon)`` fails loudly at start (no silent hang).
 
-    Without U1's preflight on the one-sided path, every in-window row would defer
+    Without the preflight on the one-sided path, every in-window row would defer
     forever (total silent data loss). The capability gate now raises before any
     ledger is allocated.
     """
