@@ -93,9 +93,13 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
   produces **~5011.20** — cross-arch LightGBM float divergence (SIMD/FMA/libm) plus
   Accelerate-vs-OpenBLAS, **not** a regression and **not** threading (single- and
   multi-thread agree bit-for-bit). Don't chase the macOS delta or loosen 4992.20.
-- Reconciliation strategy is an M5-coverage lever, not coverage-neutral: `wls_struct`
-  lands population coverage on-target (~90.97%) where `bottom_up` over-covers (~94.92%).
-  Weigh the reconciler choice, not just conformal knobs, on a coverage miss.
+- Reconciliation strategy is an M5-coverage lever, not coverage-neutral — but the
+  ranking is PATH-DEPENDENT. On the point+conformal path `wls_struct` lands population
+  coverage on-target (~90.97%) where `bottom_up` over-covers (~94.92%), so weigh the
+  reconciler choice, not just conformal knobs, on a coverage miss. That ordering held
+  only on that path: on the now-retired Nixtla fused path both reconcilers under-covered
+  and no reconciler repaired the unsound calibration — don't carry the wls_struct-vs-
+  bottom_up ranking over to a different calibration path.
 
 ## Worktrees
 

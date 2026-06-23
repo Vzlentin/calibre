@@ -8,7 +8,6 @@ from calibre.core.order_types import (
 )
 from calibre.ordering.decision_frame import decision_columns, validate_interval_columns
 from calibre.ordering.decision_rules import (
-    CumulativeBoundRule,
     QuantileInterpolationRule,
     RSArithmetic,
     RSSArithmetic,
@@ -50,7 +49,6 @@ __all__ = [
     "apply_rss_policy",
     "QuantileInterpolationRule",
     "UpperBoundRule",
-    "CumulativeBoundRule",
     "RSArithmetic",
     "RSSArithmetic",
     "Simulator",
