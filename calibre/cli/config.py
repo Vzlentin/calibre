@@ -10,6 +10,7 @@ import pandas as pd
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
 from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.reconciliation import Reconciler, resolve_reconciler
@@ -93,6 +94,60 @@ class ConformalConfig(_Section):
             spread=self.spread,
             draw_count=self.draw_count,
             draw_seed=self.draw_seed,
+        )
+
+
+class OrderConformalConfig(_Section):
+    """One-sided CRC decision-runtime knobs for the ordering bound.
+
+    Selects :class:`~calibre.conformal.cumulative_risk.CumulativeRiskRuntime`,
+    the cost-shaped cumulative residual correction whose terminal-horizon
+    ``hi_<coverage>`` bound is the order-up-to target the R,S policy consumes.
+    This is the **decision** runtime; the sibling :class:`ConformalConfig` is the
+    two-sided coverage-honesty **diagnostic** — the two cannot both be set yet
+    (co-residence lands in a later slice).
+
+    ``coverage`` here is the CRC residual-quantile risk-control level (it names
+    the ``hi_<coverage>`` column); it is **not** the newsvendor cost fractile and
+    **not** the forecast's base quantile. With the default ``buffer_max=0.0`` the
+    CRC step is cost-blind — it can only trim the base sum, never inflate it.
+
+    ``base_column`` names the forecast column the CRC corrects *from* (the base
+    order-quantile sum); when ``None`` :func:`prepare_run` resolves it to the
+    run's base order-quantile column.
+    """
+
+    coverage: float = 0.5
+    protection_period: int | None = None
+    calibration_window: int = 5000
+    partition: Literal["global", "series"] = "global"
+    base_column: str | None = None
+    buffer_max: float = 0.0
+    # Internal defaults — fixed to the capped-CRC winner shape and not exposed.
+    # ``weight_decay=None`` is dead on the cost path (the buffer is clamped by
+    # ``buffer_max`` to a one-sided trim), so it stays an internal constant.
+    method_name: str = "capped_crc"
+    weight_decay: float | None = None
+
+    def to_runtime_config(self) -> CumulativeConformalRiskConfig:
+        partition_key = {
+            "global": global_partition,
+            "series": series_partition,
+        }[self.partition]
+        # protection_period is required at construction; prepare_run resolves a
+        # missing value (None) before building the runtime, so default to the
+        # dataclass minimum here purely to satisfy the frozen dataclass when the
+        # config is round-tripped in isolation (e.g. unit tests).
+        protection_period = self.protection_period if self.protection_period is not None else 1
+        return CumulativeConformalRiskConfig(
+            coverage=self.coverage,
+            protection_period=protection_period,
+            calibration_window=self.calibration_window,
+            partition_key=partition_key,
+            base_column=self.base_column,
+            buffer_max=self.buffer_max,
+            method_name=self.method_name,
+            weight_decay=self.weight_decay,
         )
 
 
@@ -223,6 +278,7 @@ class BackendConfig(BaseModel):
     origins: OriginsConfig
     output: OutputConfig = Field(default_factory=OutputConfig)
     conformal: ConformalConfig | None = None
+    order_conformal: OrderConformalConfig | None = None
     reconciliation: ReconciliationConfig | None = None
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
@@ -246,6 +302,21 @@ class BackendConfig(BaseModel):
     def _single_horizon(self) -> BackendConfig:
         if len({task.horizon for task in self.tasks}) != 1:
             raise ValueError("all tasks in a single CLI run must use the same horizon")
+        return self
+
+    @model_validator(mode="after")
+    def _conformal_and_order_conformal_mutually_exclusive(self) -> BackendConfig:
+        # Temporary engine-slot limitation: the engine has a single
+        # conformal-runtime slot, so the two-sided diagnostic (`conformal`) and
+        # the one-sided decision runtime (`order_conformal`) cannot co-reside yet.
+        # Co-residence — running the diagnostic alongside the decision — lands in
+        # S2; this is not a permanent design rule.
+        if self.conformal is not None and self.order_conformal is not None:
+            raise ValueError(
+                "conformal and order_conformal cannot both be set yet — "
+                "co-residence (running the two-sided diagnostic alongside the "
+                "one-sided decision) lands in S2"
+            )
         return self
 
     @model_validator(mode="after")

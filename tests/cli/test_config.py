@@ -9,7 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from calibre.cli.config import load_config_from_mapping
-from calibre.conformal.partitions import GLOBAL_PARTITION
+from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
+from calibre.conformal.partitions import GLOBAL_PARTITION, global_partition, series_partition
 from calibre.core.forecast_frame import UNIQUE_ID
 
 _VALID: dict[str, Any] = {
@@ -26,6 +27,15 @@ _VALID: dict[str, Any] = {
 def _config(**overrides: Any) -> dict[str, Any]:
     data = copy.deepcopy(_VALID)
     data.update(overrides)
+    return data
+
+
+def _order_conformal_config(**order_conformal: Any) -> dict[str, Any]:
+    # order_conformal cannot co-reside with conformal yet, so drop the default
+    # diagnostic block from the base fixture for these scenarios.
+    data = copy.deepcopy(_VALID)
+    data.pop("conformal", None)
+    data["order_conformal"] = order_conformal
     return data
 
 
@@ -142,3 +152,74 @@ def test_origins_coerces_string_timestamps_and_validates_order() -> None:
         load_config_from_mapping(
             _config(origins={"start": "2024-02-05", "end": "2024-01-29", "freq": "W-MON"})
         )
+
+
+# --- order_conformal decision-runtime config (U1) --------------------------
+
+
+def test_order_conformal_round_trips_to_runtime_config() -> None:
+    config = load_config_from_mapping(
+        _order_conformal_config(
+            coverage=0.74,
+            calibration_window=5000,
+            buffer_max=0.0,
+            protection_period=3,
+        )
+    )
+
+    assert config.conformal is None
+    assert config.order_conformal is not None
+    runtime_config = config.order_conformal.to_runtime_config()
+
+    assert isinstance(runtime_config, CumulativeConformalRiskConfig)
+    assert runtime_config.coverage == pytest.approx(0.74)
+    assert runtime_config.calibration_window == 5000
+    assert runtime_config.buffer_max == pytest.approx(0.0)
+    assert runtime_config.protection_period == 3
+    assert runtime_config.method_name == "capped_crc"
+    assert runtime_config.weight_decay is None
+    assert runtime_config.partition_key is global_partition
+
+
+def test_order_conformal_partition_series_uses_series_runtime_key() -> None:
+    config = load_config_from_mapping(_order_conformal_config(coverage=0.74, partition="series"))
+
+    assert config.order_conformal is not None
+    runtime_config = config.order_conformal.to_runtime_config()
+
+    assert runtime_config.partition_key is series_partition
+    assert runtime_config.partition_key({UNIQUE_ID: "A"}) == "A"
+
+
+def test_order_conformal_unknown_key_raises_at_parse_time() -> None:
+    with pytest.raises(ValidationError, match="coherage"):
+        load_config_from_mapping(_order_conformal_config(coherage=0.74))
+
+
+def test_order_conformal_invalid_partition_raises_at_parse_time() -> None:
+    with pytest.raises(ValidationError, match="partition"):
+        load_config_from_mapping(_order_conformal_config(coverage=0.74, partition="bogus"))
+
+
+def test_conformal_and_order_conformal_both_set_rejected_with_s2_message() -> None:
+    data = copy.deepcopy(_VALID)
+    data["conformal"] = {"method": "mscp", "coverage": 0.9}
+    data["order_conformal"] = {"coverage": 0.74}
+
+    with pytest.raises(ValidationError, match="co-residence.*lands in S2"):
+        load_config_from_mapping(data)
+
+
+def test_order_conformal_base_column_defaults_to_none() -> None:
+    config = load_config_from_mapping(_order_conformal_config(coverage=0.74))
+
+    assert config.order_conformal is not None
+    assert config.order_conformal.base_column is None
+
+
+def test_order_conformal_base_column_carried_verbatim() -> None:
+    config = load_config_from_mapping(_order_conformal_config(coverage=0.74, base_column="q_0p59"))
+
+    assert config.order_conformal is not None
+    assert config.order_conformal.base_column == "q_0p59"
+    assert config.order_conformal.to_runtime_config().base_column == "q_0p59"

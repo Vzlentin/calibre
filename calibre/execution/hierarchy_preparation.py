@@ -8,8 +8,12 @@ from typing import Any, Protocol
 
 import pandas as pd
 
-from calibre.conformal.runtime import SymmetricIntervalConfig
-from calibre.core.forecast_frame import UNIQUE_ID
+from calibre.conformal.cumulative_risk import (
+    CumulativeConformalRiskConfig,
+    CumulativeRiskRuntime,
+)
+from calibre.conformal.runtime import ConformalRuntime, SymmetricIntervalConfig
+from calibre.core.forecast_frame import UNIQUE_ID, quantile_column
 from calibre.core.forecast_task import TaskGroups
 from calibre.execution.actuals import ActualsSource, HierarchyActualsSource
 from calibre.execution.dataset import DatasetBundle
@@ -50,6 +54,16 @@ class _ConformalConfig(Protocol):
     def to_runtime_config(self) -> SymmetricIntervalConfig: ...
 
 
+class _OrderConformalConfig(Protocol):
+    @property
+    def protection_period(self) -> int | None: ...
+
+    @property
+    def base_column(self) -> str | None: ...
+
+    def to_runtime_config(self) -> CumulativeConformalRiskConfig: ...
+
+
 class _ReconciliationConfig(Protocol):
     @property
     def strategy(self) -> str: ...
@@ -70,6 +84,9 @@ class RunPreparationConfig(Protocol):
     def conformal(self) -> _ConformalConfig | None: ...
 
     @property
+    def order_conformal(self) -> _OrderConformalConfig | None: ...
+
+    @property
     def reconciliation(self) -> _ReconciliationConfig | None: ...
 
 
@@ -77,13 +94,18 @@ class RunPreparationConfig(Protocol):
 class RunPreparation:
     """Resolved engine inputs for one run.
 
-    Carries tasks, actuals, origins, the reconciler, and conformal config.
+    Carries tasks, actuals, origins, the reconciler, and conformal inputs.
+    ``conformal_config`` (two-sided diagnostic) and ``conformal_runtime`` (the
+    pre-built one-sided CRC decision runtime from ``order_conformal``) are
+    mutually exclusive — the config rejects both blocks at parse time — so the
+    engine fills its single conformal-runtime slot from whichever is set.
     """
 
     tasks: TaskGroups
     actuals: pd.DataFrame | ActualsSource
     origins: list[pd.Timestamp]
     conformal_config: SymmetricIntervalConfig | None
+    conformal_runtime: ConformalRuntime | None
     hierarchy_index: HierarchyIndex | None
     reconciler: Reconciler | None
     conformal_partition_estimate: int | None
@@ -163,11 +185,18 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
     conformal_config: SymmetricIntervalConfig | None = (
         config.conformal.to_runtime_config() if config.conformal is not None else None
     )
+    conformal_runtime = _resolve_order_conformal_runtime(config, model_configs, horizon)
+    # Parse-time validation already rejects both blocks; this asserts the
+    # single-slot invariant the engine relies on holds before construction.
+    assert not (conformal_config is not None and conformal_runtime is not None), (
+        "conformal and order_conformal cannot both resolve to a runtime"
+    )
     return RunPreparation(
         tasks=tasks,
         actuals=actuals,
         origins=origins,
         conformal_config=conformal_config,
+        conformal_runtime=conformal_runtime,
         hierarchy_index=hierarchy_index,
         reconciler=(
             config.reconciliation.to_reconciler()
@@ -176,6 +205,56 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         ),
         conformal_partition_estimate=conformal_partition_estimate,
     )
+
+
+def _resolve_order_conformal_runtime(
+    config: RunPreparationConfig,
+    model_configs: Sequence[dict[str, Any]],
+    horizon: int,
+) -> ConformalRuntime | None:
+    """Build the one-sided CRC decision runtime from ``order_conformal``.
+
+    Resolves ``base_column`` (when ``None``, the run's base order-quantile
+    column, derived as the benchmark derives ``target_quantile_col``) and
+    ``protection_period`` (when ``None``, the run horizon) before constructing
+    the runtime so the engine's pre-built-runtime slot picks it up.
+    """
+    order_conformal = config.order_conformal
+    if order_conformal is None:
+        return None
+    runtime_config = order_conformal.to_runtime_config()
+    protection_period = (
+        order_conformal.protection_period
+        if order_conformal.protection_period is not None
+        else horizon
+    )
+    base_column = (
+        order_conformal.base_column
+        if order_conformal.base_column is not None
+        else _base_order_quantile_column(model_configs)
+    )
+    resolved_config = replace(
+        runtime_config,
+        base_column=base_column,
+        protection_period=protection_period,
+    )
+    return CumulativeRiskRuntime(resolved_config)
+
+
+def _base_order_quantile_column(model_configs: Sequence[dict[str, Any]]) -> str | None:
+    """Derive the base order-quantile column the CRC corrects from.
+
+    Mirrors the benchmark's ``target_quantile_col = quantile_column(quantile_alpha)``
+    derivation: the base quantile is the model's first configured quantile. A
+    point model (no ``quantiles``) has no quantile column, so ``None`` is
+    returned and the runtime falls back to ``y_hat``.
+    """
+    if not model_configs:
+        return None
+    quantiles = model_configs[0].get("quantiles")
+    if not quantiles:
+        return None
+    return quantile_column(float(quantiles[0]))
 
 
 def _evaluation_window_ds(
