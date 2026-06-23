@@ -614,3 +614,78 @@ def test_partition_limit_memo_is_clone_safe(monkeypatch: pytest.MonkeyPatch) -> 
     # Both cloned histories resolve to the same content key, so the memo holds a
     # single distinct entry for them (the key scan runs per task, the count once).
     assert len(set(seen_keys)) == 1
+
+
+# --- order_conformal decision-runtime threading (U2) -----------------------
+
+
+def test_order_conformal_threads_cumulative_runtime_into_preparation() -> None:
+    from calibre.conformal.cumulative_risk import CumulativeRiskRuntime
+
+    preparation = prepare_run(
+        _config(order_conformal={"coverage": 0.74, "protection_period": 2}),
+        _bundle(),
+    )
+
+    runtime = preparation.conformal_runtime
+    assert isinstance(runtime, CumulativeRiskRuntime)
+    assert preparation.conformal_config is None
+    assert runtime.config.coverage == pytest.approx(0.74)
+    assert runtime.config.protection_period == 2
+    assert runtime.config.method_name == "capped_crc"
+
+
+def test_order_conformal_protection_period_defaults_to_horizon() -> None:
+    # The default _config task carries horizon=2 with no explicit protection_period.
+    preparation = prepare_run(_config(order_conformal={"coverage": 0.74}), _bundle())
+
+    runtime = preparation.conformal_runtime
+    assert runtime is not None
+    assert runtime.config.protection_period == 2
+
+
+def test_order_conformal_base_column_none_resolves_to_quantile_column() -> None:
+    config = _config(
+        tasks=[
+            {
+                "model": "lightgbm.LGBMRegressor",
+                "horizon": 2,
+                "config": {"backend": "mlforecast", "quantiles": [0.59]},
+            }
+        ],
+        order_conformal={"coverage": 0.74},
+    )
+    preparation = prepare_run(config, _bundle())
+
+    runtime = preparation.conformal_runtime
+    assert runtime is not None
+    assert runtime.config.base_column == "q_0p59"
+
+
+def test_order_conformal_base_column_none_point_model_falls_back_to_y_hat() -> None:
+    # The default SeasonalNaive task has no quantiles, so base_column resolves to
+    # None and the runtime falls back to y_hat.
+    preparation = prepare_run(_config(order_conformal={"coverage": 0.74}), _bundle())
+
+    runtime = preparation.conformal_runtime
+    assert runtime is not None
+    assert runtime.config.base_column is None
+    assert runtime.config.resolved_base_column == Y_HAT
+
+
+def test_order_conformal_base_column_explicit_preserved() -> None:
+    preparation = prepare_run(
+        _config(order_conformal={"coverage": 0.74, "base_column": "q_0p59"}),
+        _bundle(),
+    )
+
+    runtime = preparation.conformal_runtime
+    assert runtime is not None
+    assert runtime.config.base_column == "q_0p59"
+
+
+def test_no_conformal_blocks_leaves_runtime_and_config_none() -> None:
+    preparation = prepare_run(_config(), _bundle())
+
+    assert preparation.conformal_runtime is None
+    assert preparation.conformal_config is None

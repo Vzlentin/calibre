@@ -144,6 +144,7 @@ def run_config(
             streaming=config.output.streaming,
         ),
         conformal=ConformalOptions(
+            runtime=preparation.conformal_runtime,
             config=preparation.conformal_config,
             run_id=run_id,
             state_store=conformal_state_store,
