@@ -9,6 +9,7 @@ import math
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,7 +78,7 @@ class _TailACITracker:
         self,
         alpha: float,
         gamma: float,
-        score,
+        score: Callable[[float, float], float],
         initial_scores,
         alpha_bounds: tuple[float, float] | None,
         quantile_rule: str,
@@ -94,14 +95,14 @@ class _TailACITracker:
 
     @property
     def current_alpha(self) -> float:
-        return float(self._alpha)
+        return self._alpha
 
     def get_radius(self) -> float:
         """Return the (1-alpha) finite-sample 'higher' quantile of the history."""
         return finite_sample_radius(
             self._score_history,
             self._alpha,
-            0.0,
+            default_radius=0.0,
             quantile_rule=self._quantile_rule,
         )
 

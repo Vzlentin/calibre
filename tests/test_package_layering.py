@@ -8,10 +8,8 @@ from pathlib import Path
 
 import pytest
 
-# Experimental conformal/ordering surface removed in the S0 elevation slice. The
-# live decision path (conformal/runtime.py + cumulative_risk.py, ordering
-# UpperBoundRule) imports the live submodules directly and never reaches these,
-# so the guards below lock the boundary against silent re-introduction.
+# Guard against silent re-introduction of the deleted experimental conformal/
+# ordering surface; the live decision path imports its submodules directly.
 _DELETED_CONFORMAL_MODULES = (
     "calibre.conformal.split",
     "calibre.conformal.adaptive",
