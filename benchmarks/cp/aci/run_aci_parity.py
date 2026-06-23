@@ -95,6 +95,7 @@ class _TailACITracker:
 
     @property
     def current_alpha(self) -> float:
+        """Return the current adaptive alpha after the latest update."""
         return self._alpha
 
     def get_radius(self) -> float:

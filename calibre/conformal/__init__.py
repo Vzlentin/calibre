@@ -1,9 +1,10 @@
-"""Experimental low-level conformal controllers.
+"""Conformal calibration building blocks and runtime interface.
 
-These exports are algorithm-level building blocks. They are not yet the stable
-pipeline-facing conformal interface for the repository. Stable runtime-facing
-configuration helpers now live alongside the low-level controllers so the
-engine can adopt them incrementally.
+Exposes the low-level conformal primitives (scores, intervals, partitions,
+spread, coherent draws) together with the runtime-facing entry points
+re-exported from :mod:`calibre.conformal.runtime` (:class:`ConformalRuntime`,
+:func:`build_symmetric_interval_runtime`) and the cumulative-risk decision
+runtime in :mod:`calibre.conformal.cumulative_risk`.
 """
 
 from calibre.conformal.coherent_draws import CoherentDraws
