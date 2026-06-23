@@ -181,6 +181,28 @@ _DEFAULT_CONFORMAL = ConformalOptions()
 _DEFAULT_RECONCILIATION = ReconciliationOptions()
 
 
+def _cumulative_protection_period(runtime: ConformalRuntime) -> int | None:
+    """Return the runtime's cumulative deferral protection period, or ``None``.
+
+    The capability that drives the engine's cumulative-window deferral and its
+    preflight loud-fail: a runtime is in this class when ``mode == "cumulative"``
+    and it carries a configured ``protection_period``. Both
+    :class:`~calibre.conformal.runtime.SymmetricIntervalRuntime` (cumulative mode)
+    and :class:`~calibre.conformal.cumulative_risk.CumulativeRiskRuntime` expose
+    ``mode`` plus ``config.protection_period``, so the capability is read
+    structurally rather than narrowing to a concrete type — the one-sided runtime
+    gets the same defer→complete→score lifecycle the symmetric one does. Returns
+    ``None`` for perhorizon runtimes and anything lacking the configured period.
+    """
+    if getattr(runtime, "mode", None) != "cumulative":
+        return None
+    config = getattr(runtime, "config", None)
+    protection_period = getattr(config, "protection_period", None)
+    if protection_period is None:
+        return None
+    return int(protection_period)
+
+
 class BackendEngine:
     """Orchestrate the per-origin backtest pipeline across local or Ray backends.
 
@@ -317,13 +339,13 @@ class BackendEngine:
         # after restore; mode/protection_period are construction-time facts
         # identical across that swap.
         preflight_runtime = self.conformal_runtime
-        if (
-            isinstance(preflight_runtime, SymmetricIntervalRuntime)
-            and preflight_runtime.mode == "cumulative"
-            and preflight_runtime.config.protection_period is not None
-        ):
+        protection_period = (
+            _cumulative_protection_period(preflight_runtime)
+            if preflight_runtime is not None
+            else None
+        )
+        if protection_period is not None:
             horizons = [task.horizon for task in tasks]
-            protection_period = preflight_runtime.config.protection_period
             if horizons and protection_period > min(horizons):
                 # A window can never accumulate protection_period horizons, so
                 # the deferral would keep every in-window row pending forever —
@@ -959,18 +981,20 @@ class BackendEngine:
         # the open set, so the window can never be presented complete and never
         # scores. Defer incomplete cumulative windows here — their rows stay
         # unresolved (y NaN) in the open set until the terminal horizon resolves,
-        # at which point the whole window is due together. Strictly gated to the
-        # SymmetricIntervalRuntime cumulative path; perhorizon, runtime-None, and
-        # CumulativeRiskRuntime paths are untouched.
-        if (
-            isinstance(conformal_runtime, SymmetricIntervalRuntime)
-            and conformal_runtime.mode == "cumulative"
-            and conformal_runtime.config.protection_period is not None
-        ):
+        # at which point the whole window is due together. Gated on the cumulative
+        # deferral capability (mode + protection_period), so both the symmetric
+        # cumulative runtime AND the one-sided CumulativeRiskRuntime are driven;
+        # perhorizon and runtime-None paths are untouched.
+        protection_period = (
+            _cumulative_protection_period(conformal_runtime)
+            if conformal_runtime is not None
+            else None
+        )
+        if protection_period is not None:
             updated, newly_resolved = self._defer_incomplete_cumulative_windows(
                 updated,
                 newly_resolved,
-                int(conformal_runtime.config.protection_period),
+                protection_period,
             )
 
         if newly_resolved.empty:
