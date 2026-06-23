@@ -44,7 +44,8 @@ FLOAT_ATOL = 1e-12
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from calibre.conformal.adaptive import AdaptiveConformalInference  # noqa: E402
+from calibre.conformal.controllers import AdaptiveAlphaController  # noqa: E402
+from calibre.conformal.numerics import finite_sample_radius  # noqa: E402
 
 
 @dataclass(slots=True)
@@ -279,13 +280,23 @@ def run_local_tail_aci(
     quantile_rule: str,
     alpha_bounds: tuple[float, float] | None,
 ) -> dict[str, np.ndarray]:
-    """Run the local Calibre tail-ACI implementation and return its outputs."""
+    """Run the local Calibre tail-ACI implementation and return its outputs.
+
+    Composes :class:`~calibre.conformal.controllers.AdaptiveAlphaController` for
+    the online alpha update with an explicit rolling score history fed to
+    :func:`~calibre.conformal.numerics.finite_sample_radius` for the threshold.
+    The previous monolithic ``AdaptiveConformalInference`` bundled both; this
+    pairing reproduces it 1:1 — same alpha-update step, same finite-sample
+    quantile rule, same raw-score seeding from ``scores[:t_pred]`` — over the
+    decomposed runtime surface.
+    """
     scores = np.asarray(scores, dtype=float)
     q = np.empty(scores.shape[0], dtype=float)
     alpha_trace = np.full(scores.shape[0], float(alpha), dtype=float)
     covered = np.empty(scores.shape[0], dtype=bool)
     miss = np.empty(scores.shape[0], dtype=int)
-    controller: AdaptiveConformalInference | None = None
+    controller: AdaptiveAlphaController | None = None
+    score_history: list[float] = []
 
     for t in range(scores.shape[0]):
         t_pred = t
@@ -296,25 +307,33 @@ def run_local_tail_aci(
             continue
 
         if controller is None:
-            controller = AdaptiveConformalInference(
+            controller = AdaptiveAlphaController(
                 alpha=alpha,
                 gamma=gamma,
                 initial_alpha=alpha,
-                score=raw_scalar_score,
-                initial_scores=scores[:t_pred],
                 alpha_bounds=alpha_bounds,
-                quantile_rule=quantile_rule,
             )
+            # Seed the radius history with the full pre-adaptive scores, matching
+            # the reference warm-up; the raw score IS the value (signed-residual
+            # tail), so ``raw_scalar_score`` reduces to the score itself.
+            score_history = [raw_scalar_score(value, 0.0) for value in scores[:t_pred]]
 
-        alpha_trace[t] = controller.current_alpha
-        threshold = controller.get_radius()
-        q[t] = threshold
-        outcome = controller.observe(
-            y_true=float(scores[t]),
-            prediction=ThresholdPrediction(threshold=threshold, alpha=controller.current_alpha),
+        current_alpha = controller.current_alpha
+        alpha_trace[t] = current_alpha
+        threshold = finite_sample_radius(
+            score_history, current_alpha, 0.0, quantile_rule=quantile_rule
         )
-        covered[t] = not bool(outcome["error"])
-        miss[t] = int(outcome["error"])
+        q[t] = threshold
+
+        # ``ThresholdPrediction.contains`` is ``y_true <= threshold``; pass the
+        # realized miss directly so the controller's alpha update sees the same
+        # error signal the old monolithic controller computed internally.
+        prediction = ThresholdPrediction(threshold=threshold, alpha=current_alpha)
+        error = int(not prediction.contains(float(scores[t])))
+        score_history.append(raw_scalar_score(float(scores[t]), 0.0))
+        controller.observe(y_true=float(scores[t]), y_pred=bool(error), h=1)
+        covered[t] = not bool(error)
+        miss[t] = error
 
     return {
         "q": q,
