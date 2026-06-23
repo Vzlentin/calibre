@@ -20,19 +20,6 @@ class AbsoluteErrorScore:
         return score
 
 
-@dataclass(frozen=True, slots=True)
-class ScaledAbsoluteErrorScore:
-    """Absolute residual divided by a fixed ``scale`` (floored at ``eps``)."""
-
-    scale: float
-    eps: float = 1e-8
-
-    def __call__(self, y_true, y_pred, *, mask=None, weights=None) -> np.ndarray:
-        denom = np.maximum(np.asarray(self.scale, dtype=float), self.eps)
-        score = absolute_error_score(y_true, y_pred, mask=mask, weights=weights) / denom
-        return np.asarray(score, dtype=float)
-
-
 absolute_error_score = AbsoluteErrorScore()
 
 
@@ -42,20 +29,15 @@ def absolute_error(y_true, y_pred, *, mask=None, weights=None):
 
 
 def scaled_absolute_error(y_true, y_pred, scale, eps: float = 1e-8, *, mask=None, weights=None):
-    """Scale-invariant absolute residual score.
+    """Scale-invariant absolute residual score (``scale`` floored at ``eps``).
 
-    Takes three positional arguments and cannot be used directly as the
-    ``score`` parameter of ACI controllers (which call
-    ``score(y_true, y_pred)`` with two arguments).  Wrap with
-    ``functools.partial`` to fix the scale::
+    Takes three positional arguments and cannot be used directly as a two-arg
+    ``score(y_true, y_pred)`` callable.  Wrap with ``functools.partial`` to fix
+    the scale::
 
         import functools
         score = functools.partial(scaled_absolute_error, scale=demand_mean)
-        aci = AdaptiveConformalInference(alpha=0.1, gamma=0.05, score=score)
     """
-    return ScaledAbsoluteErrorScore(scale=scale, eps=eps)(
-        y_true,
-        y_pred,
-        mask=mask,
-        weights=weights,
-    )
+    denom = np.maximum(np.asarray(scale, dtype=float), eps)
+    score = absolute_error_score(y_true, y_pred, mask=mask, weights=weights) / denom
+    return np.asarray(score, dtype=float)
