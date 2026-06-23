@@ -58,7 +58,7 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.io import join_uri
 from calibre.core.order_types import RsPolicyParameters
-from calibre.execution import actuals_lookup_from_cache, observe_pending
+from calibre.execution import actuals_lookup_from_cache, observe_pending, warmup_cumulative
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import partition_tasks
@@ -104,42 +104,6 @@ def round_actuals(
         )
         actuals = dict(zip(unique_ids, round_raw[last_col].fillna(0.0).astype(float), strict=False))
     return {uid: actuals.get(uid, 0.0) for uid in state_keys}
-
-
-def run_order_conformal_warmup(
-    *,
-    sales: pd.DataFrame,
-    instock: pd.DataFrame | None,
-    model_config: dict[str, Any],
-    horizon: int,
-    warmup_origins: int,
-    runtime: CumulativeRiskRuntime,
-    series_filter: list[str] | None,
-    cumulative_target: bool = False,
-    execution_backend: Literal["local", "ray", "auto"] = "auto",
-    ray_address: str | None = None,
-    staging_uri: str | None = None,
-    ray_threshold: int = 10,
-    max_concurrency: int | None = None,
-    cpu_per_task: float | None = None,
-) -> None:
-    """Calibrate the cumulative order conformal runtime on resolved origins."""
-    for frame in order_conformal_warmup_frames(
-        sales=sales,
-        instock=instock,
-        model_config=model_config,
-        horizon=horizon,
-        warmup_origins=warmup_origins,
-        series_filter=series_filter,
-        cumulative_target=cumulative_target,
-        execution_backend=execution_backend,
-        ray_address=ray_address,
-        staging_uri=staging_uri,
-        ray_threshold=ray_threshold,
-        max_concurrency=max_concurrency,
-        cpu_per_task=cpu_per_task,
-    ):
-        runtime.observe(runtime.apply(frame))
 
 
 def order_conformal_warmup_frames(
@@ -430,8 +394,10 @@ def replay_cached_cost(
             protection_period=cache.lead_time + cache.review_period,
         )
         runtime = CumulativeRiskRuntime(resolved_config)
-        for frame in cache.warmup_frames:
-            runtime.observe(runtime.apply(_scale_base_forecasts(frame, order_base_scale)))
+        warmup_cumulative(
+            runtime,
+            (_scale_base_forecasts(frame, order_base_scale) for frame in cache.warmup_frames),
+        )
 
     orders_by_round: dict[int, dict[str, float]] = {}
     pending: list[pd.DataFrame] = []

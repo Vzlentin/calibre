@@ -32,9 +32,9 @@ from benchmarks.vn2.data import as_cumulative_decision_frame, prepare_cumulative
 from benchmarks.vn2.diagnostics import optimal_order_path_for_sku
 from benchmarks.vn2.replay import (
     build_replay_cache,
+    order_conformal_warmup_frames,
     replay_cached_cost,
     round_actuals,
-    run_order_conformal_warmup,
 )
 from benchmarks.vn2.run_benchmark import run_benchmark, run_from_config
 from benchmarks.vn2.search import run_cost_search, run_hpo
@@ -54,6 +54,7 @@ from calibre.core.forecast_frame import (
     Y,
     quantile_column,
 )
+from calibre.execution import warmup_cumulative
 from calibre.execution.data_loading import load_period
 from calibre.tuning import CumulativePinball, StudyOutcome
 
@@ -548,8 +549,13 @@ def test_round_actuals_uses_current_round_demand() -> None:
     assert actuals == {uid: expected.get(uid, 0.0) for uid in series}
 
 
-def test_run_order_conformal_warmup_seeds_residual_pool() -> None:
-    """Warmup helper produces at least one residual on real week_0 sales."""
+def test_order_conformal_warmup_seeds_residual_pool() -> None:
+    """Package warmup primitive produces at least one residual on real week_0 sales.
+
+    The benchmark's former standalone warmup driver is gone; calibration now runs
+    through the package primitive ``warmup_cumulative`` over the resolved frames
+    ``order_conformal_warmup_frames`` builds.
+    """
     series = _get_first_n_series(3)
     sales = load_period(DATA_DIR, 0)
     sales = sales[sales["unique_id"].isin(series)]
@@ -568,14 +574,28 @@ def test_run_order_conformal_warmup_seeds_residual_pool() -> None:
 
     assert runtime.get_diagnostics()["n_scores"] == 0
 
-    run_order_conformal_warmup(
-        sales=sales,
-        instock=None,
-        model_config=engine_config,
-        horizon=horizon,
-        warmup_origins=2,
-        runtime=runtime,
-        series_filter=series,
+    warmup_cumulative(
+        runtime,
+        order_conformal_warmup_frames(
+            sales=sales,
+            instock=None,
+            model_config=engine_config,
+            horizon=horizon,
+            warmup_origins=2,
+            series_filter=series,
+        ),
     )
 
     assert runtime.get_diagnostics()["n_scores"] > 0
+
+
+def test_standalone_order_conformal_warmup_driver_removed() -> None:
+    """Deletion guard: the standalone warmup driver no longer exists.
+
+    U3 collapses the benchmark's standalone warmup onto the package primitive, so
+    ``run_order_conformal_warmup`` must be gone — calibration runs through one
+    package path on both benchmark entry points.
+    """
+    import benchmarks.vn2.replay as replay_module
+
+    assert not hasattr(replay_module, "run_order_conformal_warmup")

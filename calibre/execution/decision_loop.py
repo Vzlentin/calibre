@@ -7,7 +7,7 @@ per-horizon vs cumulative split logic.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -163,6 +163,25 @@ def observe_cumulative(
         if not unresolved.empty:
             still_pending.append(unresolved)
     return still_pending
+
+
+def warmup_cumulative(
+    runtime: ConformalRuntime,
+    frames: Iterable[pd.DataFrame],
+) -> None:
+    """Calibrate a cumulative runtime on already-resolved warmup frames.
+
+    The package-owned calibration primitive: for each resolved frame, apply the
+    runtime (populating its interval columns) and observe the result so the
+    runtime's own inner readiness rule scores every complete window. Callers pass
+    frames whose actuals are already filled — the benchmark warmup, where origins
+    predate the live decision window — so no pending bookkeeping is needed and the
+    runtime's calibrator is seeded in one batch. This replaces the benchmark's
+    former standalone warmup driver, so calibration runs through one package path
+    on both the ``DecisionLoop`` and replay benchmark entry points.
+    """
+    for frame in frames:
+        runtime.observe(runtime.apply(frame))
 
 
 def observe_pending(

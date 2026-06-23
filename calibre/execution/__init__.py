@@ -31,6 +31,7 @@ from calibre.execution.decision_loop import (
     observe_cumulative,
     observe_pending,
     observe_per_horizon,
+    warmup_cumulative,
 )
 from calibre.execution.ledger import (
     InMemoryLedger,
@@ -68,6 +69,7 @@ __all__ = [
     "observe_cumulative",
     "observe_pending",
     "observe_per_horizon",
+    "warmup_cumulative",
     "Ledger",
     "InMemoryLedger",
     "StreamingLedger",

@@ -43,9 +43,9 @@ from benchmarks.vn2.data import (
 )
 from benchmarks.vn2.replay import (
     build_rs_params,
+    order_conformal_warmup_frames,
     orders_from_policy_result,
     round_actuals,
-    run_order_conformal_warmup,
     summary_from_simulator,
 )
 from benchmarks.vn2.search import run_hpo
@@ -67,6 +67,7 @@ from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
     RoundResult,
+    warmup_cumulative,
 )
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
@@ -172,21 +173,23 @@ def run_benchmark(
             week0_sales = load_period(data_dir, 0)
             if series_filter is not None:
                 week0_sales = week0_sales[week0_sales[UNIQUE_ID].isin(initial_states)]
-            run_order_conformal_warmup(
-                sales=week0_sales,
-                instock=instock,
-                model_config=engine_config,
-                horizon=horizon,
-                warmup_origins=order_conformal_warmup_origins,
-                runtime=order_conformal_runtime,
-                series_filter=list(initial_states),
-                cumulative_target=cumulative_target,
-                execution_backend=execution_backend,
-                ray_address=ray_address,
-                staging_uri=staging_uri,
-                ray_threshold=ray_threshold,
-                max_concurrency=max_concurrency,
-                cpu_per_task=cpu_per_task,
+            warmup_cumulative(
+                order_conformal_runtime,
+                order_conformal_warmup_frames(
+                    sales=week0_sales,
+                    instock=instock,
+                    model_config=engine_config,
+                    horizon=horizon,
+                    warmup_origins=order_conformal_warmup_origins,
+                    series_filter=list(initial_states),
+                    cumulative_target=cumulative_target,
+                    execution_backend=execution_backend,
+                    ray_address=ray_address,
+                    staging_uri=staging_uri,
+                    ray_threshold=ray_threshold,
+                    max_concurrency=max_concurrency,
+                    cpu_per_task=cpu_per_task,
+                ),
             )
             conformal_runtime = order_conformal_runtime
             mlflow.log_param("order_conformal_method", resolved_order_config.method_name)
