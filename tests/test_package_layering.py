@@ -3,7 +3,36 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
+
+import pytest
+
+# Experimental conformal/ordering surface removed in the S0 elevation slice. The
+# live decision path (conformal/runtime.py + cumulative_risk.py, ordering
+# UpperBoundRule) imports the live submodules directly and never reaches these,
+# so the guards below lock the boundary against silent re-introduction.
+_DELETED_CONFORMAL_MODULES = (
+    "calibre.conformal.split",
+    "calibre.conformal.adaptive",
+    "calibre.conformal.policies",
+)
+_DELETED_CONFORMAL_SYMBOLS = (
+    "AdaptiveConformalInference",
+    "MultiStepAdaptiveConformalInference",
+    "CumulativeSplitConformalInference",
+    "MultiStepSplitConformalInference",
+    "OnlineConformalController",
+    "ScaledAbsoluteErrorScore",
+    "MultiStepIntervalPrediction",
+    "symmetric_intervals",
+)
+_KEPT_CONFORMAL_SYMBOLS = (
+    "IntervalPrediction",
+    "AbsoluteErrorScore",
+    "scaled_absolute_error",
+    "symmetric_interval",
+)
 
 
 def _benchmark_imports(path: Path) -> list[tuple[int, str]]:
@@ -31,3 +60,29 @@ def test_calibre_does_not_import_benchmarks() -> None:
             rel = path.relative_to(root.parent)
             violations.append(f"{rel}:{lineno}: {stmt}")
     assert not violations, "shipped calibre/ must not import benchmarks:\n" + "\n".join(violations)
+
+
+@pytest.mark.parametrize("module_name", _DELETED_CONFORMAL_MODULES)
+def test_deleted_conformal_modules_are_gone(module_name: str) -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(module_name)
+
+
+@pytest.mark.parametrize("symbol", _DELETED_CONFORMAL_SYMBOLS)
+def test_deleted_conformal_symbols_are_not_re_exported(symbol: str) -> None:
+    conformal = importlib.import_module("calibre.conformal")
+    assert not hasattr(conformal, symbol)
+    assert symbol not in conformal.__all__
+
+
+def test_cumulative_bound_rule_is_gone_from_ordering() -> None:
+    ordering = importlib.import_module("calibre.ordering")
+    assert not hasattr(ordering, "CumulativeBoundRule")
+    assert "CumulativeBoundRule" not in ordering.__all__
+
+
+@pytest.mark.parametrize("symbol", _KEPT_CONFORMAL_SYMBOLS)
+def test_live_conformal_symbols_still_import(symbol: str) -> None:
+    conformal = importlib.import_module("calibre.conformal")
+    assert hasattr(conformal, symbol)
+    assert symbol in conformal.__all__
