@@ -84,26 +84,6 @@ class UpperBoundRule:
 
 
 @dataclass(frozen=True, slots=True)
-class CumulativeBoundRule:
-    """Order-up-to target from the terminal-horizon cumulative upper bound."""
-
-    coverage: float = 0.9
-
-    def __call__(self, frame: pd.DataFrame, costs: CostStruct) -> float:
-        del costs
-        ordered = frame.sort_values(H)
-        protection_period = _protection_period(ordered)
-        horizons = _validate_protection_horizons(ordered, protection_period)
-        _, upper_col = validate_interval_columns(ordered, self.coverage)
-        terminal = ordered.loc[horizons == protection_period, upper_col]
-        if terminal.empty:
-            raise ValueError(
-                f"Cumulative conformal frame missing terminal h={protection_period} row"
-            )
-        return float(terminal.iloc[0])
-
-
-@dataclass(frozen=True, slots=True)
 class QuantileInterpolationRule:
     """Newsvendor target interpolated between interval bounds by critical ratio."""
 

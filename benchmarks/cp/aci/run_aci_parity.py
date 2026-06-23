@@ -9,6 +9,7 @@ import math
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,12 @@ FLOAT_ATOL = 1e-12
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from calibre.conformal.adaptive import AdaptiveConformalInference  # noqa: E402
+from calibre.conformal.numerics import (  # noqa: E402
+    clip_alpha,
+    finite_sample_radius,
+    validate_bounds,
+    validate_quantile_rule,
+)
 
 
 @dataclass(slots=True)
@@ -57,6 +63,61 @@ class ThresholdPrediction:
 
     def contains(self, value: float) -> bool:
         return bool(float(value) <= float(self.threshold))
+
+
+class _TailACITracker:
+    """Self-contained one-sided tail-ACI quantile tracker for the parity run.
+
+    Reproduces the score-history + ``quantile_rule="higher"`` radius selection +
+    alpha-update loop the parity check needs (a radius/quantile trace ``q``),
+    without depending on a shipped conformal controller. ``score`` is the raw
+    scalar nonconformity (here the signed-residual tail value itself).
+    """
+
+    def __init__(
+        self,
+        alpha: float,
+        gamma: float,
+        score: Callable[[float, float], float],
+        initial_scores,
+        alpha_bounds: tuple[float, float] | None,
+        quantile_rule: str,
+    ):
+        if gamma < 0:
+            raise ValueError("gamma must be non-negative")
+        self._bounds = validate_bounds(alpha_bounds)
+        self._quantile_rule = validate_quantile_rule(quantile_rule)
+        self._target_alpha = float(alpha)
+        self._gamma = float(gamma)
+        self._alpha = float(clip_alpha(self._target_alpha, self._bounds))
+        self._score = score
+        self._score_history = [float(s) for s in initial_scores]
+
+    @property
+    def current_alpha(self) -> float:
+        """Return the current adaptive alpha after the latest update."""
+        return self._alpha
+
+    def get_radius(self) -> float:
+        """Return the (1-alpha) finite-sample 'higher' quantile of the history."""
+        return finite_sample_radius(
+            self._score_history,
+            self._alpha,
+            default_radius=0.0,
+            quantile_rule=self._quantile_rule,
+        )
+
+    def observe(self, y_true: float, prediction: ThresholdPrediction) -> dict:
+        """Record the score, score the miss, and nudge alpha toward the target."""
+        error = int(not prediction.contains(float(y_true)))
+        self._score_history.append(float(self._score(y_true, prediction.center)))
+        self._alpha = float(
+            clip_alpha(
+                self._alpha + self._gamma * (self._target_alpha - error),
+                self._bounds,
+            )
+        )
+        return {"error": error}
 
 
 def raw_scalar_score(y_true: float, _center: float) -> float:
@@ -285,7 +346,7 @@ def run_local_tail_aci(
     alpha_trace = np.full(scores.shape[0], float(alpha), dtype=float)
     covered = np.empty(scores.shape[0], dtype=bool)
     miss = np.empty(scores.shape[0], dtype=int)
-    controller: AdaptiveConformalInference | None = None
+    controller: _TailACITracker | None = None
 
     for t in range(scores.shape[0]):
         t_pred = t
@@ -296,10 +357,9 @@ def run_local_tail_aci(
             continue
 
         if controller is None:
-            controller = AdaptiveConformalInference(
+            controller = _TailACITracker(
                 alpha=alpha,
                 gamma=gamma,
-                initial_alpha=alpha,
                 score=raw_scalar_score,
                 initial_scores=scores[:t_pred],
                 alpha_bounds=alpha_bounds,
