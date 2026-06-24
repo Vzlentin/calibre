@@ -173,6 +173,9 @@ class ConformalRuntime(Protocol):
     @property
     def mode(self) -> str: ...
 
+    @property
+    def protection_period(self) -> int | None: ...
+
     def apply(self, frame: pd.DataFrame) -> pd.DataFrame: ...
 
     def observe(self, resolved: pd.DataFrame) -> pd.DataFrame: ...
@@ -463,6 +466,10 @@ class SymmetricIntervalRuntime:
     @property
     def mode(self) -> str:
         return self.config.mode
+
+    @property
+    def protection_period(self) -> int | None:
+        return self.config.protection_period
 
     @property
     def issued_count(self) -> int:
