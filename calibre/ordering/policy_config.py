@@ -170,7 +170,7 @@ def build_rs_params(
     targets the position the simulator actually holds at this round. For the VN2
     two-slot pipeline this equals the manual sum
     ``end_inventory + in_transit_w1 + in_transit_w2`` the benchmark previously
-    read off its VN2-shaped state — the byte-identity hinge across the elevation.
+    read off its VN2-shaped state.
     """
     return [
         RsPolicyParameters(
@@ -192,8 +192,8 @@ def derive_warmup_origins(
 
     Returns the last ``warmup_origins`` decision dates that still leave a full
     ``horizon`` of resolvable future, clamping the count down when the history is
-    too short and returning an empty list when no origin resolves. Elevated
-    verbatim from the VN2 warmup-frame derivation so the engine's loop-path
+    too short and returning an empty list when no origin resolves. Shared with
+    the VN2 benchmark's warmup-frame derivation so the engine's loop-path
     warmup walk and the benchmark's stay one implementation.
     """
     if warmup_origins <= 0:

@@ -1,4 +1,4 @@
-"""Settle-contract fixture for the rolling decision loop (U3 keystone).
+"""Settle-contract fixture for the rolling decision loop.
 
 Drives a :class:`~calibre.execution.decision_loop.DecisionLoop` over the generic
 :class:`~calibre.ordering.simulation.simulator.Simulator` and a real

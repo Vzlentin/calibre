@@ -1,8 +1,8 @@
-"""Censoring reaches the gated fit on the engine staging path (U3·A4).
+"""Censoring reaches the gated fit on the engine staging path.
 
-Slice A wired the censoring-aware fit *fit-side only*; Slice B carries
-``ForecastTask.censoring`` across the staging boundary so the gated mlforecast
-fit fires on the real engine path. The primary path is GLOBAL (VN2's winning
+The censoring-aware fit is wired fit-side, and ``ForecastTask.censoring`` is
+carried across the staging boundary so the gated mlforecast fit fires on the
+real engine path. The primary path is GLOBAL (VN2's winning
 config is ``scope: global``): ``ForecastTask.to_uri`` writes a censoring parquet,
 ``ForecastTaskRef.materialize`` reads it back, and ``_process_global_panel``
 concatenates it alongside the histories. This proves:

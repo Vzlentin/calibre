@@ -10,7 +10,8 @@ cost/inventory kwargs proves the loop branch stays inert (bundle inventory
 ``None``, single-pass, no cost gauge written).
 
 The two former tally-guard tests (``test_tally_rejects_per_uid_cost_panel`` and
-``test_tally_rejects_heterogeneous_protection_period``) were DELETED in Slice B:
+``test_tally_rejects_heterogeneous_protection_period``) were removed when the
+tally seam was replaced by the settle loop:
 they asserted ``_tally_order_cost`` seam-specific ``ValueError``s that have no
 loop-path equivalent. The generic :class:`Simulator` accumulates a single scalar
 cost, so there is no per-uid cost panel and no per-ledger protection-period

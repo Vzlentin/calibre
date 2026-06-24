@@ -176,8 +176,8 @@ def stage_local_chunk(
     grouped by resolved config upstream). The chunk's future_x and censoring
     panels are the union of the per-series frames, each filtered to the chunk's
     uids; mixed presence is harmless because the worker re-slices per uid (and
-    passes ``None`` when a series has no rows). M5 carries no real censoring
-    today, so the censoring panel is usually absent here.
+    passes ``None`` when a series has no rows). The M5 dataset carries no
+    censoring, so the censoring panel is absent for that path.
     """
     from calibre.core.io import join_uri, write_parquet
 

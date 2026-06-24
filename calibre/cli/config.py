@@ -123,7 +123,7 @@ class OrderConformalConfig(_Section):
     than inheriting the ``0.85`` weighted default, so an explicit null reaches the
     ``weight_decay is None`` path. ``warmup_origins`` is the loop-path CRC
     calibration walk length and ``method_name`` is cosmetic (the recorded method
-    label). Slice B threads only the loop-path-needed fields; full
+    label). Only the loop-path-needed fields are threaded through; full
     ``CumulativeConformalRiskConfig``-via-YAML parity is deferred.
     """
 

@@ -329,8 +329,8 @@ def _run_settle_loop(
 def _settle_warmup_count(config: BackendConfig) -> int:
     """Resolve the CRC warmup-origin count for the settle loop.
 
-    Defaults to ``HPO_N_ORIGINS = 3`` (the order-conformal warmup default the VN2
-    winner uses), overridable via ``order_conformal.warmup_origins``.
+    Defaults to 3 (the CRC warmup length the VN2 winning config uses),
+    overridable via ``order_conformal.warmup_origins``.
     ``WARMUP_ORIGINS = 6`` is a ``run_seasonal``-only constant and must not seed
     this default.
     """
@@ -437,7 +437,10 @@ def run_config(
         )
         if not config.output.streaming and config.output.ledger_path is not None:
             result.ledger.to_parquet(config.output.ledger_path)
-        logger.info("run complete", extra={"rows": len(result.ledger.to_df())})
+        if config.output.streaming:
+            logger.info("run complete", extra={"streaming": True})
+        else:
+            logger.info("run complete", extra={"rows": len(result.ledger.to_df())})
         if config.output.ledger_path is not None:
             logger.info("ledger written", extra={"ledger_path": config.output.ledger_path})
         return result

@@ -1,6 +1,6 @@
-"""Schema coverage for the loop-path ordering/order-conformal config knobs (U4).
+"""Schema coverage for the loop-path ordering/order-conformal config knobs.
 
-Proves the Elevation S6·B schema additions: ``OrderingConfig`` gains
+Proves the schema additions: ``OrderingConfig`` gains
 ``lead_time``/``review_period`` and validates on the loop path with no static
 ``params``; ``OrderConformalConfig`` gains ``weight_decay``/``warmup_origins``/
 ``method_name`` and round-trips them into the runtime config, with an explicit

@@ -206,7 +206,7 @@ def test_order_conformal_series_partition_uses_unique_id_runtime_key() -> None:
 
 
 def test_order_conformal_unknown_key_raises_at_parse_time() -> None:
-    # ``weight_decay`` is now a valid loop-path knob (Elevation S6·B); a genuinely
+    # ``weight_decay`` is now a valid loop-path knob; a genuinely
     # unknown key still trips the ``extra="forbid"`` guard at parse time.
     with pytest.raises(ValidationError, match="not_a_real_knob"):
         load_config_from_mapping(
