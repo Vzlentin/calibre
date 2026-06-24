@@ -1,12 +1,16 @@
-"""Tests for ``calibre run --tune``: same-study identity + a small real run.
+"""Tests for ``calibre run --tune``: study-surface parity + a small real run.
 
-The structural assertion confirms the CLI builds the same Optuna study the VN2
-benchmark builds (search space, objective + cost fractile, sampler seed, budget,
-origins-count / ASHA ``max_t``, ASHA grace period, and freq) without running a
-real search. The small-run check drives a real tiny tune end-to-end and confirms
-the discovered quantile is a configured choice with a finite cost. Tuning is
-wiring-faithful, not bit-exact: Ray + ASHA make the discovered fractile
-non-reproducible even seeded, so no literal value is asserted.
+The structural assertion pins the *study-determining surface* the CLI shares
+with the VN2 benchmark — objective + cost fractile, sampler seed, budget,
+origins-count / ASHA ``max_t``, ASHA grace period, freq — plus the
+``quantile_alpha`` search dimension, without running a real search. Full
+search-space equality is intentionally NOT asserted: the benchmark carries
+VN2-only glue (e.g. ``lag_set_idx`` → ``HPO_LAG_SETS``) that the dataset-general
+CLI does not, so the shared, runtime-coherent dimension is ``quantile_alpha``.
+The small-run check drives a real tiny tune end-to-end and confirms the
+discovered quantile is a configured choice (the run returned, so the study had a
+finite objective). Tuning is wiring-faithful, not bit-exact: Ray + ASHA make the
+discovered fractile non-reproducible even seeded, so no literal value is asserted.
 """
 
 from __future__ import annotations
@@ -98,7 +102,7 @@ def _tune_config(*, search_space: dict, budget: int, origins_end: str, lags: lis
     }
 
 
-def test_run_tune_builds_same_study_as_benchmark(monkeypatch) -> None:
+def test_run_tune_matches_benchmark_study_surface(monkeypatch) -> None:
     # Three origins, matching the benchmark's HPO_N_ORIGINS=3 (so ASHA max_t agrees).
     config = load_config_from_mapping(
         _tune_config(
@@ -121,11 +125,23 @@ def test_run_tune_builds_same_study_as_benchmark(monkeypatch) -> None:
 
     task = captured["task"]
 
-    # Search-space spec: the CLI samples the benchmark's quantile_alpha choices.
+    # The shared, runtime-coherent search dimension is quantile_alpha; the
+    # benchmark's other dims (e.g. lag_set_idx -> HPO_LAG_SETS) are VN2-only glue
+    # the dataset-general CLI does not carry, so full-space equality is not pinned.
     sampled = _sampled_search_space(task)
     assert sampled["quantile_alpha"] == HPO_SEARCH_SPACE["quantile_alpha"]
 
+    # The tuned quantile_alpha re-points BOTH the model's predicted quantile and
+    # the per-trial evaluation quantile (ordering_config overrides the objective),
+    # so what the search optimizes is what gets deployed.
+    candidate = task.search_space(_SpecRecorder())
+    alpha = sampled["quantile_alpha"]["choices"][0]
+    assert candidate.ordering_config["quantile"] == alpha
+    assert candidate.model_config["quantiles"] == [alpha]
+
     # Objective identity + tau derived from the dataset cost struct (== benchmark).
+    # objective.quantile is the template placeholder (always overridden per trial
+    # via ordering_config, asserted above); tau is the cost fractile, never tuned.
     assert isinstance(task.objective, CumulativePinball)
     assert task.objective.quantile == 0.5
     assert task.objective.tau == pytest.approx(_VN2_UNDERAGE / (_VN2_UNDERAGE + _VN2_OVERAGE))
@@ -141,6 +157,8 @@ def test_run_tune_builds_same_study_as_benchmark(monkeypatch) -> None:
     assert task.study_config.freq == "W-MON"
 
     # base_model_config drives the global study and never re-targets the fractile.
+    # (The CLI's base carries the full task model config + scope=global, richer
+    # than the benchmark's minimal {backend, scope}; only scope/global is shared.)
     assert task.base_model_config["scope"] == "global"
 
 
@@ -218,8 +236,9 @@ def test_run_tune_small_real_run_completes() -> None:
 
     # A real Ray + ASHA tune over two trials. optimize_global_task delegates to
     # _best_result_config, which RAISES unless at least one trial produced a
-    # FINITE objective — so a returning call is itself the finite-cost proof
-    # (no degenerate all-inf study can pass).
+    # FINITE objective — so a returning call is itself the finite-objective proof
+    # (no degenerate all-inf study can pass). This is a wiring proof, not a cost
+    # bound: the study ran end-to-end and returned a deployable config.
     best_config = run_tune(config)
 
     # The discovered per-horizon quantile is one of the configured choices: the

@@ -246,14 +246,21 @@ class ExecutionConfig(_Section):
 
 _HPO_SPEC_TYPES = frozenset({"categorical", "int", "float"})
 
-# Search-space keys that name a derived or deployment-decision number rather than
-# a sampled hyperparameter. The objective ``tau`` is the newsvendor cost fractile
-# (derived from the dataset cost struct, overridable only via ``cost_fractile``),
-# and ``coverage`` is the orthogonal CRC decision level on ``order_conformal`` —
-# neither is a search dimension, so a key targeting them is a config defect.
-_HPO_FORBIDDEN_SEARCH_KEYS = frozenset(
-    {"coverage", "order_conformal.coverage", "cost_fractile", "tau"}
-)
+# Search-space *names* that denote a derived or deployment-decision number rather
+# than a sampled hyperparameter. The objective ``tau`` is the newsvendor cost
+# fractile (derived from the dataset cost struct, overridable only via
+# ``cost_fractile``), ``coverage`` is the orthogonal CRC decision level on
+# ``order_conformal``, and ``critical_ratio`` is the cost-struct field ``tau``
+# derives from — none is a search dimension, so a key targeting one is a config
+# defect. Matched on the final dotted segment, case-insensitively, so dotted
+# aliases (``ordering.coverage``, ``objective.tau``) and case/whitespace variants
+# all trip it.
+_HPO_FORBIDDEN_SEARCH_NAMES = frozenset({"coverage", "tau", "cost_fractile", "critical_ratio"})
+
+
+def _is_forbidden_search_key(name: str) -> bool:
+    """Whether a search-space key names a forbidden decision/derived number."""
+    return name.strip().casefold().split(".")[-1] in _HPO_FORBIDDEN_SEARCH_NAMES
 
 
 class HpoConfig(_Section):
@@ -278,10 +285,9 @@ class HpoConfig(_Section):
         # Defence-in-depth: ``tau`` is un-leakable by construction (sourced from
         # cost_fractile/critical_ratio, never read out of search_space), but a
         # key named for the fractile or the orthogonal decision coverage signals
-        # a misconception, so reject it loud. This is a flat name-set check — no
-        # alias resolution; the dotted ``order_conformal.coverage`` entry only
-        # bites if dotted-path keys are ever introduced.
-        forbidden = sorted(set(value) & _HPO_FORBIDDEN_SEARCH_KEYS)
+        # a misconception, so reject it loud — matched on the final dotted
+        # segment, case-insensitively, so aliases and case variants trip too.
+        forbidden = sorted(k for k in value if _is_forbidden_search_key(k))
         if forbidden:
             raise ValueError(
                 f"hpo.search_space may not target {forbidden[0]!r}: the objective "

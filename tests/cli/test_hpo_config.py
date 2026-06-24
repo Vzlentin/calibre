@@ -49,7 +49,19 @@ def test_cost_fractile_override_loads() -> None:
 
 
 @pytest.mark.parametrize(
-    "forbidden", ["coverage", "tau", "cost_fractile", "order_conformal.coverage"]
+    "forbidden",
+    [
+        "coverage",
+        "tau",
+        "cost_fractile",
+        "order_conformal.coverage",
+        # Matched on the final dotted segment, case-insensitively: aliases and
+        # case/whitespace variants of a decision/derived number trip the guard too.
+        "Tau",
+        "critical_ratio",
+        "ordering.coverage",
+        "objective.tau",
+    ],
 )
 def test_search_space_rejects_forbidden_keys(forbidden: str) -> None:
     space = {**_VALID_SEARCH_SPACE, forbidden: {"type": "float", "low": 0.5, "high": 0.9}}
