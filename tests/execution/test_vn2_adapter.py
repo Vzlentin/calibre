@@ -48,6 +48,18 @@ def test_absent_state_file_leaves_inventory_none(tmp_path: Path) -> None:
     assert bundle.inventory is None
 
 
+def test_period_state_file_falls_back_to_week_0(tmp_path: Path) -> None:
+    # A non-zero period with no period-specific state CSV falls back to week_0.
+    pd.read_csv(DATA_DIR / "week_0_sales.csv").to_csv(tmp_path / "week_2_sales.csv", index=False)
+    pd.read_csv(DATA_DIR / "week_0_initial_state.csv").to_csv(
+        tmp_path / "week_0_initial_state.csv", index=False
+    )
+
+    bundle = VN2DatasetAdapter().load(tmp_path, period=2)
+
+    assert bundle.inventory is not None
+
+
 def test_censoring_carried_as_long_instock_frame() -> None:
     bundle = VN2DatasetAdapter().load(DATA_DIR)
 
@@ -57,7 +69,7 @@ def test_censoring_carried_as_long_instock_frame() -> None:
 
 
 def test_forecast_only_output_invariant_to_inventory_seeding(tmp_path: Path) -> None:
-    """Seeding inventory must not change the loaded history (the byte-identical lever)."""
+    """Seeding inventory must not change the loaded history (forecast-only stays byte-identical)."""
     with_inventory = VN2DatasetAdapter().load(DATA_DIR)
 
     # A data dir without the state CSV yields inventory=None but identical history.

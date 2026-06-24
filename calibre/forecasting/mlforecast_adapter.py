@@ -41,6 +41,7 @@ _RESERVED_KEYS = frozenset(
         "quantiles",
         "strategy",
         "static_features",
+        "censoring_fit",
     }
 )
 
@@ -196,7 +197,16 @@ class MLForecastAdapter(ModelAdapter):
         # Derive exog from the pre-imputation history so the in_stock flag added
         # by add_stockout_features never leaks in as a regressor.
         exog = exogenous_columns(task.history)
-        if task.model_config.get("censoring_fit") and task.censoring is not None:
+        if task.model_config.get("censoring_fit"):
+            # Fail loud rather than silently train on censored demand: the
+            # engine populates task.censoring on the order/decision path
+            # (Elevation S6·B, #261); until then enabling the gate without
+            # censoring data is a wiring error, not a quiet fallback.
+            if task.censoring is None:
+                raise ValueError(
+                    "censoring_fit is enabled but task.censoring is None; "
+                    "censoring data must reach the fit to impute demand."
+                )
             imputed = add_stockout_features(task.history, task.censoring)
             mlf_df = imputed[[UNIQUE_ID, DS, "y_uncensored", *exog]].rename(
                 columns={"y_uncensored": Y}

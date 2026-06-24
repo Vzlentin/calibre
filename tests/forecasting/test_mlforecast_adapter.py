@@ -9,6 +9,7 @@ from mlforecast.lag_transforms import RollingMean, RollingStd
 
 from calibre.core.forecast_frame import DS, FITTED_Y_HAT, IN_STOCK, MODEL_NAME, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
+from calibre.forecasting.features import add_stockout_features
 from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
 
 
@@ -497,7 +498,9 @@ def test_gate_off_uses_observed_target_even_with_censoring(monkeypatch, repeatin
     assert np.array_equal(fit_df[Y].to_numpy(), expected)
 
 
-def test_gate_on_with_censoring_none_falls_back_to_observed(monkeypatch, repeating_history):
+def test_gate_on_with_censoring_none_raises(repeating_history):
+    # Fail loud rather than silently train on censored demand when the gate is
+    # on but no censoring data reached the fit (the engine wiring lands in #261).
     task = ForecastTask(
         history=repeating_history,
         horizon=4,
@@ -510,16 +513,14 @@ def test_gate_on_with_censoring_none_falls_back_to_observed(monkeypatch, repeati
         censoring=None,
     )
 
-    fit_df = _capture_fit_df(monkeypatch, task)
-
-    expected = repeating_history[Y].astype("float32").to_numpy()
-    assert np.array_equal(fit_df[Y].to_numpy(), expected)
+    with pytest.raises(ValueError, match="censoring_fit is enabled"):
+        MLForecastAdapter(task.model_config).fit(task)
 
 
 def test_gate_on_with_censoring_uses_imputed_target(monkeypatch, repeating_history):
     # Force an out-of-stock week whose imputed demand exceeds the censored
     # observation: at index 8 (a value-10 week) the expanding median of prior
-    # in-stock sales (~25) lifts the target above the observed 10.
+    # in-stock sales lifts the target above the observed 10.
     oos_index = 8
     censoring = _censoring_frame(repeating_history, oos_index=oos_index)
     task = ForecastTask(
@@ -538,6 +539,14 @@ def test_gate_on_with_censoring_uses_imputed_target(monkeypatch, repeating_histo
 
     # Exactly one Y column — guards the rename-then-select duplicate landmine.
     assert list(fit_df.columns).count(Y) == 1
-    # The OOS week's target is lifted above the censored observation.
+    # The captured target equals the imputed-demand oracle exactly (not just a
+    # directional lift), so a wiring error in the adapter branch is caught.
+    expected = (
+        add_stockout_features(repeating_history, censoring)["y_uncensored"]
+        .astype("float32")
+        .to_numpy()
+    )
+    assert np.array_equal(fit_df[Y].to_numpy(), expected)
+    # And the OOS week's target is lifted above the censored observation.
     observed = float(repeating_history[Y].iloc[oos_index])
     assert float(fit_df[Y].iloc[oos_index]) > observed

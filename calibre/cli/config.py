@@ -61,7 +61,14 @@ class TaskConfig(_Section):
         resolved = dict(self.config)
         resolved.setdefault("model", self.model)
         resolved.setdefault("name", self.model)
-        resolved["censoring_fit"] = self.censoring_fit
+        # Inject the gate only when on: the root field is authoritative over any
+        # stray ``config:`` key, and a default-off value must not pollute the
+        # generic model config (non-mlforecast adapters forward unknown keys to
+        # their estimator constructor).
+        if self.censoring_fit:
+            resolved["censoring_fit"] = True
+        else:
+            resolved.pop("censoring_fit", None)
         return resolved
 
 

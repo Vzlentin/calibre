@@ -1,6 +1,6 @@
 """C1 gating parity: the engine's censoring-aware fit target equals the benchmark's.
 
-This is the slice's acceptance checkpoint. It captures the *actual* frame
+This is checkpoint C1, the acceptance gate for issue #260. It captures the *actual* frame
 ``MLForecastAdapter.fit`` hands to the underlying mlforecast ``.fit`` (via a spy
 on the MLForecast class) for the VN2 winning config with ``censoring_fit`` on,
 and asserts its ``[unique_id, ds, y]`` subset equals
