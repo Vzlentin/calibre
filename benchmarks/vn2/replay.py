@@ -58,7 +58,7 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.io import join_uri
 from calibre.core.order_types import RsPolicyParameters
-from calibre.execution import actuals_lookup_from_cache, observe_pending
+from calibre.execution import actuals_lookup_from_cache, build_actuals_lookup, observe_pending
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import partition_tasks
@@ -124,7 +124,7 @@ def run_order_conformal_warmup(
     cpu_per_task: float | None = None,
 ) -> None:
     """Calibrate the cumulative order conformal runtime on resolved origins."""
-    for frame in order_conformal_warmup_frames(
+    frames = order_conformal_warmup_frames(
         sales=sales,
         instock=instock,
         model_config=model_config,
@@ -138,8 +138,15 @@ def run_order_conformal_warmup(
         ray_threshold=ray_threshold,
         max_concurrency=max_concurrency,
         cpu_per_task=cpu_per_task,
-    ):
-        runtime.observe(runtime.apply(frame))
+    )
+    if not frames:
+        return
+    # Reach calibration through the package primitive instead of forking an
+    # observe loop: the frames are already resolved and origin-ordered, so the
+    # actuals lookup is a pass-through and observe_pending presents them in the
+    # same order, preserving the runtime's per-origin recency weighting.
+    actuals_lookup = build_actuals_lookup(pd.concat(frames, ignore_index=True))
+    observe_pending(runtime, frames, actuals_lookup)
 
 
 def order_conformal_warmup_frames(
