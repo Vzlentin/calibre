@@ -215,6 +215,75 @@ def test_order_conformal_and_conformal_together_rejected() -> None:
         )
 
 
+def test_ordering_coverage_inherits_from_order_conformal_when_unset() -> None:
+    """An omitted ordering.coverage is back-filled from order_conformal.coverage."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={"coverage": 0.74},
+            ordering={"policy": "rs", "params": {"unique_id": "1_10"}},
+        )
+    )
+
+    assert config.ordering is not None
+    assert config.ordering.coverage == 0.74
+
+
+def test_ordering_coverage_matching_order_conformal_parses() -> None:
+    """An explicit ordering.coverage equal to order_conformal.coverage is accepted."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={"coverage": 0.74},
+            ordering={"policy": "rs", "coverage": 0.74, "params": {"unique_id": "1_10"}},
+        )
+    )
+
+    assert config.ordering is not None
+    assert config.ordering.coverage == 0.74
+
+
+def test_ordering_coverage_mismatch_rejected_at_parse_time() -> None:
+    """An explicit ordering.coverage that disagrees with order_conformal raises."""
+    with pytest.raises(ValidationError, match="must equal order_conformal.coverage"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                order_conformal={"coverage": 0.74},
+                ordering={"policy": "rs", "coverage": 0.9, "params": {"unique_id": "1_10"}},
+            )
+        )
+
+
+def test_ordering_quantile_mode_exempt_from_coverage_sync() -> None:
+    """Quantile mode reads a q_<p> column, not the bound, so coverage is unchecked."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={"coverage": 0.74},
+            ordering={"policy": "rs", "quantile": 0.8, "params": {"unique_id": "1_10"}},
+        )
+    )
+
+    assert config.ordering is not None
+    # Not back-filled and not rejected: the default coverage stands.
+    assert config.ordering.coverage == 0.9
+    assert config.ordering.quantile == 0.8
+
+
+def test_ordering_coverage_unchanged_without_order_conformal() -> None:
+    """Without an order_conformal block, ordering.coverage is left as configured."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            ordering={"policy": "rs", "coverage": 0.9, "params": {"unique_id": "1_10"}},
+        )
+    )
+
+    assert config.ordering is not None
+    assert config.ordering.coverage == 0.9
+
+
 def test_execution_chunk_size_plumbs_into_execution_options() -> None:
     config = load_config_from_mapping(_config(execution={"backend": "local", "chunk_size": 32}))
 

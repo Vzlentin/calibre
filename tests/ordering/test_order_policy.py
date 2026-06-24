@@ -269,6 +269,62 @@ def test_apply_rs_policy_cumulative_mode_picks_terminal_bound_without_summing() 
     assert row["order_qty"] == 37.0
 
 
+def test_apply_rs_policy_cumulative_nan_terminal_bound_raises() -> None:
+    """A present-but-NaN terminal bound raises instead of emitting a NaN order.
+
+    An incomplete/uncalibrated window leaves its terminal-horizon hi_<cov> cell
+    NaN; without the guard ``max(NaN - ip, 0)`` would flow a silent NaN order to
+    the ledger.
+    """
+    frame = _cumulative_forecast_frame(
+        unique_id="SKU_001",
+        cumulative_upper_at_terminal=np.nan,
+        horizon=3,
+    )
+
+    with pytest.raises(ValueError, match="decision bound is NaN"):
+        apply_rs_policy(
+            frame,
+            [
+                RsPolicyParameters(
+                    unique_id="SKU_001",
+                    inventory_position=5.0,
+                    lead_time=1,
+                    review_period=2,
+                )
+            ],
+        )
+
+
+def test_apply_rs_policy_summed_branch_skips_nan_band() -> None:
+    """The summed branch uses Series.sum (skipna), so a NaN band needs no guard.
+
+    Negative control documenting why U2's guard is scoped to the cumulative
+    branch only: a NaN in a non-terminal per-horizon band sums away to a finite
+    target rather than propagating, so no raise belongs on the summed path.
+    """
+    frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
+    assert CONFORMAL_MODE not in frame.columns
+    _, upper_col = interval_column_names(0.9)
+    # NaN out a non-terminal band (h=1); the summed target should skip it.
+    frame.loc[frame[H] == 1, upper_col] = np.nan
+
+    result = apply_rs_policy(
+        frame,
+        [
+            RsPolicyParameters(
+                unique_id="SKU_001",
+                inventory_position=5.0,
+                lead_time=1,
+                review_period=2,
+            )
+        ],
+    )
+    target = result.iloc[0]["target_stock_level"]
+    assert np.isfinite(target)
+    assert target == 50.0
+
+
 def test_apply_rs_policy_perhorizon_frame_still_sums_bounds() -> None:
     """Without a CONFORMAL_MODE column, behaviour is unchanged (sum of bounds)."""
     frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
