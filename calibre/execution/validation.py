@@ -10,6 +10,7 @@ import pandas as pd
 from calibre.core.forecast_frame import DS, IN_STOCK, UNIQUE_ID, Y, validate_actuals_frame
 from calibre.core.order_types import CostStruct
 from calibre.execution.dataset import DatasetBundle
+from calibre.ordering.simulation.state import ProductState
 
 
 def _validate_monotonic_per_series(df: pd.DataFrame, *, name: str) -> None:
@@ -77,6 +78,15 @@ def validate_dataset_bundle(bundle: DatasetBundle) -> None:
             raise ValueError(
                 f"censoring.{IN_STOCK} expected bool, got {bundle.censoring[IN_STOCK].dtype}"
             )
+
+    if bundle.inventory is not None:
+        inventory_uids = {str(uid) for uid in bundle.inventory}
+        unknown = inventory_uids - history_uids
+        if unknown:
+            raise ValueError(f"inventory contains unknown unique_id values: {sorted(unknown)}")
+        for uid, state in bundle.inventory.items():
+            if not isinstance(state, ProductState):
+                raise ValueError(f"inventory state for unique_id={uid!r} must be ProductState")
 
     if isinstance(bundle.costs, CostStruct):
         return

@@ -16,7 +16,7 @@ from calibre.cli.config import (
     load_config_from_mapping,
 )
 from calibre.conformal.cumulative_risk import CumulativeRiskRuntime
-from calibre.core.forecast_frame import DS, UNIQUE_ID, Y
+from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
 from calibre.core.io import is_local_fs, open_fs
 from calibre.core.metrics import set_order_cost
 from calibre.evaluation.m5_coverage import (
@@ -36,6 +36,9 @@ from calibre.execution.dataset_registry import resolve_dataset_adapter
 from calibre.execution.hierarchy_preparation import prepare_run
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering import OrderPolicy, build_order_policy
+from calibre.ordering.simulation.costs import LinearCostModel
+from calibre.ordering.simulation.rules import LostSalesRule
+from calibre.ordering.simulation.simulator import Simulator
 from calibre.storage.state import ConformalStateStore
 from calibre.tuning import (
     CumulativePinball,
@@ -126,6 +129,64 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
     set_order_cost(currency, dataset, total_cost)
 
 
+def _tally_order_cost(
+    bundle: DatasetBundle,
+    result: BackendResult,
+    config: BackendConfig,
+) -> pd.DataFrame | None:
+    """Replay the order ledger against realized demand through the generic ``Simulator``.
+
+    Returns ``None`` (tally skipped) when the bundle supplied no initial
+    inventory state or no order ledger ran. Otherwise it builds a
+    :class:`LostSalesRule` / :class:`LinearCostModel` / :class:`Simulator` from
+    the bundle's uniform cost struct and seeded states, then steps once per
+    forecast origin (ascending; period = 1-based origin index). For each
+    ``(uid, origin)`` the order is the ledger's ``order_qty`` and the realized
+    demand is the sum of resolved ``y`` over horizons ``1..protection_period``;
+    any in-window NaN (an unresolved tail) collapses that origin's demand to
+    ``0.0`` so a NaN never reaches ``missed_sales``. Returns the simulator's
+    per-(product, period) frame carrying ``holding_cost``/``shortage_cost``.
+    """
+    if bundle.inventory is None or result.order_ledger is None:
+        return None
+    del config
+    if isinstance(bundle.costs, dict):
+        raise ValueError(
+            "the order cost tally needs a single uniform cost struct, but the dataset carries a "
+            "per-uid cost panel; per-uid cost tallying is out of scope for this seam"
+        )
+    costs = bundle.costs
+
+    order_frame = result.order_ledger.to_df()
+    if order_frame.empty:
+        return None
+    forecast_frame = result.ledger.to_df()
+
+    lead_time = next(iter(bundle.inventory.values())).lead_time_depth
+    rule = LostSalesRule(lead_time)
+    cost_model = LinearCostModel(
+        rates={"holding": costs.holding_cost, "shortage": costs.shortage_cost}
+    )
+    simulator = Simulator(bundle.inventory, rule, cost_model)
+
+    protection_period = int(order_frame["protection_period"].iloc[0])
+    resolved = forecast_frame[forecast_frame[H].astype(int) <= protection_period]
+    origins = sorted(order_frame[FORECAST_ORIGIN].unique())
+    for period, origin in enumerate(origins, start=1):
+        origin_orders = order_frame[order_frame[FORECAST_ORIGIN] == origin]
+        orders = {
+            str(row[UNIQUE_ID]): float(row["order_qty"]) for _, row in origin_orders.iterrows()
+        }
+        window = resolved[resolved[FORECAST_ORIGIN] == origin]
+        actual_demand: dict[str, float] = {}
+        for uid, group in window.groupby(UNIQUE_ID, sort=False):
+            values = group[Y]
+            actual_demand[str(uid)] = 0.0 if values.isna().any() else float(values.sum())
+        simulator.step(period, orders, actual_demand)
+
+    return simulator.to_dataframe()
+
+
 def run(
     config_path: str | Path,
     *,
@@ -206,8 +267,10 @@ def run_config(
     ):
         result.order_ledger.to_parquet(config.output.order_ledger_path)
     if result.order_ledger is not None:
+        tally = _tally_order_cost(bundle, result, config)
+        cost_frame = tally if tally is not None else result.order_ledger.to_df()
         _record_order_cost_metric(
-            result.order_ledger.to_df(),
+            cost_frame,
             dataset=config.dataset.adapter,
             currency=_metric_currency(config),
         )

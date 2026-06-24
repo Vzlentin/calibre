@@ -1,0 +1,70 @@
+config_schema: "1.0"
+dataset:
+  adapter: m5
+  path: tests/fixtures/m5
+  phase: evaluation
+  # Cost + inventory kwargs ride the dataset block (the `options{}` seam): they
+  # drive M5DatasetAdapter to build a non-zero CostStruct and seed an initial
+  # ProductState per series so the post-run order-cost tally can run. lead_time
+  # >= 1 is required (the seeded pipeline must accept orders) and must match the
+  # ordering block's lead_time and the tally's LostSalesRule depth.
+  underage_cost: 1.0
+  overage_cost: 0.2
+  holding_cost: 0.2
+  shortage_cost: 1.0
+  initial_inventory: 5.0
+  lead_time: 1
+  review_period: 1
+tasks:
+  - model: SeasonalNaive
+    horizon: 2
+    config:
+      backend: statsforecast
+      season_length: 2
+origins:
+  # Multi-origin daily range so earlier protection windows resolve at later
+  # origins: each early origin's h=1,2 windows target ds <= a later origin, so
+  # realized demand (y) resolves to real, varying per-series values. A single
+  # origin would leave every forecast row unresolved (y all-NaN) and the tally
+  # would see zero demand everywhere. The fixture history runs to 2011-02-13.
+  start: 2011-01-31
+  end: 2011-02-10
+  freq: D
+order_conformal:
+  # One-sided cumulative-risk decision bound over the 2-step protection window;
+  # coverage 0.5 keeps the higher-quantile calibrator ready on the tiny fixture
+  # (smoke, not a coverage gate). buffer_max 0.0 mirrors the VN2 winner clamp.
+  coverage: 0.5
+  protection_period: 2
+  calibration_window: 4
+  partition: series
+  buffer_max: 0.0
+ordering:
+  # R,S policy keyed on the M5 composite unique_id (item_id_store_id). coverage
+  # is omitted -> back-filled from order_conformal.coverage (the no-drift
+  # guarantee). lead_time + review_period == 2 == order_conformal.protection_period.
+  policy: rs
+  params:
+    - unique_id: HOBBIES_1_001_CA_1
+      inventory_position: 5.0
+      lead_time: 1
+      review_period: 1
+    - unique_id: HOBBIES_1_001_CA_2
+      inventory_position: 5.0
+      lead_time: 1
+      review_period: 1
+    - unique_id: HOBBIES_2_001_TX_1
+      inventory_position: 5.0
+      lead_time: 1
+      review_period: 1
+    - unique_id: HOBBIES_2_001_TX_2
+      inventory_position: 5.0
+      lead_time: 1
+      review_period: 1
+output:
+  ledger_path: results/m5/smoke-ordering/forecast-ledger.parquet
+  order_ledger_path: results/m5/smoke-ordering/order-ledger.parquet
+  streaming: false
+execution:
+  backend: local
+  seed: 42

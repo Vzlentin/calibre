@@ -22,6 +22,7 @@ _FULL_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "full.yaml"
 _FULL_WLS_STRUCT_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "full-wls-struct.yaml"
 _FULL_CUMULATIVE_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "full-cumulative.yaml"
 _SMOKE_CUMULATIVE_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "smoke-cumulative.yaml"
+_SMOKE_ORDERING_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "smoke-ordering.yaml"
 _M5_README = _REPO_ROOT / "benchmarks" / "m5" / "README.md"
 
 
@@ -159,6 +160,36 @@ def test_m5_full_cumulative_config_selects_engine_internal_cumulative_mode() -> 
     assert isinstance(runtime_config, SymmetricIntervalConfig)
     assert runtime_config.mode == "cumulative"
     assert runtime_config.protection_period == 28
+
+
+def test_m5_smoke_ordering_config_parses_with_backfilled_coverage() -> None:
+    """The ordering-enabled smoke config validates and back-fills coverage.
+
+    Pins U4: cost+inventory kwargs ride the dataset block, ``ordering.coverage``
+    is omitted and inherited from ``order_conformal.coverage`` (no drift), the
+    task horizon equals the protection period, and every R,S param carries a
+    positive lead_time.
+    """
+    config = load_config(_SMOKE_ORDERING_CONFIG)
+
+    assert config.dataset.adapter == "m5"
+    assert config.dataset.path == "tests/fixtures/m5"
+    assert config.dataset.options["lead_time"] == 1
+    assert config.dataset.options["holding_cost"] == 0.2
+
+    assert config.order_conformal is not None
+    assert config.order_conformal.protection_period == 2
+    assert config.tasks[0].horizon == config.order_conformal.protection_period
+
+    assert config.ordering is not None
+    assert config.ordering.policy == "rs"
+    assert config.ordering.coverage == config.order_conformal.coverage
+    assert config.ordering.params is not None
+    for param in config.ordering.params:
+        assert param["lead_time"] >= 1
+
+    assert config.reconciliation is None
+    assert config.output.order_ledger_path == "results/m5/smoke-ordering/order-ledger.parquet"
 
 
 def test_m5_smoke_cumulative_config_parses_as_source_cli_config() -> None:
