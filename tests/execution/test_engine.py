@@ -431,6 +431,81 @@ def test_cumulative_window_scores_exactly_once_across_resolve_phases():
     assert len(score_history[partition]) == 3
 
 
+def _cumulative_risk_config(protection_period=3):
+    """One-sided cumulative-risk config matching the split-window fixture.
+
+    Pairs with :func:`_cumulative_split_window_setup`: the runtime calibrates
+    signed cumulative residuals over the same ``protection_period``-horizon
+    windows, against the ``y_hat`` base SeasonalNaive emits.
+    """
+    return CumulativeConformalRiskConfig(
+        coverage=0.5,
+        protection_period=protection_period,
+        calibration_window=10,
+        weight_decay=None,
+    )
+
+
+def test_cumulative_split_window_deferral_fires_for_one_sided_runtime():
+    """The engine defers split windows for the one-sided runtime too.
+
+    The one-sided ``CumulativeRiskRuntime`` only skips incomplete windows — it
+    has no deferral of its own. When a window's horizons resolve across origins,
+    the engine must hold it open until its terminal horizon lands, exactly as it
+    does for the two-sided runtime, or no residual is ever recorded. This is RED
+    when the engine gates deferral on the concrete ``SymmetricIntervalRuntime``
+    class (one-sided runtime falls through to no-deferral, ``n_scores == 0``) and
+    GREEN once the gate reads the ``protection_period`` capability.
+    """
+    task, actuals, origins, _config = _cumulative_split_window_setup()
+    runtime = CumulativeRiskRuntime(_cumulative_risk_config())
+    engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
+
+    result = engine.execute(partition_tasks([task]), actuals, origins)
+
+    # The calibrator recorded at least one cumulative residual.
+    assert runtime.get_diagnostics()["n_scores"] > 0
+
+    # The window's terminal horizon (h == protection_period) carries a real
+    # nonconformity score in the ledger, not NaN.
+    df = result.ledger.to_df()
+    terminal = df[(df[H] == 3) & df[Y].notna()]
+    assert not terminal.empty
+    assert terminal[NONCONFORMITY_SCORE].notna().any()
+
+
+def test_cumulative_split_window_one_sided_scores_exactly_once():
+    """Each completed one-sided window scores once across ResolveOpen/Commit.
+
+    Mirrors the two-sided exactly-once contract for the one-sided runtime: across
+    origins dates[7..11], exactly three windows complete within the run, and the
+    deferral must hand each to ``observe`` once — never double-counting across the
+    twice-per-origin ``_resolve_due`` passes.
+    """
+    task, actuals, origins, _config = _cumulative_split_window_setup()
+    runtime = CumulativeRiskRuntime(_cumulative_risk_config())
+    engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
+
+    engine.execute(partition_tasks([task]), actuals, origins)
+
+    assert runtime.get_diagnostics()["n_scores"] == 3
+
+
+def test_cumulative_one_sided_protection_period_exceeding_horizon_raises():
+    """One-sided protection_period > horizon fails loudly at preflight.
+
+    A window can never accumulate ``protection_period`` horizons, so the deferral
+    would keep every in-window row pending forever. The engine must fail loudly
+    for the one-sided runtime too, not fall through and hang.
+    """
+    task, actuals, origins, _config = _cumulative_split_window_setup()
+    runtime = CumulativeRiskRuntime(_cumulative_risk_config(protection_period=task.horizon + 1))
+    engine = BackendEngine(conformal=ConformalOptions(runtime=runtime))
+
+    with pytest.raises(ValueError, match="exceeds available horizon"):
+        engine.execute(partition_tasks([task]), actuals, origins)
+
+
 def test_cumulative_high_horizon_rows_resolve_per_origin():
     """U1 h > protection_period: out-of-window horizons never defer.
 
