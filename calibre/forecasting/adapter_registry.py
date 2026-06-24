@@ -42,6 +42,10 @@ def get_adapter_cls(model_config: dict) -> type[ModelAdapter]:
         )
     if backend not in _ADAPTERS:
         raise ValueError(f"Unknown backend: {backend!r}. Available: {_available_backends()}")
+    if model_config.get("censoring_fit") and backend != "mlforecast":
+        raise ValueError(
+            f"censoring_fit is only supported by the mlforecast backend, not {backend!r}."
+        )
     if backend not in _REGISTRY:
         module_name, class_name = _ADAPTERS[backend]
         module = importlib.import_module(module_name)

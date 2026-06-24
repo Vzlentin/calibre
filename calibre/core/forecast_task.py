@@ -33,6 +33,7 @@ class ForecastTask:
     forecast_origin: pd.Timestamp | None = None
     future_x: pd.DataFrame | None = None
     task_group: str | None = None
+    censoring: pd.DataFrame | None = None
 
     def __post_init__(self) -> None:
         if UNIQUE_ID not in self.history.columns:

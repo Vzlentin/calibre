@@ -25,6 +25,7 @@ from calibre.forecasting.adapter_base import (
     build_fitted_values_frame,
     build_predict_frame,
 )
+from calibre.forecasting.features import add_stockout_features
 from calibre.forecasting.native_persistence import load_dir_from_bytes, save_dir_to_bytes
 
 _RESERVED_KEYS = frozenset(
@@ -40,6 +41,7 @@ _RESERVED_KEYS = frozenset(
         "quantiles",
         "strategy",
         "static_features",
+        "censoring_fit",
     }
 )
 
@@ -192,7 +194,25 @@ class MLForecastAdapter(ModelAdapter):
             if (val := self._config.get(opt_key)) is not None:
                 mlf_kwargs[opt_key] = _resolve_mlforecast_option(val)
 
-        mlf_df = task.history[[UNIQUE_ID, DS, Y, *exogenous_columns(task.history)]].copy()
+        # Derive exog from the pre-imputation history so the in_stock flag added
+        # by add_stockout_features never leaks in as a regressor.
+        exog = exogenous_columns(task.history)
+        if task.model_config.get("censoring_fit"):
+            # Fail loud rather than silently train on censored demand: the
+            # engine populates task.censoring on the order/decision path
+            # (Elevation S6·B, #261); until then enabling the gate without
+            # censoring data is a wiring error, not a quiet fallback.
+            if task.censoring is None:
+                raise ValueError(
+                    "censoring_fit is enabled but task.censoring is None; "
+                    "censoring data must reach the fit to impute demand."
+                )
+            imputed = add_stockout_features(task.history, task.censoring)
+            mlf_df = imputed[[UNIQUE_ID, DS, "y_uncensored", *exog]].rename(
+                columns={"y_uncensored": Y}
+            )
+        else:
+            mlf_df = task.history[[UNIQUE_ID, DS, Y, *exog]].copy()
         mlf_df[Y] = mlf_df[Y].astype("float32")
 
         self._mlf = mlforecast_cls(**mlf_kwargs)
