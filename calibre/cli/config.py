@@ -244,6 +244,61 @@ class ExecutionConfig(_Section):
         )
 
 
+_HPO_SPEC_TYPES = frozenset({"categorical", "int", "float"})
+
+# Search-space keys that name a derived or deployment-decision number rather than
+# a sampled hyperparameter. The objective ``tau`` is the newsvendor cost fractile
+# (derived from the dataset cost struct, overridable only via ``cost_fractile``),
+# and ``coverage`` is the orthogonal CRC decision level on ``order_conformal`` —
+# neither is a search dimension, so a key targeting them is a config defect.
+_HPO_FORBIDDEN_SEARCH_KEYS = frozenset(
+    {"coverage", "order_conformal.coverage", "cost_fractile", "tau"}
+)
+
+
+class HpoConfig(_Section):
+    """Hyperparameter-search block consumed only by ``calibre run --tune``.
+
+    Present-but-unused on a plain run (validated, never executed). ``budget``
+    becomes the study's trial count and ``search_space`` is the declarative
+    spec :func:`calibre.tuning.suggest_from_spec` samples each trial. The
+    objective cost fractile is derived from the dataset cost struct, overridable
+    only via ``cost_fractile`` — it is never a ``search_space`` dimension.
+    """
+
+    budget: int = Field(..., ge=1)
+    seed: int | None = None
+    search_space: dict[str, dict[str, Any]]
+    cost_fractile: float | None = Field(default=None, gt=0.0, lt=1.0)
+    asha_grace_period: int = Field(default=1, ge=1)
+
+    @field_validator("search_space")
+    @classmethod
+    def _validate_search_space(cls, value: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        # Defence-in-depth: ``tau`` is un-leakable by construction (sourced from
+        # cost_fractile/critical_ratio, never read out of search_space), but a
+        # key named for the fractile or the orthogonal decision coverage signals
+        # a misconception, so reject it loud. This is a flat name-set check — no
+        # alias resolution; the dotted ``order_conformal.coverage`` entry only
+        # bites if dotted-path keys are ever introduced.
+        forbidden = sorted(set(value) & _HPO_FORBIDDEN_SEARCH_KEYS)
+        if forbidden:
+            raise ValueError(
+                f"hpo.search_space may not target {forbidden[0]!r}: the objective "
+                "cost fractile is derived from the dataset cost struct (override via "
+                "hpo.cost_fractile) and order_conformal.coverage is the orthogonal "
+                "decision level — neither is a search dimension"
+            )
+        for name, spec in value.items():
+            kind = spec.get("type")
+            if kind not in _HPO_SPEC_TYPES:
+                raise ValueError(
+                    f"hpo.search_space[{name!r}].type must be one of "
+                    f"{sorted(_HPO_SPEC_TYPES)}, got {kind!r}"
+                )
+        return value
+
+
 class BackendConfig(BaseModel):
     """Top-level backtest config validated from a YAML mapping."""
 
@@ -258,15 +313,9 @@ class BackendConfig(BaseModel):
     order_conformal: OrderConformalConfig | None = None
     reconciliation: ReconciliationConfig | None = None
     ordering: OrderingConfig | None = None
+    hpo: HpoConfig | None = None
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     source_path: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_hpo(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "hpo" in data:
-            raise ValueError("config.hpo is not supported until CLI tuning is wired")
-        return data
 
     @model_validator(mode="before")
     @classmethod
