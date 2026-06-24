@@ -374,6 +374,60 @@ def test_settle_loop_rs_with_quantile_parses() -> None:
     assert config.ordering.quantile == 0.8
 
 
+def test_settle_loop_rs_half_set_protection_window_rejected_at_parse_time() -> None:
+    """A loop-path rs config with only one of lead_time/review_period is rejected.
+
+    The loop builds the protection window from BOTH params; a half-set pair is
+    unsatisfiable (case 2 sets neither, the loop path needs both) and would raise
+    deep in ``_run_settle_loop``. Reject it at parse time instead.
+    """
+    with pytest.raises(ValidationError, match="needs BOTH ordering.lead_time"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                order_conformal={"coverage": 0.5, "protection_period": 2},
+                ordering={"policy": "rs", "lead_time": 1},
+            )
+        )
+
+
+def test_settle_loop_protection_window_mismatch_rejected_at_parse_time() -> None:
+    """lead_time + review_period must equal order_conformal.protection_period.
+
+    The (R,S) rule reads the cumulative bound off the terminal protection-window
+    row, which the order-conformal runtime emits only at its own
+    ``protection_period``. A misaligned pair parses but raises mid-walk
+    ("decision bound is NaN at terminal h") — couple them at parse time.
+    """
+    with pytest.raises(ValidationError, match="must.*equal order_conformal.protection_period"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                order_conformal={"coverage": 0.5, "protection_period": 2},
+                ordering={"policy": "rs", "lead_time": 1, "review_period": 2},
+            )
+        )
+
+
+def test_settle_loop_horizon_below_protection_window_rejected_at_parse_time() -> None:
+    """The task horizon must cover the protection window on the loop path.
+
+    With ``horizon < protection_period`` the (R,S) rule raises ("Protection period
+    exceeds available horizon") or the CRC never calibrates. Reject at parse time.
+    """
+    with pytest.raises(ValidationError, match="must cover the protection window"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                tasks=[
+                    {"model": "SeasonalNaive", "horizon": 2, "config": {"backend": "statsforecast"}}
+                ],
+                order_conformal={"coverage": 0.5, "protection_period": 3},
+                ordering={"policy": "rs", "lead_time": 1, "review_period": 2},
+            )
+        )
+
+
 def test_execution_chunk_size_plumbs_into_execution_options() -> None:
     config = load_config_from_mapping(_config(execution={"backend": "local", "chunk_size": 32}))
 

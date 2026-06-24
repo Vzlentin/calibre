@@ -364,6 +364,57 @@ def test_settle_warmup_origins_strictly_precede_first_decision_origin() -> None:
     assert any(origin >= first_decision_origin for origin in full_history_origins)
 
 
+def test_settle_policy_quantile_mode_reads_q_column_not_conformal_bound() -> None:
+    """A quantile-mode settle config orders off the q_<p> column, not the bound.
+
+    Regression for the settle loop building ``RsConfig`` without
+    ``quantile=ordering.quantile``: a quantile-only loop config (no
+    order_conformal, so no hi_<coverage> columns) would otherwise take the
+    interval branch and crash on the missing columns. Mirror the loop policy's
+    construction — RsConfig with the quantile threaded, then the shared
+    ceil-then-clamp rule — on a frame carrying only a q-column.
+    """
+    from calibre.core.forecast_frame import interval_column_names
+    from calibre.ordering.policy_config import orders_from_policy_result
+
+    quantile = 0.8
+    qcol = quantile_column(quantile)
+    offset = pd.tseries.frequencies.to_offset(_FREQ)
+    origin = _ORIGINS[0]
+    rows = []
+    for uid, base in (("A", 5.0), ("B", 3.0)):
+        for h in range(1, _PROTECTION + 1):
+            rows.append(
+                {
+                    UNIQUE_ID: uid,
+                    DS: origin + h * offset,
+                    Y: float("nan"),
+                    Y_HAT: base,
+                    qcol: base + 1.0,
+                    H: h,
+                    FORECAST_ORIGIN: origin,
+                    MODEL_NAME: "stub",
+                }
+            )
+    frame = pd.DataFrame(rows)
+    # No conformal interval columns exist on a quantile-only loop frame.
+    lower_col, upper_col = interval_column_names(_COVERAGE)
+    assert lower_col not in frame.columns and upper_col not in frame.columns
+
+    simulator = _seeded_simulator()
+    order_config = RsConfig(
+        params=build_rs_params(simulator, _LEAD_TIME, _REVIEW_PERIOD),
+        coverage=_COVERAGE,
+        quantile=quantile,
+    )
+    order_result = apply_order_policy(frame, order_config)
+    orders = orders_from_policy_result(order_result, list(_SERIES))
+
+    # A,B each seed inventory_position 10; q-target sums (base+1) over the 2-step
+    # protection window: A 6+6=12 -> order ceil(12-10)=2; B 4+4=8 -> 8-10<0 -> 0.
+    assert orders == {"A": 2.0, "B": 0.0}
+
+
 def test_non_ordering_run_is_single_pass_with_no_simulator(tmp_path) -> None:
     """A non-ordering `run_config` takes the single pass: no settle, no cost gauge.
 

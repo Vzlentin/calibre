@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import tempfile
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -66,6 +65,7 @@ from calibre.ordering.policy_config import (
     apply_order_policy,
     build_rs_params,
     derive_warmup_origins,
+    orders_from_policy_result,
 )
 
 __all__ = [
@@ -287,28 +287,6 @@ def _scale_base_forecasts(frame: pd.DataFrame, scale: float) -> pd.DataFrame:
     for col in [Y_HAT, *(c for c in result.columns if is_quantile_column(c))]:
         result[col] = result[col].astype(float) * float(scale)
     return result
-
-
-def orders_from_policy_result(
-    order_result: pd.DataFrame,
-    state_keys: Mapping[str, object],
-    reorder_point_scale: float | None = None,
-) -> dict[str, float]:
-    """Extract per-series order quantities from a policy result frame."""
-    adjusted = order_result.copy()
-    if reorder_point_scale is not None:
-        reorder_point = adjusted["target_stock_level"].astype(float) * float(reorder_point_scale)
-        inventory_position = adjusted["inventory_position"].astype(float)
-        adjusted.loc[inventory_position >= reorder_point, "order_qty"] = 0.0
-
-    orders: dict[str, float] = dict.fromkeys(state_keys, 0.0)
-    for uid, qty in zip(
-        adjusted[UNIQUE_ID].astype(str),
-        adjusted["order_qty"].astype(float),
-        strict=False,
-    ):
-        orders[uid] = float(max(math.ceil(qty), 0))
-    return orders
 
 
 def _actuals_for_replay_round(

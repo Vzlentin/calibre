@@ -87,6 +87,27 @@ def test_m5_ordering_run_decision_settle_finite_cost(tmp_path: Path) -> None:
     assert total_cost > 0.0
 
 
+def test_m5_settle_loop_rejects_history_short_of_drain_window(tmp_path: Path) -> None:
+    """The settle loop rejects a config whose drain window runs past history end.
+
+    The lead-time drain resolves demand for ``lead_time`` weeks past the last
+    decision origin. With the origin range stretched so those drain weeks fall
+    after the fixture history end (2011-02-13), the loop would settle them at the
+    all-zero default and undercount shortage — so ``_run_settle_loop`` raises
+    instead of silently producing a too-low cost.
+    """
+    import pandas as pd
+    import pytest
+
+    config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
+    # Extend the origin range so the lead-time drain reaches past 2011-02-13.
+    stretched = config.origins.model_copy(update={"end": pd.Timestamp("2011-02-13")})
+    config = config.model_copy(update={"origins": stretched})
+
+    with pytest.raises(ValueError, match="needs realised demand through"):
+        run_config(config)
+
+
 def test_m5_run_without_inventory_skips_settle_loop(tmp_path: Path) -> None:
     """Non-regression: an M5 run with no cost/inventory kwargs is single-pass.
 

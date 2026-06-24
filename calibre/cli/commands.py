@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -52,6 +51,7 @@ from calibre.ordering.policy_config import (
     apply_order_policy,
     build_rs_params,
     derive_warmup_origins,
+    orders_from_policy_result,
 )
 from calibre.ordering.simulation.costs import LinearCostModel
 from calibre.ordering.simulation.rules import LostSalesRule
@@ -219,6 +219,22 @@ def _run_settle_loop(
     history = bundle.history
     state_keys: list[str] = list(bundle.inventory)
 
+    # The loop drains ``lead_time`` zero-order delivery rounds past the last
+    # decision round, so the final demand week ``_actuals_at`` resolves targets
+    # ``origins[0] + (n_rounds + lead_time)`` steps. Demand for those weeks must
+    # come from real history rows: a target past the history end resolves to the
+    # all-zero default, silently undercharging the shortage that real future
+    # demand would have caused. Require history to cover the full drain window.
+    last_demand_week = pd.Timestamp(origins[0]) + (len(origins) + lead_time) * freq_offset
+    history_end = pd.Timestamp(history[DS].max())
+    if history_end < last_demand_week:
+        raise ValueError(
+            f"settle-loop history ends at {history_end.date()} but the {lead_time}-round "
+            f"lead-time drain past the last decision origin needs realised demand through "
+            f"{last_demand_week.date()}; weeks past history end would settle at zero demand "
+            "and undercount shortage. Extend the dataset history or shrink the origin range."
+        )
+
     simulator = _settle_simulator(bundle)
 
     engine = BackendEngine(
@@ -257,7 +273,9 @@ def _run_settle_loop(
         # Realised demand for the t-th demand week, anchored one step past the
         # first decision origin (origins are consecutive at ``freq``): round r's
         # demand resolves at origins[0] + r steps. A uid with no row that week
-        # settles at zero demand.
+        # settles at zero demand. A present-but-NaN ``y`` cannot occur here: every
+        # run loads through _load_dataset -> validate_dataset_bundle, which rejects
+        # null history.y before the settle loop runs.
         target = pd.Timestamp(origins[0]) + week * freq_offset
         rows = history[history[DS] == target]
         demand = dict(zip(rows[UNIQUE_ID].astype(str), rows[Y].astype(float), strict=False))
@@ -266,22 +284,19 @@ def _run_settle_loop(
     def policy(frame: pd.DataFrame) -> dict[str, float]:
         if frame.empty:
             return dict.fromkeys(state_keys, 0.0)
+        # Thread ordering.quantile so quantile-mode loop configs read the q_<p>
+        # column instead of the conformal upper bound. Omitting it sends a
+        # quantile-only config (no order_conformal) into the interval branch,
+        # which crashes on the missing hi_<coverage> columns on round 1.
         order_config = RsConfig(
             params=build_rs_params(simulator, lead_time, review_period),
             coverage=coverage,
+            quantile=ordering.quantile,
         )
         order_result = apply_order_policy(frame, order_config)
-        orders = dict.fromkeys(state_keys, 0.0)
-        for uid, qty in zip(
-            order_result[UNIQUE_ID].astype(str),
-            order_result["order_qty"].astype(float),
-            strict=False,
-        ):
-            # Integer order units, matching the VN2 benchmark's
-            # orders_from_policy_result: ceil so a fractional order-up-to gap
-            # never under-orders, then clamp at zero.
-            orders[uid] = float(max(math.ceil(qty), 0))
-        return orders
+        # Integer order units (ceil then clamp at zero), shared with the VN2
+        # benchmark replay/seasonal paths via the single hoisted rule.
+        return orders_from_policy_result(order_result, state_keys)
 
     if order_runtime is not None:
         _warmup_settle_runtime(
@@ -453,6 +468,17 @@ def run_config(
         )
         if not config.output.streaming and config.output.ledger_path is not None:
             result.ledger.to_parquet(config.output.ledger_path)
+        if config.output.order_ledger_path is not None:
+            # The settle loop owns the cost on the simulator (recorded once on the
+            # order-cost gauge) and produces no per-origin order ledger, so a
+            # configured order_ledger_path has nothing to write. Warn instead of
+            # silently dropping it — the single-pass order path (case 2) does emit
+            # one, so a carried-over config would otherwise expect a file here.
+            logger.warning(
+                "order_ledger_path is set but the settle loop produces no order ledger; "
+                "the order cost is recorded on the calibre_order_cost gauge instead",
+                extra={"order_ledger_path": config.output.order_ledger_path},
+            )
         if config.output.streaming:
             logger.info("run complete", extra={"streaming": True})
         else:

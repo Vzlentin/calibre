@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, assert_never
 
 import pandas as pd
 
-from calibre.core.forecast_frame import DS
+from calibre.core.forecast_frame import DS, UNIQUE_ID
 from calibre.core.order_types import RsPolicyParameters
 from calibre.ordering.newsvendor import apply_newsvendor_policy
 from calibre.ordering.periodic_review import apply_rs_policy
@@ -155,6 +156,44 @@ def apply_order_policy(frame: pd.DataFrame, config: OrderPolicy) -> pd.DataFrame
     if isinstance(config, NewsvendorConfig):
         return apply_newsvendor_policy(frame, config.params, config.coverage, config.period)
     assert_never(config)
+
+
+def orders_from_policy_result(
+    order_result: pd.DataFrame,
+    state_keys: Mapping[str, Any] | list[str],
+    reorder_point_scale: float | None = None,
+) -> dict[str, float]:
+    """Extract per-series integer order quantities from a policy result frame.
+
+    Single owner of the order-units rule shared by the engine settle loop and the
+    VN2 benchmark replay/seasonal paths: clamp each ``order_qty`` to whole units
+    via ``ceil`` (so a fractional order-up-to gap never under-orders) then floor at
+    zero. Series with no row in ``order_result`` default to a zero order.
+
+    Args:
+        order_result: A policy result frame carrying ``unique_id``/``order_qty``
+            (and ``target_stock_level``/``inventory_position`` when scaling).
+        state_keys: The series whose orders to return; every key gets an entry.
+        reorder_point_scale: Optional (R,s,S)-style reorder-point gate — zero out
+            an order when the inventory position already sits at or above
+            ``target_stock_level * reorder_point_scale``.
+    """
+    orders: dict[str, float] = dict.fromkeys(state_keys, 0.0)
+    if order_result.empty:
+        return orders
+    adjusted = order_result
+    if reorder_point_scale is not None:
+        adjusted = order_result.copy()
+        reorder_point = adjusted["target_stock_level"].astype(float) * float(reorder_point_scale)
+        inventory_position = adjusted["inventory_position"].astype(float)
+        adjusted.loc[inventory_position >= reorder_point, "order_qty"] = 0.0
+    for uid, qty in zip(
+        adjusted[UNIQUE_ID].astype(str),
+        adjusted["order_qty"].astype(float),
+        strict=False,
+    ):
+        orders[uid] = float(max(math.ceil(qty), 0))
+    return orders
 
 
 def build_rs_params(

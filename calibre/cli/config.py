@@ -491,6 +491,59 @@ class BackendConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _settle_loop_rs_needs_complete_protection_window(self) -> BackendConfig:
+        # The settle loop is signalled by the loop-only lead_time/review_period
+        # params, and the run-time loop raises deep if only one is set. A partial
+        # pair (one present, one absent) is unsatisfiable on either path: case 2
+        # (single-pass order ledger) sets neither, the loop path needs both. Reject
+        # the half-set pair at parse time instead of failing inside _run_settle_loop.
+        if self.ordering is not None and self.ordering.policy == "rs":
+            has_lead = self.ordering.lead_time is not None
+            has_review = self.ordering.review_period is not None
+            if has_lead != has_review:
+                raise ValueError(
+                    "the settle-loop (R,S) policy needs BOTH ordering.lead_time and "
+                    "ordering.review_period to build the protection window; got only "
+                    f"{'lead_time' if has_lead else 'review_period'}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _settle_loop_protection_window_couples_to_order_conformal(self) -> BackendConfig:
+        # On the loop path with a conformal decision bound, the (R,S) rule reads the
+        # cumulative bound off the terminal row at h = lead_time + review_period, but
+        # the order-conformal runtime emits a non-NaN cumulative bound only at its own
+        # protection_period. A mismatched pair parses but raises mid-walk ("decision
+        # bound is NaN at terminal h"); a horizon shorter than the protection window
+        # raises ("Protection period exceeds available horizon") or never calibrates
+        # the CRC. Couple all three at parse time.
+        if (
+            self.ordering is not None
+            and self.ordering.policy == "rs"
+            and self.ordering.lead_time is not None
+            and self.ordering.review_period is not None
+            and self.order_conformal is not None
+        ):
+            protection_window = self.ordering.lead_time + self.ordering.review_period
+            if protection_window != self.order_conformal.protection_period:
+                raise ValueError(
+                    f"ordering.lead_time + ordering.review_period ({protection_window}) must "
+                    f"equal order_conformal.protection_period "
+                    f"({self.order_conformal.protection_period}): the (R,S) rule reads the "
+                    "cumulative decision bound off the terminal protection-window row, which "
+                    "the order-conformal runtime emits only at its own protection_period"
+                )
+            horizon = self.tasks[0].horizon
+            if horizon < protection_window:
+                raise ValueError(
+                    f"task horizon ({horizon}) must cover the protection window "
+                    f"({protection_window}): the (R,S) rule needs horizons 1..{protection_window} "
+                    "present, and the CRC warmup only calibrates when every protection-period "
+                    "horizon resolves"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _coherent_spread_requires_no_reconciliation(self) -> BackendConfig:
         if self.conformal is None or self.conformal.spread != "coherent_draws":
             return self
