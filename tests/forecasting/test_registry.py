@@ -61,6 +61,21 @@ def test_resolve_missing_backend_raises():
         resolve_adapter({"model": "SeasonalNaive"})
 
 
+def test_censoring_fit_on_non_mlforecast_backend_raises():
+    # The censoring-aware fit gate is implemented only by the mlforecast adapter;
+    # enabling it on another backend fails fast rather than crashing the estimator.
+    with pytest.raises(ValueError, match="censoring_fit is only supported by the mlforecast"):
+        resolve_adapter(
+            {"backend": "statsforecast", "model": "SeasonalNaive", "censoring_fit": True}
+        )
+
+
+def test_censoring_fit_on_mlforecast_backend_is_allowed():
+    resolve_adapter(
+        {"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "censoring_fit": True}
+    )
+
+
 def test_get_scope_defaults_to_local():
     assert get_scope({"backend": "mlforecast", "model": "X"}) == "local"
 
