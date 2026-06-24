@@ -140,7 +140,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
         # falls through to the unchanged lazy compute byte-identically.
         ds_values = _evaluation_window_ds(origins, config.origins.freq, horizon)
         actuals.precompute(hierarchy_index.node_labels, ds_values)
-        tasks = build_tasks(bundle.history, model_configs, horizon)
+        tasks = build_tasks(bundle.history, model_configs, horizon, censoring=bundle.censoring)
         hierarchy_partitions = len(hierarchy_index.node_labels) * horizon * len(config.tasks)
     else:
         if hierarchy_index is not None:
@@ -165,7 +165,7 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
             enforce_hierarchical_expansion_memory_limit(expansion)
             hierarchy_partitions = expansion.forecast_partitions
         actuals = build_node_history(bundle.history, hierarchy_index)
-        tasks = build_tasks(actuals, model_configs, horizon)
+        tasks = build_tasks(actuals, model_configs, horizon, censoring=bundle.censoring)
     conformal_partition_estimate = _enforce_conformal_partition_limit(
         config,
         tasks,

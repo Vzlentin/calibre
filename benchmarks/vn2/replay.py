@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import tempfile
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -57,29 +56,31 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.io import join_uri
-from calibre.core.order_types import RsPolicyParameters
 from calibre.execution import actuals_lookup_from_cache, build_actuals_lookup, observe_pending
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import partition_tasks
-from calibre.ordering.policy_config import RsConfig, apply_order_policy
+from calibre.ordering.policy_config import (
+    RsConfig,
+    apply_order_policy,
+    build_rs_params,
+    derive_warmup_origins,
+    orders_from_policy_result,
+)
 
-
-def build_rs_params(
-    simulator: VN2Simulator,
-    lead_time: int,
-    review_period: int,
-) -> list[RsPolicyParameters]:
-    """Build per-series (R,S) policy params from the simulator's state."""
-    return [
-        RsPolicyParameters(
-            unique_id=uid,
-            inventory_position=s.end_inventory + s.in_transit_w1 + s.in_transit_w2,
-            lead_time=lead_time,
-            review_period=review_period,
-        )
-        for uid, s in simulator.states.items()
-    ]
+__all__ = [
+    "build_rs_params",
+    "build_replay_cache",
+    "replay_cached_cost",
+    "round_actuals",
+    "run_order_conformal_warmup",
+    "summary_from_simulator",
+    "orders_from_policy_result",
+    "log_cached_replay_run",
+    "CachedRound",
+    "VN2ReplayCache",
+    "ReplayResult",
+]
 
 
 def round_actuals(
@@ -175,10 +176,7 @@ def order_conformal_warmup_frames(
         protection_period=horizon,
         cumulative_target=cumulative_target,
     )
-    all_dates = sorted(history[DS].unique())
-    if len(all_dates) < warmup_origins + horizon:
-        warmup_origins = max(1, len(all_dates) - horizon)
-    origin_dates = [pd.Timestamp(d) for d in all_dates[-(warmup_origins + horizon) : -horizon]]
+    origin_dates = derive_warmup_origins(history, horizon, warmup_origins)
     if not origin_dates:
         return []
 
@@ -289,28 +287,6 @@ def _scale_base_forecasts(frame: pd.DataFrame, scale: float) -> pd.DataFrame:
     for col in [Y_HAT, *(c for c in result.columns if is_quantile_column(c))]:
         result[col] = result[col].astype(float) * float(scale)
     return result
-
-
-def orders_from_policy_result(
-    order_result: pd.DataFrame,
-    state_keys: Mapping[str, object],
-    reorder_point_scale: float | None = None,
-) -> dict[str, float]:
-    """Extract per-series order quantities from a policy result frame."""
-    adjusted = order_result.copy()
-    if reorder_point_scale is not None:
-        reorder_point = adjusted["target_stock_level"].astype(float) * float(reorder_point_scale)
-        inventory_position = adjusted["inventory_position"].astype(float)
-        adjusted.loc[inventory_position >= reorder_point, "order_qty"] = 0.0
-
-    orders: dict[str, float] = dict.fromkeys(state_keys, 0.0)
-    for uid, qty in zip(
-        adjusted[UNIQUE_ID].astype(str),
-        adjusted["order_qty"].astype(float),
-        strict=False,
-    ):
-        orders[uid] = float(max(math.ceil(qty), 0))
-    return orders
 
 
 def _actuals_for_replay_round(

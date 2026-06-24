@@ -29,6 +29,7 @@ from calibre.ordering.policy_config import (
     RsConfig,
     RssConfig,
     apply_order_policy,
+    orders_from_policy_result,
 )
 
 
@@ -292,3 +293,55 @@ class TestDispatchErrors:
 
         with pytest.raises(AssertionError, match="Expected code to be unreachable"):
             apply_order_policy(frame, object())  # type: ignore[arg-type]
+
+
+class TestOrdersFromPolicyResult:
+    """The single hoisted ceil-then-clamp order-units rule.
+
+    Shared by the engine settle loop and the VN2 benchmark replay/seasonal
+    paths; a drift in this rule would move the ``total_cost=4992.20`` baseline.
+    """
+
+    def _result(self, rows: list[dict[str, object]]) -> pd.DataFrame:
+        return pd.DataFrame(rows)
+
+    def test_ceils_fractional_orders_and_clamps_negatives(self) -> None:
+        result = self._result(
+            [
+                {UNIQUE_ID: "A", "order_qty": 3.2},
+                {UNIQUE_ID: "B", "order_qty": -1.0},
+                {UNIQUE_ID: "C", "order_qty": 5.0},
+            ]
+        )
+        orders = orders_from_policy_result(result, ["A", "B", "C"])
+        assert orders == {"A": 4.0, "B": 0.0, "C": 5.0}
+
+    def test_missing_uid_defaults_to_zero_order(self) -> None:
+        result = self._result([{UNIQUE_ID: "A", "order_qty": 2.5}])
+        orders = orders_from_policy_result(result, ["A", "B"])
+        assert orders == {"A": 3.0, "B": 0.0}
+
+    def test_empty_result_yields_all_zero_orders(self) -> None:
+        orders = orders_from_policy_result(pd.DataFrame(), ["A", "B"])
+        assert orders == {"A": 0.0, "B": 0.0}
+
+    def test_reorder_point_scale_gates_order_above_threshold(self) -> None:
+        # ip 30 >= target 40 * 0.5 = 20 -> the (R,s,S) gate zeroes the order.
+        result = self._result(
+            [
+                {
+                    UNIQUE_ID: "A",
+                    "order_qty": 10.0,
+                    "target_stock_level": 40.0,
+                    "inventory_position": 30.0,
+                },
+                {
+                    UNIQUE_ID: "B",
+                    "order_qty": 8.0,
+                    "target_stock_level": 40.0,
+                    "inventory_position": 5.0,
+                },
+            ]
+        )
+        orders = orders_from_policy_result(result, ["A", "B"], reorder_point_scale=0.5)
+        assert orders == {"A": 0.0, "B": 8.0}

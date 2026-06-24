@@ -43,6 +43,17 @@ class ProductState:
     cumulative_holding_cost: float = 0.0
     cumulative_shortage_cost: float = 0.0
 
+    @property
+    def inventory_position(self) -> float:
+        """End inventory plus both in-transit pipeline slots.
+
+        Matches the generic
+        :attr:`calibre.ordering.simulation.state.ProductState.inventory_position`
+        so the elevated :func:`calibre.ordering.policy_config.build_rs_params`
+        reads the same value off either state shape.
+        """
+        return float(self.end_inventory) + float(self.in_transit_w1) + float(self.in_transit_w2)
+
 
 @dataclass
 class WeekResult:

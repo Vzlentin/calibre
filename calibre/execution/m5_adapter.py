@@ -73,7 +73,7 @@ def _build_costs_and_inventory(
     path: a zero ``CostStruct()`` and no inventory. When any cost kwarg is
     supplied a non-zero ``CostStruct`` is built; when any cost OR inventory kwarg
     is supplied an initial ``ProductState`` per history series is seeded, which
-    requires ``lead_time >= 1`` so the ordering tally's :class:`LostSalesRule`
+    requires ``lead_time >= 1`` so the settle loop's :class:`LostSalesRule`
     can accept positive orders.
     """
     cost_kwargs = {key: float(kwargs[key]) for key in _COST_KEYS if key in kwargs}

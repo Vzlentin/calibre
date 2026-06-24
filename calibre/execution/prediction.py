@@ -163,6 +163,11 @@ def _process_local_chunk(
     future_panel = (
         _read_parquet_cached(chunk_ref.future_x_uri) if chunk_ref.future_x_uri is not None else None
     )
+    censoring_panel = (
+        _read_parquet_cached(chunk_ref.censoring_uri)
+        if chunk_ref.censoring_uri is not None
+        else None
+    )
 
     # Group once per chunk: per-uid boolean masks over the full panel would be
     # O(chunk_size^2 x rows) and grow quadratically with the chunk_size knob.
@@ -173,6 +178,11 @@ def _process_local_chunk(
     future_by_uid: dict[str, pd.DataFrame] = (
         {str(uid): group for uid, group in future_panel.groupby(UNIQUE_ID, sort=False)}
         if future_panel is not None and not future_panel.empty
+        else {}
+    )
+    censoring_by_uid: dict[str, pd.DataFrame] = (
+        {str(uid): group for uid, group in censoring_panel.groupby(UNIQUE_ID, sort=False)}
+        if censoring_panel is not None and not censoring_panel.empty
         else {}
     )
 
@@ -186,6 +196,8 @@ def _process_local_chunk(
             continue
 
         future_x = future_by_uid.get(uid)
+        uid_censoring = censoring_by_uid.get(uid)
+        censoring = uid_censoring[uid_censoring[DS] < origin] if uid_censoring is not None else None
 
         origin_task = ForecastTask(
             history=history.reset_index(drop=True),
@@ -194,6 +206,9 @@ def _process_local_chunk(
             forecast_origin=origin,
             future_x=future_x.reset_index(drop=True) if future_x is not None else None,
             task_group=chunk_ref.task_group,
+            censoring=censoring.reset_index(drop=True)
+            if censoring is not None and not censoring.empty
+            else None,
         )
         result = fit_predict_task(origin_task, collect_fitted_values=collect_fitted_values)
         results.append(
@@ -216,6 +231,7 @@ def _process_global_panel(
     """Fit one global adapter for a config over the full multi-SKU panel."""
     histories: list[pd.DataFrame] = []
     future_frames: list[pd.DataFrame] = []
+    censoring_frames: list[pd.DataFrame] = []
     horizon: int | None = None
     task_group: str | None = None
 
@@ -226,6 +242,13 @@ def _process_global_panel(
             histories.append(history)
         if task.future_x is not None and not task.future_x.empty:
             future_frames.append(task.future_x)
+        # Slice censoring to ds < origin exactly as the history is sliced, so the
+        # in-stock flag stays aligned with the leakage-free training window the
+        # gated censoring-aware fit imputes over.
+        if task.censoring is not None and not task.censoring.empty:
+            censoring = task.censoring[task.censoring[DS] < origin]
+            if not censoring.empty:
+                censoring_frames.append(censoring)
         if horizon is None:
             horizon = task.horizon
         if task_group is None:
@@ -240,6 +263,11 @@ def _process_global_panel(
         if future_frames
         else None
     )
+    censoring = (
+        pd.concat(censoring_frames, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
+        if censoring_frames
+        else None
+    )
     origin_task = ForecastTask(
         history=panel,
         horizon=horizon,
@@ -247,6 +275,7 @@ def _process_global_panel(
         forecast_origin=origin,
         future_x=future_x,
         task_group=task_group,
+        censoring=censoring,
     )
     result = fit_predict_task(origin_task, collect_fitted_values=collect_fitted_values)
     return PredictionResult(

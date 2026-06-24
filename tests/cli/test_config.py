@@ -206,9 +206,11 @@ def test_order_conformal_series_partition_uses_unique_id_runtime_key() -> None:
 
 
 def test_order_conformal_unknown_key_raises_at_parse_time() -> None:
-    with pytest.raises(ValidationError, match="weight_decay"):
+    # ``weight_decay`` is now a valid loop-path knob; a genuinely
+    # unknown key still trips the ``extra="forbid"`` guard at parse time.
+    with pytest.raises(ValidationError, match="not_a_real_knob"):
         load_config_from_mapping(
-            _config(conformal=None, order_conformal={"coverage": 0.5, "weight_decay": 0.9})
+            _config(conformal=None, order_conformal={"coverage": 0.5, "not_a_real_knob": 0.9})
         )
 
 
@@ -327,6 +329,103 @@ def test_ordering_coverage_unchanged_without_order_conformal() -> None:
 
     assert config.ordering is not None
     assert config.ordering.coverage == 0.9
+
+
+def test_settle_loop_rs_without_decision_bound_rejected_at_parse_time() -> None:
+    """A settle-loop rs config with no order_conformal and no quantile is rejected.
+
+    The loop-only ``lead_time``/``review_period`` params signal the settle path,
+    whose (R,S) rule reads a decision bound off the frame. With no
+    ``order_conformal`` block and no ``ordering.quantile``, the bound never exists
+    and ``apply_rs_policy`` would crash mid-walk on the missing interval columns —
+    so reject the combo at parse time (``calibre validate``) instead.
+    """
+    with pytest.raises(ValidationError, match="needs a decision bound"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                ordering={"policy": "rs", "lead_time": 1, "review_period": 1},
+            )
+        )
+
+
+def test_settle_loop_rs_with_order_conformal_parses() -> None:
+    """The same loop-path rs config parses once an order_conformal bound is present."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={"coverage": 0.5, "protection_period": 2},
+            ordering={"policy": "rs", "lead_time": 1, "review_period": 1},
+        )
+    )
+    assert config.ordering is not None
+    assert config.order_conformal is not None
+
+
+def test_settle_loop_rs_with_quantile_parses() -> None:
+    """The same loop-path rs config parses in quantile mode (no order_conformal)."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            ordering={"policy": "rs", "lead_time": 1, "review_period": 1, "quantile": 0.8},
+        )
+    )
+    assert config.ordering is not None
+    assert config.ordering.quantile == 0.8
+
+
+def test_settle_loop_rs_half_set_protection_window_rejected_at_parse_time() -> None:
+    """A loop-path rs config with only one of lead_time/review_period is rejected.
+
+    The loop builds the protection window from BOTH params; a half-set pair is
+    unsatisfiable (case 2 sets neither, the loop path needs both) and would raise
+    deep in ``_run_settle_loop``. Reject it at parse time instead.
+    """
+    with pytest.raises(ValidationError, match="needs BOTH ordering.lead_time"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                order_conformal={"coverage": 0.5, "protection_period": 2},
+                ordering={"policy": "rs", "lead_time": 1},
+            )
+        )
+
+
+def test_settle_loop_protection_window_mismatch_rejected_at_parse_time() -> None:
+    """lead_time + review_period must equal order_conformal.protection_period.
+
+    The (R,S) rule reads the cumulative bound off the terminal protection-window
+    row, which the order-conformal runtime emits only at its own
+    ``protection_period``. A misaligned pair parses but raises mid-walk
+    ("decision bound is NaN at terminal h") — couple them at parse time.
+    """
+    with pytest.raises(ValidationError, match="must.*equal order_conformal.protection_period"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                order_conformal={"coverage": 0.5, "protection_period": 2},
+                ordering={"policy": "rs", "lead_time": 1, "review_period": 2},
+            )
+        )
+
+
+def test_settle_loop_horizon_below_protection_window_rejected_at_parse_time() -> None:
+    """The task horizon must cover the protection window on the loop path.
+
+    With ``horizon < protection_period`` the (R,S) rule raises ("Protection period
+    exceeds available horizon") or the CRC never calibrates. Reject at parse time.
+    """
+    with pytest.raises(ValidationError, match="must cover the protection window"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                tasks=[
+                    {"model": "SeasonalNaive", "horizon": 2, "config": {"backend": "statsforecast"}}
+                ],
+                order_conformal={"coverage": 0.5, "protection_period": 3},
+                ordering={"policy": "rs", "lead_time": 1, "review_period": 2},
+            )
+        )
 
 
 def test_execution_chunk_size_plumbs_into_execution_options() -> None:

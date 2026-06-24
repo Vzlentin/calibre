@@ -116,6 +116,15 @@ class OrderConformalConfig(_Section):
     into the ``hi_<coverage>`` column (e.g. ``coverage=0.74`` -> ``hi_0p74``).
     ``coverage`` is the CRC risk-control level (the residual quantile), not a
     cost fractile — cost-shaping lives upstream of this block.
+
+    ``weight_decay`` threads straight through to
+    :class:`~calibre.conformal.cumulative_risk.CumulativeConformalRiskConfig`:
+    ``null`` selects the unweighted split-conformal ("capped-CRC") branch rather
+    than inheriting the ``0.85`` weighted default, so an explicit null reaches the
+    ``weight_decay is None`` path. ``warmup_origins`` is the loop-path CRC
+    calibration walk length and ``method_name`` is cosmetic (the recorded method
+    label). Only the loop-path-needed fields are threaded through; full
+    ``CumulativeConformalRiskConfig``-via-YAML parity is deferred.
     """
 
     coverage: float = Field(default=0.5, gt=0.0, lt=1.0)
@@ -124,9 +133,23 @@ class OrderConformalConfig(_Section):
     partition: Literal["global", "series"] = "global"
     base_column: str | None = None
     buffer_max: float | None = None
+    weight_decay: float | None = None
+    warmup_origins: int | None = Field(default=None, ge=1)
+    method_name: str | None = None
 
     def to_runtime_config(self) -> CumulativeConformalRiskConfig:
         partition_key = _PARTITION_MAP[self.partition]
+        # An omitted weight_decay/method_name must inherit the runtime config's
+        # own default, but an explicit null weight_decay must reach the
+        # unweighted (capped) branch — so thread the field only when present,
+        # keying on the model field being explicitly set, and let the runtime
+        # default fill the rest. method_name is cosmetic; pass it only when set.
+        overrides: dict[str, Any] = {}
+        fields_set = self.model_fields_set
+        if "weight_decay" in fields_set:
+            overrides["weight_decay"] = self.weight_decay
+        if self.method_name is not None:
+            overrides["method_name"] = self.method_name
         return CumulativeConformalRiskConfig(
             coverage=self.coverage,
             protection_period=self.protection_period,
@@ -134,6 +157,7 @@ class OrderConformalConfig(_Section):
             partition_key=partition_key,
             base_column=self.base_column,
             buffer_max=self.buffer_max,
+            **overrides,
         )
 
 
@@ -159,13 +183,25 @@ class ReconciliationConfig(_Section):
 
 
 class OrderingConfig(_Section):
-    """Ordering section: policy choice, coverage, and policy parameters."""
+    """Ordering section: policy choice, coverage, and policy parameters.
+
+    ``lead_time``/``review_period`` are the loop-path (R,S) protection-window
+    parameters: the engine settle loop builds the (R,S) policy params live from
+    the simulator's ``inventory_position`` each round, so on that path ``params``
+    is **ignored** (the static rows have no live inventory state to stand in for).
+    An explicit ``decision_loop:``/``ordering.mode`` flag was considered and
+    rejected in favour of state-implicit branching (settle iff the bundle carries
+    inventory): a clean cutover with no new schema surface, accepting that the
+    loop path couples "has inventory" to "must settle".
+    """
 
     policy: str
     coverage: float = 0.9
     quantile: float | None = None
     # None means "unset": the domain default lives on NewsvendorConfig.period.
     period: int | None = None
+    lead_time: int | None = Field(default=None, ge=0)
+    review_period: int | None = Field(default=None, ge=1)
     params: list[dict[str, Any]] | dict[str, Any] | None = None
 
 
@@ -427,6 +463,84 @@ class BackendConfig(BaseModel):
                 "runtime writes, so the two coverages must match (or omit "
                 "ordering.coverage to inherit it)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _settle_loop_rs_needs_decision_bound(self) -> BackendConfig:
+        # The settle loop's (R,S) policy reads a decision bound off the forecast
+        # frame: an order_conformal hi_<coverage> interval column, or — in
+        # quantile mode — a q_<p> column. With neither, the loop has no upper
+        # bound to order against and apply_rs_policy crashes mid-walk on the
+        # missing interval columns. The loop path is signalled by the loop-only
+        # lead_time/review_period params, so reject that combo here, at parse
+        # time, instead of failing deep in the run.
+        if (
+            self.ordering is not None
+            and self.ordering.policy == "rs"
+            and self.ordering.lead_time is not None
+            and self.ordering.review_period is not None
+            and self.order_conformal is None
+            and self.ordering.quantile is None
+        ):
+            raise ValueError(
+                "the settle-loop (R,S) policy needs a decision bound to order against: "
+                "configure an order_conformal block (conformal decision bound) or set "
+                "ordering.quantile (quantile mode). With neither, the (R,S) rule has no "
+                "upper bound and the loop fails on the missing interval columns"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _settle_loop_rs_needs_complete_protection_window(self) -> BackendConfig:
+        # The settle loop is signalled by the loop-only lead_time/review_period
+        # params, and the run-time loop raises deep if only one is set. A partial
+        # pair (one present, one absent) is unsatisfiable on either path: case 2
+        # (single-pass order ledger) sets neither, the loop path needs both. Reject
+        # the half-set pair at parse time instead of failing inside _run_settle_loop.
+        if self.ordering is not None and self.ordering.policy == "rs":
+            has_lead = self.ordering.lead_time is not None
+            has_review = self.ordering.review_period is not None
+            if has_lead != has_review:
+                raise ValueError(
+                    "the settle-loop (R,S) policy needs BOTH ordering.lead_time and "
+                    "ordering.review_period to build the protection window; got only "
+                    f"{'lead_time' if has_lead else 'review_period'}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _settle_loop_protection_window_couples_to_order_conformal(self) -> BackendConfig:
+        # On the loop path with a conformal decision bound, the (R,S) rule reads the
+        # cumulative bound off the terminal row at h = lead_time + review_period, but
+        # the order-conformal runtime emits a non-NaN cumulative bound only at its own
+        # protection_period. A mismatched pair parses but raises mid-walk ("decision
+        # bound is NaN at terminal h"); a horizon shorter than the protection window
+        # raises ("Protection period exceeds available horizon") or never calibrates
+        # the CRC. Couple all three at parse time.
+        if (
+            self.ordering is not None
+            and self.ordering.policy == "rs"
+            and self.ordering.lead_time is not None
+            and self.ordering.review_period is not None
+            and self.order_conformal is not None
+        ):
+            protection_window = self.ordering.lead_time + self.ordering.review_period
+            if protection_window != self.order_conformal.protection_period:
+                raise ValueError(
+                    f"ordering.lead_time + ordering.review_period ({protection_window}) must "
+                    f"equal order_conformal.protection_period "
+                    f"({self.order_conformal.protection_period}): the (R,S) rule reads the "
+                    "cumulative decision bound off the terminal protection-window row, which "
+                    "the order-conformal runtime emits only at its own protection_period"
+                )
+            horizon = self.tasks[0].horizon
+            if horizon < protection_window:
+                raise ValueError(
+                    f"task horizon ({horizon}) must cover the protection window "
+                    f"({protection_window}): the (R,S) rule needs horizons 1..{protection_window} "
+                    "present, and the CRC warmup only calibrates when every protection-period "
+                    "horizon resolves"
+                )
         return self
 
     @model_validator(mode="after")

@@ -167,8 +167,9 @@ def test_m5_smoke_ordering_config_parses_with_backfilled_coverage() -> None:
 
     Pins U4: cost+inventory kwargs ride the dataset block, ``ordering.coverage``
     is omitted and inherited from ``order_conformal.coverage`` (no drift), the
-    task horizon equals the protection period, and every R,S param carries a
-    positive lead_time.
+    task horizon equals the protection period, and the loop-path ordering block
+    carries top-level ``lead_time``/``review_period`` with no static ``params``
+    (the rolling settle loop builds the R,S params live from the simulator).
     """
     config = load_config(_SMOKE_ORDERING_CONFIG)
 
@@ -184,9 +185,16 @@ def test_m5_smoke_ordering_config_parses_with_backfilled_coverage() -> None:
     assert config.ordering is not None
     assert config.ordering.policy == "rs"
     assert config.ordering.coverage == config.order_conformal.coverage
-    assert config.ordering.params is not None
-    for param in config.ordering.params:
-        assert param["lead_time"] >= 1
+    # Loop path: R,S params are built live from the simulator each round, so the
+    # config carries no static ``params`` rows; lead_time/review_period live at
+    # the top level and sum to the protection period.
+    assert config.ordering.params is None
+    assert config.ordering.lead_time == 1
+    assert config.ordering.review_period == 1
+    assert (
+        config.ordering.lead_time + config.ordering.review_period
+        == config.order_conformal.protection_period
+    )
 
     assert config.reconciliation is None
     assert config.output.order_ledger_path == "results/m5/smoke-ordering/order-ledger.parquet"

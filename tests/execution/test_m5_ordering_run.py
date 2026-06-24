@@ -1,28 +1,35 @@
-"""End-to-end `run_config` proof for the M5 ordering testbed (decision -> order -> cost).
+"""End-to-end `run_config` proof for the M5 ordering testbed (decision -> settle).
 
-Exercises the full production path (config -> prepare_run -> BackendEngine ->
-post-run cost tally) on the committed 4-series x 16-day ``tests/fixtures/m5``
-surface: an ``order_conformal`` decision bound feeds the R,S policy, whose order
-ledger is replayed against realized fixture demand through the generic
-:class:`Simulator` to a finite, sane order cost. A second run with no
-cost/inventory kwargs proves the seam stays inert (bundle inventory ``None``,
-zero costs, tally skipped).
+Exercises the full production path (config -> prepare_run -> rolling settle loop)
+on the committed 4-series x 16-day ``tests/fixtures/m5`` surface: an
+``order_conformal`` decision bound feeds the live (R,S) policy, the engine walks
+the decision origins with a per-origin forecast -> order -> settle -> observe hook
+over the generic :class:`Simulator`, and the accumulated cost lands on the
+``calibre_order_cost`` gauge once after the lead-time drain. A second run with no
+cost/inventory kwargs proves the loop branch stays inert (bundle inventory
+``None``, single-pass, no cost gauge written).
+
+The two former tally-guard tests (``test_tally_rejects_per_uid_cost_panel`` and
+``test_tally_rejects_heterogeneous_protection_period``) were removed when the
+tally seam was replaced by the settle loop:
+they asserted ``_tally_order_cost`` seam-specific ``ValueError``s that have no
+loop-path equivalent. The generic :class:`Simulator` accumulates a single scalar
+cost, so there is no per-uid cost panel and no per-ledger protection-period
+heterogeneity to guard — the conditions are structurally impossible on the loop
+path, and ``_tally_order_cost`` itself is gone.
 """
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 import numpy as np
-import pytest
+from prometheus_client import REGISTRY
 
-from calibre.cli.commands import _load_dataset, _tally_order_cost, run_config
+from calibre.cli.commands import _load_dataset, run_config
 from calibre.cli.config import load_config
-from calibre.core.forecast_frame import FORECAST_ORIGIN, UNIQUE_ID, H
+from calibre.core.forecast_frame import H
 from calibre.core.order_types import CostStruct
-from calibre.execution.backend import BackendResult
-from calibre.execution.ledger import InMemoryOrderLedger
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ORDERING_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "smoke-ordering.yaml"
@@ -37,19 +44,33 @@ def _config_to_tmp(config_path: Path, tmp_path: Path):
     return config.model_copy(update={"output": config.output.model_copy(update=updates)})
 
 
-def test_m5_ordering_run_decision_order_finite_cost(tmp_path: Path) -> None:
+def _order_cost_gauge(dataset: str, currency: str = "EUR") -> float | None:
+    return REGISTRY.get_sample_value(
+        "calibre_order_cost", {"currency": currency, "dataset": dataset}
+    )
+
+
+def test_m5_ordering_run_decision_settle_finite_cost(tmp_path: Path) -> None:
     config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
     assert config.order_conformal is not None
+    # The bundle seeds inventory, so the run routes to the rolling settle loop.
+    assert config.ordering is not None
+    assert config.ordering.lead_time is not None
+    assert config.ordering.review_period is not None
     protection_period = config.order_conformal.protection_period
     coverage = config.order_conformal.coverage
     # coverage 0.5 -> hi_0p5 (the interval_column_names form, "." -> "p").
     upper_col = f"hi_0p{str(coverage).split('.')[1]}"
 
-    bundle = _load_dataset(config)
     result = run_config(config)
     ledger = result.ledger.to_df()
 
-    # 1. Bound emitted on the terminal-horizon rows, NaN below (production path).
+    # 1. The settle loop produces no order ledger — the simulator owns the cost.
+    assert result.order_ledger is None
+    assert not ledger.empty
+
+    # 2. The decision bound is emitted on the terminal-horizon rows, NaN below
+    # (the loop's runtime applies it; the engine itself carries no runtime).
     assert upper_col in ledger.columns
     terminal = ledger[ledger[H] == protection_period]
     earlier = ledger[ledger[H] < protection_period]
@@ -57,50 +78,42 @@ def test_m5_ordering_run_decision_order_finite_cost(tmp_path: Path) -> None:
     assert terminal[upper_col].notna().any()
     assert earlier[upper_col].isna().all()
 
-    # 2. R,S consumes the bound: order_qty == max(target_stock_level - ip, 0).
-    orders = result.order_ledger.to_df()
-    assert not orders.empty
-    assert orders["order_qty"].notna().all()
-    assert orders["target_stock_level"].notna().all()
-    expected_qty = (orders["target_stock_level"] - orders["inventory_position"]).clip(lower=0.0)
-    np.testing.assert_allclose(
-        orders["order_qty"].to_numpy(), expected_qty.to_numpy(), rtol=0, atol=0
-    )
-
-    # 3. Simulator tallies a FINITE, non-negative, non-degenerate total cost.
-    tally = _tally_order_cost(bundle, result)
-    assert tally is not None
-    assert {"holding_cost", "shortage_cost"} <= set(tally.columns)
-    total_cost = float((tally["holding_cost"] + tally["shortage_cost"]).sum())
+    # 3. The settle walk tallies a FINITE, non-negative, non-degenerate total
+    # cost once, after the lead-time drain, onto the order-cost gauge.
+    total_cost = _order_cost_gauge(config.dataset.adapter)
+    assert total_cost is not None
     assert np.isfinite(total_cost)
     assert total_cost >= 0.0
     assert total_cost > 0.0
-    assert (tally["demand"] > 0).any()
-
-    # 4. SANE / demand-responsive orders: all >= 0, no NaN, and resolved demand
-    # varies ACROSS the four series at a fixed origin (true cross-series spread,
-    # not single-series variation across origins).
-    assert (orders["order_qty"] >= 0).all()
-    assert orders["order_qty"].notna().all()
-    window = ledger[ledger[H] <= protection_period]
-    resolved_window = window.dropna(subset=["y"])
-    # Pick an origin whose protection window resolves multiple series, then
-    # assert their summed demand is not all identical.
-    series_per_origin = resolved_window.groupby(FORECAST_ORIGIN)[UNIQUE_ID].nunique()
-    multi_series_origins = series_per_origin[series_per_origin > 1].index
-    assert len(multi_series_origins) > 0
-    origin = multi_series_origins[0]
-    demand_across_series = (
-        resolved_window[resolved_window[FORECAST_ORIGIN] == origin].groupby(UNIQUE_ID)["y"].sum()
-    )
-    assert demand_across_series.nunique() > 1
 
 
-def test_m5_run_without_costs_keeps_inventory_none_and_zero_costs(tmp_path: Path) -> None:
-    """Non-regression: an M5 run with no cost/inventory kwargs is inert.
+def test_m5_settle_loop_rejects_history_short_of_drain_window(tmp_path: Path) -> None:
+    """The settle loop rejects a config whose drain window runs past history end.
+
+    The lead-time drain resolves demand for ``lead_time`` weeks past the last
+    decision origin. With the origin range stretched so those drain weeks fall
+    after the fixture history end (2011-02-13), the loop would settle them at the
+    all-zero default and undercount shortage — so ``_run_settle_loop`` raises
+    instead of silently producing a too-low cost.
+    """
+    import pandas as pd
+    import pytest
+
+    config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
+    # Extend the origin range so the lead-time drain reaches past 2011-02-13.
+    stretched = config.origins.model_copy(update={"end": pd.Timestamp("2011-02-13")})
+    config = config.model_copy(update={"origins": stretched})
+
+    with pytest.raises(ValueError, match="needs realised demand through"):
+        run_config(config)
+
+
+def test_m5_run_without_inventory_skips_settle_loop(tmp_path: Path) -> None:
+    """Non-regression: an M5 run with no cost/inventory kwargs is single-pass.
 
     The bundle carries ``inventory is None`` and a zero ``CostStruct()``, so the
-    tally seam is skipped and the unchanged path runs (criterion 5).
+    settle branch is skipped and the unchanged single-pass path runs (no order
+    ledger, no cost gauge written for this run).
     """
     config = _config_to_tmp(_SMOKE_CONFIG, tmp_path)
     bundle = _load_dataset(config)
@@ -108,60 +121,9 @@ def test_m5_run_without_costs_keeps_inventory_none_and_zero_costs(tmp_path: Path
     assert bundle.inventory is None
     assert isinstance(bundle.costs, CostStruct)
     assert bundle.costs == CostStruct()
+    # No ordering block at all -> single-pass forecast run.
+    assert config.ordering is None
 
     result = run_config(config)
-    # The tally seam is gated off (no inventory), so it returns None even though
-    # this config records no order ledger either.
-    assert _tally_order_cost(bundle, result) is None
+    assert result.order_ledger is None
     assert not result.ledger.to_df().empty
-
-
-def test_tally_rejects_per_uid_cost_panel(tmp_path: Path) -> None:
-    """A per-uid ``dict[str, CostStruct]`` cost panel trips the tally guard.
-
-    The seam tallies against a single uniform cost struct; a per-uid panel is
-    out of scope and must raise rather than silently pick one struct.
-    """
-    config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
-    bundle = _load_dataset(config)
-    result = run_config(config)
-    # Sanity: the real ordering path supplies inventory and a non-empty ledger,
-    # so the guard is reached (not short-circuited by the None gates above it).
-    assert bundle.inventory is not None
-    assert not result.order_ledger.to_df().empty
-
-    assert isinstance(bundle.costs, CostStruct)
-    cost_panel = {uid: bundle.costs for uid in bundle.inventory}
-    panel_bundle = dataclasses.replace(bundle, costs=cost_panel)
-
-    with pytest.raises(ValueError, match="per-uid cost panel"):
-        _tally_order_cost(panel_bundle, result)
-
-
-def test_tally_rejects_heterogeneous_protection_period(tmp_path: Path) -> None:
-    """A heterogeneous-``protection_period`` order ledger trips the tally guard.
-
-    The protection window is applied globally from the first row; a ledger
-    carrying more than one ``protection_period`` would silently mis-window, so
-    the seam rejects it.
-    """
-    config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
-    bundle = _load_dataset(config)
-    result = run_config(config)
-    assert bundle.inventory is not None
-
-    order_frame = result.order_ledger.to_df()
-    assert not order_frame.empty
-    # Make protection_period non-uniform across the (uid, origin) rows.
-    heterogeneous = order_frame.copy()
-    heterogeneous.loc[heterogeneous.index[0], "protection_period"] = (
-        int(heterogeneous["protection_period"].iloc[0]) + 1
-    )
-    assert heterogeneous["protection_period"].nunique() > 1
-
-    poisoned_ledger = InMemoryOrderLedger()
-    poisoned_ledger.append(heterogeneous)
-    poisoned_result = BackendResult(ledger=result.ledger, order_ledger=poisoned_ledger)
-
-    with pytest.raises(ValueError, match="single protection period"):
-        _tally_order_cost(bundle, poisoned_result)

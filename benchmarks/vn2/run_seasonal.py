@@ -26,7 +26,6 @@ End-to-end pipeline:
 from __future__ import annotations
 
 import logging
-import math
 import sys
 from pathlib import Path
 
@@ -78,7 +77,6 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.core.io import join_uri
-from calibre.core.order_types import RsPolicyParameters
 from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
@@ -89,25 +87,14 @@ from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import build_tasks
 from calibre.forecasting.ensemble import ensemble_median
-from calibre.ordering.policy_config import RsConfig, apply_order_policy
+from calibre.ordering.policy_config import (
+    RsConfig,
+    apply_order_policy,
+    build_rs_params,
+    orders_from_policy_result,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _build_rs_params(
-    simulator: VN2Simulator,
-    lead_time: int,
-    review_period: int,
-) -> list[RsPolicyParameters]:
-    return [
-        RsPolicyParameters(
-            unique_id=uid,
-            inventory_position=s.end_inventory + s.in_transit_w1 + s.in_transit_w2,
-            lead_time=lead_time,
-            review_period=review_period,
-        )
-        for uid, s in simulator.states.items()
-    ]
 
 
 def _run_warmup(
@@ -330,20 +317,17 @@ def run_seasonal(
                 order_result = apply_order_policy(
                     frame,
                     RsConfig(
-                        params=_build_rs_params(
+                        params=build_rs_params(
                             simulator, lead_time=lead_time, review_period=review_period
                         ),
                         coverage=conformal_config.coverage,
                     ),
                 )
-                orders: dict[str, float] = {}
-                for uid, qty in zip(
-                    order_result[UNIQUE_ID].astype(str),
-                    order_result["order_qty"].astype(float),
-                    strict=False,
-                ):
-                    orders[uid] = float(max(math.ceil(qty), 0))
-                return orders
+                # Shared ceil-then-clamp integer-order rule (one owner in
+                # calibre.ordering). states-keyed so a uid absent from the policy
+                # result settles at a zero order — a no-op the simulator's step
+                # already applies via orders.get(uid, 0.0).
+                return orders_from_policy_result(order_result, states)
             except (ValueError, KeyError) as exc:
                 if verbose:
                     logger.info("  Order policy failed: %s. Using zero orders.", exc)

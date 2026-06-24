@@ -116,12 +116,27 @@ def build_node_history(sales: pd.DataFrame, hierarchy_index: HierarchyIndex | No
     )
 
 
+def _filter_censoring(censoring: pd.DataFrame | None, uids: tuple[str, ...]) -> pd.DataFrame | None:
+    """Filter a censoring panel to ``uids`` (a filter, not a reshape).
+
+    ``add_stockout_features`` merges censoring on ``[unique_id, ds]``, so each
+    emitted task carries the censoring rows for its own series only; the column
+    set is left untouched. Returns ``None`` when there is no censoring or the
+    filtered slice is empty.
+    """
+    if censoring is None:
+        return None
+    sliced = censoring[censoring[UNIQUE_ID].astype(str).isin(uids)]
+    return sliced.reset_index(drop=True) if not sliced.empty else None
+
+
 def build_tasks(
     sales: pd.DataFrame,
     model_configs: list[dict],
     horizon: int,
     series_filter: list[str] | None = None,
     overrides: Mapping[str, list[dict]] | None = None,
+    censoring: pd.DataFrame | None = None,
 ) -> TaskGroups:
     """Create ForecastTask objects from sales data and model configs.
 
@@ -139,6 +154,10 @@ def build_tasks(
             model configs. When present for a series, that list replaces
             ``model_configs`` for that series only. Unknown ``unique_id`` keys
             raise ``ValueError``.
+        censoring: Optional ``[unique_id, ds, in_stock]`` panel (the bundle's
+            censoring frame). When present each emitted task carries the slice
+            for its own uid(s) so the gated censoring-aware fit can impute
+            uncensored demand; ``None`` (e.g. M5) is a no-op.
 
     Returns:
         A :class:`TaskGroups` partition. The engine consumes this directly and
@@ -199,6 +218,7 @@ def build_tasks(
                         history=series_data,
                         horizon=horizon,
                         model_config=model_config,
+                        censoring=_filter_censoring(censoring, (uid,)),
                     )
                 )
             else:
@@ -216,6 +236,7 @@ def build_tasks(
                         history=data,
                         horizon=horizon,
                         model_config=model_config,
+                        censoring=_filter_censoring(censoring, panel_uids),
                     )
                 )
 
