@@ -4,13 +4,32 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, assert_never
+from typing import TYPE_CHECKING, Any, Protocol, assert_never
 
 import pandas as pd
 
+from calibre.core.forecast_frame import DS
+from calibre.core.order_types import RsPolicyParameters
 from calibre.ordering.newsvendor import apply_newsvendor_policy
 from calibre.ordering.periodic_review import apply_rs_policy
 from calibre.ordering.reorder_point import apply_rss_policy
+
+if TYPE_CHECKING:
+    from calibre.ordering.simulation.simulator import Simulator
+
+
+class _InventoryStates(Protocol):
+    """Structural view of a simulator's per-series inventory position.
+
+    The elevated :func:`build_rs_params` reads only ``inventory_position`` off
+    each state, so any object exposing ``states`` mapping ``unique_id`` to a
+    state with that property satisfies it — the generic
+    :class:`~calibre.ordering.simulation.simulator.Simulator` and the VN2
+    benchmark's wrapped generic simulator alike.
+    """
+
+    @property
+    def states(self) -> Mapping[str, Any]: ...
 
 
 def _validate_coverage(coverage: float) -> None:
@@ -136,3 +155,53 @@ def apply_order_policy(frame: pd.DataFrame, config: OrderPolicy) -> pd.DataFrame
     if isinstance(config, NewsvendorConfig):
         return apply_newsvendor_policy(frame, config.params, config.coverage, config.period)
     assert_never(config)
+
+
+def build_rs_params(
+    simulator: Simulator | _InventoryStates,
+    lead_time: int,
+    review_period: int,
+) -> list[RsPolicyParameters]:
+    """Build per-series (R,S) policy params from a simulator's live state.
+
+    Reads each series' ``inventory_position`` (end inventory plus all in-transit
+    pipeline quantities) off the generic
+    :class:`~calibre.ordering.simulation.state.ProductState`, so the order policy
+    targets the position the simulator actually holds at this round. For the VN2
+    two-slot pipeline this equals the manual sum
+    ``end_inventory + in_transit_w1 + in_transit_w2`` the benchmark previously
+    read off its VN2-shaped state — the byte-identity hinge across the elevation.
+    """
+    return [
+        RsPolicyParameters(
+            unique_id=uid,
+            inventory_position=float(state.inventory_position),
+            lead_time=lead_time,
+            review_period=review_period,
+        )
+        for uid, state in simulator.states.items()
+    ]
+
+
+def derive_warmup_origins(
+    history: pd.DataFrame,
+    horizon: int,
+    warmup_origins: int,
+) -> list[pd.Timestamp]:
+    """Derive the calibration-warmup origin timestamps from a model history.
+
+    Returns the last ``warmup_origins`` decision dates that still leave a full
+    ``horizon`` of resolvable future, clamping the count down when the history is
+    too short and returning an empty list when no origin resolves. Elevated
+    verbatim from the VN2 warmup-frame derivation so the engine's loop-path
+    warmup walk and the benchmark's stay one implementation.
+    """
+    if warmup_origins <= 0:
+        return []
+    all_dates = sorted(history[DS].unique())
+    if len(all_dates) < warmup_origins + horizon:
+        warmup_origins = max(1, len(all_dates) - horizon)
+    origin_dates = [pd.Timestamp(d) for d in all_dates[-(warmup_origins + horizon) : -horizon]]
+    if not origin_dates:
+        return []
+    return origin_dates

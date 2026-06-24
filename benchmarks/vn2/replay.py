@@ -57,29 +57,30 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask
 from calibre.core.io import join_uri
-from calibre.core.order_types import RsPolicyParameters
 from calibre.execution import actuals_lookup_from_cache, build_actuals_lookup, observe_pending
 from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import partition_tasks
-from calibre.ordering.policy_config import RsConfig, apply_order_policy
+from calibre.ordering.policy_config import (
+    RsConfig,
+    apply_order_policy,
+    build_rs_params,
+    derive_warmup_origins,
+)
 
-
-def build_rs_params(
-    simulator: VN2Simulator,
-    lead_time: int,
-    review_period: int,
-) -> list[RsPolicyParameters]:
-    """Build per-series (R,S) policy params from the simulator's state."""
-    return [
-        RsPolicyParameters(
-            unique_id=uid,
-            inventory_position=s.end_inventory + s.in_transit_w1 + s.in_transit_w2,
-            lead_time=lead_time,
-            review_period=review_period,
-        )
-        for uid, s in simulator.states.items()
-    ]
+__all__ = [
+    "build_rs_params",
+    "build_replay_cache",
+    "replay_cached_cost",
+    "round_actuals",
+    "run_order_conformal_warmup",
+    "summary_from_simulator",
+    "orders_from_policy_result",
+    "log_cached_replay_run",
+    "CachedRound",
+    "VN2ReplayCache",
+    "ReplayResult",
+]
 
 
 def round_actuals(
@@ -175,10 +176,7 @@ def order_conformal_warmup_frames(
         protection_period=horizon,
         cumulative_target=cumulative_target,
     )
-    all_dates = sorted(history[DS].unique())
-    if len(all_dates) < warmup_origins + horizon:
-        warmup_origins = max(1, len(all_dates) - horizon)
-    origin_dates = [pd.Timestamp(d) for d in all_dates[-(warmup_origins + horizon) : -horizon]]
+    origin_dates = derive_warmup_origins(history, horizon, warmup_origins)
     if not origin_dates:
         return []
 

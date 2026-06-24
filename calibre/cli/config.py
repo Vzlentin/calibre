@@ -116,6 +116,15 @@ class OrderConformalConfig(_Section):
     into the ``hi_<coverage>`` column (e.g. ``coverage=0.74`` -> ``hi_0p74``).
     ``coverage`` is the CRC risk-control level (the residual quantile), not a
     cost fractile — cost-shaping lives upstream of this block.
+
+    ``weight_decay`` threads straight through to
+    :class:`~calibre.conformal.cumulative_risk.CumulativeConformalRiskConfig`:
+    ``null`` selects the unweighted split-conformal ("capped-CRC") branch rather
+    than inheriting the ``0.85`` weighted default, so an explicit null reaches the
+    ``weight_decay is None`` path. ``warmup_origins`` is the loop-path CRC
+    calibration walk length and ``method_name`` is cosmetic (the recorded method
+    label). Slice B threads only the loop-path-needed fields; full
+    ``CumulativeConformalRiskConfig``-via-YAML parity is deferred.
     """
 
     coverage: float = Field(default=0.5, gt=0.0, lt=1.0)
@@ -124,9 +133,23 @@ class OrderConformalConfig(_Section):
     partition: Literal["global", "series"] = "global"
     base_column: str | None = None
     buffer_max: float | None = None
+    weight_decay: float | None = None
+    warmup_origins: int | None = Field(default=None, ge=1)
+    method_name: str | None = None
 
     def to_runtime_config(self) -> CumulativeConformalRiskConfig:
         partition_key = _PARTITION_MAP[self.partition]
+        # An omitted weight_decay/method_name must inherit the runtime config's
+        # own default, but an explicit null weight_decay must reach the
+        # unweighted (capped) branch — so thread the field only when present,
+        # keying on the model field being explicitly set, and let the runtime
+        # default fill the rest. method_name is cosmetic; pass it only when set.
+        overrides: dict[str, Any] = {}
+        fields_set = self.model_fields_set
+        if "weight_decay" in fields_set:
+            overrides["weight_decay"] = self.weight_decay
+        if self.method_name is not None:
+            overrides["method_name"] = self.method_name
         return CumulativeConformalRiskConfig(
             coverage=self.coverage,
             protection_period=self.protection_period,
@@ -134,6 +157,7 @@ class OrderConformalConfig(_Section):
             partition_key=partition_key,
             base_column=self.base_column,
             buffer_max=self.buffer_max,
+            **overrides,
         )
 
 
@@ -159,13 +183,25 @@ class ReconciliationConfig(_Section):
 
 
 class OrderingConfig(_Section):
-    """Ordering section: policy choice, coverage, and policy parameters."""
+    """Ordering section: policy choice, coverage, and policy parameters.
+
+    ``lead_time``/``review_period`` are the loop-path (R,S) protection-window
+    parameters: the engine settle loop builds the (R,S) policy params live from
+    the simulator's ``inventory_position`` each round, so on that path ``params``
+    is **ignored** (the static rows have no live inventory state to stand in for).
+    An explicit ``decision_loop:``/``ordering.mode`` flag was considered and
+    rejected in favour of state-implicit branching (settle iff the bundle carries
+    inventory): a clean cutover with no new schema surface, accepting that the
+    loop path couples "has inventory" to "must settle".
+    """
 
     policy: str
     coverage: float = 0.9
     quantile: float | None = None
     # None means "unset": the domain default lives on NewsvendorConfig.period.
     period: int | None = None
+    lead_time: int | None = Field(default=None, ge=0)
+    review_period: int | None = Field(default=None, ge=1)
     params: list[dict[str, Any]] | dict[str, Any] | None = None
 
 
