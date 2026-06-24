@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -242,26 +242,28 @@ def _derive_cost_fractile(config: BackendConfig, bundle: DatasetBundle) -> float
     return float(bundle.costs.critical_ratio)
 
 
-def _cli_search_space(
-    search_space: dict[str, dict[str, Any]],
-) -> Callable[[optuna.Trial], TuningCandidate]:
-    """Build a dataset-general candidate factory from a declarative search spec.
+@dataclass(frozen=True, slots=True)
+class _CliCandidateSpace:
+    """Picklable dataset-general candidate factory from a declarative search spec.
 
     Each trial samples every ``search_space`` key via
     :func:`calibre.tuning.suggest_from_spec`; ``quantile_alpha`` (required) flows
     into ``model_config["quantiles"]`` so the optimizer's returned config carries
     it, with the remaining sampled keys passed through as model-config overrides.
+    Defined at module scope (not a closure) so Ray Tune can pickle the searcher.
     """
 
-    def _build(trial: optuna.Trial) -> TuningCandidate:
-        params = {name: suggest_from_spec(trial, name, spec) for name, spec in search_space.items()}
+    search_space: dict[str, dict[str, Any]]
+
+    def __call__(self, trial: optuna.Trial) -> TuningCandidate:
+        params = {
+            name: suggest_from_spec(trial, name, spec) for name, spec in self.search_space.items()
+        }
         quantile_alpha = float(params.pop("quantile_alpha"))
         return TuningCandidate(
             model_config={**params, "quantiles": [quantile_alpha]},
             ordering_config={"quantile": quantile_alpha},
         )
-
-    return _build
 
 
 def run_tune(config: BackendConfig) -> dict[str, Any]:
@@ -295,7 +297,7 @@ def run_tune(config: BackendConfig) -> dict[str, Any]:
         history=bundle.history,
         horizon=config.tasks[0].horizon,
         base_model_config=base_model_config,
-        search_space=_cli_search_space(config.hpo.search_space),
+        search_space=_CliCandidateSpace(config.hpo.search_space),
         actuals=actuals,
         origins=origins,
         objective=CumulativePinball(quantile=0.5, tau=tau),
