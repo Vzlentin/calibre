@@ -79,7 +79,20 @@ class UpperBoundRule:
                 raise ValueError(
                     f"Cumulative conformal frame missing terminal h={protection_period} row"
                 )
-            return float(cumulative_rows.iloc[0])
+            value = cumulative_rows.iloc[0]
+            # A present-but-NaN terminal bound means the window was not calibrated
+            # (incomplete/uncalibrated). Refusing it here keeps a NaN out of the
+            # order arithmetic (max(NaN-ip, 0) is NaN), which would otherwise emit a
+            # silent NaN order to the ledger. The summed/quantile branches use
+            # Series.sum() (skipna), so only this scalar .iloc[0] read can propagate
+            # a NaN — no guard is needed there.
+            if pd.isna(value):
+                raise ValueError(
+                    f"Cumulative conformal decision bound is NaN at terminal "
+                    f"h={protection_period} for coverage={self.coverage}: the window is "
+                    "incomplete/uncalibrated, refusing to emit a NaN order"
+                )
+            return float(value)
         return float(ordered.loc[horizons <= protection_period, target_col].sum())
 
 

@@ -268,6 +268,37 @@ class BackendConfig(BaseModel):
             raise ValueError("config.hpo is not supported until CLI tuning is wired")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def _inherit_ordering_coverage(cls, data: Any) -> Any:
+        # The R,S policy reads the hi_<coverage> decision bound the order-conformal
+        # runtime writes, so the two coverages must be one value. Back-fill an
+        # *omitted* ordering.coverage from order_conformal's *effective* coverage —
+        # its explicit value, or its own default when it too is omitted — here, on
+        # the raw mapping, because key presence ("unset" vs "set to its default") is
+        # only visible before construction. The two block defaults differ (ordering
+        # 0.9 vs order_conformal 0.5), so without inheriting order_conformal's
+        # default an omit-both config would collide them. An explicitly-set,
+        # mismatched value is left for the mode="after" backstop.
+        if not isinstance(data, dict):
+            return data
+        order_conformal = data.get("order_conformal")
+        ordering = data.get("ordering")
+        if not isinstance(order_conformal, dict) or not isinstance(ordering, dict):
+            return data
+        if (
+            ordering.get("policy") == "rs"
+            and "coverage" not in ordering
+            and ordering.get("quantile") is None
+        ):
+            ordering = dict(ordering)
+            ordering["coverage"] = order_conformal.get(
+                "coverage", OrderConformalConfig.model_fields["coverage"].default
+            )
+            data = dict(data)
+            data["ordering"] = ordering
+        return data
+
     @field_validator("config_schema")
     @classmethod
     def _check_schema(cls, value: str) -> str:
@@ -292,6 +323,30 @@ class BackendConfig(BaseModel):
                 "conformal (diagnostic band) and order_conformal (decision bound) "
                 "cannot both be configured: the engine has one runtime slot, so "
                 "select one per run"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _ordering_coverage_matches_order_conformal(self) -> BackendConfig:
+        # Backstop for the mode="before" back-fill: an *explicitly-set* ordering
+        # coverage that disagrees with order_conformal would drift the column the
+        # bound is written into away from the one the R,S rule reads back. Reject
+        # it (don't silently override) so the config bug surfaces at parse time.
+        # Quantile mode reads a q_<p> column, not the conformal bound, so it is
+        # exempt.
+        if (
+            self.order_conformal is not None
+            and self.ordering is not None
+            and self.ordering.policy == "rs"
+            and self.ordering.quantile is None
+            and self.ordering.coverage != self.order_conformal.coverage
+        ):
+            raise ValueError(
+                f"ordering.coverage ({self.ordering.coverage}) must equal "
+                f"order_conformal.coverage ({self.order_conformal.coverage}): the R,S "
+                "policy reads the hi_<coverage> decision bound the order-conformal "
+                "runtime writes, so the two coverages must match (or omit "
+                "ordering.coverage to inherit it)"
             )
         return self
 

@@ -13,10 +13,11 @@ from typing import Any
 
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
-from calibre.core.forecast_frame import UNIQUE_ID, H
+from calibre.core.forecast_frame import FORECAST_ORIGIN, UNIQUE_ID, H
 
 # Weekly wide-format VN2 sales with a roughly period-2 seasonal pattern that
 # SeasonalNaive cannot fit perfectly (the level drifts up across periods), so
@@ -183,3 +184,93 @@ def test_diagnostic_only_run_has_no_decision_column(tmp_path: Path) -> None:
     key = [UNIQUE_ID, "forecast_origin", H]
     merged = baseline_ledger.merge(decision_ledger, on=key, suffixes=("_base", "_dec"))
     pd.testing.assert_series_equal(merged["y_hat_base"], merged["y_hat_dec"], check_names=False)
+
+
+def _rs_ordering() -> dict[str, Any]:
+    # Params MUST be keyed on the vn2 adapter's composite unique_id
+    # (f"{Store}_{Product}" -> "1_10"/"2_20"), not the raw Product id; otherwise
+    # apply_rs_policy raises "Missing policy parameters". lead_time + review_period
+    # = 2 matches order_conformal.protection_period. No coverage key: it is
+    # back-filled from order_conformal.coverage (the no-drift guarantee).
+    return {
+        "policy": "rs",
+        "params": [
+            {"unique_id": "1_10", "inventory_position": 3.0, "lead_time": 1, "review_period": 1},
+            {"unique_id": "2_20", "inventory_position": 2.0, "lead_time": 1, "review_period": 1},
+        ],
+    }
+
+
+def test_order_conformal_run_emits_non_nan_orders_from_bound(tmp_path: Path) -> None:
+    """The R,S policy drives non-NaN orders from the emitted decision bound, e2e.
+
+    This is the production-path proof: a ``calibre run`` with BOTH an
+    ``order_conformal`` block AND an ``rs`` ``ordering`` block routes the order
+    ledger through ``_build_order_config`` -> ``OrderingConfig`` -> ``RsConfig`` ->
+    ``UpperBoundRule``, reading back the exact ``hi_0p74`` column the cumulative
+    runtime wrote. Coverage is back-filled from ``order_conformal`` (no drift).
+    The VN2 regression paths hand-build ``RsConfig`` and bypass this surface, so
+    they cannot stand in for this proof.
+    """
+    data_dir = _write_fixture(tmp_path)
+    config = load_config_from_mapping(
+        _config(
+            data_dir,
+            order_conformal={
+                "coverage": 0.74,
+                "protection_period": 2,
+                "calibration_window": 5000,
+                "buffer_max": 0.0,
+            },
+            ordering=_rs_ordering(),
+        )
+    )
+    # The back-fill made ordering.coverage match the bound's namer.
+    assert config.ordering is not None
+    assert config.ordering.coverage == 0.74
+
+    result = run_config(config)
+    orders = result.order_ledger.to_df()
+
+    # The ledger is non-empty and every order is finite (the headline acceptance).
+    assert not orders.empty
+    assert orders["order_qty"].notna().all()
+    assert orders["target_stock_level"].notna().all()
+
+    # The R,S arithmetic holds row-by-row: order_qty == max(TSL - ip, 0).
+    expected_qty = (orders["target_stock_level"] - orders["inventory_position"]).clip(lower=0.0)
+    pd.testing.assert_series_equal(orders["order_qty"], expected_qty, check_names=False)
+
+    # target_stock_level equals the emitted hi_0p74 terminal bound per (uid, origin):
+    # closes the loop from the decision column to the ordering policy.
+    ledger = result.ledger.to_df()
+    terminal = ledger[ledger[H] == 2].set_index([UNIQUE_ID, FORECAST_ORIGIN])["hi_0p74"]
+    assert not terminal.empty
+    for _, row in orders.iterrows():
+        bound = terminal.loc[(row[UNIQUE_ID], row[FORECAST_ORIGIN])]
+        assert row["target_stock_level"] == pytest.approx(bound)
+
+
+def test_order_conformal_run_rejects_drifting_coverage(tmp_path: Path) -> None:
+    """An explicit, mismatched ordering.coverage is rejected at parse time.
+
+    The production-path guarantee that drift cannot reach the engine: the
+    coverage-matching validator fires at ``load_config_from_mapping`` before any
+    run executes.
+    """
+    data_dir = _write_fixture(tmp_path)
+    ordering = _rs_ordering()
+    ordering["coverage"] = 0.9  # explicit and != order_conformal.coverage (0.74)
+    with pytest.raises(ValidationError, match="must equal order_conformal.coverage"):
+        load_config_from_mapping(
+            _config(
+                data_dir,
+                order_conformal={
+                    "coverage": 0.74,
+                    "protection_period": 2,
+                    "calibration_window": 5000,
+                    "buffer_max": 0.0,
+                },
+                ordering=ordering,
+            )
+        )
