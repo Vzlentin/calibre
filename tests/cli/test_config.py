@@ -8,9 +8,31 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from calibre.cli.config import load_config_from_mapping
+from calibre.cli.config import TaskConfig, load_config_from_mapping
 from calibre.conformal.partitions import GLOBAL_PARTITION
 from calibre.core.forecast_frame import UNIQUE_ID
+
+
+def test_censoring_fit_gate_defaults_false_and_plumbs_into_model_config() -> None:
+    default = TaskConfig(model="lightgbm.LGBMRegressor", horizon=3)
+    assert default.censoring_fit is False
+    assert default.resolved_model_config()["censoring_fit"] is False
+
+    enabled = TaskConfig(model="lightgbm.LGBMRegressor", horizon=3, censoring_fit=True)
+    assert enabled.resolved_model_config()["censoring_fit"] is True
+
+
+def test_censoring_fit_inside_config_dict_does_not_enable_gate() -> None:
+    # The gate is a task-root peer of model/horizon, not a config key. A stray
+    # key inside config: does not flip the typed gate (it stays the default).
+    task = TaskConfig(
+        model="lightgbm.LGBMRegressor",
+        horizon=3,
+        config={"censoring_fit": True},
+    )
+    assert task.censoring_fit is False
+    assert task.resolved_model_config()["censoring_fit"] is False
+
 
 _VALID: dict[str, Any] = {
     "config_schema": "1.0",

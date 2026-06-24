@@ -54,12 +54,14 @@ class TaskConfig(_Section):
 
     model: str
     horizon: int = Field(ge=1)
+    censoring_fit: bool = False
     config: dict[str, Any] = Field(default_factory=dict)
 
     def resolved_model_config(self) -> dict[str, Any]:
         resolved = dict(self.config)
         resolved.setdefault("model", self.model)
         resolved.setdefault("name", self.model)
+        resolved["censoring_fit"] = self.censoring_fit
         return resolved
 
 

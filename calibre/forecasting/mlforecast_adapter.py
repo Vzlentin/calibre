@@ -192,7 +192,19 @@ class MLForecastAdapter(ModelAdapter):
             if (val := self._config.get(opt_key)) is not None:
                 mlf_kwargs[opt_key] = _resolve_mlforecast_option(val)
 
-        mlf_df = task.history[[UNIQUE_ID, DS, Y, *exogenous_columns(task.history)]].copy()
+        # Derive exog from the pre-imputation history so the in_stock flag added
+        # by add_stockout_features never leaks in as a regressor.
+        exog = exogenous_columns(task.history)
+        if task.model_config.get("censoring_fit") and task.censoring is not None:
+            from calibre.forecasting.features import add_stockout_features
+
+            imputed = add_stockout_features(task.history, task.censoring)
+            # Select y_uncensored first, then rename -> exactly one Y column.
+            mlf_df = imputed[[UNIQUE_ID, DS, "y_uncensored", *exog]].rename(
+                columns={"y_uncensored": Y}
+            )
+        else:
+            mlf_df = task.history[[UNIQUE_ID, DS, Y, *exog]].copy()
         mlf_df[Y] = mlf_df[Y].astype("float32")
 
         self._mlf = mlforecast_cls(**mlf_kwargs)

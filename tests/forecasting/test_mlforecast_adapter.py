@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from mlforecast.lag_transforms import RollingMean, RollingStd
 
-from calibre.core.forecast_frame import DS, FITTED_Y_HAT, MODEL_NAME, UNIQUE_ID, H, Y
+from calibre.core.forecast_frame import DS, FITTED_Y_HAT, IN_STOCK, MODEL_NAME, UNIQUE_ID, H, Y
 from calibre.core.forecast_task import ForecastTask
 from calibre.forecasting.mlforecast_adapter import MLForecastAdapter
 
@@ -457,3 +457,87 @@ def test_direct_fitted_values_drop_backend_horizon_metadata(repeating_history):
     assert fitted.duplicated([UNIQUE_ID, DS, MODEL_NAME]).sum() == 0
     assert fitted[FITTED_Y_HAT].tolist() == [19.0, 31.0]
     assert set(fitted[MODEL_NAME]) == {"direct_lgbm"}
+
+
+def _capture_fit_df(monkeypatch, task) -> pd.DataFrame:
+    """Spy on the underlying mlforecast ``.fit`` and return the frame it received."""
+    mock_instance = MagicMock()
+    monkeypatch.setattr(
+        "calibre.forecasting.mlforecast_adapter.MLForecast", MagicMock(return_value=mock_instance)
+    )
+    MLForecastAdapter(task.model_config).fit(task)
+    return mock_instance.fit.call_args[0][0]
+
+
+def _censoring_frame(history: pd.DataFrame, oos_index: int) -> pd.DataFrame:
+    """Long in-stock frame marking exactly one week out of stock for SKU_001."""
+    in_stock = [True] * len(history)
+    in_stock[oos_index] = False
+    return pd.DataFrame(
+        {
+            UNIQUE_ID: history[UNIQUE_ID].to_numpy(),
+            DS: history[DS].to_numpy(),
+            IN_STOCK: in_stock,
+        }
+    )
+
+
+def test_gate_off_uses_observed_target_even_with_censoring(monkeypatch, repeating_history):
+    censoring = _censoring_frame(repeating_history, oos_index=10)
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=4,
+        model_config={"backend": "mlforecast", "model": "lightgbm.LGBMRegressor", "freq": "W"},
+        censoring=censoring,
+    )
+
+    fit_df = _capture_fit_df(monkeypatch, task)
+
+    expected = repeating_history[Y].astype("float32").to_numpy()
+    assert np.array_equal(fit_df[Y].to_numpy(), expected)
+
+
+def test_gate_on_with_censoring_none_falls_back_to_observed(monkeypatch, repeating_history):
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=4,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "freq": "W",
+            "censoring_fit": True,
+        },
+        censoring=None,
+    )
+
+    fit_df = _capture_fit_df(monkeypatch, task)
+
+    expected = repeating_history[Y].astype("float32").to_numpy()
+    assert np.array_equal(fit_df[Y].to_numpy(), expected)
+
+
+def test_gate_on_with_censoring_uses_imputed_target(monkeypatch, repeating_history):
+    # Force an out-of-stock week whose imputed demand exceeds the censored
+    # observation: at index 8 (a value-10 week) the expanding median of prior
+    # in-stock sales (~25) lifts the target above the observed 10.
+    oos_index = 8
+    censoring = _censoring_frame(repeating_history, oos_index=oos_index)
+    task = ForecastTask(
+        history=repeating_history,
+        horizon=4,
+        model_config={
+            "backend": "mlforecast",
+            "model": "lightgbm.LGBMRegressor",
+            "freq": "W",
+            "censoring_fit": True,
+        },
+        censoring=censoring,
+    )
+
+    fit_df = _capture_fit_df(monkeypatch, task)
+
+    # Exactly one Y column — guards the rename-then-select duplicate landmine.
+    assert list(fit_df.columns).count(Y) == 1
+    # The OOS week's target is lifted above the censored observation.
+    observed = float(repeating_history[Y].iloc[oos_index])
+    assert float(fit_df[Y].iloc[oos_index]) > observed
