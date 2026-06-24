@@ -20,6 +20,11 @@ def _parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--config", required=True)
     run_parser.add_argument("--metrics-port", type=int)
+    run_parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="Run the config's hpo search instead of a backtest (requires an hpo block).",
+    )
 
     validate_parser = subparsers.add_parser("validate")
     validate_parser.add_argument("--config", required=True)
@@ -49,7 +54,7 @@ def app(argv: list[str] | None = None) -> int:
     setup_logging(args.log_level, format=args.log_format)
 
     if args.command == "run":
-        commands.run(args.config, metrics_port=args.metrics_port)
+        commands.run(args.config, metrics_port=args.metrics_port, tune=args.tune)
     elif args.command == "validate":
         commands.validate(args.config)
     elif args.command == "health":

@@ -12,6 +12,7 @@ from calibre.tuning.optimizer import (
     optimize_local_task_candidate,
     run_optuna_study,
 )
+from calibre.tuning.search_space import suggest_from_spec
 from calibre.tuning.task import GlobalTuningTask, LocalTuningTask, StudyConfig, TuningCandidate
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "optimize_local_task",
     "optimize_local_task_candidate",
     "run_optuna_study",
+    "suggest_from_spec",
 ]

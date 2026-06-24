@@ -360,19 +360,32 @@ def test_load_config_requires_staging_uri_for_remote_ray(tmp_path) -> None:
         load_config(path)
 
 
-def test_load_config_rejects_hpo_section_until_cli_tuning_is_wired(tmp_path) -> None:
+def test_hpo_block_loads_and_is_inert_on_a_plain_run(monkeypatch, tmp_path) -> None:
     path = _write_config(tmp_path)
     text = Path(path).read_text(encoding="utf-8")
+    hpo_block = (
+        "hpo:\n"
+        "  budget: 4\n"
+        "  search_space:\n"
+        "    quantile_alpha:\n"
+        "      type: categorical\n"
+        "      choices: [0.45, 0.51, 0.59]\n"
+        "execution:\n  backend: local"
+    )
     Path(path).write_text(
-        text.replace(
-            "execution:\n  backend: local",
-            "hpo:\n  tune_experiment_dir: results/tune\nexecution:\n  backend: local",
-        ),
+        text.replace("execution:\n  backend: local", hpo_block),
         encoding="utf-8",
     )
+    monkeypatch.setattr("calibre.execution.task_builder.get_adapter_cls", lambda _: _StubAdapter)
+    monkeypatch.setattr("calibre.execution.prediction.resolve_adapter", lambda _: _StubAdapter())
 
-    with pytest.raises(ValueError, match="config.hpo is not supported"):
-        load_config(path)
+    config = load_config(path)
+    assert config.hpo is not None
+    assert config.hpo.budget == 4
+
+    # A plain run never reads hpo; the present-but-unused block stays inert.
+    result = run(path)
+    assert len(result.ledger.to_df()) == 1
 
 
 def test_load_config_reads_fsspec_uri() -> None:

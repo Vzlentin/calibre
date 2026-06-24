@@ -20,8 +20,9 @@ class TuningCandidate:
     three routing channels the optimizer drives separately:
     ``model_config`` is merged into the ForecastTask, ``conformal_config``
     overrides fields on the conformal runtime config snapshot, and
-    ``ordering_config`` overrides fields on the tuning objective
-    (``Cost`` / ``Pareto``).
+    ``ordering_config`` overrides fields on the tuning objective — generically,
+    via :func:`dataclasses.replace`, so it targets any dataclass objective
+    (``CumulativePinball.quantile``, ``Cost`` / ``Pareto`` decision params, …).
     """
 
     model_config: dict
