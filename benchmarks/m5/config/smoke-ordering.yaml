@@ -14,7 +14,6 @@ dataset:
   shortage_cost: 1.0
   initial_inventory: 5.0
   lead_time: 1
-  review_period: 1
 tasks:
   - model: SeasonalNaive
     horizon: 2

@@ -145,6 +145,10 @@ def _tally_order_cost(
     any in-window NaN (an unresolved tail) collapses that origin's demand to
     ``0.0`` so a NaN never reaches ``missed_sales``. Returns the simulator's
     per-(product, period) frame carrying ``holding_cost``/``shortage_cost``.
+
+    Invariant: a single ``protection_period`` spans the whole order ledger. The
+    window is applied globally, so a heterogeneous-protection ledger would
+    silently mis-window; such a ledger is rejected (see :class:`ValueError`).
     """
     if bundle.inventory is None or result.order_ledger is None:
         return None
@@ -167,6 +171,12 @@ def _tally_order_cost(
     )
     simulator = Simulator(bundle.inventory, rule, cost_model)
 
+    if order_frame["protection_period"].nunique() != 1:
+        raise ValueError(
+            "the order cost tally needs a single protection period across the order ledger, but "
+            "the ledger carries heterogeneous protection_period values; the window is applied "
+            "globally and per-uid windowing is out of scope for this seam"
+        )
     protection_period = int(order_frame["protection_period"].iloc[0])
     resolved = forecast_frame[forecast_frame[H].astype(int) <= protection_period]
     origins = sorted(order_frame[FORECAST_ORIGIN].unique())

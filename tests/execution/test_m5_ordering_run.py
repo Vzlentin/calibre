@@ -11,14 +11,18 @@ zero costs, tally skipped).
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from calibre.cli.commands import _load_dataset, _tally_order_cost, run_config
 from calibre.cli.config import load_config
 from calibre.core.forecast_frame import FORECAST_ORIGIN, UNIQUE_ID, H
 from calibre.core.order_types import CostStruct
+from calibre.execution.backend import BackendResult
+from calibre.execution.ledger import InMemoryOrderLedger
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ORDERING_CONFIG = _REPO_ROOT / "benchmarks" / "m5" / "config" / "smoke-ordering.yaml"
@@ -73,13 +77,23 @@ def test_m5_ordering_run_decision_order_finite_cost(tmp_path: Path) -> None:
     assert total_cost > 0.0
     assert (tally["demand"] > 0).any()
 
-    # 4. SANE / demand-responsive orders: all >= 0, no NaN, and the per-(uid,
-    # origin) resolved demands are not all identical across the four series.
+    # 4. SANE / demand-responsive orders: all >= 0, no NaN, and resolved demand
+    # varies ACROSS the four series at a fixed origin (true cross-series spread,
+    # not single-series variation across origins).
     assert (orders["order_qty"] >= 0).all()
     assert orders["order_qty"].notna().all()
     window = ledger[ledger[H] <= protection_period]
-    demand_by_series = window.groupby([UNIQUE_ID, FORECAST_ORIGIN])["y"].sum().dropna()
-    assert demand_by_series.nunique() > 1
+    resolved_window = window.dropna(subset=["y"])
+    # Pick an origin whose protection window resolves multiple series, then
+    # assert their summed demand is not all identical.
+    series_per_origin = resolved_window.groupby(FORECAST_ORIGIN)[UNIQUE_ID].nunique()
+    multi_series_origins = series_per_origin[series_per_origin > 1].index
+    assert len(multi_series_origins) > 0
+    origin = multi_series_origins[0]
+    demand_across_series = (
+        resolved_window[resolved_window[FORECAST_ORIGIN] == origin].groupby(UNIQUE_ID)["y"].sum()
+    )
+    assert demand_across_series.nunique() > 1
 
 
 def test_m5_run_without_costs_keeps_inventory_none_and_zero_costs(tmp_path: Path) -> None:
@@ -100,3 +114,54 @@ def test_m5_run_without_costs_keeps_inventory_none_and_zero_costs(tmp_path: Path
     # this config records no order ledger either.
     assert _tally_order_cost(bundle, result) is None
     assert not result.ledger.to_df().empty
+
+
+def test_tally_rejects_per_uid_cost_panel(tmp_path: Path) -> None:
+    """A per-uid ``dict[str, CostStruct]`` cost panel trips the tally guard.
+
+    The seam tallies against a single uniform cost struct; a per-uid panel is
+    out of scope and must raise rather than silently pick one struct.
+    """
+    config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
+    bundle = _load_dataset(config)
+    result = run_config(config)
+    # Sanity: the real ordering path supplies inventory and a non-empty ledger,
+    # so the guard is reached (not short-circuited by the None gates above it).
+    assert bundle.inventory is not None
+    assert not result.order_ledger.to_df().empty
+
+    assert isinstance(bundle.costs, CostStruct)
+    cost_panel = {uid: bundle.costs for uid in bundle.inventory}
+    panel_bundle = dataclasses.replace(bundle, costs=cost_panel)
+
+    with pytest.raises(ValueError, match="per-uid cost panel"):
+        _tally_order_cost(panel_bundle, result)
+
+
+def test_tally_rejects_heterogeneous_protection_period(tmp_path: Path) -> None:
+    """A heterogeneous-``protection_period`` order ledger trips the tally guard.
+
+    The protection window is applied globally from the first row; a ledger
+    carrying more than one ``protection_period`` would silently mis-window, so
+    the seam rejects it.
+    """
+    config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
+    bundle = _load_dataset(config)
+    result = run_config(config)
+    assert bundle.inventory is not None
+
+    order_frame = result.order_ledger.to_df()
+    assert not order_frame.empty
+    # Make protection_period non-uniform across the (uid, origin) rows.
+    heterogeneous = order_frame.copy()
+    heterogeneous.loc[heterogeneous.index[0], "protection_period"] = (
+        int(heterogeneous["protection_period"].iloc[0]) + 1
+    )
+    assert heterogeneous["protection_period"].nunique() > 1
+
+    poisoned_ledger = InMemoryOrderLedger()
+    poisoned_ledger.append(heterogeneous)
+    poisoned_result = BackendResult(ledger=result.ledger, order_ledger=poisoned_ledger)
+
+    with pytest.raises(ValueError, match="single protection period"):
+        _tally_order_cost(bundle, poisoned_result)
