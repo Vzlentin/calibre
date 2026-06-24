@@ -142,8 +142,9 @@ def test_order_conformal_winner_knob_subset_builds_implied_config() -> None:
 
     This asserts the subset's mapped fields, not winner-runtime equivalence: the
     deployed winner also injects a tuned base column, protection period, and
-    weight_decay/method the static block cannot supply (S2/S6 territory). The
-    block-implied config keeps the runtime defaults for those unset knobs.
+    weight_decay/method the static block cannot supply (those need runtime
+    injection paths this config surface does not expose). The block-implied
+    config keeps the runtime defaults for those unset knobs.
     """
     config = load_config_from_mapping(
         _config(

@@ -63,6 +63,9 @@ class TaskConfig(_Section):
         return resolved
 
 
+_PARTITION_MAP = {"global": global_partition, "series": series_partition}
+
+
 class ConformalConfig(_Section):
     """Conformal calibration knobs, convertible to the runtime config."""
 
@@ -79,10 +82,7 @@ class ConformalConfig(_Section):
     draw_seed: int = 0
 
     def to_runtime_config(self) -> SymmetricIntervalConfig:
-        partition_key = {
-            "global": global_partition,
-            "series": series_partition,
-        }[self.partition]
+        partition_key = _PARTITION_MAP[self.partition]
         return SymmetricIntervalConfig(
             method=self.method,
             coverage=self.coverage,
@@ -117,10 +117,7 @@ class OrderConformalConfig(_Section):
     buffer_max: float | None = None
 
     def to_runtime_config(self) -> CumulativeConformalRiskConfig:
-        partition_key = {
-            "global": global_partition,
-            "series": series_partition,
-        }[self.partition]
+        partition_key = _PARTITION_MAP[self.partition]
         return CumulativeConformalRiskConfig(
             coverage=self.coverage,
             protection_period=self.protection_period,

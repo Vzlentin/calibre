@@ -138,10 +138,9 @@ def run_config(
     streaming_output = config.output.ledger_path if config.output.streaming else None
     streaming_order_output = config.output.order_ledger_path if config.output.streaming else None
 
-    # The decision runtime (order_conformal) takes the single ConformalOptions
-    # runtime slot when configured; the diagnostic band (conformal) takes the
-    # config slot otherwise. The CLI rejects configuring both, so at most one of
-    # these is non-None here (ConformalOptions forbids passing both).
+    # order_conformal claims the single ConformalOptions runtime slot; conformal
+    # uses the config slot. ConformalOptions forbids both, and the CLI rejects
+    # configuring both — so at most one is non-None here.
     order_runtime: ConformalRuntime | None = (
         CumulativeRiskRuntime(preparation.order_conformal_config)
         if preparation.order_conformal_config is not None

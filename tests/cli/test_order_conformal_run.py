@@ -68,7 +68,7 @@ def test_order_conformal_run_emits_decision_bound(tmp_path: Path) -> None:
     """A configured order_conformal block lands a non-NaN hi_0p74 decision bound.
 
     coverage=0.74 names the column ``hi_0p74`` (the interval_column_names form,
-    ``.`` -> ``p``) — the exact column the R,S policy reads in S3 — and the
+    ``.`` -> ``p``) — the exact column the R,S ordering policy reads — and the
     cumulative runtime populates it on the terminal-horizon (H == protection
     period) row of each (uid, origin) window via the real production path.
     """
