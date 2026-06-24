@@ -18,8 +18,10 @@ from calibre.ordering.simulation.state import ProductState, make_pipeline
 class DatasetBundle:
     """All inputs a dataset adapter resolves for a run.
 
-    Carries history, future regressors, costs, and optional hierarchy/censoring
-    frames.
+    Carries history, future regressors, costs, optional hierarchy/censoring
+    frames, and optional initial inventory state keyed by ``unique_id`` (set by
+    adapters that drive the ordering cost tally; ``None`` for diagnostic-only
+    datasets).
     """
 
     history: pd.DataFrame
@@ -27,6 +29,7 @@ class DatasetBundle:
     costs: CostStruct | dict[str, CostStruct]
     hierarchy: pd.DataFrame | None
     censoring: pd.DataFrame | None
+    inventory: dict[str, ProductState] | None = None
 
 
 class DatasetAdapter(Protocol):
