@@ -206,9 +206,11 @@ def test_order_conformal_series_partition_uses_unique_id_runtime_key() -> None:
 
 
 def test_order_conformal_unknown_key_raises_at_parse_time() -> None:
-    with pytest.raises(ValidationError, match="weight_decay"):
+    # ``weight_decay`` is now a valid loop-path knob (Elevation S6·B); a genuinely
+    # unknown key still trips the ``extra="forbid"`` guard at parse time.
+    with pytest.raises(ValidationError, match="not_a_real_knob"):
         load_config_from_mapping(
-            _config(conformal=None, order_conformal={"coverage": 0.5, "weight_decay": 0.9})
+            _config(conformal=None, order_conformal={"coverage": 0.5, "not_a_real_knob": 0.9})
         )
 
 

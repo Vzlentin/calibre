@@ -20,7 +20,7 @@ class DatasetBundle:
 
     Carries history, future regressors, costs, optional hierarchy/censoring
     frames, and optional initial inventory state keyed by ``unique_id`` (set by
-    adapters that drive the ordering cost tally; ``None`` for diagnostic-only
+    adapters that drive the ordering settle loop; ``None`` for diagnostic-only
     datasets).
     """
 

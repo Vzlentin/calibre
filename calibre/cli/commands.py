@@ -16,7 +16,7 @@ from calibre.cli.config import (
     load_config_from_mapping,
 )
 from calibre.conformal.cumulative_risk import CumulativeRiskRuntime
-from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, H, Y
+from calibre.core.forecast_frame import DS, FORECAST_ORIGIN, UNIQUE_ID, Y
 from calibre.core.io import is_local_fs, open_fs
 from calibre.core.metrics import set_order_cost
 from calibre.evaluation.m5_coverage import (
@@ -33,9 +33,25 @@ from calibre.execution.backend import (
 )
 from calibre.execution.dataset import DatasetBundle
 from calibre.execution.dataset_registry import resolve_dataset_adapter
-from calibre.execution.hierarchy_preparation import prepare_run
+from calibre.execution.decision_loop import (
+    DecisionLoop,
+    DecisionLoopConfig,
+    RoundResult,
+    build_actuals_lookup,
+    observe_pending,
+)
+from calibre.execution.hierarchy_preparation import RunPreparation, prepare_run
+from calibre.execution.ledger import InMemoryLedger
+from calibre.execution.prediction import _coerce_forecast_frame_dtypes
+from calibre.execution.task_builder import build_tasks
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering import OrderPolicy, build_order_policy
+from calibre.ordering.policy_config import (
+    RsConfig,
+    apply_order_policy,
+    build_rs_params,
+    derive_warmup_origins,
+)
 from calibre.ordering.simulation.costs import LinearCostModel
 from calibre.ordering.simulation.rules import LostSalesRule
 from calibre.ordering.simulation.simulator import Simulator
@@ -129,70 +145,235 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
     set_order_cost(currency, dataset, total_cost)
 
 
-def _tally_order_cost(
-    bundle: DatasetBundle,
-    result: BackendResult,
-) -> pd.DataFrame | None:
-    """Replay the order ledger against realized demand through the generic ``Simulator``.
+def _settling(config: BackendConfig, bundle: DatasetBundle) -> bool:
+    """Whether the run takes the rolling settle/loop path (execution case 3).
 
-    Returns ``None`` (tally skipped) when the bundle supplied no initial
-    inventory state or no order ledger ran. Otherwise it builds a
-    :class:`LostSalesRule` / :class:`LinearCostModel` / :class:`Simulator` from
-    the bundle's uniform cost struct and seeded states, then steps once per
-    forecast origin (ascending; period = 1-based origin index). For each
-    ``(uid, origin)`` the order is the ledger's ``order_qty`` and the realized
-    demand is the sum of resolved ``y`` over horizons ``1..protection_period``;
-    any in-window NaN (an unresolved tail) collapses that origin's demand to
-    ``0.0`` so a NaN never reaches ``missed_sales``. Returns the simulator's
-    per-(product, period) frame carrying ``holding_cost``/``shortage_cost``.
-
-    Invariant: a single ``protection_period`` spans the whole order ledger. The
-    window is applied globally, so a heterogeneous-protection ledger would
-    silently mis-window; such a ledger is rejected (see :class:`ValueError`).
+    The trichotomy: no ``ordering:`` is a single-pass forecast run; ``ordering:``
+    with no bundle inventory is today's single-pass order ledger; ``ordering:``
+    **and** seeded inventory is the new loop path — the production engine walks
+    origins with a per-origin forecast -> order -> settle -> observe hook. The
+    branch is state-implicit (inventory presence), not a separate config flag.
     """
-    if bundle.inventory is None or result.order_ledger is None:
-        return None
+    return bundle.inventory is not None and config.ordering is not None
+
+
+def _settle_simulator(bundle: DatasetBundle) -> Simulator:
+    """Build the generic settle :class:`Simulator` from the bundle's seeded state."""
+    assert bundle.inventory is not None
     if isinstance(bundle.costs, dict):
         raise ValueError(
-            "the order cost tally needs a single uniform cost struct, but the dataset carries a "
-            "per-uid cost panel; per-uid cost tallying is out of scope for this seam"
+            "the settle loop needs a single uniform cost struct, but the dataset carries a "
+            "per-uid cost panel; per-uid cost simulation is out of scope for this path"
         )
     costs = bundle.costs
-
-    order_frame = result.order_ledger.to_df()
-    if order_frame.empty:
-        return None
-    forecast_frame = result.ledger.to_df()
-
     lead_time = next(iter(bundle.inventory.values())).lead_time_depth
     rule = LostSalesRule(lead_time)
     cost_model = LinearCostModel(
         rates={"holding": costs.holding_cost, "shortage": costs.shortage_cost}
     )
-    simulator = Simulator(bundle.inventory, rule, cost_model)
+    return Simulator(bundle.inventory, rule, cost_model)
 
-    if order_frame["protection_period"].nunique() != 1:
+
+def _run_settle_loop(
+    config: BackendConfig,
+    bundle: DatasetBundle,
+    preparation: RunPreparation,
+    *,
+    order_runtime: ConformalRuntime | None,
+    run_id: UUID | None,
+    conformal_state_store: ConformalStateStore | None,
+    initial_ledger: pd.DataFrame | None,
+) -> BackendResult:
+    """Drive the rolling forecast -> order -> settle -> observe walk (case 3).
+
+    The engine is built with **no order policy and no conformal runtime** —
+    forecasts only — and the order-conformal runtime is handed to the
+    :class:`DecisionLoop`, which owns ``apply``/``observe``. Leaving the runtime
+    on the engine while also passing it to the loop would double-observe every
+    origin's residuals, drifting the decision bound and the cost; the loop is the
+    sole observer here.
+
+    Per round the loop forecasts at the decision origin, builds live (R,S) params
+    from the simulator's ``inventory_position``, places the order, settles the
+    realised demand, and feeds the resolved actuals back to the runtime in
+    chronological order. A wait-then-order warmup seeds the CRC first (observe
+    only, no orders); ``lead_time`` zero-order delivery rounds drain the pipeline
+    after the decision rounds.
+    """
+    assert config.ordering is not None
+    ordering = config.ordering
+    if ordering.lead_time is None or ordering.review_period is None:
         raise ValueError(
-            "the order cost tally needs a single protection period across the order ledger, but "
-            "the ledger carries heterogeneous protection_period values; the window is applied "
-            "globally and per-uid windowing is out of scope for this seam"
+            "the settle loop needs ordering.lead_time and ordering.review_period; the (R,S) "
+            "protection window is built live from the simulator state, not from static params"
         )
-    protection_period = int(order_frame["protection_period"].iloc[0])
-    resolved = forecast_frame[forecast_frame[H].astype(int) <= protection_period]
-    origins = sorted(order_frame[FORECAST_ORIGIN].unique())
-    for period, origin in enumerate(origins, start=1):
-        origin_orders = order_frame[order_frame[FORECAST_ORIGIN] == origin]
-        orders = {
-            str(row[UNIQUE_ID]): float(row["order_qty"]) for _, row in origin_orders.iterrows()
-        }
-        window = resolved[resolved[FORECAST_ORIGIN] == origin]
-        actual_demand: dict[str, float] = {}
-        for uid, group in window.groupby(UNIQUE_ID, sort=False):
-            values = group[Y]
-            actual_demand[str(uid)] = 0.0 if values.isna().any() else float(values.sum())
-        simulator.step(period, orders, actual_demand)
+    lead_time = int(ordering.lead_time)
+    review_period = int(ordering.review_period)
+    horizon = config.tasks[0].horizon
+    freq = config.origins.freq
+    freq_offset = pd.tseries.frequencies.to_offset(freq)
+    assert bundle.inventory is not None
+    model_configs = [task.resolved_model_config() for task in config.tasks]
+    origins = preparation.origins
+    history = bundle.history
+    state_keys: list[str] = list(bundle.inventory)
 
-    return simulator.to_dataframe()
+    simulator = _settle_simulator(bundle)
+
+    engine = BackendEngine(
+        execution=config.execution.to_execution_options(freq=freq),
+        output=LedgerOutputOptions(streaming=False),
+        conformal=ConformalOptions(
+            runtime=None,
+            config=None,
+            run_id=run_id,
+            state_store=conformal_state_store,
+            initial_ledger=initial_ledger,
+        ),
+        reconciliation=ReconciliationOptions(
+            reconciler=preparation.reconciler,
+            hierarchy_index=preparation.hierarchy_index,
+        ),
+        order=None,
+    )
+
+    coverage = float(ordering.coverage)
+
+    def _origin_tasks(origin: pd.Timestamp):
+        sliced = history[history[DS] <= origin]
+        censoring = (
+            bundle.censoring[bundle.censoring[DS] <= origin]
+            if bundle.censoring is not None
+            else None
+        )
+        return build_tasks(sliced, model_configs, horizon, censoring=censoring)
+
+    def build_round(round_num: int):
+        origin = origins[round_num - 1]
+        return _origin_tasks(origin), origin, history
+
+    def _actuals_at(week: int) -> dict[str, float]:
+        # Realised demand for the t-th demand week, anchored one step past the
+        # first decision origin (origins are consecutive at ``freq``): round r's
+        # demand resolves at origins[0] + r steps. A uid with no row that week
+        # settles at zero demand.
+        target = pd.Timestamp(origins[0]) + week * freq_offset
+        rows = history[history[DS] == target]
+        demand = dict(zip(rows[UNIQUE_ID].astype(str), rows[Y].astype(float), strict=False))
+        return {uid: float(demand.get(uid, 0.0)) for uid in state_keys}
+
+    def policy(frame: pd.DataFrame) -> dict[str, float]:
+        if frame.empty:
+            return dict.fromkeys(state_keys, 0.0)
+        order_config = RsConfig(
+            params=build_rs_params(simulator, lead_time, review_period),
+            coverage=coverage,
+        )
+        order_result = apply_order_policy(frame, order_config)
+        orders = dict.fromkeys(state_keys, 0.0)
+        for uid, qty in zip(
+            order_result[UNIQUE_ID].astype(str),
+            order_result["order_qty"].astype(float),
+            strict=False,
+        ):
+            orders[uid] = float(max(qty, 0.0))
+        return orders
+
+    if order_runtime is not None:
+        _warmup_settle_runtime(
+            engine=engine,
+            runtime=order_runtime,
+            history=history,
+            censoring=bundle.censoring,
+            model_configs=model_configs,
+            horizon=horizon,
+            warmup_origins=_settle_warmup_count(config),
+        )
+
+    ledger = InMemoryLedger()
+
+    def _on_round(rr: RoundResult) -> None:
+        # Accumulate the per-round decision frame (carries the hi_<coverage>
+        # bound the policy read) so the returned ledger reflects the walk.
+        frame = rr.conformal_frame if rr.conformal_frame is not None else rr.ledger
+        if frame is not None and not frame.empty:
+            ledger.append(_coerce_forecast_frame_dtypes(frame))
+
+    try:
+        DecisionLoop(
+            engine=engine,
+            simulator=simulator,
+            build_round_tasks=build_round,
+            policy=policy,
+            get_actuals=_actuals_at,
+            config=DecisionLoopConfig(
+                n_rounds=len(origins), n_delivery_rounds=lead_time, on_round=_on_round
+            ),
+            runtime=order_runtime,
+        ).run()
+    finally:
+        engine.close()
+
+    # Cost once: read the simulator's accumulated cost after the drain and record
+    # the single scalar via the order-cost gauge. There is no per-origin order
+    # ledger on this path — the simulator owns the cost.
+    cost_frame = pd.DataFrame([{"total_cost": simulator.total_cost()}])
+    _record_order_cost_metric(
+        cost_frame,
+        dataset=config.dataset.adapter,
+        currency=_metric_currency(config),
+    )
+    return BackendResult(ledger=ledger, order_ledger=None)
+
+
+def _settle_warmup_count(config: BackendConfig) -> int:
+    """Resolve the CRC warmup-origin count for the settle loop.
+
+    Defaults to ``HPO_N_ORIGINS = 3`` (the order-conformal warmup default the VN2
+    winner uses), overridable via ``order_conformal.warmup_origins``.
+    ``WARMUP_ORIGINS = 6`` is a ``run_seasonal``-only constant and must not seed
+    this default.
+    """
+    default = 3
+    if config.order_conformal is not None and config.order_conformal.warmup_origins is not None:
+        return int(config.order_conformal.warmup_origins)
+    return default
+
+
+def _warmup_settle_runtime(
+    *,
+    engine: BackendEngine,
+    runtime: ConformalRuntime,
+    history: pd.DataFrame,
+    censoring: pd.DataFrame | None,
+    model_configs: list[dict[str, Any]],
+    horizon: int,
+    warmup_origins: int,
+) -> None:
+    """Calibrate the order-conformal runtime on resolved warmup origins (observe-only).
+
+    A wait-then-order warmup: forecast over the derived warmup origins, apply the
+    runtime, and feed the resolved frames to ``observe_pending`` in chronological
+    order (the same sorted order the benchmark's warmup uses — CRC recency
+    weighting depends on it). No orders are placed; the simulator is untouched.
+    """
+    origin_dates = derive_warmup_origins(history, horizon, warmup_origins)
+    if not origin_dates:
+        return
+    tasks = build_tasks(history, model_configs, horizon, censoring=censoring)
+    ledger_df = engine.execute(tasks, actuals=history, origins=origin_dates).ledger.to_df()
+    if ledger_df.empty:
+        return
+
+    frames: list[pd.DataFrame] = []
+    for origin in origin_dates:
+        origin_rows = ledger_df[ledger_df[FORECAST_ORIGIN] == origin]
+        if not origin_rows.empty:
+            frames.append(runtime.apply(origin_rows))
+    if not frames:
+        return
+    actuals_lookup = build_actuals_lookup(pd.concat(frames, ignore_index=True))
+    observe_pending(runtime, frames, actuals_lookup)
 
 
 def run(
@@ -241,6 +422,26 @@ def run_config(
         else None
     )
 
+    # Execution case 3: ordering + seeded inventory -> the rolling settle loop.
+    # The engine here carries NO order policy and NO conformal runtime (the loop
+    # owns apply/observe); cases 1 and 2 stay the byte-identical single pass.
+    if _settling(config, bundle):
+        result = _run_settle_loop(
+            config,
+            bundle,
+            preparation,
+            order_runtime=order_runtime,
+            run_id=run_id,
+            conformal_state_store=conformal_state_store,
+            initial_ledger=initial_ledger,
+        )
+        if not config.output.streaming and config.output.ledger_path is not None:
+            result.ledger.to_parquet(config.output.ledger_path)
+        logger.info("run complete", extra={"rows": len(result.ledger.to_df())})
+        if config.output.ledger_path is not None:
+            logger.info("ledger written", extra={"ledger_path": config.output.ledger_path})
+        return result
+
     engine = BackendEngine(
         execution=config.execution.to_execution_options(freq=config.origins.freq),
         output=LedgerOutputOptions(
@@ -275,10 +476,11 @@ def run_config(
     ):
         result.order_ledger.to_parquet(config.output.order_ledger_path)
     if result.order_ledger is not None:
-        tally = _tally_order_cost(bundle, result)
-        cost_frame = tally if tally is not None else result.order_ledger.to_df()
+        # Case 2 (ordering, no inventory): the single-pass order ledger carries
+        # the cost directly; there is no inventory to settle and no simulator on
+        # this path. Case 3 (inventory) is handled by the settle loop above.
         _record_order_cost_metric(
-            cost_frame,
+            result.order_ledger.to_df(),
             dataset=config.dataset.adapter,
             currency=_metric_currency(config),
         )

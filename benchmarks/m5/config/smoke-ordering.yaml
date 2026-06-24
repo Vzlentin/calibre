@@ -42,24 +42,16 @@ ordering:
   # R,S policy keyed on the M5 composite unique_id (item_id_store_id). coverage
   # is omitted -> back-filled from order_conformal.coverage (the no-drift
   # guarantee). lead_time + review_period == 2 == order_conformal.protection_period.
+  #
+  # The bundle seeds inventory (initial_inventory above), so this routes to the
+  # rolling settle loop (execution case 3): the engine walks origins and builds
+  # the (R,S) params live from the simulator's inventory_position each round, so
+  # top-level lead_time/review_period define the protection window and any static
+  # `params:` rows would be inert (the loop has live inventory, not a hand-set
+  # inventory_position).
   policy: rs
-  params:
-    - unique_id: HOBBIES_1_001_CA_1
-      inventory_position: 5.0
-      lead_time: 1
-      review_period: 1
-    - unique_id: HOBBIES_1_001_CA_2
-      inventory_position: 5.0
-      lead_time: 1
-      review_period: 1
-    - unique_id: HOBBIES_2_001_TX_1
-      inventory_position: 5.0
-      lead_time: 1
-      review_period: 1
-    - unique_id: HOBBIES_2_001_TX_2
-      inventory_position: 5.0
-      lead_time: 1
-      review_period: 1
+  lead_time: 1
+  review_period: 1
 output:
   ledger_path: results/m5/smoke-ordering/forecast-ledger.parquet
   order_ledger_path: results/m5/smoke-ordering/order-ledger.parquet
