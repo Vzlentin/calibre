@@ -310,6 +310,27 @@ def test_cumulative_config_rejects_aci_method():
         SymmetricIntervalConfig(method="aci", coverage=0.9, mode="cumulative", protection_period=3)
 
 
+def test_symmetric_runtime_advertises_protection_period_capability():
+    """The cumulative runtime exposes protection_period as a read capability.
+
+    The engine reads this off the runtime to decide whether to defer incomplete
+    cumulative windows, without inspecting the concrete class.
+    """
+    runtime, _ = _build_cumulative_runtime(protection_period=3)
+    assert runtime.protection_period == 3
+
+
+def test_symmetric_perhorizon_runtime_advertises_no_protection_period():
+    """A per-horizon runtime advertises protection_period None (no deferral)."""
+    from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime
+
+    runtime = SymmetricIntervalRuntime(
+        SymmetricIntervalConfig(method="mscp", coverage=0.9, calibration_window=5)
+    )
+    assert runtime.mode == "perhorizon"
+    assert runtime.protection_period is None
+
+
 def test_cumulative_runtime_pads_horizon_beyond_protection_period():
     """When horizon > protection_period, only h=K gets a finite bound; h>K is NaN."""
     from calibre.conformal import SymmetricIntervalConfig, SymmetricIntervalRuntime

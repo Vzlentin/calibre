@@ -318,12 +318,12 @@ class BackendEngine:
         # identical across that swap.
         preflight_runtime = self.conformal_runtime
         if (
-            isinstance(preflight_runtime, SymmetricIntervalRuntime)
+            preflight_runtime is not None
             and preflight_runtime.mode == "cumulative"
-            and preflight_runtime.config.protection_period is not None
+            and preflight_runtime.protection_period is not None
         ):
             horizons = [task.horizon for task in tasks]
-            protection_period = preflight_runtime.config.protection_period
+            protection_period = preflight_runtime.protection_period
             if horizons and protection_period > min(horizons):
                 # A window can never accumulate protection_period horizons, so
                 # the deferral would keep every in-window row pending forever —
@@ -951,26 +951,27 @@ class BackendEngine:
         with span("actuals_lookup", origin=origin):
             updated, newly_resolved = actuals.resolve(current, origin)
 
-        # Cumulative engine-internal conformal scores a window only at its
-        # terminal horizon and only when the whole window is present. When a
-        # window's horizons resolve across multiple origins, resolving its early
-        # rows per-origin would strand them: the runtime skips the still-partial
-        # window (no side effect) and apply_resolutions then removes them from
-        # the open set, so the window can never be presented complete and never
-        # scores. Defer incomplete cumulative windows here — their rows stay
-        # unresolved (y NaN) in the open set until the terminal horizon resolves,
-        # at which point the whole window is due together. Strictly gated to the
-        # SymmetricIntervalRuntime cumulative path; perhorizon, runtime-None, and
-        # CumulativeRiskRuntime paths are untouched.
+        # Cumulative conformal scores a window only at its terminal horizon and
+        # only when the whole window is present. When a window's horizons resolve
+        # across multiple origins, resolving its early rows per-origin would
+        # strand them: the runtime skips the still-partial window (no side effect)
+        # and apply_resolutions then removes them from the open set, so the window
+        # can never be presented complete and never scores. Defer incomplete
+        # cumulative windows here — their rows stay unresolved (y NaN) in the open
+        # set until the terminal horizon resolves, at which point the whole window
+        # is due together. Gated on the cumulative-deferral capability the runtime
+        # advertises (mode == "cumulative" and protection_period set), so both the
+        # two-sided and one-sided cumulative runtimes get it; perhorizon and
+        # runtime-None paths are untouched.
         if (
-            isinstance(conformal_runtime, SymmetricIntervalRuntime)
+            conformal_runtime is not None
             and conformal_runtime.mode == "cumulative"
-            and conformal_runtime.config.protection_period is not None
+            and conformal_runtime.protection_period is not None
         ):
             updated, newly_resolved = self._defer_incomplete_cumulative_windows(
                 updated,
                 newly_resolved,
-                int(conformal_runtime.config.protection_period),
+                int(conformal_runtime.protection_period),
             )
 
         if newly_resolved.empty:
@@ -1049,6 +1050,16 @@ class BackendEngine:
         return updated, newly_resolved
 
     def _restore_conformal_state(self) -> None:
+        """Rebuild the conformal runtime from the state store on resume.
+
+        Only ``SymmetricIntervalRuntime`` is restorable today: it exposes the
+        ``from_partition_states``/``from_state`` factories this reconstructs, and
+        :meth:`_advance_issued_count_from_initial_ledger` recovers its issued
+        count. The one-sided ``CumulativeRiskRuntime`` has no resume-state
+        round-trip yet, so a state-store-backed resume would not restore its
+        calibration; the early-return below no-ops when no state store is
+        configured, which is the in-process warmup path it currently runs on.
+        """
         if (
             self.run_id is None
             or self.conformal_state_store is None
@@ -1123,7 +1134,12 @@ class BackendEngine:
                 set_conformal_coverage_drift(model_name, partition, drift)
 
     def _advance_issued_count_from_initial_ledger(self) -> None:
-        """Recover issued-origin accounting from a resumed ledger snapshot."""
+        """Recover issued-origin accounting from a resumed ledger snapshot.
+
+        Two-sided ``SymmetricIntervalRuntime`` only: the one-sided
+        ``CumulativeRiskRuntime`` has no resume-state surface yet (the same gap
+        noted on :meth:`_restore_conformal_state`).
+        """
         runtime = self.conformal_runtime
         if (
             runtime is None

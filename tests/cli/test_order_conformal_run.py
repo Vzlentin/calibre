@@ -18,8 +18,10 @@ from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
 from calibre.core.forecast_frame import UNIQUE_ID, H
 
-# Weekly wide-format VN2 sales with a period-2 seasonal pattern; long enough that
-# the rolling origins below have in-window actuals to resolve against.
+# Weekly wide-format VN2 sales with a roughly period-2 seasonal pattern that
+# SeasonalNaive cannot fit perfectly (the level drifts up across periods), so
+# resolved windows carry non-zero residuals and the calibration buffer is
+# exercised. Long enough that the rolling origins below have in-window actuals.
 _DATES = [
     "2024-01-01",
     "2024-01-08",
@@ -35,8 +37,8 @@ _DATES = [
 _WIDE_SALES = "\n".join(
     [
         "Store,Product," + ",".join(_DATES),
-        "1,10," + ",".join(["10", "12"] * 5),
-        "2,20," + ",".join(["5", "7"] * 5),
+        "1,10," + ",".join(["10", "12", "11", "15", "9", "13", "12", "16", "10", "14"]),
+        "2,20," + ",".join(["5", "7", "6", "9", "4", "8", "7", "10", "5", "9"]),
     ]
 )
 
@@ -99,23 +101,23 @@ def test_order_conformal_run_emits_decision_bound(tmp_path: Path) -> None:
     assert ledger[ledger[H] < 2]["hi_0p74"].isna().all()
 
 
-def test_order_conformal_bound_is_uncalibrated_base_sum_passthrough(tmp_path: Path) -> None:
-    """The emitted hi_0p74 bound is the bare base-sum: calibration is stranded.
+def test_order_conformal_bound_is_calibrated(tmp_path: Path) -> None:
+    """The emitted hi_0p74 bound is calibrated: the engine drives the deferral.
 
-    S1 wires the cumulative decision runtime through the production path, but its
-    calibration buffer is structurally stranded — the incomplete-cumulative-window
-    deferral in BackendEngine is gated to ``SymmetricIntervalRuntime`` only, so for
-    the ``CumulativeRiskRuntime`` decision path each window's early horizons resolve
-    per-origin, ``observe()`` skips the still-partial window, and ``apply_resolutions``
-    then drops those rows from the open set. The window is never presented complete,
-    so no residual is ever recorded and the calibration buffer stays exactly 0.0.
+    The cumulative decision runtime reaches calibration through the production
+    (CLI) path: ``BackendEngine`` now defers incomplete cumulative windows for
+    the one-sided runtime via the protection_period capability gate, so each
+    window resolves whole, ``observe()`` records its residual, and the buffer is
+    no longer structurally 0. This is the engine-path RED -> GREEN proof of the
+    deferral generalization.
 
-    The bound is therefore ``base_sum + 0`` (an uncalibrated passthrough), regardless
-    of ``buffer_max``: this test uses ``buffer_max=1e9`` so no clamp can mask the
-    zero buffer, and asserts both that ``hi == base_sum`` per terminal window and that
-    no nonconformity score was ever written (calibration genuinely never ran). S2
-    (generalizing the deferral off ``SymmetricIntervalRuntime``) is the deliverable
-    that lets the window resolve whole; it then flips this to a non-zero buffer.
+    Uses the default unbounded buffer (``buffer_max=None``) — this is the test
+    fixture's buffer, NOT the VN2 winner config (which sets ``buffer_max=0.0`` so
+    its ``hi`` can never exceed ``base_sum`` even when fully calibrated). The
+    residual is ``actual_sum - base_sum`` and the 0.74-quantile base commonly
+    over-forecasts, so the buffer is often negative and ``hi < base_sum`` when
+    correctly calibrated; the proof is that calibration RAN and moved the bound
+    off the bare base-sum, not the sign of the move.
     """
     data_dir = _write_fixture(tmp_path)
     config = load_config_from_mapping(
@@ -125,9 +127,8 @@ def test_order_conformal_bound_is_uncalibrated_base_sum_passthrough(tmp_path: Pa
                 "coverage": 0.74,
                 "protection_period": 2,
                 "calibration_window": 5000,
-                # 1e9 makes the buffer_max clamp unreachable, so a zero buffer can
-                # only mean calibration never ran — not that a clamp pinned it to 0.
-                "buffer_max": 1e9,
+                # Default unbounded buffer: no clamp masks the calibrated buffer.
+                "buffer_max": None,
             },
         )
     )
@@ -135,19 +136,25 @@ def test_order_conformal_bound_is_uncalibrated_base_sum_passthrough(tmp_path: Pa
     result = run_config(config)
     ledger = result.ledger.to_df()
 
-    # Calibration never ran: no terminal window ever recorded a residual, so the
-    # nonconformity score is NaN across the whole ledger (the stranded state).
-    assert ledger["nonconformity_score"].isna().all()
+    # Calibration ran: at least one terminal window recorded a residual, so the
+    # nonconformity score is non-NaN somewhere in the ledger.
+    assert ledger["nonconformity_score"].notna().any()
 
-    # The bound is the bare base-sum (window sum of the resolved base column over
-    # H <= protection_period) plus a zero buffer — an uncalibrated passthrough.
+    # The bound moved off the bare base-sum: on at least one terminal window the
+    # calibrated buffer is non-zero, so hi != base_sum there. Direction is not
+    # asserted — a negative buffer (hi < base_sum) is correct under the
+    # over-forecasting 0.74-quantile base.
     window = ledger[ledger[H] <= 2]
     base_sums = window.groupby([UNIQUE_ID, "forecast_origin"])["y_hat"].sum()
     terminal = ledger[ledger[H] == 2]
     assert not terminal.empty
+    moved = False
     for _, row in terminal.iterrows():
         base_sum = base_sums.loc[(row[UNIQUE_ID], row["forecast_origin"])]
-        assert row["hi_0p74"] == pytest.approx(base_sum), "buffer contribution must be 0 (stranded)"
+        if row["hi_0p74"] != pytest.approx(base_sum):
+            moved = True
+            break
+    assert moved, "calibration ran but the buffer was zero on every terminal window"
 
 
 def test_diagnostic_only_run_has_no_decision_column(tmp_path: Path) -> None:

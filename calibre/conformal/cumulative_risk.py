@@ -286,6 +286,10 @@ class CumulativeRiskRuntime:
     def mode(self) -> str:
         return "cumulative"
 
+    @property
+    def protection_period(self) -> int | None:
+        return int(self.config.protection_period)
+
     def adaptive_drift(self) -> float | None:
         return None
 
