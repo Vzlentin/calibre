@@ -1050,6 +1050,16 @@ class BackendEngine:
         return updated, newly_resolved
 
     def _restore_conformal_state(self) -> None:
+        """Rebuild the conformal runtime from the state store on resume.
+
+        Only ``SymmetricIntervalRuntime`` is restorable today: it exposes the
+        ``from_partition_states``/``from_state`` factories this reconstructs, and
+        :meth:`_advance_issued_count_from_initial_ledger` recovers its issued
+        count. The one-sided ``CumulativeRiskRuntime`` has no resume-state
+        round-trip yet, so a state-store-backed resume would not restore its
+        calibration; the early-return below no-ops when no state store is
+        configured, which is the in-process warmup path it currently runs on.
+        """
         if (
             self.run_id is None
             or self.conformal_state_store is None
