@@ -132,7 +132,6 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
 def _tally_order_cost(
     bundle: DatasetBundle,
     result: BackendResult,
-    config: BackendConfig,
 ) -> pd.DataFrame | None:
     """Replay the order ledger against realized demand through the generic ``Simulator``.
 
@@ -149,7 +148,6 @@ def _tally_order_cost(
     """
     if bundle.inventory is None or result.order_ledger is None:
         return None
-    del config
     if isinstance(bundle.costs, dict):
         raise ValueError(
             "the order cost tally needs a single uniform cost struct, but the dataset carries a "
@@ -267,7 +265,7 @@ def run_config(
     ):
         result.order_ledger.to_parquet(config.output.order_ledger_path)
     if result.order_ledger is not None:
-        tally = _tally_order_cost(bundle, result, config)
+        tally = _tally_order_cost(bundle, result)
         cost_frame = tally if tally is not None else result.order_ledger.to_df()
         _record_order_cost_metric(
             cost_frame,

@@ -64,7 +64,7 @@ def test_m5_ordering_run_decision_order_finite_cost(tmp_path: Path) -> None:
     )
 
     # 3. Simulator tallies a FINITE, non-negative, non-degenerate total cost.
-    tally = _tally_order_cost(bundle, result, config)
+    tally = _tally_order_cost(bundle, result)
     assert tally is not None
     assert {"holding_cost", "shortage_cost"} <= set(tally.columns)
     total_cost = float((tally["holding_cost"] + tally["shortage_cost"]).sum())
@@ -98,5 +98,5 @@ def test_m5_run_without_costs_keeps_inventory_none_and_zero_costs(tmp_path: Path
     result = run_config(config)
     # The tally seam is gated off (no inventory), so it returns None even though
     # this config records no order ledger either.
-    assert _tally_order_cost(bundle, result, config) is None
+    assert _tally_order_cost(bundle, result) is None
     assert not result.ledger.to_df().empty
