@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import pandas as pd
@@ -15,7 +15,6 @@ from calibre.cli.config import (
     load_config_from_mapping,
 )
 from calibre.conformal.cumulative_risk import CumulativeRiskRuntime
-from calibre.conformal.runtime import ConformalRuntime
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.io import is_local_fs, open_fs
 from calibre.core.metrics import set_order_cost
@@ -37,6 +36,9 @@ from calibre.execution.hierarchy_preparation import prepare_run
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering import OrderPolicy, build_order_policy
 from calibre.storage.state import ConformalStateStore
+
+if TYPE_CHECKING:
+    from calibre.conformal.runtime import ConformalRuntime
 
 logger = logging.getLogger(__name__)
 

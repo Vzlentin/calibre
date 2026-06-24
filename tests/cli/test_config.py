@@ -187,14 +187,22 @@ def test_order_conformal_unknown_key_raises_at_parse_time() -> None:
         )
 
 
-def test_order_conformal_out_of_range_coverage_rejected() -> None:
-    # The bound (0 < coverage < 1) is the runtime config's own invariant; it
-    # fires when the block builds its CumulativeConformalRiskConfig.
-    config = load_config_from_mapping(_config(conformal=None, order_conformal={"coverage": 1.0}))
+def test_order_conformal_out_of_range_coverage_rejected_at_parse_time() -> None:
+    # The bound (0 < coverage < 1) is enforced at parse time via the Field
+    # constraint, so `calibre validate` rejects it without ever building the
+    # runtime config (parity with protection_period/calibration_window).
+    with pytest.raises(ValidationError, match="coverage"):
+        load_config_from_mapping(_config(conformal=None, order_conformal={"coverage": 1.0}))
 
-    assert config.order_conformal is not None
+
+def test_order_conformal_runtime_config_also_guards_coverage() -> None:
+    # Defense-in-depth: the runtime CumulativeConformalRiskConfig keeps its own
+    # 0 < coverage < 1 invariant, so a coverage that bypasses the CLI surface is
+    # still rejected when the config object is constructed directly.
+    from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
+
     with pytest.raises(ValueError, match="coverage"):
-        config.order_conformal.to_runtime_config()
+        CumulativeConformalRiskConfig(coverage=1.0)
 
 
 def test_order_conformal_and_conformal_together_rejected() -> None:

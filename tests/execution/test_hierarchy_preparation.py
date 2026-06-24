@@ -584,10 +584,12 @@ def test_order_conformal_absent_yields_no_decision_config() -> None:
 
 
 def test_order_conformal_and_diagnostic_resolve_independently() -> None:
-    """Both blocks resolve in prepare_run; engine-channel selection is U3's concern.
+    """Both blocks resolve in prepare_run; which runtime reaches the engine is not.
 
-    The CLI rejects configuring both at once, but prepare_run itself resolves
-    whichever config objects are present without coupling them.
+    engine-channel selection (which runtime reaches the engine) is asserted in the
+    CLI command-assembly tests, not here. The CLI rejects configuring both at once,
+    but prepare_run itself resolves whichever config objects are present without
+    coupling them.
     """
     from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
 

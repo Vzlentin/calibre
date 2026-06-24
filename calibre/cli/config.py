@@ -109,7 +109,7 @@ class OrderConformalConfig(_Section):
     cost fractile — cost-shaping lives upstream of this block.
     """
 
-    coverage: float = 0.5
+    coverage: float = Field(default=0.5, gt=0.0, lt=1.0)
     protection_period: int = Field(default=3, ge=1)
     calibration_window: int = Field(default=5000, ge=1)
     partition: Literal["global", "series"] = "global"

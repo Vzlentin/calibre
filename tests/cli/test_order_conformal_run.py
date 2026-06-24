@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from calibre.cli.commands import run_config
 from calibre.cli.config import load_config_from_mapping
@@ -96,6 +97,57 @@ def test_order_conformal_run_emits_decision_bound(tmp_path: Path) -> None:
     # Every terminal-horizon row carries the decision bound; no earlier-H row does.
     assert terminal["hi_0p74"].notna().all()
     assert ledger[ledger[H] < 2]["hi_0p74"].isna().all()
+
+
+def test_order_conformal_bound_is_uncalibrated_base_sum_passthrough(tmp_path: Path) -> None:
+    """The emitted hi_0p74 bound is the bare base-sum: calibration is stranded.
+
+    S1 wires the cumulative decision runtime through the production path, but its
+    calibration buffer is structurally stranded — the incomplete-cumulative-window
+    deferral in BackendEngine is gated to ``SymmetricIntervalRuntime`` only, so for
+    the ``CumulativeRiskRuntime`` decision path each window's early horizons resolve
+    per-origin, ``observe()`` skips the still-partial window, and ``apply_resolutions``
+    then drops those rows from the open set. The window is never presented complete,
+    so no residual is ever recorded and the calibration buffer stays exactly 0.0.
+
+    The bound is therefore ``base_sum + 0`` (an uncalibrated passthrough), regardless
+    of ``buffer_max``: this test uses ``buffer_max=1e9`` so no clamp can mask the
+    zero buffer, and asserts both that ``hi == base_sum`` per terminal window and that
+    no nonconformity score was ever written (calibration genuinely never ran). S2
+    (generalizing the deferral off ``SymmetricIntervalRuntime``) is the deliverable
+    that lets the window resolve whole; it then flips this to a non-zero buffer.
+    """
+    data_dir = _write_fixture(tmp_path)
+    config = load_config_from_mapping(
+        _config(
+            data_dir,
+            order_conformal={
+                "coverage": 0.74,
+                "protection_period": 2,
+                "calibration_window": 5000,
+                # 1e9 makes the buffer_max clamp unreachable, so a zero buffer can
+                # only mean calibration never ran — not that a clamp pinned it to 0.
+                "buffer_max": 1e9,
+            },
+        )
+    )
+
+    result = run_config(config)
+    ledger = result.ledger.to_df()
+
+    # Calibration never ran: no terminal window ever recorded a residual, so the
+    # nonconformity score is NaN across the whole ledger (the stranded state).
+    assert ledger["nonconformity_score"].isna().all()
+
+    # The bound is the bare base-sum (window sum of the resolved base column over
+    # H <= protection_period) plus a zero buffer — an uncalibrated passthrough.
+    window = ledger[ledger[H] <= 2]
+    base_sums = window.groupby([UNIQUE_ID, "forecast_origin"])["y_hat"].sum()
+    terminal = ledger[ledger[H] == 2]
+    assert not terminal.empty
+    for _, row in terminal.iterrows():
+        base_sum = base_sums.loc[(row[UNIQUE_ID], row["forecast_origin"])]
+        assert row["hi_0p74"] == pytest.approx(base_sum), "buffer contribution must be 0 (stranded)"
 
 
 def test_diagnostic_only_run_has_no_decision_column(tmp_path: Path) -> None:
