@@ -331,6 +331,49 @@ def test_ordering_coverage_unchanged_without_order_conformal() -> None:
     assert config.ordering.coverage == 0.9
 
 
+def test_settle_loop_rs_without_decision_bound_rejected_at_parse_time() -> None:
+    """A settle-loop rs config with no order_conformal and no quantile is rejected.
+
+    The loop-only ``lead_time``/``review_period`` params signal the settle path,
+    whose (R,S) rule reads a decision bound off the frame. With no
+    ``order_conformal`` block and no ``ordering.quantile``, the bound never exists
+    and ``apply_rs_policy`` would crash mid-walk on the missing interval columns —
+    so reject the combo at parse time (``calibre validate``) instead.
+    """
+    with pytest.raises(ValidationError, match="needs a decision bound"):
+        load_config_from_mapping(
+            _config(
+                conformal=None,
+                ordering={"policy": "rs", "lead_time": 1, "review_period": 1},
+            )
+        )
+
+
+def test_settle_loop_rs_with_order_conformal_parses() -> None:
+    """The same loop-path rs config parses once an order_conformal bound is present."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={"coverage": 0.5, "protection_period": 2},
+            ordering={"policy": "rs", "lead_time": 1, "review_period": 1},
+        )
+    )
+    assert config.ordering is not None
+    assert config.order_conformal is not None
+
+
+def test_settle_loop_rs_with_quantile_parses() -> None:
+    """The same loop-path rs config parses in quantile mode (no order_conformal)."""
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            ordering={"policy": "rs", "lead_time": 1, "review_period": 1, "quantile": 0.8},
+        )
+    )
+    assert config.ordering is not None
+    assert config.ordering.quantile == 0.8
+
+
 def test_execution_chunk_size_plumbs_into_execution_options() -> None:
     config = load_config_from_mapping(_config(execution={"backend": "local", "chunk_size": 32}))
 

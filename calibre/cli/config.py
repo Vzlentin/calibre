@@ -466,6 +466,31 @@ class BackendConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _settle_loop_rs_needs_decision_bound(self) -> BackendConfig:
+        # The settle loop's (R,S) policy reads a decision bound off the forecast
+        # frame: an order_conformal hi_<coverage> interval column, or — in
+        # quantile mode — a q_<p> column. With neither, the loop has no upper
+        # bound to order against and apply_rs_policy crashes mid-walk on the
+        # missing interval columns. The loop path is signalled by the loop-only
+        # lead_time/review_period params, so reject that combo here, at parse
+        # time, instead of failing deep in the run.
+        if (
+            self.ordering is not None
+            and self.ordering.policy == "rs"
+            and self.ordering.lead_time is not None
+            and self.ordering.review_period is not None
+            and self.order_conformal is None
+            and self.ordering.quantile is None
+        ):
+            raise ValueError(
+                "the settle-loop (R,S) policy needs a decision bound to order against: "
+                "configure an order_conformal block (conformal decision bound) or set "
+                "ordering.quantile (quantile mode). With neither, the (R,S) rule has no "
+                "upper bound and the loop fails on the missing interval columns"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _coherent_spread_requires_no_reconciliation(self) -> BackendConfig:
         if self.conformal is None or self.conformal.spread != "coherent_draws":
             return self

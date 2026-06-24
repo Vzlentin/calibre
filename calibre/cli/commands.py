@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -146,7 +147,7 @@ def _record_order_cost_metric(frame: pd.DataFrame, *, dataset: str, currency: st
 
 
 def _settling(config: BackendConfig, bundle: DatasetBundle) -> bool:
-    """Whether the run takes the rolling settle/loop path (execution case 3).
+    """Return True when the run takes the rolling settle loop path (execution case 3).
 
     The trichotomy: no ``ordering:`` is a single-pass forecast run; ``ordering:``
     with no bundle inventory is today's single-pass order ledger; ``ordering:``
@@ -276,7 +277,10 @@ def _run_settle_loop(
             order_result["order_qty"].astype(float),
             strict=False,
         ):
-            orders[uid] = float(max(qty, 0.0))
+            # Integer order units, matching the VN2 benchmark's
+            # orders_from_policy_result: ceil so a fractional order-up-to gap
+            # never under-orders, then clamp at zero.
+            orders[uid] = float(max(math.ceil(qty), 0))
         return orders
 
     if order_runtime is not None:
@@ -284,6 +288,7 @@ def _run_settle_loop(
             engine=engine,
             runtime=order_runtime,
             history=history,
+            decision_origin=pd.Timestamp(origins[0]),
             censoring=bundle.censoring,
             model_configs=model_configs,
             horizon=horizon,
@@ -345,6 +350,7 @@ def _warmup_settle_runtime(
     engine: BackendEngine,
     runtime: ConformalRuntime,
     history: pd.DataFrame,
+    decision_origin: pd.Timestamp,
     censoring: pd.DataFrame | None,
     model_configs: list[dict[str, Any]],
     horizon: int,
@@ -356,12 +362,22 @@ def _warmup_settle_runtime(
     runtime, and feed the resolved frames to ``observe_pending`` in chronological
     order (the same sorted order the benchmark's warmup uses — CRC recency
     weighting depends on it). No orders are placed; the simulator is untouched.
+
+    The warmup walk is derived from history **strictly before** ``decision_origin``
+    so its origins (and their protection windows) precede the decision walk, just
+    like the benchmark's pre-decision warmup. Deriving on the full history would
+    land warmup origins at the tail, overlapping/post-dating the decision origins
+    and observing windows the loop has not yet ordered against.
     """
-    origin_dates = derive_warmup_origins(history, horizon, warmup_origins)
+    pre_decision = history[history[DS] < decision_origin]
+    origin_dates = derive_warmup_origins(pre_decision, horizon, warmup_origins)
     if not origin_dates:
         return
-    tasks = build_tasks(history, model_configs, horizon, censoring=censoring)
-    ledger_df = engine.execute(tasks, actuals=history, origins=origin_dates).ledger.to_df()
+    pre_decision_censoring = (
+        censoring[censoring[DS] < decision_origin] if censoring is not None else None
+    )
+    tasks = build_tasks(pre_decision, model_configs, horizon, censoring=pre_decision_censoring)
+    ledger_df = engine.execute(tasks, actuals=pre_decision, origins=origin_dates).ledger.to_df()
     if ledger_df.empty:
         return
 

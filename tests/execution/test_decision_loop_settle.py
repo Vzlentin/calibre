@@ -25,6 +25,8 @@ It does NOT prove recency-weighting parity at scale — that is
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 import pytest
 
@@ -45,7 +47,12 @@ from calibre.core.forecast_frame import (
 from calibre.core.forecast_task import TaskGroups
 from calibre.execution.decision_loop import DecisionLoop, DecisionLoopConfig
 from calibre.execution.ledger import InMemoryLedger
-from calibre.ordering.policy_config import RsConfig, apply_order_policy, build_rs_params
+from calibre.ordering.policy_config import (
+    RsConfig,
+    apply_order_policy,
+    build_rs_params,
+    derive_warmup_origins,
+)
 from calibre.ordering.simulation.costs import LinearCostModel
 from calibre.ordering.simulation.rules import LostSalesRule
 from calibre.ordering.simulation.simulator import Simulator
@@ -174,7 +181,9 @@ def _drive_loop() -> tuple[Simulator, CumulativeRiskRuntime, _StubEngine, list]:
             order_result["order_qty"].astype(float),
             strict=False,
         ):
-            orders[uid] = float(max(qty, 0.0))
+            # Integer order units, matching the engine settle policy and the VN2
+            # benchmark's orders_from_policy_result (ceil then clamp at zero).
+            orders[uid] = float(max(math.ceil(qty), 0))
         return orders
 
     def get_actuals(week: int) -> dict[str, float]:
@@ -207,6 +216,20 @@ def test_settle_loop_drains_lead_time_rounds() -> None:
     assert len(results) == _N_ROUNDS
 
 
+def test_settle_loop_places_integer_orders() -> None:
+    """Every placed order is integer-valued (ceil parity with the VN2 benchmark).
+
+    The settle policy ceils the (R,S) order-up-to gap to whole units, matching
+    ``benchmarks/vn2/replay.py::orders_from_policy_result``. A regression to a
+    plain ``max(qty, 0.0)`` (no ceil) would surface a fractional order here.
+    """
+    _, _, _, results = _drive_loop()
+    placed = [qty for rr in results for qty in rr.orders.values()]
+    assert placed, "expected at least one order across the decision rounds"
+    for qty in placed:
+        assert qty == float(int(qty)), f"non-integer order placed: {qty!r}"
+
+
 def test_settle_loop_pipeline_shift_defers_arrivals_by_lead_time() -> None:
     """An order placed at round r only arrives lead_time rounds later."""
     simulator, _, _, _ = _drive_loop()
@@ -220,28 +243,125 @@ def test_settle_loop_pipeline_shift_defers_arrivals_by_lead_time() -> None:
 
 
 def test_settle_loop_accumulates_cost_once() -> None:
-    """The simulator owns a single finite scalar cost (no double counting)."""
+    """The simulator owns the exact hand-computed cost — no double counting.
+
+    The earlier assertion (``total == holding + shortage``) was vacuous: the
+    breakdown sums to the total by construction. Pin the actual trajectory
+    instead, so a double-count (or a missed/extra step) shifts the scalar and
+    fails.
+
+    Both series seed 10 units; lead_time 1, holding rate 0.2, shortage rate 1.0.
+    A orders 4 each from round 2 (B's order-up-to never clears its inventory
+    position, so B never orders). The 4 periods (3 decision + 1 delivery) run:
+
+    * A demand 4,5,6,5 with two lead-time-deferred arrivals of 4:
+      end inv 6, 1, 0, 0 -> holding 0.2*(6+1) = 1.4; the tail two periods miss
+      1 unit each -> shortage 1.0*(1+1) = 2.0.
+    * B demand 2,3,2,3, no arrivals: end inv 8, 5, 3, 0 ->
+      holding 0.2*(8+5+3) = 3.2; never short.
+
+    so holding = 1.4 + 3.2 = 4.6, shortage = 2.0, total = 6.6.
+    """
     simulator, _, _, _ = _drive_loop()
-    total = simulator.total_cost()
     breakdown = simulator.cost_breakdown()
-    assert total == pytest.approx(breakdown["holding"] + breakdown["shortage"])
-    assert total >= 0.0
-    # The fixture demand exceeds the per-round forecast at the tail, so the lost-
-    # sales rule books some shortage — a non-degenerate, finite cost.
-    assert total > 0.0
+    assert breakdown["holding"] == pytest.approx(4.6)
+    assert breakdown["shortage"] == pytest.approx(2.0)
+    assert simulator.total_cost() == pytest.approx(6.6)
 
 
 def test_settle_loop_observes_origins_in_chronological_order() -> None:
-    """The CRC ingests origins in ascending date order (recency weighting)."""
-    _, runtime, _, _ = _drive_loop()
-    records = runtime._calibrator._records
-    # At least one window resolved over the loop + drain.
-    assert records, "expected the CRC to record at least one resolved residual"
-    sequences = [record.sequence for record in records]
-    # sort=True in observe means the per-origin sequence counter is monotone in
-    # ingestion (chronological) order — never reordered.
-    assert sequences == sorted(sequences)
-    assert sequences[0] >= 1
+    """The CRC ingests forecast origins in non-decreasing date order.
+
+    The previous assertion (``sequences == sorted(sequences)``) was vacuous: the
+    ``_sequence`` counter is incremented per observe call, so it is monotone by
+    construction and could never detect a reorder. Capture the actual
+    ``forecast_origin`` timestamps handed to ``observe`` instead — if a later
+    origin were ever ingested before an earlier one, the captured stream would
+    dip and this fails.
+    """
+    simulator = _seeded_simulator()
+    runtime = CumulativeRiskRuntime(
+        CumulativeConformalRiskConfig(
+            coverage=_COVERAGE,
+            protection_period=_PROTECTION,
+            weight_decay=None,
+            buffer_max=0.0,
+        )
+    )
+    engine = _StubEngine(base={"A": 5.0, "B": 3.0})
+
+    observed_origins: list[pd.Timestamp] = []
+    real_observe = runtime.observe
+
+    def _capturing_observe(resolved: pd.DataFrame) -> pd.DataFrame:
+        if not resolved.empty:
+            for origin in sorted(pd.unique(resolved[FORECAST_ORIGIN])):
+                observed_origins.append(pd.Timestamp(origin))
+        return real_observe(resolved)
+
+    runtime.observe = _capturing_observe  # type: ignore[method-assign]
+
+    def build_round(round_num: int):
+        origin = _ORIGINS[round_num - 1]
+        return TaskGroups(), origin, pd.DataFrame()
+
+    def policy(frame: pd.DataFrame) -> dict[str, float]:
+        order_config = RsConfig(
+            params=build_rs_params(simulator, _LEAD_TIME, _REVIEW_PERIOD),
+            coverage=_COVERAGE,
+        )
+        order_result = apply_order_policy(frame, order_config)
+        orders = dict.fromkeys(_SERIES, 0.0)
+        for uid, qty in zip(
+            order_result[UNIQUE_ID].astype(str),
+            order_result["order_qty"].astype(float),
+            strict=False,
+        ):
+            orders[uid] = float(max(math.ceil(qty), 0))
+        return orders
+
+    DecisionLoop(
+        engine=engine,
+        simulator=simulator,
+        build_round_tasks=build_round,
+        policy=policy,
+        get_actuals=_demand_at,
+        config=DecisionLoopConfig(n_rounds=_N_ROUNDS, n_delivery_rounds=_LEAD_TIME),
+        runtime=runtime,
+    ).run()
+
+    assert observed_origins, "expected the CRC to observe at least one resolved origin"
+    assert observed_origins == sorted(observed_origins), (
+        f"forecast origins reached observe out of order: {observed_origins}"
+    )
+
+
+def test_settle_warmup_origins_strictly_precede_first_decision_origin() -> None:
+    """The settle warmup walk is derived strictly before the first decision origin.
+
+    ``_warmup_settle_runtime`` slices history to ``ds < origins[0]`` before
+    deriving warmup origins, so the calibration walk precedes the decision walk
+    (the benchmark's pre-decision warmup). Deriving on the FULL history instead
+    lands the warmup origins at the tail, overlapping/post-dating the decision
+    origins — which this guards against.
+    """
+    freq = pd.tseries.frequencies.to_offset(_FREQ)
+    dates = [pd.Timestamp("2024-01-01") + i * freq for i in range(10)]
+    history = pd.DataFrame([{UNIQUE_ID: uid, DS: d, Y: 1.0} for uid in _SERIES for d in dates])
+    first_decision_origin = dates[6]
+
+    pre_decision = history[history[DS] < first_decision_origin]
+    warmup_origins = derive_warmup_origins(pre_decision, _HORIZON, warmup_origins=3)
+
+    assert warmup_origins, "expected the pre-decision slice to yield warmup origins"
+    assert all(origin < first_decision_origin for origin in warmup_origins), (
+        f"warmup origins must precede the first decision origin "
+        f"{first_decision_origin}, got {warmup_origins}"
+    )
+    # Contrast: deriving on the FULL history (the pre-fix behaviour) would pull
+    # origins at/after the decision origin — the overlap the slice removes.
+    full_history_origins = derive_warmup_origins(history, _HORIZON, warmup_origins=3)
+    assert any(origin >= first_decision_origin for origin in full_history_origins)
 
 
 def test_non_ordering_run_is_single_pass_with_no_simulator(tmp_path) -> None:

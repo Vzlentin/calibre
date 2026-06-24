@@ -78,7 +78,6 @@ from calibre.core.forecast_frame import (
 )
 from calibre.core.forecast_task import ForecastTask, TaskGroups
 from calibre.core.io import join_uri
-from calibre.core.order_types import RsPolicyParameters
 from calibre.execution import (
     DecisionLoop,
     DecisionLoopConfig,
@@ -89,25 +88,9 @@ from calibre.execution.backend import BackendEngine, ExecutionOptions
 from calibre.execution.data_loading import load_period
 from calibre.execution.task_builder import build_tasks
 from calibre.forecasting.ensemble import ensemble_median
-from calibre.ordering.policy_config import RsConfig, apply_order_policy
+from calibre.ordering.policy_config import RsConfig, apply_order_policy, build_rs_params
 
 logger = logging.getLogger(__name__)
-
-
-def _build_rs_params(
-    simulator: VN2Simulator,
-    lead_time: int,
-    review_period: int,
-) -> list[RsPolicyParameters]:
-    return [
-        RsPolicyParameters(
-            unique_id=uid,
-            inventory_position=s.end_inventory + s.in_transit_w1 + s.in_transit_w2,
-            lead_time=lead_time,
-            review_period=review_period,
-        )
-        for uid, s in simulator.states.items()
-    ]
 
 
 def _run_warmup(
@@ -330,7 +313,7 @@ def run_seasonal(
                 order_result = apply_order_policy(
                     frame,
                     RsConfig(
-                        params=_build_rs_params(
+                        params=build_rs_params(
                             simulator, lead_time=lead_time, review_period=review_period
                         ),
                         coverage=conformal_config.coverage,
