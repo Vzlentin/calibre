@@ -1134,7 +1134,12 @@ class BackendEngine:
                 set_conformal_coverage_drift(model_name, partition, drift)
 
     def _advance_issued_count_from_initial_ledger(self) -> None:
-        """Recover issued-origin accounting from a resumed ledger snapshot."""
+        """Recover issued-origin accounting from a resumed ledger snapshot.
+
+        Two-sided ``SymmetricIntervalRuntime`` only: the one-sided
+        ``CumulativeRiskRuntime`` has no resume-state surface yet (the same gap
+        noted on :meth:`_restore_conformal_state`).
+        """
         runtime = self.conformal_runtime
         if (
             runtime is None

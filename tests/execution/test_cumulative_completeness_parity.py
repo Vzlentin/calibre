@@ -16,10 +16,13 @@ observe gate, and the runtime would drift apart:
 3. :func:`calibre.execution.decision_loop.observe_cumulative` — the driver-side
    conservative outer gate (``count == size`` over every row in the group).
 
-The three coincide only under the contiguous ``h = 1..horizon`` invariant the
-task builder guarantees. The fixture below holds that invariant and includes a
-contiguous ``horizon > protection_period`` window — the only band where the
-rules could diverge — alongside a complete window and a split (partial) window.
+Under the contiguous ``h = 1..horizon`` invariant the task builder guarantees,
+the three rules coincide for every window shape. The fixture below holds that
+invariant and covers a complete window, a split (partial) window, and a
+contiguous ``horizon > protection_period`` window — confirming the agreement
+extends to the ``horizon > protection_period`` band. The rules could only
+diverge if that contiguity invariant were violated, which the task builder
+prevents.
 """
 
 from __future__ import annotations

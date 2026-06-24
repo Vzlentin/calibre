@@ -452,10 +452,10 @@ def test_cumulative_split_window_deferral_fires_for_one_sided_runtime():
     The one-sided ``CumulativeRiskRuntime`` only skips incomplete windows — it
     has no deferral of its own. When a window's horizons resolve across origins,
     the engine must hold it open until its terminal horizon lands, exactly as it
-    does for the two-sided runtime, or no residual is ever recorded. This is RED
-    when the engine gates deferral on the concrete ``SymmetricIntervalRuntime``
-    class (one-sided runtime falls through to no-deferral, ``n_scores == 0``) and
-    GREEN once the gate reads the ``protection_period`` capability.
+    does for the two-sided runtime, or no residual is ever recorded. With the
+    engine deferral active for the one-sided runtime, the deferred window is held
+    open until its terminal horizon lands and the calibrator scores it
+    (``n_scores > 0``) instead of leaving it stranded.
     """
     task, actuals, origins, _config = _cumulative_split_window_setup()
     runtime = CumulativeRiskRuntime(_cumulative_risk_config())
