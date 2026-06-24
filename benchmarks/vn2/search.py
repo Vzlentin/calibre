@@ -51,6 +51,7 @@ from calibre.tuning import (
     TuningCandidate,
     optimize_global_task,
     run_optuna_study,
+    suggest_from_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,24 +73,6 @@ def _cost_trial_failure_report(exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, ValueError | KeyError):
         return {OBJECTIVE_METRIC: float("inf"), TUNE_STEP_ATTR: 1, "bad_trial": repr(exc)[:500]}
     raise exc
-
-
-def _suggest_from_spec(trial: optuna.Trial, name: str, spec: dict[str, Any]) -> Any:
-    """Sample a parameter from a declarative search-space spec."""
-    kind = spec["type"]
-    if kind == "categorical":
-        return trial.suggest_categorical(name, spec["choices"])
-    if kind == "int":
-        return trial.suggest_int(name, spec["low"], spec["high"], step=spec.get("step", 1))
-    if kind == "float":
-        return trial.suggest_float(
-            name,
-            spec["low"],
-            spec["high"],
-            step=spec.get("step"),
-            log=spec.get("log", False),
-        )
-    raise ValueError(f"Unknown HPO spec type: {kind!r}")
 
 
 def _walk_forward_origins(
@@ -116,9 +99,7 @@ def _hpo_candidate_from_params(params: dict[str, Any]) -> TuningCandidate:
 
 
 def _hpo_search_space(trial: optuna.Trial) -> TuningCandidate:
-    params = {
-        name: _suggest_from_spec(trial, name, spec) for name, spec in HPO_SEARCH_SPACE.items()
-    }
+    params = {name: suggest_from_spec(trial, name, spec) for name, spec in HPO_SEARCH_SPACE.items()}
     return _hpo_candidate_from_params(params)
 
 
