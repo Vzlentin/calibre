@@ -1194,6 +1194,7 @@ class BackendEngine:
                 forecast_origin=task.forecast_origin,
                 future_x=task.future_x,
                 task_group=task.task_group,
+                censoring=task.censoring,
             ).to_uri(task_base)
             refs.append(ref)
         return refs
@@ -1221,6 +1222,7 @@ class BackendEngine:
                 forecast_origin=task.forecast_origin,
                 future_x=task.future_x,
                 task_group=task.task_group,
+                censoring=task.censoring,
             )
             for task in tasks
         ]

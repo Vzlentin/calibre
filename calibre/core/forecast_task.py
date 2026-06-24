@@ -59,6 +59,10 @@ class ForecastTask:
         if self.future_x is not None:
             future_x_uri = join_uri(base_uri, f"{self.unique_id}.future_x.parquet")
             write_parquet(self.future_x, future_x_uri)
+        censoring_uri = None
+        if self.censoring is not None:
+            censoring_uri = join_uri(base_uri, f"{self.unique_id}.censoring.parquet")
+            write_parquet(self.censoring, censoring_uri)
         return ForecastTaskRef(
             unique_id=self.unique_id,
             model_config=dict(self.model_config),
@@ -67,6 +71,7 @@ class ForecastTask:
             history_uri=history_uri,
             future_x_uri=future_x_uri,
             task_group=self.task_group,
+            censoring_uri=censoring_uri,
         )
 
 
@@ -110,12 +115,18 @@ class ForecastTaskRef:
     history_uri: str
     future_x_uri: str | None = None
     task_group: str | None = None
+    censoring_uri: str | None = None
 
     def materialize(self) -> ForecastTask:
         history = _read_parquet_cached(self.history_uri).copy()
         future_x = (
             _read_parquet_cached(self.future_x_uri).copy()
             if self.future_x_uri is not None
+            else None
+        )
+        censoring = (
+            _read_parquet_cached(self.censoring_uri).copy()
+            if self.censoring_uri is not None
             else None
         )
         return ForecastTask(
@@ -125,6 +136,7 @@ class ForecastTaskRef:
             forecast_origin=self.forecast_origin,
             future_x=future_x,
             task_group=self.task_group,
+            censoring=censoring,
         )
 
 
@@ -147,6 +159,7 @@ class ChunkTaskRef:
     history_uri: str
     future_x_uri: str | None = None
     task_group: str | None = None
+    censoring_uri: str | None = None
 
 
 def stage_local_chunk(
@@ -157,12 +170,14 @@ def stage_local_chunk(
     model_config: dict[str, Any],
     task_group: str | None,
 ) -> ChunkTaskRef:
-    """Stage one chunk: concat the per-series histories + filtered future_x.
+    """Stage one chunk: concat the per-series histories + filtered future_x/censoring.
 
     Every task in ``tasks`` shares ``horizon``/``model_config`` (they were
-    grouped by resolved config upstream). The chunk's future_x is the union of
-    the per-series future_x frames; mixed presence is harmless because the
-    worker re-slices per uid (and passes ``None`` when a series has no rows).
+    grouped by resolved config upstream). The chunk's future_x and censoring
+    panels are the union of the per-series frames, each filtered to the chunk's
+    uids; mixed presence is harmless because the worker re-slices per uid (and
+    passes ``None`` when a series has no rows). M5 carries no real censoring
+    today, so the censoring panel is usually absent here.
     """
     from calibre.core.io import join_uri, write_parquet
 
@@ -188,6 +203,14 @@ def stage_local_chunk(
         future_x_uri = join_uri(base_uri, "future_x.parquet")
         write_parquet(future_x, future_x_uri)
 
+    censoring_frames = [task.censoring for task in tasks if task.censoring is not None]
+    censoring_uri: str | None = None
+    if censoring_frames:
+        censoring = pd.concat(censoring_frames, ignore_index=True).drop_duplicates([UNIQUE_ID, DS])
+        censoring = censoring[censoring[UNIQUE_ID].astype(str).isin(unique_ids)]
+        censoring_uri = join_uri(base_uri, "censoring.parquet")
+        write_parquet(censoring, censoring_uri)
+
     return ChunkTaskRef(
         unique_ids=unique_ids,
         model_config=dict(model_config),
@@ -195,4 +218,5 @@ def stage_local_chunk(
         history_uri=history_uri,
         future_x_uri=future_x_uri,
         task_group=task_group,
+        censoring_uri=censoring_uri,
     )
