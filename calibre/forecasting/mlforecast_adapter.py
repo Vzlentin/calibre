@@ -25,6 +25,7 @@ from calibre.forecasting.adapter_base import (
     build_fitted_values_frame,
     build_predict_frame,
 )
+from calibre.forecasting.features import add_stockout_features
 from calibre.forecasting.native_persistence import load_dir_from_bytes, save_dir_to_bytes
 
 _RESERVED_KEYS = frozenset(
@@ -196,10 +197,7 @@ class MLForecastAdapter(ModelAdapter):
         # by add_stockout_features never leaks in as a regressor.
         exog = exogenous_columns(task.history)
         if task.model_config.get("censoring_fit") and task.censoring is not None:
-            from calibre.forecasting.features import add_stockout_features
-
             imputed = add_stockout_features(task.history, task.censoring)
-            # Select y_uncensored first, then rename -> exactly one Y column.
             mlf_df = imputed[[UNIQUE_ID, DS, "y_uncensored", *exog]].rename(
                 columns={"y_uncensored": Y}
             )

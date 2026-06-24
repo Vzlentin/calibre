@@ -72,14 +72,15 @@ def _load_inventory(state_path: str) -> dict[str, ProductState]:
     W+2]`` the two-slot in-transit pipeline at ``LEAD_TIME_DEPTH``.
     """
     df = pd.read_csv(state_path)
-    return {
-        f"{int(row['Store'])}_{int(row['Product'])}": ProductState(
-            unique_id=f"{int(row['Store'])}_{int(row['Product'])}",
+    inventory: dict[str, ProductState] = {}
+    for _, row in df.iterrows():
+        uid = f"{int(row['Store'])}_{int(row['Product'])}"
+        inventory[uid] = ProductState(
+            unique_id=uid,
             end_inventory=float(row["End Inventory"]),
             pipeline=make_pipeline(
                 [float(row["In Transit W+1"]), float(row["In Transit W+2"])],
                 LEAD_TIME_DEPTH,
             ),
         )
-        for _, row in df.iterrows()
-    }
+    return inventory
