@@ -63,6 +63,11 @@ uv run calibre health
 # Run a backtest from a YAML config
 uv run calibre run --config benchmarks/vn2/config/smoke.yaml
 
+# Search for a best config via HPO (needs an `hpo` block: budget + search_space).
+# The objective is the newsvendor cost fractile derived from the dataset cost
+# struct; prints the discovered model config as JSON to stdout.
+uv run calibre run --config my-config.yaml --tune
+
 # Validate a config without executing
 uv run calibre validate --config my-config.yaml
 

@@ -257,6 +257,14 @@ _HPO_SPEC_TYPES = frozenset({"categorical", "int", "float"})
 # all trip it.
 _HPO_FORBIDDEN_SEARCH_NAMES = frozenset({"coverage", "tau", "cost_fractile", "critical_ratio"})
 
+# Reserved structural/identity ``model_config`` fields — they define the study or
+# model identity, not a tunable hyperparameter. A ``search_space`` key naming one is
+# sampled into the candidate and merged over the forced study config (e.g. flipping
+# ``scope`` off ``"global"``), so reject it at parse time rather than let it corrupt
+# the study. ``freq`` is re-forced after the merge, but is rejected here for the same
+# clarity (it is not a hyperparameter either).
+_HPO_RESERVED_STRUCTURAL_KEYS = frozenset({"scope", "model", "name", "backend", "horizon", "freq"})
+
 
 def _is_forbidden_search_key(name: str) -> bool:
     """Whether a search-space key names a forbidden decision/derived number."""
@@ -294,6 +302,13 @@ class HpoConfig(_Section):
                 "cost fractile is derived from the dataset cost struct (override via "
                 "hpo.cost_fractile) and order_conformal.coverage is the orthogonal "
                 "decision level — neither is a search dimension"
+            )
+        reserved = sorted(k for k in value if k.strip().casefold() in _HPO_RESERVED_STRUCTURAL_KEYS)
+        if reserved:
+            raise ValueError(
+                f"hpo.search_space may not target the reserved structural key {reserved[0]!r}: "
+                "it defines the study or model identity (scope/model/backend/horizon/freq), not "
+                "a hyperparameter, and would override the forced study config"
             )
         for name, spec in value.items():
             kind = spec.get("type")

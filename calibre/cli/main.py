@@ -54,7 +54,11 @@ def app(argv: list[str] | None = None) -> int:
     setup_logging(args.log_level, format=args.log_format)
 
     if args.command == "run":
-        commands.run(args.config, metrics_port=args.metrics_port, tune=args.tune)
+        result = commands.run(args.config, metrics_port=args.metrics_port, tune=args.tune)
+        if args.tune:
+            # A tune run writes no ledger — the discovered config is its only output,
+            # so surface it as JSON (default=str for numpy floats / lag transforms).
+            print(json.dumps(result, sort_keys=True, default=str))
     elif args.command == "validate":
         commands.validate(args.config)
     elif args.command == "health":
