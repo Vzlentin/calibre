@@ -70,6 +70,18 @@ def test_search_space_rejects_forbidden_keys(forbidden: str) -> None:
         load_config_from_mapping(_base_config({"budget": 4, "search_space": space}))
 
 
+@pytest.mark.parametrize(
+    "reserved", ["scope", "model", "name", "backend", "horizon", "freq", "Scope"]
+)
+def test_search_space_rejects_reserved_structural_keys(reserved: str) -> None:
+    # Structural model_config/study fields are not hyperparameters; a search key
+    # naming one would override the forced study config (e.g. flipping scope).
+    space = {**_VALID_SEARCH_SPACE, reserved: {"type": "categorical", "choices": ["x"]}}
+
+    with pytest.raises(ValueError, match="reserved structural key"):
+        load_config_from_mapping(_base_config({"budget": 4, "search_space": space}))
+
+
 def test_search_space_rejects_malformed_spec_type() -> None:
     space = {"quantile_alpha": {"type": "boolean", "choices": [True, False]}}
 

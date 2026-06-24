@@ -73,6 +73,60 @@ class _TuneVN2Adapter:
 register_dataset_adapter("tune_vn2")(_TuneVN2Adapter)
 
 
+def _two_series_history() -> pd.DataFrame:
+    dates = pd.date_range("2024-01-01", periods=20, freq="W-MON")
+    return pd.concat(
+        [
+            pd.DataFrame({UNIQUE_ID: "A", DS: dates, Y: [10.0, 20.0, 30.0, 40.0] * 5}),
+            pd.DataFrame({UNIQUE_ID: "B", DS: dates, Y: [5.0, 15.0, 25.0, 35.0] * 5}),
+        ],
+        ignore_index=True,
+    )
+
+
+class _DegenerateCostAdapter:
+    """Panel whose cost struct gives critical_ratio == 1.0 (overage_cost == 0)."""
+
+    def name(self) -> str:
+        return "tune_degenerate_cost"
+
+    def load(self, path: str, **kwargs: Any) -> DatasetBundle:
+        del path, kwargs
+        return DatasetBundle(
+            history=_two_series_history(),
+            future_x=None,
+            costs=CostStruct(
+                underage_cost=1.0, overage_cost=0.0, holding_cost=0.0, shortage_cost=1.0
+            ),
+            hierarchy=None,
+            censoring=None,
+        )
+
+
+class _PerUidCostAdapter:
+    """Panel carrying a per-uid cost dict rather than a single cost struct."""
+
+    def name(self) -> str:
+        return "tune_per_uid_cost"
+
+    def load(self, path: str, **kwargs: Any) -> DatasetBundle:
+        del path, kwargs
+        struct = CostStruct(
+            underage_cost=1.0, overage_cost=0.2, holding_cost=0.2, shortage_cost=1.0
+        )
+        return DatasetBundle(
+            history=_two_series_history(),
+            future_x=None,
+            costs={"A": struct, "B": struct},
+            hierarchy=None,
+            censoring=None,
+        )
+
+
+register_dataset_adapter("tune_degenerate_cost")(_DegenerateCostAdapter)
+register_dataset_adapter("tune_per_uid_cost")(_PerUidCostAdapter)
+
+
 def _tune_config(*, search_space: dict, budget: int, origins_end: str, lags: list[int]) -> dict:
     return {
         "config_schema": "1.0",
@@ -249,3 +303,91 @@ def test_run_tune_small_real_run_completes() -> None:
     assert best_config["scope"] == "global"
     assert best_config["backend"] == "mlforecast"
     assert best_config["model"] == "lightgbm.LGBMRegressor"
+
+
+def _single_quantile_alpha_config(**overrides: Any) -> dict:
+    config = _tune_config(
+        search_space={"quantile_alpha": {"type": "categorical", "choices": [0.5]}},
+        budget=2,
+        origins_end="2024-04-15",
+        lags=[1, 2, 3, 4],
+    )
+    config.update(overrides)
+    return config
+
+
+def test_cli_run_tune_prints_discovered_config(monkeypatch, capsys) -> None:
+    # `calibre run --tune` writes no ledger, so the discovered config is its only
+    # output and must reach stdout as JSON (parity with health/score-m5-coverage).
+    from calibre.cli import main as cli_main
+
+    monkeypatch.setattr(
+        cli_main.commands,
+        "run",
+        lambda *args, **kwargs: {"scope": "global", "quantiles": [0.59]},
+    )
+    rc = cli_main.app(["run", "--config", "ignored.yaml", "--tune"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"quantiles"' in out
+    assert "0.59" in out
+
+
+def test_run_tune_rejects_multi_task_config() -> None:
+    # The global study fits a single panel; a multi-task config must fail loud
+    # rather than silently tune tasks[0] and drop the rest.
+    config_mapping = _single_quantile_alpha_config()
+    config_mapping["tasks"] = [
+        config_mapping["tasks"][0],
+        {
+            "model": "lightgbm.LGBMRegressor",
+            "horizon": 3,
+            "config": {
+                "backend": "mlforecast",
+                "objective": "quantile",
+                "strategy": "direct",
+                "lags": [1, 2, 3, 4],
+                "verbosity": -1,
+            },
+        },
+    ]
+    config = load_config_from_mapping(config_mapping)
+    with pytest.raises(ValueError, match="single-task config"):
+        run_tune(config)
+
+
+def test_run_tune_cost_fractile_override_sets_tau(monkeypatch) -> None:
+    # An explicit hpo.cost_fractile overrides the cost-struct-derived fractile.
+    config_mapping = _single_quantile_alpha_config()
+    config_mapping["hpo"]["cost_fractile"] = 0.7
+    config = load_config_from_mapping(config_mapping)
+    captured: dict[str, Any] = {}
+
+    def _capture(task):
+        captured["task"] = task
+        return {"backend": "mlforecast", "scope": "global", "quantiles": [0.5]}
+
+    monkeypatch.setattr("calibre.cli.commands.optimize_global_task", _capture)
+    run_tune(config)
+    assert captured["task"].objective.tau == pytest.approx(0.7)
+
+
+def test_run_tune_rejects_per_uid_cost_panel() -> None:
+    # A heterogeneous per-uid cost panel can't derive one global fractile.
+    config = load_config_from_mapping(
+        _single_quantile_alpha_config(dataset={"adapter": "tune_per_uid_cost", "path": "ignored"})
+    )
+    with pytest.raises(ValueError, match="per-uid cost panel"):
+        run_tune(config)
+
+
+def test_run_tune_rejects_degenerate_derived_tau() -> None:
+    # A zero overage cost gives critical_ratio == 1.0, a degenerate objective.
+    config = load_config_from_mapping(
+        _single_quantile_alpha_config(
+            dataset={"adapter": "tune_degenerate_cost", "path": "ignored"}
+        )
+    )
+    with pytest.raises(ValueError, match="degenerate objective fractile"):
+        run_tune(config)

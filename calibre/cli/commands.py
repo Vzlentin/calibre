@@ -239,7 +239,14 @@ def _derive_cost_fractile(config: BackendConfig, bundle: DatasetBundle) -> float
             "--tune needs a single cost struct to derive the objective fractile, but the "
             "dataset carries a per-uid cost panel; set hpo.cost_fractile to tune a global study"
         )
-    return float(bundle.costs.critical_ratio)
+    tau = float(bundle.costs.critical_ratio)
+    if not 0.0 < tau < 1.0:
+        raise ValueError(
+            f"--tune derived a degenerate objective fractile tau={tau} from the dataset cost "
+            "struct: Cu/(Cu+Co) must lie in the open interval (0, 1) (a zero underage or "
+            "overage cost collapses the pinball objective); set hpo.cost_fractile instead"
+        )
+    return tau
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +284,11 @@ def run_tune(config: BackendConfig) -> dict[str, Any]:
     """
     if config.hpo is None:
         raise ValueError("--tune requires an hpo config block")
+    if len(config.tasks) != 1:
+        raise ValueError(
+            f"--tune supports a single-task config, got {len(config.tasks)} tasks: the global "
+            "study fits one panel, so a multi-task config must be split and tuned per task"
+        )
     if "quantile_alpha" not in config.hpo.search_space:
         raise ValueError(
             "hpo.search_space must include a 'quantile_alpha' dimension: it is the "
