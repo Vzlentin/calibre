@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 import pandas as pd
 
+from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.forecast_task import TaskGroups
@@ -50,6 +51,10 @@ class _ConformalConfig(Protocol):
     def to_runtime_config(self) -> SymmetricIntervalConfig: ...
 
 
+class _OrderConformalConfig(Protocol):
+    def to_runtime_config(self) -> CumulativeConformalRiskConfig: ...
+
+
 class _ReconciliationConfig(Protocol):
     @property
     def strategy(self) -> str: ...
@@ -70,6 +75,9 @@ class RunPreparationConfig(Protocol):
     def conformal(self) -> _ConformalConfig | None: ...
 
     @property
+    def order_conformal(self) -> _OrderConformalConfig | None: ...
+
+    @property
     def reconciliation(self) -> _ReconciliationConfig | None: ...
 
 
@@ -77,13 +85,18 @@ class RunPreparationConfig(Protocol):
 class RunPreparation:
     """Resolved engine inputs for one run.
 
-    Carries tasks, actuals, origins, the reconciler, and conformal config.
+    Carries tasks, actuals, origins, the reconciler, and conformal configs. The
+    diagnostic ``conformal_config`` (two-sided band) and the decision
+    ``order_conformal_config`` (one-sided cumulative bound) are resolved
+    independently, but only one becomes the engine's runtime — the CLI rejects
+    configuring both.
     """
 
     tasks: TaskGroups
     actuals: pd.DataFrame | ActualsSource
     origins: list[pd.Timestamp]
     conformal_config: SymmetricIntervalConfig | None
+    order_conformal_config: CumulativeConformalRiskConfig | None
     hierarchy_index: HierarchyIndex | None
     reconciler: Reconciler | None
     conformal_partition_estimate: int | None
@@ -163,11 +176,15 @@ def prepare_run(config: RunPreparationConfig, bundle: DatasetBundle) -> RunPrepa
     conformal_config: SymmetricIntervalConfig | None = (
         config.conformal.to_runtime_config() if config.conformal is not None else None
     )
+    order_conformal_config: CumulativeConformalRiskConfig | None = (
+        config.order_conformal.to_runtime_config() if config.order_conformal is not None else None
+    )
     return RunPreparation(
         tasks=tasks,
         actuals=actuals,
         origins=origins,
         conformal_config=conformal_config,
+        order_conformal_config=order_conformal_config,
         hierarchy_index=hierarchy_index,
         reconciler=(
             config.reconciliation.to_reconciler()
