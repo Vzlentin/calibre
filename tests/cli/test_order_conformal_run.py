@@ -254,8 +254,9 @@ def test_order_conformal_run_emits_non_nan_orders_from_bound(tmp_path: Path) -> 
 def test_order_conformal_run_rejects_drifting_coverage(tmp_path: Path) -> None:
     """An explicit, mismatched ordering.coverage is rejected at parse time.
 
-    The production-path guarantee that drift cannot reach the engine: the U1
-    validator fires at ``load_config_from_mapping`` before any run executes.
+    The production-path guarantee that drift cannot reach the engine: the
+    coverage-matching validator fires at ``load_config_from_mapping`` before any
+    run executes.
     """
     data_dir = _write_fixture(tmp_path)
     ordering = _rs_ordering()

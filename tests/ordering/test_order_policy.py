@@ -299,9 +299,9 @@ def test_apply_rs_policy_cumulative_nan_terminal_bound_raises() -> None:
 def test_apply_rs_policy_summed_branch_skips_nan_band() -> None:
     """The summed branch uses Series.sum (skipna), so a NaN band needs no guard.
 
-    Negative control documenting why U2's guard is scoped to the cumulative
-    branch only: a NaN in a non-terminal per-horizon band sums away to a finite
-    target rather than propagating, so no raise belongs on the summed path.
+    Negative control documenting why the NaN-raise guard is scoped to the
+    cumulative branch only: a NaN in a non-terminal per-horizon band sums away to
+    a finite target rather than propagating, so no raise belongs on the summed path.
     """
     frame = _forecast_frame(unique_id="SKU_001", upper_bounds=(10.0, 20.0, 30.0))
     assert CONFORMAL_MODE not in frame.columns

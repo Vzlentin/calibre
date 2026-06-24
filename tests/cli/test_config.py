@@ -229,6 +229,26 @@ def test_ordering_coverage_inherits_from_order_conformal_when_unset() -> None:
     assert config.ordering.coverage == 0.74
 
 
+def test_ordering_coverage_inherits_order_conformal_default_when_both_omitted() -> None:
+    """Omitting coverage on BOTH blocks back-fills ordering from order_conformal's default.
+
+    order_conformal and ordering carry different defaults (0.5 vs 0.9), so an
+    omit-both rs decision-bound config must inherit order_conformal's effective
+    default rather than collide the two and reject.
+    """
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={"protection_period": 2},
+            ordering={"policy": "rs", "params": {"unique_id": "1_10"}},
+        )
+    )
+
+    assert config.order_conformal is not None
+    assert config.ordering is not None
+    assert config.ordering.coverage == config.order_conformal.coverage == 0.5
+
+
 def test_ordering_coverage_matching_order_conformal_parses() -> None:
     """An explicit ordering.coverage equal to order_conformal.coverage is accepted."""
     config = load_config_from_mapping(

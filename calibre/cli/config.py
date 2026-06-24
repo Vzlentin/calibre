@@ -273,11 +273,13 @@ class BackendConfig(BaseModel):
     def _inherit_ordering_coverage(cls, data: Any) -> Any:
         # The R,S policy reads the hi_<coverage> decision bound the order-conformal
         # runtime writes, so the two coverages must be one value. Back-fill an
-        # *omitted* ordering.coverage from order_conformal.coverage here, on the raw
-        # mapping, because key presence ("unset" vs "set to its default") is only
-        # visible before construction — the two defaults differ (0.9 vs 0.5), so a
-        # mode="after" back-fill could not tell omit from an explicit default. An
-        # explicitly-set, mismatched value is left for the mode="after" backstop.
+        # *omitted* ordering.coverage from order_conformal's *effective* coverage —
+        # its explicit value, or its own default when it too is omitted — here, on
+        # the raw mapping, because key presence ("unset" vs "set to its default") is
+        # only visible before construction. The two block defaults differ (ordering
+        # 0.9 vs order_conformal 0.5), so without inheriting order_conformal's
+        # default an omit-both config would collide them. An explicitly-set,
+        # mismatched value is left for the mode="after" backstop.
         if not isinstance(data, dict):
             return data
         order_conformal = data.get("order_conformal")
@@ -288,10 +290,11 @@ class BackendConfig(BaseModel):
             ordering.get("policy") == "rs"
             and "coverage" not in ordering
             and ordering.get("quantile") is None
-            and "coverage" in order_conformal
         ):
             ordering = dict(ordering)
-            ordering["coverage"] = order_conformal["coverage"]
+            ordering["coverage"] = order_conformal.get(
+                "coverage", OrderConformalConfig.model_fields["coverage"].default
+            )
             data = dict(data)
             data["ordering"] = ordering
         return data
