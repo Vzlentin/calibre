@@ -10,6 +10,7 @@ import pandas as pd
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
 from calibre.conformal.partitions import global_partition, series_partition
 from calibre.conformal.runtime import SymmetricIntervalConfig
 from calibre.reconciliation import Reconciler, resolve_reconciler
@@ -62,6 +63,9 @@ class TaskConfig(_Section):
         return resolved
 
 
+_PARTITION_MAP = {"global": global_partition, "series": series_partition}
+
+
 class ConformalConfig(_Section):
     """Conformal calibration knobs, convertible to the runtime config."""
 
@@ -78,10 +82,7 @@ class ConformalConfig(_Section):
     draw_seed: int = 0
 
     def to_runtime_config(self) -> SymmetricIntervalConfig:
-        partition_key = {
-            "global": global_partition,
-            "series": series_partition,
-        }[self.partition]
+        partition_key = _PARTITION_MAP[self.partition]
         return SymmetricIntervalConfig(
             method=self.method,
             coverage=self.coverage,
@@ -93,6 +94,37 @@ class ConformalConfig(_Section):
             spread=self.spread,
             draw_count=self.draw_count,
             draw_seed=self.draw_seed,
+        )
+
+
+class OrderConformalConfig(_Section):
+    """One-sided order-conformal decision knobs, convertible to the runtime config.
+
+    Sibling to :class:`ConformalConfig` (the two-sided diagnostic): this block
+    selects the cumulative-risk *decision* runtime the ordering policy consumes.
+    ``to_runtime_config`` returns a :class:`CumulativeConformalRiskConfig`; the
+    engine builds a ``CumulativeRiskRuntime`` from it and emits the upper bound
+    into the ``hi_<coverage>`` column (e.g. ``coverage=0.74`` -> ``hi_0p74``).
+    ``coverage`` is the CRC risk-control level (the residual quantile), not a
+    cost fractile — cost-shaping lives upstream of this block.
+    """
+
+    coverage: float = Field(default=0.5, gt=0.0, lt=1.0)
+    protection_period: int = Field(default=3, ge=1)
+    calibration_window: int = Field(default=5000, ge=1)
+    partition: Literal["global", "series"] = "global"
+    base_column: str | None = None
+    buffer_max: float | None = None
+
+    def to_runtime_config(self) -> CumulativeConformalRiskConfig:
+        partition_key = _PARTITION_MAP[self.partition]
+        return CumulativeConformalRiskConfig(
+            coverage=self.coverage,
+            protection_period=self.protection_period,
+            calibration_window=self.calibration_window,
+            partition_key=partition_key,
+            base_column=self.base_column,
+            buffer_max=self.buffer_max,
         )
 
 
@@ -223,6 +255,7 @@ class BackendConfig(BaseModel):
     origins: OriginsConfig
     output: OutputConfig = Field(default_factory=OutputConfig)
     conformal: ConformalConfig | None = None
+    order_conformal: OrderConformalConfig | None = None
     reconciliation: ReconciliationConfig | None = None
     ordering: OrderingConfig | None = None
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
@@ -246,6 +279,20 @@ class BackendConfig(BaseModel):
     def _single_horizon(self) -> BackendConfig:
         if len({task.horizon for task in self.tasks}) != 1:
             raise ValueError("all tasks in a single CLI run must use the same horizon")
+        return self
+
+    @model_validator(mode="after")
+    def _decision_xor_diagnostic_conformal(self) -> BackendConfig:
+        # The engine holds one conformal runtime slot (ConformalOptions), so the
+        # decision runtime (order_conformal) and the diagnostic band (conformal)
+        # cannot both reach it in one pass. Running both needs a second runtime
+        # channel on the engine — out of scope; reject the combo at parse time.
+        if self.conformal is not None and self.order_conformal is not None:
+            raise ValueError(
+                "conformal (diagnostic band) and order_conformal (decision bound) "
+                "cannot both be configured: the engine has one runtime slot, so "
+                "select one per run"
+            )
         return self
 
     @model_validator(mode="after")

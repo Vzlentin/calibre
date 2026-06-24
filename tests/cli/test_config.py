@@ -111,6 +111,110 @@ def test_unknown_key_raises_at_parse_time() -> None:
         load_config_from_mapping(_config(conformal={"method": "mscp", "conformal_window": 10}))
 
 
+def test_order_conformal_maps_six_knobs_to_runtime_config() -> None:
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={
+                "coverage": 0.74,
+                "protection_period": 4,
+                "calibration_window": 1000,
+                "partition": "global",
+                "base_column": "q_0p833",
+                "buffer_max": 0.0,
+            },
+        )
+    )
+
+    assert config.order_conformal is not None
+    runtime_config = config.order_conformal.to_runtime_config()
+
+    assert runtime_config.coverage == 0.74
+    assert runtime_config.protection_period == 4
+    assert runtime_config.calibration_window == 1000
+    assert runtime_config.base_column == "q_0p833"
+    assert runtime_config.buffer_max == 0.0
+    assert runtime_config.partition_key({UNIQUE_ID: "A"}) == GLOBAL_PARTITION
+
+
+def test_order_conformal_winner_knob_subset_builds_implied_config() -> None:
+    """The six-knob winner-shaped subset builds exactly the config it implies.
+
+    This asserts the subset's mapped fields, not winner-runtime equivalence: the
+    deployed winner also injects a tuned base column, protection period, and
+    weight_decay/method the static block cannot supply (those need runtime
+    injection paths this config surface does not expose). The block-implied
+    config keeps the runtime defaults for those unset knobs.
+    """
+    config = load_config_from_mapping(
+        _config(
+            conformal=None,
+            order_conformal={
+                "coverage": 0.74,
+                "calibration_window": 5000,
+                "buffer_max": 0.0,
+            },
+        )
+    )
+
+    assert config.order_conformal is not None
+    runtime_config = config.order_conformal.to_runtime_config()
+
+    assert runtime_config.coverage == 0.74
+    assert runtime_config.calibration_window == 5000
+    assert runtime_config.buffer_max == 0.0
+    # Unset knobs keep the cumulative-risk runtime defaults (not winner values).
+    assert runtime_config.weight_decay == 0.85
+    assert runtime_config.weighted_quantile_mode == "empirical"
+    assert runtime_config.resolved_base_column == "y_hat"
+
+
+def test_order_conformal_series_partition_uses_unique_id_runtime_key() -> None:
+    config = load_config_from_mapping(
+        _config(conformal=None, order_conformal={"partition": "series"})
+    )
+
+    assert config.order_conformal is not None
+    runtime_config = config.order_conformal.to_runtime_config()
+
+    assert runtime_config.partition_key({UNIQUE_ID: "A"}) == "A"
+
+
+def test_order_conformal_unknown_key_raises_at_parse_time() -> None:
+    with pytest.raises(ValidationError, match="weight_decay"):
+        load_config_from_mapping(
+            _config(conformal=None, order_conformal={"coverage": 0.5, "weight_decay": 0.9})
+        )
+
+
+def test_order_conformal_out_of_range_coverage_rejected_at_parse_time() -> None:
+    # The bound (0 < coverage < 1) is enforced at parse time via the Field
+    # constraint, so `calibre validate` rejects it without ever building the
+    # runtime config (parity with protection_period/calibration_window).
+    with pytest.raises(ValidationError, match="coverage"):
+        load_config_from_mapping(_config(conformal=None, order_conformal={"coverage": 1.0}))
+
+
+def test_order_conformal_runtime_config_also_guards_coverage() -> None:
+    # Defense-in-depth: the runtime CumulativeConformalRiskConfig keeps its own
+    # 0 < coverage < 1 invariant, so a coverage that bypasses the CLI surface is
+    # still rejected when the config object is constructed directly.
+    from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
+
+    with pytest.raises(ValueError, match="coverage"):
+        CumulativeConformalRiskConfig(coverage=1.0)
+
+
+def test_order_conformal_and_conformal_together_rejected() -> None:
+    with pytest.raises(ValidationError, match="one runtime slot"):
+        load_config_from_mapping(
+            _config(
+                conformal={"method": "mscp"},
+                order_conformal={"coverage": 0.74},
+            )
+        )
+
+
 def test_execution_chunk_size_plumbs_into_execution_options() -> None:
     config = load_config_from_mapping(_config(execution={"backend": "local", "chunk_size": 32}))
 

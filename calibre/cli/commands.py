@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import pandas as pd
@@ -14,6 +14,7 @@ from calibre.cli.config import (
     load_config,
     load_config_from_mapping,
 )
+from calibre.conformal.cumulative_risk import CumulativeRiskRuntime
 from calibre.core.forecast_frame import UNIQUE_ID
 from calibre.core.io import is_local_fs, open_fs
 from calibre.core.metrics import set_order_cost
@@ -35,6 +36,9 @@ from calibre.execution.hierarchy_preparation import prepare_run
 from calibre.execution.validation import validate_dataset_bundle
 from calibre.ordering import OrderPolicy, build_order_policy
 from calibre.storage.state import ConformalStateStore
+
+if TYPE_CHECKING:
+    from calibre.conformal.runtime import ConformalRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +140,15 @@ def run_config(
     streaming_output = config.output.ledger_path if config.output.streaming else None
     streaming_order_output = config.output.order_ledger_path if config.output.streaming else None
 
+    # order_conformal claims the single ConformalOptions runtime slot; conformal
+    # uses the config slot. ConformalOptions forbids both, and the CLI rejects
+    # configuring both — so at most one is non-None here.
+    order_runtime: ConformalRuntime | None = (
+        CumulativeRiskRuntime(preparation.order_conformal_config)
+        if preparation.order_conformal_config is not None
+        else None
+    )
+
     engine = BackendEngine(
         execution=config.execution.to_execution_options(freq=config.origins.freq),
         output=LedgerOutputOptions(
@@ -144,7 +157,8 @@ def run_config(
             streaming=config.output.streaming,
         ),
         conformal=ConformalOptions(
-            config=preparation.conformal_config,
+            runtime=order_runtime,
+            config=preparation.conformal_config if order_runtime is None else None,
             run_id=run_id,
             state_store=conformal_state_store,
             initial_ledger=initial_ledger,

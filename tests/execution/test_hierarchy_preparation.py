@@ -552,6 +552,56 @@ def test_bottom_up_preparation_runs_end_to_end_through_engine() -> None:
     assert resolved[TOTAL_LABEL] == pytest.approx(7.0)
 
 
+def test_order_conformal_resolves_to_cumulative_risk_config() -> None:
+    from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
+
+    config = _config(
+        order_conformal={
+            "coverage": 0.74,
+            "protection_period": 2,
+            "calibration_window": 1000,
+            "base_column": "q_0p833",
+            "buffer_max": 0.0,
+        }
+    )
+
+    preparation = prepare_run(config, _bundle())
+
+    resolved = preparation.order_conformal_config
+    assert isinstance(resolved, CumulativeConformalRiskConfig)
+    assert resolved.coverage == 0.74
+    assert resolved.protection_period == 2
+    assert resolved.calibration_window == 1000
+    assert resolved.base_column == "q_0p833"
+    assert resolved.buffer_max == 0.0
+
+
+def test_order_conformal_absent_yields_no_decision_config() -> None:
+    preparation = prepare_run(_config(), _bundle())
+
+    assert preparation.order_conformal_config is None
+    assert preparation.conformal_config is None
+
+
+def test_order_conformal_and_diagnostic_resolve_independently() -> None:
+    """Both blocks resolve in prepare_run; which runtime reaches the engine is not.
+
+    engine-channel selection (which runtime reaches the engine) is asserted in the
+    CLI command-assembly tests, not here. The CLI rejects configuring both at once,
+    but prepare_run itself resolves whichever config objects are present without
+    coupling them.
+    """
+    from calibre.conformal.cumulative_risk import CumulativeConformalRiskConfig
+
+    order_only = prepare_run(_config(order_conformal={"coverage": 0.74}), _bundle())
+    diagnostic_only = prepare_run(_config(conformal={"method": "mscp"}), _bundle())
+
+    assert isinstance(order_only.order_conformal_config, CumulativeConformalRiskConfig)
+    assert order_only.conformal_config is None
+    assert diagnostic_only.order_conformal_config is None
+    assert diagnostic_only.conformal_config is not None
+
+
 def test_global_scope_configs_still_deduplicate_through_build_tasks() -> None:
     config = _config(
         tasks=[
