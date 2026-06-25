@@ -61,7 +61,7 @@ def test_calibre_does_not_import_benchmarks() -> None:
 
 
 def test_decision_and_tuning_symbols_import_from_calibre() -> None:
-    """Gate 4 positive boundary: the elevated decision/tuning glue lives in ``calibre``.
+    """Assert Gate 4's positive half: the elevated decision/tuning glue lives in ``calibre``.
 
     The one-way layering rule has two halves: :func:`test_calibre_does_not_import_benchmarks`
     proves ``calibre`` never reaches into ``benchmarks``; this proves the decision and
