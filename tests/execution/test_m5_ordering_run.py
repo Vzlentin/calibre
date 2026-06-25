@@ -24,6 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 from prometheus_client import REGISTRY
 
 from calibre.cli.commands import _load_dataset, run_config
@@ -78,13 +79,24 @@ def test_m5_ordering_run_decision_settle_finite_cost(tmp_path: Path) -> None:
     assert terminal[upper_col].notna().any()
     assert earlier[upper_col].isna().all()
 
-    # 3. The settle walk tallies a FINITE, non-negative, non-degenerate total
-    # cost once, after the lead-time drain, onto the order-cost gauge.
+    # 3. The settle walk tallies the exact hand-checkable cost once, after the
+    # lead-time drain, onto the order-cost gauge. SeasonalNaive is deterministic
+    # integer arithmetic (no LightGBM float divergence), so the scalar is exact
+    # and platform-independent. This value is the CORRECTED-anchor cost: the
+    # settle loop settles round r's demand at the origin's own revealed week
+    # (origins[r-1]), and scores each round against history strictly before the
+    # origin. The prior divergent S6b anchor (demand one week late) produced a
+    # different, higher ~35.4; re-derived here from the corrected reveal.
+    #
+    # 34.6 is therefore not a bare pinned literal but the M5-scale consequence of
+    # the SAME anchor correction independently proven on VN2 by
+    # tests/benchmarks/test_vn2_cli_parity.py's C2/C3/C5 (which pin `calibre run`
+    # to the benchmark's frozen 4992.20). Same fix, two scales: VN2's LightGBM
+    # scalar there, M5's exact integer scalar here.
     total_cost = _order_cost_gauge(config.dataset.adapter)
     assert total_cost is not None
     assert np.isfinite(total_cost)
-    assert total_cost >= 0.0
-    assert total_cost > 0.0
+    assert total_cost == pytest.approx(34.6, abs=1e-6)
 
 
 def test_m5_settle_loop_rejects_history_short_of_drain_window(tmp_path: Path) -> None:
@@ -97,7 +109,6 @@ def test_m5_settle_loop_rejects_history_short_of_drain_window(tmp_path: Path) ->
     instead of silently producing a too-low cost.
     """
     import pandas as pd
-    import pytest
 
     config = _config_to_tmp(_ORDERING_CONFIG, tmp_path)
     # Extend the origin range so the lead-time drain reaches past 2011-02-13.

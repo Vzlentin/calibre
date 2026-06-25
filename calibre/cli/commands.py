@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -184,6 +185,8 @@ def _run_settle_loop(
     run_id: UUID | None,
     conformal_state_store: ConformalStateStore | None,
     initial_ledger: pd.DataFrame | None,
+    on_round: Callable[[RoundResult], None] | None = None,
+    on_complete: Callable[[Simulator], None] | None = None,
 ) -> BackendResult:
     """Drive the rolling forecast -> order -> settle -> observe walk (case 3).
 
@@ -200,6 +203,17 @@ def _run_settle_loop(
     chronological order. A wait-then-order warmup seeds the CRC first (observe
     only, no orders); ``lead_time`` zero-order delivery rounds drain the pipeline
     after the decision rounds.
+
+    Args:
+        on_round: Optional read-only per-round observer composed **after** the
+            internal ledger accumulator (both fire — the ledger still appends).
+            Each :class:`RoundResult` carries a snapshot of the simulator's
+            cumulative holding/shortage cost and per-uid inventory_position taken
+            after that round's step. Must not mutate the frame, the pending queue,
+            or the simulator (CRC recency weighting depends on untouched order).
+        on_complete: Optional read-only callback fired once with the simulator
+            after the lead-time drain, so a caller can read the final bucketed
+            cost off the simulator rather than the global order-cost gauge.
     """
     assert config.ordering is not None
     ordering = config.ordering
@@ -220,12 +234,14 @@ def _run_settle_loop(
     state_keys: list[str] = list(bundle.inventory)
 
     # The loop drains ``lead_time`` zero-order delivery rounds past the last
-    # decision round, so the final demand week ``_actuals_at`` resolves targets
-    # ``origins[0] + (n_rounds + lead_time)`` steps. Demand for those weeks must
-    # come from real history rows: a target past the history end resolves to the
-    # all-zero default, silently undercharging the shortage that real future
-    # demand would have caused. Require history to cover the full drain window.
-    last_demand_week = pd.Timestamp(origins[0]) + (len(origins) + lead_time) * freq_offset
+    # decision round, so the final round index is ``len(origins) + lead_time``.
+    # ``_actuals_at(round)`` settles round r at ``origins[0] + (r - 1)`` steps, so
+    # the final demand week is ``origins[0] + (len(origins) + lead_time - 1)``
+    # steps. Demand for those weeks must come from real history rows: a target
+    # past the history end resolves to the all-zero default, silently
+    # undercharging the shortage that real future demand would have caused.
+    # Require history to cover the full drain window.
+    last_demand_week = pd.Timestamp(origins[0]) + (len(origins) + lead_time - 1) * freq_offset
     history_end = pd.Timestamp(history[DS].max())
     if history_end < last_demand_week:
         raise ValueError(
@@ -257,9 +273,15 @@ def _run_settle_loop(
     coverage = float(ordering.coverage)
 
     def _origin_tasks(origin: pd.Timestamp):
-        sliced = history[history[DS] <= origin]
+        # Fit on history strictly before the origin, matching the benchmark's
+        # prepare_model_history(week_{r-1}) window (max ds = origin - 1wk). The
+        # engine re-applies the same ``ds < origin`` slice per origin (prediction
+        # ``_process_*``), so this strict pre-slice is byte-identical to the
+        # benchmark fit, never the off-by-one ``<= origin`` window that would leak
+        # the origin row into training.
+        sliced = history[history[DS] < origin]
         censoring = (
-            bundle.censoring[bundle.censoring[DS] <= origin]
+            bundle.censoring[bundle.censoring[DS] < origin]
             if bundle.censoring is not None
             else None
         )
@@ -267,16 +289,30 @@ def _run_settle_loop(
 
     def build_round(round_num: int):
         origin = origins[round_num - 1]
-        return _origin_tasks(origin), origin, history
+        # The engine scores each round against history strictly before the
+        # origin, matching the benchmark's round_sales = week_{r-1} actuals
+        # (max ds = origin - 1wk). Passing the full static history would let the
+        # engine pre-resolve the round's forecast-window y for ds <= origin, so
+        # the loop's cumulative observe would resolve that window one round early
+        # — drifting the CRC recency sequence and the decision bound. The
+        # benchmark reveals demand progressively; the strict ``< origin`` slice
+        # reproduces that reveal from the byte-consistent static history.
+        round_actuals = history[history[DS] < origin]
+        return _origin_tasks(origin), origin, round_actuals
 
     def _actuals_at(week: int) -> dict[str, float]:
-        # Realised demand for the t-th demand week, anchored one step past the
-        # first decision origin (origins are consecutive at ``freq``): round r's
-        # demand resolves at origins[0] + r steps. A uid with no row that week
-        # settles at zero demand. A present-but-NaN ``y`` cannot occur here: every
-        # run loads through _load_dataset -> validate_dataset_bundle, which rejects
-        # null history.y before the settle loop runs.
-        target = pd.Timestamp(origins[0]) + week * freq_offset
+        # Realised demand for round ``week`` (1-based), settled at the origin's
+        # OWN revealed week: round r's demand is the week_r reveal, which the
+        # benchmark reads via extract_new_actuals(r) — the new column at
+        # origins[r-1] = origins[0] + (r-1) steps (origins are consecutive at
+        # ``freq``). The static period-8 history is byte-equal to that progressive
+        # reveal (no revision), so the equality slice here reproduces it exactly.
+        # The prior ``+ week`` anchor settled one week late, charging round r with
+        # round r+1's demand. A uid with no row that week settles at zero demand.
+        # A present-but-NaN ``y`` cannot occur here: every run loads through
+        # _load_dataset -> validate_dataset_bundle, which rejects null history.y
+        # before the settle loop runs.
+        target = pd.Timestamp(origins[0]) + (week - 1) * freq_offset
         rows = history[history[DS] == target]
         demand = dict(zip(rows[UNIQUE_ID].astype(str), rows[Y].astype(float), strict=False))
         return {uid: float(demand.get(uid, 0.0)) for uid in state_keys}
@@ -318,6 +354,18 @@ def _run_settle_loop(
         frame = rr.conformal_frame if rr.conformal_frame is not None else rr.ledger
         if frame is not None and not frame.empty:
             ledger.append(_coerce_forecast_frame_dtypes(frame))
+        # Snapshot the simulator's post-step cumulative buckets and per-uid
+        # inventory_position onto the RoundResult, then fire the caller's
+        # read-only observer. Reads only; the pending queue and simulator stay
+        # untouched so the CRC's recency weighting is unaffected.
+        if on_round is not None:
+            breakdown = simulator.cost_breakdown()
+            rr.holding_cost_cum = float(breakdown.get("holding", 0.0))
+            rr.shortage_cost_cum = float(breakdown.get("shortage", 0.0))
+            rr.inventory_position = {
+                uid: float(state.inventory_position) for uid, state in simulator.states.items()
+            }
+            on_round(rr)
 
     try:
         DecisionLoop(
@@ -333,6 +381,9 @@ def _run_settle_loop(
         ).run()
     finally:
         engine.close()
+
+    if on_complete is not None:
+        on_complete(simulator)
 
     # Cost once: read the simulator's accumulated cost after the drain and record
     # the single scalar via the order-cost gauge. There is no per-origin order
@@ -396,6 +447,28 @@ def _warmup_settle_runtime(
     if ledger_df.empty:
         return
 
+    # Refill any still-NaN forecast ``y`` from the full pre-decision history, the
+    # same explicit refill the benchmark warmup does
+    # (:func:`benchmarks.vn2.replay.order_conformal_warmup_frames`). The engine
+    # resolves ``y`` per origin only up to that origin's own revealed window, so a
+    # later warmup origin's terminal-horizon rows stay NaN and would be dropped by
+    # the cumulative observe's all-resolved gate — calibrating the CRC on fewer
+    # warmup origins than the benchmark and drifting the decision bound. The
+    # pre-decision history is byte-consistent with the benchmark's week_0 reveal,
+    # so refilling from it reproduces the benchmark's resolved warmup windows.
+    unresolved = ledger_df[Y].isna()
+    if unresolved.any():
+        history_lookup = pre_decision.drop_duplicates(subset=[UNIQUE_ID, DS]).set_index(
+            [UNIQUE_ID, DS]
+        )[Y]
+        keys = pd.MultiIndex.from_arrays(
+            [
+                ledger_df.loc[unresolved, UNIQUE_ID].to_numpy(),
+                ledger_df.loc[unresolved, DS].to_numpy(),
+            ]
+        )
+        ledger_df.loc[unresolved, Y] = history_lookup.reindex(keys).to_numpy()
+
     frames: list[pd.DataFrame] = []
     for origin in origin_dates:
         origin_rows = ledger_df[ledger_df[FORECAST_ORIGIN] == origin]
@@ -436,8 +509,19 @@ def run_config(
     conformal_state_store: ConformalStateStore | None = None,
     initial_ledger: pd.DataFrame | None = None,
     max_unique_ids: int | None = None,
+    settle_on_round: Callable[[RoundResult], None] | None = None,
+    settle_on_complete: Callable[[Simulator], None] | None = None,
 ) -> BackendResult:
-    """Execute a backtest from an already-loaded :class:`BackendConfig`."""
+    """Execute a backtest from an already-loaded :class:`BackendConfig`.
+
+    ``settle_on_round``/``settle_on_complete`` are read-only instrumentation
+    hooks for the settle path (execution case 3): the per-round observer fires
+    after each decision round's simulator step with the round's cumulative cost
+    buckets and inventory_position snapshot, and the completion hook fires once
+    with the simulator after the lead-time drain. Both are ignored on the
+    single-pass paths (cases 1 and 2). They are behavior-neutral: a run with the
+    hooks and one without produce the identical ``total_cost``.
+    """
     bundle = _load_dataset(config)
     _enforce_unique_id_limit(bundle, max_unique_ids)
     preparation = prepare_run(config, bundle)
@@ -465,6 +549,8 @@ def run_config(
             run_id=run_id,
             conformal_state_store=conformal_state_store,
             initial_ledger=initial_ledger,
+            on_round=settle_on_round,
+            on_complete=settle_on_complete,
         )
         if not config.output.streaming and config.output.ledger_path is not None:
             result.ledger.to_parquet(config.output.ledger_path)

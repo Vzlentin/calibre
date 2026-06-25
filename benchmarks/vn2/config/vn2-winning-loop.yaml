@@ -1,0 +1,85 @@
+config_schema: "1.0"
+# VN2 winning config driven through the production rolling settle loop (execution
+# case 3: ordering + seeded inventory). This reproduces the benchmark's
+# total_cost = 4992.20 via `calibre run`, NOT the bespoke benchmarks/vn2 harness.
+#
+# The static history is loaded at period 8 (week_8_sales.csv, through 2024-06-03):
+# its `ds < origin` slice is byte-equal to the progressive week_{r-1} reveal the
+# benchmark walks (no revision in the VN2 data), so correct per-origin slicing
+# reproduces the benchmark fit exactly. Decision origins (2024-04-15 .. 05-20,
+# W-MON) are the benchmark's computed origins: round r loads week_{r-1}, whose
+# max date + 1wk is origin r. The lead-time drain settles two further weeks
+# (2024-05-27, 2024-06-03), both within the period-8 history.
+dataset:
+  adapter: vn2
+  path: data/vn2
+  period: 8
+  holding_cost: 0.2
+  shortage_cost: 1.0
+tasks:
+  # The full HPO-best global LGBM (BEST_CONFIG). `censoring_fit` sits at the task
+  # ROOT (a TaskConfig field) — nested under `config:` it is silently dropped by
+  # resolved_model_config, so the engine would train on raw (censored) sales
+  # instead of the in-stock-imputed y_uncensored the benchmark fits.
+  - model: global_lgbm_qq_0p59
+    horizon: 3
+    censoring_fit: true
+    config:
+      backend: mlforecast
+      scope: global
+      name: global_lgbm_qq_0p59
+      model: lightgbm.LGBMRegressor
+      objective: quantile
+      quantiles: [0.59]
+      strategy: direct
+      lags: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 52]
+      # The lag_transforms spec-dict form the mlforecast adapter resolver accepts
+      # (`{transform: RollingMean, window_size: N}`); resolves to the same six
+      # live transforms BEST_CONFIG carries at lag 1.
+      lag_transforms:
+        1:
+          - {transform: RollingMean, window_size: 4}
+          - {transform: RollingMean, window_size: 13}
+          - {transform: RollingMean, window_size: 26}
+          - {transform: RollingStd, window_size: 4}
+          - {transform: RollingStd, window_size: 13}
+          - {transform: RollingStd, window_size: 26}
+      n_estimators: 800
+      learning_rate: 0.029992886777618452
+      num_leaves: 15
+      min_child_samples: 41
+      subsample: 0.8010716092915446
+      colsample_bytree: 0.6205915004999957
+      reg_alpha: 0.006853925708853058
+      reg_lambda: 0.5306371575220844
+      verbosity: -1
+      n_jobs: -1
+      random_state: 42
+origins:
+  start: 2024-04-15
+  end: 2024-05-20
+  freq: W-MON
+order_conformal:
+  # capped-CRC decision bound over the lead_time + review_period = 3 window.
+  # base_column q_0p59 (the cost-tuned base quantile) is what the benchmark sets
+  # — defaulting to None reads Y_HAT instead, which for a quantile-objective LGBM
+  # differs from q_0p59 and drifts the bound. weight_decay null selects the
+  # unweighted (capped) split-conformal branch, not the 0.85 weighted default.
+  coverage: 0.74
+  protection_period: 3
+  weight_decay: null
+  base_column: q_0p59
+  buffer_max: 0.0
+  warmup_origins: 3
+  method_name: capped_crc
+ordering:
+  # R,S order-up-to policy. lead_time + review_period == 3 == protection_period.
+  # On the settle loop the (R,S) params are built live from the simulator's
+  # inventory_position each round, so no static `params:` rows are set.
+  policy: rs
+  coverage: 0.74
+  lead_time: 2
+  review_period: 1
+execution:
+  backend: local
+  seed: 42
