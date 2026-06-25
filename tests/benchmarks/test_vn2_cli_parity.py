@@ -141,6 +141,12 @@ def test_c1_fit_history_matches_prepare_model_history(data_dir: Path) -> None:
     ``prepare_model_history(week_{r-1}, instock)``. With period-8 history sliced
     ``< origin`` byte-equal to ``week_{r-1}`` (no revision) and the same
     ``add_stockout_features`` imputation, the training ``y`` must match exactly.
+
+    This proves the **data-shaping contract** —
+    ``add_stockout_features``/``prepare_model_history`` produce equivalent
+    training ``y`` — by reconstructing the imputation, NOT the engine's internal
+    ``censoring_fit`` dispatch. That the engine actually routes through this fit
+    is covered end-to-end by C3/C5 (which pin the run to the frozen scalar).
     """
     config = load_config(_CONFIG)
     config = config.model_copy(
@@ -245,6 +251,7 @@ def test_c3_cumulative_cost_trajectory_matches_replay(
     _cache, _result, trajectory = replay_reference
     for rn in range(1, DECISION_ROUNDS + 1):
         rr = settle_capture.rounds[rn]
+        assert rr.holding_cost_cum is not None and rr.shortage_cost_cum is not None
         settle_cum = float(rr.holding_cost_cum) + float(rr.shortage_cost_cum)
         bench_cum = trajectory[rn - 1]
         assert settle_cum == pytest.approx(bench_cum, abs=BASELINE_ABS_TOL), (
@@ -260,10 +267,13 @@ def test_c4_inventory_position_matches_replay(
 ) -> None:
     """C4 — the live (R,S) ``inventory_position`` matches the benchmark sim.
 
-    Each round the settle policy builds (R,S) params off
-    ``simulator.inventory_position``; replaying the benchmark with the SAME
-    captured per-round orders and actuals must hold the identical per-uid
-    position at each round, proving the two simulators step in lock-step.
+    This is a simulator **state-transition identity** check, NOT an
+    order-correctness check: it replays the settle path's OWN captured per-round
+    orders + actuals through a freshly-seeded generic simulator and asserts the
+    two simulators hold the identical per-uid ``inventory_position`` at each round
+    — i.e. given the same inputs they step in lock-step. Because it feeds the
+    captured orders back in, it cannot catch a wrong order; order correctness is
+    covered end-to-end by C3 (cumulative-cost trajectory) and C5 (frozen scalar).
     """
     from calibre.ordering.policy_config import build_rs_params
     from calibre.ordering.simulation.costs import LinearCostModel
@@ -364,7 +374,9 @@ def test_config_fidelity_guard() -> None:
     benchmark's ``strip_private(BEST_CONFIG)`` (every hyperparam + the resolved
     ``lag_transforms`` spec-dict), ``censoring_fit`` survives at the task root,
     ``base_column`` is ``q_0p59`` (divergence #2), and ``weight_decay`` is None
-    (DF-90). A dropped transform or flipped flag is a silent model divergence.
+    (an omitted ``weight_decay`` inherits the runtime ``0.85`` weighted-CRC
+    default; this config requires ``weight_decay: null`` = the unweighted/capped
+    branch). A dropped transform or flipped flag is a silent model divergence.
     """
     from benchmarks.vn2.config import BEST_CONFIG
     from calibre.forecasting.mlforecast_adapter import _resolve_mlforecast_option
@@ -377,7 +389,9 @@ def test_config_fidelity_guard() -> None:
     # it would be silently popped by resolved_model_config.
     assert resolved.pop("censoring_fit") is True
 
-    # base_column (divergence #2) and weight_decay (DF-90) on the order block.
+    # base_column (divergence #2) and weight_decay on the order block: an omitted
+    # weight_decay inherits the runtime 0.85 weighted-CRC default; this config
+    # requires weight_decay: null = the unweighted/capped branch.
     assert config.order_conformal is not None
     assert config.order_conformal.base_column == "q_0p59"
     assert config.order_conformal.weight_decay is None

@@ -86,7 +86,13 @@ def test_m5_ordering_run_decision_settle_finite_cost(tmp_path: Path) -> None:
     # settle loop settles round r's demand at the origin's own revealed week
     # (origins[r-1]), and scores each round against history strictly before the
     # origin. The prior divergent S6b anchor (demand one week late) produced a
-    # different, higher cost; re-derived here from the corrected reveal.
+    # different, higher ~35.4; re-derived here from the corrected reveal.
+    #
+    # 34.6 is therefore not a bare pinned literal but the M5-scale consequence of
+    # the SAME anchor correction independently proven on VN2 by
+    # tests/benchmarks/test_vn2_cli_parity.py's C2/C3/C5 (which pin `calibre run`
+    # to the benchmark's frozen 4992.20). Same fix, two scales: VN2's LightGBM
+    # scalar there, M5's exact integer scalar here.
     total_cost = _order_cost_gauge(config.dataset.adapter)
     assert total_cost is not None
     assert np.isfinite(total_cost)
