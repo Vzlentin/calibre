@@ -88,11 +88,14 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
 - `conformal/` top-level exports are experimental low-level building blocks;
   the stable pipeline-facing interface is `conformal/runtime.py`.
 - VN2 winning-config regression baseline is `total_cost=4992.20` — don't drift it.
-  This is the **x86_64/Linux CI** value, which is where the gate runs (no test
-  asserts the literal number). On arm64/macOS the same config deterministically
-  produces **~5011.20** — cross-arch LightGBM float divergence (SIMD/FMA/libm) plus
-  Accelerate-vs-OpenBLAS, **not** a regression and **not** threading (single- and
-  multi-thread agree bit-for-bit). Don't chase the macOS delta or loosen 4992.20.
+  This is the **x86_64/Linux CI** value, where the gate runs:
+  `tests/benchmarks/test_vn2_regression.py` hard-asserts it (`BASELINE_TOTAL_COST =
+  4992.20`, holding `2488.20` / shortage `2504.00`, at `abs_tol 0.01`) on both model
+  paths — `regression`-marked and skipped off x86_64 via `_x86_64_gate`. On
+  arm64/macOS the same config deterministically produces **~5011.20** — cross-arch
+  LightGBM float divergence (SIMD/FMA/libm) plus Accelerate-vs-OpenBLAS, **not** a
+  regression and **not** threading (single- and multi-thread agree bit-for-bit).
+  Don't chase the macOS delta or loosen 4992.20.
 - Reconciliation strategy is an M5-coverage lever, not coverage-neutral: `wls_struct`
   lands population coverage on-target (~90.97%) where `bottom_up` over-covers (~94.92%).
   Weigh the reconciler choice, not just conformal knobs, on a coverage miss.
