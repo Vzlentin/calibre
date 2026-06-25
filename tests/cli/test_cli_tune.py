@@ -274,7 +274,15 @@ def test_run_tune_requires_hpo_block() -> None:
 
 
 def test_run_tune_small_real_run_completes() -> None:
+    # The tuned outcome is the Gate 2 tolerant-outcome DoD proof. Tie it to the
+    # benchmark's DOCUMENTED quantile_alpha band, not a local hand-picked subset:
+    # subsetting choices into the band, then asserting the discovered alpha lands
+    # in the band, fails loudly if either drifts. The outcome stays tolerant by
+    # design — Ray + ASHA make the literal fractile non-reproducible even seeded —
+    # so this is a band-membership proof, not a bit-exact one.
+    band = HPO_SEARCH_SPACE["quantile_alpha"]["choices"]
     choices = [0.45, 0.51, 0.59]
+    assert set(choices) <= set(band)
     search_space = {
         "quantile_alpha": {"type": "categorical", "choices": choices},
         "n_estimators": {"type": "categorical", "choices": [5]},
@@ -295,11 +303,11 @@ def test_run_tune_small_real_run_completes() -> None:
     # bound: the study ran end-to-end and returned a deployable config.
     best_config = run_tune(config)
 
-    # The discovered per-horizon quantile is one of the configured choices: the
-    # search ran end-to-end and produced a valid, deployable config. Not
-    # bit-exact — Ray + ASHA make the literal value non-reproducible even seeded.
+    # The discovered per-horizon quantile lands in the documented band: the search
+    # ran end-to-end and produced a valid, deployable config. Not bit-exact — Ray +
+    # ASHA make the literal value non-reproducible even seeded.
     discovered_alpha = float(best_config["quantiles"][0])
-    assert discovered_alpha in choices
+    assert discovered_alpha in band
     assert best_config["scope"] == "global"
     assert best_config["backend"] == "mlforecast"
     assert best_config["model"] == "lightgbm.LGBMRegressor"

@@ -60,6 +60,46 @@ def test_calibre_does_not_import_benchmarks() -> None:
     assert not violations, "shipped calibre/ must not import benchmarks:\n" + "\n".join(violations)
 
 
+def test_decision_and_tuning_symbols_import_from_calibre() -> None:
+    """Gate 4 positive boundary: the elevated decision/tuning glue lives in ``calibre``.
+
+    The one-way layering rule has two halves: :func:`test_calibre_does_not_import_benchmarks`
+    proves ``calibre`` never reaches into ``benchmarks``; this proves the decision and
+    tuning surface the benchmark consumes has a ``calibre`` home — each symbol imports from
+    ``calibre`` and is callable/instantiable, so a successful import IS the assertion.
+    """
+    from calibre.execution.decision_loop import DecisionLoop, RoundResult
+    from calibre.ordering.policy_config import (
+        RsConfig,
+        apply_order_policy,
+        build_rs_params,
+        derive_warmup_origins,
+        orders_from_policy_result,
+    )
+    from calibre.tuning import (
+        CumulativePinball,
+        GlobalTuningTask,
+        StudyConfig,
+        optimize_global_task,
+    )
+
+    symbols = (
+        RsConfig,
+        build_rs_params,
+        derive_warmup_origins,
+        orders_from_policy_result,
+        apply_order_policy,
+        DecisionLoop,
+        RoundResult,
+        CumulativePinball,
+        GlobalTuningTask,
+        StudyConfig,
+        optimize_global_task,
+    )
+    for symbol in symbols:
+        assert callable(symbol), f"{symbol!r} imported from calibre but is not callable"
+
+
 @pytest.mark.parametrize("module_name", _DELETED_CONFORMAL_MODULES)
 def test_deleted_conformal_modules_are_gone(module_name: str) -> None:
     with pytest.raises(ModuleNotFoundError):
