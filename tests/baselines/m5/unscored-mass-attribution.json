@@ -1,0 +1,53 @@
+{
+  "input": {
+    "path": "results/m5/full-mscp-wls-struct/forecast-ledger.resolved.parquet",
+    "sha256": "82a94ae91176b6ed12e12316d76aa709216b9821a71c8250bbabb1c117b617a7",
+    "num_rows": 60144896
+  },
+  "totals": {
+    "total": 60144896,
+    "resolved": 47458082,
+    "scored": 26279829,
+    "unscored": 21178253
+  },
+  "by_cause": {
+    "warm_up": 9397640,
+    "residual": 11780613
+  },
+  "by_horizon": [
+    {"h": 1, "resolved": 2148032, "scored": 1812402, "unscored": 335630},
+    {"h": 2, "resolved": 2114469, "scored": 1778839, "unscored": 335630},
+    {"h": 3, "resolved": 2080906, "scored": 1711713, "unscored": 369193},
+    {"h": 4, "resolved": 2047343, "scored": 1644587, "unscored": 402756},
+    {"h": 5, "resolved": 2013780, "scored": 1577461, "unscored": 436319},
+    {"h": 6, "resolved": 1980217, "scored": 1510335, "unscored": 469882},
+    {"h": 7, "resolved": 1946654, "scored": 1443209, "unscored": 503445},
+    {"h": 8, "resolved": 1913091, "scored": 1376083, "unscored": 537008},
+    {"h": 9, "resolved": 1879528, "scored": 1308957, "unscored": 570571},
+    {"h": 10, "resolved": 1845965, "scored": 1241831, "unscored": 604134},
+    {"h": 11, "resolved": 1812402, "scored": 1174705, "unscored": 637697},
+    {"h": 12, "resolved": 1778839, "scored": 1107579, "unscored": 671260},
+    {"h": 13, "resolved": 1745276, "scored": 1040453, "unscored": 704823},
+    {"h": 14, "resolved": 1711713, "scored": 973327, "unscored": 738386},
+    {"h": 15, "resolved": 1678150, "scored": 906201, "unscored": 771949},
+    {"h": 16, "resolved": 1644587, "scored": 839075, "unscored": 805512},
+    {"h": 17, "resolved": 1611024, "scored": 771949, "unscored": 839075},
+    {"h": 18, "resolved": 1577461, "scored": 704823, "unscored": 872638},
+    {"h": 19, "resolved": 1543898, "scored": 637697, "unscored": 906201},
+    {"h": 20, "resolved": 1510335, "scored": 570571, "unscored": 939764},
+    {"h": 21, "resolved": 1476772, "scored": 503445, "unscored": 973327},
+    {"h": 22, "resolved": 1443209, "scored": 436319, "unscored": 1006890},
+    {"h": 23, "resolved": 1409646, "scored": 369193, "unscored": 1040453},
+    {"h": 24, "resolved": 1376083, "scored": 302067, "unscored": 1074016},
+    {"h": 25, "resolved": 1342520, "scored": 234941, "unscored": 1107579},
+    {"h": 26, "resolved": 1308957, "scored": 167815, "unscored": 1141142},
+    {"h": 27, "resolved": 1275394, "scored": 100689, "unscored": 1174705},
+    {"h": 28, "resolved": 1241831, "scored": 33563, "unscored": 1208268}
+  ],
+  "confirmation": {
+    "conformal_mode_dist": {"perhorizon": 60144896},
+    "unscored_empty_ref_share": 0.0
+  },
+  "methodology": "Predicate reused verbatim from calibre/evaluation/forecast_metrics.py:161-168 over results/m5/full-mscp-wls-struct/forecast-ledger.resolved.parquet: resolved = isfinite(y); scored = resolved AND isfinite(lo_0p9) AND isfinite(hi_0p9); unscored = resolved AND NOT scored (the 21,178,253-row population attributed here). Run is perhorizon (benchmarks/m5/config/full-wls-struct.yaml: conformal.mode=perhorizon, partition=series, calibration_window=10, reconciliation.strategy=wls_struct). by_cause splits the unscored mass by origin geometry, the only signals that vary on this run: warm_up = unscored rows whose per-(unique_id, h) calibrator was not yet ready -- ordering each (unique_id, h) group by forecast_origin, the count of PRIOR resolved origins (y finite, ROWS UNBOUNDED PRECEDING..1 PRECEDING) is < calibration_window (10); residual = the remaining unscored rows with >= 10 prior resolved observations whose bounds are still NaN. residual is an UNDETERMINED cause: the ledger does not persist the calibrator's `ready & isfinite(radii)` decision that nulls the bounds, so the precise reason these >=10-history rows are unscorable is not recoverable from the ledger and is reported honestly rather than split further. warm_up + residual == unscored exactly. Confirmation (reported, not split on): conformal_mode is single-valued for this run (perhorizon over all 60,144,896 rows) and calibration_state_ref / conformal_partition are always populated on unscored rows (unscored_empty_ref_share = 0.0), so the conformal columns do not discriminate the cause -- hence the origin-geometry attribution. Computed by streaming the parquet with DuckDB (COUNT(*) FILTER + a row-ordered window per (unique_id, h)); the 60M-row panel is never materialized.",
+  "generated_against": "main@ba08d162"
+}
