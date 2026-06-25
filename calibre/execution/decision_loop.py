@@ -29,7 +29,14 @@ from calibre.storage.postgres import PendingObservationRepo
 
 @dataclass
 class RoundResult:
-    """Per-round outputs from a :class:`DecisionLoop` run."""
+    """Per-round outputs from a :class:`DecisionLoop` run.
+
+    The trailing snapshot fields (``holding_cost_cum``/``shortage_cost_cum``/
+    ``inventory_position``) are populated only by drivers that own a simulator
+    and choose to expose its per-round state to an ``on_round`` observer (the
+    settle loop does this for the VN2 parity harness); the generic loop leaves
+    them ``None``.
+    """
 
     round_num: int
     origin: pd.Timestamp
@@ -37,6 +44,9 @@ class RoundResult:
     conformal_frame: pd.DataFrame | None
     orders: dict[str, float]
     actual_demand: dict[str, float]
+    holding_cost_cum: float | None = None
+    shortage_cost_cum: float | None = None
+    inventory_position: dict[str, float] | None = None
 
 
 @dataclass
