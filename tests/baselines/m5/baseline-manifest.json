@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "active": "full-m5-2026-06-25",
+  "baselines": {
+    "full-m5-2026-06-25": {
+      "coverage_by_node": "tests/baselines/m5/coverage-by-node.parquet",
+      "coverage_summary": "tests/baselines/m5/coverage-summary.json",
+      "sha256": {
+        "coverage-by-node.parquet": "b983b0fd5f5943221d5be4ffad0b715a78bfb48ea93747e996440a54ebe9e5be",
+        "coverage-summary.json": "6c2c2bfa551814e007f82a4bae6e0a74a601546fd9012ad94efe26ff0ac5898f"
+      },
+      "resolved_ledger_sha256": "82a94ae91176b6ed12e12316d76aa709216b9821a71c8250bbabb1c117b617a7",
+      "config": "benchmarks/m5/config/full-wls-struct.yaml",
+      "freeze_tag": "m5-baseline-2026-06-25",
+      "generated_against": "main@92b4d1a",
+      "population_coverage": 0.90972433648636,
+      "date": "2026-06-25"
+    }
+  }
+}

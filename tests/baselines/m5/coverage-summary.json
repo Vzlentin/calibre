@@ -1,0 +1,16 @@
+{
+  "acceptance_status": "PASS",
+  "completeness_status": "PASS",
+  "level_status": "PASS",
+  "level_tolerance": 0.05,
+  "minimum_scored_ratio": 0.5,
+  "population_coverage": 0.90972433648636,
+  "population_resolved_rows": 47458082,
+  "population_scored_ratio": 0.5537482319660537,
+  "population_scored_rows": 26279829,
+  "population_status": "PASS",
+  "population_tolerance": 0.03,
+  "population_total_rows": 60144896,
+  "population_unscored_rows": 21178253,
+  "target_coverage": 0.9
+}
