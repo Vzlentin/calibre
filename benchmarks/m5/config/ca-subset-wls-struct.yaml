@@ -19,10 +19,10 @@ tasks:
     config:
       backend: statsforecast
       season_length: 7
-      # Global scope: one vectorized statsforecast panel call per origin.
-      # Local scope at M5 scale means 30,490 per-series tasks per origin and
-      # the run drowns in task-dispatch overhead (~3 min/origin predict);
-      # SeasonalNaive forecasts are identical either way.
+      # Global scope mirrors the full-wls-struct run this derives from (one
+      # vectorized statsforecast panel call per origin). SeasonalNaive forecasts
+      # are identical under local scope; global keeps the float path on the same
+      # dispatch the baseline is minted on.
       scope: global
 reconciliation:
   # Sparse-capable MinT: reconciles through MinTraceSparse on a csr summing
