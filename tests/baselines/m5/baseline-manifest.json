@@ -15,6 +15,14 @@
       "generated_against": "main@92b4d1a",
       "population_coverage": 0.90972433648636,
       "date": "2026-06-25"
+    },
+    "ca-subset": {
+      "coverage_by_node": "tests/baselines/m5/ca-subset-coverage-by-node.parquet",
+      "config": "benchmarks/m5/config/ca-subset-wls-struct.yaml",
+      "stores": ["CA_1", "CA_2"],
+      "status": "pending-mint-#279",
+      "platform": "linux-x86_64",
+      "sha256": null
     }
   }
 }
