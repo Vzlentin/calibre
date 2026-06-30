@@ -1,0 +1,4 @@
+{
+  "skills": ["../.claude/skills"],
+  "shellCommandPrefix": "while IFS=\"=\" read -r k v; do case \"$k\" in \"\" |\\#*) continue ;; esac; v=${v%$'\\r'}; export \"$k=$v\"; done < .env 2>/dev/null || true"
+}
