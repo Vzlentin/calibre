@@ -2,6 +2,7 @@
 data/
 mlruns/
 .vscode/
+.pi/
 .claude/*
 !.claude/skills/
 benchmarks/cp/aci/conformal-time-series/
