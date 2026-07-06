@@ -139,8 +139,11 @@ architecture-patterns, design-patterns, conventions, performance-issues, workflo
 in `Projects/Calibre/CONCEPTS.md`, and postponed work in
 `Projects/Calibre/deferred-findings-register.md`; consult them when implementing or
 debugging in a documented area. If `.env` carries no `OBSIDIAN_VAULT_PATH` line
-(truly unset — not merely absent from the live shell), plans fall back to
-repo-local `docs/plans/` while durable memory is skipped (per the skill).
+(truly unset — not merely absent from the live shell), durable memory is skipped
+(per the skill). `docs/plans/`, `docs/adr/`, and `CONTEXT.md` are public-safe
+redirectors to the vault (see `docs/agents/domain.md`), not artifact stores — a
+skill may write a temporary local plan under `docs/plans/` if the vault is
+unreachable, then relocate it on vault return.
 
 ### Roadmap: GitHub for status, vault for rationale
 
@@ -161,3 +164,24 @@ Hybrid, one source of truth per fact-type — don't mirror one into the other:
 - **Durable rationale = `ROADMAP.md`** (vault): mission, how-we-work
   cadence/gates, root-issue analysis (R1–R5), dependency ordering, parked
   decisions. Read it for the *why*; it carries **no** issue-status checklist.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues in `Vzlentin/calibre` — hybrid with the vault `ROADMAP.md` for
+rationale (status on GitHub, rationale in the vault); external PRs are a
+triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles → `needs-triage`, `needs-info`, `ready-for-agent`,
+`needs-decision` (the `ready-for-human` role, reusing the existing label),
+`wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain docs live in the Obsidian vault, not the repo: glossary at
+`Projects/Calibre/CONCEPTS.md`, ADRs at `Projects/Calibre/adr/`, plans at
+`Projects/Calibre/plans/`. Repo `CONTEXT.md`, `docs/adr/`, `docs/plans/` are
+public-safe redirectors. See `docs/agents/domain.md`.
