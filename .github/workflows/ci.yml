@@ -68,6 +68,40 @@ jobs:
       - run: uv sync --extra dev --extra benchmarks --extra s3
       - run: uv run --extra s3 --with 'moto[server]' pytest tests/integration/test_s3_ingestion.py
 
+  m5-coverage-neutrality:
+    # Advisory M5 per-node coverage-neutrality gate on the committed CA slice (no
+    # data download). It runs the real predict -> wls_struct reconcile -> mscp
+    # pipeline only when a float-relevant path changes, and short-circuits to a
+    # green report otherwise so the check never deadlocks a PR. Until the Linux
+    # baseline lands (#279) the test itself skips. NOT a branch-protection
+    # required check yet — measure its run-time before promoting it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect float-path changes
+        id: changed
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            calibre/reconciliation/**
+            calibre/conformal/**
+            calibre/evaluation/**
+            calibre/execution/**
+            benchmarks/m5/**
+      - name: Flag float-path changes
+        id: float
+        run: echo "float_path=${{ steps.changed.outputs.any_changed }}" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.float.outputs.float_path == 'true'
+      - name: Install deps (hierarchy extra for MinTraceSparse)
+        if: steps.float.outputs.float_path == 'true'
+        run: uv sync --extra dev --extra benchmarks --extra hierarchy
+      - name: Run M5 coverage-neutrality gate
+        if: steps.float.outputs.float_path == 'true'
+        run: uv run pytest tests/benchmarks/test_m5_coverage_neutrality.py
+      - name: Report advisory gate result
+        run: echo "m5-coverage-neutrality complete (float_path=${{ steps.float.outputs.float_path }})"
+
   docker-build:
     runs-on: ubuntu-latest
     steps:

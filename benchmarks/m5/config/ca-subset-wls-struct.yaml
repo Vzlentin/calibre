@@ -1,0 +1,56 @@
+config_schema: "1.0"
+# CA-subset coverage-neutrality acceptance surface for the M5 coverage-neutrality
+# CI gate. DERIVED from full-wls-struct.yaml: the tasks / reconciliation /
+# conformal blocks are copied VERBATIM so the gate exercises the same
+# predict -> MinTraceSparse reconcile -> mscp/perhorizon float path the full run
+# does, just on the committed CA_1+CA_2 slice. It is a neutrality config (diff
+# per-node coverage vs a frozen baseline), NOT a coverage-acceptance config.
+# The slice lives at tests/baselines/m5/ca-subset-data/ (git-tracked); the
+# baseline parquet is minted on Linux and resolved via baseline-manifest.json.
+dataset:
+  adapter: m5
+  # Committed CA_1+CA_2 slice of sales_train_evaluation.csv plus calendar.csv
+  # copied unchanged. Path is cwd-relative (pytest/CI runs from the repo root).
+  path: tests/baselines/m5/ca-subset-data
+  phase: evaluation
+tasks:
+  - model: SeasonalNaive
+    horizon: 28
+    config:
+      backend: statsforecast
+      season_length: 7
+      # Global scope mirrors the full-wls-struct run this derives from (one
+      # vectorized statsforecast panel call per origin). SeasonalNaive forecasts
+      # are identical under local scope; global keeps the float path on the same
+      # dispatch the baseline is minted on.
+      scope: global
+reconciliation:
+  # Sparse-capable MinT: reconciles through MinTraceSparse on a csr summing
+  # matrix built from hierarchy index facts (~2.7 MB at full M5 instead of the
+  # ~7.6 GiB dense S), so the full lattice fits commodity memory. Structural
+  # weights exercise the sparse solve more representatively than ols's
+  # identity weights, without wls_var's residual-estimation dependency.
+  strategy: wls_struct
+conformal:
+  method: mscp
+  mode: perhorizon
+  coverage: 0.9
+  calibration_window: 10
+  partition: series
+  # Explicit guard for conformal calibration state cardinality only. The CLI
+  # separately preflights node-history materialization before hierarchy expansion.
+  max_partitions: 1000000
+origins:
+  # Short daily window (~23 origins): long enough to warm the perhorizon mscp
+  # calibrators and emit scored per-node rows for the neutrality diff, short
+  # enough that the gate stays a few-minute CI run. NOT a coverage-acceptance
+  # window (the full run owns that).
+  start: 2016-03-20
+  end: 2016-04-12
+  freq: D
+output:
+  ledger_path: results/m5/ca-subset-wls-struct/forecast-ledger.parquet
+  streaming: true
+execution:
+  backend: auto
+  seed: 42
