@@ -1,0 +1,73 @@
+{
+  "launch_utc": "2026-07-07T08:40:24+00:00",
+  "first_log_utc": "2026-07-07T08:44:22.768276+00:00",
+  "last_log_utc": "2026-07-07T09:55:03.687136+00:00",
+  "total_wall_s": 4479.7,
+  "pre_origin_s": 238.8,
+  "logged_window_s": 4240.9,
+  "n_origins": 64,
+  "origin_loop_total_s": 4073.7,
+  "origin_duration_s": {
+    "min": 38.3,
+    "mean": 63.7,
+    "max": 190.6
+  },
+  "phase_totals_s": {
+    "ResolveOpen": 1213.2,
+    "Predict": 1363.9,
+    "Reconcile": 163.0,
+    "Calibrate": 253.9,
+    "Order": 0.0,
+    "Commit": 1075.9
+  },
+  "span_totals_s": {
+    "conformal_state_restore": {
+      "n": 1,
+      "total_s": 0.0
+    },
+    "staging_materialize": {
+      "n": 1,
+      "total_s": 7.3
+    },
+    "ledger_resolution_frame": {
+      "n": 128,
+      "total_s": 22.6
+    },
+    "actuals_lookup": {
+      "n": 128,
+      "total_s": 1686.6
+    },
+    "ledger_append": {
+      "n": 64,
+      "total_s": 215.9
+    },
+    "resolve_scoring": {
+      "n": 127,
+      "total_s": 243.5
+    },
+    "ledger_update_resolved": {
+      "n": 127,
+      "total_s": 105.4
+    },
+    "ledger_close": {
+      "n": 1,
+      "total_s": 159.9
+    }
+  },
+  "adapter_totals_s": {
+    "fit": 833.1,
+    "predict": 29.2
+  },
+  "conformal_totals_s": {
+    "apply": {
+      "n": 64,
+      "total_s": 252.7
+    },
+    "observe": {
+      "n": 127,
+      "total_s": 223.6
+    }
+  },
+  "tail_after_last_origin_s": 159.9,
+  "head_before_first_origin_s": 7.3
+}

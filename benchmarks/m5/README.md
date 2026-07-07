@@ -166,6 +166,15 @@ CI tests this scorer with synthetic M5-shaped ledgers. The checked-in
 `tests/fixtures/m5` smoke fixture remains a contract fixture only and is not M5
 coverage validation.
 
+## Wall-Clock Profile
+
+`profile/MEMO.md` attributes a complete `full-wls-struct.yaml` run's wall
+clock by phase (74.7 min on the machine it names; origin loop 90.9%,
+pre-origin 5.3%, ledger close 3.6%) from the engine's own JSON telemetry plus
+a standalone pre-origin re-measurement. The raw log and machine-readable
+aggregates sit beside it. It is the R8 evidence for the architecture spec's
+performance chapter and the sanity check on the 15-minute full-M5 bar.
+
 ## Origin Window
 
 The full config uses 64 daily origins:
