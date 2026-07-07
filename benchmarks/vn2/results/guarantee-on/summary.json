@@ -1,0 +1,30 @@
+{
+  "machine": {
+    "platform": "Windows-11-10.0.22631-SP0",
+    "machine": "AMD64",
+    "python": "3.12.13"
+  },
+  "configs": {
+    "baseline": "vn2-winning-loop.yaml",
+    "guarantee_on": "vn2-winning-loop-guarantee-on.yaml"
+  },
+  "reference_triple_x86_64_linux": {
+    "total": 4992.2,
+    "holding": 2488.2,
+    "shortage": 2504.0
+  },
+  "guarantee_on": {
+    "holding": 3042.9999999999973,
+    "shortage": 2156.0,
+    "total": 5198.999999999997,
+    "coverage_raw_overall": 0.7378964941569283,
+    "coverage_censoring_aware_overall": 0.7378964941569283
+  },
+  "baseline": {
+    "holding": 2488.1999999999994,
+    "shortage": 2504.0,
+    "total": 4992.199999999999,
+    "coverage_raw_overall": 0.6093489148580968,
+    "coverage_censoring_aware_overall": 0.6093489148580968
+  }
+}

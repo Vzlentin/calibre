@@ -1,0 +1,81 @@
+config_schema: "1.0"
+# Guarantee-on variant of vn2-winning-loop.yaml (#286): the first committed VN2
+# run with the conformal guarantee ON at tau. Exactly two decision knobs differ
+# from the winning config:
+#   1. coverage: 0.74 -> 0.833 (tau = Cu/(Cu+Co) = 1/1.2, repo convention 0.833;
+#      set in BOTH order_conformal and ordering — the parse-time backstop
+#      requires them equal for an (R,S) config without a quantile).
+#   2. buffer_max: 0.0 -> omitted (None). The residual buffer is unclamped, so
+#      the one-sided split-conformal bound actually bites. (For buffer_max,
+#      omitted == null: it is threaded to the runtime unconditionally.)
+# weight_decay stays explicitly null — the unweighted split-conformal branch
+# that carries the exchangeability guarantee. The four YAML-unreachable runtime
+# fields keep their guarantee-correct defaults. method_name is a cosmetic label
+# updated to match (it lands in the ledger's conformal_method column).
+# All other fields are byte-identical to vn2-winning-loop.yaml; see that file's
+# comments for the settle-loop anatomy.
+dataset:
+  adapter: vn2
+  path: data/vn2
+  period: 8
+  holding_cost: 0.2
+  shortage_cost: 1.0
+tasks:
+  # The full HPO-best global LGBM (BEST_CONFIG). `censoring_fit` sits at the task
+  # ROOT (a TaskConfig field) — nested under `config:` it is silently dropped by
+  # resolved_model_config, so the engine would train on raw (censored) sales
+  # instead of the in-stock-imputed y_uncensored the benchmark fits.
+  - model: global_lgbm_qq_0p59
+    horizon: 3
+    censoring_fit: true
+    config:
+      backend: mlforecast
+      scope: global
+      name: global_lgbm_qq_0p59
+      model: lightgbm.LGBMRegressor
+      objective: quantile
+      quantiles: [0.59]
+      strategy: direct
+      lags: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 26, 52]
+      lag_transforms:
+        1:
+          - {transform: RollingMean, window_size: 4}
+          - {transform: RollingMean, window_size: 13}
+          - {transform: RollingMean, window_size: 26}
+          - {transform: RollingStd, window_size: 4}
+          - {transform: RollingStd, window_size: 13}
+          - {transform: RollingStd, window_size: 26}
+      n_estimators: 800
+      learning_rate: 0.029992886777618452
+      num_leaves: 15
+      min_child_samples: 41
+      subsample: 0.8010716092915446
+      colsample_bytree: 0.6205915004999957
+      reg_alpha: 0.006853925708853058
+      reg_lambda: 0.5306371575220844
+      verbosity: -1
+      n_jobs: -1
+      random_state: 42
+origins:
+  start: 2024-04-15
+  end: 2024-05-20
+  freq: W-MON
+order_conformal:
+  # One-sided split-conformal decision bound over the lead_time + review_period
+  # = 3 window, at the newsvendor critical ratio. No buffer clamp: the
+  # calibrated residual quantile is applied in full.
+  coverage: 0.833
+  protection_period: 3
+  weight_decay: null
+  base_column: q_0p59
+  warmup_origins: 3
+  method_name: guarantee_on_crc
+ordering:
+  # R,S order-up-to policy. lead_time + review_period == 3 == protection_period.
+  policy: rs
+  coverage: 0.833
+  lead_time: 2
+  review_period: 1
+execution:
+  backend: local
+  seed: 42
