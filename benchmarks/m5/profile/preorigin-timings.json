@@ -1,0 +1,62 @@
+{
+  "imports": {
+    "seconds": 0.78,
+    "rss_gb_after": null
+  },
+  "config_load": {
+    "seconds": 0.0,
+    "rss_gb_after": null
+  },
+  "read_csv_sales": {
+    "seconds": 1.82,
+    "rss_gb_after": null
+  },
+  "read_csv_calendar": {
+    "seconds": 0.0,
+    "rss_gb_after": null
+  },
+  "melt_m5_sales": {
+    "seconds": 11.77,
+    "rss_gb_after": null
+  },
+  "build_m5_hierarchy_table": {
+    "seconds": 0.01,
+    "rss_gb_after": null
+  },
+  "costs_and_bundle": {
+    "seconds": 0.0,
+    "rss_gb_after": null
+  },
+  "validate_dataset_bundle": {
+    "seconds": 7.53,
+    "rss_gb_after": null
+  },
+  "build_hierarchy_index": {
+    "seconds": 0.02,
+    "rss_gb_after": null
+  },
+  "oom_preflight": {
+    "seconds": 93.95,
+    "rss_gb_after": null
+  },
+  "build_node_history": {
+    "seconds": 112.75,
+    "rss_gb_after": null
+  },
+  "build_tasks": {
+    "seconds": 20.46,
+    "rss_gb_after": null
+  },
+  "TOTAL": {
+    "seconds": 249.38,
+    "rss_gb_after": null
+  },
+  "_facts": {
+    "history_rows": 59181090,
+    "node_history_rows": 65145783,
+    "n_nodes": 33563,
+    "n_bottom": 30490,
+    "n_global_tasks": 1,
+    "n_origins": 64
+  }
+}
