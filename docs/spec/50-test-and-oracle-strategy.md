@@ -236,8 +236,8 @@ structurally (behavioral properties over the same surface) or not at all.
 | 0 | Static gates: lint, types, frame schema validation `[FRA-3]` | — | Every commit | Permanent |
 | 1 | Oracle-property suite on synthetic fixtures: the carried corpus as fast unit/property tests | 1, 2, 3 | Every commit | Permanent — outlives the oracle |
 | 2 | Self-consistency suite: resume, serialization, distribution invariance, seeded determinism | 4 | Every merge | Permanent, per-engine |
-| 3 | Cross-engine equivalence harness: conditional replay against pinned-tag oracle captures; reference-implementation gates | 2, 3, 6 | Scheduled / pre-release | Deleted with the oracle |
-| 4 | Protocol acceptance at scale: statistical coverage bands, scored-ratio floor, machine-readable summary, nonzero exit on non-PASS | 5 | Scheduled | Permanent, bands re-derived per run scale |
+| 3 | Cross-engine equivalence harness: conditional replay against pinned-tag oracle captures; the frozen engine's side of reference-implementation comparisons | 2, 3, 6 | Scheduled / pre-release | Deleted with the oracle |
+| 4 | Protocol acceptance at scale (statistical coverage bands, scored-ratio floor, machine-readable summary, nonzero exit on non-PASS); the rewrite's side of reference-implementation gates (engine-independent references — closed-form, or third-party implementations at pinned commits) | 3, 5 | Scheduled | Permanent — statistical bands re-derived per run scale, reference pins immutable |
 
 Lifecycle rules:
 
@@ -248,9 +248,19 @@ Lifecycle rules:
   it is the *only* tier allowed to touch frozen-engine outputs.
 - No apparatus of the frozen engine (pinned scalars, sha-pinned baselines,
   config pins) is imported into any tier. Retired means deleted.
-- Every tier-4 gate re-derives its bands from the run's own sample sizes at
-  execution time; no band constant is committed as a literal without its
-  derivation alongside.
+- Every statistical tier-4 gate re-derives its bands from the run's own
+  sample sizes at execution time; no band constant is committed as a literal
+  without its derivation alongside. A tier-4 reference-implementation gate
+  instead carries the engine's declared solver tolerance plus the
+  per-fixture conditioning term (class 3), re-derived for the engine under
+  test.
+- Reference-implementation gates are per-engine instances of one
+  engine-independent reference: the rewrite's scheduled-gate instance is
+  permanent (tier 4; fast closed-form instances run as tier-1 property
+  tests); the frozen engine's instance exists only as build-time
+  triangulation evidence (tier 3) and retires with the oracle. The
+  reference itself — a closed-form formula, or a third-party implementation
+  at a pinned commit — is never frozen-engine apparatus.
 - Every numeric gate in any tier ships its witness (above) in the same tier.
 
 ## State the acceptance criteria
