@@ -251,7 +251,9 @@ benchmarks/              # Benchmark suites
 └── cp/aci/              # Adaptive conformal inference parity
 
 tests/                   # pytest suite
-docs/                    # Deployment guides
+docs/                    # Deployment guides + agent docs
+└── spec/                # Architecture spec for the greenfield rewrite
+                         #   (public layer; start at docs/spec/00-overview.md)
 infra/                   # Terraform modules
 scripts/                 # Databricks notebooks, jobs
 .github/workflows/       # CI: ruff, ty, pytest
