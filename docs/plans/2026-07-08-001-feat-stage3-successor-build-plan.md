@@ -264,7 +264,7 @@ tracking, the spec relocation/rename, and cutover.
    versus repo split (fresh public `calibre` repo seeded from the successor
    package; this repo archived). Both satisfy D1 and D4; the plan defaults to
    the in-place hard rename for tracker continuity and executes either at
-   U24 on the owner's Gate D-authorize selection.
+   U24 on the owner's Gate D-authorize selection.  USER hard in place rename
 3. **Pre-registration pair for the certificate band (C1).** This plan
    pre-commits Wilson at 95% at the run's declared post-warmup event count;
    `[FLG-3]` requires the owner to fix interval type and confidence in the
@@ -275,7 +275,7 @@ tracking, the spec relocation/rename, and cutover.
    values; the owner ratifies them when U2 mints the tracking milestone.
 5. **Working package name.** `newcalibre` (also the sibling draft's choice,
    matching the spec's "New-Calibre" phrasing) — confirm before U1 lands;
-   the name disappears at U24 anyway.
+   the name disappears at U24 anyway. USER ok
 
 ### Sources
 
