@@ -31,6 +31,11 @@ ledger + metrics. Orchestrated by `execution/backend.py::BackendEngine`.
 
 Entry points: CLI `calibre.cli.main:app`, API `calibre.api.main:app`.
 
+The architecture spec for the greenfield rewrite lives at `docs/spec/`
+(start at `docs/spec/00-overview.md`). It describes the successor engine,
+not this codebase; this repo remains the behavior reference until cutover.
+See *Agent memory* below for the editing rule that governs it.
+
 ## Commands
 
 Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
@@ -143,7 +148,14 @@ debugging in a documented area. If `.env` carries no `OBSIDIAN_VAULT_PATH` line
 (per the skill). `docs/plans/`, `docs/adr/`, and `CONTEXT.md` are public-safe
 redirectors to the vault (see `docs/agents/domain.md`), not artifact stores — a
 skill may write a temporary local plan under `docs/plans/` if the vault is
-unreachable, then relocate it on vault return.
+unreachable, then relocate it on vault return. **`docs/spec/` is the one
+deliberate exception**: the repo's single durable public artifact store,
+holding the public layer of the two-layer rewrite spec (private rationale
+stays in the vault behind opaque `[ANNEX:*]` pointers — never resolve or
+inline them in the repo). **Leak review before edit:** any change under
+`docs/spec/` requires an owner leak-review stamp on the landing's tracking
+issue *before* it lands; reviews are batched per landing, not per file (see
+`docs/agents/domain.md`).
 
 ### Roadmap: GitHub for status, vault for rationale
 

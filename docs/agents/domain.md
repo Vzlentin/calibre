@@ -36,6 +36,29 @@ If a skill reads `CONTEXT.md` expecting a glossary body, it will find a pointer
 instead — resolve to the vault `CONCEPTS.md` as above. Do **not** write ADRs or
 plans into the repo; new ones land in the vault at the next number/slug.
 
+## The one repo-resident artifact store: `docs/spec/`
+
+`docs/spec/` is the deliberate exception to redirectors-only: the repo's
+single durable public artifact store, holding the **public layer** of the
+two-layer architecture spec for the greenfield rewrite (start at
+`docs/spec/00-overview.md`). Its private rationale annex stays in the vault;
+public files reference it only by opaque `[ANNEX:*]` pointers, each registered
+in `docs/spec/90-annex-registry.md`. Consumer rules:
+
+- **Never resolve an `[ANNEX:*]` pointer in repo prose.** If a fact you need
+  sits behind one, the public chapter must restate it public-safely or the
+  work stops at the pointer — surface that, don't paraphrase annex content in.
+- **Leak review before edit.** Every change under `docs/spec/` requires an
+  owner leak-review stamp on the landing's tracking issue *before* it lands.
+  Reviews are batched per landing milestone, not per file; an unstamped edit
+  fails review regardless of content.
+- **The registry is the leak-review surface.** A pointer in use but not
+  registered — or annex material inlined anywhere in `docs/spec/` — fails
+  review (`docs/spec/90-annex-registry.md` states the full rules).
+- The spec describes the **successor engine**, not this codebase. Don't
+  "fix" a spec chapter to match current-engine behavior; divergence is
+  usually the point. Contradictions worth raising go to the tracking issue.
+
 ## If the vault is unavailable
 
 If `.env` carries no `OBSIDIAN_VAULT_PATH` line (truly unset — not merely absent
