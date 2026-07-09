@@ -1,6 +1,7 @@
 # project specific
 data/
 mlruns/
+.rtk/
 .vscode/
 .pi/
 .claude/*
