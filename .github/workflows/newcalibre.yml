@@ -1,0 +1,273 @@
+name: newcalibre
+# Successor CI lanes (Stage 3). Tiers 0-1 run per commit and are
+# branch-protection required, so they must report on every PR: they
+# short-circuit green while the successor project does not exist yet.
+# Tier 2 runs per merge to main. Tiers 3-4 are scheduled monitoring
+# (verify-only, never minting tracked evidence) or manual evidence runs at a
+# full 40-hex candidate SHA. Evidence environment: ADR 0001 — explicitly
+# versioned ubuntu-24.04 x86_64, locked toolchain; never ubuntu-latest.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Full 40-hex candidate SHA (manual evidence runs only)"
+        required: true
+      lane:
+        description: "Evidence lane to run"
+        type: choice
+        required: true
+        options: [oracle, vn2-verify, vn2-mint]
+
+permissions:
+  contents: read
+
+jobs:
+  newcalibre-lint:
+    # Tier 0 — required context; real work only once newcalibre/ exists.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Successor presence
+        id: present
+        run: echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Record environment manifest
+        if: steps.present.outputs.exists == 'true'
+        run: |
+          echo "runner_image=${ImageOS:-unknown}/${ImageVersion:-unknown}"
+          echo "cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+          echo "os_release=$(. /etc/os-release && echo "$PRETTY_NAME")"
+          echo "arch=$(uname -m)"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.present.outputs.exists == 'true'
+      - name: Locked sync (dev group)
+        if: steps.present.outputs.exists == 'true'
+        working-directory: newcalibre
+        run: uv sync --locked --group dev
+      - name: Ruff check
+        if: steps.present.outputs.exists == 'true'
+        working-directory: newcalibre
+        run: uv run --locked ruff check .
+      - name: Ruff format check
+        if: steps.present.outputs.exists == 'true'
+        working-directory: newcalibre
+        run: uv run --locked ruff format --check .
+      - name: Type check
+        if: steps.present.outputs.exists == 'true'
+        working-directory: newcalibre
+        run: uv run --locked ty check src/newcalibre/
+      - name: Report lane result
+        run: echo "newcalibre-lint complete (successor present=${{ steps.present.outputs.exists }})"
+
+  newcalibre-unit:
+    # Tier 1 — required context. Runs from a successor-only export with the
+    # frozen tree, Git objects, captures, and network physically unavailable
+    # (GA5): provision the venv first, then run the suite inside a
+    # no-network namespace after the canaries prove the isolation.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Successor presence
+        id: present
+        run: echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.present.outputs.exists == 'true'
+      - name: Build successor-only export
+        if: steps.present.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          export_root="${RUNNER_TEMP}/successor-export"
+          mkdir -p "$export_root"
+          rsync -a --exclude '.git' --exclude 'captures/' newcalibre/ "$export_root/newcalibre/"
+          echo "EXPORT_ROOT=$export_root" >> "$GITHUB_ENV"
+      - name: Provision export venv (network still on)
+        if: steps.present.outputs.exists == 'true'
+        working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
+        run: uv sync --locked --group dev
+      - name: Isolation canaries
+        if: steps.present.outputs.exists == 'true'
+        working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
+        run: |
+          set -euo pipefail
+          test ! -e "$EXPORT_ROOT/calibre" || { echo "frozen package present in export"; exit 1; }
+          test ! -e "$EXPORT_ROOT/benchmarks" || { echo "frozen benchmarks present in export"; exit 1; }
+          test ! -e "$EXPORT_ROOT/newcalibre/.git" || { echo "Git objects present in export"; exit 1; }
+          find "$EXPORT_ROOT" -type d -name captures | grep -q . && { echo "captures present in export"; exit 1; } || true
+          uv run --no-sync python -c "import importlib.util, sys; sys.exit(1 if importlib.util.find_spec('calibre') else 0)" \
+            || { echo "frozen 'calibre' importable from export venv"; exit 1; }
+      - name: Tier 1 (network disabled)
+        if: steps.present.outputs.exists == 'true'
+        working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
+        run: |
+          set -euo pipefail
+          sudo unshare -n sudo -E -u "$USER" env "PATH=$PATH" bash -c '
+            set -euo pipefail
+            uv run --no-sync python -c "
+          import socket, sys
+          try:
+              socket.create_connection((\"1.1.1.1\", 443), timeout=3)
+          except OSError:
+              sys.exit(0)
+          sys.exit(1)
+          " || { echo "network canary failed: network reachable"; exit 1; }
+            uv run --no-sync pytest tests/tier1
+          '
+      - name: Report lane result
+        run: echo "newcalibre-unit complete (successor present=${{ steps.present.outputs.exists }})"
+
+  s3-activation-gate:
+    # Required context: mechanically blocks post-U1a Stage 3 PRs while the
+    # Gate issue lacks a schema-complete clock activation record (KTD-A7).
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Activation-record gate
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/stage3_clock.py gate --pr "${{ github.event.pull_request.number }}"
+      - name: Report lane result
+        run: echo "s3-activation-gate complete"
+
+  newcalibre-consistency:
+    # Tier 2 — per merge to main: byte identity across two executions inside
+    # one job; later class-4 legs stay visibly pending, never green-washed.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Successor presence
+        id: present
+        run: echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.present.outputs.exists == 'true'
+      - name: Locked sync (dev group)
+        if: steps.present.outputs.exists == 'true'
+        working-directory: newcalibre
+        run: uv sync --locked --group dev
+      - name: Tier 2, execution 1
+        if: steps.present.outputs.exists == 'true'
+        working-directory: newcalibre
+        run: NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run1" uv run --locked pytest tests/tier2
+      - name: Tier 2, execution 2
+        if: steps.present.outputs.exists == 'true'
+        working-directory: newcalibre
+        run: NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run2" uv run --locked pytest tests/tier2
+      - name: Byte identity across executions
+        if: steps.present.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          if [ -d "${RUNNER_TEMP}/tier2-run1" ] || [ -d "${RUNNER_TEMP}/tier2-run2" ]; then
+            diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
+          else
+            echo "no tier-2 artifacts emitted yet (skeleton phase)"
+          fi
+      - name: Report lane result
+        run: echo "newcalibre-consistency complete (successor present=${{ steps.present.outputs.exists }})"
+
+  oracle:
+    # Tier 3 — schedule verifies the default-branch SHA (monitoring only,
+    # never minting tracked evidence); manual dispatch requires a full
+    # candidate SHA. Consumes only promoted, manifest-complete captures;
+    # absent captures skip visibly.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.lane == 'oracle')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate candidate SHA (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      - name: Verify checked-out HEAD
+        if: github.event_name == 'workflow_dispatch'
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - name: Successor + captures presence
+        id: present
+        run: |
+          echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "captures=$([ -d stage3/evidence/captures ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Tier 3 visibly skipped
+        if: steps.present.outputs.exists != 'true' || steps.present.outputs.captures != 'true'
+        run: echo "::notice::tier 3 skipped — successor or promoted captures absent (pending U1/U7b)"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.present.outputs.exists == 'true' && steps.present.outputs.captures == 'true'
+      - name: Tier 3 replay + divergence + witness enforcement
+        if: steps.present.outputs.exists == 'true' && steps.present.outputs.captures == 'true'
+        working-directory: newcalibre
+        run: |
+          uv sync --locked --group dev
+          uv run --locked pytest tests/tier3
+
+  vn2-acceptance:
+    # Tier 4 — schedule is verify-only against the default-branch SHA;
+    # manual mint/verify runs require a full candidate SHA and emit a
+    # digest-bound bundle artifact. The job never edits the checkout.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate candidate SHA (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      - name: Verify checked-out HEAD
+        if: github.event_name == 'workflow_dispatch'
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - name: Preflight — evidence environment (ADR 0001)
+        run: test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+      - name: Successor + harness presence
+        id: present
+        run: |
+          ready=false
+          [ -f newcalibre/pyproject.toml ] && [ -f stage3/evidence/vn2-input-digests.json ] \
+            && [ -d newcalibre/src/newcalibre/protocols ] && ready=true
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+      - name: Tier 4 visibly skipped
+        if: steps.present.outputs.ready != 'true'
+        run: echo "::notice::tier 4 skipped — successor VN2 harness or digest inventory absent (pending U2d/U8)"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.present.outputs.ready == 'true'
+      - name: Restore VN2 data (exact digest-inventory key, no fallback)
+        if: steps.present.outputs.ready == 'true'
+        uses: actions/cache@v4
+        with:
+          path: newcalibre/data/vn2
+          key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
+      - name: Acquire + unconditionally validate inputs
+        if: steps.present.outputs.ready == 'true'
+        run: |
+          python3 .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
+          python3 .github/scripts/stage3_vn2_data.py verify --target newcalibre/data/vn2 \
+            --inventory stage3/evidence/vn2-input-digests.json
+      - name: Tier 4 run
+        if: steps.present.outputs.ready == 'true'
+        working-directory: newcalibre
+        env:
+          VN2_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' && 'mint' || 'verify' }}
+        run: |
+          uv sync --locked --group dev
+          uv run --locked pytest tests/tier4
+      - name: Upload digest-bound bundle
+        if: steps.present.outputs.ready == 'true' && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vn2-acceptance-${{ inputs.candidate_sha }}
+          path: newcalibre/artifacts/vn2/
+          if-no-files-found: warn

@@ -1,0 +1,68 @@
+name: stage3-clock
+# Gate A clock mechanics (KTD-A7). The activation job consumes merged-PR
+# events and records the immutable start/deadline on the Gate issue the
+# first time a merged PR carries the validated `s3:clock-start` marker; it
+# refuses any other merge. A daily check escalates at the deadline and flags
+# stalled active units; a weekly heartbeat records sublanding states. The
+# Gate issue record is authoritative; the milestone due date is a mirror.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  schedule:
+    - cron: "30 6 * * *" # daily deadline + stall check
+    - cron: "0 7 * * 1" # weekly heartbeat (Monday)
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Clock command to run"
+        type: choice
+        required: true
+        options: [check-deadline, heartbeat]
+
+permissions:
+  contents: read
+
+jobs:
+  activate:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record activation if this is the validated clock-start merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/stage3_clock.py activate --pr "${{ github.event.pull_request.number }}"
+
+  check-deadline:
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '30 6 * * *')
+      || (github.event_name == 'workflow_dispatch' && inputs.command == 'check-deadline')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deadline escalation + stall tripwire
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/stage3_clock.py check-deadline
+
+  heartbeat:
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '0 7 * * 1')
+      || (github.event_name == 'workflow_dispatch' && inputs.command == 'heartbeat')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Weekly heartbeat
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/stage3_clock.py heartbeat
