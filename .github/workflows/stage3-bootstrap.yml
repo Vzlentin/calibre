@@ -1,0 +1,99 @@
+name: stage3-bootstrap
+# Pre-clock bootstrap evidence (U2d, KTD-A4): the one-time VN2 digest mint
+# and the pinned-tag order-extraction preflight. Manual dispatch only; both
+# jobs are read-only (artifacts are promoted into the repository through
+# reviewed PRs, never pushed from CI). Evidence environment per ADR 0001.
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Bootstrap job to run"
+        type: choice
+        required: true
+        options: [mint-inventory, extraction-preflight]
+
+permissions:
+  contents: read
+
+env:
+  ORACLE_TAG: oracle-freeze-2026-07-06
+  ORACLE_COMMIT: 686a1b284a4f4879123b4095d306f07b88d2ddc3
+  ORACLE_LOCK_SHA256: 5cc585d347195861d81760e16a675bd2a05b51777cf90c13d9af0ab05bb743f3
+
+jobs:
+  mint-inventory:
+    if: inputs.job == 'mint-inventory'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preflight — evidence environment (ADR 0001)
+        run: test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+      - name: Download the challenge distribution
+        run: python3 .github/scripts/stage3_vn2_data.py download --target "${RUNNER_TEMP}/vn2"
+      - name: Mint the twelve-file digest inventory
+        run: |
+          python3 .github/scripts/stage3_vn2_data.py mint --target "${RUNNER_TEMP}/vn2" \
+            --out "${RUNNER_TEMP}/vn2-input-digests.json"
+      - name: Upload inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: vn2-input-digests
+          path: ${{ runner.temp }}/vn2-input-digests.json
+          if-no-files-found: error
+      - name: Upload verified bytes (custody mirror source)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vn2-data-bytes
+          path: ${{ runner.temp }}/vn2/
+          if-no-files-found: error
+
+  extraction-preflight:
+    if: inputs.job == 'extraction-preflight'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Preflight — evidence environment (ADR 0001)
+        run: test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+      - name: Fetch and verify the oracle tag
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/tags/${ORACLE_TAG}:refs/tags/${ORACLE_TAG}" --no-tags --force
+          resolved="$(git rev-parse "${ORACLE_TAG}^{}")"
+          test "$resolved" = "$ORACLE_COMMIT" \
+            || { echo "oracle tag resolves to $resolved, expected $ORACLE_COMMIT"; exit 1; }
+      - name: Create detached oracle worktree and verify its lock
+        run: |
+          set -euo pipefail
+          git worktree add --detach "${RUNNER_TEMP}/oracle-tag" "$ORACLE_COMMIT"
+          lock_sha="$(sha256sum "${RUNNER_TEMP}/oracle-tag/uv.lock" | cut -d' ' -f1)"
+          test "$lock_sha" = "$ORACLE_LOCK_SHA256" \
+            || { echo "oracle uv.lock sha256 $lock_sha, expected $ORACLE_LOCK_SHA256"; exit 1; }
+      - uses: astral-sh/setup-uv@v4
+      - name: Provision the oracle venv (frozen)
+        working-directory: ${{ runner.temp }}/oracle-tag
+        run: uv sync --frozen --extra dev --extra benchmarks
+      - name: Acquire + unconditionally validate the twelve VN2 inputs
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/stage3_vn2_data.py download --target "${RUNNER_TEMP}/oracle-tag/data/vn2"
+          python3 .github/scripts/stage3_vn2_data.py verify --target "${RUNNER_TEMP}/oracle-tag/data/vn2" \
+            --inventory stage3/evidence/vn2-input-digests.json
+      - name: Extraction run 1
+        run: |
+          "${RUNNER_TEMP}/oracle-tag/.venv/bin/python" .github/scripts/stage3_oracle_extract.py \
+            --worktree "${RUNNER_TEMP}/oracle-tag" --out "${RUNNER_TEMP}/extract-run1"
+      - name: Extraction run 2 (determinism proof)
+        run: |
+          "${RUNNER_TEMP}/oracle-tag/.venv/bin/python" .github/scripts/stage3_oracle_extract.py \
+            --worktree "${RUNNER_TEMP}/oracle-tag" --out "${RUNNER_TEMP}/extract-run2"
+      - name: Byte identity across the two runs
+        run: diff -r "${RUNNER_TEMP}/extract-run1" "${RUNNER_TEMP}/extract-run2"
+      - name: Upload extraction preflight bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-extraction-preflight
+          path: ${{ runner.temp }}/extract-run1/
+          if-no-files-found: error
