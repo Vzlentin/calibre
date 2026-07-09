@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "newcalibre"
+version = "0.1.0"
+description = "Greenfield successor engine built to docs/spec/ (working name; in-place hard rename at cutover)"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "pydantic",
+    "pyyaml",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "ty",
+    "pandas-stubs",
+    "types-PyYAML",
+    "hypothesis>=6.156.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/newcalibre"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "tier0: static gates — lint, types, schema validation (every commit)",
+    "tier1: oracle-property suite on synthetic fixtures; runs without the oracle, captures, or network (every commit)",
+    "tier2: self-consistency — resume, serialization, seeded determinism (every merge)",
+    "tier3: cross-engine conditional replay against promoted oracle captures (scheduled/manual)",
+    "tier4: protocol acceptance at scale (scheduled verify-only / manual evidence runs)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "T20",   # flake8-print
+    # Same minimal pydocstyle subset as the frozen repo's house style:
+    # presence + summary-line format; methods and __init__ stay convention.
+    "D100",
+    "D104",
+    "D101",
+    "D103",
+    "D205",
+    "D212",
+    "D415",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test modules carry a module docstring only; per-function docstrings are not
+# external-reader API.
+"tests/**" = ["D103", "D101", "D104"]
+
+[tool.ty.environment]
+python-version = "3.12"
