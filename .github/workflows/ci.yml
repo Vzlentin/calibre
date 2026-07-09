@@ -11,16 +11,44 @@ permissions:
   contents: read
   packages: write
 
+# Frozen-engine lanes. Successor-only PRs (newcalibre/**, stage3/**, and the
+# Stage 3 workflows/scripts) skip the heavy frozen work but still report every
+# required context; pushes and the nightly schedule always run the full frozen
+# suite. The guard is a changed-files step, never a workflow-level paths
+# filter, so required checks can never disappear from a PR.
 jobs:
   lint-and-type-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Detect successor-only change
+        id: scope
+        if: github.event_name == 'pull_request'
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            newcalibre/**
+            stage3/**
+            .github/workflows/newcalibre.yml
+            .github/workflows/oracle-capture.yml
+            .github/workflows/gate-a.yml
+            .github/workflows/stage3-clock.yml
+            .github/scripts/stage3_*.py
+      - name: Gate frozen work
+        id: gate
+        run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev --extra benchmarks
+        if: steps.gate.outputs.run_frozen == 'true'
+      - run: uv sync --locked --extra dev --extra benchmarks
+        if: steps.gate.outputs.run_frozen == 'true'
       - run: uv run ruff check .
+        if: steps.gate.outputs.run_frozen == 'true'
       - run: uv run ruff format --check .
+        if: steps.gate.outputs.run_frozen == 'true'
       - run: uv run ty check calibre/
+        if: steps.gate.outputs.run_frozen == 'true'
+      - name: Report lane result
+        run: echo "lint-and-type-check complete (frozen work run=${{ steps.gate.outputs.run_frozen }})"
 
   test:
     runs-on: ubuntu-latest
@@ -46,9 +74,28 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+      - name: Detect successor-only change
+        id: scope
+        if: github.event_name == 'pull_request'
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            newcalibre/**
+            stage3/**
+            .github/workflows/newcalibre.yml
+            .github/workflows/oracle-capture.yml
+            .github/workflows/gate-a.yml
+            .github/workflows/stage3-clock.yml
+            .github/scripts/stage3_*.py
+      - name: Gate frozen work
+        id: gate
+        run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev --extra benchmarks --extra hierarchy
+        if: steps.gate.outputs.run_frozen == 'true'
+      - run: uv sync --locked --extra dev --extra benchmarks --extra hierarchy
+        if: steps.gate.outputs.run_frozen == 'true'
       - name: Cache VN2 data
+        if: steps.gate.outputs.run_frozen == 'true'
         uses: actions/cache@v4
         id: vn2-cache
         with:
@@ -56,17 +103,41 @@ jobs:
           key: vn2-data-${{ hashFiles('benchmarks/vn2/vn2_file_links.json') }}
           restore-keys: vn2-data-
       - name: Download VN2 data (cache miss only)
-        if: steps.vn2-cache.outputs.cache-hit != 'true'
+        if: steps.gate.outputs.run_frozen == 'true' && steps.vn2-cache.outputs.cache-hit != 'true'
         run: uv run python benchmarks/vn2/download_vn2_data.py
       - run: uv run pytest
+        if: steps.gate.outputs.run_frozen == 'true'
+      - name: Report lane result
+        run: echo "test complete (frozen work run=${{ steps.gate.outputs.run_frozen }})"
 
   s3-ingestion:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Detect successor-only change
+        id: scope
+        if: github.event_name == 'pull_request'
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            newcalibre/**
+            stage3/**
+            .github/workflows/newcalibre.yml
+            .github/workflows/oracle-capture.yml
+            .github/workflows/gate-a.yml
+            .github/workflows/stage3-clock.yml
+            .github/scripts/stage3_*.py
+      - name: Gate frozen work
+        id: gate
+        run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev --extra benchmarks --extra s3
+        if: steps.gate.outputs.run_frozen == 'true'
+      - run: uv sync --locked --extra dev --extra benchmarks --extra s3
+        if: steps.gate.outputs.run_frozen == 'true'
       - run: uv run --extra s3 --with 'moto[server]' pytest tests/integration/test_s3_ingestion.py
+        if: steps.gate.outputs.run_frozen == 'true'
+      - name: Report lane result
+        run: echo "s3-ingestion complete (frozen work run=${{ steps.gate.outputs.run_frozen }})"
 
   m5-coverage-neutrality:
     # Advisory M5 per-node coverage-neutrality gate on the committed CA slice (no
@@ -95,7 +166,7 @@ jobs:
         if: steps.float.outputs.float_path == 'true'
       - name: Install deps (hierarchy extra for MinTraceSparse)
         if: steps.float.outputs.float_path == 'true'
-        run: uv sync --extra dev --extra benchmarks --extra hierarchy
+        run: uv sync --locked --extra dev --extra benchmarks --extra hierarchy
       - name: Run M5 coverage-neutrality gate
         if: steps.float.outputs.float_path == 'true'
         run: uv run pytest tests/benchmarks/test_m5_coverage_neutrality.py
@@ -106,7 +177,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Detect successor-only change
+        id: scope
+        if: github.event_name == 'pull_request'
+        uses: tj-actions/changed-files@v45
+        with:
+          files: |
+            newcalibre/**
+            stage3/**
+            .github/workflows/newcalibre.yml
+            .github/workflows/oracle-capture.yml
+            .github/workflows/gate-a.yml
+            .github/workflows/stage3-clock.yml
+            .github/scripts/stage3_*.py
+      - name: Gate frozen work
+        id: gate
+        run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
       - name: Free disk space
+        if: steps.gate.outputs.run_frozen == 'true'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" \
@@ -114,18 +202,22 @@ jobs:
           sudo docker image prune --all --force || true
           df -h
       - uses: docker/setup-buildx-action@v3
+        if: steps.gate.outputs.run_frozen == 'true'
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.gate.outputs.run_frozen == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build full image
+        if: steps.gate.outputs.run_frozen == 'true'
         run: docker build -t calibre:full .
       - name: Smoke test full image
+        if: steps.gate.outputs.run_frozen == 'true'
         run: docker run --rm calibre:full run --config /app/benchmarks/vn2/config/smoke.yaml
       - name: Download VN2 data with full image
+        if: steps.gate.outputs.run_frozen == 'true'
         run: |
           mkdir -p data
           docker run --rm --user root \
@@ -134,17 +226,20 @@ jobs:
             calibre:full \
             /app/benchmarks/vn2/download_vn2_data.py --target /app/data/vn2
       - name: Smoke test full VN2 benchmark
+        if: steps.gate.outputs.run_frozen == 'true'
         run: |
           docker run --rm -v "$PWD/data/vn2:/app/data/vn2:ro" \
             --entrypoint python \
             calibre:full \
             -m benchmarks.vn2 --config /app/benchmarks/vn2/config/winning.yaml
       - name: Build slim image
+        if: steps.gate.outputs.run_frozen == 'true'
         run: docker build -f Dockerfile.slim -t calibre:slim .
       - name: Smoke test slim image
+        if: steps.gate.outputs.run_frozen == 'true'
         run: docker run --rm calibre:slim run --config /app/benchmarks/vn2/config/smoke.yaml
       - name: Push images to GHCR
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: steps.gate.outputs.run_frozen == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         shell: bash
         run: |
           set -euo pipefail
@@ -167,4 +262,5 @@ jobs:
           docker push "$image_repo:${tag_prefix}-slim"
           docker push "$image_repo:${sha_tag}-full"
           docker push "$image_repo:${sha_tag}-slim"
-
+      - name: Report lane result
+        run: echo "docker-build complete (frozen work run=${{ steps.gate.outputs.run_frozen }})"

@@ -1,0 +1,149 @@
+name: gate-a
+# Single-candidate Gate A aggregation (KTD-A13). Accepts exactly one full
+# 40-hex candidate SHA (C1, after capture and record promotions merged),
+# checks out exactly that SHA in every job, runs or verifies every lane
+# there, and emits one machine-readable Gate report artifact. Individually
+# green links from different revisions are inadmissible; this aggregate is
+# the only accepted evidence surface for the Gate record. Tier 4 runs
+# verify-only here: it validates the promoted U9 record without minting
+# another.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Full 40-hex candidate SHA (C1)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate candidate SHA
+        run: |
+          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - name: Verify HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - uses: astral-sh/setup-uv@v4
+      - name: Tier 0 at C1
+        working-directory: newcalibre
+        run: |
+          uv sync --locked --group dev
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked ty check src/newcalibre/
+
+  unit-isolated:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - name: Verify HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - uses: astral-sh/setup-uv@v4
+      - name: Successor-only export + isolation canaries + tier 1 offline
+        run: |
+          set -euo pipefail
+          export_root="${RUNNER_TEMP}/successor-export"
+          mkdir -p "$export_root"
+          rsync -a --exclude '.git' --exclude 'captures/' newcalibre/ "$export_root/newcalibre/"
+          cd "$export_root/newcalibre"
+          uv sync --locked --group dev
+          test ! -e "$export_root/calibre" && test ! -e "$export_root/benchmarks"
+          uv run --no-sync python -c "import importlib.util, sys; sys.exit(1 if importlib.util.find_spec('calibre') else 0)"
+          sudo unshare -n sudo -E -u "$USER" env "PATH=$PATH" uv run --no-sync pytest tests/tier1
+
+  consistency:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - name: Verify HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - uses: astral-sh/setup-uv@v4
+      - name: Tier 2 double-run byte identity at C1
+        working-directory: newcalibre
+        run: |
+          set -euo pipefail
+          uv sync --locked --group dev
+          NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run1" uv run --locked pytest tests/tier2
+          NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run2" uv run --locked pytest tests/tier2
+          if [ -d "${RUNNER_TEMP}/tier2-run1" ] || [ -d "${RUNNER_TEMP}/tier2-run2" ]; then
+            diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
+          fi
+
+  oracle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - name: Verify HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - name: Gate precondition — promoted captures present
+        run: test -d stage3/evidence/captures || { echo "no promoted captures at C1"; exit 1; }
+      - uses: astral-sh/setup-uv@v4
+      - name: Tier 3 at C1
+        working-directory: newcalibre
+        run: |
+          uv sync --locked --group dev
+          uv run --locked pytest tests/tier3
+
+  vn2-verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+      - name: Verify HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - name: Preflight — evidence environment (ADR 0001)
+        run: test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+      - uses: astral-sh/setup-uv@v4
+      - name: Restore VN2 data (exact digest-inventory key, no fallback)
+        uses: actions/cache@v4
+        with:
+          path: newcalibre/data/vn2
+          key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
+      - name: Acquire + unconditionally validate inputs
+        run: |
+          python3 .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
+          python3 .github/scripts/stage3_vn2_data.py verify --target newcalibre/data/vn2 \
+            --inventory stage3/evidence/vn2-input-digests.json
+      - name: Tier 4 verify-only at C1 (recompute; must equal the promoted record)
+        working-directory: newcalibre
+        env:
+          VN2_MODE: verify
+        run: |
+          uv sync --locked --group dev
+          uv run --locked pytest tests/tier4
+
+  aggregate:
+    needs: [lint, unit-isolated, consistency, oracle, vn2-verify]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Verify HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - name: Emit the single-SHA technical Gate report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: python3 .github/scripts/stage3_gate_report.py --out "${RUNNER_TEMP}/gate-report.json"
+      - name: Upload Gate report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-a-report-${{ inputs.candidate_sha }}
+          path: ${{ runner.temp }}/gate-report.json
+          if-no-files-found: error

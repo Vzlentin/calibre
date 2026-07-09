@@ -1,17 +1,30 @@
 repos:
-repos:
   - repo: https://github.com/astral-sh/uv-pre-commit
     # uv version.
     rev: 0.11.19
     hooks:
+      # Root project lock: the hook's default file filter is anchored to the
+      # repo root, so it never fires on newcalibre/ changes.
       - id: uv-lock
+      # Successor project lock: newcalibre/ is an independent uv project with
+      # its own lockfile; only its own manifest changes re-lock it.
+      - id: uv-lock
+        name: uv-lock (newcalibre)
+        files: ^newcalibre/(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
+        args: [--project, newcalibre]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.0
     hooks:
+      # Root Ruff receives successor files explicitly via pass_filenames, so
+      # config-level excludes are not enough: exclude them at hook level. The
+      # successor runs its own locked Ruff from its own project.
       - id: ruff
         args: [--fix]
+        exclude: ^newcalibre/
       - id: ruff-format
+        exclude: ^newcalibre/
 
   - repo: local
     hooks:
