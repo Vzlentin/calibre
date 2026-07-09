@@ -125,17 +125,16 @@ before any real model runs.
   (below), produced by the rewrite's own benchmark harness — the budget is a
   CI-checkable fact, not a claim.
 
-**PENDING DECISION — reference-environment pinning.** The budget in `[PRF-1]`
-binds to a *pinned reference environment* (hardware class, OS, Python/BLAS
-versions, thread policy). Which environment is pinned — the laptop class
-above, a fixed CI runner, or a workstation profile — is an open entry
-decision, to be recorded as an ADR under `docs/spec/adr/`. That decision
-also settles which hardware class the 15-minute bar of `[PRF-1]` binds to:
-the bar is assessed plausible for workstation-class hardware only, so
-pinning the laptop class would first require establishing laptop-class
-feasibility. Until it lands, the baseline machine above is the provisional
-reference and all numbers in this chapter are stated against it. This is an
-engineering decision, not a gated seam; no material for `40-gated-seams/`.
+**Reference-environment pinning — resolved by
+[ADR 0001](adr/0001-reference-environment.md).** The budget in `[PRF-1]`
+binds to the environment roles that ADR pins: acceptance evidence and
+skeleton-era tracking records run on an explicitly versioned x86_64 Linux
+CI runner, while the 15-minute bar of `[PRF-1]` binds to a
+workstation-class x86_64 Linux profile whose concrete instance facts are
+appended to the ADR when the Gate C machine is stood up. The laptop-class
+machine above remains the provenance of this chapter's measured numbers —
+directional context, never a comparison surface. This is an engineering
+decision, not a gated seam; no material for `40-gated-seams/`.
 
 ## Derive the architectural requirements
 
