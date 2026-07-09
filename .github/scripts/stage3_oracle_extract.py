@@ -49,8 +49,7 @@ def main() -> int:
                 "round_num": int(round_result.round_num),
                 "origin": str(round_result.origin),
                 "orders": {
-                    str(key): float(value)
-                    for key, value in sorted(round_result.orders.items())
+                    str(key): float(value) for key, value in sorted(round_result.orders.items())
                 },
             }
         )

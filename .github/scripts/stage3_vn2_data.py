@@ -96,8 +96,7 @@ def cmd_download(target: Path, if_missing: bool) -> int:
             print(f"upstream fetch failed for {name}: {error}")
             if not fetch_from_mirror(name, target):
                 raise SystemExit(
-                    f"could not obtain {name} from upstream or mirror; "
-                    "VN2 inputs are unavailable"
+                    f"could not obtain {name} from upstream or mirror; VN2 inputs are unavailable"
                 ) from error
             print(f"fetched {name} from mirror")
     return 0
@@ -132,9 +131,7 @@ def cmd_verify(target: Path, inventory_path: Path) -> int:
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     expected = {entry["name"]: entry for entry in inventory["files"]}
     if len(expected) != EXPECTED_FILE_COUNT:
-        raise SystemExit(
-            f"inventory carries {len(expected)} files, expected {EXPECTED_FILE_COUNT}"
-        )
+        raise SystemExit(f"inventory carries {len(expected)} files, expected {EXPECTED_FILE_COUNT}")
     present = {p.name for p in target.glob("*.csv")}
     missing = sorted(set(expected) - present)
     extra = sorted(present - set(expected))
