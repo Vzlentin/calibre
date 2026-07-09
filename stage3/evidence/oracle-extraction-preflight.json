@@ -1,0 +1,13 @@
+{
+  "config": "benchmarks/vn2/config/vn2-winning-loop.yaml",
+  "files": {
+    "round-1.json": "95484ebab662b7409a88b4c4a0beb676ef29f5710db68c7e70d92de47344544e",
+    "round-2.json": "c15c986c3bd248bcf29d5c36276949b8e3528ece936ec5ed43b106bdaabbb3bb",
+    "round-3.json": "2a6b15bbed2a1320050b02d1f950800cae3ccb85f637e018facbee6351de682d",
+    "round-4.json": "2583264e3f69fc7650de548970105ffaf34d566ec555b39819effb84b8f5cb46",
+    "round-5.json": "7c46d3519cafb5a3c59f0a619d5cfb83c4307a3545b0ed8aa075904bce825c91",
+    "round-6.json": "2b904b1f34d377808adffbff079880b32de06edd3d30178f628eaa993870020a"
+  },
+  "rounds": 6,
+  "series_per_round": 599
+}
