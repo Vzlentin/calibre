@@ -1,60 +1,61 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "newcalibre"
 version = "0.1.0"
-description = "Greenfield successor engine built to docs/spec/ (working name; in-place hard rename at cutover)"
+description = "Greenfield demand-planning engine built from the Calibre architecture spec."
+readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "numpy",
-    "pandas",
-    "pyarrow",
-    "pydantic",
-    "pyyaml",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
+    "pydantic>=2.8",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest",
-    "ruff",
-    "ty",
-    "pandas-stubs",
-    "types-PyYAML",
-    "hypothesis>=6.156.4",
+    "pandas-stubs>=2.2",
+    "pytest>=8.3",
+    "ruff>=0.11",
+    "ty>=0.0.1",
+    "types-pyyaml>=6.0",
 ]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/newcalibre"]
 
 [tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
+xfail_strict = true
 markers = [
-    "tier0: static gates — lint, types, schema validation (every commit)",
-    "tier1: oracle-property suite on synthetic fixtures; runs without the oracle, captures, or network (every commit)",
-    "tier2: self-consistency — resume, serialization, seeded determinism (every merge)",
-    "tier3: cross-engine conditional replay against promoted oracle captures (scheduled/manual)",
-    "tier4: protocol acceptance at scale (scheduled verify-only / manual evidence runs)",
+    "tier0: static gates - lint, types, and schema validation (every commit)",
+    "tier1: synthetic conformance without oracle, captures, or network (every commit)",
+    "tier2: tolerance-class-4 self-consistency (every merge)",
+    "tier3: conditional replay against promoted oracle captures (scheduled/manual)",
+    "tier4: protocol acceptance at scale (scheduled verify-only/manual evidence)",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = [
-    "E",     # pycodestyle errors
-    "F",     # pyflakes
-    "W",     # pycodestyle warnings
-    "I",     # isort
-    "UP",    # pyupgrade
-    "B",     # flake8-bugbear
-    "SIM",   # flake8-simplify
-    "T20",   # flake8-print
-    # Same minimal pydocstyle subset as the frozen repo's house style:
-    # presence + summary-line format; methods and __init__ stay convention.
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "T20",
     "D100",
     "D104",
     "D101",
@@ -65,9 +66,7 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Test modules carry a module docstring only; per-function docstrings are not
-# external-reader API.
-"tests/**" = ["D103", "D101", "D104"]
+"tests/**" = ["D101", "D103", "D104"]
 
 [tool.ty.environment]
 python-version = "3.12"

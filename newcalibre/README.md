@@ -1,45 +1,52 @@
 # newcalibre
 
-The greenfield successor engine, built to the public architecture spec at
-`../docs/spec/` (start at `00-overview.md`). `newcalibre` is a working name:
-the repository-wide in-place hard rename happens at cutover, so expect the
-package name to change once the successor replaces the frozen engine.
+`newcalibre` is the isolated greenfield successor to Calibre. The name is
+temporary: the successor takes the `calibre` name at the repository-wide hard
+cutover. Until then, it is an independent Python 3.12 uv project beside the
+frozen engine and never imports `calibre` or `benchmarks`.
 
-This is an independent uv project: it carries its own lockfile, Python pin
-(3.12), Ruff/ty configuration, and pytest tiers. Root-repo tooling never
-touches this tree, and nothing under `newcalibre/` may import `calibre` or
-`benchmarks` (enforced by a tier-1 test). The frozen engine next door is a
-behavior oracle consulted only through promoted captures in tier 3 — never a
-design source.
+The public architecture specification is the design authority. Read these
+three files in order before writing first-brick code:
 
-## Start here
+1. [`00-overview.md`](../docs/spec/00-overview.md)
+2. [`02-domain-model.md`](../docs/spec/02-domain-model.md)
+3. [`04-forecasting-plugins.md`](../docs/spec/04-forecasting-plugins.md)
 
-Read exactly three spec files, in order, before writing code:
+[`60-onboarding.md`](../docs/spec/60-onboarding.md) turns those contracts into
+the first-contributor walkthrough. The first brick must remain buildable from
+the three-file reading path without frozen code or private rationale.
 
-1. `../docs/spec/00-overview.md`
-2. `../docs/spec/02-domain-model.md`
-3. `../docs/spec/04-forecasting-plugins.md`
+## Package layers
 
-Then run the first brick's test:
+- `src/newcalibre/domain/` owns the chapter 02 vocabulary and contracts.
+- `src/newcalibre/forecasting/` owns the chapter 04 adapter surface and may
+  depend on `domain`.
 
-```bash
+Additional layers arrive only with their owning chapter. A tier-1 AST test
+rejects imports from the frozen package and benchmark tree.
+
+## Development
+
+Run every command from this directory against the successor lockfile:
+
+```console
 uv sync --locked --group dev
-uv run --locked pytest tests/tier1/test_seasonal_naive.py
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked ty check src/newcalibre/
+uv run --locked pytest tests/tier1
 ```
-
-Needing anything outside those three chapters on the first-contributor path
-is a spec defect to report, never a reader failure (chapter 60's rule).
 
 ## Test tiers
 
 | Tier | Content | Cadence |
 |---|---|---|
-| 0 | lint, types, schema validation | every commit |
-| 1 | oracle-property suite on synthetic fixtures — no oracle, no network | every commit |
-| 2 | self-consistency (resume, seeded determinism) | every merge |
-| 3 | conditional replay vs promoted oracle captures | scheduled/manual |
-| 4 | protocol acceptance at scale | scheduled/manual |
+| 0 | lint, types, and schema validation | every commit |
+| 1 | synthetic conformance, without oracle or network | every commit |
+| 2 | self-consistency | every merge |
+| 3 | conditional replay against promoted captures | scheduled or manual |
+| 4 | protocol acceptance at scale | scheduled or manual |
 
-Commands (from this directory): `uv run --locked pytest tests/tier1`,
-`uv run --locked ruff check .`, `uv run --locked ruff format --check .`,
-`uv run --locked ty check src/newcalibre/`.
+Tier 2 keeps the four chapter-50 class-4 contracts visible. U5c instantiates
+the Gate-A subset (same seed and resume); serialization and distribution
+invariance stay explicitly pending for U10 and U16.

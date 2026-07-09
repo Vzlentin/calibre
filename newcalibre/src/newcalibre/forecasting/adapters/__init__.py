@@ -1,0 +1,1 @@
+"""Provide forecasting adapter implementations."""

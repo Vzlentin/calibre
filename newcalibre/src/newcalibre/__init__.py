@@ -1,1 +1,1 @@
-"""Greenfield successor engine built to the public spec (docs/spec/)."""
+"""Build the greenfield Calibre successor from the public specification."""

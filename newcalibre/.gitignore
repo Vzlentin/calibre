@@ -1,7 +1,12 @@
 .venv/
-__pycache__/
-*.pyc
 .pytest_cache/
 .ruff_cache/
+.ty_cache/
+.hypothesis/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
 data/
 artifacts/
