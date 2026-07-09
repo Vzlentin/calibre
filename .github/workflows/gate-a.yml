@@ -58,7 +58,7 @@ jobs:
           uv sync --locked --group dev
           test ! -e "$export_root/calibre" && test ! -e "$export_root/benchmarks"
           uv run --no-sync python -c "import importlib.util, sys; sys.exit(1 if importlib.util.find_spec('calibre') else 0)"
-          sudo unshare -n sudo -E -u "$USER" env "PATH=$PATH" uv run --no-sync pytest tests/tier1
+          sudo unshare -n sudo -u "$USER" env "PATH=$PATH" "HOME=$HOME" "UV_CACHE_DIR=${UV_CACHE_DIR:-$HOME/.cache/uv}" uv run --no-sync pytest tests/tier1
 
   consistency:
     runs-on: ubuntu-24.04
