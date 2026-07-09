@@ -262,6 +262,9 @@ Lifecycle rules:
   reference itself — a closed-form formula, or a third-party implementation
   at a pinned commit — is never frozen-engine apparatus.
 - Every numeric gate in any tier ships its witness (above) in the same tier.
+- CI evidence for every tier runs on the acceptance-evidence environment
+  pinned by [ADR 0001](adr/0001-reference-environment.md); the class-6
+  cross-environment spread is measured against the ADR's pinned roles.
 
 ## State the acceptance criteria
 

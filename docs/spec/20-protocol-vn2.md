@@ -209,7 +209,10 @@ additionally record:
   pinned toolchain **and CPU architecture** — floating-point results of
   gradient-boosted model paths are known to diverge across architectures, so
   a total is comparable only under a pinned (config, toolchain, architecture)
-  triple, and any frozen figure must record all three.
+  triple, and any frozen figure must record all three. The environment
+  roles this pin resolves to (acceptance-evidence runner, headline
+  performance profile) are recorded in
+  [ADR 0001](adr/0001-reference-environment.md).
 
 ## Bind the flagship figures
 

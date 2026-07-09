@@ -27,7 +27,7 @@ states, implies, or narrows a gated ruling fails review.
 
 | ADR | Title | Status | Binds |
 |---|---|---|---|
-| — | (none yet) | — | — |
+| [0001](0001-reference-environment.md) | Pin the reference environments: Gate-A evidence on a versioned x86_64 Linux CI runner, the `[PRF-1]` headline on a workstation-class profile | ratified | 20, 30, 50 |
 
 ## Name ADR files
 
