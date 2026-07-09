@@ -107,7 +107,7 @@ jobs:
         working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
         run: |
           set -euo pipefail
-          sudo unshare -n sudo -E -u "$USER" env "PATH=$PATH" bash -c '
+          sudo unshare -n sudo -u "$USER" env "PATH=$PATH" "HOME=$HOME" "UV_CACHE_DIR=${UV_CACHE_DIR:-$HOME/.cache/uv}" bash -c '
             set -euo pipefail
             uv run --no-sync python -c "
           import socket, sys
