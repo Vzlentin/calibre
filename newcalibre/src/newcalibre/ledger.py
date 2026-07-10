@@ -21,6 +21,7 @@ from newcalibre.domain import (
     MODEL_NAME,
     ORIGIN,
     POINT_FORECAST,
+    REQUIRED_FRAME_COLUMNS,
     SERIES_KEY,
     TARGET_TIMESTAMP,
     Calendar,
@@ -41,6 +42,19 @@ type BoundKey = tuple[str, ...]
 type OrderKey = tuple[SessionIdentity, str, pd.Timestamp, str]
 type SettlementKey = tuple[SessionIdentity, str, pd.Timestamp]
 type PredicateKey = tuple[GuaranteeClaim, GuaranteeCurrency | None]
+
+_ROW_EVENT_PREDICATE_KEYS: frozenset[PredicateKey] = frozenset(
+    {
+        (
+            GuaranteeClaim.ONE_SIDED_COVERAGE,
+            GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+        ),
+        (
+            GuaranteeClaim.TWO_SIDED_COVERAGE,
+            GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+        ),
+    }
+)
 
 
 class LedgerError(ValueError):
@@ -111,20 +125,25 @@ type Predicate = Callable[
 
 @dataclass(frozen=True, slots=True)
 class PredicateRegistration:
-    """Bind exactly one closed descriptor-type pair to one scoring predicate."""
+    """Bind one supported finite-sample row-event pair to a predicate."""
 
     key: PredicateKey
     predicate: Predicate
 
     def __post_init__(self) -> None:
         _validate_predicate_key(self.key)
+        if self.key not in _ROW_EVENT_PREDICATE_KEYS:
+            raise LedgerError(
+                "callable row-event predicates support only finite-sample "
+                "one- and two-sided coverage"
+            )
         if not callable(self.predicate):
             raise LedgerError("registered predicate must be callable")
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class PredicateRegistry:
-    """Hold one immutable insertion-ordered predicate per descriptor pair."""
+    """Hold one immutable predicate per supported finite-sample row-event pair."""
 
     _registrations: tuple[PredicateRegistration, ...]
     _by_key: Mapping[PredicateKey, PredicateRegistration] = field(repr=False)
@@ -157,7 +176,7 @@ class PredicateRegistry:
 
     @classmethod
     def gate_a(cls) -> PredicateRegistry:
-        """Return the explicit Gate-A finite-sample coverage registry."""
+        """Return the complete Gate-A row-event predicate registry."""
         return cls(
             (
                 PredicateRegistration(
@@ -629,6 +648,7 @@ class Ledger:
         "_calendar",
         "_forecasts",
         "_orders",
+        "_pending_forecasts",
         "_session",
         "_settlements",
     )
@@ -639,6 +659,7 @@ class Ledger:
         self._session = session
         self._calendar = calendar
         self._forecasts: dict[ForecastKey, ForecastRow] = {}
+        self._pending_forecasts: dict[ForecastKey, ForecastRow] = {}
         self._orders: dict[OrderKey, OrderRow] = {}
         self._settlements: dict[SettlementKey, SettlementRecord] = {}
 
@@ -716,6 +737,7 @@ class Ledger:
             )
 
         self._forecasts.update(staged_rows)
+        self._pending_forecasts.update(staged_rows)
 
     def append_orders(self, rows: Iterable[OrderRow]) -> None:
         """Validate one input chunk once, then append it atomically."""
@@ -747,10 +769,17 @@ class Ledger:
         """Return a fresh append-ordered snapshot of pending rows due before origin."""
         self._require_calendar_origin(origin)
         due_values: list[dict[str, object]] = []
-        for row in self._forecasts.values():
-            if row.actual_value is None and row.target_timestamp < origin:
+        for row in self._pending_forecasts.values():
+            if row.target_timestamp < origin:
                 due_values.append(dict(row._values))
-        return pd.DataFrame(due_values)
+        if not due_values:
+            return _empty_forecast_frame()
+
+        due_frame = pd.DataFrame(due_values)
+        due_frame[SERIES_KEY] = due_frame[SERIES_KEY].astype("string")
+        due_frame[MODEL_NAME] = due_frame[MODEL_NAME].astype("string")
+        due_frame[ACTUAL_VALUE] = due_frame[ACTUAL_VALUE].astype("float64")
+        return due_frame
 
     def apply_resolutions(
         self,
@@ -763,7 +792,7 @@ class Ledger:
         if not isinstance(resolutions, Mapping):
             raise LedgerError("forecast resolutions must be keyed by forecast row key")
 
-        staged: list[tuple[ForecastKey, ForecastRow]] = []
+        staged: dict[ForecastKey, ForecastRow] = {}
         for key, actual_value in resolutions.items():
             try:
                 row = self._forecasts[key]
@@ -774,10 +803,11 @@ class Ledger:
             if row.target_timestamp >= origin:
                 raise LedgerError(f"forecast row is not yet due: {key!r}")
             normalized_actual = _finite_real(actual_value, name="resolved actual value")
-            staged.append((key, row._with_actual_value(normalized_actual)))
+            staged[key] = row._with_actual_value(normalized_actual)
 
-        for key, row in staged:
-            self._forecasts[key] = row
+        self._forecasts.update(staged)
+        for key in staged:
+            del self._pending_forecasts[key]
 
     def coverage_report(self, registry: PredicateRegistry) -> CoverageReport:
         """Score each forecast-bound fact once under its registered descriptor pair."""
@@ -940,6 +970,19 @@ def _validate_predicate_key(key: object) -> None:
         raise LedgerError("the none claim cannot register a scoring predicate")
     if not isinstance(currency, GuaranteeCurrency):
         raise LedgerError("a non-none predicate key requires a GuaranteeCurrency")
+
+
+def _empty_forecast_frame() -> pd.DataFrame:
+    columns = {
+        SERIES_KEY: pd.Series(dtype="string"),
+        TARGET_TIMESTAMP: pd.Series(dtype="datetime64[ns]"),
+        ACTUAL_VALUE: pd.Series(dtype="float64"),
+        POINT_FORECAST: pd.Series(dtype="float64"),
+        HORIZON_STEP: pd.Series(dtype="int64"),
+        ORIGIN: pd.Series(dtype="datetime64[ns]"),
+        MODEL_NAME: pd.Series(dtype="string"),
+    }
+    return pd.DataFrame({column: columns[column] for column in REQUIRED_FRAME_COLUMNS})
 
 
 def _stage_rows[T](

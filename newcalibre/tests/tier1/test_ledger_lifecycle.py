@@ -13,6 +13,7 @@ from newcalibre.domain import (
     MODEL_NAME,
     ORIGIN,
     POINT_FORECAST,
+    REQUIRED_FRAME_COLUMNS,
     SERIES_KEY,
     TARGET_TIMESTAMP,
     Calendar,
@@ -25,6 +26,7 @@ from newcalibre.domain import (
     ScoredSeries,
     SessionIdentity,
     quantile_column,
+    validate_forecast_frame,
 )
 from newcalibre.ledger import (
     BoundKey,
@@ -102,6 +104,41 @@ def _ledger() -> Ledger:
     return ledger
 
 
+def _assert_empty_due_frame(frame: pd.DataFrame) -> None:
+    assert frame.index.equals(pd.RangeIndex(0))
+    assert tuple(frame.columns) == REQUIRED_FRAME_COLUMNS
+    assert isinstance(frame[SERIES_KEY].dtype, pd.StringDtype)
+    assert str(frame[TARGET_TIMESTAMP].dtype) == "datetime64[ns]"
+    assert str(frame[ACTUAL_VALUE].dtype) == "float64"
+    assert str(frame[POINT_FORECAST].dtype) == "float64"
+    assert str(frame[HORIZON_STEP].dtype) == "int64"
+    assert str(frame[ORIGIN].dtype) == "datetime64[ns]"
+    assert isinstance(frame[MODEL_NAME].dtype, pd.StringDtype)
+    validate_forecast_frame(frame, calendar=CALENDAR)
+
+
+def test_empty_ledger_due_frame_has_a_stable_valid_schema() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+
+    due = ledger.due_frame(pd.Timestamp("2026-01-02"))
+
+    _assert_empty_due_frame(due)
+
+
+def test_future_only_due_frame_has_the_same_empty_schema() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    ledger.append_forecasts(
+        _frame(steps=(4,)),
+        issuances={_key(4): {QUANTILE: _issuance()}},
+    )
+
+    before_target = ledger.due_frame(pd.Timestamp("2026-01-02"))
+    at_target = ledger.due_frame(pd.Timestamp("2026-01-04"))
+
+    _assert_empty_due_frame(before_target)
+    _assert_empty_due_frame(at_target)
+
+
 def test_due_frame_filters_pending_rows_strictly_before_a_calendar_origin() -> None:
     ledger = _ledger()
 
@@ -117,6 +154,9 @@ def test_due_frame_filters_pending_rows_strictly_before_a_calendar_origin() -> N
     ]
     assert due[ACTUAL_VALUE].isna().all()
     assert 3 not in due[HORIZON_STEP].tolist()  # Equality with origin is not due.
+    assert isinstance(due[SERIES_KEY].dtype, pd.StringDtype)
+    assert isinstance(due[MODEL_NAME].dtype, pd.StringDtype)
+    validate_forecast_frame(due, calendar=CALENDAR)
 
 
 def test_due_frame_is_a_fresh_snapshot_that_cannot_mutate_the_ledger() -> None:
@@ -133,6 +173,7 @@ def test_due_frame_is_a_fresh_snapshot_that_cannot_mutate_the_ledger() -> None:
     assert second[POINT_FORECAST].tolist() == [20.0, 10.0]
     assert second[ACTUAL_VALUE].isna().all()
     assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
+    assert ledger.due_frame(pd.Timestamp("2026-01-05"))[HORIZON_STEP].tolist() == [2, 1, 3, 4]
 
 
 def test_due_frame_does_not_materialize_future_row_extension_schemas() -> None:
@@ -206,6 +247,7 @@ def test_resolution_rejects_unknown_keys_atomically() -> None:
         )
 
     assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
+    assert ledger.due_frame(pd.Timestamp("2026-01-05"))[HORIZON_STEP].tolist() == [2, 1, 3, 4]
 
 
 def test_resolution_rejects_already_resolved_rows_atomically() -> None:

@@ -196,10 +196,11 @@ def _indicator_predicate(
     return PredicateResult(value=float(covered), covered=covered)
 
 
-def test_registry_accepts_the_full_closed_non_none_pair_vocabulary() -> None:
-    registrations = tuple(
-        PredicateRegistration(key=(claim, currency), predicate=_indicator_predicate)
-        for claim, currency in product(
+@pytest.mark.parametrize(
+    "key",
+    [
+        pair
+        for pair in product(
             (
                 GuaranteeClaim.ONE_SIDED_COVERAGE,
                 GuaranteeClaim.TWO_SIDED_COVERAGE,
@@ -208,13 +209,102 @@ def test_registry_accepts_the_full_closed_non_none_pair_vocabulary() -> None:
             ),
             tuple(GuaranteeCurrency),
         )
+        if pair
+        not in {
+            (
+                GuaranteeClaim.ONE_SIDED_COVERAGE,
+                GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            ),
+            (
+                GuaranteeClaim.TWO_SIDED_COVERAGE,
+                GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            ),
+        }
+    ],
+)
+def test_registry_rejects_predicates_outside_supported_row_event_pairs(
+    key: PredicateKey,
+) -> None:
+    with pytest.raises(LedgerError, match="row-event predicates support only"):
+        PredicateRegistration(key=key, predicate=_indicator_predicate)
+
+
+def test_supported_custom_predicate_receives_exact_inputs_and_propagates_result() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    key, bound_key = _append_one_sided(
+        ledger,
+        model="custom-row-event",
+        side=GuaranteedSide.UPPER,
+        lower=0.0,
+        upper=12.0,
+    )
+    ledger.apply_resolutions({key: 10.0}, origin=SCORE_ORIGIN)
+    issuance = ledger.forecasts[0].issuances[bound_key]
+    observed: list[tuple[float, tuple[float, ...], ForecastIssuance]] = []
+
+    def custom_predicate(
+        actual_value: float,
+        bound_values: tuple[float, ...],
+        actual_issuance: ForecastIssuance,
+    ) -> PredicateResult:
+        observed.append((actual_value, bound_values, actual_issuance))
+        return PredicateResult(value=0.25, covered=None)
+
+    registry = PredicateRegistry(
+        (
+            PredicateRegistration(
+                key=(
+                    GuaranteeClaim.ONE_SIDED_COVERAGE,
+                    GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+                ),
+                predicate=custom_predicate,
+            ),
+        )
     )
 
-    registry = PredicateRegistry(registrations)
+    report = ledger.coverage_report(registry)
+    outcome = _outcome(report, key, bound_key)
 
-    assert tuple(registration.key for registration in registry.registrations) == tuple(
-        registration.key for registration in registrations
+    assert observed == [(10.0, (12.0,), issuance)]
+    assert outcome.value == 0.25
+    assert outcome.covered is None
+    assert outcome.scored is True
+    assert report.summaries[outcome.target].coverage_ratio is None
+
+
+def test_custom_predicate_must_return_a_predicate_result() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    key, _ = _append_one_sided(
+        ledger,
+        model="bad-custom-row-event",
+        side=GuaranteedSide.UPPER,
+        lower=0.0,
+        upper=12.0,
     )
+    ledger.apply_resolutions({key: 10.0}, origin=SCORE_ORIGIN)
+
+    def invalid_predicate(
+        actual_value: float,
+        bound_values: tuple[float, ...],
+        issuance: ForecastIssuance,
+    ) -> PredicateResult:
+        del actual_value, bound_values, issuance
+        return cast(PredicateResult, object())
+
+    registry = PredicateRegistry(
+        (
+            PredicateRegistration(
+                key=(
+                    GuaranteeClaim.ONE_SIDED_COVERAGE,
+                    GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+                ),
+                predicate=invalid_predicate,
+            ),
+        )
+    )
+
+    with pytest.raises(LedgerError, match="must return a PredicateResult"):
+        ledger.coverage_report(registry)
 
 
 def test_predicate_result_carries_numeric_scores_without_forcing_coverage() -> None:
@@ -236,11 +326,11 @@ def test_predicate_result_carries_numeric_scores_without_forcing_coverage() -> N
             GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
         ),
         (
-            GuaranteeClaim.RISK_CONTROL,
-            GuaranteeCurrency.APPROXIMATE_WITH_DECLARED_SLACK,
+            GuaranteeClaim.TWO_SIDED_COVERAGE,
+            GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
         ),
     ],
-    ids=["finite-sample", "approximate-pair"],
+    ids=["one-sided", "two-sided"],
 )
 def test_registry_rejects_duplicate_claim_currency_pairs(key: PredicateKey) -> None:
     registration = PredicateRegistration(key=key, predicate=_indicator_predicate)
@@ -435,6 +525,105 @@ def test_mixed_target_uses_only_scored_outcomes_as_its_denominator() -> None:
     }
     assert summary.coverage_ratio == pytest.approx(2 / 3)
     assert not hasattr(report, "coverage_ratio")
+
+
+def test_distinct_targets_keep_independent_denominators_and_reasons() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    target_a = interval_columns(0.9)
+    target_b = interval_columns(0.8)
+    descriptor_a = _descriptor(
+        GuaranteeClaim.TWO_SIDED_COVERAGE,
+        GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+        level=0.9,
+    )
+    descriptor_b = _descriptor(
+        GuaranteeClaim.TWO_SIDED_COVERAGE,
+        GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+        level=0.8,
+    )
+
+    target_a_rows = [
+        (
+            _append(
+                ledger,
+                model="target-a-covered",
+                bound_values={target_a[0]: 0.0, target_a[1]: 10.0},
+                issuances={target_a: _issuance(descriptor_a)},
+            ),
+            target_a,
+        ),
+        (
+            _append(
+                ledger,
+                model="target-a-uncovered",
+                bound_values={target_a[0]: 0.0, target_a[1]: 9.0},
+                issuances={target_a: _issuance(descriptor_a)},
+            ),
+            target_a,
+        ),
+        (
+            _append(
+                ledger,
+                model="target-a-unscored",
+                bound_values={target_a[0]: math.nan, target_a[1]: math.nan},
+                issuances={
+                    target_a: _issuance(
+                        descriptor_a,
+                        finite=False,
+                        reason="target-a-nonfinite",
+                        ready=True,
+                    )
+                },
+            ),
+            target_a,
+        ),
+    ]
+    target_b_rows = [
+        (
+            _append(
+                ledger,
+                model="target-b-covered-a",
+                bound_values={target_b[0]: 0.0, target_b[1]: 10.0},
+                issuances={target_b: _issuance(descriptor_b)},
+            ),
+            target_b,
+        ),
+        (
+            _append(
+                ledger,
+                model="target-b-covered-b",
+                bound_values={target_b[0]: 5.0, target_b[1]: 15.0},
+                issuances={target_b: _issuance(descriptor_b)},
+            ),
+            target_b,
+        ),
+    ]
+    ledger.apply_resolutions(
+        {key: 10.0 for key, _ in (*target_a_rows, *target_b_rows)},
+        origin=SCORE_ORIGIN,
+    )
+
+    report = ledger.coverage_report(PredicateRegistry.gate_a())
+    summary_a = _summary(report, *target_a_rows[0])
+    summary_b = _summary(report, *target_b_rows[0])
+
+    assert len(report.summaries) == 2
+    assert (summary_a.total, summary_a.scored, summary_a.covered, summary_a.unscored) == (
+        3,
+        2,
+        1,
+        1,
+    )
+    assert dict(summary_a.unscored_by_reason) == {"target-a-nonfinite": 1}
+    assert summary_a.coverage_ratio == 0.5
+    assert (summary_b.total, summary_b.scored, summary_b.covered, summary_b.unscored) == (
+        2,
+        2,
+        2,
+        0,
+    )
+    assert dict(summary_b.unscored_by_reason) == {}
+    assert summary_b.coverage_ratio == 1.0
 
 
 def test_an_all_unscored_target_has_no_coverage_ratio() -> None:
