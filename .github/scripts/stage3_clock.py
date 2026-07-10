@@ -4,9 +4,42 @@ Bootstrap-only root tooling (never imported by ``newcalibre``). The Gate
 tracking issue is the authoritative record: activation writes an immutable
 machine-readable comment there, and every other command only reads or appends.
 All GitHub access goes through the ``gh`` CLI with the workflow token.
-A current blocker is the newest ``<!-- s3-blocker -->`` comment carrying one
-fenced JSON object with exactly ``description`` and ``next_review``
-(``YYYY-MM-DD``); its stall exemption expires on that UTC review date.
+Control records use an exact first line and GitHub's immutable comment metadata.
+An active transition starts with ``s3-started-at: YYYY-MM-DDTHH:MM:SSZ``. A
+current blocker starts with ``<!-- s3-blocker -->`` and carries one fenced JSON
+object with exactly ``description`` and ``next_review`` (``YYYY-MM-DD``); its
+stall exemption expires on that UTC review date. A Gate decision starts with
+``<!-- s3-gate-decision -->`` and carries one of the closed JSON records
+validated by :func:`decision_record_is_complete`. Operator-written records
+must come from an owner/member/collaborator; Gate decisions are owner-only.
+
+Copy-paste templates (replace angle-bracket values)::
+
+    s3-started-at: <YYYY-MM-DDTHH:MM:SSZ>
+
+    <!-- s3-blocker -->
+    ```json
+    {"description": "<why work is blocked>", "next_review": "<YYYY-MM-DD>"}
+    ```
+
+    <!-- s3-gate-decision -->
+    ```json
+    {"kind": "gate", "decision": "go", "disposition": "mint-b1-b5",
+     "candidate_sha": "<40-lower-hex>", "report_sha256": "<64-lower-hex>",
+     "report_emitted_at": "<YYYY-MM-DDTHH:MM:SSZ>"}
+    ```
+
+    <!-- s3-gate-decision -->
+    ```json
+    {"kind": "early-halt", "decision": "no-go", "disposition": "abandon"}
+    ```
+
+For a normal Gate result, ``go`` pairs only with ``mint-b1-b5`` and ``no-go``
+pairs with exactly one of ``rescope-once-max-3-weeks``, ``respec``, or
+``abandon``. The report must predate the unedited decision comment, whose
+GitHub creation time must not exceed the immutable deadline.
+Use ``gh api repos/OWNER/REPO/dispatches -f event_type=stage3-check-deadline``
+or ``event_type=stage3-heartbeat`` for a default-branch manual run.
 
 Commands:
     activate --pr N   Record the immutable clock start from a merged PR event.
@@ -38,6 +71,13 @@ EXPIRY_MARKER = "<!-- s3-clock-expired -->"
 DECISION_MARKER = "<!-- s3-gate-decision -->"
 HEARTBEAT_MARKER = "<!-- s3-heartbeat"
 STARTED_AT_RE = re.compile(r"s3-started-at:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
+UTC_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+TRACKER_OPERATOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+GATE_DISPOSITIONS = {
+    "go": frozenset({"mint-b1-b5"}),
+    "no-go": frozenset({"rescope-once-max-3-weeks", "respec", "abandon"}),
+}
+EARLY_HALT_DISPOSITIONS = GATE_DISPOSITIONS["no-go"]
 SUCCESSOR_PATTERNS = (
     "newcalibre/",
     "stage3/",
@@ -89,34 +129,149 @@ def issue_comments(issue: int) -> list:
     return gh_api_paginated(f"repos/{repo()}/issues/{issue}/comments")
 
 
+def comment_from_github_actions(comment: dict) -> bool:
+    """Accept a machine record only from this repository's Actions application."""
+    user = comment.get("user")
+    app = comment.get("performed_via_github_app")
+    return (
+        isinstance(user, dict)
+        and user.get("login") == "github-actions[bot]"
+        and user.get("type") == "Bot"
+        and isinstance(app, dict)
+        and app.get("slug") == "github-actions"
+    )
+
+
+def comment_from_tracker_operator(comment: dict) -> bool:
+    """Accept human tracker metadata only from repository operators."""
+    return comment.get("author_association") in TRACKER_OPERATOR_ASSOCIATIONS
+
+
+def comment_has_leading_marker(comment: dict, marker: str) -> bool:
+    """Require a control marker to be the comment's exact first line."""
+    body = comment.get("body")
+    return isinstance(body, str) and bool(body.splitlines()) and body.splitlines()[0] == marker
+
+
+def single_fenced_json_object(comment: dict) -> dict | None:
+    """Parse exactly one fenced JSON object from a control comment."""
+    body = comment.get("body")
+    if not isinstance(body, str):
+        return None
+    matches = re.findall(r"```json\s*(.*?)\s*```", body, re.DOTALL)
+    if len(matches) != 1:
+        return None
+    try:
+        record = json.loads(matches[0])
+    except (json.JSONDecodeError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def parse_utc_timestamp(value: object) -> datetime | None:
+    """Parse the exact second-resolution UTC timestamp used by tracker records."""
+    if not isinstance(value, str) or not UTC_TIMESTAMP_RE.fullmatch(value):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def find_activation_record(comments: list | None = None) -> dict | None:
-    """Parse the Gate issue's activation record, if one exists."""
+    """Find the first schema-complete record backed by immutable PR events."""
     comments_to_read = issue_comments(GATE_ISSUE) if comments is None else comments
     for comment in comments_to_read:
-        body = comment.get("body", "")
-        if ACTIVATION_MARKER in body:
-            match = re.search(r"```json\s*(\{.*?\})\s*```", body, re.DOTALL)
-            if not match:
-                return {"malformed": True}
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                return {"malformed": True}
+        if not comment_from_github_actions(comment) or not comment_has_leading_marker(
+            comment, ACTIVATION_MARKER
+        ):
+            continue
+        record = single_fenced_json_object(comment)
+        if record_is_schema_complete(record) and activation_record_matches_pull_request(record):
+            return record
     return None
 
 
 def record_is_schema_complete(record: dict | None) -> bool:
     """Check the activation record against the published schema."""
-    if not record or record.get("malformed"):
+    if not isinstance(record, dict) or set(record) != {"merge_sha", "merged_at", "deadline", "pr"}:
         return False
-    if not re.fullmatch(r"[0-9a-f]{40}", str(record.get("merge_sha", ""))):
+    merge_sha = record["merge_sha"]
+    if not isinstance(merge_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", merge_sha):
         return False
-    for field in ("merged_at", "deadline"):
-        try:
-            datetime.fromisoformat(str(record.get(field, "")).replace("Z", "+00:00"))
-        except ValueError:
-            return False
-    return isinstance(record.get("pr"), int)
+    merged_at = parse_utc_timestamp(record["merged_at"])
+    deadline = parse_utc_timestamp(record["deadline"])
+    pr_number = record["pr"]
+    try:
+        expected_deadline = (
+            merged_at + timedelta(days=WINDOW_DAYS) if merged_at is not None else None
+        )
+    except OverflowError:
+        return False
+    return (
+        merged_at is not None
+        and deadline is not None
+        and deadline == expected_deadline
+        and type(pr_number) is int
+        and pr_number > 0
+    )
+
+
+def activation_record_matches_pull_request(record: dict) -> bool:
+    """Bind an activation record to immutable merge, label, and U1-link events."""
+    if not record_is_schema_complete(record):
+        return False
+    pr_number = record["pr"]
+    pr = gh_api(f"repos/{repo()}/pulls/{pr_number}")
+    if not isinstance(pr, dict):
+        return False
+    if (
+        not pr.get("merged")
+        or pr.get("merge_commit_sha") != record["merge_sha"]
+        or pr.get("merged_at") != record["merged_at"]
+        or pr.get("base", {}).get("ref") != "main"
+    ):
+        return False
+
+    merged_at = parse_utc_timestamp(record["merged_at"])
+    if merged_at is None:
+        return False
+    pr_events = gh_api_paginated(f"repos/{repo()}/issues/{pr_number}/events?per_page=100")
+    matching_merge = any(
+        event.get("event") == "merged"
+        and event.get("commit_id") == record["merge_sha"]
+        and parse_utc_timestamp(event.get("created_at")) == merged_at
+        for event in pr_events
+    )
+    label_events = []
+    for position, event in enumerate(pr_events):
+        if event.get("event") not in {"labeled", "unlabeled"}:
+            continue
+        label = event.get("label")
+        event_at = parse_utc_timestamp(event.get("created_at"))
+        if (
+            isinstance(label, dict)
+            and label.get("name") == CLOCK_START_LABEL
+            and event_at is not None
+            and event_at <= merged_at
+        ):
+            label_events.append((event_at, position, event.get("event")))
+    labeled_at_merge = bool(label_events) and max(label_events)[2] == "labeled"
+
+    u1_timeline = gh_api_paginated(f"repos/{repo()}/issues/{S3_U1_ISSUE}/timeline?per_page=100")
+    linked_before_merge = any(
+        event.get("event") == "cross-referenced"
+        and parse_utc_timestamp(event.get("created_at")) is not None
+        and parse_utc_timestamp(event.get("created_at")) <= merged_at
+        and isinstance(event.get("source"), dict)
+        and isinstance(event["source"].get("issue"), dict)
+        and event["source"]["issue"].get("number") == pr_number
+        and event["source"]["issue"].get("repository_url")
+        == f"https://api.github.com/repos/{repo()}"
+        and "pull_request" in event["source"]["issue"]
+        for event in u1_timeline
+    )
+    return matching_merge and labeled_at_merge and linked_before_merge
 
 
 def cmd_activate(pr_number: int) -> int:
@@ -141,14 +296,30 @@ def cmd_activate(pr_number: int) -> int:
         print("An activation record already exists on the Gate issue; refusing a second clock.")
         return 1
 
-    merged_at = datetime.fromisoformat(pr["merged_at"].replace("Z", "+00:00"))
-    deadline = merged_at + timedelta(days=WINDOW_DAYS)
+    merged_at = parse_utc_timestamp(pr.get("merged_at"))
+    if merged_at is None:
+        print(f"PR #{pr_number} has no exact UTC merged_at timestamp; refusing activation.")
+        return 1
+    try:
+        deadline = merged_at + timedelta(days=WINDOW_DAYS)
+    except OverflowError:
+        print(f"PR #{pr_number} has an out-of-range merged_at timestamp; refusing activation.")
+        return 1
     record = {
         "merge_sha": pr["merge_commit_sha"],
         "merged_at": merged_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "deadline": deadline.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pr": pr_number,
     }
+    if not record_is_schema_complete(record):
+        print(f"PR #{pr_number} produced an invalid activation record; refusing activation.")
+        return 1
+    if not activation_record_matches_pull_request(record):
+        print(
+            f"PR #{pr_number} lacks immutable merge-time clock-label/U1-link proof; "
+            "refusing activation."
+        )
+        return 1
     comment = (
         f"{ACTIVATION_MARKER}\n## Clock activation record (immutable)\n\n"
         f"Written by `stage3-clock` from GitHub's merge event for PR #{pr_number} "
@@ -219,17 +390,12 @@ def milestone_issues() -> list:
 def blocker_suspends_stall(comments: list, *, today: date) -> bool:
     """Suspend only when the newest blocker comment is valid and unexpired."""
     for comment in reversed(comments):
-        body = comment.get("body", "")
-        if BLOCKER_MARKER not in body:
+        if not comment_from_tracker_operator(comment) or not comment_has_leading_marker(
+            comment, BLOCKER_MARKER
+        ):
             continue
-        matches = re.findall(r"```json\s*(.*?)\s*```", body, re.DOTALL)
-        if len(matches) != 1:
-            return False
-        try:
-            record = json.loads(matches[0])
-        except json.JSONDecodeError:
-            return False
-        if not isinstance(record, dict) or set(record) != {"description", "next_review"}:
+        record = single_fenced_json_object(comment)
+        if record is None or set(record) != {"description", "next_review"}:
             return False
         description = record["description"]
         next_review = record["next_review"]
@@ -245,13 +411,131 @@ def blocker_suspends_stall(comments: list, *, today: date) -> bool:
     return False
 
 
-def started_at(comments: list) -> datetime | None:
+def started_at(comments: list, *, now: datetime) -> datetime | None:
     """Read the latest s3-started-at timestamp from complete issue comments."""
     for comment in reversed(comments):
-        match = STARTED_AT_RE.search(comment.get("body", ""))
+        if not comment_from_tracker_operator(comment):
+            continue
+        body = comment.get("body")
+        first_line = body.splitlines()[0] if isinstance(body, str) and body.splitlines() else ""
+        match = STARTED_AT_RE.fullmatch(first_line)
         if match:
-            return datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+            parsed = parse_utc_timestamp(match.group(1))
+            created_at = parse_utc_timestamp(comment.get("created_at"))
+            if (
+                parsed is not None
+                and created_at is not None
+                and parsed <= created_at
+                and parsed <= now
+            ):
+                return parsed
     return None
+
+
+def decision_record_is_complete(
+    record: dict | None,
+    *,
+    comment_created_at: datetime,
+) -> bool:
+    """Validate either a report-bound Gate result or an explicit early halt."""
+    if not isinstance(record, dict):
+        return False
+    kind = record.get("kind")
+    if not isinstance(kind, str) or kind not in {"gate", "early-halt"}:
+        return False
+    if kind == "early-halt":
+        disposition = record.get("disposition")
+        return (
+            set(record) == {"kind", "decision", "disposition"}
+            and record.get("decision") == "no-go"
+            and isinstance(disposition, str)
+            and disposition in EARLY_HALT_DISPOSITIONS
+        )
+    if set(record) != {
+        "kind",
+        "decision",
+        "disposition",
+        "candidate_sha",
+        "report_sha256",
+        "report_emitted_at",
+    }:
+        return False
+    decision = record.get("decision")
+    disposition = record.get("disposition")
+    candidate_sha = record.get("candidate_sha")
+    report_sha256 = record.get("report_sha256")
+    report_emitted_at = parse_utc_timestamp(record.get("report_emitted_at"))
+    return (
+        isinstance(decision, str)
+        and decision in GATE_DISPOSITIONS
+        and isinstance(disposition, str)
+        and disposition in GATE_DISPOSITIONS[decision]
+        and isinstance(candidate_sha, str)
+        and re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is not None
+        and isinstance(report_sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", report_sha256) is not None
+        and report_emitted_at is not None
+        and report_emitted_at <= comment_created_at
+    )
+
+
+def comment_is_timely_owner_decision(comment: dict, *, deadline: datetime) -> bool:
+    """Accept a closed, unedited owner decision created by the Gate deadline."""
+    if comment.get("author_association") != "OWNER" or not comment_has_leading_marker(
+        comment, DECISION_MARKER
+    ):
+        return False
+    created_at = parse_utc_timestamp(comment.get("created_at"))
+    updated_at = parse_utc_timestamp(comment.get("updated_at"))
+    record = single_fenced_json_object(comment)
+    return (
+        created_at is not None
+        and updated_at == created_at
+        and created_at <= deadline
+        and decision_record_is_complete(record, comment_created_at=created_at)
+    )
+
+
+def comment_is_valid_expiry(
+    comment: dict,
+    *,
+    activation_record: dict,
+    deadline: datetime,
+) -> bool:
+    """Accept only an immutable post-deadline expiry for this activation."""
+    if not comment_from_github_actions(comment) or not comment_has_leading_marker(
+        comment, EXPIRY_MARKER
+    ):
+        return False
+    created_at = parse_utc_timestamp(comment.get("created_at"))
+    updated_at = parse_utc_timestamp(comment.get("updated_at"))
+    expiry_record = single_fenced_json_object(comment)
+    return (
+        created_at is not None
+        and updated_at == created_at
+        and created_at > deadline
+        and expiry_record
+        == {
+            "activation_merge_sha": activation_record["merge_sha"],
+            "deadline": activation_record["deadline"],
+        }
+    )
+
+
+def expiry_comment(record: dict) -> str:
+    """Render the machine-bound default no-go record."""
+    expiry_record = {
+        "activation_merge_sha": record["merge_sha"],
+        "deadline": record["deadline"],
+    }
+    return (
+        f"{EXPIRY_MARKER}\n## Gate A window expired without a recorded decision\n\n"
+        f"The immutable deadline `{record['deadline']}` has passed and no "
+        f"`{DECISION_MARKER}` comment exists. Per the ratified abort criterion "
+        "this records **no-go by default**: successor work halts pending the "
+        "owner disposition (re-scope once ≤ 3 weeks / re-spec / abandon).\n\n"
+        f"```json\n{json.dumps(expiry_record, indent=2)}\n```"
+    )
 
 
 def cmd_check_deadline() -> int:
@@ -259,21 +543,25 @@ def cmd_check_deadline() -> int:
     now = datetime.now(UTC)
     gate_comments = issue_comments(GATE_ISSUE)
     record = find_activation_record(gate_comments)
-    all_bodies = "\n".join(c.get("body", "") for c in gate_comments)
 
     if record_is_schema_complete(record):
-        deadline = datetime.fromisoformat(record["deadline"].replace("Z", "+00:00"))
-        has_decision = DECISION_MARKER in all_bodies
-        already_escalated = EXPIRY_MARKER in all_bodies
-        if now > deadline and not has_decision and not already_escalated:
-            post_issue_comment(
-                GATE_ISSUE,
-                f"{EXPIRY_MARKER}\n## Gate A window expired without a recorded decision\n\n"
-                f"The immutable deadline `{record['deadline']}` has passed and no "
-                f"`{DECISION_MARKER}` comment exists. Per the ratified abort criterion "
-                "this records **no-go by default**: successor work halts pending the "
-                "owner disposition (re-scope once ≤ 3 weeks / re-spec / abandon).",
+        deadline = parse_utc_timestamp(record["deadline"])
+        if deadline is None:
+            raise RuntimeError("schema-complete activation record has no UTC deadline")
+        has_decision = any(
+            comment_is_timely_owner_decision(comment, deadline=deadline)
+            for comment in gate_comments
+        )
+        already_escalated = any(
+            comment_is_valid_expiry(
+                comment,
+                activation_record=record,
+                deadline=deadline,
             )
+            for comment in gate_comments
+        )
+        if now > deadline and not has_decision and not already_escalated:
+            post_issue_comment(GATE_ISSUE, expiry_comment(record))
             print("Deadline escalation recorded.")
     else:
         print("No activation record yet; pre-clock phase — deadline check idle.")
@@ -295,7 +583,7 @@ def cmd_check_deadline() -> int:
         unit_comments = issue_comments(issue["number"])
         if "s3:blocked" in labels and blocker_suspends_stall(unit_comments, today=now.date()):
             continue
-        begun = started_at(unit_comments)
+        begun = started_at(unit_comments, now=now)
         if begun and now - begun > timedelta(days=STALL_DAYS):
             gh_api(
                 f"repos/{repo()}/issues/{issue['number']}/labels",
@@ -317,7 +605,10 @@ def cmd_heartbeat() -> int:
     now = datetime.now(UTC)
     week = now.strftime("%G-W%V")
     marker = f"{HEARTBEAT_MARKER} {week} -->"
-    if any(marker in c.get("body", "") for c in issue_comments(GATE_ISSUE)):
+    if any(
+        comment_from_github_actions(comment) and comment_has_leading_marker(comment, marker)
+        for comment in issue_comments(GATE_ISSUE)
+    ):
         print(f"Heartbeat for {week} already recorded.")
         return 0
     lines = [f"{marker}\n## Heartbeat {week} (non-gating)\n"]
@@ -334,7 +625,10 @@ def cmd_heartbeat() -> int:
 
 def main() -> int:
     """Dispatch the requested clock command."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     activate = sub.add_parser("activate")
     activate.add_argument("--pr", type=int, required=True)

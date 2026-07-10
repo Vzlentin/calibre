@@ -21,7 +21,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from stage3_clock import find_activation_record, record_is_schema_complete
+from stage3_clock import find_activation_record, parse_utc_timestamp, record_is_schema_complete
 
 EVIDENCE_ALLOWLIST = ("stage3/evidence/",)
 TRACKING_SERIES = Path("stage3/evidence/tracking/series.jsonl")
@@ -81,8 +81,10 @@ def main() -> int:
     now = datetime.now(UTC)
     budget = None
     record = find_activation_record()
-    if record_is_schema_complete(record):
-        deadline = datetime.fromisoformat(str(record["deadline"]).replace("Z", "+00:00"))
+    deadline = (
+        parse_utc_timestamp(record["deadline"]) if record_is_schema_complete(record) else None
+    )
+    if deadline is not None:
         budget = {
             "deadline": record["deadline"],
             "evaluated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
