@@ -12,13 +12,10 @@ on:
   schedule:
     - cron: "30 6 * * *" # daily deadline + stall check
     - cron: "0 7 * * 1" # weekly heartbeat (Monday)
-  workflow_dispatch:
-    inputs:
-      command:
-        description: "Clock command to run"
-        type: choice
-        required: true
-        options: [check-deadline, heartbeat]
+  # repository_dispatch always executes the default-branch workflow. This
+  # keeps the issue-write token away from caller-selected branch revisions.
+  repository_dispatch:
+    types: [stage3-check-deadline, stage3-heartbeat]
 
 permissions:
   contents: read
@@ -30,6 +27,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
       - name: Record activation if this is the validated clock-start merge
@@ -40,11 +38,12 @@ jobs:
   check-deadline:
     if: >-
       (github.event_name == 'schedule' && github.event.schedule == '30 6 * * *')
-      || (github.event_name == 'workflow_dispatch' && inputs.command == 'check-deadline')
+      || (github.event_name == 'repository_dispatch' && github.event.action == 'stage3-check-deadline')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       issues: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
       - name: Deadline escalation + stall tripwire
@@ -55,7 +54,7 @@ jobs:
   heartbeat:
     if: >-
       (github.event_name == 'schedule' && github.event.schedule == '0 7 * * 1')
-      || (github.event_name == 'workflow_dispatch' && inputs.command == 'heartbeat')
+      || (github.event_name == 'repository_dispatch' && github.event.action == 'stage3-heartbeat')
     runs-on: ubuntu-24.04
     permissions:
       contents: read

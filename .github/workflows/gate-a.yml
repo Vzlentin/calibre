@@ -129,6 +129,10 @@ jobs:
   aggregate:
     needs: [lint, unit-isolated, consistency, oracle, vn2-verify]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -142,6 +146,7 @@ jobs:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: python3 .github/scripts/stage3_gate_report.py --out "${RUNNER_TEMP}/gate-report.json"
       - name: Upload Gate report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gate-a-report-${{ inputs.candidate_sha }}
