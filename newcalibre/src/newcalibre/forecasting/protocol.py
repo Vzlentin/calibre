@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
-from newcalibre.domain import ForecastTask
+from newcalibre.domain import FittedValues, ForecastTask
 
 
 class AdapterCapability(StrEnum):
@@ -64,7 +64,7 @@ class ForecastAdapter(Protocol):
         """Emit a validated forecast frame for one forecast task."""
         ...
 
-    def fitted_values(self, task: ForecastTask) -> pd.DataFrame:
+    def fitted_values(self, task: ForecastTask) -> FittedValues:
         """Emit the optional fitted-values side channel."""
         ...
 

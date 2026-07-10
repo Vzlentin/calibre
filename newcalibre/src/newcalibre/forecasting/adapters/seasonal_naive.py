@@ -20,11 +20,12 @@ from newcalibre.domain import (
     POINT_FORECAST,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    Calendar,
+    FittedValues,
     ForecastTask,
     target_timestamp,
     validate_forecast_frame,
 )
-from newcalibre.domain._calendar import advance_timestamp, calendar_offset
 from newcalibre.forecasting.protocol import (
     AdapterCapability,
     AdapterCapabilityError,
@@ -64,7 +65,7 @@ class SeasonalNaiveAdapter:
         self._season_length = config.season_length
         self._model_name = config.model_name
         self._fit_origin: pd.Timestamp | None = None
-        self._fit_calendar_frequency: str | None = None
+        self._fit_calendar: Calendar | None = None
         self._season_by_series: dict[str, _RetainedSeason] | None = None
 
     @property
@@ -86,7 +87,7 @@ class SeasonalNaiveAdapter:
 
         retained = self._extract_retained_season(task)
         self._fit_origin = task.origin
-        self._fit_calendar_frequency = task.calendar_frequency
+        self._fit_calendar = task.calendar
         self._season_by_series = retained
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
@@ -95,7 +96,8 @@ class SeasonalNaiveAdapter:
         self._require_matching_config(task)
         if (
             task.origin != self._fit_origin
-            or task.calendar_frequency != self._fit_calendar_frequency
+            or self._fit_calendar is None
+            or not task.calendar.shares_grid_with(self._fit_calendar)
         ):
             raise AdapterDataError("predict task origin and calendar must match the fitted task")
 
@@ -129,7 +131,7 @@ class SeasonalNaiveAdapter:
                     target_timestamp(
                         task.origin,
                         horizon_step,
-                        calendar_frequency=task.calendar_frequency,
+                        calendar=task.calendar,
                     )
                 )
                 output_points.append(values_by_series[series_key][seasonal_timestamps[phase]])
@@ -147,9 +149,9 @@ class SeasonalNaiveAdapter:
                 MODEL_NAME: pd.Series([self._model_name] * row_count, dtype="string"),
             }
         )
-        return validate_forecast_frame(frame, calendar_frequency=task.calendar_frequency)
+        return validate_forecast_frame(frame, calendar=task.calendar)
 
-    def fitted_values(self, task: ForecastTask) -> pd.DataFrame:
+    def fitted_values(self, task: ForecastTask) -> FittedValues:
         """Reject fitted-value collection because this adapter does not declare it."""
         del task
         self._raise_unsupported(AdapterCapability.FITTED_VALUES)
@@ -217,7 +219,7 @@ class SeasonalNaiveAdapter:
 
     def _extract_retained_season(self, task: ForecastTask) -> dict[str, _RetainedSeason]:
         history = task.history
-        series_keys = self._validate_history_surface(history)
+        series_keys = self._validate_history_surface(history, task.series_keys)
         seasonal_timestamp_set = set(self._seasonal_timestamps(task))
         relevant = history[history[HISTORY_TIMESTAMP].isin(seasonal_timestamp_set)]
 
@@ -236,7 +238,9 @@ class SeasonalNaiveAdapter:
             retained[series_key] = tuple(sorted(observations, key=lambda item: item[0]))
         return retained
 
-    def _validate_history_surface(self, history: pd.DataFrame) -> list[str]:
+    def _validate_history_surface(
+        self, history: pd.DataFrame, task_series_keys: tuple[str, ...]
+    ) -> tuple[str, ...]:
         missing = [
             column
             for column in (SERIES_KEY, HISTORY_TIMESTAMP, HISTORY_VALUE)
@@ -246,20 +250,19 @@ class SeasonalNaiveAdapter:
             raise AdapterDataError(f"history is missing required columns: {', '.join(missing)}")
 
         raw_keys = history[SERIES_KEY].tolist()
-        if not raw_keys:
-            raise AdapterDataError("history must contain at least one series")
         if any(not isinstance(key, str) or not key for key in raw_keys):
             raise AdapterDataError("history series keys must be non-empty strings")
+        if not set(raw_keys) <= set(task_series_keys):
+            raise AdapterDataError("history contains a series outside task.series_keys")
         value_dtype = history[HISTORY_VALUE].dtype
         if not is_numeric_dtype(value_dtype) or is_bool_dtype(value_dtype):
             raise AdapterDataError("history values must be numeric")
-        return list(dict.fromkeys(raw_keys))
+        return task_series_keys
 
     def _seasonal_timestamps(self, task: ForecastTask) -> tuple[pd.Timestamp, ...]:
-        offset = calendar_offset(task.calendar_frequency)
-        season_start = task.origin - self._season_length * offset
+        season_start = task.calendar.retreat(task.origin, self._season_length)
         return tuple(
-            advance_timestamp(season_start, phase, offset) for phase in range(self._season_length)
+            task.calendar.advance(season_start, phase) for phase in range(self._season_length)
         )
 
     def _require_fitted(self) -> dict[str, _RetainedSeason]:

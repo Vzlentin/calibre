@@ -3,8 +3,7 @@
 The U1 column vocabulary is deliberately literal: required columns use the
 names declared below, while intervals and quantiles use canonical decimal
 suffixes such as ``lower_0.9`` and ``quantile_0.5``. Value columns normalize
-integer inputs to ``float64``; other dtype families are validated without
-coercion.
+accepted dense, nullable, Arrow-backed, or sparse real numerics to ``float64``.
 """
 
 from __future__ import annotations
@@ -15,13 +14,10 @@ from typing import Final
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 from pandas.api.types import is_bool_dtype, is_integer_dtype
 
-from newcalibre.domain._calendar import (
-    CalendarFrequencyError,
-    advance_timestamp,
-    calendar_offset,
-)
+from newcalibre.domain.calendar import Calendar, CalendarError
 
 SERIES_KEY: Final = "series_key"
 TARGET_TIMESTAMP: Final = "target_timestamp"
@@ -47,7 +43,72 @@ _UPPER_PREFIX = "upper_"
 _QUANTILE_PREFIX = "quantile_"
 _OPTIONAL_PREFIXES = (_LOWER_PREFIX, _UPPER_PREFIX, _QUANTILE_PREFIX)
 _OPTIONAL_STEMS = ("lower", "upper", "quantile")
+_FITTED_VALUE_SIDECAR_COLUMN = "fitted_value"
 _FLOAT64 = np.dtype("float64")
+_DATETIME_UNITS = frozenset({"s", "ms", "us", "ns"})
+_TRANSPORT_STRING_DTYPE = pd.StringDtype(storage="pyarrow")
+_SUPPORTED_EXTENSION_DTYPE_NUMS = frozenset(
+    np.dtype(name).num
+    for name in (
+        "bool",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float16",
+        "float32",
+        "float64",
+    )
+)
+_INTEGER_DTYPE_NUMS = frozenset(
+    np.dtype(name).num
+    for name in (
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+    )
+)
+_SPARSE_REAL_DTYPE_NUMS = _INTEGER_DTYPE_NUMS | frozenset(
+    np.dtype(name).num for name in ("float16", "float32", "float64")
+)
+_NULLABLE_REAL_DTYPE_NAMES = frozenset(
+    {
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "Float32",
+        "Float64",
+    }
+)
+_ARROW_REAL_TYPES = frozenset(
+    {
+        pa.int8(),
+        pa.int16(),
+        pa.int32(),
+        pa.int64(),
+        pa.uint8(),
+        pa.uint16(),
+        pa.uint32(),
+        pa.uint64(),
+        pa.float16(),
+        pa.float32(),
+        pa.float64(),
+    }
+)
 
 
 class ForecastFrameError(ValueError):
@@ -69,43 +130,47 @@ def target_timestamp(
     origin: pd.Timestamp,
     horizon_step: int,
     *,
-    calendar_frequency: str,
+    calendar: Calendar,
 ) -> pd.Timestamp:
     """Derive a row target as origin advanced ``horizon_step - 1`` periods."""
-    if not isinstance(origin, pd.Timestamp) or pd.isna(origin):
-        raise ForecastFrameError("origin must be a non-missing pandas Timestamp")
-    if origin.tz is not None:
-        raise ForecastFrameError("origin must be timezone-naive for the provisional calendar")
     if not isinstance(horizon_step, Integral) or isinstance(horizon_step, bool) or horizon_step < 1:
         raise ForecastFrameError("horizon step must be a positive integer")
+    if not isinstance(calendar, Calendar):
+        raise ForecastFrameError("calendar must be a Calendar")
     try:
-        offset = calendar_offset(calendar_frequency)
-    except CalendarFrequencyError as error:
+        return calendar.advance(origin, int(horizon_step) - 1)
+    except CalendarError as error:
         raise ForecastFrameError(str(error)) from error
-    return advance_timestamp(origin, horizon_step - 1, offset)
 
 
 def validate_forecast_frame(
     frame: pd.DataFrame,
     *,
-    calendar_frequency: str,
+    calendar: Calendar,
 ) -> pd.DataFrame:
     """Validate a frame atomically and return its normalized copy.
 
-    Integer forecast-value columns are the sole coercion: they are copied and
-    upcast to ``float64``. All other required dtypes must already be exact.
+    Accepted real-numeric value columns are copied and normalized to
+    ``float64``. All other required dtypes must already be exact.
     """
     if not isinstance(frame, pd.DataFrame):
         raise ForecastFrameError("forecast frame must be a pandas DataFrame")
     if frame.columns.has_duplicates:
         raise ForecastFrameError("forecast frame has duplicate column labels")
+    _require_column_labels(frame)
 
     missing = [column for column in REQUIRED_FRAME_COLUMNS if column not in frame.columns]
     if missing:
         raise ForecastFrameError(f"missing required columns: {', '.join(missing)}")
 
     optional_value_columns = _optional_value_columns(frame.columns)
-    normalized = frame.copy(deep=True)
+    if _FITTED_VALUE_SIDECAR_COLUMN in frame.columns:
+        raise ForecastFrameError("fitted values belong in the separate fitted-values sidecar")
+
+    normalized = frame.copy(deep=True).set_flags(allows_duplicate_labels=True)
+    normalized.attrs = {}
+    normalized.index.name = None
+    normalized.columns.name = None
     _require_string(normalized, SERIES_KEY)
     _require_naive_datetime64(normalized, TARGET_TIMESTAMP)
     _normalize_float64(normalized, ACTUAL_VALUE)
@@ -116,8 +181,13 @@ def validate_forecast_frame(
     for column in optional_value_columns:
         _normalize_float64(normalized, column)
 
+    owned_columns = {*REQUIRED_FRAME_COLUMNS, *optional_value_columns}
+    for column in normalized.columns:
+        if column not in owned_columns:
+            _canonicalize_extension(normalized, column)
+
     _validate_row_identity(normalized)
-    _validate_target_timestamps(normalized, calendar_frequency)
+    _validate_target_timestamps(normalized, calendar)
     return normalized
 
 
@@ -192,6 +262,72 @@ def _looks_like_malformed_optional_name(column: str) -> bool:
 def _require_string(frame: pd.DataFrame, column: str) -> None:
     if not isinstance(frame[column].dtype, pd.StringDtype):
         raise ForecastFrameError(f"column {column!r} must have pandas string dtype")
+    try:
+        frame[column] = frame[column].astype(_TRANSPORT_STRING_DTYPE)
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise ForecastFrameError(
+            f"column {column!r} cannot normalize to Arrow-backed string dtype"
+        ) from error
+
+
+def _require_column_labels(frame: pd.DataFrame) -> None:
+    if any(not isinstance(column, str) for column in frame.columns):
+        raise ForecastFrameError("forecast frame column labels must be strings")
+    try:
+        for column in frame.columns:
+            column.encode("utf-8")
+    except UnicodeError as error:
+        raise ForecastFrameError(
+            "forecast frame column labels must be valid UTF-8 strings"
+        ) from error
+
+
+def _canonicalize_extension(frame: pd.DataFrame, column: str) -> None:
+    dtype = frame[column].dtype
+    if isinstance(dtype, pd.StringDtype):
+        _require_string(frame, column)
+        return
+    if isinstance(dtype, pd.ArrowDtype) and dtype.pyarrow_dtype in _ARROW_REAL_TYPES:
+        chunked = frame[column].array.__arrow_array__()
+        array = (
+            pa.concat_arrays(chunked.chunks)
+            if chunked.num_chunks
+            else pa.array([], type=dtype.pyarrow_dtype)
+        )
+        mask = array.is_null().to_numpy(zero_copy_only=False)
+        values = array.fill_null(0).to_numpy(zero_copy_only=False)
+        if pa.types.is_floating(dtype.pyarrow_dtype):
+            mask |= np.isnan(values)
+        canonical = pa.array(values, mask=mask, type=dtype.pyarrow_dtype, from_pandas=False)
+        frame[column] = pd.Series(canonical, index=frame.index, name=column, dtype=dtype)
+        return
+    if isinstance(dtype, pd.SparseDtype):
+        try:
+            frame[column] = frame[column].sparse.to_dense()
+        except (TypeError, ValueError) as error:
+            raise ForecastFrameError(
+                f"extension column {column!r} could not densify its sparse values"
+            ) from error
+        _canonicalize_extension(frame, column)
+        return
+    nullable_name = str(dtype)
+    if nullable_name in _NULLABLE_REAL_DTYPE_NAMES:
+        expected = pd.api.types.pandas_dtype(nullable_name)
+        if type(dtype) is type(expected):
+            return
+    if not isinstance(dtype, np.dtype) or not dtype.isnative:
+        raise ForecastFrameError(
+            f"extension column {column!r} must have a flat transport-safe primitive dtype"
+        )
+    if dtype.kind == "M":
+        _require_naive_datetime64(frame, column)
+        return
+    if dtype.num not in _SUPPORTED_EXTENSION_DTYPE_NUMS:
+        raise ForecastFrameError(
+            f"extension column {column!r} must have a flat transport-safe primitive dtype"
+        )
+    if dtype.kind == "f" and frame[column].isna().any():
+        frame.loc[frame[column].isna(), column] = np.nan
 
 
 def _require_naive_datetime64(frame: pd.DataFrame, column: str) -> None:
@@ -200,19 +336,68 @@ def _require_naive_datetime64(frame: pd.DataFrame, column: str) -> None:
         raise ForecastFrameError(
             f"column {column!r} must have a timezone-naive numpy datetime64 dtype"
         )
+    if str(dtype) not in {f"datetime64[{unit}]" for unit in _DATETIME_UNITS}:
+        raise ForecastFrameError(f"column {column!r} must use datetime64[s], [ms], [us], or [ns]")
 
 
 def _require_integer(frame: pd.DataFrame, column: str) -> None:
     dtype = frame[column].dtype
-    if not is_integer_dtype(dtype) or is_bool_dtype(dtype):
+    if not isinstance(dtype, np.dtype) or not is_integer_dtype(dtype) or is_bool_dtype(dtype):
         raise ForecastFrameError(f"column {column!r} must have an integer dtype")
 
 
 def _normalize_float64(frame: pd.DataFrame, column: str) -> None:
     dtype = frame[column].dtype
-    if dtype == _FLOAT64:
+    if isinstance(dtype, pd.ArrowDtype) and dtype.pyarrow_dtype in _ARROW_REAL_TYPES:
+        try:
+            values = frame[column].array.to_numpy(
+                dtype=_FLOAT64,
+                na_value=np.nan,
+                copy=True,
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ForecastFrameError(
+                f"column {column!r} could not normalize Arrow-backed values to float64"
+            ) from error
+        frame[column] = pd.Series(values, index=frame.index, name=column)
         return
-    if is_integer_dtype(dtype) and not is_bool_dtype(dtype):
+    if isinstance(dtype, pd.SparseDtype):
+        try:
+            dense = frame[column].sparse.to_dense()
+        except (TypeError, ValueError) as error:
+            raise ForecastFrameError(
+                f"column {column!r} could not densify its sparse real values"
+            ) from error
+        dense_dtype = dense.dtype
+        if (
+            not isinstance(dense_dtype, np.dtype)
+            or not dense_dtype.isnative
+            or dense_dtype.num not in _SPARSE_REAL_DTYPE_NUMS
+        ):
+            raise ForecastFrameError(f"column {column!r} must have exact float64 or integer dtype")
+        try:
+            frame[column] = dense.astype(_FLOAT64)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ForecastFrameError(
+                f"column {column!r} could not normalize sparse values to float64"
+            ) from error
+        return
+    nullable_name = str(dtype)
+    if nullable_name in _NULLABLE_REAL_DTYPE_NAMES:
+        expected = pd.api.types.pandas_dtype(nullable_name)
+        if type(dtype) is type(expected):
+            values = frame[column].array.to_numpy(
+                dtype=_FLOAT64,
+                na_value=np.nan,
+                copy=True,
+            )
+            frame[column] = pd.Series(values, index=frame.index, name=column)
+            return
+    if not isinstance(dtype, np.dtype) or not dtype.isnative:
+        raise ForecastFrameError(f"column {column!r} must have exact float64 or integer dtype")
+    if dtype.num == _FLOAT64.num:
+        return
+    if dtype.num in _INTEGER_DTYPE_NUMS:
         try:
             frame[column] = frame[column].astype(_FLOAT64)
         except (TypeError, ValueError) as error:
@@ -234,17 +419,17 @@ def _validate_row_identity(frame: pd.DataFrame) -> None:
         raise ForecastFrameError("forecast frame contains a duplicate full row key")
 
 
-def _validate_target_timestamps(frame: pd.DataFrame, calendar_frequency: str) -> None:
-    try:
-        offset = calendar_offset(calendar_frequency)
-    except CalendarFrequencyError as error:
-        raise ForecastFrameError(str(error)) from error
-
+def _validate_target_timestamps(frame: pd.DataFrame, calendar: Calendar) -> None:
+    if not isinstance(calendar, Calendar):
+        raise ForecastFrameError("calendar must be a Calendar")
     expected: list[pd.Timestamp] = []
     for origin, horizon_step in zip(frame[ORIGIN], frame[HORIZON_STEP], strict=True):
         if pd.isna(origin):
             raise ForecastFrameError("origin cannot be missing")
-        expected.append(advance_timestamp(origin, int(horizon_step) - 1, offset))
+        try:
+            expected.append(calendar.advance(pd.Timestamp(origin), int(horizon_step) - 1))
+        except CalendarError as error:
+            raise ForecastFrameError(str(error)) from error
 
     actual_targets = pd.DatetimeIndex(frame[TARGET_TIMESTAMP])
     expected_targets = pd.DatetimeIndex(expected)
