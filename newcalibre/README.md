@@ -43,6 +43,23 @@ coercion. Calendar frequencies are provisionally explicit pandas strings:
 weekly data uses an anchor such as `W-MON`, never bare `W`. U3 owns the final
 calendar representation.
 
+The adapter protocol exposes `fit`, `predict`, `fitted_values`, `dump_state`,
+`load_state`, and `update`, with fitted values, native quantiles,
+censoring-aware fit, incremental update, and artifact persistence represented
+as explicit capabilities. The seasonal-naive backend declares none of those
+optional capabilities and rejects every request loudly. Backend selection is
+always the explicit `backend` field; the registry has no default and reports
+its available identifiers on a missing or unknown selection. For this brick,
+non-empty `quantile_levels` and `censoring_aware: true` are capability requests
+and are rejected before prediction.
+
+The seasonal-naive retention rule is deliberately narrow: `fit` keeps
+only the non-missing observations in the final `m` pre-origin calendar periods
+for each series. It retains no earlier history, whole task, fitted-value
+sidecar, or forecast rows. `predict` therefore fails loudly when that retained
+season is short or has a missing phase, and otherwise repeats the phase lookup
+deterministically for every horizon step.
+
 ## Development
 
 Run every command from this directory against the successor lockfile:
