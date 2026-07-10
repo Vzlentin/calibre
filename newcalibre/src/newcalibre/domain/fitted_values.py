@@ -7,6 +7,7 @@ from typing import Final
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from newcalibre.domain.forecast_frame import ACTUAL_VALUE, MODEL_NAME, SERIES_KEY
 from newcalibre.domain.panel import TIMESTAMP
@@ -38,6 +39,35 @@ _SUPPORTED_INPUT_DTYPE_NUMS = frozenset(
         "float32",
         "float64",
     )
+)
+_NULLABLE_REAL_DTYPE_NAMES = frozenset(
+    {
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "Float32",
+        "Float64",
+    }
+)
+_ARROW_REAL_TYPES = frozenset(
+    {
+        pa.int8(),
+        pa.int16(),
+        pa.int32(),
+        pa.int64(),
+        pa.uint8(),
+        pa.uint16(),
+        pa.uint32(),
+        pa.uint64(),
+        pa.float16(),
+        pa.float32(),
+        pa.float64(),
+    }
 )
 
 
@@ -106,19 +136,7 @@ class FittedValues:
             )
 
         for column in (ACTUAL_VALUE, FITTED_VALUE):
-            dtype = normalized[column].dtype
-            if (
-                not isinstance(dtype, np.dtype)
-                or not dtype.isnative
-                or dtype.num not in _SUPPORTED_INPUT_DTYPE_NUMS
-            ):
-                raise FittedValuesError(f"fitted-values column {column!r} must be numeric")
-            try:
-                normalized[column] = normalized[column].astype(_FLOAT64)
-            except (TypeError, ValueError, OverflowError) as error:
-                raise FittedValuesError(
-                    f"fitted-values column {column!r} cannot normalize to float64"
-                ) from error
+            normalized[column] = _normalize_real_to_float64(normalized[column], column=column)
 
         normalized = normalized.dropna(subset=[ACTUAL_VALUE, FITTED_VALUE]).reset_index(drop=True)
         if normalized.duplicated(subset=list(FITTED_VALUE_KEY_COLUMNS)).any():
@@ -145,3 +163,61 @@ class FittedValues:
     def frame(self) -> pd.DataFrame:
         """Return a defensive copy in canonical key order."""
         return self._frame.copy(deep=True)
+
+
+def _normalize_real_to_float64(series: pd.Series, *, column: str) -> pd.Series:
+    dtype = series.dtype
+    if isinstance(dtype, pd.ArrowDtype) and dtype.pyarrow_dtype in _ARROW_REAL_TYPES:
+        try:
+            values = series.array.to_numpy(
+                dtype=_FLOAT64,
+                na_value=np.nan,
+                copy=True,
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise FittedValuesError(
+                f"fitted-values column {column!r} cannot normalize to float64"
+            ) from error
+        return pd.Series(values, index=series.index, name=column, dtype=_FLOAT64)
+    if isinstance(dtype, pd.SparseDtype):
+        try:
+            dense = series.sparse.to_dense()
+        except (TypeError, ValueError) as error:
+            raise FittedValuesError(
+                f"fitted-values column {column!r} cannot densify sparse real values"
+            ) from error
+        return _normalize_real_to_float64(dense, column=column)
+
+    nullable_name = str(dtype)
+    if nullable_name in _NULLABLE_REAL_DTYPE_NAMES:
+        expected = pd.api.types.pandas_dtype(nullable_name)
+        if type(dtype) is type(expected):
+            try:
+                values = series.array.to_numpy(
+                    dtype=_FLOAT64,
+                    na_value=np.nan,
+                    copy=True,
+                )
+            except (TypeError, ValueError, OverflowError) as error:
+                raise FittedValuesError(
+                    f"fitted-values column {column!r} cannot normalize to float64"
+                ) from error
+            return pd.Series(values, index=series.index, name=column, dtype=_FLOAT64)
+
+    if (
+        not isinstance(dtype, np.dtype)
+        or not dtype.isnative
+        or dtype.num not in _SUPPORTED_INPUT_DTYPE_NUMS
+    ):
+        raise FittedValuesError(f"fitted-values column {column!r} must be numeric")
+    try:
+        return pd.Series(
+            series.to_numpy(dtype=_FLOAT64, copy=True),
+            index=series.index,
+            name=column,
+            dtype=_FLOAT64,
+        )
+    except (TypeError, ValueError, OverflowError) as error:
+        raise FittedValuesError(
+            f"fitted-values column {column!r} cannot normalize to float64"
+        ) from error

@@ -7,6 +7,7 @@ from typing import cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -474,6 +475,27 @@ def test_nullable_numeric_dtypes_round_trip_with_missing_values(dtype: str) -> N
     restored = ForecastTask.from_bytes(task.to_bytes())
 
     assert str(restored.history[OBSERVED_VALUE].dtype) == dtype
+    pd.testing.assert_frame_equal(restored.history, task.history)
+
+
+@pytest.mark.parametrize(
+    "arrow_type",
+    [pa.int64(), pa.uint64(), pa.float16(), pa.float32(), pa.float64()],
+    ids=str,
+)
+def test_arrow_backed_numeric_dtypes_round_trip_with_missing_values(
+    arrow_type: pa.DataType,
+) -> None:
+    frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
+    values: list[object] = [3, None, 1, 2, 2, 3]
+    if arrow_type == pa.uint64():
+        values = [3, None, 2**63 + 1, 2, 2, 3]
+    frame[OBSERVED_VALUE] = pd.Series(values, dtype=pd.ArrowDtype(arrow_type))
+    task = _task(frame=frame)
+
+    restored = ForecastTask.from_bytes(task.to_bytes())
+
+    assert restored.history[OBSERVED_VALUE].dtype == pd.ArrowDtype(arrow_type)
     pd.testing.assert_frame_equal(restored.history, task.history)
 
 

@@ -6,6 +6,7 @@ from typing import cast
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from newcalibre.domain import Calendar, CalendarError
@@ -158,6 +159,56 @@ def test_frame_integer_values_upcast_atomically_without_mutating_input() -> None
         assert validated[column].dtype == np.dtype("float64")
 
 
+def test_frame_nullable_integers_upcast_across_all_float_value_columns() -> None:
+    lower, upper = interval_columns(0.9)
+    quantile = quantile_column(0.5)
+    frame = _weekly_frame()
+    frame[ACTUAL_VALUE] = pd.Series([pd.NA, 2], dtype="Int64")
+    frame[POINT_FORECAST] = pd.Series([7.0, 8.0], dtype="Float32")
+    frame[lower] = pd.Series([5, pd.NA], dtype="Int32")
+    frame[upper] = pd.Series([9, 10], dtype="UInt32")
+    frame[quantile] = pd.Series([7, 8], dtype="Int8")
+
+    validated = validate_forecast_frame(frame, calendar=WEEKLY)
+
+    for column in (ACTUAL_VALUE, POINT_FORECAST, lower, upper, quantile):
+        assert validated[column].dtype == np.dtype("float64")
+    assert np.isnan(validated.loc[0, ACTUAL_VALUE])
+    assert np.isnan(validated.loc[1, lower])
+
+
+def test_frame_sparse_real_values_densify_and_normalize_to_float64() -> None:
+    lower, upper = interval_columns(0.9)
+    frame = _weekly_frame()
+    frame[ACTUAL_VALUE] = pd.Series([1, 0], dtype=pd.SparseDtype("int16", fill_value=0))
+    frame[POINT_FORECAST] = pd.Series(
+        [7.0, 8.0], dtype=pd.SparseDtype("float32", fill_value=np.nan)
+    )
+    frame[lower] = pd.Series([5, 6], dtype=pd.SparseDtype("uint8", fill_value=0))
+    frame[upper] = pd.Series([9.0, 10.0], dtype=pd.SparseDtype("float16", fill_value=np.nan))
+
+    validated = validate_forecast_frame(frame, calendar=WEEKLY)
+
+    for column in (ACTUAL_VALUE, POINT_FORECAST, lower, upper):
+        assert validated[column].dtype == np.dtype("float64")
+
+
+def test_frame_arrow_backed_real_values_normalize_to_float64() -> None:
+    lower, upper = interval_columns(0.9)
+    frame = _weekly_frame()
+    frame[ACTUAL_VALUE] = pd.Series([None, 2], dtype=pd.ArrowDtype(pa.int64()))
+    frame[POINT_FORECAST] = pd.Series([7, 8], dtype=pd.ArrowDtype(pa.uint64()))
+    frame[lower] = pd.Series([5.0, None], dtype=pd.ArrowDtype(pa.float32()))
+    frame[upper] = pd.Series([9.0, 10.0], dtype=pd.ArrowDtype(pa.float64()))
+
+    validated = validate_forecast_frame(frame, calendar=WEEKLY)
+
+    for column in (ACTUAL_VALUE, POINT_FORECAST, lower, upper):
+        assert validated[column].dtype == np.dtype("float64")
+    assert np.isnan(validated.loc[0, ACTUAL_VALUE])
+    assert np.isnan(validated.loc[1, lower])
+
+
 def test_frame_validation_rejects_duplicate_keys_and_wrong_target_derivation() -> None:
     duplicate = pd.concat([_weekly_frame(), _weekly_frame().iloc[[0]]], ignore_index=True)
     with pytest.raises(ForecastFrameError, match="duplicate full row key"):
@@ -215,6 +266,9 @@ def test_frame_accepts_and_canonicalizes_flat_primitive_extensions() -> None:
         pd.to_datetime(["2026-01-01", "2026-01-02"]).astype("datetime64[ms]")
     )
     frame["note"] = pd.Series(["a", "b"], dtype=pd.StringDtype(storage="python"))
+    frame["nullable_rank"] = pd.Series([1, pd.NA], dtype="Int64")
+    frame["arrow_score"] = pd.Series([1.5, None], dtype=pd.ArrowDtype(pa.float32()))
+    frame["sparse_count"] = pd.Series([1, 0], dtype=pd.SparseDtype("int16", fill_value=0))
 
     validated = validate_forecast_frame(frame, calendar=WEEKLY)
 
@@ -223,6 +277,9 @@ def test_frame_accepts_and_canonicalizes_flat_primitive_extensions() -> None:
     assert validated["score"].dtype == np.dtype("float16")
     assert validated["event_time"].dtype == np.dtype("datetime64[ms]")
     assert validated["note"].dtype.storage == "pyarrow"
+    assert str(validated["nullable_rank"].dtype) == "Int64"
+    assert validated["arrow_score"].dtype == pd.ArrowDtype(pa.float32())
+    assert validated["sparse_count"].dtype == np.dtype("int16")
 
 
 @pytest.mark.parametrize(
@@ -230,7 +287,6 @@ def test_frame_accepts_and_canonicalizes_flat_primitive_extensions() -> None:
     [
         pd.Series([object(), object()], dtype="object"),
         pd.Series([1 + 2j, 3 + 4j], dtype="complex128"),
-        pd.Series([1, 0], dtype=pd.SparseDtype("int64", fill_value=0)),
     ],
 )
 def test_frame_rejects_nonprimitive_extension_dtypes(extension: pd.Series) -> None:

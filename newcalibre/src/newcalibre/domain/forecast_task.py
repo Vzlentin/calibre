@@ -78,6 +78,22 @@ _NULLABLE_NUMPY_DTYPES = {
         ("nullable:Float64", "float64"),
     )
 }
+_ARROW_NUMERIC_DTYPES = {
+    f"arrow:{arrow_type!s}": pd.ArrowDtype(arrow_type)
+    for arrow_type in (
+        pa.int8(),
+        pa.int16(),
+        pa.int32(),
+        pa.int64(),
+        pa.uint8(),
+        pa.uint16(),
+        pa.uint32(),
+        pa.uint64(),
+        pa.float16(),
+        pa.float32(),
+        pa.float64(),
+    )
+}
 
 
 class ForecastTaskError(ValueError):
@@ -384,6 +400,11 @@ def _dtype_token(dtype: object) -> str:
     expected_nullable = _NULLABLE_NUMERIC_DTYPES.get(nullable_token)
     if expected_nullable is not None and type(dtype) is type(expected_nullable):
         return nullable_token
+    if isinstance(dtype, pd.ArrowDtype):
+        arrow_token = f"arrow:{dtype.pyarrow_dtype!s}"
+        expected_arrow = _ARROW_NUMERIC_DTYPES.get(arrow_token)
+        if expected_arrow is not None and expected_arrow == dtype:
+            return arrow_token
     if isinstance(dtype, np.dtype):
         return str(dtype)
     raise ForecastTaskError(f"task frame contains unsupported dtype {dtype!s}")
@@ -463,6 +484,9 @@ def _arrow_column_to_series(column: pa.ChunkedArray, *, token: str) -> pd.Series
     array = pa.concat_arrays(column.chunks) if column.num_chunks else pa.array([], type=column.type)
     if token == _STRING_DTYPE_TOKEN:
         return pd.Series(array.to_pylist(), dtype=_TRANSPORT_STRING_DTYPE)
+    arrow_dtype = _ARROW_NUMERIC_DTYPES.get(token)
+    if arrow_dtype is not None:
+        return pd.Series(array.to_pylist(), dtype=arrow_dtype)
     nullable_dtype = _NULLABLE_NUMERIC_DTYPES.get(token)
     if nullable_dtype is not None:
         numpy_dtype = _NULLABLE_NUMPY_DTYPES[token]
@@ -516,6 +540,9 @@ def _arrow_type(token: str) -> pa.DataType:
     nullable_numpy = _NULLABLE_NUMPY_DTYPES.get(token)
     if nullable_numpy is not None:
         return pa.from_numpy_dtype(nullable_numpy)
+    arrow_dtype = _ARROW_NUMERIC_DTYPES.get(token)
+    if arrow_dtype is not None:
+        return arrow_dtype.pyarrow_dtype
     if token not in _SUPPORTED_NUMERIC_TOKENS:
         raise ForecastTaskError(f"serialized task schema dtype {token!r} is unsupported")
     try:

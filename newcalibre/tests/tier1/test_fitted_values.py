@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from newcalibre.domain import (
@@ -61,6 +62,45 @@ def test_fitted_values_drops_rows_with_missing_actual_or_fitted_value() -> None:
 
     assert len(sidecar.frame) == 1
     assert sidecar.frame[TIMESTAMP].tolist() == [pd.Timestamp("2026-01-05")]
+
+
+def test_fitted_values_nullable_reals_drop_missing_and_upcast_exactly() -> None:
+    frame = _frame()
+    frame[ACTUAL_VALUE] = pd.Series([1, pd.NA, 3], dtype="Int64")
+    frame[FITTED_VALUE] = pd.Series([1.5, 2.5, pd.NA], dtype="Float32")
+
+    sidecar = FittedValues.from_frame(frame)
+
+    assert len(sidecar.frame) == 1
+    assert sidecar.frame[ACTUAL_VALUE].dtype == np.dtype("float64")
+    assert sidecar.frame[FITTED_VALUE].dtype == np.dtype("float64")
+    assert sidecar.frame[[ACTUAL_VALUE, FITTED_VALUE]].values.tolist() == [[1.0, 1.5]]
+
+
+def test_fitted_values_sparse_reals_densify_drop_missing_and_upcast() -> None:
+    frame = _frame()
+    frame[ACTUAL_VALUE] = pd.Series(
+        [1.0, np.nan, 3.0], dtype=pd.SparseDtype("float32", fill_value=np.nan)
+    )
+    frame[FITTED_VALUE] = pd.Series([1, 2, 0], dtype=pd.SparseDtype("int16", fill_value=0))
+
+    sidecar = FittedValues.from_frame(frame)
+
+    assert len(sidecar.frame) == 2
+    assert sidecar.frame[ACTUAL_VALUE].dtype == np.dtype("float64")
+    assert sidecar.frame[FITTED_VALUE].dtype == np.dtype("float64")
+
+
+def test_fitted_values_arrow_backed_reals_drop_missing_and_upcast() -> None:
+    frame = _frame()
+    frame[ACTUAL_VALUE] = pd.Series([1, None, 3], dtype=pd.ArrowDtype(pa.int64()))
+    frame[FITTED_VALUE] = pd.Series([1.5, 2.5, None], dtype=pd.ArrowDtype(pa.float32()))
+
+    sidecar = FittedValues.from_frame(frame)
+
+    assert len(sidecar.frame) == 1
+    assert sidecar.frame[ACTUAL_VALUE].dtype == np.dtype("float64")
+    assert sidecar.frame[FITTED_VALUE].dtype == np.dtype("float64")
 
 
 def test_fitted_values_defensively_snapshots_input_and_output() -> None:

@@ -3,8 +3,7 @@
 The U1 column vocabulary is deliberately literal: required columns use the
 names declared below, while intervals and quantiles use canonical decimal
 suffixes such as ``lower_0.9`` and ``quantile_0.5``. Value columns normalize
-integer inputs to ``float64``; other dtype families are validated without
-coercion.
+accepted dense, nullable, Arrow-backed, or sparse real numerics to ``float64``.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ from typing import Final
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 from pandas.api.types import is_bool_dtype, is_integer_dtype
 
 from newcalibre.domain.calendar import Calendar, CalendarError
@@ -64,6 +64,51 @@ _SUPPORTED_EXTENSION_DTYPE_NUMS = frozenset(
         "float64",
     )
 )
+_INTEGER_DTYPE_NUMS = frozenset(
+    np.dtype(name).num
+    for name in (
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+    )
+)
+_SPARSE_REAL_DTYPE_NUMS = _INTEGER_DTYPE_NUMS | frozenset(
+    np.dtype(name).num for name in ("float16", "float32", "float64")
+)
+_NULLABLE_REAL_DTYPE_NAMES = frozenset(
+    {
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "Float32",
+        "Float64",
+    }
+)
+_ARROW_REAL_TYPES = frozenset(
+    {
+        pa.int8(),
+        pa.int16(),
+        pa.int32(),
+        pa.int64(),
+        pa.uint8(),
+        pa.uint16(),
+        pa.uint32(),
+        pa.uint64(),
+        pa.float16(),
+        pa.float32(),
+        pa.float64(),
+    }
+)
 
 
 class ForecastFrameError(ValueError):
@@ -105,8 +150,8 @@ def validate_forecast_frame(
 ) -> pd.DataFrame:
     """Validate a frame atomically and return its normalized copy.
 
-    Integer forecast-value columns are the sole coercion: they are copied and
-    upcast to ``float64``. All other required dtypes must already be exact.
+    Accepted real-numeric value columns are copied and normalized to
+    ``float64``. All other required dtypes must already be exact.
     """
     if not isinstance(frame, pd.DataFrame):
         raise ForecastFrameError("forecast frame must be a pandas DataFrame")
@@ -242,6 +287,34 @@ def _canonicalize_extension(frame: pd.DataFrame, column: str) -> None:
     if isinstance(dtype, pd.StringDtype):
         _require_string(frame, column)
         return
+    if isinstance(dtype, pd.ArrowDtype) and dtype.pyarrow_dtype in _ARROW_REAL_TYPES:
+        chunked = frame[column].array.__arrow_array__()
+        array = (
+            pa.concat_arrays(chunked.chunks)
+            if chunked.num_chunks
+            else pa.array([], type=dtype.pyarrow_dtype)
+        )
+        mask = array.is_null().to_numpy(zero_copy_only=False)
+        values = array.fill_null(0).to_numpy(zero_copy_only=False)
+        if pa.types.is_floating(dtype.pyarrow_dtype):
+            mask |= np.isnan(values)
+        canonical = pa.array(values, mask=mask, type=dtype.pyarrow_dtype, from_pandas=False)
+        frame[column] = pd.Series(canonical, index=frame.index, name=column, dtype=dtype)
+        return
+    if isinstance(dtype, pd.SparseDtype):
+        try:
+            frame[column] = frame[column].sparse.to_dense()
+        except (TypeError, ValueError) as error:
+            raise ForecastFrameError(
+                f"extension column {column!r} could not densify its sparse values"
+            ) from error
+        _canonicalize_extension(frame, column)
+        return
+    nullable_name = str(dtype)
+    if nullable_name in _NULLABLE_REAL_DTYPE_NAMES:
+        expected = pd.api.types.pandas_dtype(nullable_name)
+        if type(dtype) is type(expected):
+            return
     if not isinstance(dtype, np.dtype) or not dtype.isnative:
         raise ForecastFrameError(
             f"extension column {column!r} must have a flat transport-safe primitive dtype"
@@ -275,11 +348,56 @@ def _require_integer(frame: pd.DataFrame, column: str) -> None:
 
 def _normalize_float64(frame: pd.DataFrame, column: str) -> None:
     dtype = frame[column].dtype
+    if isinstance(dtype, pd.ArrowDtype) and dtype.pyarrow_dtype in _ARROW_REAL_TYPES:
+        try:
+            values = frame[column].array.to_numpy(
+                dtype=_FLOAT64,
+                na_value=np.nan,
+                copy=True,
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ForecastFrameError(
+                f"column {column!r} could not normalize Arrow-backed values to float64"
+            ) from error
+        frame[column] = pd.Series(values, index=frame.index, name=column)
+        return
+    if isinstance(dtype, pd.SparseDtype):
+        try:
+            dense = frame[column].sparse.to_dense()
+        except (TypeError, ValueError) as error:
+            raise ForecastFrameError(
+                f"column {column!r} could not densify its sparse real values"
+            ) from error
+        dense_dtype = dense.dtype
+        if (
+            not isinstance(dense_dtype, np.dtype)
+            or not dense_dtype.isnative
+            or dense_dtype.num not in _SPARSE_REAL_DTYPE_NUMS
+        ):
+            raise ForecastFrameError(f"column {column!r} must have exact float64 or integer dtype")
+        try:
+            frame[column] = dense.astype(_FLOAT64)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ForecastFrameError(
+                f"column {column!r} could not normalize sparse values to float64"
+            ) from error
+        return
+    nullable_name = str(dtype)
+    if nullable_name in _NULLABLE_REAL_DTYPE_NAMES:
+        expected = pd.api.types.pandas_dtype(nullable_name)
+        if type(dtype) is type(expected):
+            values = frame[column].array.to_numpy(
+                dtype=_FLOAT64,
+                na_value=np.nan,
+                copy=True,
+            )
+            frame[column] = pd.Series(values, index=frame.index, name=column)
+            return
     if not isinstance(dtype, np.dtype) or not dtype.isnative:
         raise ForecastFrameError(f"column {column!r} must have exact float64 or integer dtype")
     if dtype.num == _FLOAT64.num:
         return
-    if is_integer_dtype(dtype) and not is_bool_dtype(dtype):
+    if dtype.num in _INTEGER_DTYPE_NUMS:
         try:
             frame[column] = frame[column].astype(_FLOAT64)
         except (TypeError, ValueError) as error:

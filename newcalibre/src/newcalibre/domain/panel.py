@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from newcalibre.domain.calendar import Calendar, CalendarError
 from newcalibre.domain.forecast_frame import SERIES_KEY
@@ -57,6 +58,22 @@ _NULLABLE_NUMERIC_DTYPE_NAMES: Final = frozenset(
         "Float64",
     }
 )
+_ARROW_NUMERIC_TYPES = {
+    str(arrow_type): arrow_type
+    for arrow_type in (
+        pa.int8(),
+        pa.int16(),
+        pa.int32(),
+        pa.int64(),
+        pa.uint8(),
+        pa.uint16(),
+        pa.uint32(),
+        pa.uint64(),
+        pa.float16(),
+        pa.float32(),
+        pa.float64(),
+    )
+}
 
 
 class PanelError(ValueError):
@@ -372,6 +389,10 @@ def _require_naive_datetime(frame: pd.DataFrame, column: str, *, surface: str) -
 
 def _require_numeric(frame: pd.DataFrame, column: str, *, surface: str) -> None:
     dtype = frame[column].dtype
+    arrow_type = _arrow_numeric_type(dtype)
+    if arrow_type is not None:
+        _canonicalize_arrow_numeric(frame, column, arrow_type=arrow_type)
+        return
     if isinstance(dtype, pd.SparseDtype):
         try:
             frame[column] = frame[column].sparse.to_dense()
@@ -404,6 +425,34 @@ def _nullable_numeric_dtype_name(dtype: object) -> str | None:
         return None
     expected = pd.api.types.pandas_dtype(name)
     return name if type(dtype) is type(expected) else None
+
+
+def _arrow_numeric_type(dtype: object) -> pa.DataType | None:
+    if not isinstance(dtype, pd.ArrowDtype):
+        return None
+    arrow_type = dtype.pyarrow_dtype
+    expected = _ARROW_NUMERIC_TYPES.get(str(arrow_type))
+    return expected if expected == arrow_type else None
+
+
+def _canonicalize_arrow_numeric(
+    frame: pd.DataFrame, column: str, *, arrow_type: pa.DataType
+) -> None:
+    chunked = frame[column].array.__arrow_array__()
+    array = (
+        pa.concat_arrays(chunked.chunks) if chunked.num_chunks else pa.array([], type=arrow_type)
+    )
+    mask = array.is_null().to_numpy(zero_copy_only=False)
+    values = array.fill_null(0).to_numpy(zero_copy_only=False)
+    if pa.types.is_floating(arrow_type):
+        mask |= np.isnan(values)
+    canonical = pa.array(values, mask=mask, type=arrow_type, from_pandas=False)
+    frame[column] = pd.Series(
+        canonical,
+        index=frame.index,
+        name=column,
+        dtype=pd.ArrowDtype(arrow_type),
+    )
 
 
 def _canonicalize_nullable_numeric(frame: pd.DataFrame, column: str, *, dtype_name: str) -> None:

@@ -35,8 +35,9 @@ canonical plain-decimal spelling such as `0.9`. These helpers own spelling and
 interval pairing only; the configuration requesting a level owns its
 admissible range.
 
-All value columns are `float64`; integer values are copied and upcast at frame
-validation. Horizon steps retain any non-boolean integer dtype. Timestamps are
+All value columns are `float64`; accepted dense, nullable, Arrow-backed, and
+sparse real numerics are copied and normalized at frame validation. Horizon
+steps retain any non-boolean integer dtype. Timestamps are
 timezone-naive NumPy `datetime64` values at `s`, `ms`, `us`, or `ns`
 resolution. A `Calendar` owns the normalized dataset frequency; weekly data
 uses an anchor such as `W-MON`, never bare `W`. Every frequency binds its
