@@ -8,6 +8,7 @@ accepted dense, nullable, Arrow-backed, or sparse real numerics to ``float64``.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
 from typing import Final
@@ -124,6 +125,37 @@ def interval_columns(level: object) -> tuple[str, str]:
 def quantile_column(level: object) -> str:
     """Return the canonical column name for a native quantile level."""
     return f"{_QUANTILE_PREFIX}{_canonical_level(level)}"
+
+
+def forecast_bound_groups(columns: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+    """Return every canonical quantile or interval group in stable column order.
+
+    Quantiles are singleton groups. Interval lower/upper columns are one
+    two-column group even when the two columns are not adjacent in the frame.
+    """
+    if isinstance(columns, (str, bytes)):
+        raise ForecastFrameError("forecast columns must be an iterable of column names")
+    try:
+        labels = pd.Index(tuple(columns))
+    except TypeError as error:
+        raise ForecastFrameError("forecast columns must be iterable") from error
+    if labels.has_duplicates:
+        raise ForecastFrameError("forecast columns contain duplicate labels")
+    _require_column_labels(pd.DataFrame(columns=labels))
+
+    optional = _optional_value_columns(labels)
+    groups: list[tuple[str, ...]] = []
+    grouped_interval_levels: set[str] = set()
+    for column in optional:
+        if column.startswith(_QUANTILE_PREFIX):
+            groups.append((column,))
+            continue
+        prefix = _LOWER_PREFIX if column.startswith(_LOWER_PREFIX) else _UPPER_PREFIX
+        level = column.removeprefix(prefix)
+        if level not in grouped_interval_levels:
+            groups.append(interval_columns(level))
+            grouped_interval_levels.add(level)
+    return tuple(groups)
 
 
 def target_timestamp(
