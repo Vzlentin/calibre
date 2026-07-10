@@ -58,6 +58,9 @@ jobs:
           lock_sha="$(sha256sum uv.lock | cut -d' ' -f1)"
           test "$lock_sha" = "$ORACLE_LOCK_SHA256" || { echo "lock changed during sync"; exit 1; }
       - name: Acquire + unconditionally validate the twelve VN2 inputs
+        env:
+          DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
+          GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
         run: |
           set -euo pipefail
           python3 .github/scripts/stage3_vn2_data.py download --target "${RUNNER_TEMP}/oracle-tag/data/vn2"
