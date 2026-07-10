@@ -104,7 +104,7 @@ def validate_forecast_frame(
     if _FITTED_VALUE_SIDECAR_COLUMN in frame.columns:
         raise ForecastFrameError("fitted values belong in the separate fitted-values sidecar")
 
-    normalized = frame.copy(deep=True)
+    normalized = frame.copy(deep=True).set_flags(allows_duplicate_labels=True)
     normalized.attrs = {}
     normalized.index.name = None
     normalized.columns.name = None
@@ -224,9 +224,9 @@ def _require_integer(frame: pd.DataFrame, column: str) -> None:
 
 def _normalize_float64(frame: pd.DataFrame, column: str) -> None:
     dtype = frame[column].dtype
-    if not isinstance(dtype, np.dtype):
+    if not isinstance(dtype, np.dtype) or not dtype.isnative:
         raise ForecastFrameError(f"column {column!r} must have exact float64 or integer dtype")
-    if dtype == _FLOAT64:
+    if dtype.num == _FLOAT64.num:
         return
     if is_integer_dtype(dtype) and not is_bool_dtype(dtype):
         try:

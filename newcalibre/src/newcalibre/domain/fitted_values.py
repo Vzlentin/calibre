@@ -7,7 +7,6 @@ from typing import Final
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_bool_dtype, is_complex_dtype, is_numeric_dtype
 
 from newcalibre.domain.forecast_frame import ACTUAL_VALUE, MODEL_NAME, SERIES_KEY
 from newcalibre.domain.panel import TIMESTAMP
@@ -24,6 +23,22 @@ FITTED_VALUE_KEY_COLUMNS: Final = (SERIES_KEY, TIMESTAMP, MODEL_NAME)
 _FLOAT64 = np.dtype("float64")
 _DATETIME_UNITS = frozenset({"s", "ms", "us", "ns"})
 _TRANSPORT_STRING_DTYPE = pd.StringDtype(storage="pyarrow")
+_SUPPORTED_INPUT_DTYPE_NUMS = frozenset(
+    np.dtype(name).num
+    for name in (
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float16",
+        "float32",
+        "float64",
+    )
+)
 
 
 class FittedValuesError(ValueError):
@@ -55,7 +70,11 @@ class FittedValues:
                 f"missing={missing}, unexpected={unexpected}"
             )
 
-        normalized = frame.loc[:, list(REQUIRED_FITTED_VALUE_COLUMNS)].copy(deep=True)
+        normalized = (
+            frame.loc[:, list(REQUIRED_FITTED_VALUE_COLUMNS)]
+            .copy(deep=True)
+            .set_flags(allows_duplicate_labels=True)
+        )
         normalized.attrs = {}
         normalized.index.name = None
         normalized.columns.name = None
@@ -91,12 +110,7 @@ class FittedValues:
             if (
                 not isinstance(dtype, np.dtype)
                 or not dtype.isnative
-                or not is_numeric_dtype(dtype)
-                or is_bool_dtype(dtype)
-                or is_complex_dtype(dtype)
-                or dtype.kind not in "iuf"
-                or (dtype.kind in "iu" and dtype.itemsize not in {1, 2, 4, 8})
-                or (dtype.kind == "f" and dtype.itemsize not in {2, 4, 8})
+                or dtype.num not in _SUPPORTED_INPUT_DTYPE_NUMS
             ):
                 raise FittedValuesError(f"fitted-values column {column!r} must be numeric")
             try:
@@ -117,7 +131,9 @@ class FittedValues:
                 str(normalized.iloc[index][MODEL_NAME]).encode(),
             ),
         )
-        normalized = normalized.iloc[order].reset_index(drop=True)
+        normalized = (
+            normalized.iloc[order].reset_index(drop=True).set_flags(allows_duplicate_labels=True)
+        )
         normalized.attrs = {}
         normalized.index.name = None
         normalized.columns.name = None

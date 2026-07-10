@@ -371,10 +371,12 @@ def test_python_string_storage_canonicalizes_to_arrow_and_round_trips() -> None:
 def test_task_bytes_discard_pandas_metadata_and_depend_only_on_declared_inputs() -> None:
     marked = _panel_frame()
     marked.attrs["transport-secret-marker"] = "must-not-ship"
+    marked.flags.allows_duplicate_labels = False
     marked.index.name = "transport-secret-index"
     marked.columns.name = "transport-secret-columns"
     marked_future = _future()
     marked_future.attrs["transport-secret-marker"] = "must-not-ship"
+    marked_future.flags.allows_duplicate_labels = False
     marked_future.index.name = "transport-secret-future-index"
     marked_future.columns.name = "transport-secret-future-columns"
 
@@ -383,10 +385,12 @@ def test_task_bytes_discard_pandas_metadata_and_depend_only_on_declared_inputs()
     payload = marked_task.to_bytes()
 
     assert marked_task.history.attrs == {}
+    assert marked_task.history.flags.allows_duplicate_labels
     assert marked_task.history.index.name is None
     assert marked_task.history.columns.name is None
     assert marked_task.future_exogenous is not None
     assert marked_task.future_exogenous.attrs == {}
+    assert marked_task.future_exogenous.flags.allows_duplicate_labels
     assert b"transport-secret" not in payload
     assert b"pandas" not in payload
     assert payload == clean_task.to_bytes()
@@ -636,6 +640,18 @@ def test_forecast_frame_rejects_mistyped_optional_forecast_values(column: str) -
         validate_forecast_frame(frame, calendar=Calendar("W-MON"))
 
 
+def test_forecast_and_fitted_surfaces_reject_windows_longdouble_alias() -> None:
+    forecast = _forecast_frame()
+    forecast[POINT_FORECAST] = np.array([2.0], dtype=np.longdouble)
+    with pytest.raises(ForecastFrameError, match="exact float64"):
+        validate_forecast_frame(forecast, calendar=Calendar("W-MON"))
+
+    fitted = _fitted_frame()
+    fitted[FITTED_VALUE] = np.array([1.1], dtype=np.longdouble)
+    with pytest.raises(FittedValuesError, match="numeric"):
+        FittedValues.from_frame(fitted)
+
+
 def test_forecast_frame_and_fitted_values_reject_each_others_surfaces() -> None:
     forecast = _forecast_frame()
     forecast[FITTED_VALUE] = pd.Series([1.5], dtype="float64")
@@ -651,16 +667,20 @@ def test_forecast_frame_and_fitted_values_reject_each_others_surfaces() -> None:
 def test_public_frame_strings_are_arrow_backed_and_sidecar_metadata_is_stripped() -> None:
     forecast = _forecast_frame()
     forecast[SERIES_KEY] = forecast[SERIES_KEY].astype(pd.StringDtype(storage="python"))
+    forecast.flags.allows_duplicate_labels = False
     validated = validate_forecast_frame(forecast, calendar=Calendar("W-MON"))
     assert validated[SERIES_KEY].dtype.storage == "pyarrow"
+    assert validated.flags.allows_duplicate_labels
 
     fitted = _fitted_frame()
     fitted.attrs["ignored"] = "metadata"
+    fitted.flags.allows_duplicate_labels = False
     fitted.index.name = "ignored-index"
     fitted.columns.name = "ignored-columns"
     sidecar = FittedValues.from_frame(fitted)
     assert sidecar.frame[SERIES_KEY].dtype.storage == "pyarrow"
     assert sidecar.frame.attrs == {}
+    assert sidecar.frame.flags.allows_duplicate_labels
     assert sidecar.frame.index.name is None
     assert sidecar.frame.columns.name is None
 

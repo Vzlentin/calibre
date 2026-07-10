@@ -262,7 +262,7 @@ def _canonicalize_panel_frame(
         ),
     )
     normalized = normalized.iloc[order].reset_index(drop=True)
-    _clear_pandas_metadata(normalized)
+    normalized = _clear_pandas_metadata(normalized)
     return normalized, effective_calendar
 
 
@@ -330,7 +330,7 @@ def _canonicalize_future_exogenous(
         ),
     )
     normalized = normalized.iloc[order].reset_index(drop=True)
-    _clear_pandas_metadata(normalized)
+    normalized = _clear_pandas_metadata(normalized)
     return normalized
 
 
@@ -372,8 +372,7 @@ def _require_numeric(frame: pd.DataFrame, column: str, *, surface: str) -> None:
 
 def _data_only_copy(frame: pd.DataFrame) -> pd.DataFrame:
     normalized = frame.copy(deep=True)
-    _clear_pandas_metadata(normalized)
-    return normalized
+    return _clear_pandas_metadata(normalized)
 
 
 def _require_column_labels(frame: pd.DataFrame, *, surface: str) -> None:
@@ -386,7 +385,9 @@ def _require_column_labels(frame: pd.DataFrame, *, surface: str) -> None:
         raise PanelError(f"{surface} column labels must be valid UTF-8 strings") from error
 
 
-def _clear_pandas_metadata(frame: pd.DataFrame) -> None:
-    frame.attrs = {}
-    frame.index.name = None
-    frame.columns.name = None
+def _clear_pandas_metadata(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = frame.set_flags(allows_duplicate_labels=True)
+    normalized.attrs = {}
+    normalized.index.name = None
+    normalized.columns.name = None
+    return normalized

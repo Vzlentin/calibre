@@ -407,6 +407,7 @@ def _arrow_to_frame(
             frame[column] = frame[column].astype(dtype)
     except (pa.ArrowException, OverflowError, TypeError, ValueError) as error:
         raise ForecastTaskError(f"serialized task {surface} schema cannot be restored") from error
+    frame = frame.set_flags(allows_duplicate_labels=True)
     frame.attrs = {}
     frame.index.name = None
     frame.columns.name = None
