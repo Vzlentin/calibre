@@ -29,6 +29,14 @@ from newcalibre.domain.forecast_task import (
     ForecastTask,
     ForecastTaskError,
 )
+from newcalibre.domain.hierarchy import (
+    AGGREGATE_NODE_PREFIX,
+    TOTAL_NODE_LABEL,
+    HierarchyError,
+    HierarchyIndex,
+    HierarchyNode,
+    HierarchyNodeKind,
+)
 from newcalibre.domain.panel import (
     AVAILABILITY_BOUND,
     CENSOR_STATUS,
@@ -46,12 +54,17 @@ from newcalibre.domain.panel import (
 
 __all__ = [
     "ACTUAL_VALUE",
+    "AGGREGATE_NODE_PREFIX",
     "AVAILABILITY_BOUND",
     "CENSOR_STATUS",
     "FITTED_VALUE",
     "FITTED_VALUE_KEY_COLUMNS",
     "FRAME_KEY_COLUMNS",
     "HISTORY_TIMESTAMP",
+    "HierarchyError",
+    "HierarchyIndex",
+    "HierarchyNode",
+    "HierarchyNodeKind",
     "HORIZON_STEP",
     "KNOWN_AT",
     "MODEL_NAME",
@@ -65,6 +78,7 @@ __all__ = [
     "SERIES_KEY",
     "TARGET_TIMESTAMP",
     "TIMESTAMP",
+    "TOTAL_NODE_LABEL",
     "UNDECLARED_CENSORING",
     "Calendar",
     "CalendarError",
