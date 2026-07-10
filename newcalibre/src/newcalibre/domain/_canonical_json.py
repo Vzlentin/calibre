@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 
 class CanonicalJsonError(ValueError):
@@ -20,7 +21,7 @@ def require_json_value(
     if value is None or isinstance(value, (str, bool, int)):
         return
     if isinstance(value, float):
-        if not -float("inf") < value < float("inf"):
+        if not math.isfinite(value):
             raise CanonicalJsonError(f"{path} contains a non-finite number")
         return
     if isinstance(value, list):

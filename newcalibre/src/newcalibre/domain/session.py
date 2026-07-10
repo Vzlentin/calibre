@@ -108,10 +108,7 @@ def _canonical_config(value: Mapping[str, object], *, name: str) -> dict[str, ob
         encoded = canonical_json_bytes(candidate, path=name)
     except CanonicalJsonError as error:
         raise SessionIdentityError(str(error)) from error
-    decoded = json.loads(encoded)
-    if not isinstance(decoded, dict):
-        raise SessionIdentityError(f"{name} must be a mapping")
-    return decoded
+    return json.loads(encoded)
 
 
 def _canonical_decision_config(
