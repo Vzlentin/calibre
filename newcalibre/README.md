@@ -25,6 +25,24 @@ the three-file reading path without frozen code or private rationale.
 Additional layers arrive only with their owning chapter. A tier-1 AST test
 rejects imports from the frozen package and benchmark tree.
 
+## First-brick domain decisions
+
+The forecast frame uses the literal required names `series_key`,
+`target_timestamp`, `actual_value`, `point_forecast`, `horizon_step`, `origin`,
+and `model_name`. Optional interval pairs are `lower_<decimal>` /
+`upper_<decimal>` and native quantiles are `quantile_<decimal>`; suffixes use a
+canonical plain-decimal spelling such as `0.9`. These helpers own spelling and
+interval pairing only; the configuration requesting a level owns its
+admissible range.
+
+All value columns are `float64`; integer values are copied and upcast at frame
+validation. Horizon steps retain any non-boolean integer dtype. Timestamps are
+timezone-naive NumPy `datetime64` values at their existing resolution, which
+keeps natural pandas 2 and pandas 3 construction valid without silent
+coercion. Calendar frequencies are provisionally explicit pandas strings:
+weekly data uses an anchor such as `W-MON`, never bare `W`. U3 owns the final
+calendar representation.
+
 ## Development
 
 Run every command from this directory against the successor lockfile:
