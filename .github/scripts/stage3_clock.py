@@ -4,6 +4,9 @@ Bootstrap-only root tooling (never imported by ``newcalibre``). The Gate
 tracking issue is the authoritative record: activation writes an immutable
 machine-readable comment there, and every other command only reads or appends.
 All GitHub access goes through the ``gh`` CLI with the workflow token.
+A current blocker is the newest ``<!-- s3-blocker -->`` comment carrying one
+fenced JSON object with exactly ``description`` and ``next_review``
+(``YYYY-MM-DD``); its stall exemption expires on that UTC review date.
 
 Commands:
     activate --pr N   Record the immutable clock start from a merged PR event.
@@ -21,7 +24,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 GATE_ISSUE = 301
 S3_U1_ISSUE = 302
@@ -30,6 +33,7 @@ WINDOW_DAYS = 42
 STALL_DAYS = 14
 CLOCK_START_LABEL = "s3:clock-start"
 ACTIVATION_MARKER = "<!-- s3-clock-activation -->"
+BLOCKER_MARKER = "<!-- s3-blocker -->"
 EXPIRY_MARKER = "<!-- s3-clock-expired -->"
 DECISION_MARKER = "<!-- s3-gate-decision -->"
 HEARTBEAT_MARKER = "<!-- s3-heartbeat"
@@ -211,9 +215,39 @@ def milestone_issues() -> list:
     return gh_api_paginated(f"repos/{repo()}/issues?milestone={number}&state=all&per_page=100")
 
 
-def started_at(issue: dict) -> datetime | None:
-    """Read the s3-started-at timestamp recorded on an active issue."""
-    for comment in issue_comments(issue["number"]):
+def blocker_suspends_stall(comments: list, *, today: date) -> bool:
+    """Suspend a stall only for the newest valid blocker before its review date."""
+    for comment in reversed(comments):
+        body = comment.get("body", "")
+        if BLOCKER_MARKER not in body:
+            continue
+        matches = re.findall(r"```json\s*(.*?)\s*```", body, re.DOTALL)
+        if len(matches) != 1:
+            return False
+        try:
+            record = json.loads(matches[0])
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(record, dict) or set(record) != {"description", "next_review"}:
+            return False
+        description = record["description"]
+        next_review = record["next_review"]
+        if not isinstance(description, str) or not description.strip():
+            return False
+        if not isinstance(next_review, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", next_review):
+            return False
+        try:
+            review_date = date.fromisoformat(next_review)
+        except ValueError:
+            return False
+        return today < review_date
+    return False
+
+
+def started_at(issue: dict, *, comments: list | None = None) -> datetime | None:
+    """Read the latest s3-started-at timestamp recorded on an active issue."""
+    issue_comments_to_read = issue_comments(issue["number"]) if comments is None else comments
+    for comment in reversed(issue_comments_to_read):
         match = STARTED_AT_RE.search(comment.get("body", ""))
         if match:
             return datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
@@ -247,13 +281,22 @@ def cmd_check_deadline() -> int:
     # Stall tripwire: only actively started U1-U8 issues can stall.
     for issue in milestone_issues():
         labels = {label["name"] for label in issue.get("labels", [])}
-        if "s3:in-progress" not in labels or "s3:blocked" in labels:
+        if (
+            issue.get("state") != "open"
+            or "pull_request" in issue
+            or "s3:in-progress" not in labels
+            or "s3:queued" in labels
+            or "s3:stalled?" in labels
+        ):
             continue
         match = re.match(r"S3-U(\d+):", issue.get("title", ""))
-        if not match or int(match.group(1)) > 8:
+        if not match or not 1 <= int(match.group(1)) <= 8:
             continue
-        begun = started_at(issue)
-        if begun and now - begun > timedelta(days=STALL_DAYS) and "s3:stalled?" not in labels:
+        comments = issue_comments(issue["number"]) if "s3:blocked" in labels else None
+        if comments is not None and blocker_suspends_stall(comments, today=now.date()):
+            continue
+        begun = started_at(issue, comments=comments)
+        if begun and now - begun > timedelta(days=STALL_DAYS):
             gh_api(
                 f"repos/{repo()}/issues/{issue['number']}/labels",
                 "-f",
@@ -262,7 +305,7 @@ def cmd_check_deadline() -> int:
             post_issue_comment(
                 issue["number"],
                 f"`s3:stalled?` — active since {begun.strftime('%Y-%m-%dT%H:%M:%SZ')} "
-                f"(> {STALL_DAYS} days) without a machine-readable blocker. "
+                f"(> {STALL_DAYS} days) without a current schema-complete blocker. "
                 "Owner review required before the gate date.",
             )
             print(f"Stall flagged on #{issue['number']}.")

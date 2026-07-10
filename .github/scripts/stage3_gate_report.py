@@ -21,7 +21,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-GATE_ISSUE = 301
+from stage3_clock import find_activation_record, record_is_schema_complete
+
 EVIDENCE_ALLOWLIST = ("stage3/evidence/",)
 TRACKING_SERIES = Path("stage3/evidence/tracking/series.jsonl")
 INPUT_INVENTORY = Path("stage3/evidence/vn2-input-digests.json")
@@ -40,33 +41,6 @@ def sha256_file(path: Path) -> str:
 def git(*args: str) -> str:
     """Run a git command and return stripped stdout."""
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
-
-
-def activation_record() -> dict | None:
-    """Fetch the Gate issue's activation record via the gh CLI."""
-    out = subprocess.run(
-        [
-            "gh",
-            "api",
-            "--paginate",
-            f"repos/{os.environ['GITHUB_REPOSITORY']}/issues/{GATE_ISSUE}/comments",
-            "--jq",
-            ".[].body",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    for body in out.split("\n"):
-        if "s3-clock-activation" in body:
-            start = body.find("{")
-            end = body.rfind("}")
-            if start != -1 and end != -1:
-                try:
-                    return json.loads(body[start : end + 1].replace("\\n", "\n"))
-                except json.JSONDecodeError:
-                    return None
-    return None
 
 
 def main() -> int:
@@ -106,8 +80,8 @@ def main() -> int:
     # Budget check against the immutable activation record.
     now = datetime.now(UTC)
     budget = None
-    record = activation_record()
-    if record and record.get("deadline"):
+    record = find_activation_record()
+    if record_is_schema_complete(record):
         deadline = datetime.fromisoformat(str(record["deadline"]).replace("Z", "+00:00"))
         budget = {
             "deadline": record["deadline"],
