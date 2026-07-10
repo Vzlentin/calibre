@@ -253,6 +253,9 @@ jobs:
           key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
       - name: Acquire + unconditionally validate inputs
         if: steps.present.outputs.ready == 'true'
+        env:
+          DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
+          GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
         run: |
           python3 .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
           python3 .github/scripts/stage3_vn2_data.py verify --target newcalibre/data/vn2 \
