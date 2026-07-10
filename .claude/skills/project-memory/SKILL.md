@@ -59,13 +59,11 @@ $OBSIDIAN_VAULT_PATH/Projects/<project>/
 └── solutions/<category>/           # per-problem knowledge-track docs
 ```
 
-This is the **complete** durable surface — do not create any permanent file or
-folder outside this set. `plans/` may contain many transient files and
-`solutions/<category>/` many durable per-problem docs; everything else listed is
-a single top-level file. (`CONCEPTS.md`, `deferred-findings-register.md`, and
-`solutions/` already exist on disk and are referenced by the project's
-`CLAUDE.md`; this section documents them as owned surfaces rather than admitting
-new free-form folders.)
+This is the default durable surface. A project may declare additional owned
+surfaces in its vault-side operating manual. Do not create a permanent file or
+folder outside this set unless that manual declares it. `plans/` may contain
+many transient files and `solutions/<category>/` many durable per-problem docs;
+everything else listed is a single top-level file.
 
 ## Plan store location
 
@@ -103,8 +101,8 @@ When a task reaches a terminal outcome, flip the plan's `status` in the resolved
 store to `shipped` (merged) or `failed` (the run stopped short):
 
 - **Vault mode:** set `status` on the vault plan, update `architecture.md` /
-  `lessons.md` where a durable decision or lesson warrants it, and commit +
-  push the vault (it is its own git repo).
+  `lessons.md` where a durable decision or lesson warrants it, and commit the
+  vault; push only if a remote is configured (it is its own git repo).
 - **Fallback mode:** set `status` on the `docs/plans/` plan — that file is the
   record. Do **not** write durable vault memory; there is no vault.
 
