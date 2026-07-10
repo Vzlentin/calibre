@@ -22,6 +22,8 @@ REQUIRED_FITTED_VALUE_COLUMNS: Final = (
 )
 FITTED_VALUE_KEY_COLUMNS: Final = (SERIES_KEY, TIMESTAMP, MODEL_NAME)
 _FLOAT64 = np.dtype("float64")
+_DATETIME_UNITS = frozenset({"s", "ms", "us", "ns"})
+_TRANSPORT_STRING_DTYPE = pd.StringDtype(storage="pyarrow")
 
 
 class FittedValuesError(ValueError):
@@ -54,6 +56,9 @@ class FittedValues:
             )
 
         normalized = frame.loc[:, list(REQUIRED_FITTED_VALUE_COLUMNS)].copy(deep=True)
+        normalized.attrs = {}
+        normalized.index.name = None
+        normalized.columns.name = None
         for column in (SERIES_KEY, MODEL_NAME):
             if not isinstance(normalized[column].dtype, pd.StringDtype):
                 raise FittedValuesError(
@@ -63,6 +68,12 @@ class FittedValues:
                 raise FittedValuesError(
                     f"fitted-values column {column!r} cannot be missing or empty"
                 )
+            try:
+                normalized[column] = normalized[column].astype(_TRANSPORT_STRING_DTYPE)
+            except (TypeError, UnicodeError, ValueError) as error:
+                raise FittedValuesError(
+                    f"fitted-values column {column!r} cannot normalize to Arrow-backed string dtype"
+                ) from error
         timestamp_dtype = normalized[TIMESTAMP].dtype
         if not isinstance(timestamp_dtype, np.dtype) or timestamp_dtype.kind != "M":
             raise FittedValuesError(
@@ -70,10 +81,23 @@ class FittedValues:
             )
         if normalized[TIMESTAMP].isna().any():
             raise FittedValuesError("fitted-values timestamps cannot be missing")
+        if str(timestamp_dtype) not in {f"datetime64[{unit}]" for unit in _DATETIME_UNITS}:
+            raise FittedValuesError(
+                "fitted-values timestamps must use datetime64[s], [ms], [us], or [ns]"
+            )
 
         for column in (ACTUAL_VALUE, FITTED_VALUE):
             dtype = normalized[column].dtype
-            if not is_numeric_dtype(dtype) or is_bool_dtype(dtype) or is_complex_dtype(dtype):
+            if (
+                not isinstance(dtype, np.dtype)
+                or not dtype.isnative
+                or not is_numeric_dtype(dtype)
+                or is_bool_dtype(dtype)
+                or is_complex_dtype(dtype)
+                or dtype.kind not in "iuf"
+                or (dtype.kind in "iu" and dtype.itemsize not in {1, 2, 4, 8})
+                or (dtype.kind == "f" and dtype.itemsize not in {2, 4, 8})
+            ):
                 raise FittedValuesError(f"fitted-values column {column!r} must be numeric")
             try:
                 normalized[column] = normalized[column].astype(_FLOAT64)
@@ -94,6 +118,9 @@ class FittedValues:
             ),
         )
         normalized = normalized.iloc[order].reset_index(drop=True)
+        normalized.attrs = {}
+        normalized.index.name = None
+        normalized.columns.name = None
         instance = object.__new__(cls)
         object.__setattr__(instance, "_frame", normalized)
         return instance

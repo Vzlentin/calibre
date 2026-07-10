@@ -15,6 +15,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.135",
     "pandas-stubs>=2.2",
     "pytest>=8.3",
     "ruff>=0.11",

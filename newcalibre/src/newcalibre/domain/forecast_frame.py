@@ -43,7 +43,10 @@ _UPPER_PREFIX = "upper_"
 _QUANTILE_PREFIX = "quantile_"
 _OPTIONAL_PREFIXES = (_LOWER_PREFIX, _UPPER_PREFIX, _QUANTILE_PREFIX)
 _OPTIONAL_STEMS = ("lower", "upper", "quantile")
+_FITTED_VALUE_SIDECAR_COLUMN = "fitted_value"
 _FLOAT64 = np.dtype("float64")
+_DATETIME_UNITS = frozenset({"s", "ms", "us", "ns"})
+_TRANSPORT_STRING_DTYPE = pd.StringDtype(storage="pyarrow")
 
 
 class ForecastFrameError(ValueError):
@@ -98,7 +101,13 @@ def validate_forecast_frame(
         raise ForecastFrameError(f"missing required columns: {', '.join(missing)}")
 
     optional_value_columns = _optional_value_columns(frame.columns)
+    if _FITTED_VALUE_SIDECAR_COLUMN in frame.columns:
+        raise ForecastFrameError("fitted values belong in the separate fitted-values sidecar")
+
     normalized = frame.copy(deep=True)
+    normalized.attrs = {}
+    normalized.index.name = None
+    normalized.columns.name = None
     _require_string(normalized, SERIES_KEY)
     _require_naive_datetime64(normalized, TARGET_TIMESTAMP)
     _normalize_float64(normalized, ACTUAL_VALUE)
@@ -108,6 +117,10 @@ def validate_forecast_frame(
     _require_string(normalized, MODEL_NAME)
     for column in optional_value_columns:
         _normalize_float64(normalized, column)
+
+    for column in normalized.columns:
+        if isinstance(normalized[column].dtype, pd.StringDtype):
+            _require_string(normalized, column)
 
     _validate_row_identity(normalized)
     _validate_target_timestamps(normalized, calendar)
@@ -185,6 +198,12 @@ def _looks_like_malformed_optional_name(column: str) -> bool:
 def _require_string(frame: pd.DataFrame, column: str) -> None:
     if not isinstance(frame[column].dtype, pd.StringDtype):
         raise ForecastFrameError(f"column {column!r} must have pandas string dtype")
+    try:
+        frame[column] = frame[column].astype(_TRANSPORT_STRING_DTYPE)
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise ForecastFrameError(
+            f"column {column!r} cannot normalize to Arrow-backed string dtype"
+        ) from error
 
 
 def _require_naive_datetime64(frame: pd.DataFrame, column: str) -> None:
@@ -193,16 +212,20 @@ def _require_naive_datetime64(frame: pd.DataFrame, column: str) -> None:
         raise ForecastFrameError(
             f"column {column!r} must have a timezone-naive numpy datetime64 dtype"
         )
+    if str(dtype) not in {f"datetime64[{unit}]" for unit in _DATETIME_UNITS}:
+        raise ForecastFrameError(f"column {column!r} must use datetime64[s], [ms], [us], or [ns]")
 
 
 def _require_integer(frame: pd.DataFrame, column: str) -> None:
     dtype = frame[column].dtype
-    if not is_integer_dtype(dtype) or is_bool_dtype(dtype):
+    if not isinstance(dtype, np.dtype) or not is_integer_dtype(dtype) or is_bool_dtype(dtype):
         raise ForecastFrameError(f"column {column!r} must have an integer dtype")
 
 
 def _normalize_float64(frame: pd.DataFrame, column: str) -> None:
     dtype = frame[column].dtype
+    if not isinstance(dtype, np.dtype):
+        raise ForecastFrameError(f"column {column!r} must have exact float64 or integer dtype")
     if dtype == _FLOAT64:
         return
     if is_integer_dtype(dtype) and not is_bool_dtype(dtype):

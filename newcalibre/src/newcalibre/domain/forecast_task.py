@@ -9,7 +9,7 @@ import struct
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Integral
-from typing import Final
+from typing import Final, cast
 
 import numpy as np
 import pandas as pd
@@ -30,6 +30,23 @@ _MAGIC = b"NCFT"
 _FORMAT_VERSION = 1
 _PREFIX = struct.Struct(">4sBQQQ")
 _DIGEST_SIZE = hashlib.sha256().digest_size
+_DATETIME_UNITS = frozenset({"s", "ms", "us", "ns"})
+_STRING_DTYPE_TOKEN = "string[pyarrow]"
+_TRANSPORT_STRING_DTYPE = pd.StringDtype(storage="pyarrow")
+_SUPPORTED_NUMERIC_TOKENS = frozenset(
+    {
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float32",
+        "float64",
+    }
+)
 
 
 class ForecastTaskError(ValueError):
@@ -70,6 +87,8 @@ class ForecastTask:
             calendar.require_member(origin, name="origin")
         except CalendarError as error:
             raise ForecastTaskError(str(error)) from error
+        if origin.unit not in _DATETIME_UNITS:
+            raise ForecastTaskError("origin must use timestamp resolution s, ms, us, or ns")
         if not isinstance(scope, Scope):
             raise ForecastTaskError("scope must be a Scope")
         if (
@@ -85,7 +104,7 @@ class ForecastTask:
             raise ForecastTaskError("a local task must contain exactly one series")
 
         try:
-            normalized_history = _canonicalize_panel_frame(
+            normalized_history, _ = _canonicalize_panel_frame(
                 history, calendar=calendar, allow_empty=True
             )
         except ValueError as error:
@@ -154,7 +173,7 @@ class ForecastTask:
 
     @property
     def model_config(self) -> Mapping[str, object]:
-        """Return an isolated copy of the finite JSON model configuration."""
+        """Return an isolated copy of adapter configuration, excluding engine scope."""
         return json.loads(_canonical_json(self._model_config))
 
     @property
@@ -164,7 +183,12 @@ class ForecastTask:
 
     @property
     def series_keys(self) -> tuple[str, ...]:
-        """Return the fixed task enumeration in UTF-8 byte order."""
+        """Return the fixed operational enumeration in UTF-8 byte order.
+
+        Consumers that derive identity from the participating series must
+        canonicalize the set independently. Presentation or processing order
+        is never itself an identity hash input.
+        """
         return self._series_keys
 
     def to_bytes(self) -> bytes:
@@ -220,26 +244,34 @@ class ForecastTask:
         if _canonical_json(header).encode() != header_bytes:
             raise ForecastTaskError("serialized task header is not canonical JSON")
 
-        history = _arrow_to_frame(history_bytes, surface="history")
+        history = _arrow_to_frame(
+            history_bytes,
+            schema=header["history_schema"],
+            surface="history",
+        )
         future = None
         if future_size:
-            future = _arrow_to_frame(future_bytes, surface="future exogenous")
+            future = _arrow_to_frame(
+                future_bytes,
+                schema=header["future_schema"],
+                surface="future exogenous",
+            )
         if _frame_schema(history) != header["history_schema"]:
             raise ForecastTaskError("serialized task history schema drifted")
         if (None if future is None else _frame_schema(future)) != header["future_schema"]:
             raise ForecastTaskError("serialized task future-exogenous schema drifted")
         try:
-            raw_origin = header["origin"]
-            if (
-                not isinstance(raw_origin, dict)
-                or set(raw_origin) != {"unit", "value"}
-                or raw_origin["unit"] not in {"s", "ms", "us", "ns"}
-                or not isinstance(raw_origin["value"], int)
-                or isinstance(raw_origin["value"], bool)
-            ):
+            origin = _timestamp_from_record(header["origin"], name="origin")
+            raw_calendar = header["calendar"]
+            if not isinstance(raw_calendar, dict) or set(raw_calendar) != {
+                "frequency",
+                "phase",
+            }:
                 raise TypeError
-            origin = pd.Timestamp(np.datetime64(raw_origin["value"], raw_origin["unit"]))
-            calendar = Calendar(header["calendar"])
+            calendar = Calendar(raw_calendar["frequency"])
+            raw_phase = raw_calendar["phase"]
+            if raw_phase is not None:
+                calendar = calendar.bind(_timestamp_from_record(raw_phase, name="calendar phase"))
             scope = Scope(header["scope"])
             raw_keys = header["series_keys"]
             if not isinstance(raw_keys, list) or any(not isinstance(key, str) for key in raw_keys):
@@ -265,9 +297,15 @@ def _canonical_model_config(model_config: Mapping[str, object]) -> dict[str, obj
     if not isinstance(model_config, Mapping):
         raise ForecastTaskError("model configuration must be a mapping")
     candidate = dict(model_config)
+    if "scope" in candidate:
+        raise ForecastTaskError(
+            "scope is engine configuration and cannot appear in model configuration"
+        )
     _require_json_value(candidate, path="model configuration")
     try:
-        return json.loads(_canonical_json(candidate))
+        canonical = _canonical_json(candidate)
+        canonical.encode("utf-8")
+        return json.loads(canonical)
     except (TypeError, ValueError) as error:
         raise ForecastTaskError("model configuration must contain finite JSON values") from error
 
@@ -303,23 +341,148 @@ def _canonical_json(value: object) -> str:
 
 
 def _frame_schema(frame: pd.DataFrame) -> list[dict[str, str]]:
-    return [{"dtype": str(frame[column].dtype), "name": column} for column in frame.columns]
+    return [
+        {"dtype": _dtype_token(frame[column].dtype), "name": column} for column in frame.columns
+    ]
+
+
+def _dtype_token(dtype: object) -> str:
+    if isinstance(dtype, pd.StringDtype) and dtype.storage == "pyarrow":
+        return _STRING_DTYPE_TOKEN
+    if isinstance(dtype, np.dtype):
+        return str(dtype)
+    raise ForecastTaskError(f"task frame contains unsupported dtype {dtype!s}")
 
 
 def _frame_to_arrow(frame: pd.DataFrame) -> bytes:
-    table = pa.Table.from_pandas(frame, preserve_index=False)
-    sink = pa.BufferOutputStream()
-    with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
-    return sink.getvalue().to_pybytes()
+    try:
+        source = pa.Table.from_pandas(frame, preserve_index=False)
+        arrays = [
+            (
+                pa.concat_arrays(column.chunks)
+                if column.num_chunks
+                else pa.array([], type=column.type)
+            )
+            for column in source.columns
+        ]
+        table = pa.Table.from_arrays(
+            arrays,
+            names=source.column_names,
+        )
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        return sink.getvalue().to_pybytes()
+    except (pa.ArrowException, OverflowError, TypeError, ValueError) as error:
+        raise ForecastTaskError("task frame cannot be encoded as Arrow") from error
 
 
-def _arrow_to_frame(data: bytes, *, surface: str) -> pd.DataFrame:
+def _arrow_to_frame(
+    data: bytes,
+    *,
+    schema: object,
+    surface: str,
+) -> pd.DataFrame:
+    manifest = _validate_frame_schema(schema, surface=surface)
     try:
         with pa.ipc.open_stream(data) as reader:
-            return reader.read_all().to_pandas()
+            table = reader.read_all()
     except (pa.ArrowException, OSError, TypeError, ValueError) as error:
         raise ForecastTaskError(f"serialized task {surface} Arrow stream is invalid") from error
+    if table.schema.metadata is not None:
+        raise ForecastTaskError(f"serialized task {surface} contains undeclared Arrow metadata")
+    if table.column_names != [entry["name"] for entry in manifest]:
+        raise ForecastTaskError(f"serialized task {surface} schema drifted")
+    for arrow_field, entry in zip(table.schema, manifest, strict=True):
+        if arrow_field.type != _arrow_type(entry["dtype"]):
+            raise ForecastTaskError(f"serialized task {surface} schema drifted")
+    try:
+        frame = table.to_pandas()
+        for entry in manifest:
+            column = entry["name"]
+            token = entry["dtype"]
+            dtype: object = (
+                _TRANSPORT_STRING_DTYPE if token == _STRING_DTYPE_TOKEN else np.dtype(token)
+            )
+            frame[column] = frame[column].astype(dtype)
+    except (pa.ArrowException, OverflowError, TypeError, ValueError) as error:
+        raise ForecastTaskError(f"serialized task {surface} schema cannot be restored") from error
+    frame.attrs = {}
+    frame.index.name = None
+    frame.columns.name = None
+    return frame
+
+
+def _validate_frame_schema(schema: object, *, surface: str) -> list[dict[str, str]]:
+    if not isinstance(schema, list):
+        raise ForecastTaskError(f"serialized task {surface} schema is invalid")
+    manifest: list[dict[str, str]] = []
+    names: set[str] = set()
+    for entry in schema:
+        if not isinstance(entry, dict):
+            raise ForecastTaskError(f"serialized task {surface} schema is invalid")
+        raw_entry = cast(dict[object, object], entry)
+        dtype = raw_entry.get("dtype")
+        name = raw_entry.get("name")
+        if (
+            set(raw_entry) != {"dtype", "name"}
+            or not isinstance(dtype, str)
+            or not isinstance(name, str)
+            or name in names
+        ):
+            raise ForecastTaskError(f"serialized task {surface} schema is invalid")
+        _arrow_type(dtype)
+        names.add(name)
+        manifest.append({"dtype": dtype, "name": name})
+    return manifest
+
+
+def _arrow_type(token: str) -> pa.DataType:
+    if token == _STRING_DTYPE_TOKEN:
+        return pa.large_string()
+    if token.startswith("datetime64["):
+        unit = token.removeprefix("datetime64[").removesuffix("]")
+        if token != f"datetime64[{unit}]" or unit not in _DATETIME_UNITS:
+            raise ForecastTaskError(f"serialized task schema dtype {token!r} is unsupported")
+        return pa.timestamp(unit)
+    if token not in _SUPPORTED_NUMERIC_TOKENS:
+        raise ForecastTaskError(f"serialized task schema dtype {token!r} is unsupported")
+    try:
+        dtype = np.dtype(token)
+        if not dtype.isnative or str(dtype) != token:
+            raise TypeError
+        return pa.from_numpy_dtype(dtype)
+    except (pa.ArrowException, TypeError, ValueError) as error:
+        raise ForecastTaskError(f"serialized task schema dtype {token!r} is unsupported") from error
+
+
+def _timestamp_record(timestamp: pd.Timestamp) -> dict[str, int | str]:
+    if timestamp.unit not in _DATETIME_UNITS:
+        raise ForecastTaskError("timestamp resolution must be s, ms, us, or ns")
+    return {
+        "unit": timestamp.unit,
+        "value": int(timestamp.asm8.astype("int64")),
+    }
+
+
+def _timestamp_from_record(record: object, *, name: str) -> pd.Timestamp:
+    if not isinstance(record, dict):
+        raise TypeError(f"{name} representation is invalid")
+    raw_record = cast(dict[object, object], record)
+    unit = raw_record.get("unit")
+    value = raw_record.get("value")
+    if (
+        set(raw_record) != {"unit", "value"}
+        or not isinstance(unit, str)
+        or unit not in _DATETIME_UNITS
+        or not isinstance(value, int)
+        or isinstance(value, bool)
+    ):
+        raise TypeError(f"{name} representation is invalid")
+    try:
+        return pd.Timestamp(value, unit=unit)
+    except (OverflowError, ValueError) as error:
+        raise TypeError(f"{name} representation is invalid") from error
 
 
 def _encode_task(task: ForecastTask) -> bytes:
@@ -327,17 +490,21 @@ def _encode_task(task: ForecastTask) -> bytes:
     future = b"" if task._future_exogenous is None else _frame_to_arrow(task._future_exogenous)
     header = _canonical_json(
         {
-            "calendar": task._calendar.frequency,
+            "calendar": {
+                "frequency": task._calendar.frequency,
+                "phase": (
+                    None
+                    if task._calendar.phase is None
+                    else _timestamp_record(task._calendar.phase)
+                ),
+            },
             "future_schema": (
                 None if task._future_exogenous is None else _frame_schema(task._future_exogenous)
             ),
             "history_schema": _frame_schema(task._history),
             "horizon": task._horizon,
             "model_config": task._model_config,
-            "origin": {
-                "unit": task._origin.unit,
-                "value": int(task._origin.asm8.astype("int64")),
-            },
+            "origin": _timestamp_record(task._origin),
             "scope": task._scope.value,
             "series_keys": list(task._series_keys),
         }

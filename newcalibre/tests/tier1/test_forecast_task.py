@@ -20,7 +20,9 @@ from newcalibre.domain import (
     OBSERVED_VALUE,
     SERIES_KEY,
     TIMESTAMP,
+    UNDECLARED_CENSORING,
     Calendar,
+    CensoringAssertion,
     ForecastTask,
     ForecastTaskError,
     Panel,
@@ -118,7 +120,8 @@ def test_panel_canonicalizes_rows_columns_and_numeric_values_without_fabricating
     assert panel.frame[OBSERVED_VALUE].isna().sum() == 1
     assert panel.frame[AVAILABILITY_BOUND].dtype == np.dtype("int64")
     assert panel.frame["planned_price"].dtype == np.dtype("int32")
-    assert panel.frame[CENSOR_STATUS].isna().sum() == 2
+    assert panel.frame[CENSOR_STATUS].tolist().count(UNDECLARED_CENSORING) == 2
+    assert panel.frame[CENSOR_STATUS].dtype.storage == "pyarrow"
 
 
 def test_panel_permutations_produce_the_same_canonical_snapshot() -> None:
@@ -139,13 +142,13 @@ def test_panel_permutations_produce_the_same_canonical_snapshot() -> None:
         (lambda frame: frame.drop(columns=OBSERVED_VALUE), "missing required"),
         (lambda frame: pd.concat([frame, frame.iloc[[0]]]), "duplicate"),
         (lambda frame: frame.assign(series_key=frame[SERIES_KEY].astype("object")), "string dtype"),
-        (lambda frame: frame.assign(value=True), "numeric and not boolean"),
-        (lambda frame: frame.assign(note="not numeric"), "exogenous.*numeric"),
+        (lambda frame: frame.assign(value=True), "native NumPy"),
+        (lambda frame: frame.assign(note="not numeric"), "exogenous.*native NumPy"),
         (
             lambda frame: frame.assign(
-                censor_status=pd.Series(["undeclared"] * len(frame), dtype="string")
+                censor_status=pd.Series(["unknown"] * len(frame), dtype="string")
             ),
-            "assertions",
+            "invalid values",
         ),
         (
             lambda frame: frame.assign(timestamp=frame[TIMESTAMP] + pd.Timedelta(days=1)),
@@ -179,14 +182,26 @@ def test_panel_uses_utf8_byte_order_for_exact_opaque_keys() -> None:
     assert Panel.from_frame(frame, calendar=Calendar("W-MON")).series_keys == ("z", "é")
 
 
-def test_panel_materializes_undeclared_censoring_as_nullable_missing_status() -> None:
-    frame = _panel_frame().drop(columns=CENSOR_STATUS)
+def test_panel_preserves_optional_censor_surface_and_records_undeclared_facts() -> None:
+    no_facts = Panel.from_frame(
+        _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND]),
+        calendar=Calendar("W-MON"),
+    )
+    bound_only = Panel.from_frame(
+        _panel_frame().drop(columns=CENSOR_STATUS),
+        calendar=Calendar("W-MON"),
+    )
 
-    canonical = Panel.from_frame(frame, calendar=Calendar("W-MON")).frame
-
-    assert isinstance(canonical[CENSOR_STATUS].dtype, pd.StringDtype)
-    assert canonical[CENSOR_STATUS].isna().all()
-    assert "undeclared" not in canonical[CENSOR_STATUS].dropna().tolist()
+    assert not no_facts.has_censoring_facts
+    assert CENSOR_STATUS not in no_facts.frame
+    assert bound_only.has_censoring_facts
+    assert bound_only.frame[CENSOR_STATUS].eq(UNDECLARED_CENSORING).all()
+    assert set(CensoringAssertion) == {
+        CensoringAssertion.CENSORED,
+        CensoringAssertion.UNCENSORED,
+    }
+    reingested = Panel.from_frame(bound_only.frame, calendar=bound_only.calendar)
+    pd.testing.assert_frame_equal(reingested.frame, bound_only.frame)
 
 
 def test_task_partition_filters_all_history_at_or_after_origin_before_adapter_visibility() -> None:
@@ -271,7 +286,7 @@ def test_future_exogenous_is_canonical_and_partitioned_with_tasks() -> None:
             _future().assign(series_key=pd.Series(["unknown", "sku-a"], dtype="string")),
             "unknown series",
         ),
-        (_future().assign(promotion=pd.Series([True, False])), "numeric and not boolean"),
+        (_future().assign(promotion=pd.Series([True, False])), "native NumPy"),
         (_future().assign(promotion=pd.Series([np.nan, 1.0])), "must be known"),
         (_future().drop(columns=KNOWN_AT), "missing columns"),
     ],

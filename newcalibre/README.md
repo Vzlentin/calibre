@@ -37,11 +37,19 @@ admissible range.
 
 All value columns are `float64`; integer values are copied and upcast at frame
 validation. Horizon steps retain any non-boolean integer dtype. Timestamps are
-timezone-naive NumPy `datetime64` values at their existing resolution, which
-keeps natural pandas 2 and pandas 3 construction valid without silent
-coercion. Calendar frequencies are provisionally explicit pandas strings:
-weekly data uses an anchor such as `W-MON`, never bare `W`. U3 owns the final
-calendar representation.
+timezone-naive NumPy `datetime64` values at `s`, `ms`, `us`, or `ns`
+resolution. A `Calendar` owns the normalized dataset frequency; weekly data
+uses an anchor such as `W-MON`, never bare `W`. Multiplied frequencies bind
+their stride phase to the panel's earliest canonical timestamp, and the same
+value validates every observation, task origin, and forecast target.
+
+Panels own canonical row and column order, deterministic series enumeration,
+and local/global task partitioning. Optional censoring facts use the two
+assertions `censored` and `uncensored`, with the separate literal `undeclared`
+as their recorded default. If neither censor metadata field is supplied, the
+canonical panel keeps the optional surface absent. Task transport uses a
+versioned, digested Arrow envelope with explicit primitive dtypes and no
+pandas metadata; materialization reproduces the public task frames exactly.
 
 The adapter protocol exposes `fit`, `predict`, `fitted_values`, `dump_state`,
 `load_state`, and `update`, with fitted values, native quantiles,
