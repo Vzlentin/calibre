@@ -15,6 +15,7 @@ import pandas as pd
 
 from newcalibre.domain import (
     ACTUAL_VALUE,
+    FRAME_KEY_COLUMNS,
     HORIZON_STEP,
     MODEL_NAME,
     ORIGIN,
@@ -342,29 +343,37 @@ class Ledger:
             raise LedgerError("forecast issuances must be keyed by forecast row key")
 
         columns = tuple(validated.columns)
-        staged_values: list[dict[str, object]] = []
-        staged_keys: list[ForecastKey] = []
+        staged: list[tuple[ForecastKey, dict[str, object]]] = []
         for values in validated.itertuples(index=False, name=None):
             by_name = dict(zip(columns, values, strict=True))
-            staged_values.append(by_name)
-            staged_keys.append(_forecast_key(by_name))
+            staged.append((_forecast_key(by_name), by_name))
 
         try:
             issuance_keys = set(issuances)
         except (TypeError, ValueError) as error:
             raise LedgerError("forecast issuance keys must be hashable row keys") from error
-        if issuance_keys != set(staged_keys):
+        staged_keys = {key for key, _ in staged}
+        if issuance_keys != staged_keys:
             raise LedgerError("forecast issuance keys must exactly match forecast frame keys")
-        duplicate = next((key for key in staged_keys if key in self._forecast_keys), None)
+        duplicate = next((key for key, _ in staged if key in self._forecast_keys), None)
         if duplicate is not None:
             raise LedgerError(f"duplicate forecast key: {duplicate!r}")
 
         staged_rows: list[ForecastRow] = []
-        for key, values in zip(staged_keys, staged_values, strict=True):
+        bound_columns_by_descriptor: dict[
+            tuple[GuaranteeDescriptor, GuaranteedSide | None], tuple[str, ...]
+        ] = {}
+        available_columns = frozenset(columns)
+        for key, values in staged:
             issuance = issuances[key]
             if not isinstance(issuance, ForecastIssuance):
                 raise LedgerError("each forecast issuance must be a ForecastIssuance")
-            payload_is_finite = _bound_payload_is_finite(values, issuance)
+            descriptor_key = (issuance.descriptor, issuance.guaranteed_side)
+            bound_columns = bound_columns_by_descriptor.get(descriptor_key)
+            if bound_columns is None:
+                bound_columns = _bound_columns(available_columns, issuance)
+                bound_columns_by_descriptor[descriptor_key] = bound_columns
+            payload_is_finite = _bound_payload_is_finite(values, bound_columns)
             if payload_is_finite is not issuance.bounds_finite:
                 raise LedgerError("issued bounds finiteness does not match the forecast payload")
             staged_rows.append(ForecastRow._from_validated_values(values, issuance=issuance))
@@ -379,9 +388,10 @@ class Ledger:
         for row in staged:
             if row.session != self._session:
                 raise LedgerError("order row session does not match the ledger session")
-            if row.key in self._order_keys or row.key in staged_keys:
-                raise LedgerError(f"duplicate order key: {row.key!r}")
-            staged_keys.add(row.key)
+            key = row.key
+            if key in self._order_keys or key in staged_keys:
+                raise LedgerError(f"duplicate order key: {key!r}")
+            staged_keys.add(key)
         self._orders.extend(staged)
         self._order_keys.update(staged_keys)
 
@@ -392,9 +402,10 @@ class Ledger:
         for row in staged:
             if row.session != self._session:
                 raise LedgerError("settlement row session does not match the ledger session")
-            if row.key in self._settlement_keys or row.key in staged_keys:
-                raise LedgerError(f"duplicate settlement key: {row.key!r}")
-            staged_keys.add(row.key)
+            key = row.key
+            if key in self._settlement_keys or key in staged_keys:
+                raise LedgerError(f"duplicate settlement key: {key!r}")
+            staged_keys.add(key)
         self._settlements.extend(staged)
         self._settlement_keys.update(staged_keys)
 
@@ -417,33 +428,35 @@ def _stage_rows[T](
 
 
 def _forecast_key(values: Mapping[str, object]) -> ForecastKey:
-    return (
-        cast(str, values[SERIES_KEY]),
-        cast(pd.Timestamp, values[ORIGIN]),
-        cast(int, values[HORIZON_STEP]),
-        cast(str, values[MODEL_NAME]),
-    )
+    return cast(ForecastKey, tuple(values[column] for column in FRAME_KEY_COLUMNS))
+
+
+def _bound_columns(
+    available_columns: frozenset[str],
+    issuance: ForecastIssuance,
+) -> tuple[str, ...]:
+    claim = issuance.descriptor.type.claim
+
+    if claim is GuaranteeClaim.ONE_SIDED_COVERAGE:
+        lower, upper = interval_columns(issuance.descriptor.level)
+        column = lower if issuance.guaranteed_side is GuaranteedSide.LOWER else upper
+        return (column,)
+    if claim is GuaranteeClaim.TWO_SIDED_COVERAGE:
+        return interval_columns(issuance.descriptor.level)
+
+    quantile = quantile_column(issuance.descriptor.level)
+    if quantile in available_columns:
+        return (quantile,)
+    lower, upper = interval_columns(issuance.descriptor.level)
+    if lower in available_columns and upper in available_columns:
+        return (lower, upper)
+    return ()
 
 
 def _bound_payload_is_finite(
     values: Mapping[str, object],
-    issuance: ForecastIssuance,
+    bound_columns: tuple[str, ...],
 ) -> bool:
-    lower, upper = interval_columns(issuance.descriptor.level)
-    quantile = quantile_column(issuance.descriptor.level)
-    claim = issuance.descriptor.type.claim
-
-    if claim is GuaranteeClaim.ONE_SIDED_COVERAGE:
-        column = lower if issuance.guaranteed_side is GuaranteedSide.LOWER else upper
-        bound_columns = (column,)
-    elif claim is GuaranteeClaim.TWO_SIDED_COVERAGE:
-        bound_columns = (lower, upper)
-    elif quantile in values:
-        bound_columns = (quantile,)
-    elif lower in values and upper in values:
-        bound_columns = (lower, upper)
-    else:
-        bound_columns = ()
     return bool(bound_columns) and all(
         column in values and _is_finite_real(values[column]) for column in bound_columns
     )
@@ -489,14 +502,13 @@ def _require_session(session: object) -> None:
         raise LedgerError("session must be a SessionIdentity")
 
 
-def _require_text(value: object, *, name: str) -> str:
+def _require_text(value: object, *, name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise LedgerError(f"{name} must be a non-empty string")
     try:
         value.encode("utf-8")
     except UnicodeError as error:
         raise LedgerError(f"{name} must be valid UTF-8") from error
-    return value
 
 
 def _require_timestamp(value: object, *, name: str) -> None:

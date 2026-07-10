@@ -10,6 +10,13 @@ import pandas as pd
 import pytest
 
 from newcalibre.domain import (
+    ACTUAL_VALUE,
+    HORIZON_STEP,
+    MODEL_NAME,
+    ORIGIN,
+    POINT_FORECAST,
+    SERIES_KEY,
+    TARGET_TIMESTAMP,
     Calendar,
     DecisionScope,
     DecisionScopeKind,
@@ -35,7 +42,7 @@ from newcalibre.ledger import (
 )
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
-ORIGIN = pd.Timestamp("2026-01-05")
+ISSUE_ORIGIN = pd.Timestamp("2026-01-05")
 ARRIVAL = pd.Timestamp("2026-01-07")
 
 
@@ -90,13 +97,13 @@ def _issuance(
 def _frame(*, actual: float | None = None) -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "series_key": pd.Series(["sku-a", "sku-b"], dtype="string"),
-            "target_timestamp": pd.to_datetime(["2026-01-05", "2026-01-06"]),
-            "actual_value": pd.Series([actual, actual], dtype="float64"),
-            "point_forecast": pd.Series([10.0, 20.0], dtype="float64"),
-            "horizon_step": pd.Series([1, 2], dtype="int64"),
-            "origin": pd.to_datetime([ORIGIN, ORIGIN]),
-            "model_name": pd.Series(["seasonal", "seasonal"], dtype="string"),
+            SERIES_KEY: pd.Series(["sku-a", "sku-b"], dtype="string"),
+            TARGET_TIMESTAMP: pd.to_datetime(["2026-01-05", "2026-01-06"]),
+            ACTUAL_VALUE: pd.Series([actual, actual], dtype="float64"),
+            POINT_FORECAST: pd.Series([10.0, 20.0], dtype="float64"),
+            HORIZON_STEP: pd.Series([1, 2], dtype="int64"),
+            ORIGIN: pd.to_datetime([ISSUE_ORIGIN, ISSUE_ORIGIN]),
+            MODEL_NAME: pd.Series(["seasonal", "seasonal"], dtype="string"),
             quantile_column(0.5): pd.Series([10.0, 20.0], dtype="float64"),
             "adapter_note": pd.Series(["first", "second"], dtype="string"),
         }
@@ -104,7 +111,7 @@ def _frame(*, actual: float | None = None) -> pd.DataFrame:
 
 
 def _forecast_key(series: str, step: int) -> tuple[str, pd.Timestamp, int, str]:
-    return (series, ORIGIN, step, "seasonal")
+    return (series, ISSUE_ORIGIN, step, "seasonal")
 
 
 def _issuances() -> dict[tuple[str, pd.Timestamp, int, str], ForecastIssuance]:
@@ -117,7 +124,7 @@ def _issuances() -> dict[tuple[str, pd.Timestamp, int, str], ForecastIssuance]:
 def _order(
     *,
     series: str = "sku-a",
-    origin: pd.Timestamp = ORIGIN,
+    origin: pd.Timestamp = ISSUE_ORIGIN,
     arrival: pd.Timestamp = ARRIVAL,
     quantity: float = 3.0,
     session: SessionIdentity | None = None,
@@ -174,7 +181,7 @@ def test_public_ledger_round_trips_all_three_row_families_in_append_order() -> N
     assert ledger.forecasts[0].bounds_finite is True
     assert ledger.forecasts[0].bounds_null_reason is None
     assert [row.quantity for row in ledger.orders] == [0.0, 4.0]
-    assert ledger.orders[0].key == (_session(), "sku-a", ORIGIN, "seasonal")
+    assert ledger.orders[0].key == (_session(), "sku-a", ISSUE_ORIGIN, "seasonal")
     assert ledger.settlements == (_settlement(),)
     assert ledger.settlements[0].key == (_session(), "sku-a", ARRIVAL)
 
@@ -335,17 +342,16 @@ def test_append_consumes_a_new_chunk_once_without_replacing_prior_rows() -> None
     ledger = Ledger(session=_session())
     first = _order()
     ledger.append_orders([first])
-    chunk = _OnePassOrders(
-        (
-            _order(series="sku-b", quantity=1.0),
-            _order(series="sku-a", origin=pd.Timestamp("2026-01-06"), quantity=2.0),
-        )
+    new_rows = (
+        _order(series="sku-b", quantity=1.0),
+        _order(series="sku-a", origin=pd.Timestamp("2026-01-06"), quantity=2.0),
     )
+    chunk = _OnePassOrders(new_rows)
 
     ledger.append_orders(chunk)
 
     assert chunk.iterations == 1
-    assert ledger.orders == (first, *chunk._rows)
+    assert ledger.orders == (first, *new_rows)
 
 
 def test_open_orders_and_realized_cost_are_derivable_from_public_rows_only() -> None:
