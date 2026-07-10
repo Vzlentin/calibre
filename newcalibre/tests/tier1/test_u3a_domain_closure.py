@@ -43,6 +43,7 @@ from newcalibre.domain import (
 )
 
 pytestmark = pytest.mark.tier1
+FRAME_CALENDAR = Calendar("W-MON").bind(pd.Timestamp("2026-01-19"))
 
 
 def _panel_frame(*, string_storage: str = "pyarrow") -> pd.DataFrame:
@@ -195,9 +196,98 @@ def test_weekly_anchor_refuses_a_monday_under_sunday_calendar() -> None:
         Panel.from_frame(frame, calendar=Calendar("W-SUN"))
 
 
-def test_unbound_multiplied_calendar_cannot_answer_membership_without_dataset_phase() -> None:
+def test_unbound_calendar_cannot_answer_membership_without_dataset_phase() -> None:
     with pytest.raises(CalendarError, match="bound to a dataset phase"):
-        Calendar("2D").contains(pd.Timestamp("2026-01-05"))
+        Calendar("D").contains(pd.Timestamp("2026-01-05"))
+
+
+@pytest.mark.parametrize(
+    ("frequency", "valid", "invalid_observation", "invalid_origin"),
+    [
+        (
+            "D",
+            ["2026-01-05 00:00", "2026-01-06 00:00"],
+            "2026-01-06 12:00",
+            "2026-01-07 12:00",
+        ),
+        (
+            "W-MON",
+            ["2026-01-05 00:00", "2026-01-12 00:00"],
+            "2026-01-12 12:00",
+            "2026-01-19 12:00",
+        ),
+        (
+            "h",
+            ["2026-01-05 00:00", "2026-01-05 01:00"],
+            "2026-01-05 01:30",
+            "2026-01-05 02:30",
+        ),
+    ],
+)
+def test_every_calendar_frequency_enforces_observation_and_origin_clock_phase(
+    frequency: str,
+    valid: list[str],
+    invalid_observation: str,
+    invalid_origin: str,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            SERIES_KEY: pd.Series(["sku", "sku"], dtype="string"),
+            TIMESTAMP: pd.to_datetime(valid),
+            OBSERVED_VALUE: pd.Series([1.0, 2.0], dtype="float64"),
+        }
+    )
+    panel = Panel.from_frame(frame, calendar=Calendar(frequency))
+    bad_observation = pd.concat(
+        [
+            frame,
+            pd.DataFrame(
+                {
+                    SERIES_KEY: pd.Series(["sku"], dtype="string"),
+                    TIMESTAMP: pd.to_datetime([invalid_observation]),
+                    OBSERVED_VALUE: pd.Series([3.0], dtype="float64"),
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    assert panel.calendar.phase == pd.Timestamp(valid[0])
+    with pytest.raises(PanelError, match="does not lie on calendar"):
+        Panel.from_frame(bad_observation, calendar=Calendar(frequency))
+    with pytest.raises(PanelError, match="does not lie on calendar"):
+        panel.forecast_tasks(
+            origin=pd.Timestamp(invalid_origin),
+            horizon=1,
+            scope=Scope.GLOBAL,
+            model_config={},
+        )
+
+
+def test_fixed_tick_membership_is_constant_space_for_far_timestamps() -> None:
+    phase = pd.Timestamp(np.datetime64("1900-01-01T00:00:00", "s"))
+    calendar = Calendar("2s").bind(phase)
+    far_member = pd.Timestamp(np.datetime64("9999-12-31T23:59:58", "s"))
+
+    assert calendar.contains(far_member)
+    assert not calendar.contains(far_member + pd.Timedelta(seconds=1))
+
+
+def test_nonfixed_advance_and_retreat_remain_on_the_phase_bound_grid() -> None:
+    phase = pd.Timestamp("2026-01-05 09:00")
+    calendar = Calendar("bh").bind(phase)
+
+    next_hour = calendar.advance(phase, 1)
+
+    assert next_hour == pd.Timestamp("2026-01-05 10:00")
+    assert calendar.contains(next_hour)
+    assert calendar.retreat(next_hour, 1) == phase
+
+    closing_phase = pd.Timestamp("2026-01-05 17:00")
+    closing_calendar = Calendar("bh").bind(closing_phase)
+    previous_hour = closing_calendar.retreat(closing_phase, 1)
+    assert closing_calendar.contains(previous_hour)
+    assert closing_calendar.advance(previous_hour, 1) == closing_phase
 
 
 def test_panel_refuses_a_prebound_noncanonical_phase() -> None:
@@ -321,11 +411,19 @@ def test_panel_rejects_invalid_status_bound_and_exogenous_values(
         Panel.from_frame(mutation(_panel_frame()), calendar=Calendar("W-MON"))
 
 
-def test_panel_rejects_sparse_numeric_domain_values_before_transport() -> None:
-    frame = _panel_frame()
-    frame[OBSERVED_VALUE] = pd.Series([3, 1, 1, 2, 2, 3], dtype=pd.SparseDtype("float64"))
-    with pytest.raises(PanelError, match="native NumPy"):
-        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+def test_sparse_numeric_values_densify_losslessly_to_the_same_task_bytes() -> None:
+    dense = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
+    dense[OBSERVED_VALUE] = pd.Series([3, 0, 1, 2, 0, 3], dtype="float32")
+    sparse = dense.copy(deep=True)
+    sparse[OBSERVED_VALUE] = pd.Series(
+        [3, 0, 1, 2, 0, 3], dtype=pd.SparseDtype("float32", fill_value=0)
+    )
+
+    sparse_task = _task(frame=sparse)
+    dense_task = _task(frame=dense)
+
+    assert sparse_task.history[OBSERVED_VALUE].dtype == np.dtype("float32")
+    assert sparse_task.to_bytes() == dense_task.to_bytes()
 
 
 @pytest.mark.parametrize(
@@ -339,6 +437,7 @@ def test_panel_rejects_sparse_numeric_domain_values_before_transport() -> None:
         "uint16",
         "uint32",
         "uint64",
+        "float16",
         "float32",
         "float64",
     ],
@@ -351,6 +450,76 @@ def test_every_accepted_numeric_primitive_round_trips_exactly(dtype: str) -> Non
 
     assert restored.history[OBSERVED_VALUE].dtype == np.dtype(dtype)
     pd.testing.assert_frame_equal(restored.history, task.history)
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "Float32",
+        "Float64",
+    ],
+)
+def test_nullable_numeric_dtypes_round_trip_with_missing_values(dtype: str) -> None:
+    frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
+    frame[OBSERVED_VALUE] = pd.Series([3, pd.NA, 1, 2, 2, 3], dtype=dtype)
+    task = _task(frame=frame)
+    restored = ForecastTask.from_bytes(task.to_bytes())
+
+    assert str(restored.history[OBSERVED_VALUE].dtype) == dtype
+    pd.testing.assert_frame_equal(restored.history, task.history)
+
+
+def test_nullable_mask_payloads_canonicalize_to_identical_task_bytes() -> None:
+    first = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
+    second = first.copy(deep=True)
+    mask = np.array([False, True, False, False, False, False])
+    first[OBSERVED_VALUE] = pd.Series(
+        pd.arrays.IntegerArray(np.array([3, 99, 1, 2, 2, 3], dtype="int16"), mask)
+    )
+    second[OBSERVED_VALUE] = pd.Series(
+        pd.arrays.IntegerArray(np.array([3, 0, 1, 2, 2, 3], dtype="int16"), mask)
+    )
+
+    assert _task(frame=first).to_bytes() == _task(frame=second).to_bytes()
+
+
+def test_nullable_uint64_round_trip_preserves_values_above_float_precision() -> None:
+    frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
+    frame[OBSERVED_VALUE] = pd.Series(
+        [pd.NA, 2**64 - 1, 2**63 + 1, 2**63, 2, 3],
+        dtype="UInt64",
+    )
+    task = _task(frame=frame)
+
+    restored = ForecastTask.from_bytes(task.to_bytes())
+
+    pd.testing.assert_frame_equal(restored.history, task.history)
+    assert 2**64 - 1 in restored.history[OBSERVED_VALUE].tolist()
+    assert 2**63 + 1 in restored.history[OBSERVED_VALUE].tolist()
+
+
+def test_nullable_float_canonicalizes_valid_nan_to_the_missing_representation() -> None:
+    valid_nan = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
+    missing = valid_nan.copy(deep=True)
+    values = np.array([3.0, np.nan, 0.0, 2.0, 2.0, 3.0], dtype="float32")
+    mask = np.array([False, False, True, False, False, False])
+    valid_nan[OBSERVED_VALUE] = pd.Series(pd.arrays.FloatingArray(values, mask))
+    missing[OBSERVED_VALUE] = pd.Series(pd.arrays.FloatingArray(values, mask | np.isnan(values)))
+
+    valid_nan_task = _task(frame=valid_nan)
+    missing_task = _task(frame=missing)
+    restored = ForecastTask.from_bytes(valid_nan_task.to_bytes())
+
+    assert valid_nan_task.to_bytes() == missing_task.to_bytes()
+    pd.testing.assert_frame_equal(restored.history, valid_nan_task.history)
 
 
 def test_python_string_storage_canonicalizes_to_arrow_and_round_trips() -> None:
@@ -418,12 +587,17 @@ def test_task_bytes_ignore_arrow_string_chunking_and_slice_offsets() -> None:
     assert _task(frame=sliced).to_bytes() == _task(frame=direct).to_bytes()
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("dtype", ["float16", "float32", "float64"])
 def test_task_bytes_normalize_equivalent_nan_payloads(dtype: str) -> None:
     standard = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     custom = standard.copy(deep=True)
     standard_values = np.array([3, np.nan, 1, 2, 2, 3], dtype=dtype)
-    if dtype == "float32":
+    if dtype == "float16":
+        custom_values = np.array(
+            [0x4200, 0x7E01, 0x3C00, 0x4000, 0x4000, 0x4200],
+            dtype="uint16",
+        ).view("float16")
+    elif dtype == "float32":
         custom_values = np.array(
             [0x40400000, 0x7FC00001, 0x3F800000, 0x40000000, 0x40000000, 0x40400000],
             dtype="uint32",
@@ -446,7 +620,7 @@ def test_task_bytes_normalize_equivalent_nan_payloads(dtype: str) -> None:
     assert _task(frame=custom).to_bytes() == _task(frame=standard).to_bytes()
 
 
-@pytest.mark.parametrize("dtype", ["float16", "longdouble"])
+@pytest.mark.parametrize("dtype", ["longdouble"])
 def test_panel_rejects_numeric_dtypes_without_exact_arrow_round_trip(dtype: str) -> None:
     frame = _panel_frame()
     frame[OBSERVED_VALUE] = np.array([3, 1, 1, 2, 2, 3], dtype=dtype)
@@ -637,14 +811,14 @@ def test_forecast_frame_rejects_mistyped_optional_forecast_values(column: str) -
     frame[column] = pd.Series(["bad"], dtype="string")
 
     with pytest.raises(ForecastFrameError, match=column):
-        validate_forecast_frame(frame, calendar=Calendar("W-MON"))
+        validate_forecast_frame(frame, calendar=FRAME_CALENDAR)
 
 
 def test_forecast_and_fitted_surfaces_reject_windows_longdouble_alias() -> None:
     forecast = _forecast_frame()
     forecast[POINT_FORECAST] = np.array([2.0], dtype=np.longdouble)
     with pytest.raises(ForecastFrameError, match="exact float64"):
-        validate_forecast_frame(forecast, calendar=Calendar("W-MON"))
+        validate_forecast_frame(forecast, calendar=FRAME_CALENDAR)
 
     fitted = _fitted_frame()
     fitted[FITTED_VALUE] = np.array([1.1], dtype=np.longdouble)
@@ -656,19 +830,19 @@ def test_forecast_frame_and_fitted_values_reject_each_others_surfaces() -> None:
     forecast = _forecast_frame()
     forecast[FITTED_VALUE] = pd.Series([1.5], dtype="float64")
     with pytest.raises(ForecastFrameError, match="separate fitted-values sidecar"):
-        validate_forecast_frame(forecast, calendar=Calendar("W-MON"))
+        validate_forecast_frame(forecast, calendar=FRAME_CALENDAR)
 
     with pytest.raises(FittedValuesError, match="exact schema"):
         FittedValues.from_frame(_forecast_frame())
     with pytest.raises(ForecastFrameError, match="missing required columns"):
-        validate_forecast_frame(_fitted_frame(), calendar=Calendar("W-MON"))
+        validate_forecast_frame(_fitted_frame(), calendar=FRAME_CALENDAR)
 
 
 def test_public_frame_strings_are_arrow_backed_and_sidecar_metadata_is_stripped() -> None:
     forecast = _forecast_frame()
     forecast[SERIES_KEY] = forecast[SERIES_KEY].astype(pd.StringDtype(storage="python"))
     forecast.flags.allows_duplicate_labels = False
-    validated = validate_forecast_frame(forecast, calendar=Calendar("W-MON"))
+    validated = validate_forecast_frame(forecast, calendar=FRAME_CALENDAR)
     assert validated[SERIES_KEY].dtype.storage == "pyarrow"
     assert validated.flags.allows_duplicate_labels
 
@@ -689,7 +863,7 @@ def test_public_frame_strings_are_arrow_backed_and_sidecar_metadata_is_stripped(
 def test_cross_surface_fixture_still_covers_every_forecast_required_column(column: str) -> None:
     frame = _forecast_frame().drop(columns=column)
     with pytest.raises(ForecastFrameError, match="missing required columns"):
-        validate_forecast_frame(frame, calendar=Calendar("W-MON"))
+        validate_forecast_frame(frame, calendar=FRAME_CALENDAR)
 
 
 def test_invalid_scope_objects_still_fail_before_adapter_configuration() -> None:

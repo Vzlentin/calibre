@@ -94,7 +94,11 @@ class SeasonalNaiveAdapter:
         """Emit a deterministic validated frame from retained seasonal phases."""
         retained = self._require_fitted()
         self._require_matching_config(task)
-        if task.origin != self._fit_origin or task.calendar != self._fit_calendar:
+        if (
+            task.origin != self._fit_origin
+            or self._fit_calendar is None
+            or not task.calendar.shares_grid_with(self._fit_calendar)
+        ):
             raise AdapterDataError("predict task origin and calendar must match the fitted task")
 
         predict_season = self._extract_retained_season(task)

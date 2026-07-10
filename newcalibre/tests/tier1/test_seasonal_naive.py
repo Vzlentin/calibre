@@ -111,7 +111,7 @@ def test_m7_walkthrough_emits_the_hand_checkable_validated_frame() -> None:
 
     pd.testing.assert_frame_equal(
         frame,
-        validate_forecast_frame(frame, calendar=Calendar("D")),
+        validate_forecast_frame(frame, calendar=task.calendar),
     )
     assert frame[SERIES_KEY].tolist() == ["sku-a"] * 4
     assert frame[TARGET_TIMESTAMP].tolist() == [

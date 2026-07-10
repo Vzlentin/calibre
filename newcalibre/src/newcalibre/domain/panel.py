@@ -38,9 +38,24 @@ _SUPPORTED_NUMERIC_DTYPE_NUMS: Final = frozenset(
         "uint16",
         "uint32",
         "uint64",
+        "float16",
         "float32",
         "float64",
     )
+)
+_NULLABLE_NUMERIC_DTYPE_NAMES: Final = frozenset(
+    {
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "Float32",
+        "Float64",
+    }
 )
 
 
@@ -207,7 +222,7 @@ def _canonicalize_panel_frame(
     if normalized.duplicated(subset=list(PANEL_KEY_COLUMNS)).any():
         raise PanelError("panel contains a duplicate series/timestamp key")
     effective_calendar = calendar
-    if bind_calendar and calendar.requires_phase:
+    if bind_calendar:
         try:
             effective_calendar = calendar.bind(pd.Timestamp(normalized[TIMESTAMP].min()))
         except CalendarError as error:
@@ -357,6 +372,19 @@ def _require_naive_datetime(frame: pd.DataFrame, column: str, *, surface: str) -
 
 def _require_numeric(frame: pd.DataFrame, column: str, *, surface: str) -> None:
     dtype = frame[column].dtype
+    if isinstance(dtype, pd.SparseDtype):
+        try:
+            frame[column] = frame[column].sparse.to_dense()
+        except (TypeError, ValueError) as error:
+            raise PanelError(
+                f"{surface} column {column!r} cannot densify its sparse numeric values"
+            ) from error
+        _require_numeric(frame, column, surface=surface)
+        return
+    nullable_name = _nullable_numeric_dtype_name(dtype)
+    if nullable_name is not None:
+        _canonicalize_nullable_numeric(frame, column, dtype_name=nullable_name)
+        return
     if (
         not isinstance(dtype, np.dtype)
         or not dtype.isnative
@@ -368,6 +396,28 @@ def _require_numeric(frame: pd.DataFrame, column: str, *, surface: str) -> None:
         )
     if dtype.kind == "f" and frame[column].isna().any():
         frame.loc[frame[column].isna(), column] = np.nan
+
+
+def _nullable_numeric_dtype_name(dtype: object) -> str | None:
+    name = str(dtype)
+    if name not in _NULLABLE_NUMERIC_DTYPE_NAMES:
+        return None
+    expected = pd.api.types.pandas_dtype(name)
+    return name if type(dtype) is type(expected) else None
+
+
+def _canonicalize_nullable_numeric(frame: pd.DataFrame, column: str, *, dtype_name: str) -> None:
+    numpy_dtype = np.dtype(dtype_name.lower())
+    extension = frame[column].array
+    mask = np.asarray(extension.isna(), dtype=bool)
+    values = extension.to_numpy(dtype=numpy_dtype, na_value=0, copy=True)
+    if numpy_dtype.kind == "f":
+        mask |= np.isnan(values)
+        values[mask] = 0
+        canonical = pd.arrays.FloatingArray(values, mask)
+    else:
+        canonical = pd.arrays.IntegerArray(values, mask)
+    frame[column] = pd.Series(canonical, index=frame.index, name=column)
 
 
 def _data_only_copy(frame: pd.DataFrame) -> pd.DataFrame:

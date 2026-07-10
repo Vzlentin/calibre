@@ -43,10 +43,41 @@ _SUPPORTED_NUMERIC_TOKENS = frozenset(
         "uint16",
         "uint32",
         "uint64",
+        "float16",
         "float32",
         "float64",
     }
 )
+_NULLABLE_NUMERIC_DTYPES = {
+    f"nullable:{name}": pd.api.types.pandas_dtype(name)
+    for name in (
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "Float32",
+        "Float64",
+    )
+}
+_NULLABLE_NUMPY_DTYPES = {
+    token: np.dtype(name.lower())
+    for token, name in (
+        ("nullable:Int8", "int8"),
+        ("nullable:Int16", "int16"),
+        ("nullable:Int32", "int32"),
+        ("nullable:Int64", "int64"),
+        ("nullable:UInt8", "uint8"),
+        ("nullable:UInt16", "uint16"),
+        ("nullable:UInt32", "uint32"),
+        ("nullable:UInt64", "uint64"),
+        ("nullable:Float32", "float32"),
+        ("nullable:Float64", "float64"),
+    )
+}
 
 
 class ForecastTaskError(ValueError):
@@ -349,6 +380,10 @@ def _frame_schema(frame: pd.DataFrame) -> list[dict[str, str]]:
 def _dtype_token(dtype: object) -> str:
     if isinstance(dtype, pd.StringDtype) and dtype.storage == "pyarrow":
         return _STRING_DTYPE_TOKEN
+    nullable_token = f"nullable:{dtype!s}"
+    expected_nullable = _NULLABLE_NUMERIC_DTYPES.get(nullable_token)
+    if expected_nullable is not None and type(dtype) is type(expected_nullable):
+        return nullable_token
     if isinstance(dtype, np.dtype):
         return str(dtype)
     raise ForecastTaskError(f"task frame contains unsupported dtype {dtype!s}")
@@ -358,7 +393,7 @@ def _frame_to_arrow(frame: pd.DataFrame) -> bytes:
     try:
         source = pa.Table.from_pandas(frame, preserve_index=False)
         arrays = [
-            (
+            _canonical_arrow_array(
                 pa.concat_arrays(column.chunks)
                 if column.num_chunks
                 else pa.array([], type=column.type)
@@ -375,6 +410,16 @@ def _frame_to_arrow(frame: pd.DataFrame) -> bytes:
         return sink.getvalue().to_pybytes()
     except (pa.ArrowException, OverflowError, TypeError, ValueError) as error:
         raise ForecastTaskError("task frame cannot be encoded as Arrow") from error
+
+
+def _canonical_arrow_array(array: pa.Array) -> pa.Array:
+    if not array.null_count:
+        return array
+    if pa.types.is_integer(array.type) or pa.types.is_floating(array.type):
+        mask = array.is_null().to_numpy(zero_copy_only=False)
+        values = array.fill_null(0).to_numpy(zero_copy_only=False)
+        return pa.array(values, mask=mask, type=array.type, from_pandas=False)
+    return pa.array(array.to_pylist(), type=array.type)
 
 
 def _arrow_to_frame(
@@ -397,14 +442,14 @@ def _arrow_to_frame(
         if arrow_field.type != _arrow_type(entry["dtype"]):
             raise ForecastTaskError(f"serialized task {surface} schema drifted")
     try:
-        frame = table.to_pandas()
-        for entry in manifest:
-            column = entry["name"]
-            token = entry["dtype"]
-            dtype: object = (
-                _TRANSPORT_STRING_DTYPE if token == _STRING_DTYPE_TOKEN else np.dtype(token)
+        columns = {
+            entry["name"]: _arrow_column_to_series(
+                table.column(entry["name"]),
+                token=entry["dtype"],
             )
-            frame[column] = frame[column].astype(dtype)
+            for entry in manifest
+        }
+        frame = pd.DataFrame(columns)
     except (pa.ArrowException, OverflowError, TypeError, ValueError) as error:
         raise ForecastTaskError(f"serialized task {surface} schema cannot be restored") from error
     frame = frame.set_flags(allows_duplicate_labels=True)
@@ -412,6 +457,28 @@ def _arrow_to_frame(
     frame.index.name = None
     frame.columns.name = None
     return frame
+
+
+def _arrow_column_to_series(column: pa.ChunkedArray, *, token: str) -> pd.Series:
+    array = pa.concat_arrays(column.chunks) if column.num_chunks else pa.array([], type=column.type)
+    if token == _STRING_DTYPE_TOKEN:
+        return pd.Series(array.to_pylist(), dtype=_TRANSPORT_STRING_DTYPE)
+    nullable_dtype = _NULLABLE_NUMERIC_DTYPES.get(token)
+    if nullable_dtype is not None:
+        numpy_dtype = _NULLABLE_NUMPY_DTYPES[token]
+        mask = array.is_null().to_numpy(zero_copy_only=False)
+        values = array.fill_null(0).to_numpy(zero_copy_only=False).astype(numpy_dtype)
+        if numpy_dtype.kind == "f":
+            valid_nan = np.isnan(values) & ~mask
+            values[valid_nan] = np.nan
+            extension = pd.arrays.FloatingArray(values, mask)
+        else:
+            extension = pd.arrays.IntegerArray(values, mask)
+        return pd.Series(extension, dtype=nullable_dtype)
+    dtype = np.dtype(token)
+    if dtype.kind in "iu" and array.null_count:
+        raise ForecastTaskError("serialized native integer column contains missing values")
+    return pd.Series(array.to_numpy(zero_copy_only=False), dtype=dtype)
 
 
 def _validate_frame_schema(schema: object, *, surface: str) -> list[dict[str, str]]:
@@ -446,6 +513,9 @@ def _arrow_type(token: str) -> pa.DataType:
         if token != f"datetime64[{unit}]" or unit not in _DATETIME_UNITS:
             raise ForecastTaskError(f"serialized task schema dtype {token!r} is unsupported")
         return pa.timestamp(unit)
+    nullable_numpy = _NULLABLE_NUMPY_DTYPES.get(token)
+    if nullable_numpy is not None:
+        return pa.from_numpy_dtype(nullable_numpy)
     if token not in _SUPPORTED_NUMERIC_TOKENS:
         raise ForecastTaskError(f"serialized task schema dtype {token!r} is unsupported")
     try:

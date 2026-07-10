@@ -27,7 +27,7 @@ from newcalibre.domain.forecast_frame import (
 )
 
 pytestmark = pytest.mark.tier1
-WEEKLY = Calendar("W-MON")
+WEEKLY = Calendar("W-MON").bind(pd.Timestamp("2026-01-12"))
 
 
 def _weekly_frame() -> pd.DataFrame:
@@ -45,10 +45,12 @@ def _weekly_frame() -> pd.DataFrame:
 
 
 def test_calendar_normalizes_and_advances_explicit_anchored_frequencies() -> None:
-    calendar = Calendar("1W-MON")
     origin = pd.Timestamp("2026-01-12")
+    declaration = Calendar("1W-MON")
+    calendar = declaration.bind(origin)
 
     assert calendar.frequency == "W-MON"
+    assert calendar.phase == origin
     assert calendar.contains(origin)
     assert calendar.advance(origin, 0) == origin
     assert calendar.advance(origin, 2) == pd.Timestamp("2026-01-26")
@@ -202,6 +204,56 @@ def test_frame_preserves_unregistered_extension_columns() -> None:
     frame["adapter_note"] = pd.Series(["a", "b"], dtype="string")
     validated = validate_forecast_frame(frame, calendar=WEEKLY)
     pd.testing.assert_series_equal(validated["adapter_note"], frame["adapter_note"])
+
+
+def test_frame_accepts_and_canonicalizes_flat_primitive_extensions() -> None:
+    frame = _weekly_frame()
+    frame["rank"] = pd.Series([1, 2], dtype="int16")
+    frame["eligible"] = pd.Series([True, False], dtype="bool")
+    frame["score"] = pd.Series([1.5, np.nan], dtype="float16")
+    frame["event_time"] = pd.Series(
+        pd.to_datetime(["2026-01-01", "2026-01-02"]).astype("datetime64[ms]")
+    )
+    frame["note"] = pd.Series(["a", "b"], dtype=pd.StringDtype(storage="python"))
+
+    validated = validate_forecast_frame(frame, calendar=WEEKLY)
+
+    assert validated["rank"].dtype == np.dtype("int16")
+    assert validated["eligible"].dtype == np.dtype("bool")
+    assert validated["score"].dtype == np.dtype("float16")
+    assert validated["event_time"].dtype == np.dtype("datetime64[ms]")
+    assert validated["note"].dtype.storage == "pyarrow"
+
+
+@pytest.mark.parametrize(
+    "extension",
+    [
+        pd.Series([object(), object()], dtype="object"),
+        pd.Series([1 + 2j, 3 + 4j], dtype="complex128"),
+        pd.Series([1, 0], dtype=pd.SparseDtype("int64", fill_value=0)),
+    ],
+)
+def test_frame_rejects_nonprimitive_extension_dtypes(extension: pd.Series) -> None:
+    frame = _weekly_frame()
+    frame["adapter_extension"] = extension
+
+    with pytest.raises(ForecastFrameError, match="flat transport-safe primitive"):
+        validate_forecast_frame(frame, calendar=WEEKLY)
+
+
+def test_frame_rejects_non_string_and_non_utf8_column_labels() -> None:
+    integer_label = _weekly_frame()
+    integer_label[7] = pd.Series([1, 2], dtype="int64")
+    with pytest.raises(ForecastFrameError, match="column labels must be strings"):
+        validate_forecast_frame(integer_label, calendar=WEEKLY)
+
+    surrogate_label = _weekly_frame()
+    surrogate_label.columns = pd.Index(
+        ["\ud800" if column == MODEL_NAME else column for column in surrogate_label.columns],
+        dtype="object",
+    )
+    with pytest.raises(ForecastFrameError, match="valid UTF-8"):
+        validate_forecast_frame(surrogate_label, calendar=WEEKLY)
 
 
 @pytest.mark.parametrize("level", [True, "NaN", "Infinity", "not-a-level"])

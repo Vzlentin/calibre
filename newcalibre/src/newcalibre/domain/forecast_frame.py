@@ -47,6 +47,23 @@ _FITTED_VALUE_SIDECAR_COLUMN = "fitted_value"
 _FLOAT64 = np.dtype("float64")
 _DATETIME_UNITS = frozenset({"s", "ms", "us", "ns"})
 _TRANSPORT_STRING_DTYPE = pd.StringDtype(storage="pyarrow")
+_SUPPORTED_EXTENSION_DTYPE_NUMS = frozenset(
+    np.dtype(name).num
+    for name in (
+        "bool",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float16",
+        "float32",
+        "float64",
+    )
+)
 
 
 class ForecastFrameError(ValueError):
@@ -95,6 +112,7 @@ def validate_forecast_frame(
         raise ForecastFrameError("forecast frame must be a pandas DataFrame")
     if frame.columns.has_duplicates:
         raise ForecastFrameError("forecast frame has duplicate column labels")
+    _require_column_labels(frame)
 
     missing = [column for column in REQUIRED_FRAME_COLUMNS if column not in frame.columns]
     if missing:
@@ -118,9 +136,10 @@ def validate_forecast_frame(
     for column in optional_value_columns:
         _normalize_float64(normalized, column)
 
+    owned_columns = {*REQUIRED_FRAME_COLUMNS, *optional_value_columns}
     for column in normalized.columns:
-        if isinstance(normalized[column].dtype, pd.StringDtype):
-            _require_string(normalized, column)
+        if column not in owned_columns:
+            _canonicalize_extension(normalized, column)
 
     _validate_row_identity(normalized)
     _validate_target_timestamps(normalized, calendar)
@@ -204,6 +223,38 @@ def _require_string(frame: pd.DataFrame, column: str) -> None:
         raise ForecastFrameError(
             f"column {column!r} cannot normalize to Arrow-backed string dtype"
         ) from error
+
+
+def _require_column_labels(frame: pd.DataFrame) -> None:
+    if any(not isinstance(column, str) for column in frame.columns):
+        raise ForecastFrameError("forecast frame column labels must be strings")
+    try:
+        for column in frame.columns:
+            column.encode("utf-8")
+    except UnicodeError as error:
+        raise ForecastFrameError(
+            "forecast frame column labels must be valid UTF-8 strings"
+        ) from error
+
+
+def _canonicalize_extension(frame: pd.DataFrame, column: str) -> None:
+    dtype = frame[column].dtype
+    if isinstance(dtype, pd.StringDtype):
+        _require_string(frame, column)
+        return
+    if not isinstance(dtype, np.dtype) or not dtype.isnative:
+        raise ForecastFrameError(
+            f"extension column {column!r} must have a flat transport-safe primitive dtype"
+        )
+    if dtype.kind == "M":
+        _require_naive_datetime64(frame, column)
+        return
+    if dtype.num not in _SUPPORTED_EXTENSION_DTYPE_NUMS:
+        raise ForecastFrameError(
+            f"extension column {column!r} must have a flat transport-safe primitive dtype"
+        )
+    if dtype.kind == "f" and frame[column].isna().any():
+        frame.loc[frame[column].isna(), column] = np.nan
 
 
 def _require_naive_datetime64(frame: pd.DataFrame, column: str) -> None:
