@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Integral, Real
-from typing import Any, Final
+from typing import Any, Final, cast
 from urllib.parse import quote
 
 import numpy as np
@@ -94,16 +94,12 @@ class HierarchyIndex:
         ]
         generated_labels: set[str] = set()
         for attribute in attributes:
-            groups: dict[tuple[str, str], tuple[_AttributeValue, list[str]]] = {}
-            for series_key, raw_value in zip(
+            groups: dict[_AttributeValue, list[str]] = {}
+            for series_key, value in zip(
                 normalized[SERIES_KEY], normalized[attribute], strict=True
             ):
-                value = _canonical_attribute_value(raw_value, attribute=attribute)
-                token = (value.tag, value.payload)
-                if token not in groups:
-                    groups[token] = (value, [])
-                groups[token][1].append(series_key)
-            ordered_groups = sorted(groups.values(), key=lambda item: item[0].order_key)
+                groups.setdefault(value, []).append(series_key)
+            ordered_groups = sorted(groups.items(), key=lambda item: item[0].order_key)
             for value, member_list in ordered_groups:
                 members = tuple(sorted(member_list, key=str.encode))
                 label = _aggregate_label(attribute, value)
@@ -185,26 +181,43 @@ class HierarchyIndex:
 
         source = panel.frame
         timestamps = tuple(sorted(pd.Timestamp(value) for value in source[TIMESTAMP].unique()))
-        values = {
-            (series_key, pd.Timestamp(timestamp)): value
-            for series_key, timestamp, value in source[
-                [SERIES_KEY, TIMESTAMP, OBSERVED_VALUE]
-            ].itertuples(index=False, name=None)
-        }
-        aggregate_labels: list[str] = []
-        aggregate_timestamps: list[pd.Timestamp] = []
-        aggregate_values: list[float] = []
-        for node in self._nodes[len(self._bottom_series) :]:
-            for timestamp in timestamps:
-                aggregate_labels.append(node.label)
-                aggregate_timestamps.append(timestamp)
-                aggregate_values.append(_coherent_sum(values, node=node, timestamp=timestamp))
+        timestamp_positions = {timestamp: index for index, timestamp in enumerate(timestamps)}
+        aggregate_nodes = self._nodes[len(self._bottom_series) :]
+        aggregate_values = np.empty((len(aggregate_nodes), len(timestamps)), dtype=np.float64)
+        for timestamp, rows in source.groupby(TIMESTAMP, sort=False, observed=True):
+            normalized_timestamp = cast(pd.Timestamp, timestamp)
+            values = dict(zip(rows[SERIES_KEY], rows[OBSERVED_VALUE], strict=True))
+            timestamp_position = timestamp_positions[normalized_timestamp]
+            for node_position, node in enumerate(aggregate_nodes):
+                aggregate_values[node_position, timestamp_position] = _coherent_sum(
+                    values,
+                    node=node,
+                    timestamp=normalized_timestamp,
+                )
+
+        aggregate_labels = (
+            pd.Series(
+                [node.label for node in aggregate_nodes],
+                dtype=source[SERIES_KEY].dtype,
+            )
+            .repeat(len(timestamps))
+            .reset_index(drop=True)
+        )
+        timestamp_values = pd.Series(timestamps, dtype=source[TIMESTAMP].dtype)
+        aggregate_timestamps = pd.concat(
+            [timestamp_values] * len(aggregate_nodes),
+            ignore_index=True,
+        )
+        aggregate_value_series = pd.Series(
+            aggregate_values.reshape(-1),
+            dtype="float64",
+        )
 
         expanded = _append_aggregate_rows(
             source,
             labels=aggregate_labels,
             timestamps=aggregate_timestamps,
-            values=aggregate_values,
+            values=aggregate_value_series,
         )
         return Panel.from_frame(expanded, calendar=panel.calendar)
 
@@ -260,8 +273,14 @@ def _normalize_facts(
             f"hierarchy facts must cover bottom series exactly; missing={missing}, extra={extra}"
         )
     for attribute in attributes:
-        for value in normalized[attribute]:
-            _canonical_attribute_value(value, attribute=attribute)
+        normalized[attribute] = pd.Series(
+            [
+                _canonical_attribute_value(value, attribute=attribute)
+                for value in normalized[attribute]
+            ],
+            index=normalized.index,
+            dtype="object",
+        )
     normalized = normalized.sort_values(SERIES_KEY, key=lambda column: column.map(str.encode))
     return normalized.reset_index(drop=True), attributes
 
@@ -309,18 +328,17 @@ def _aggregate_label(attribute: str, value: _AttributeValue) -> str:
 
 
 def _coherent_sum(
-    observations: dict[tuple[str, pd.Timestamp], Any],
+    observations: dict[str, Any],
     *,
     node: HierarchyNode,
     timestamp: pd.Timestamp,
 ) -> float:
     operands: list[float] = []
     for member in node.members:
-        key = (member, timestamp)
-        if key not in observations or _is_missing(observations[key]):
+        if member not in observations or _is_missing(observations[member]):
             return math.nan
         try:
-            operands.append(float(observations[key]))
+            operands.append(float(observations[member]))
         except (OverflowError, TypeError, ValueError) as error:
             raise HierarchyError(
                 f"cannot aggregate node {node.label!r} at {timestamp!s} as float"
@@ -336,33 +354,30 @@ def _coherent_sum(
 def _append_aggregate_rows(
     source: pd.DataFrame,
     *,
-    labels: list[str],
-    timestamps: list[pd.Timestamp],
-    values: list[float],
+    labels: pd.Series,
+    timestamps: pd.Series,
+    values: pd.Series,
 ) -> pd.DataFrame:
     row_count = len(labels)
     columns: dict[str, pd.Series] = {}
     for column in source.columns:
+        head = source[column]
         if column == SERIES_KEY:
-            tail = pd.Series(labels, dtype=source[column].dtype)
-            columns[column] = pd.concat([source[column], tail], ignore_index=True)
+            tail = labels
         elif column == TIMESTAMP:
-            tail = pd.Series(timestamps, dtype=source[column].dtype)
-            columns[column] = pd.concat([source[column], tail], ignore_index=True)
+            tail = timestamps
         elif column == OBSERVED_VALUE:
-            head = source[column].astype("float64")
-            tail = pd.Series(values, dtype="float64")
-            columns[column] = pd.concat([head, tail], ignore_index=True)
+            head = head.astype("float64")
+            tail = values
         elif column == CENSOR_STATUS:
             tail = pd.Series(
                 [UNDECLARED_CENSORING] * row_count,
-                dtype=source[column].dtype,
+                dtype=head.dtype,
             )
-            columns[column] = pd.concat([source[column], tail], ignore_index=True)
         else:
-            head = _numeric_with_missing_capacity(source[column])
+            head = _numeric_with_missing_capacity(head)
             tail = pd.Series([pd.NA] * row_count, dtype=head.dtype)
-            columns[column] = pd.concat([head, tail], ignore_index=True)
+        columns[column] = pd.concat([head, tail], ignore_index=True)
     return pd.DataFrame(columns)
 
 
