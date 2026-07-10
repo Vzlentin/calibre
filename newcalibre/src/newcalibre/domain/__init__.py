@@ -1,6 +1,23 @@
 """Define the demand-planning domain vocabulary and contracts."""
 
 from newcalibre.domain.calendar import Calendar, CalendarError
+from newcalibre.domain.cost import CostStructure, CostStructureError
+from newcalibre.domain.decision import (
+    DecisionError,
+    DecisionTiming,
+    InventoryPosition,
+)
+from newcalibre.domain.descriptor import (
+    DecisionScope,
+    DecisionScopeKind,
+    EmissionScope,
+    GuaranteeClaim,
+    GuaranteeCurrency,
+    GuaranteeDescriptor,
+    GuaranteeDescriptorError,
+    GuaranteeType,
+    ScoredSeries,
+)
 from newcalibre.domain.fitted_values import (
     FITTED_VALUE,
     FITTED_VALUE_KEY_COLUMNS,
@@ -51,22 +68,36 @@ from newcalibre.domain.panel import (
     PanelError,
     Scope,
 )
+from newcalibre.domain.session import SessionIdentity, SessionIdentityError
 
 __all__ = [
     "ACTUAL_VALUE",
     "AGGREGATE_NODE_PREFIX",
     "AVAILABILITY_BOUND",
     "CENSOR_STATUS",
+    "CostStructure",
+    "CostStructureError",
+    "DecisionError",
+    "DecisionScope",
+    "DecisionScopeKind",
+    "DecisionTiming",
+    "EmissionScope",
     "FITTED_VALUE",
     "FITTED_VALUE_KEY_COLUMNS",
     "FRAME_KEY_COLUMNS",
     "HISTORY_TIMESTAMP",
+    "GuaranteeClaim",
+    "GuaranteeCurrency",
+    "GuaranteeDescriptor",
+    "GuaranteeDescriptorError",
+    "GuaranteeType",
     "HierarchyError",
     "HierarchyIndex",
     "HierarchyNode",
     "HierarchyNodeKind",
     "HORIZON_STEP",
     "KNOWN_AT",
+    "InventoryPosition",
     "MODEL_NAME",
     "OBSERVED_VALUE",
     "ORIGIN",
@@ -91,6 +122,9 @@ __all__ = [
     "Panel",
     "PanelError",
     "Scope",
+    "ScoredSeries",
+    "SessionIdentity",
+    "SessionIdentityError",
     "interval_columns",
     "quantile_column",
     "target_timestamp",

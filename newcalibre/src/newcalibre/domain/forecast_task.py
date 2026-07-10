@@ -15,6 +15,13 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from newcalibre.domain._canonical_json import (
+    CanonicalJsonError,
+    canonical_json_bytes,
+)
+from newcalibre.domain._canonical_json import (
+    canonical_json as _canonical_json,
+)
 from newcalibre.domain.calendar import Calendar, CalendarError
 from newcalibre.domain.forecast_frame import SERIES_KEY
 from newcalibre.domain.panel import (
@@ -348,43 +355,11 @@ def _canonical_model_config(model_config: Mapping[str, object]) -> dict[str, obj
         raise ForecastTaskError(
             "scope is engine configuration and cannot appear in model configuration"
         )
-    _require_json_value(candidate, path="model configuration")
     try:
-        canonical = _canonical_json(candidate)
-        canonical.encode("utf-8")
+        canonical = canonical_json_bytes(candidate, path="model configuration")
         return json.loads(canonical)
-    except (TypeError, ValueError) as error:
+    except CanonicalJsonError as error:
         raise ForecastTaskError("model configuration must contain finite JSON values") from error
-
-
-def _require_json_value(value: object, *, path: str) -> None:
-    if value is None or isinstance(value, (str, bool, int)):
-        return
-    if isinstance(value, float):
-        if not pd.notna(value) or value in (float("inf"), float("-inf")):
-            raise ForecastTaskError(f"{path} contains a non-finite number")
-        return
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _require_json_value(item, path=f"{path}[{index}]")
-        return
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ForecastTaskError(f"{path} contains a non-string object key")
-            _require_json_value(item, path=f"{path}.{key}")
-        return
-    raise ForecastTaskError(f"{path} contains non-JSON value {type(value).__name__}")
-
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
 
 
 def _frame_schema(frame: pd.DataFrame) -> list[dict[str, str]]:

@@ -313,6 +313,24 @@ def test_task_model_configuration_must_be_finite_json(config: dict[object, objec
         _tasks(config=cast(dict[str, object], config))
 
 
+def test_task_model_configuration_wraps_structural_json_errors() -> None:
+    cycle: list[object] = []
+    cycle.append(cycle)
+
+    for config in ({"x": cycle}, {"x": "\ud800"}):
+        with pytest.raises(ForecastTaskError, match="finite JSON values"):
+            _tasks(config=config)
+
+
+def test_task_model_configuration_wraps_excessive_json_nesting() -> None:
+    nested: object = None
+    for _ in range(sys.getrecursionlimit() + 10):
+        nested = [nested]
+
+    with pytest.raises(ForecastTaskError, match="finite JSON values"):
+        _tasks(config={"nested": nested})
+
+
 def test_task_defensively_copies_every_mutable_surface() -> None:
     future = _future()
     nested = [1]
