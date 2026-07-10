@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -116,7 +117,7 @@ class PredicateRegistration:
     predicate: Predicate
 
     def __post_init__(self) -> None:
-        _validate_predicate_key(self.key, allow_none=False)
+        _validate_predicate_key(self.key)
         if not callable(self.predicate):
             raise LedgerError("registered predicate must be callable")
 
@@ -367,7 +368,7 @@ class _SummaryAccumulator:
     covered: int = 0
     unscored: int = 0
     coverage_observations: int = 0
-    unscored_by_reason: dict[str, int] = field(default_factory=dict)
+    unscored_by_reason: Counter[str] = field(default_factory=Counter)
 
     def add(self, outcome: ScoreOutcome) -> None:
         self.total += 1
@@ -383,7 +384,7 @@ class _SummaryAccumulator:
             return
         self.unscored += 1
         reason = cast(str, outcome.unscored_reason)
-        self.unscored_by_reason[reason] = self.unscored_by_reason.get(reason, 0) + 1
+        self.unscored_by_reason[reason] += 1
 
     def freeze(self) -> CoverageSummary:
         ratio = (
@@ -412,32 +413,25 @@ class _DerivedReportFacts:
 
 def _derive_report_facts(outcomes: tuple[ScoreOutcome, ...]) -> _DerivedReportFacts:
     accumulators: dict[CoverageTarget, _SummaryAccumulator] = {}
-    reasons: dict[str, int] = {}
-    counts = {
-        "bound_count": len(outcomes),
-        "pending_bound_count": 0,
-        "resolved_bound_count": 0,
-        "scored_bound_count": 0,
-        "covered_bound_count": 0,
-        "unscored_bound_count": 0,
-    }
+    overall = _SummaryAccumulator()
     for outcome in outcomes:
-        accumulators.setdefault(outcome.target, _SummaryAccumulator()).add(outcome)
-        if not outcome.resolved:
-            counts["pending_bound_count"] += 1
-            continue
-        counts["resolved_bound_count"] += 1
-        if outcome.scored:
-            counts["scored_bound_count"] += 1
-            counts["covered_bound_count"] += int(outcome.covered is True)
-            continue
-        counts["unscored_bound_count"] += 1
-        reason = cast(str, outcome.unscored_reason)
-        reasons[reason] = reasons.get(reason, 0) + 1
+        overall.add(outcome)
+        accumulator = accumulators.get(outcome.target)
+        if accumulator is None:
+            accumulator = _SummaryAccumulator()
+            accumulators[outcome.target] = accumulator
+        accumulator.add(outcome)
     return _DerivedReportFacts(
-        counts=counts,
+        counts={
+            "bound_count": overall.total,
+            "pending_bound_count": overall.pending,
+            "resolved_bound_count": overall.resolved,
+            "scored_bound_count": overall.scored,
+            "covered_bound_count": overall.covered,
+            "unscored_bound_count": overall.unscored,
+        },
         summaries={target: summary.freeze() for target, summary in accumulators.items()},
-        unscored_by_reason=reasons,
+        unscored_by_reason=dict(overall.unscored_by_reason),
     )
 
 
@@ -753,13 +747,10 @@ class Ledger:
         """Return a fresh append-ordered snapshot of pending rows due before origin."""
         self._require_calendar_origin(origin)
         due_values: list[dict[str, object]] = []
-        ordered_columns: dict[str, None] = {}
         for row in self._forecasts.values():
             if row.actual_value is None and row.target_timestamp < origin:
-                values = dict(row.values)
-                ordered_columns.update(dict.fromkeys(values))
-                due_values.append(values)
-        return pd.DataFrame(due_values, columns=tuple(ordered_columns))
+                due_values.append(dict(row._values))
+        return pd.DataFrame(due_values)
 
     def apply_resolutions(
         self,
@@ -795,7 +786,6 @@ class Ledger:
 
         outcomes: list[ScoreOutcome] = []
         for forecast_key, row in self._forecasts.items():
-            values = dict(row._values)
             for bound_key, issuance in row.issuances.items():
                 target = CoverageTarget(
                     descriptor=issuance.descriptor,
@@ -805,7 +795,6 @@ class Ledger:
                 outcome = _score_bound(
                     forecast_key=forecast_key,
                     row=row,
-                    values=values,
                     target=target,
                     issuance=issuance,
                     registry=registry,
@@ -832,7 +821,6 @@ def _score_bound(
     *,
     forecast_key: ForecastKey,
     row: ForecastRow,
-    values: Mapping[str, object],
     target: CoverageTarget,
     issuance: ForecastIssuance,
     registry: PredicateRegistry,
@@ -876,6 +864,7 @@ def _score_bound(
             reason="predicate-unregistered",
         )
 
+    values = dict(row._values)
     bound_values = tuple(
         _finite_real(values[column], name="issued bound value") for column in target.bound_key
     )
@@ -939,7 +928,7 @@ def _two_sided_coverage_predicate(
     return PredicateResult(value=float(covered), covered=covered)
 
 
-def _validate_predicate_key(key: object, *, allow_none: bool) -> None:
+def _validate_predicate_key(key: object) -> None:
     if not isinstance(key, tuple) or len(key) != 2:
         raise LedgerError("predicate key must be an exact (claim, currency) pair")
     claim, currency = key
@@ -948,9 +937,7 @@ def _validate_predicate_key(key: object, *, allow_none: bool) -> None:
     if claim is GuaranteeClaim.NONE:
         if currency is not None:
             raise LedgerError("the none claim cannot carry a predicate currency")
-        if not allow_none:
-            raise LedgerError("the none claim cannot register a scoring predicate")
-        return
+        raise LedgerError("the none claim cannot register a scoring predicate")
     if not isinstance(currency, GuaranteeCurrency):
         raise LedgerError("a non-none predicate key requires a GuaranteeCurrency")
 

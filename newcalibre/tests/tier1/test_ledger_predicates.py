@@ -34,6 +34,8 @@ from newcalibre.domain import (
 )
 from newcalibre.ledger import (
     BoundKey,
+    CoverageReport,
+    CoverageSummary,
     ForecastIssuance,
     ForecastKey,
     GuaranteedSide,
@@ -43,6 +45,7 @@ from newcalibre.ledger import (
     PredicateRegistration,
     PredicateRegistry,
     PredicateResult,
+    ScoreOutcome,
 )
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
@@ -167,17 +170,21 @@ def _append_one_sided(
     return key, scored_key
 
 
-def _outcome(report: object, key: ForecastKey, bound_key: BoundKey) -> Any:
+def _outcome(report: CoverageReport, key: ForecastKey, bound_key: BoundKey) -> ScoreOutcome:
     return next(
         outcome
-        for outcome in cast(Any, report).outcomes
+        for outcome in report.outcomes
         if outcome.forecast_key == key and outcome.bound_key == bound_key
     )
 
 
-def _summary(report: object, key: ForecastKey, bound_key: BoundKey) -> Any:
+def _summary(
+    report: CoverageReport,
+    key: ForecastKey,
+    bound_key: BoundKey,
+) -> CoverageSummary:
     outcome = _outcome(report, key, bound_key)
-    return cast(Any, report).summaries[outcome.target]
+    return report.summaries[outcome.target]
 
 
 def _indicator_predicate(
