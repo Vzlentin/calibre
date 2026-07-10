@@ -1,9 +1,9 @@
-"""Exercise hierarchy compilation and aggregate-history coherence."""
+"""Exercise hierarchy compilation and bounded coherent aggregation."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -13,37 +13,13 @@ from hypothesis import strategies as st
 
 from newcalibre.domain import (
     AGGREGATE_NODE_PREFIX,
-    AVAILABILITY_BOUND,
-    CENSOR_STATUS,
-    OBSERVED_VALUE,
     SERIES_KEY,
-    TIMESTAMP,
     TOTAL_NODE_LABEL,
-    UNDECLARED_CENSORING,
-    Calendar,
     HierarchyError,
     HierarchyIndex,
+    HierarchyNode,
     HierarchyNodeKind,
-    Panel,
-    Scope,
 )
-
-
-def _panel(
-    rows: Sequence[tuple[str, str, float]],
-    *,
-    frequency: str = "D",
-    extras: bool = False,
-) -> Panel:
-    frame = pd.DataFrame(rows, columns=[SERIES_KEY, TIMESTAMP, OBSERVED_VALUE])
-    frame[SERIES_KEY] = frame[SERIES_KEY].astype("string[pyarrow]")
-    frame[TIMESTAMP] = pd.to_datetime(frame[TIMESTAMP]).astype("datetime64[us]")
-    frame[OBSERVED_VALUE] = frame[OBSERVED_VALUE].astype("float64")
-    if extras:
-        frame[CENSOR_STATUS] = pd.Series(["uncensored"] * len(frame), dtype="string[pyarrow]")
-        frame[AVAILABILITY_BOUND] = np.arange(len(frame), dtype="int64")
-        frame["price"] = np.arange(10, 10 + len(frame), dtype="int32")
-    return Panel.from_frame(frame, calendar=Calendar(frequency))
 
 
 def _facts() -> pd.DataFrame:
@@ -56,19 +32,19 @@ def _facts() -> pd.DataFrame:
     )
 
 
-def _index(panel: Panel, facts: pd.DataFrame | None = None) -> HierarchyIndex:
+def _index(
+    facts: pd.DataFrame | None = None,
+    *,
+    bottom_series: tuple[str, ...] = ("sku-a", "sku-b", "sku-c"),
+) -> HierarchyIndex:
     return HierarchyIndex.from_facts(
         _facts() if facts is None else facts,
-        bottom_series=panel.series_keys,
-        calendar=panel.calendar,
+        bottom_series=bottom_series,
     )
 
 
 def test_compiles_the_direct_overlapping_lattice_in_exact_canonical_order() -> None:
-    panel = _panel(
-        [("sku-a", "2026-01-01", 1), ("sku-b", "2026-01-01", 2), ("sku-c", "2026-01-01", 3)]
-    )
-    index = _index(panel)
+    index = _index()
 
     assert index.bottom_series == ("sku-a", "sku-b", "sku-c")
     assert index.attribute_names == ("category", "location")
@@ -103,98 +79,163 @@ def test_compiles_the_direct_overlapping_lattice_in_exact_canonical_order() -> N
     assert len(index.nodes) == 3 + 2 + 2 + 1
 
 
-def test_expand_history_sums_complete_members_and_poison_only_containing_nodes() -> None:
-    panel = _panel(
-        [
-            ("sku-a", "2026-01-01", 1),
-            ("sku-b", "2026-01-01", 2),
-            ("sku-c", "2026-01-01", 3),
-            ("sku-a", "2026-01-02", 0),
-            ("sku-c", "2026-01-02", 4),
-            ("sku-a", "2026-01-03", 5),
-            ("sku-b", "2026-01-03", math.nan),
-            ("sku-c", "2026-01-03", 6),
-            ("sku-a", "2026-01-04", 0),
-            ("sku-b", "2026-01-04", 0),
-            ("sku-c", "2026-01-04", 0),
-        ],
-        extras=True,
-    )
-    index = _index(panel)
-    expanded = index.expand_history(panel)
-    frame = expanded.frame.set_index([SERIES_KEY, TIMESTAMP])[OBSERVED_VALUE]
+def test_aggregates_exact_values_in_canonical_lattice_order() -> None:
+    index = _index()
 
+    result = index.aggregate({"sku-a": 1, "sku-b": 2, "sku-c": 3})
+
+    assert tuple(result) == index.node_labels
+    assert tuple(result.values()) == (1, 2, 3, 3, 3, 4, 2, 6)
+
+    cancellation = index.aggregate(
+        {"sku-a": 10**16, "sku-b": 1.0, "sku-c": -(10**16)},
+        node_labels=[TOTAL_NODE_LABEL],
+    )
+    assert cancellation == {TOTAL_NODE_LABEL: 1.0}
+
+
+def test_missing_members_poison_only_the_nodes_that_contain_them() -> None:
+    index = _index()
     category_drink = f"{AGGREGATE_NODE_PREFIX}:category:s:drink"
     category_food = f"{AGGREGATE_NODE_PREFIX}:category:s:food"
     location_north = f"{AGGREGATE_NODE_PREFIX}:location:s:north"
     location_south = f"{AGGREGATE_NODE_PREFIX}:location:s:south"
-    at = lambda label, day: frame.loc[(label, pd.Timestamp(day))]  # noqa: E731
 
-    assert at(category_drink, "2026-01-01") == 3.0
-    assert at(category_food, "2026-01-01") == 3.0
-    assert at(location_north, "2026-01-01") == 4.0
-    assert at(TOTAL_NODE_LABEL, "2026-01-01") == 6.0
-    assert at(category_drink, "2026-01-02") == 4.0
-    assert math.isnan(at(category_food, "2026-01-02"))
-    assert at(location_north, "2026-01-02") == 4.0
-    assert math.isnan(at(location_south, "2026-01-02"))
-    assert math.isnan(at(TOTAL_NODE_LABEL, "2026-01-02"))
-    assert at(category_drink, "2026-01-03") == 6.0
-    assert math.isnan(at(category_food, "2026-01-03"))
-    assert at(location_north, "2026-01-03") == 11.0
-    assert math.isnan(at(TOTAL_NODE_LABEL, "2026-01-03"))
-    assert at(TOTAL_NODE_LABEL, "2026-01-04") == 0.0
+    absent = index.aggregate({"sku-a": 1, "sku-c": 3})
+    assert absent == {
+        "sku-a": 1,
+        "sku-b": None,
+        "sku-c": 3,
+        category_drink: 3,
+        category_food: None,
+        location_north: 4,
+        location_south: None,
+        TOTAL_NODE_LABEL: None,
+    }
 
-    expected_panel_order = tuple(sorted(index.node_labels, key=str.encode))
-    assert expanded.series_keys == expected_panel_order
-    assert expanded.calendar == panel.calendar
-    assert expanded.frame[SERIES_KEY].drop_duplicates().tolist() == list(expected_panel_order)
-    aggregate_rows = expanded.frame[~expanded.frame[SERIES_KEY].isin(index.bottom_series)]
-    assert set(aggregate_rows[CENSOR_STATUS]) == {UNDECLARED_CENSORING}
-    assert aggregate_rows[[AVAILABILITY_BOUND, "price"]].isna().all(axis=None)
+    explicit = index.aggregate({"sku-a": 1, "sku-b": 2, "sku-c": pd.NA})
+    assert explicit[category_drink] is None
+    assert explicit[category_food] == 3
+    assert explicit[location_north] is None
+    assert explicit[location_south] == 2
+    assert explicit[TOTAL_NODE_LABEL] is None
 
 
-def test_expanded_history_preserves_the_panel_contract_through_task_construction() -> None:
-    panel = _panel(
-        [("sku-a", "2026-01-01", 1), ("sku-b", "2026-01-01", 2), ("sku-c", "2026-01-01", 3)]
+def test_selected_nodes_are_evaluated_only_over_their_members() -> None:
+    index = _index()
+    location_north = f"{AGGREGATE_NODE_PREFIX}:location:s:north"
+    observations = {"sku-a": 1, "sku-b": object(), "sku-c": 3}
+    selection = [location_north, "sku-a"]
+
+    result = index.aggregate(observations, node_labels=selection)
+
+    assert result == {"sku-a": 1, location_north: 4}
+    assert selection == [location_north, "sku-a"]
+    assert observations["sku-a"] == 1
+
+
+def test_integral_aggregation_remains_exact_above_float_and_uint64_boundaries() -> None:
+    index = _index()
+    category_food = f"{AGGREGATE_NODE_PREFIX}:category:s:food"
+    high = np.uint64(2**64 - 1)
+
+    result = index.aggregate(
+        {"sku-a": high, "sku-b": np.uint64(7), "sku-c": np.uint64(2)},
+        node_labels=[category_food, TOTAL_NODE_LABEL],
     )
-    expanded = _index(panel).expand_history(panel)
 
-    reingested = Panel.from_frame(expanded.frame, calendar=expanded.calendar)
-    (task,) = expanded.forecast_tasks(
-        origin=pd.Timestamp("2026-01-02"),
-        horizon=1,
-        scope=Scope.GLOBAL,
-        model_config={"backend": "test"},
+    assert result == {
+        category_food: 2**64 + 6,
+        TOTAL_NODE_LABEL: 2**64 + 8,
+    }
+    assert all(isinstance(value, int) for value in result.values())
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "pattern"),
+    [
+        ({"label": "", "kind": HierarchyNodeKind.BOTTOM, "members": ("a",)}, "label"),
+        (
+            {"label": "\ud800", "kind": HierarchyNodeKind.BOTTOM, "members": ("\ud800",)},
+            "UTF-8",
+        ),
+        ({"label": "a", "kind": "bottom", "members": ("a",)}, "kind"),
+        ({"label": "a", "kind": HierarchyNodeKind.BOTTOM, "members": ["a"]}, "tuple"),
+        ({"label": "a", "kind": HierarchyNodeKind.BOTTOM, "members": ()}, "tuple"),
+        ({"label": "a", "kind": HierarchyNodeKind.BOTTOM, "members": (1,)}, "strings"),
+        ({"label": "a", "kind": HierarchyNodeKind.BOTTOM, "members": ("",)}, "strings"),
+        ({"label": "a", "kind": HierarchyNodeKind.BOTTOM, "members": ("a", "a")}, "unique"),
+        ({"label": "a", "kind": HierarchyNodeKind.BOTTOM, "members": ("b",)}, "sole member"),
+        (
+            {"label": "group:x", "kind": HierarchyNodeKind.AGGREGATE, "members": ("a",)},
+            "aggregate prefix",
+        ),
+        (
+            {
+                "label": f"{AGGREGATE_NODE_PREFIX}:group:s:x",
+                "kind": HierarchyNodeKind.BOTTOM,
+                "members": (f"{AGGREGATE_NODE_PREFIX}:group:s:x",),
+            },
+            "only aggregate",
+        ),
+        ({"label": "a", "kind": HierarchyNodeKind.TOTAL, "members": ("a",)}, "total"),
+        (
+            {
+                "label": TOTAL_NODE_LABEL,
+                "kind": HierarchyNodeKind.BOTTOM,
+                "members": (TOTAL_NODE_LABEL,),
+            },
+            "total",
+        ),
+        (
+            {
+                "label": TOTAL_NODE_LABEL,
+                "kind": HierarchyNodeKind.TOTAL,
+                "members": (TOTAL_NODE_LABEL,),
+            },
+            "cannot also be its member",
+        ),
+        (
+            {
+                "label": f"{AGGREGATE_NODE_PREFIX}:group:s:x",
+                "kind": HierarchyNodeKind.AGGREGATE,
+                "members": (TOTAL_NODE_LABEL,),
+            },
+            "bottom series labels",
+        ),
+        (
+            {
+                "label": TOTAL_NODE_LABEL,
+                "kind": HierarchyNodeKind.TOTAL,
+                "members": (f"{AGGREGATE_NODE_PREFIX}:group:s:x",),
+            },
+            "bottom series labels",
+        ),
+    ],
+)
+def test_public_node_constructor_rejects_invalid_states(
+    kwargs: dict[str, Any], pattern: str
+) -> None:
+    with pytest.raises(HierarchyError, match=pattern):
+        HierarchyNode(**kwargs)
+
+
+def test_public_node_derives_its_member_count() -> None:
+    node = HierarchyNode(
+        label=f"{AGGREGATE_NODE_PREFIX}:group:s:x",
+        kind=HierarchyNodeKind.AGGREGATE,
+        members=("a", "b"),
     )
 
-    pd.testing.assert_frame_equal(expanded.frame, reingested.frame)
-    assert task.series_keys == expanded.series_keys
-    assert set(task.history[SERIES_KEY]) == set(expanded.series_keys)
-
-
-def test_compilation_and_expansion_do_not_retain_or_expose_mutable_callers() -> None:
-    source = pd.DataFrame(
-        {
-            SERIES_KEY: ["a", "b"],
-            "group": ["one", "one"],
-        }
-    )
-    panel = _panel([("a", "2026-01-01", 1), ("b", "2026-01-01", 2)])
-    index = _index(panel, source)
-    source.loc[:, "group"] = "mutated"
-    exposed = panel.frame
-    exposed.loc[:, OBSERVED_VALUE] = 999
-
-    expanded = index.expand_history(panel)
-    returned = expanded.frame
-    returned.loc[:, OBSERVED_VALUE] = -1
-
-    assert index.nodes[2].members == ("a", "b")
-    assert (
-        expanded.frame.loc[expanded.frame[SERIES_KEY] == TOTAL_NODE_LABEL, OBSERVED_VALUE].item()
-        == 3.0
-    )
+    assert node.expected_member_count == 2
+    constructor = cast(Any, HierarchyNode)
+    with pytest.raises(TypeError, match="expected_member_count"):
+        constructor(
+            label=f"{AGGREGATE_NODE_PREFIX}:group:s:x",
+            kind=HierarchyNodeKind.AGGREGATE,
+            members=("a", "b"),
+            expected_member_count=99,
+        )
 
 
 @pytest.mark.parametrize(
@@ -203,77 +244,99 @@ def test_compilation_and_expansion_do_not_retain_or_expose_mutable_callers() -> 
         (pd.DataFrame({"group": ["x"]}), "missing required"),
         (pd.DataFrame({SERIES_KEY: ["a"]}), "attribute"),
         (pd.DataFrame({SERIES_KEY: ["a", "a"], "group": ["x", "y"]}), "collide"),
-        (pd.DataFrame({SERIES_KEY: [1, "1"], "group": ["x", "y"]}), "non-empty strings"),
+        (pd.DataFrame({SERIES_KEY: [1], "group": ["x"]}), "non-empty strings"),
         (pd.DataFrame({SERIES_KEY: ["a"], "group": [None]}), "cannot be missing"),
         (pd.DataFrame({SERIES_KEY: ["a"], "group": [["x"]]}), "must use a string"),
     ],
 )
 def test_rejects_invalid_fact_shapes_and_values(facts: pd.DataFrame, pattern: str) -> None:
-    panel = _panel([("a", "2026-01-01", 1)])
     with pytest.raises(HierarchyError, match=pattern):
-        _index(panel, facts)
+        _index(facts, bottom_series=("a",))
 
 
 def test_rejects_missing_extra_facts_and_reserved_or_generated_label_collisions() -> None:
-    panel = _panel([("a", "2026-01-01", 1), ("b", "2026-01-01", 2)])
-    with pytest.raises(HierarchyError, match="cover bottom series exactly"):
-        _index(panel, pd.DataFrame({SERIES_KEY: ["a"], "group": ["x"]}))
     with pytest.raises(HierarchyError, match="cover bottom series exactly"):
         _index(
-            panel,
+            pd.DataFrame({SERIES_KEY: ["a"], "group": ["x"]}),
+            bottom_series=("a", "b"),
+        )
+    with pytest.raises(HierarchyError, match="cover bottom series exactly"):
+        _index(
             pd.DataFrame({SERIES_KEY: ["a", "b", "c"], "group": ["x", "x", "x"]}),
+            bottom_series=("a", "b"),
         )
-
-    numeric_fact_panel = _panel([("1", "2026-01-01", 1)])
-    with pytest.raises(HierarchyError, match="non-empty strings"):
+    with pytest.raises(HierarchyError, match="total label"):
         _index(
-            numeric_fact_panel,
-            pd.DataFrame({SERIES_KEY: [1], "group": ["x"]}),
-        )
-
-    total_panel = _panel([(TOTAL_NODE_LABEL, "2026-01-01", 1)])
-    with pytest.raises(HierarchyError, match="collide with bottom"):
-        _index(
-            total_panel,
             pd.DataFrame({SERIES_KEY: [TOTAL_NODE_LABEL], "group": ["x"]}),
+            bottom_series=(TOTAL_NODE_LABEL,),
         )
     generated = f"{AGGREGATE_NODE_PREFIX}:group:s:x"
-    generated_panel = _panel([(generated, "2026-01-01", 1)])
-    with pytest.raises(HierarchyError, match="collide with bottom"):
+    with pytest.raises(HierarchyError, match="only aggregate"):
         _index(
-            generated_panel,
             pd.DataFrame({SERIES_KEY: [generated], "group": ["x"]}),
+            bottom_series=(generated,),
         )
 
 
 def test_typed_escaped_labels_and_permuted_facts_are_deterministic() -> None:
-    panel = _panel([("a", "2026-01-01", 1), ("b", "2026-01-01", 2), ("c", "2026-01-01", 3)])
-    facts = pd.DataFrame({SERIES_KEY: ["a", "b", "c"], "a:b": [1, "1", "x/y% z"]})
-    first = _index(panel, facts)
-    second = _index(panel, facts.iloc[::-1][["a:b", SERIES_KEY]])
+    keys = ("a", "b", "c", "d", "e")
+    facts = pd.DataFrame(
+        {
+            SERIES_KEY: keys,
+            "a:b": pd.Series([True, 1, 1.5, "1", "x/y% z"], dtype="object"),
+        }
+    )
+    first = _index(facts, bottom_series=keys)
+    second = _index(facts.iloc[::-1][["a:b", SERIES_KEY]], bottom_series=tuple(reversed(keys)))
 
     assert first == second
-    assert first.node_labels[3:-1] == (
+    assert first.node_labels[5:-1] == (
+        f"{AGGREGATE_NODE_PREFIX}:a%3Ab:b:true",
         f"{AGGREGATE_NODE_PREFIX}:a%3Ab:i:1",
+        f"{AGGREGATE_NODE_PREFIX}:a%3Ab:f:0x1.8000000000000p%2B0",
         f"{AGGREGATE_NODE_PREFIX}:a%3Ab:s:1",
         f"{AGGREGATE_NODE_PREFIX}:a%3Ab:s:x%2Fy%25%20z",
     )
 
 
-def test_expansion_rejects_wrong_calendar_unknown_nodes_and_already_expanded_panels() -> None:
-    daily = _panel([("a", "2026-01-05", 1), ("b", "2026-01-05", 2)])
-    facts = pd.DataFrame({SERIES_KEY: ["a", "b"], "group": ["x", "x"]})
-    index = _index(daily, facts)
-    weekly = _panel([("a", "2026-01-05", 1), ("b", "2026-01-05", 2)], frequency="W-MON")
-    with pytest.raises(HierarchyError, match="calendar is incompatible"):
-        index.expand_history(weekly)
+def test_rejects_unknown_labels_and_malformed_observation_inputs() -> None:
+    facts = pd.DataFrame({SERIES_KEY: ["a"], "group": ["x"]})
+    index = _index(facts, bottom_series=("a",))
 
-    unknown = _panel([("a", "2026-01-05", 1), ("c", "2026-01-05", 2)])
-    with pytest.raises(HierarchyError, match="missing=.*b.*unexpected=.*c"):
-        index.expand_history(unknown)
-    expanded = index.expand_history(daily)
-    with pytest.raises(HierarchyError, match="exactly the hierarchy bottom"):
-        index.expand_history(expanded)
+    with pytest.raises(HierarchyError, match="must be a mapping"):
+        index.aggregate(cast(Any, [("a", 1)]))
+    with pytest.raises(HierarchyError, match="unknown bottom"):
+        index.aggregate({"unknown": 1})
+    with pytest.raises(HierarchyError, match="keys must be non-empty strings"):
+        index.aggregate(cast(Any, {1: 1}))
+    with pytest.raises(HierarchyError, match="iterable"):
+        index.aggregate({"a": 1}, node_labels="a")
+    with pytest.raises(HierarchyError, match="unknown hierarchy node"):
+        index.aggregate({"a": 1}, node_labels=["unknown"])
+    with pytest.raises(HierarchyError, match="unique"):
+        index.aggregate({"a": 1}, node_labels=["a", "a"])
+
+    for invalid in (True, "1", object()):
+        with pytest.raises(HierarchyError, match="observation"):
+            index.aggregate({"a": invalid}, node_labels=["a"])
+    assert index.aggregate({"a": np.nan}, node_labels=["a"]) == {"a": None}
+    assert index.aggregate({"a": math.inf}, node_labels=["a"]) == {"a": math.inf}
+
+
+def test_compilation_and_aggregation_do_not_mutate_or_retain_callers() -> None:
+    facts = pd.DataFrame({SERIES_KEY: ["b", "a"], "group": ["one", "one"]})
+    bottom = ["b", "a"]
+    index = HierarchyIndex.from_facts(facts, bottom_series=bottom)
+    facts.loc[:, "group"] = "mutated"
+    bottom.append("c")
+    observations: dict[str, object] = {"a": 1, "b": 2}
+
+    result = index.aggregate(observations)
+    result[TOTAL_NODE_LABEL] = -1
+
+    assert index.nodes[2].members == ("a", "b")
+    assert observations == {"a": 1, "b": 2}
+    assert index.aggregate(observations)[TOTAL_NODE_LABEL] == 3
 
 
 @given(
@@ -281,15 +344,14 @@ def test_expansion_rejects_wrong_calendar_unknown_nodes_and_already_expanded_pan
     n_attributes=st.integers(min_value=1, max_value=5),
 )
 def test_generated_lattice_obeys_the_node_count_identity(n_bottom: int, n_attributes: int) -> None:
-    keys = [f"s{index:02d}" for index in range(n_bottom)]
-    panel = _panel([(key, "2026-01-01", float(index)) for index, key in enumerate(keys)])
-    data: dict[str, list[object]] = {SERIES_KEY: keys}
+    keys = tuple(f"s{index:02d}" for index in range(n_bottom))
+    data: dict[str, list[object]] = {SERIES_KEY: list(keys)}
     distinct_counts: list[int] = []
     for attribute_index in range(n_attributes):
         cardinality = min(n_bottom, attribute_index + 1)
         data[f"attribute-{attribute_index}"] = [index % cardinality for index in range(n_bottom)]
         distinct_counts.append(cardinality)
 
-    index = _index(panel, pd.DataFrame(data))
+    index = _index(pd.DataFrame(data), bottom_series=keys)
 
     assert len(index.nodes) == n_bottom + sum(distinct_counts) + 1

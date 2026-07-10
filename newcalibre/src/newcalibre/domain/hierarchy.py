@@ -1,34 +1,26 @@
-"""Compile hierarchy facts and construct coherent aggregate history."""
+"""Compile hierarchy facts and evaluate coherent aggregate cross-sections."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from numbers import Integral, Real
-from typing import Any, Final, cast
+from typing import Final
 from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 
-from newcalibre.domain.calendar import Calendar
 from newcalibre.domain.forecast_frame import SERIES_KEY
-from newcalibre.domain.panel import (
-    CENSOR_STATUS,
-    OBSERVED_VALUE,
-    TIMESTAMP,
-    UNDECLARED_CENSORING,
-    Panel,
-)
 
 TOTAL_NODE_LABEL: Final = "__total__"
 AGGREGATE_NODE_PREFIX: Final = "__aggregate__"
 
 
 class HierarchyError(ValueError):
-    """Report invalid hierarchy facts or an incompatible history panel."""
+    """Report invalid hierarchy facts, nodes, or observations."""
 
 
 class HierarchyNodeKind(StrEnum):
@@ -46,7 +38,47 @@ class HierarchyNode:
     label: str
     kind: HierarchyNodeKind
     members: tuple[str, ...]
-    expected_member_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.label, str) or not self.label:
+            raise HierarchyError("hierarchy node label must be a non-empty string")
+        _require_utf8(self.label, name="hierarchy node label")
+        if not isinstance(self.kind, HierarchyNodeKind):
+            raise HierarchyError("hierarchy node kind must be a HierarchyNodeKind")
+        if not isinstance(self.members, tuple) or not self.members:
+            raise HierarchyError("hierarchy node members must be a non-empty tuple")
+        for member in self.members:
+            if not isinstance(member, str) or not member:
+                raise HierarchyError("hierarchy node members must be non-empty strings")
+            _require_utf8(member, name="hierarchy node member")
+        if len(set(self.members)) != len(self.members):
+            raise HierarchyError("hierarchy node members must be unique")
+
+        has_aggregate_prefix = self.label.startswith(AGGREGATE_NODE_PREFIX)
+        has_aggregate_label = self.label.startswith(f"{AGGREGATE_NODE_PREFIX}:")
+        if self.kind is HierarchyNodeKind.AGGREGATE:
+            if not has_aggregate_label:
+                raise HierarchyError("aggregate node labels must use the aggregate prefix")
+        elif has_aggregate_prefix:
+            raise HierarchyError("only aggregate nodes may use the aggregate label prefix")
+
+        is_total_label = self.label == TOTAL_NODE_LABEL
+        if (self.kind is HierarchyNodeKind.TOTAL) != is_total_label:
+            raise HierarchyError("the total label and total node kind must be used together")
+        if self.kind is HierarchyNodeKind.BOTTOM and self.members != (self.label,):
+            raise HierarchyError("bottom node label must equal its sole member")
+        if self.kind is not HierarchyNodeKind.BOTTOM and self.label in self.members:
+            raise HierarchyError("an aggregate or total node label cannot also be its member")
+        if self.kind is not HierarchyNodeKind.BOTTOM and any(
+            member == TOTAL_NODE_LABEL or member.startswith(AGGREGATE_NODE_PREFIX)
+            for member in self.members
+        ):
+            raise HierarchyError("aggregate and total node members must be bottom series labels")
+
+    @property
+    def expected_member_count(self) -> int:
+        """Return the member count derived from the immutable member tuple."""
+        return len(self.members)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +99,6 @@ class HierarchyIndex:
     _bottom_series: tuple[str, ...]
     _attribute_names: tuple[str, ...]
     _nodes: tuple[HierarchyNode, ...]
-    _calendar: Calendar = field(repr=False)
 
     @classmethod
     def from_facts(
@@ -75,12 +106,9 @@ class HierarchyIndex:
         facts: pd.DataFrame,
         *,
         bottom_series: Iterable[str],
-        calendar: Calendar,
     ) -> HierarchyIndex:
         """Compile per-bottom hierarchy facts into a deterministic lattice."""
         bottom = _canonical_bottom_series(bottom_series)
-        if not isinstance(calendar, Calendar) or calendar.phase is None:
-            raise HierarchyError("hierarchy calendar must be a bound Calendar")
         normalized, attributes = _normalize_facts(facts, bottom=bottom)
 
         nodes: list[HierarchyNode] = [
@@ -88,7 +116,6 @@ class HierarchyIndex:
                 label=series_key,
                 kind=HierarchyNodeKind.BOTTOM,
                 members=(series_key,),
-                expected_member_count=1,
             )
             for series_key in bottom
         ]
@@ -111,7 +138,6 @@ class HierarchyIndex:
                         label=label,
                         kind=HierarchyNodeKind.AGGREGATE,
                         members=members,
-                        expected_member_count=len(members),
                     )
                 )
 
@@ -126,7 +152,6 @@ class HierarchyIndex:
                 label=TOTAL_NODE_LABEL,
                 kind=HierarchyNodeKind.TOTAL,
                 members=bottom,
-                expected_member_count=len(bottom),
             )
         )
 
@@ -134,7 +159,6 @@ class HierarchyIndex:
         object.__setattr__(instance, "_bottom_series", bottom)
         object.__setattr__(instance, "_attribute_names", attributes)
         object.__setattr__(instance, "_nodes", tuple(nodes))
-        object.__setattr__(instance, "_calendar", calendar)
         return instance
 
     @property
@@ -157,69 +181,26 @@ class HierarchyIndex:
         """Return every collision-free node label in lattice order."""
         return tuple(node.label for node in self._nodes)
 
-    def expand_history(self, panel: Panel) -> Panel:
-        """Return bottom history plus coherent aggregate and total rows.
+    def aggregate(
+        self,
+        bottom_values: Mapping[str, object],
+        *,
+        node_labels: Iterable[str] | None = None,
+    ) -> dict[str, int | float | None]:
+        """Evaluate selected nodes for one bottom-series cross-section.
 
-        Aggregate values are defined only where every expected bottom member
-        has a non-missing observation. Censoring, availability, and exogenous
-        facts are deliberately not aggregated: aggregate rows record
-        undeclared censoring and missing numeric metadata.
+        Missing or absent members make only their containing nodes undefined.
+        Results retain canonical lattice order regardless of selection order.
+        Only observations belonging to selected nodes are interpreted.
+        Integral sums remain exact Python integers; mixed or floating sums use
+        deterministic ``math.fsum``. Storage and batching stay with callers.
         """
-        if not isinstance(panel, Panel):
-            raise HierarchyError("history must be a Panel")
-        if not self._calendar.shares_grid_with(panel.calendar):
-            raise HierarchyError("history calendar is incompatible with the hierarchy calendar")
-        present = set(panel.series_keys)
-        expected = set(self._bottom_series)
-        if present != expected:
-            missing = sorted(expected - present, key=str.encode)
-            unexpected = sorted(present - expected, key=str.encode)
-            raise HierarchyError(
-                "history must contain exactly the hierarchy bottom series; "
-                f"missing={missing}, unexpected={unexpected}"
-            )
-
-        source = panel.frame
-        timestamps = tuple(sorted(pd.Timestamp(value) for value in source[TIMESTAMP].unique()))
-        timestamp_positions = {timestamp: index for index, timestamp in enumerate(timestamps)}
-        aggregate_nodes = self._nodes[len(self._bottom_series) :]
-        aggregate_values = np.empty((len(aggregate_nodes), len(timestamps)), dtype=np.float64)
-        for timestamp, rows in source.groupby(TIMESTAMP, sort=False, observed=True):
-            normalized_timestamp = cast(pd.Timestamp, timestamp)
-            values = dict(zip(rows[SERIES_KEY], rows[OBSERVED_VALUE], strict=True))
-            timestamp_position = timestamp_positions[normalized_timestamp]
-            for node_position, node in enumerate(aggregate_nodes):
-                aggregate_values[node_position, timestamp_position] = _coherent_sum(
-                    values,
-                    node=node,
-                    timestamp=normalized_timestamp,
-                )
-
-        aggregate_labels = (
-            pd.Series(
-                [node.label for node in aggregate_nodes],
-                dtype=source[SERIES_KEY].dtype,
-            )
-            .repeat(len(timestamps))
-            .reset_index(drop=True)
+        observations = _validate_observation_mapping(
+            bottom_values,
+            bottom_series=self._bottom_series,
         )
-        timestamp_values = pd.Series(timestamps, dtype=source[TIMESTAMP].dtype)
-        aggregate_timestamps = pd.concat(
-            [timestamp_values] * len(aggregate_nodes),
-            ignore_index=True,
-        )
-        aggregate_value_series = pd.Series(
-            aggregate_values.reshape(-1),
-            dtype="float64",
-        )
-
-        expanded = _append_aggregate_rows(
-            source,
-            labels=aggregate_labels,
-            timestamps=aggregate_timestamps,
-            values=aggregate_value_series,
-        )
-        return Panel.from_frame(expanded, calendar=panel.calendar)
+        selected_nodes = _select_nodes(self._nodes, node_labels=node_labels)
+        return {node.label: _coherent_sum(observations, node=node) for node in selected_nodes}
 
 
 def _canonical_bottom_series(bottom_series: Iterable[str]) -> tuple[str, ...]:
@@ -327,75 +308,94 @@ def _aggregate_label(attribute: str, value: _AttributeValue) -> str:
     return f"{AGGREGATE_NODE_PREFIX}:{quote(attribute, safe='')}:{value.label_token}"
 
 
+def _validate_observation_mapping(
+    bottom_values: Mapping[str, object],
+    *,
+    bottom_series: tuple[str, ...],
+) -> Mapping[str, object]:
+    if not isinstance(bottom_values, Mapping):
+        raise HierarchyError("bottom_values must be a mapping of series keys to observations")
+    expected = set(bottom_series)
+    unknown: list[str] = []
+    for label in bottom_values:
+        if not isinstance(label, str) or not label:
+            raise HierarchyError("bottom_values keys must be non-empty strings")
+        _require_utf8(label, name="bottom_values key")
+        if label not in expected:
+            unknown.append(label)
+    if unknown:
+        raise HierarchyError(
+            f"bottom_values contain unknown bottom series: {sorted(unknown, key=str.encode)}"
+        )
+    return bottom_values
+
+
+def _select_nodes(
+    nodes: tuple[HierarchyNode, ...],
+    *,
+    node_labels: Iterable[str] | None,
+) -> tuple[HierarchyNode, ...]:
+    if node_labels is None:
+        return nodes
+    if isinstance(node_labels, (str, bytes)):
+        raise HierarchyError("node_labels must be an iterable of node labels")
+    try:
+        labels = tuple(node_labels)
+    except TypeError as error:
+        raise HierarchyError("node_labels must be an iterable of node labels") from error
+    for label in labels:
+        if not isinstance(label, str) or not label:
+            raise HierarchyError("node_labels must contain non-empty strings")
+        _require_utf8(label, name="node label")
+    if len(set(labels)) != len(labels):
+        raise HierarchyError("node_labels must be unique")
+    known = {node.label for node in nodes}
+    unknown = sorted(set(labels) - known, key=str.encode)
+    if unknown:
+        raise HierarchyError(f"unknown hierarchy node labels: {unknown}")
+    selected = set(labels)
+    return tuple(node for node in nodes if node.label in selected)
+
+
 def _coherent_sum(
-    observations: dict[str, Any],
+    observations: Mapping[str, object],
     *,
     node: HierarchyNode,
-    timestamp: pd.Timestamp,
-) -> float:
-    operands: list[float] = []
+) -> int | float | None:
+    operands: list[int | float] = []
+    undefined = False
     for member in node.members:
-        if member not in observations or _is_missing(observations[member]):
-            return math.nan
-        try:
-            operands.append(float(observations[member]))
-        except (OverflowError, TypeError, ValueError) as error:
-            raise HierarchyError(
-                f"cannot aggregate node {node.label!r} at {timestamp!s} as float"
-            ) from error
+        if member not in observations:
+            undefined = True
+            continue
+        value = _normalize_observation(observations[member], series_key=member)
+        if value is None:
+            undefined = True
+        else:
+            operands.append(value)
+    if undefined:
+        return None
+    integer_operands = [value for value in operands if isinstance(value, int)]
+    if len(integer_operands) == len(operands):
+        return sum(integer_operands)
     try:
         return math.fsum(operands)
-    except ValueError as error:
+    except (OverflowError, ValueError) as error:
+        raise HierarchyError(f"cannot aggregate node {node.label!r} as a finite float") from error
+
+
+def _normalize_observation(value: object, *, series_key: str) -> int | float | None:
+    if _is_missing(value):
+        return None
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bool) or not isinstance(value, Real):
         raise HierarchyError(
-            f"cannot aggregate non-finite values for node {node.label!r} at {timestamp!s}"
-        ) from error
-
-
-def _append_aggregate_rows(
-    source: pd.DataFrame,
-    *,
-    labels: pd.Series,
-    timestamps: pd.Series,
-    values: pd.Series,
-) -> pd.DataFrame:
-    row_count = len(labels)
-    columns: dict[str, pd.Series] = {}
-    for column in source.columns:
-        head = source[column]
-        if column == SERIES_KEY:
-            tail = labels
-        elif column == TIMESTAMP:
-            tail = timestamps
-        elif column == OBSERVED_VALUE:
-            head = head.astype("float64")
-            tail = values
-        elif column == CENSOR_STATUS:
-            tail = pd.Series(
-                [UNDECLARED_CENSORING] * row_count,
-                dtype=head.dtype,
-            )
-        else:
-            head = _numeric_with_missing_capacity(head)
-            tail = pd.Series([pd.NA] * row_count, dtype=head.dtype)
-        columns[column] = pd.concat([head, tail], ignore_index=True)
-    return pd.DataFrame(columns)
-
-
-def _numeric_with_missing_capacity(series: pd.Series) -> pd.Series:
-    dtype = series.dtype
-    if isinstance(dtype, np.dtype) and dtype.kind in {"i", "u"}:
-        nullable_types = {
-            ("i", 1): pd.Int8Dtype(),
-            ("i", 2): pd.Int16Dtype(),
-            ("i", 4): pd.Int32Dtype(),
-            ("i", 8): pd.Int64Dtype(),
-            ("u", 1): pd.UInt8Dtype(),
-            ("u", 2): pd.UInt16Dtype(),
-            ("u", 4): pd.UInt32Dtype(),
-            ("u", 8): pd.UInt64Dtype(),
-        }
-        return series.astype(nullable_types[(dtype.kind, dtype.itemsize)])
-    return series.copy(deep=True)
+            f"observation for bottom series {series_key!r} must be an integer, float, or missing"
+        )
+    if isinstance(value, Integral):
+        return int(value)
+    return float(value)
 
 
 def _is_missing(value: object) -> bool:
