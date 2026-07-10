@@ -1,5 +1,13 @@
 """Define the demand-planning domain vocabulary and contracts."""
 
+from newcalibre.domain.calendar import Calendar, CalendarError
+from newcalibre.domain.fitted_values import (
+    FITTED_VALUE,
+    FITTED_VALUE_KEY_COLUMNS,
+    REQUIRED_FITTED_VALUE_COLUMNS,
+    FittedValues,
+    FittedValuesError,
+)
 from newcalibre.domain.forecast_frame import (
     ACTUAL_VALUE,
     FRAME_KEY_COLUMNS,
@@ -16,22 +24,55 @@ from newcalibre.domain.forecast_frame import (
     target_timestamp,
     validate_forecast_frame,
 )
-from newcalibre.domain.forecast_task import HISTORY_TIMESTAMP, ForecastTask, ForecastTaskError
+from newcalibre.domain.forecast_task import (
+    HISTORY_TIMESTAMP,
+    ForecastTask,
+    ForecastTaskError,
+)
+from newcalibre.domain.panel import (
+    AVAILABILITY_BOUND,
+    CENSOR_STATUS,
+    KNOWN_AT,
+    OBSERVED_VALUE,
+    PANEL_KEY_COLUMNS,
+    REQUIRED_PANEL_COLUMNS,
+    TIMESTAMP,
+    Panel,
+    PanelError,
+    Scope,
+)
 
 __all__ = [
     "ACTUAL_VALUE",
+    "AVAILABILITY_BOUND",
+    "CENSOR_STATUS",
+    "FITTED_VALUE",
+    "FITTED_VALUE_KEY_COLUMNS",
     "FRAME_KEY_COLUMNS",
     "HISTORY_TIMESTAMP",
     "HORIZON_STEP",
+    "KNOWN_AT",
     "MODEL_NAME",
+    "OBSERVED_VALUE",
     "ORIGIN",
+    "PANEL_KEY_COLUMNS",
     "POINT_FORECAST",
+    "REQUIRED_FITTED_VALUE_COLUMNS",
     "REQUIRED_FRAME_COLUMNS",
+    "REQUIRED_PANEL_COLUMNS",
     "SERIES_KEY",
     "TARGET_TIMESTAMP",
+    "TIMESTAMP",
+    "Calendar",
+    "CalendarError",
+    "FittedValues",
+    "FittedValuesError",
     "ForecastFrameError",
     "ForecastTask",
     "ForecastTaskError",
+    "Panel",
+    "PanelError",
+    "Scope",
     "interval_columns",
     "quantile_column",
     "target_timestamp",

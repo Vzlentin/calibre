@@ -1,252 +1,427 @@
-"""Exercise construction-time temporal hygiene for forecast tasks."""
+"""Exercise panel-owned task construction and exact task transport."""
 
 from __future__ import annotations
 
+import hashlib
+import os
+import subprocess
+import sys
+from collections.abc import Callable
 from typing import cast
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from newcalibre.domain.forecast_task import (
-    HISTORY_TIMESTAMP,
+from newcalibre.domain import (
+    AVAILABILITY_BOUND,
+    CENSOR_STATUS,
+    KNOWN_AT,
+    OBSERVED_VALUE,
+    SERIES_KEY,
+    TIMESTAMP,
+    Calendar,
     ForecastTask,
     ForecastTaskError,
+    Panel,
+    PanelError,
+    Scope,
 )
 
 pytestmark = pytest.mark.tier1
 
 
-def _history(timestamps: list[str]) -> pd.DataFrame:
+def _panel_frame(*, resolution: str = "us") -> pd.DataFrame:
+    timestamps = pd.Series(
+        pd.to_datetime(
+            [
+                "2026-01-19",
+                "2026-01-05",
+                "2026-01-12",
+                "2026-01-05",
+                "2026-01-12",
+                "2026-01-19",
+            ]
+        ).astype(f"datetime64[{resolution}]")
+    )
     return pd.DataFrame(
         {
-            "series_key": pd.Series(["sku-a"] * len(timestamps), dtype="string"),
-            HISTORY_TIMESTAMP: pd.to_datetime(timestamps),
-            "value": pd.Series(range(1, len(timestamps) + 1), dtype="float64"),
+            SERIES_KEY: pd.Series(
+                ["sku-b", "sku-a", "sku-a", "sku-b", "sku-b", "sku-a"],
+                dtype="string",
+            ),
+            TIMESTAMP: timestamps,
+            OBSERVED_VALUE: pd.Series([30, 10, np.nan, 20, 25, 15], dtype="float64"),
+            CENSOR_STATUS: pd.Series(
+                [pd.NA, "uncensored", "censored", pd.NA, "uncensored", "censored"],
+                dtype="string",
+            ),
+            AVAILABILITY_BOUND: pd.Series([30, 10, 9, 20, 25, 14], dtype="int64"),
+            "planned_price": pd.Series([3, 1, 2, 1, 2, 3], dtype="int32"),
         }
     )
 
 
-def test_task_accepts_history_strictly_before_origin_at_construction() -> None:
-    task = ForecastTask(
-        history=_history(["2026-01-05", "2026-01-12"]),
-        horizon=2,
-        origin=pd.Timestamp("2026-01-19"),
-        calendar_frequency="W-MON",
-        model_config={"backend": "seasonal-naive"},
+def _panel(*, resolution: str = "us") -> Panel:
+    return Panel.from_frame(_panel_frame(resolution=resolution), calendar=Calendar("W-MON"))
+
+
+def _tasks(
+    *,
+    scope: Scope = Scope.GLOBAL,
+    origin: str = "2026-01-19",
+    horizon: int = 2,
+    config: dict[str, object] | None = None,
+    future: pd.DataFrame | None = None,
+    resolution: str = "us",
+) -> tuple[ForecastTask, ...]:
+    return _panel(resolution=resolution).forecast_tasks(
+        origin=pd.Timestamp(origin),
+        horizon=horizon,
+        scope=scope,
+        model_config=config or {"backend": "seasonal-naive", "m": 2},
+        future_exogenous=future,
     )
 
-    assert task.origin == pd.Timestamp("2026-01-19")
-    assert task.horizon == 2
-    assert task.calendar_frequency == "W-MON"
 
-
-@pytest.mark.parametrize("timestamp", ["2026-01-19", "2026-01-26"])
-def test_task_rejects_history_at_or_after_origin(timestamp: str) -> None:
-    with pytest.raises(ForecastTaskError, match="strictly before origin"):
-        ForecastTask(
-            history=_history(["2026-01-12", timestamp]),
-            horizon=2,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
-            model_config={"backend": "seasonal-naive"},
-        )
-
-
-def test_task_checks_every_history_position_not_only_the_last() -> None:
-    with pytest.raises(ForecastTaskError, match="strictly before origin"):
-        ForecastTask(
-            history=_history(["2026-01-19", "2026-01-12"]),
-            horizon=2,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
-            model_config={"backend": "seasonal-naive"},
-        )
-
-
-def test_task_rejects_missing_history_timestamp_as_not_strictly_pre_origin() -> None:
-    history = _history(["2026-01-12"])
-    history.loc[0, HISTORY_TIMESTAMP] = pd.NaT
-
-    with pytest.raises(ForecastTaskError, match="strictly before origin"):
-        ForecastTask(
-            history=history,
-            horizon=2,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
-            model_config={"backend": "seasonal-naive"},
-        )
-
-
-def test_task_rejects_one_future_row_hidden_in_a_multi_series_history() -> None:
-    history = pd.DataFrame(
+def _future(*, known_at: str = "2026-01-19") -> pd.DataFrame:
+    return pd.DataFrame(
         {
-            "series_key": pd.Series(["sku-a", "sku-b", "sku-b"], dtype="string"),
-            HISTORY_TIMESTAMP: pd.to_datetime(["2026-01-05", "2026-01-12", "2026-01-26"]),
-            "value": pd.Series([1.0, 2.0, 3.0], dtype="float64"),
+            SERIES_KEY: pd.Series(["sku-b", "sku-a"], dtype="string"),
+            TIMESTAMP: pd.to_datetime(["2026-01-26", "2026-01-19"]),
+            KNOWN_AT: pd.to_datetime([known_at, known_at]),
+            "promotion": pd.Series([0, 1], dtype="int64"),
         }
     )
 
-    with pytest.raises(ForecastTaskError, match="strictly before origin"):
-        ForecastTask(
-            history=history,
+
+def test_panel_canonicalizes_rows_columns_and_numeric_values_without_fabricating_missing() -> None:
+    panel = _panel()
+
+    assert panel.series_keys == ("sku-a", "sku-b")
+    assert panel.frame.columns.tolist() == [
+        SERIES_KEY,
+        TIMESTAMP,
+        OBSERVED_VALUE,
+        CENSOR_STATUS,
+        AVAILABILITY_BOUND,
+        "planned_price",
+    ]
+    assert panel.frame[[SERIES_KEY, TIMESTAMP]].values.tolist() == [
+        ["sku-a", pd.Timestamp("2026-01-05")],
+        ["sku-a", pd.Timestamp("2026-01-12")],
+        ["sku-a", pd.Timestamp("2026-01-19")],
+        ["sku-b", pd.Timestamp("2026-01-05")],
+        ["sku-b", pd.Timestamp("2026-01-12")],
+        ["sku-b", pd.Timestamp("2026-01-19")],
+    ]
+    assert panel.frame[OBSERVED_VALUE].isna().sum() == 1
+    assert panel.frame[AVAILABILITY_BOUND].dtype == np.dtype("int64")
+    assert panel.frame["planned_price"].dtype == np.dtype("int32")
+    assert panel.frame[CENSOR_STATUS].isna().sum() == 2
+
+
+def test_panel_permutations_produce_the_same_canonical_snapshot() -> None:
+    frame = _panel_frame()
+    first = Panel.from_frame(frame, calendar=Calendar("W-MON"))
+    second = Panel.from_frame(
+        frame.sample(frac=1, random_state=7)[list(reversed(frame.columns))],
+        calendar=Calendar("W-MON"),
+    )
+
+    pd.testing.assert_frame_equal(first.frame, second.frame)
+    assert first.series_keys == second.series_keys
+
+
+@pytest.mark.parametrize(
+    ("mutation", "pattern"),
+    [
+        (lambda frame: frame.drop(columns=OBSERVED_VALUE), "missing required"),
+        (lambda frame: pd.concat([frame, frame.iloc[[0]]]), "duplicate"),
+        (lambda frame: frame.assign(series_key=frame[SERIES_KEY].astype("object")), "string dtype"),
+        (lambda frame: frame.assign(value=True), "numeric and not boolean"),
+        (lambda frame: frame.assign(note="not numeric"), "exogenous.*numeric"),
+        (
+            lambda frame: frame.assign(
+                censor_status=pd.Series(["undeclared"] * len(frame), dtype="string")
+            ),
+            "assertions",
+        ),
+        (
+            lambda frame: frame.assign(timestamp=frame[TIMESTAMP] + pd.Timedelta(days=1)),
+            "does not lie on calendar",
+        ),
+    ],
+)
+def test_panel_rejects_invalid_schema_and_rows(
+    mutation: Callable[[pd.DataFrame], pd.DataFrame], pattern: str
+) -> None:
+    with pytest.raises(PanelError, match=pattern):
+        Panel.from_frame(mutation(_panel_frame()), calendar=Calendar("W-MON"))
+
+
+@pytest.mark.parametrize("key", ["", None])
+def test_panel_rejects_empty_or_missing_opaque_series_keys(key: object) -> None:
+    frame = _panel_frame()
+    frame.loc[0, SERIES_KEY] = cast(str, key)
+    with pytest.raises(PanelError, match="series keys"):
+        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+
+
+def test_panel_uses_utf8_byte_order_for_exact_opaque_keys() -> None:
+    frame = pd.DataFrame(
+        {
+            SERIES_KEY: pd.Series(["é", "z"], dtype="string"),
+            TIMESTAMP: pd.to_datetime(["2026-01-05", "2026-01-05"]),
+            OBSERVED_VALUE: [1.0, 2.0],
+        }
+    )
+    assert Panel.from_frame(frame, calendar=Calendar("W-MON")).series_keys == ("z", "é")
+
+
+def test_panel_materializes_undeclared_censoring_as_nullable_missing_status() -> None:
+    frame = _panel_frame().drop(columns=CENSOR_STATUS)
+
+    canonical = Panel.from_frame(frame, calendar=Calendar("W-MON")).frame
+
+    assert isinstance(canonical[CENSOR_STATUS].dtype, pd.StringDtype)
+    assert canonical[CENSOR_STATUS].isna().all()
+    assert "undeclared" not in canonical[CENSOR_STATUS].dropna().tolist()
+
+
+def test_task_partition_filters_all_history_at_or_after_origin_before_adapter_visibility() -> None:
+    task = _tasks()[0]
+
+    assert task.scope is Scope.GLOBAL
+    assert task.series_keys == ("sku-a", "sku-b")
+    assert task.history[TIMESTAMP].max() == pd.Timestamp("2026-01-12")
+    assert task.history[TIMESTAMP].lt(task.origin).all()
+
+
+def test_local_scope_yields_one_fixed_one_series_task_per_key() -> None:
+    tasks = _tasks(scope=Scope.LOCAL)
+
+    assert tuple(task.series_keys for task in tasks) == (("sku-a",), ("sku-b",))
+    assert all(task.scope is Scope.LOCAL for task in tasks)
+    assert all(set(task.history[SERIES_KEY]) == set(task.series_keys) for task in tasks)
+
+
+def test_global_scope_yields_one_whole_panel_task() -> None:
+    tasks = _tasks(scope=Scope.GLOBAL)
+    assert len(tasks) == 1
+    assert tasks[0].series_keys == _panel().series_keys
+
+
+@pytest.mark.parametrize("scope", ["per-series", 7, None])
+def test_partition_rejects_unknown_scope(scope: object) -> None:
+    with pytest.raises(PanelError, match="scope"):
+        _panel().forecast_tasks(
+            origin=pd.Timestamp("2026-01-19"),
             horizon=2,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
+            scope=cast(Scope, scope),
             model_config={},
         )
 
 
-def test_task_requires_pandas_timestamp_origin() -> None:
-    with pytest.raises(ForecastTaskError, match="pandas Timestamp"):
-        ForecastTask(
-            history=_history(["2026-01-12"]),
+@pytest.mark.parametrize(
+    "origin", [pd.Timestamp("2026-01-20"), pd.Timestamp("2026-01-19", tz="UTC")]
+)
+def test_partition_requires_an_on_calendar_naive_origin(origin: pd.Timestamp) -> None:
+    with pytest.raises(PanelError, match="calendar|timezone-naive"):
+        _panel().forecast_tasks(
+            origin=origin,
             horizon=1,
-            origin="2026-01-19",  # type: ignore[arg-type]
-            calendar_frequency="W-MON",
+            scope=Scope.GLOBAL,
             model_config={},
         )
 
 
-def test_task_requires_timezone_naive_datetime_history() -> None:
-    history = _history(["2026-01-12"])
-    history[HISTORY_TIMESTAMP] = pd.Series(["2026-01-12"], dtype="string")
-
-    with pytest.raises(ForecastTaskError, match="timezone-naive"):
-        ForecastTask(
-            history=history,
-            horizon=1,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
-            model_config={},
-        )
-
-
-def test_task_accepts_explicit_nanosecond_history() -> None:
-    history = _history(["2026-01-12"])
-    history[HISTORY_TIMESTAMP] = history[HISTORY_TIMESTAMP].astype("datetime64[ns]")
-
-    task = ForecastTask(
-        history=history,
-        horizon=1,
-        origin=pd.Timestamp("2026-01-19"),
-        calendar_frequency="W-MON",
-        model_config={},
-    )
-
-    assert task.history[HISTORY_TIMESTAMP].dtype == "datetime64[ns]"
-
-
-def test_task_rejects_timezone_aware_history_and_origin() -> None:
-    history = _history(["2026-01-12"])
-    history[HISTORY_TIMESTAMP] = pd.date_range("2026-01-12", periods=1, tz="UTC")
-
-    with pytest.raises(ForecastTaskError, match="timezone-naive"):
-        ForecastTask(
-            history=history,
-            horizon=1,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
-            model_config={},
-        )
-
-    with pytest.raises(ForecastTaskError, match="timezone-naive"):
-        ForecastTask(
-            history=_history(["2026-01-12"]),
-            horizon=1,
-            origin=pd.Timestamp("2026-01-19", tz="UTC"),
-            calendar_frequency="W-MON",
-            model_config={},
-        )
-
-
-def test_task_requires_history_timestamp_column() -> None:
-    with pytest.raises(ForecastTaskError, match=HISTORY_TIMESTAMP):
-        ForecastTask(
-            history=_history(["2026-01-12"]).drop(columns=HISTORY_TIMESTAMP),
-            horizon=1,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
-            model_config={},
-        )
-
-
-@pytest.mark.parametrize("horizon", [0, -1, True])
-def test_task_requires_a_positive_integer_horizon(horizon: object) -> None:
+@pytest.mark.parametrize("horizon", [0, -1, True, 1.5])
+def test_partition_requires_positive_integer_horizon(horizon: object) -> None:
     with pytest.raises(ForecastTaskError, match="positive integer"):
-        ForecastTask(
-            history=_history(["2026-01-12"]),
-            horizon=horizon,  # type: ignore[arg-type]
+        _panel().forecast_tasks(
             origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W-MON",
+            horizon=cast(int, horizon),
+            scope=Scope.GLOBAL,
             model_config={},
         )
 
 
-def test_task_requires_an_explicit_weekly_anchor() -> None:
-    with pytest.raises(ForecastTaskError, match="explicit anchor"):
-        ForecastTask(
-            history=_history(["2026-01-12"]),
-            horizon=1,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency="W",
-            model_config={},
-        )
+def test_future_exogenous_is_canonical_and_partitioned_with_tasks() -> None:
+    global_task = _tasks(future=_future())[0]
+    local_tasks = _tasks(scope=Scope.LOCAL, future=_future())
+
+    assert global_task.future_exogenous is not None
+    assert global_task.future_exogenous[SERIES_KEY].tolist() == ["sku-a", "sku-b"]
+    assert global_task.future_exogenous["promotion"].dtype == np.dtype("int64")
+    local_keys = [
+        task.future_exogenous[SERIES_KEY].tolist()
+        for task in local_tasks
+        if task.future_exogenous is not None
+    ]
+    assert local_keys == [["sku-a"], ["sku-b"]]
 
 
-@pytest.mark.parametrize("frequency", ["", "not-a-frequency", 7])
-def test_task_rejects_invalid_calendar_syntax(frequency: object) -> None:
-    with pytest.raises(ForecastTaskError, match="non-empty string|invalid pandas"):
-        ForecastTask(
-            history=_history(["2026-01-12"]),
-            horizon=1,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency=frequency,  # type: ignore[arg-type]
-            model_config={},
-        )
+@pytest.mark.parametrize(
+    ("future", "pattern"),
+    [
+        (_future(known_at="2026-01-20"), "known at or before origin"),
+        (_future().assign(timestamp=pd.to_datetime(["2026-02-02", "2026-01-19"])), "horizon"),
+        (
+            _future().assign(series_key=pd.Series(["unknown", "sku-a"], dtype="string")),
+            "unknown series",
+        ),
+        (_future().assign(promotion=pd.Series([True, False])), "numeric and not boolean"),
+        (_future().assign(promotion=pd.Series([np.nan, 1.0])), "must be known"),
+        (_future().drop(columns=KNOWN_AT), "missing columns"),
+    ],
+)
+def test_future_exogenous_rejects_unknown_or_temporally_illegitimate_facts(
+    future: pd.DataFrame, pattern: str
+) -> None:
+    with pytest.raises(PanelError, match=pattern):
+        _tasks(future=future)
 
 
-@pytest.mark.parametrize("frequency", ["0D", "-1D", "0W-MON", "-1W-MON"])
-def test_task_requires_a_forward_moving_calendar(frequency: str) -> None:
-    with pytest.raises(ForecastTaskError, match="positive period"):
-        ForecastTask(
-            history=_history(["2026-01-12"]),
-            horizon=1,
-            origin=pd.Timestamp("2026-01-19"),
-            calendar_frequency=frequency,
-            model_config={},
-        )
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"x": np.nan},
+        {"x": np.inf},
+        {"x": (1, 2)},
+        {1: "non-string-key"},
+        {"x": np.array([1])},
+    ],
+)
+def test_task_model_configuration_must_be_finite_json(config: dict[object, object]) -> None:
+    with pytest.raises(ForecastTaskError, match="finite|JSON|string object key"):
+        _tasks(config=cast(dict[str, object], config))
 
 
-def test_task_defensively_copies_history_at_and_after_construction() -> None:
-    history = _history(["2026-01-12"])
-    task = ForecastTask(
-        history=history,
-        horizon=1,
-        origin=pd.Timestamp("2026-01-19"),
-        calendar_frequency="W-MON",
-        model_config={},
-    )
+def test_task_defensively_copies_every_mutable_surface() -> None:
+    future = _future()
+    nested = [1]
+    config: dict[str, object] = {"backend": "seasonal-naive", "m": 2, "nested": nested}
+    task = _tasks(config=config, future=future)[0]
 
-    history.loc[0, HISTORY_TIMESTAMP] = pd.Timestamp("2026-01-19")
-
+    future.loc[0, "promotion"] = 999
+    nested.append(2)
     exposed_history = task.history
-    exposed_history.loc[0, HISTORY_TIMESTAMP] = pd.Timestamp("2026-01-19")
-
-    assert task.history.loc[0, HISTORY_TIMESTAMP] == pd.Timestamp("2026-01-12")
-
-
-def test_task_defensively_copies_model_configuration_at_and_after_construction() -> None:
-    model_config: dict[str, object] = {"backend": "seasonal-naive", "nested": {"m": 7}}
-    task = ForecastTask(
-        history=_history(["2026-01-12"]),
-        horizon=1,
-        origin=pd.Timestamp("2026-01-19"),
-        calendar_frequency="W-MON",
-        model_config=model_config,
-    )
-
-    cast(dict[str, int], model_config["nested"])["m"] = 1
+    exposed_history.loc[:, OBSERVED_VALUE] = 999
+    exposed_future = task.future_exogenous
+    assert exposed_future is not None
+    exposed_future.loc[:, "promotion"] = 999
     exposed_config = task.model_config
-    cast(dict[str, int], exposed_config["nested"])["m"] = 2
+    cast(list[int], exposed_config["nested"]).append(3)
 
-    assert cast(dict[str, int], task.model_config["nested"])["m"] == 7
+    assert 999 not in task.history[OBSERVED_VALUE].dropna().tolist()
+    assert task.future_exogenous is not None
+    assert 999 not in task.future_exogenous["promotion"].tolist()
+    assert task.model_config["nested"] == [1]
+
+
+def test_task_round_trip_is_exact_and_preserves_datetime_resolution() -> None:
+    task = _panel(resolution="ms").forecast_tasks(
+        origin=pd.Timestamp(np.datetime64("2026-01-19", "ms")),
+        horizon=2,
+        scope=Scope.GLOBAL,
+        model_config={"backend": "seasonal-naive", "m": 2},
+        future_exogenous=_future(),
+    )[0]
+
+    restored = ForecastTask.from_bytes(task.to_bytes())
+
+    assert restored.to_bytes() == task.to_bytes()
+    assert restored.history[TIMESTAMP].dtype == np.dtype("datetime64[ms]")
+    assert restored.origin.unit == "ms"
+    pd.testing.assert_frame_equal(restored.history, task.history)
+    restored_future = restored.future_exogenous
+    task_future = task.future_exogenous
+    assert restored_future is not None
+    assert task_future is not None
+    pd.testing.assert_frame_equal(restored_future, task_future)
+    assert restored.calendar == task.calendar
+    assert restored.scope is task.scope
+    assert restored.series_keys == task.series_keys
+    assert restored.model_config == task.model_config
+
+
+def test_task_bytes_ignore_input_row_column_and_config_mapping_order() -> None:
+    frame = _panel_frame().sample(frac=1, random_state=3)
+    first = Panel.from_frame(frame, calendar=Calendar("W-MON")).forecast_tasks(
+        origin=pd.Timestamp("2026-01-19"),
+        horizon=2,
+        scope=Scope.GLOBAL,
+        model_config={"backend": "seasonal-naive", "m": 2},
+    )[0]
+    second = Panel.from_frame(
+        frame[list(reversed(frame.columns))], calendar=Calendar("W-MON")
+    ).forecast_tasks(
+        origin=pd.Timestamp("2026-01-19"),
+        horizon=2,
+        scope=Scope.GLOBAL,
+        model_config={"m": 2, "backend": "seasonal-naive"},
+    )[0]
+    assert first.to_bytes() == second.to_bytes()
+
+
+def test_task_bytes_and_enumeration_are_deterministic_across_fresh_processes() -> None:
+    script = """
+import pandas as pd
+from newcalibre.domain import Calendar, Panel, Scope
+keys = list({'é', 'a', 'z'})
+frame = pd.DataFrame({
+    'series_key': pd.Series(keys, dtype='string'),
+    'timestamp': pd.to_datetime(['2026-01-05'] * 3),
+    'value': [{'a': 1.0, 'z': 2.0, 'é': 3.0}[key] for key in keys],
+})
+task = Panel.from_frame(frame, calendar=Calendar('W-MON')).forecast_tasks(
+    origin=pd.Timestamp('2026-01-12'), horizon=2, scope=Scope.GLOBAL,
+    model_config={'m': 1, 'backend': 'seasonal-naive'},
+)[0]
+print('|'.join(task.series_keys))
+print(task.to_bytes().hex())
+"""
+    outputs: list[str] = []
+    for seed in ("1", "777"):
+        environment = {**os.environ, "PYTHONHASHSEED": seed}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        outputs.append(result.stdout)
+    assert outputs[0] == outputs[1]
+    assert outputs[0].splitlines()[0] == "a|z|é"
+
+
+def test_task_deserialization_rejects_corruption_version_truncation_and_trailing_bytes() -> None:
+    data = _tasks()[0].to_bytes()
+    corrupt = bytearray(data)
+    corrupt[-40] ^= 1
+    wrong_version = bytearray(data)
+    wrong_version[4] = 2
+
+    with pytest.raises(ForecastTaskError, match="integrity"):
+        ForecastTask.from_bytes(bytes(corrupt))
+    with pytest.raises(ForecastTaskError, match="version"):
+        ForecastTask.from_bytes(bytes(wrong_version))
+    with pytest.raises(ForecastTaskError, match="truncated"):
+        ForecastTask.from_bytes(data[:-40])
+    with pytest.raises(ForecastTaskError, match="trailing"):
+        ForecastTask.from_bytes(data + b"extra")
+
+
+def test_task_deserialization_rejects_authenticated_schema_drift() -> None:
+    data = _tasks()[0].to_bytes()
+    payload = bytearray(data[:-32])
+    marker = b'"dtype":"float64"'
+    index = payload.find(marker)
+    assert index >= 0
+    payload[index : index + len(marker)] = b'"dtype":"float32"'
+    drifted = bytes(payload) + hashlib.sha256(payload).digest()
+
+    with pytest.raises(ForecastTaskError, match="schema drifted"):
+        ForecastTask.from_bytes(drifted)

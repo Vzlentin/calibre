@@ -17,11 +17,7 @@ import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_integer_dtype
 
-from newcalibre.domain._calendar import (
-    CalendarFrequencyError,
-    advance_timestamp,
-    calendar_offset,
-)
+from newcalibre.domain.calendar import Calendar, CalendarError
 
 SERIES_KEY: Final = "series_key"
 TARGET_TIMESTAMP: Final = "target_timestamp"
@@ -69,26 +65,23 @@ def target_timestamp(
     origin: pd.Timestamp,
     horizon_step: int,
     *,
-    calendar_frequency: str,
+    calendar: Calendar,
 ) -> pd.Timestamp:
     """Derive a row target as origin advanced ``horizon_step - 1`` periods."""
-    if not isinstance(origin, pd.Timestamp) or pd.isna(origin):
-        raise ForecastFrameError("origin must be a non-missing pandas Timestamp")
-    if origin.tz is not None:
-        raise ForecastFrameError("origin must be timezone-naive for the provisional calendar")
     if not isinstance(horizon_step, Integral) or isinstance(horizon_step, bool) or horizon_step < 1:
         raise ForecastFrameError("horizon step must be a positive integer")
+    if not isinstance(calendar, Calendar):
+        raise ForecastFrameError("calendar must be a Calendar")
     try:
-        offset = calendar_offset(calendar_frequency)
-    except CalendarFrequencyError as error:
+        return calendar.advance(origin, int(horizon_step) - 1)
+    except CalendarError as error:
         raise ForecastFrameError(str(error)) from error
-    return advance_timestamp(origin, horizon_step - 1, offset)
 
 
 def validate_forecast_frame(
     frame: pd.DataFrame,
     *,
-    calendar_frequency: str,
+    calendar: Calendar,
 ) -> pd.DataFrame:
     """Validate a frame atomically and return its normalized copy.
 
@@ -117,7 +110,7 @@ def validate_forecast_frame(
         _normalize_float64(normalized, column)
 
     _validate_row_identity(normalized)
-    _validate_target_timestamps(normalized, calendar_frequency)
+    _validate_target_timestamps(normalized, calendar)
     return normalized
 
 
@@ -234,17 +227,17 @@ def _validate_row_identity(frame: pd.DataFrame) -> None:
         raise ForecastFrameError("forecast frame contains a duplicate full row key")
 
 
-def _validate_target_timestamps(frame: pd.DataFrame, calendar_frequency: str) -> None:
-    try:
-        offset = calendar_offset(calendar_frequency)
-    except CalendarFrequencyError as error:
-        raise ForecastFrameError(str(error)) from error
-
+def _validate_target_timestamps(frame: pd.DataFrame, calendar: Calendar) -> None:
+    if not isinstance(calendar, Calendar):
+        raise ForecastFrameError("calendar must be a Calendar")
     expected: list[pd.Timestamp] = []
     for origin, horizon_step in zip(frame[ORIGIN], frame[HORIZON_STEP], strict=True):
         if pd.isna(origin):
             raise ForecastFrameError("origin cannot be missing")
-        expected.append(advance_timestamp(origin, int(horizon_step) - 1, offset))
+        try:
+            expected.append(calendar.advance(pd.Timestamp(origin), int(horizon_step) - 1))
+        except CalendarError as error:
+            raise ForecastFrameError(str(error)) from error
 
     actual_targets = pd.DatetimeIndex(frame[TARGET_TIMESTAMP])
     expected_targets = pd.DatetimeIndex(expected)

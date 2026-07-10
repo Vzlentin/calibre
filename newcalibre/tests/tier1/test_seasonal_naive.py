@@ -8,6 +8,7 @@ serialized output is same-engine byte identity (class 4).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -22,7 +23,10 @@ from newcalibre.domain import (
     POINT_FORECAST,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    Calendar,
     ForecastTask,
+    Panel,
+    Scope,
     validate_forecast_frame,
 )
 from newcalibre.forecasting import (
@@ -76,13 +80,12 @@ def _task(
     config: Mapping[str, object] | None = None,
 ) -> ForecastTask:
     model_config = dict(config or _config())
-    return ForecastTask(
-        history=history,
+    return Panel.from_frame(history, calendar=Calendar("D")).forecast_tasks(
         horizon=horizon,
         origin=ORIGIN_TIMESTAMP,
-        calendar_frequency="D",
+        scope=Scope.GLOBAL,
         model_config=model_config,
-    )
+    )[0]
 
 
 def _adapter(config: Mapping[str, object] | None = None) -> ForecastAdapter:
@@ -108,7 +111,7 @@ def test_m7_walkthrough_emits_the_hand_checkable_validated_frame() -> None:
 
     pd.testing.assert_frame_equal(
         frame,
-        validate_forecast_frame(frame, calendar_frequency="D"),
+        validate_forecast_frame(frame, calendar=Calendar("D")),
     )
     assert frame[SERIES_KEY].tolist() == ["sku-a"] * 4
     assert frame[TARGET_TIMESTAMP].tolist() == [
@@ -347,15 +350,15 @@ def test_adapter_preserves_a_defensive_snapshot_of_nested_configuration() -> Non
     )
     levels = config["quantile_levels"]
     assert isinstance(levels, list)
-    levels.append(0.5)
+    cast(list[float], levels).append(0.5)
 
     adapter.fit(task)
 
     assert adapter.predict(task)[POINT_FORECAST].tolist() == [8.0, 9.0, 10.0, 11.0]
 
 
-def test_irrelevant_array_metadata_does_not_make_config_comparison_ambiguous() -> None:
-    config = _config(metadata=np.array([1.0, np.nan]))
+def test_irrelevant_json_metadata_does_not_affect_effective_config_comparison() -> None:
+    config = _config(metadata={"source": "fixture", "weights": [1.0, None]})
     task = _task(
         _history({"sku-a": [float(value) for value in range(1, 15)]}),
         config=config,
@@ -376,13 +379,12 @@ def test_weekly_anchored_calendar_uses_the_same_phase_lookup() -> None:
             "value": pd.Series(range(1, 9), dtype="float64"),
         }
     )
-    task = ForecastTask(
-        history=history,
+    task = Panel.from_frame(history, calendar=Calendar("W-MON")).forecast_tasks(
         horizon=3,
         origin=pd.Timestamp("2026-03-02"),
-        calendar_frequency="W-MON",
+        scope=Scope.GLOBAL,
         model_config=config,
-    )
+    )[0]
     adapter = _adapter(config)
     adapter.fit(task)
 
