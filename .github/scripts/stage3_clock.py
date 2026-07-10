@@ -89,9 +89,10 @@ def issue_comments(issue: int) -> list:
     return gh_api_paginated(f"repos/{repo()}/issues/{issue}/comments")
 
 
-def find_activation_record() -> dict | None:
+def find_activation_record(comments: list | None = None) -> dict | None:
     """Parse the Gate issue's activation record, if one exists."""
-    for comment in issue_comments(GATE_ISSUE):
+    comments_to_read = issue_comments(GATE_ISSUE) if comments is None else comments
+    for comment in comments_to_read:
         body = comment.get("body", "")
         if ACTIVATION_MARKER in body:
             match = re.search(r"```json\s*(\{.*?\})\s*```", body, re.DOTALL)
@@ -216,7 +217,7 @@ def milestone_issues() -> list:
 
 
 def blocker_suspends_stall(comments: list, *, today: date) -> bool:
-    """Suspend a stall only for the newest valid blocker before its review date."""
+    """Suspend only when the newest blocker comment is valid and unexpired."""
     for comment in reversed(comments):
         body = comment.get("body", "")
         if BLOCKER_MARKER not in body:
@@ -244,10 +245,9 @@ def blocker_suspends_stall(comments: list, *, today: date) -> bool:
     return False
 
 
-def started_at(issue: dict, *, comments: list | None = None) -> datetime | None:
-    """Read the latest s3-started-at timestamp recorded on an active issue."""
-    issue_comments_to_read = issue_comments(issue["number"]) if comments is None else comments
-    for comment in reversed(issue_comments_to_read):
+def started_at(comments: list) -> datetime | None:
+    """Read the latest s3-started-at timestamp from complete issue comments."""
+    for comment in reversed(comments):
         match = STARTED_AT_RE.search(comment.get("body", ""))
         if match:
             return datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
@@ -257,9 +257,9 @@ def started_at(issue: dict, *, comments: list | None = None) -> datetime | None:
 def cmd_check_deadline() -> int:
     """Escalate at the immutable deadline; flag stalled active units."""
     now = datetime.now(UTC)
-    record = find_activation_record()
-    comments = issue_comments(GATE_ISSUE)
-    all_bodies = "\n".join(c.get("body", "") for c in comments)
+    gate_comments = issue_comments(GATE_ISSUE)
+    record = find_activation_record(gate_comments)
+    all_bodies = "\n".join(c.get("body", "") for c in gate_comments)
 
     if record_is_schema_complete(record):
         deadline = datetime.fromisoformat(record["deadline"].replace("Z", "+00:00"))
@@ -292,10 +292,10 @@ def cmd_check_deadline() -> int:
         match = re.match(r"S3-U(\d+):", issue.get("title", ""))
         if not match or not 1 <= int(match.group(1)) <= 8:
             continue
-        comments = issue_comments(issue["number"]) if "s3:blocked" in labels else None
-        if comments is not None and blocker_suspends_stall(comments, today=now.date()):
+        unit_comments = issue_comments(issue["number"])
+        if "s3:blocked" in labels and blocker_suspends_stall(unit_comments, today=now.date()):
             continue
-        begun = started_at(issue, comments=comments)
+        begun = started_at(unit_comments)
         if begun and now - begun > timedelta(days=STALL_DAYS):
             gh_api(
                 f"repos/{repo()}/issues/{issue['number']}/labels",

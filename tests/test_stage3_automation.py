@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -69,6 +69,31 @@ def test_gate_report_reads_the_real_multiline_activation_record(
     assert stage3_gate_report.find_activation_record is stage3_clock.find_activation_record
 
 
+def test_deadline_check_uses_one_gate_comment_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> FixedDateTime:
+            return cls(2026, 7, 30, 6, 30, tzinfo=UTC)
+
+    reads: list[int] = []
+
+    def read_comments(issue: int) -> list[dict[str, str]]:
+        reads.append(issue)
+        return [{"body": ACTIVATION_BODY}]
+
+    monkeypatch.setattr(stage3_clock, "datetime", FixedDateTime)
+    monkeypatch.setattr(stage3_clock, "issue_comments", read_comments)
+    monkeypatch.setattr(stage3_clock, "milestone_issues", lambda: [])
+    monkeypatch.setattr(
+        stage3_clock,
+        "post_issue_comment",
+        lambda *args: pytest.fail(f"unexpected comment write: {args}"),
+    )
+
+    assert stage3_clock.cmd_check_deadline() == 0
+    assert reads == [stage3_clock.GATE_ISSUE]
+
+
 def _blocker_body(description: object, next_review: object, **extra: object) -> str:
     record = {"description": description, "next_review": next_review, **extra}
     return f"{BLOCKER_MARKER}\n```json\n{json.dumps(record)}\n```"
@@ -113,13 +138,13 @@ def _blocker_body(description: object, next_review: object, **extra: object) -> 
         ),
     ],
 )
-def test_blocker_suspends_only_for_the_latest_schema_complete_future_record(
+def test_blocker_uses_only_the_newest_marker_comment_and_requires_current_schema(
     comments: list[str],
     expected: bool,
 ) -> None:
     records = [{"body": body} for body in comments]
 
-    assert stage3_clock.blocker_suspends_stall(records, today=date(2026, 7, 30)) is expected
+    assert stage3_clock.blocker_suspends_stall(records, today=NOW.date()) is expected
 
 
 def _issue(
@@ -159,15 +184,9 @@ def _run_deadline_check(
                 tzinfo=UTC,
             )
 
-    activation = {
-        "merge_sha": "a" * 40,
-        "merged_at": "2026-07-09T23:54:34Z",
-        "deadline": "2026-08-20T23:54:34Z",
-        "pr": 331,
-    }
     monkeypatch.setattr(stage3_clock, "datetime", FixedDateTime)
     monkeypatch.setattr(stage3_clock, "repo", lambda: "Vzlentin/calibre")
-    monkeypatch.setattr(stage3_clock, "find_activation_record", lambda: activation)
+    monkeypatch.setattr(stage3_clock, "find_activation_record", lambda comments: ACTIVATION_RECORD)
     monkeypatch.setattr(stage3_clock, "milestone_issues", lambda: [issue])
     monkeypatch.setattr(
         stage3_clock,
