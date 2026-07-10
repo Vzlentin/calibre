@@ -1,4 +1,4 @@
-"""Decision-cost configuration without policy-specific derivations."""
+"""Define decision-cost configuration without policy-specific derivations."""
 
 import math
 from dataclasses import dataclass
@@ -27,7 +27,7 @@ def _finite_nonnegative_float(value: object, *, name: str) -> float:
 
 @dataclass(frozen=True, slots=True)
 class CostStructure:
-    """The independent per-decision and per-period cost components."""
+    """Represent independent per-decision and per-period cost components."""
 
     underage: float
     overage: float

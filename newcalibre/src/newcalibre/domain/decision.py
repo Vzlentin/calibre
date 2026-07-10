@@ -1,4 +1,4 @@
-"""Decision-time configuration and inventory-position vocabulary."""
+"""Define decision-time configuration and inventory-position vocabulary."""
 
 import math
 from dataclasses import dataclass, field
@@ -37,7 +37,7 @@ def _finite_nonnegative_quantity(value: object, *, name: str) -> float:
 
 @dataclass(frozen=True, slots=True)
 class DecisionTiming:
-    """Lead/review configuration with its exact protection-period invariant."""
+    """Represent lead/review timing with its exact protection-period invariant."""
 
     lead_time: int
     review_period: int
@@ -64,7 +64,7 @@ class DecisionTiming:
 
 @dataclass(frozen=True, slots=True)
 class InventoryPosition:
-    """The non-negative components read by a policy at decision time."""
+    """Represent the non-negative components read by a policy at decision time."""
 
     on_hand: float
     on_order: float

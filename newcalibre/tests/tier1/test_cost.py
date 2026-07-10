@@ -1,4 +1,4 @@
-"""Tier-1 contract tests for decision-cost configuration."""
+"""Exercise decision-cost configuration contracts at tier 1."""
 
 import sys
 from dataclasses import FrozenInstanceError

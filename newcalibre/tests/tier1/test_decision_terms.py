@@ -1,4 +1,4 @@
-"""Tier-1 contract tests for decision-time vocabulary."""
+"""Exercise decision-time vocabulary contracts at tier 1."""
 
 import sys
 from dataclasses import FrozenInstanceError

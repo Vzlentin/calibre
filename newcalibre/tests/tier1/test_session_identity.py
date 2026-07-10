@@ -221,3 +221,12 @@ def test_rejects_cyclic_configuration() -> None:
 
     with pytest.raises(SessionIdentityError, match="cyclic"):
         _derive(conformal_config=config)
+
+
+def test_rejects_excessive_configuration_nesting_with_the_public_error() -> None:
+    nested: object = None
+    for _ in range(sys.getrecursionlimit() + 10):
+        nested = [nested]
+
+    with pytest.raises(SessionIdentityError, match="nesting depth"):
+        _derive(model_config={"nested": nested})

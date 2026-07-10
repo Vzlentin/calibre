@@ -72,8 +72,12 @@ def canonical_json(value: object) -> str:
 
 def canonical_json_bytes(value: object, *, path: str) -> bytes:
     """Validate a value and return its canonical UTF-8 bytes."""
-    require_json_value(value, path=path)
     try:
+        require_json_value(value, path=path)
         return canonical_json(value).encode("utf-8")
+    except CanonicalJsonError:
+        raise
+    except RecursionError as error:
+        raise CanonicalJsonError(f"{path} exceeds maximum JSON nesting depth") from error
     except (TypeError, UnicodeError, ValueError) as error:
         raise CanonicalJsonError(f"{path} must contain finite UTF-8 JSON values") from error
