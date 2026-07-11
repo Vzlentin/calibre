@@ -16,9 +16,14 @@ three files in order before writing first-brick code:
 the first-contributor walkthrough. The first brick must remain buildable from
 the three-file reading path without frozen code or private rationale.
 
+Engine work additionally starts from
+[`03-engine-core.md`](../docs/spec/03-engine-core.md), which owns the fixed
+spine, closed verb surface, and six ports.
+
 ## Package layers
 
 - `src/newcalibre/domain/` owns the chapter 02 vocabulary and contracts.
+- `src/newcalibre/engine/` owns the chapter 03 spine and six I/O ports.
 - `src/newcalibre/forecasting/` owns the chapter 04 adapter surface and may
   depend on `domain`.
 
