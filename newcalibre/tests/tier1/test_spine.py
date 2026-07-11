@@ -22,6 +22,7 @@ from newcalibre.domain import (
     SERIES_KEY,
     TARGET_TIMESTAMP,
     TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     CostStructure,
     DecisionTiming,
@@ -51,6 +52,8 @@ from newcalibre.engine import (
     Phase,
     PhaseError,
     PhaseEvent,
+    SettlementSnapshot,
+    SettlementWindow,
     Spine,
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
@@ -399,6 +402,57 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     assert sink.forecasts[0].actual_value == 5.0
     assert sink.forecasts[1].actual_value is None
     assert len(sink.orders) == 2
+
+
+def test_spine_rejects_a_settlement_window_beyond_its_origin_before_phases() -> None:
+    panel = _panel()
+    session = _session(with_decision=True)
+    events: list[str] = []
+    artifacts = InMemoryArtifactStore()
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    spine = Spine(
+        _engine(
+            panel=panel,
+            events=events,
+            artifacts=artifacts,
+            states=InMemoryCalibrationStateStore(),
+            sink=sink,
+            dispatch=RecordingDispatch(),
+        )
+    )
+    origin = pd.Timestamp("2026-01-05")
+    following = CALENDAR.advance(origin, 1)
+    snapshot = SettlementSnapshot(
+        session=session,
+        calendar=CALENDAR,
+        periods=(origin, following),
+        frontier=None,
+        latest_positions={},
+        open_order_quantities={"a": 0.0},
+        due_arrivals={},
+        actuals_semantics=None,
+    )
+
+    with pytest.raises(ValueError, match="exactly its origin"):
+        spine.run_origin(
+            OriginRequest(
+                session=session,
+                origin=origin,
+                scope=Scope.LOCAL,
+                inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
+            ),
+            settlement=SettlementWindow(
+                snapshot=snapshot,
+                actuals={("a", origin): 0.0, ("a", following): 0.0},
+                actuals_semantics=ActualsSemantics.DEMAND,
+            ),
+        )
+
+    assert events == []
+    assert artifacts.artifacts == {}
+    assert sink.forecasts == ()
+    assert sink.orders == ()
+    assert sink.settlements == ()
 
 
 def test_unconfigured_stages_are_exact_identities() -> None:

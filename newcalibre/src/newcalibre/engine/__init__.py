@@ -10,9 +10,9 @@ from newcalibre.engine.ports import (
     DispatchBackend,
     ForecastWrite,
     LedgerSink,
-    LedgerSnapshot,
     OriginCommit,
     PanelSource,
+    SettlementSnapshot,
 )
 from newcalibre.engine.ports.memory import (
     InMemoryActualsSource,
@@ -41,7 +41,14 @@ from newcalibre.engine.spine import (
     Phase,
     PhaseError,
     PhaseEvent,
+    SettlementWindow,
     Spine,
+)
+from newcalibre.engine.time_loop import (
+    TimeLoop,
+    TimeLoopError,
+    TimeLoopRequest,
+    TimeLoopResult,
 )
 
 __all__ = [
@@ -65,7 +72,6 @@ __all__ = [
     "InMemoryPanelSource",
     "InProcessDispatch",
     "LedgerSink",
-    "LedgerSnapshot",
     "ObservationResult",
     "OrderRequest",
     "OriginCommit",
@@ -78,6 +84,12 @@ __all__ = [
     "SettlementError",
     "SettlementRequest",
     "SettlementResult",
+    "SettlementSnapshot",
+    "SettlementWindow",
     "Spine",
+    "TimeLoop",
+    "TimeLoopError",
+    "TimeLoopRequest",
+    "TimeLoopResult",
     "settle",
 ]

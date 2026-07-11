@@ -5,6 +5,8 @@ from newcalibre.engine.settlement._core import (
     SettlementRequest,
     SettlementResult,
     settle,
+    validate_actuals_window,
+    validate_snapshot_state,
 )
 
 __all__ = [
@@ -12,4 +14,6 @@ __all__ = [
     "SettlementRequest",
     "SettlementResult",
     "settle",
+    "validate_actuals_window",
+    "validate_snapshot_state",
 ]
