@@ -6,6 +6,7 @@ import hashlib
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
 from numbers import Real
 from types import MappingProxyType
 from typing import Protocol, TypeVar, runtime_checkable
@@ -158,14 +159,7 @@ class CommitReceipt:
                 raise TypeError("commit receipt settlement periods must be pandas Timestamps")
             if period.tz is not None:
                 raise ValueError("commit receipt settlement periods must be timezone-naive")
-        if any(
-            current <= previous
-            for previous, current in zip(
-                settlement_periods,
-                settlement_periods[1:],
-                strict=False,
-            )
-        ):
+        if any(current <= previous for previous, current in pairwise(settlement_periods)):
             raise ValueError(
                 "commit receipt settlement periods must be strictly increasing and unique"
             )
