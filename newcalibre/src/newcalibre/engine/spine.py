@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import time
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -31,12 +32,11 @@ from newcalibre.domain import (
     forecast_bound_groups,
     validate_forecast_frame,
 )
-from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
+from newcalibre.domain._canonical_json import canonical_json_bytes
 from newcalibre.engine.ports import (
     ActualKey,
     ActualsSource,
     ArtifactStore,
-    ArtifactWrite,
     CalibrationStateStore,
     CommitReceipt,
     DispatchBackend,
@@ -147,11 +147,17 @@ class ForecastBatch:
 
 @dataclass(frozen=True, slots=True)
 class FittedTask:
-    """Pair an explicit task with its fitted in-process adapter."""
+    """Address fitted state without carrying model objects, bytes, or locations."""
 
+    session: SessionIdentity
     task: ForecastTask
-    adapter: ForecastAdapter
-    pending_artifact: ArtifactWrite | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session, SessionIdentity):
+            raise TypeError("fitted task session must be a SessionIdentity")
+        if not isinstance(self.task, ForecastTask):
+            raise TypeError("fitted task task must be a ForecastTask")
+        _require_task_session_binding(self.task, session=self.session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +200,7 @@ class OrderRequest:
     origin: pd.Timestamp
     forecasts: ForecastBatch
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
-    cost_structure: CostStructure | None = None
+    cost_structure: CostStructure | None = field(init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
@@ -205,8 +211,7 @@ class OrderRequest:
             raise TypeError("order request forecasts must be a ForecastBatch")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
-        if self.cost_structure is not None and not isinstance(self.cost_structure, CostStructure):
-            raise TypeError("order request cost structure must be a CostStructure")
+        object.__setattr__(self, "cost_structure", _session_cost_structure(self.session))
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,7 +224,7 @@ class SettlementRequest:
     actuals: Mapping[ActualKey, float]
     inventory_positions: Mapping[str, InventoryPosition]
     timing: DecisionTiming
-    cost_structure: CostStructure
+    cost_structure: CostStructure = field(init=False)
     stockout_rule: str
     actuals_semantics: str
 
@@ -238,8 +243,10 @@ class SettlementRequest:
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         if not isinstance(self.timing, DecisionTiming):
             raise TypeError("settlement request timing must be DecisionTiming")
-        if not isinstance(self.cost_structure, CostStructure):
-            raise TypeError("settlement request cost structure must be CostStructure")
+        cost_structure = _session_cost_structure(self.session)
+        if cost_structure is None:
+            raise EngineError("settlement request session has no decision cost structure")
+        object.__setattr__(self, "cost_structure", cost_structure)
         _require_identifier(self.stockout_rule, name="stock-out transition rule")
         _require_identifier(self.actuals_semantics, name="actuals semantics")
 
@@ -263,38 +270,22 @@ class OriginRequest:
         *,
         session: SessionIdentity,
         origin: pd.Timestamp,
-        horizon: int,
         scope: Scope,
-        model_config: Mapping[str, object],
         calibration_partitions: Sequence[str] = (),
         future_exogenous: pd.DataFrame | None = None,
         inventory_positions: Mapping[str, InventoryPosition] | None = None,
-        cost_structure: CostStructure | None = None,
     ) -> None:
         if not isinstance(session, SessionIdentity):
             raise TypeError("origin request session must be a SessionIdentity")
         if not isinstance(origin, pd.Timestamp):
             raise TypeError("origin request origin must be a pandas Timestamp")
-        if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
-            raise EngineError("origin request horizon must be a positive integer")
         if not isinstance(scope, Scope):
             raise TypeError("origin request scope must be a Scope")
-        if not isinstance(model_config, Mapping):
-            raise TypeError("origin request model configuration must be a mapping")
-        try:
-            encoded_config = canonical_json_bytes(
-                dict(model_config),
-                path="origin request model configuration",
-            )
-        except CanonicalJsonError as error:
-            raise EngineError(str(error)) from error
+        horizon, encoded_config, cost_structure = _session_origin_inputs(session)
         partitions = _validated_partitions(calibration_partitions)
         if future_exogenous is not None and not isinstance(future_exogenous, pd.DataFrame):
             raise TypeError("future exogenous input must be a pandas DataFrame")
         positions = _validated_inventory_positions(inventory_positions or {})
-        if cost_structure is not None and not isinstance(cost_structure, CostStructure):
-            raise TypeError("origin request cost structure must be a CostStructure")
-
         object.__setattr__(self, "session", session)
         object.__setattr__(self, "origin", origin)
         object.__setattr__(self, "horizon", horizon)
@@ -391,8 +382,7 @@ class Engine:
         for hook, name in callables:
             if hook is not None and not callable(hook):
                 raise TypeError(f"engine {name} must be callable")
-        self._panel_source = panel_source
-        self._panel: Panel | None = None
+        self._panel = panel_source.load()
         self._actuals_source = actuals_source
         self._artifact_store = artifact_store
         self._calibration_state_store = calibration_state_store
@@ -404,35 +394,36 @@ class Engine:
         self._calibrator = calibrator
         self._orderer = orderer
         self._settler = settler
-
-    def fit(
-        self,
-        *,
-        origin: pd.Timestamp,
-        horizon: int,
-        scope: Scope,
-        model_config: Mapping[str, object],
-        future_exogenous: pd.DataFrame | None = None,
-    ) -> tuple[FittedTask, ...]:
-        """Build deterministic tasks and fit or restore their adapters."""
-        panel = self._panel
-        if panel is None:
-            panel = self._panel_source.load()
-            self._panel = panel
-        tasks = panel.forecast_tasks(
-            origin=origin,
-            horizon=horizon,
-            scope=scope,
-            model_config=model_config,
-            future_exogenous=future_exogenous,
+        _require_panel_session_binding(
+            self._panel,
+            session=self._ledger_sink.session,
+            ledger_calendar=self._ledger_sink.calendar,
         )
-        return self._dispatch_backend.map(self._fit_one, tasks)
+
+    def fit(self, request: OriginRequest) -> tuple[FittedTask, ...]:
+        """Build deterministic tasks and fit or restore their adapters."""
+        if not isinstance(request, OriginRequest):
+            raise TypeError("fit requires an OriginRequest")
+        self._require_session(request.session)
+        tasks = self._panel.forecast_tasks(
+            origin=request.origin,
+            horizon=request.horizon,
+            scope=request.scope,
+            model_config=request.model_config,
+            future_exogenous=request.future_exogenous,
+        )
+        fitted_tasks = tuple(FittedTask(session=request.session, task=task) for task in tasks)
+        return self._dispatch_backend.map(self._fit_one, fitted_tasks)
 
     def predict(self, fitted_tasks: Sequence[FittedTask]) -> ForecastBatch:
         """Predict fitted tasks in deterministic dispatch order."""
         tasks = tuple(fitted_tasks)
         if not tasks:
             raise EngineError("predict requires at least one fitted task")
+        for fitted in tasks:
+            if not isinstance(fitted, FittedTask):
+                raise TypeError("predict requires FittedTask values")
+            self._require_session(fitted.session)
         frames = self._dispatch_backend.map(self._predict_one, tasks)
         combined = pd.concat(frames, ignore_index=True)
         return ForecastBatch(combined, calendar=self._ledger_sink.calendar)
@@ -556,61 +547,62 @@ class Engine:
             raise EngineError("settler must return only SettlementRecord values")
         return settlements
 
-    def commit(self, request: OriginCommit | CommitReceipt) -> None:
-        """Persist the origin's staged ledger, artifact, and state mutations."""
+    def commit(self, request: OriginCommit | CommitReceipt) -> CommitReceipt:
+        """Persist an origin's ledger and monotone calibration-state mutations."""
         if not isinstance(request, (OriginCommit, CommitReceipt)):
             raise TypeError("commit requires an OriginCommit or CommitReceipt")
         self._require_session(request.session)
-        receipt = (
-            self._ledger_sink.commit(request) if isinstance(request, OriginCommit) else request
-        )
-        for artifact in receipt.artifacts:
-            self._artifact_store.save(artifact.key, artifact.value)
+        if isinstance(request, OriginCommit):
+            expected = CommitReceipt.from_commit(request)
+            receipt = self._ledger_sink.commit(request)
+            if receipt != expected:
+                raise EngineError("ledger sink returned a mismatched commit receipt")
+        else:
+            receipt = self._ledger_sink.receipt(request.origin)
+            if receipt is None:
+                raise EngineError("commit receipt is not journaled by the ledger sink")
+            if receipt != request:
+                raise EngineError("commit receipt does not match the ledger journal")
         for partition, value in receipt.state_updates.items():
-            self._calibration_state_store.save(request.session, partition, value)
+            self._calibration_state_store.save(
+                receipt.session,
+                partition,
+                value,
+                origin=receipt.origin,
+            )
+        return receipt
 
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:
             raise EngineError("engine session does not match its ledger sink")
 
-    def _make_order_request(
-        self,
-        *,
-        session: SessionIdentity,
-        origin: pd.Timestamp,
-        forecasts: ForecastBatch,
-        inventory_positions: Mapping[str, InventoryPosition],
-        cost_structure: CostStructure | None,
-    ) -> OrderRequest:
-        self._require_session(session)
-        return OrderRequest(
-            session=session,
-            origin=origin,
-            forecasts=forecasts,
-            inventory_positions=inventory_positions,
-            cost_structure=cost_structure,
-        )
-
-    def _fit_one(self, task: ForecastTask) -> FittedTask:
-        adapter = self._adapter_resolver(task.model_config)
-        artifact_key = f"forecast-model:{hashlib.sha256(task.to_bytes()).hexdigest()}"
-        pending_artifact = None
+    def _fit_one(self, fitted: FittedTask) -> FittedTask:
+        adapter = self._adapter_resolver(fitted.task.model_config)
         if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
+            artifact_key = _artifact_key(fitted.session, fitted.task)
             stored = self._artifact_store.load(artifact_key)
             if stored is None:
-                adapter.fit(task)
-                pending_artifact = ArtifactWrite(artifact_key, adapter.dump_state())
+                adapter.fit(fitted.task)
+                self._artifact_store.save(artifact_key, adapter.dump_state())
             else:
                 adapter.load_state(stored)
         else:
-            adapter.fit(task)
-        return FittedTask(task=task, adapter=adapter, pending_artifact=pending_artifact)
+            adapter.fit(fitted.task)
+        return fitted
 
-    @staticmethod
-    def _predict_one(fitted: FittedTask) -> pd.DataFrame:
+    def _predict_one(self, fitted: FittedTask) -> pd.DataFrame:
         if not isinstance(fitted, FittedTask):
             raise TypeError("dispatch prediction item must be a FittedTask")
-        return fitted.adapter.predict(fitted.task)
+        adapter = self._adapter_resolver(fitted.task.model_config)
+        if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
+            artifact_key = _artifact_key(fitted.session, fitted.task)
+            stored = self._artifact_store.load(artifact_key)
+            if stored is None:
+                raise EngineError("fitted model artifact is missing")
+            adapter.load_state(stored)
+        else:
+            adapter.fit(fitted.task)
+        return adapter.predict(fitted.task)
 
 
 class Spine:
@@ -636,17 +628,11 @@ class Spine:
             ),
         )
 
-        def predict_phase() -> tuple[tuple[FittedTask, ...], ForecastBatch]:
-            fitted = self._engine.fit(
-                origin=request.origin,
-                horizon=request.horizon,
-                scope=request.scope,
-                model_config=request.model_config,
-                future_exogenous=request.future_exogenous,
-            )
-            return fitted, self._engine.predict(fitted)
+        def predict_phase() -> ForecastBatch:
+            fitted = self._engine.fit(request)
+            return self._engine.predict(fitted)
 
-        fitted, predicted = self._phase(Phase.PREDICT, request.origin, predict_phase)
+        predicted = self._phase(Phase.PREDICT, request.origin, predict_phase)
         reconciled = self._phase(
             Phase.RECONCILE,
             request.origin,
@@ -662,22 +648,16 @@ class Spine:
                 observation=observation,
             ),
         )
-        order_request = self._engine._make_order_request(
+        order_request = OrderRequest(
             session=request.session,
             origin=request.origin,
             forecasts=calibrated.forecasts,
             inventory_positions=request.inventory_positions,
-            cost_structure=request.cost_structure,
         )
         orders = self._phase(
             Phase.ORDER,
             request.origin,
             lambda: self._engine.order(order_request),
-        )
-        artifacts = tuple(
-            fitted_task.pending_artifact
-            for fitted_task in fitted
-            if fitted_task.pending_artifact is not None
         )
         commit_request = OriginCommit(
             session=request.session,
@@ -690,7 +670,6 @@ class Spine:
                 ),
             ),
             orders=orders,
-            artifacts=artifacts,
             state_updates=calibrated.state_updates,
         )
         self._phase(
@@ -719,14 +698,129 @@ class Spine:
     ) -> None:
         if self._reporter is None:
             return
-        self._reporter(
-            PhaseEvent(
-                phase=phase,
-                origin=origin,
-                duration_seconds=time.perf_counter() - started,
-                error=None if error is None else str(error),
+        try:
+            self._reporter(
+                PhaseEvent(
+                    phase=phase,
+                    origin=origin,
+                    duration_seconds=time.perf_counter() - started,
+                    error=None if error is None else str(error),
+                )
             )
+        except Exception as reporter_error:
+            try:
+                warnings.warn(
+                    f"phase reporter failed for {phase.value} at {origin}: {reporter_error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            except Exception:
+                return
+
+
+def _session_definition(session: SessionIdentity) -> dict[str, object]:
+    try:
+        definition = json.loads(session.to_bytes())
+    except (TypeError, ValueError) as error:
+        raise EngineError("session identity has an invalid canonical definition") from error
+    if not isinstance(definition, dict):
+        raise EngineError("session identity definition must be an object")
+    return definition
+
+
+def _session_origin_inputs(
+    session: SessionIdentity,
+) -> tuple[int, bytes, CostStructure | None]:
+    definition = _session_definition(session)
+    horizon = definition.get("horizon")
+    model_config = definition.get("model_config")
+    if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
+        raise EngineError("session identity has an invalid horizon")
+    if not isinstance(model_config, Mapping):
+        raise EngineError("session identity has an invalid model configuration")
+    encoded_config = canonical_json_bytes(
+        dict(model_config),
+        path="session model configuration",
+    )
+    return horizon, encoded_config, _cost_from_definition(definition)
+
+
+def _session_cost_structure(session: SessionIdentity) -> CostStructure | None:
+    return _cost_from_definition(_session_definition(session))
+
+
+def _cost_from_definition(definition: Mapping[str, object]) -> CostStructure | None:
+    decision = definition.get("decision")
+    if decision is None:
+        return None
+    if not isinstance(decision, Mapping):
+        raise EngineError("session identity has an invalid decision configuration")
+    cost = decision.get("cost_structure")
+    if not isinstance(cost, Mapping):
+        raise EngineError("session identity has an invalid cost structure")
+    cost_values = dict(cost)
+    try:
+        return CostStructure(
+            underage=cast(float, cost_values["underage_cost"]),
+            overage=cast(float, cost_values["overage_cost"]),
+            holding=cast(float, cost_values["holding_cost"]),
+            shortage=cast(float, cost_values["shortage_cost"]),
         )
+    except (KeyError, TypeError, ValueError) as error:
+        raise EngineError("session identity has an invalid cost structure") from error
+
+
+def _require_panel_session_binding(
+    panel: Panel,
+    *,
+    session: SessionIdentity,
+    ledger_calendar: Calendar,
+) -> None:
+    definition = _session_definition(session)
+    series_set = definition.get("series_set")
+    frequency = definition.get("calendar_frequency")
+    if not isinstance(series_set, list) or any(
+        not isinstance(series_key, str) for series_key in series_set
+    ):
+        raise EngineError("session identity has an invalid series set")
+    if tuple(series_set) != panel.series_keys:
+        raise EngineError("panel series set does not match the engine session")
+    if frequency != ledger_calendar.frequency:
+        raise EngineError("ledger calendar does not match the engine session")
+    if panel.calendar != ledger_calendar:
+        raise EngineError("panel calendar does not match the ledger calendar")
+
+
+def _require_task_session_binding(
+    task: ForecastTask,
+    *,
+    session: SessionIdentity,
+) -> None:
+    definition = _session_definition(session)
+    expected_horizon = definition.get("horizon")
+    expected_model = definition.get("model_config")
+    expected_series = definition.get("series_set")
+    expected_frequency = definition.get("calendar_frequency")
+    if task.horizon != expected_horizon or task.model_config != expected_model:
+        raise EngineError("fitted task configuration does not match its session")
+    if not isinstance(expected_series, list) or not set(task.series_keys) <= set(expected_series):
+        raise EngineError("fitted task series do not belong to its session")
+    if task.scope is Scope.GLOBAL and tuple(expected_series) != task.series_keys:
+        raise EngineError("global fitted task must cover its session series set")
+    if task.calendar.frequency != expected_frequency:
+        raise EngineError("fitted task calendar does not match its session")
+
+
+def _artifact_key(session: SessionIdentity, task: ForecastTask) -> str:
+    digest = hashlib.sha256()
+    for payload in (
+        b"newcalibre.forecast-model/v1",
+        session.value.encode(),
+        task.to_bytes(),
+    ):
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return f"forecast-model:{digest.hexdigest()}"
 
 
 def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:

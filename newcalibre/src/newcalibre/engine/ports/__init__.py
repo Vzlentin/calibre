@@ -26,20 +26,6 @@ _Input = TypeVar("_Input")
 _Output = TypeVar("_Output")
 
 
-@dataclass(frozen=True, slots=True)
-class ArtifactWrite:
-    """Carry one idempotent model-artifact write inside an origin commit."""
-
-    key: str
-    value: bytes
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.key, str) or not self.key or self.key != self.key.strip():
-            raise ValueError("artifact key must be a non-empty trimmed string")
-        if not isinstance(self.value, bytes):
-            raise TypeError("artifact write value must be bytes")
-
-
 @dataclass(frozen=True, slots=True, init=False)
 class ForecastWrite:
     """Carry one defensive forecast-frame snapshot into a ledger commit."""
@@ -85,7 +71,6 @@ class OriginCommit:
     forecasts: tuple[ForecastWrite, ...] = ()
     orders: tuple[OrderRow, ...] = ()
     settlements: tuple[SettlementRecord, ...] = ()
-    artifacts: tuple[ArtifactWrite, ...] = ()
     state_updates: Mapping[str, bytes] = field(default_factory=dict)
     _digest: str = field(init=False, repr=False)
 
@@ -100,10 +85,6 @@ class OriginCommit:
         object.__setattr__(self, "forecasts", tuple(self.forecasts))
         object.__setattr__(self, "orders", tuple(self.orders))
         object.__setattr__(self, "settlements", tuple(self.settlements))
-        artifacts = tuple(self.artifacts)
-        if any(not isinstance(artifact, ArtifactWrite) for artifact in artifacts):
-            raise TypeError("origin commit artifacts must contain ArtifactWrite values")
-        object.__setattr__(self, "artifacts", artifacts)
         if not isinstance(self.state_updates, Mapping):
             raise TypeError("origin commit state updates must be a mapping")
         updates: dict[str, bytes] = {}
@@ -129,7 +110,6 @@ class CommitReceipt:
     session: SessionIdentity
     origin: pd.Timestamp
     digest: str
-    artifacts: tuple[ArtifactWrite, ...]
     state_updates: Mapping[str, bytes]
 
     @classmethod
@@ -139,7 +119,6 @@ class CommitReceipt:
             session=commit.session,
             origin=commit.origin,
             digest=commit.digest,
-            artifacts=commit.artifacts,
             state_updates=commit.state_updates,
         )
 
@@ -148,15 +127,23 @@ class CommitReceipt:
             raise TypeError("commit receipt session must be a SessionIdentity")
         if not isinstance(self.origin, pd.Timestamp):
             raise TypeError("commit receipt origin must be a pandas Timestamp")
-        if not isinstance(self.digest, str) or len(self.digest) != 64:
+        if (
+            not isinstance(self.digest, str)
+            or len(self.digest) != 64
+            or self.digest != self.digest.lower()
+            or any(character not in "0123456789abcdef" for character in self.digest)
+        ):
             raise ValueError("commit receipt digest must be a SHA-256 hex string")
-        artifacts = tuple(self.artifacts)
-        if any(not isinstance(artifact, ArtifactWrite) for artifact in artifacts):
-            raise TypeError("commit receipt artifacts must contain ArtifactWrite values")
-        object.__setattr__(self, "artifacts", artifacts)
         if not isinstance(self.state_updates, Mapping):
             raise TypeError("commit receipt state updates must be a mapping")
-        object.__setattr__(self, "state_updates", MappingProxyType(dict(self.state_updates)))
+        updates: dict[str, bytes] = {}
+        for partition, value in self.state_updates.items():
+            if not isinstance(partition, str) or not partition or partition != partition.strip():
+                raise ValueError("commit receipt partition must be a non-empty trimmed string")
+            if not isinstance(value, bytes):
+                raise TypeError("commit receipt state updates must contain bytes")
+            updates[partition] = value
+        object.__setattr__(self, "state_updates", MappingProxyType(updates))
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,8 +210,15 @@ class CalibrationStateStore(Protocol):
         """Return a state snapshot, or ``None`` when absent."""
         ...
 
-    def save(self, session: SessionIdentity, partition: str, value: bytes) -> None:
-        """Atomically persist one idempotent partition-state value."""
+    def save(
+        self,
+        session: SessionIdentity,
+        partition: str,
+        value: bytes,
+        *,
+        origin: pd.Timestamp,
+    ) -> None:
+        """Persist a partition value without allowing an older origin to replace it."""
         ...
 
 
@@ -275,11 +269,13 @@ class DispatchBackend(Protocol):
 def _forecast_write_digest(write: ForecastWrite) -> str:
     digest = hashlib.sha256()
     schema = tuple((str(column), str(write._frame[column].dtype)) for column in write._frame)
-    digest.update(repr(schema).encode())
-    digest.update(
+    _update_digest(digest, b"schema", repr(schema).encode())
+    _update_digest(
+        digest,
+        b"rows",
         pd.util.hash_pandas_object(write._frame, index=False, categorize=True)
         .to_numpy(dtype="uint64")
-        .tobytes()
+        .tobytes(),
     )
     issuance_facts = tuple(
         sorted(
@@ -292,35 +288,49 @@ def _forecast_write_digest(write: ForecastWrite) -> str:
             for bound_key, issuance in by_bound.items()
         )
     )
-    digest.update(repr(issuance_facts).encode())
+    _update_digest(digest, b"issuances", repr(issuance_facts).encode())
     return digest.hexdigest()
 
 
 def _origin_commit_digest(commit: OriginCommit) -> str:
     digest = hashlib.sha256()
-    digest.update(commit.session.value.encode())
-    digest.update(f"{commit.origin.isoformat()}:{commit.origin.unit}".encode())
+    _update_digest(digest, b"schema", b"newcalibre.origin-commit/v1")
+    _update_digest(digest, b"session", commit.session.value.encode())
+    _update_digest(
+        digest,
+        b"origin",
+        f"{commit.origin.isoformat()}:{commit.origin.unit}".encode(),
+    )
     resolution_facts = tuple(
         sorted((repr(key), float(value).hex()) for key, value in commit.resolutions.items())
     )
-    digest.update(repr(resolution_facts).encode())
-    digest.update(repr(tuple(write.digest for write in commit.forecasts)).encode())
-    digest.update(repr(commit.orders).encode())
-    digest.update(repr(commit.settlements).encode())
-    for artifact in commit.artifacts:
-        digest.update(artifact.key.encode())
-        digest.update(artifact.value)
+    _update_digest(digest, b"resolutions", repr(resolution_facts).encode())
+    _update_digest(
+        digest,
+        b"forecasts",
+        repr(tuple(write.digest for write in commit.forecasts)).encode(),
+    )
+    _update_digest(digest, b"orders", repr(commit.orders).encode())
+    _update_digest(digest, b"settlements", repr(commit.settlements).encode())
+    _update_digest(digest, b"state-count", len(commit.state_updates).to_bytes(8, "big"))
     for partition, state in sorted(commit.state_updates.items()):
-        digest.update(partition.encode())
-        digest.update(state)
+        _update_digest(digest, b"state-partition", partition.encode())
+        _update_digest(digest, b"state-value", state)
     return digest.hexdigest()
+
+
+def _update_digest(digest, label: bytes, payload: bytes) -> None:
+    """Add one unambiguous domain-tagged byte field to a digest."""
+    digest.update(len(label).to_bytes(4, "big"))
+    digest.update(label)
+    digest.update(len(payload).to_bytes(8, "big"))
+    digest.update(payload)
 
 
 __all__ = [
     "ActualKey",
     "ActualsSource",
     "ArtifactStore",
-    "ArtifactWrite",
     "CalibrationStateStore",
     "CommitReceipt",
     "DispatchBackend",

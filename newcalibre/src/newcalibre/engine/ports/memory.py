@@ -99,36 +99,52 @@ class InMemoryCalibrationStateStore:
     """Keep calibration-state bytes by typed session and partition."""
 
     def __init__(self) -> None:
-        self._states: dict[tuple[SessionIdentity, str], bytes] = {}
+        self._states: dict[tuple[SessionIdentity, str], tuple[pd.Timestamp, bytes]] = {}
 
     def load(self, session: SessionIdentity, partition: str) -> bytes | None:
         """Return one immutable state value, or ``None``."""
         _require_session_partition(session, partition)
-        return self._states.get((session, partition))
+        stored = self._states.get((session, partition))
+        return None if stored is None else stored[1]
 
-    def save(self, session: SessionIdentity, partition: str, value: bytes) -> None:
-        """Persist one partition's state."""
+    def save(
+        self,
+        session: SessionIdentity,
+        partition: str,
+        value: bytes,
+        *,
+        origin: pd.Timestamp,
+    ) -> None:
+        """Persist state monotonically by origin with idempotent same-origin retries."""
         _require_session_partition(session, partition)
         if not isinstance(value, bytes):
             raise TypeError("calibration state must be bytes")
-        self._states[(session, partition)] = value
+        if not isinstance(origin, pd.Timestamp):
+            raise TypeError("calibration state origin must be a pandas Timestamp")
+        key = (session, partition)
+        stored = self._states.get(key)
+        if stored is not None:
+            stored_origin, stored_value = stored
+            if origin < stored_origin:
+                return
+            if origin == stored_origin and value != stored_value:
+                raise ValueError("calibration state origin already holds different bytes")
+        self._states[key] = (origin, value)
 
     @property
     def states(self) -> Mapping[tuple[SessionIdentity, str], bytes]:
         """Return an immutable state snapshot for diagnostics."""
-        return MappingProxyType(dict(self._states))
+        return MappingProxyType({key: value for key, (_origin, value) in self._states.items()})
 
 
 class InMemoryLedgerSink:
     """Apply each origin's ledger write atomically against an owned ledger."""
 
-    def __init__(self, ledger: Ledger) -> None:
-        if not isinstance(ledger, Ledger):
-            raise TypeError("in-memory ledger sink requires a Ledger")
-        self._ledger = ledger
-        self._forecast_rows = {row.key: row for row in ledger.forecasts}
-        self._order_keys = {row.key for row in ledger.orders}
-        self._settlement_keys = {row.key for row in ledger.settlements}
+    def __init__(self, *, session: SessionIdentity, calendar: Calendar) -> None:
+        self._ledger = Ledger(session=session, calendar=calendar)
+        self._forecast_rows: dict[object, ForecastRow] = {}
+        self._order_keys: set[object] = set()
+        self._settlement_keys: set[object] = set()
         self._commits: dict[pd.Timestamp, CommitReceipt] = {}
 
     @property
@@ -174,6 +190,7 @@ class InMemoryLedgerSink:
 
         self._validate_resolutions(write)
         staged = _stage_new_rows(write, calendar=self._ledger.calendar)
+        _require_origin_rows(write, staged=staged)
         _reject_collision(self._forecast_rows, (row.key for row in staged.forecasts), "forecast")
         _reject_collision(self._order_keys, (row.key for row in staged.orders), "order")
         _reject_collision(
@@ -255,6 +272,13 @@ def _stage_new_rows(write: OriginCommit, *, calendar: Calendar) -> Ledger:
     staged.append_orders(write.orders)
     staged.append_settlements(write.settlements)
     return staged
+
+
+def _require_origin_rows(write: OriginCommit, *, staged: Ledger) -> None:
+    if any(row.origin != write.origin for row in staged.forecasts):
+        raise LedgerError("forecast row origin must match its origin commit")
+    if any(row.origin != write.origin for row in staged.orders):
+        raise LedgerError("order row origin must match its origin commit")
 
 
 def _reject_collision(existing: Container[object], staged: Iterable[object], family: str) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import pickle
 import socket
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
@@ -36,6 +37,7 @@ from newcalibre.engine import (
     CalibrationResult,
     CommitReceipt,
     Engine,
+    EngineError,
     ForecastBatch,
     InMemoryActualsSource,
     InMemoryArtifactStore,
@@ -52,10 +54,12 @@ from newcalibre.engine import (
     Spine,
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
-from newcalibre.ledger import Ledger, OrderRow
+from newcalibre.ledger import OrderRow
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
+COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
+ORDERING_POLICY = {"name": "fixture"}
 
 
 def _panel() -> Panel:
@@ -71,13 +75,21 @@ def _panel() -> Panel:
     )
 
 
-def _session() -> SessionIdentity:
+def _session(
+    *,
+    tenant: str = "tenant-a",
+    model_config: Mapping[str, object] = MODEL_CONFIG,
+    horizon: int = 1,
+    with_decision: bool = False,
+) -> SessionIdentity:
     return SessionIdentity.derive(
-        tenant="tenant-a",
+        tenant=tenant,
         series_keys=("a",),
         calendar=CALENDAR,
-        horizon=1,
-        model_config=MODEL_CONFIG,
+        horizon=horizon,
+        model_config=model_config,
+        ordering_policy=ORDERING_POLICY if with_decision else None,
+        cost_structure=COST_STRUCTURE if with_decision else None,
     )
 
 
@@ -188,11 +200,18 @@ class FailOnceStateStore(InMemoryCalibrationStateStore):
         super().__init__()
         self._fail = True
 
-    def save(self, session: SessionIdentity, partition: str, value: bytes) -> None:
+    def save(
+        self,
+        session: SessionIdentity,
+        partition: str,
+        value: bytes,
+        *,
+        origin: pd.Timestamp,
+    ) -> None:
         if self._fail:
             self._fail = False
             raise RuntimeError("calibration state store unavailable")
-        super().save(session, partition, value)
+        super().save(session, partition, value, origin=origin)
 
 
 class RecordingStateStore(InMemoryCalibrationStateStore):
@@ -210,8 +229,8 @@ class RecordingStateStore(InMemoryCalibrationStateStore):
 class FailAfterCommitLedgerSink(InMemoryLedgerSink):
     """Lose the first response after the atomic ledger receipt exists."""
 
-    def __init__(self, ledger: Ledger) -> None:
-        super().__init__(ledger)
+    def __init__(self, *, session: SessionIdentity, calendar: Calendar) -> None:
+        super().__init__(session=session, calendar=calendar)
         self._fail = True
 
     def commit(self, write: OriginCommit) -> CommitReceipt:
@@ -255,10 +274,10 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     panel = _panel()
-    session = _session()
+    session = _session(with_decision=True)
     artifacts = InMemoryArtifactStore()
     states = RecordingStateStore()
-    sink = InMemoryLedgerSink(Ledger(session=session, calendar=CALENDAR))
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
     dispatch = RecordingDispatch()
     events: list[str] = []
     calibration_inputs: list[bytes | None] = []
@@ -333,12 +352,9 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
             OriginRequest(
                 session=session,
                 origin=origin,
-                horizon=1,
                 scope=Scope.LOCAL,
-                model_config=MODEL_CONFIG,
                 calibration_partitions=("global",),
                 inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
-                cost_structure=CostStructure(1.0, 1.0, 1.0, 1.0),
             )
         )
 
@@ -357,12 +373,14 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     assert events == [
         "observe",
         "fit",
+        "load",
         "predict",
         "reconcile",
         "calibrate",
         "order",
         "observe",
         "fit",
+        "load",
         "predict",
         "reconcile",
         "calibrate",
@@ -380,8 +398,8 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
 
 def test_unconfigured_stages_are_exact_identities() -> None:
     panel = _panel()
-    session = _session()
-    sink = InMemoryLedgerSink(Ledger(session=session, calendar=CALENDAR))
+    session = _session(with_decision=True)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
     engine = _engine(
         panel=panel,
         events=[],
@@ -391,10 +409,11 @@ def test_unconfigured_stages_are_exact_identities() -> None:
         dispatch=RecordingDispatch(),
     )
     fitted = engine.fit(
-        origin=pd.Timestamp("2026-01-05"),
-        horizon=1,
-        scope=Scope.LOCAL,
-        model_config=MODEL_CONFIG,
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.LOCAL,
+        )
     )
     forecasts = engine.predict(fitted)
     snapshot = sink.snapshot()
@@ -410,7 +429,6 @@ def test_unconfigured_stages_are_exact_identities() -> None:
         actuals={},
         inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
         timing=DecisionTiming(lead_time=1, review_period=1),
-        cost_structure=CostStructure(1.0, 1.0, 1.0, 1.0),
         stockout_rule="lost-sales",
         actuals_semantics="demand",
     )
@@ -421,12 +439,12 @@ def test_unconfigured_stages_are_exact_identities() -> None:
     assert engine.settle(settlement_request) == ()
 
 
-def test_phase_failure_is_observable_and_persists_nothing() -> None:
+def test_phase_failure_is_observable_and_commits_no_origin() -> None:
     panel = _panel()
     session = _session()
     artifacts = InMemoryArtifactStore()
     states = InMemoryCalibrationStateStore()
-    sink = InMemoryLedgerSink(Ledger(session=session, calendar=CALENDAR))
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
     phase_events: list[PhaseEvent] = []
 
     def explode(_forecasts: ForecastBatch) -> ForecastBatch:
@@ -445,9 +463,7 @@ def test_phase_failure_is_observable_and_persists_nothing() -> None:
     request = OriginRequest(
         session=session,
         origin=pd.Timestamp("2026-01-05"),
-        horizon=1,
         scope=Scope.LOCAL,
-        model_config=MODEL_CONFIG,
     )
 
     with pytest.raises(PhaseError, match="Reconcile.*2026-01-05.*fixture failure") as failure:
@@ -460,23 +476,53 @@ def test_phase_failure_is_observable_and_persists_nothing() -> None:
         Phase.RECONCILE,
     ]
     assert phase_events[-1].error == "fixture failure"
-    assert artifacts.artifacts == {}
+    assert len(artifacts.artifacts) == 1
     assert states.states == {}
     assert sink.forecasts == ()
     assert sink.orders == ()
 
 
-@pytest.mark.parametrize("failing_port", ["artifact", "state", "ledger"])
+def test_fit_artifact_failure_is_retryable_before_any_origin_commit() -> None:
+    panel = _panel()
+    session = _session()
+    artifacts = FailOnceArtifactStore()
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    spine = Spine(
+        _engine(
+            panel=panel,
+            events=[],
+            artifacts=artifacts,
+            states=InMemoryCalibrationStateStore(),
+            sink=sink,
+            dispatch=RecordingDispatch(),
+        )
+    )
+    request = OriginRequest(
+        session=session,
+        origin=pd.Timestamp("2026-01-05"),
+        scope=Scope.LOCAL,
+    )
+
+    with pytest.raises(PhaseError, match="Predict.*artifact store unavailable"):
+        spine.run_origin(request)
+    assert sink.receipt(request.origin) is None
+    assert sink.forecasts == ()
+
+    spine.run_origin(request)
+    assert len(artifacts.artifacts) == 1
+    assert len(sink.forecasts) == 1
+
+
+@pytest.mark.parametrize("failing_port", ["state", "ledger"])
 def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> None:
     panel = _panel()
     session = _session()
-    artifacts = FailOnceArtifactStore() if failing_port == "artifact" else InMemoryArtifactStore()
+    artifacts = InMemoryArtifactStore()
     states = FailOnceStateStore() if failing_port == "state" else InMemoryCalibrationStateStore()
-    ledger = Ledger(session=session, calendar=CALENDAR)
     sink = (
-        FailAfterCommitLedgerSink(ledger)
+        FailAfterCommitLedgerSink(session=session, calendar=CALENDAR)
         if failing_port == "ledger"
-        else InMemoryLedgerSink(ledger)
+        else InMemoryLedgerSink(session=session, calendar=CALENDAR)
     )
 
     def calibrate(
@@ -498,9 +544,7 @@ def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> Non
     request = OriginRequest(
         session=session,
         origin=pd.Timestamp("2026-01-05"),
-        horizon=1,
         scope=Scope.LOCAL,
-        model_config=MODEL_CONFIG,
         calibration_partitions=("global",),
     )
 
@@ -518,6 +562,168 @@ def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> Non
     assert states.load(session, "global") == b"state"
 
 
+def test_commit_repair_requires_the_ledger_journal_and_never_rolls_state_back() -> None:
+    panel = _panel()
+    session = _session()
+    states = InMemoryCalibrationStateStore()
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=states,
+        sink=sink,
+        dispatch=RecordingDispatch(),
+    )
+    first_origin = pd.Timestamp("2026-01-05")
+    second_origin = pd.Timestamp("2026-01-06")
+    unjournaled = CommitReceipt(
+        session=session,
+        origin=first_origin,
+        digest="0" * 64,
+        state_updates={"global": b"forged"},
+    )
+
+    with pytest.raises(EngineError, match="not journaled"):
+        engine.commit(unjournaled)
+    assert states.states == {}
+
+    first = engine.commit(
+        OriginCommit(
+            session=session,
+            origin=first_origin,
+            state_updates={"global": b"v1"},
+        )
+    )
+    second = engine.commit(
+        OriginCommit(
+            session=session,
+            origin=second_origin,
+            state_updates={"global": b"v2"},
+        )
+    )
+    mismatched = CommitReceipt(
+        session=session,
+        origin=second.origin,
+        digest="f" * 64,
+        state_updates={"global": b"wrong"},
+    )
+    with pytest.raises(EngineError, match="does not match"):
+        engine.commit(mismatched)
+
+    engine.commit(first)
+    assert states.load(session, "global") == b"v2"
+    assert engine.commit(second) == second
+
+
+def test_fit_result_is_process_safe_and_artifacts_are_session_scoped() -> None:
+    panel = _panel()
+    session = _session()
+    shared_artifacts = InMemoryArtifactStore()
+    fit_events: list[str] = []
+    first_engine = _engine(
+        panel=panel,
+        events=fit_events,
+        artifacts=shared_artifacts,
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    request = OriginRequest(
+        session=session,
+        origin=pd.Timestamp("2026-01-05"),
+        scope=Scope.LOCAL,
+    )
+    fitted = first_engine.fit(request)
+    assert all(not hasattr(value, "adapter") for value in fitted)
+    assert all(not hasattr(value, "artifact_key") for value in fitted)
+    transported = pickle.loads(pickle.dumps(fitted))
+
+    predict_events: list[str] = []
+    fresh_engine = _engine(
+        panel=panel,
+        events=predict_events,
+        artifacts=shared_artifacts,
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    predicted = fresh_engine.predict(transported)
+    assert len(predicted.frame) == 1
+    assert fit_events == ["fit"]
+    assert predict_events == ["load", "predict"]
+
+    other_session = _session(tenant="tenant-b")
+    other_events: list[str] = []
+    other_engine = _engine(
+        panel=panel,
+        events=other_events,
+        artifacts=shared_artifacts,
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=other_session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    other_engine.fit(
+        OriginRequest(
+            session=other_session,
+            origin=request.origin,
+            scope=Scope.LOCAL,
+        )
+    )
+    assert other_events == ["fit"]
+    assert len(shared_artifacts.artifacts) == 2
+
+
+def test_reporter_failures_never_change_or_mask_phase_outcomes() -> None:
+    panel = _panel()
+    session = _session()
+
+    def broken_reporter(_event: PhaseEvent) -> None:
+        raise RuntimeError("metrics unavailable")
+
+    committed_sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    committed_spine = Spine(
+        _engine(
+            panel=panel,
+            events=[],
+            artifacts=InMemoryArtifactStore(),
+            states=InMemoryCalibrationStateStore(),
+            sink=committed_sink,
+            dispatch=RecordingDispatch(),
+        ),
+        reporter=broken_reporter,
+    )
+    request = OriginRequest(
+        session=session,
+        origin=pd.Timestamp("2026-01-05"),
+        scope=Scope.LOCAL,
+    )
+    with pytest.warns(RuntimeWarning, match="phase reporter failed"):
+        committed_spine.run_origin(request)
+    assert len(committed_sink.forecasts) == 1
+
+    def explode(_forecasts: ForecastBatch) -> ForecastBatch:
+        raise RuntimeError("original failure")
+
+    failing_spine = Spine(
+        _engine(
+            panel=panel,
+            events=[],
+            artifacts=InMemoryArtifactStore(),
+            states=InMemoryCalibrationStateStore(),
+            sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+            dispatch=RecordingDispatch(),
+            reconciler=explode,
+        ),
+        reporter=broken_reporter,
+    )
+    with (
+        pytest.warns(RuntimeWarning, match="phase reporter failed"),
+        pytest.raises(PhaseError, match="Reconcile.*original failure"),
+    ):
+        failing_spine.run_origin(request)
+
+
 def test_mismatched_session_refuses_before_any_engine_work() -> None:
     panel = _panel()
     session = _session()
@@ -530,7 +736,7 @@ def test_mismatched_session_refuses_before_any_engine_work() -> None:
     )
     artifacts = InMemoryArtifactStore()
     states = InMemoryCalibrationStateStore()
-    sink = InMemoryLedgerSink(Ledger(session=session, calendar=CALENDAR))
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
     events: list[str] = []
     spine = Spine(
         _engine(
@@ -545,9 +751,7 @@ def test_mismatched_session_refuses_before_any_engine_work() -> None:
     request = OriginRequest(
         session=other_session,
         origin=pd.Timestamp("2026-01-05"),
-        horizon=1,
         scope=Scope.LOCAL,
-        model_config=MODEL_CONFIG,
     )
 
     with pytest.raises(PhaseError, match="Resolve.*session does not match"):
@@ -559,6 +763,29 @@ def test_mismatched_session_refuses_before_any_engine_work() -> None:
     assert sink.forecasts == ()
 
 
+def test_engine_refuses_a_panel_outside_its_session_definition() -> None:
+    panel = Panel.from_frame(
+        pd.DataFrame(
+            {
+                SERIES_KEY: pd.Series(["b"], dtype="string"),
+                TIMESTAMP: pd.to_datetime(["2026-01-01"]),
+                OBSERVED_VALUE: pd.Series([1.0], dtype="float64"),
+            }
+        ),
+        calendar=CALENDAR,
+    )
+    session = _session()
+    with pytest.raises(EngineError, match="panel series set does not match"):
+        _engine(
+            panel=panel,
+            events=[],
+            artifacts=InMemoryArtifactStore(),
+            states=InMemoryCalibrationStateStore(),
+            sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+            dispatch=RecordingDispatch(),
+        )
+
+
 def test_origin_request_owns_nested_inputs() -> None:
     config: dict[str, object] = {
         "backend": "fixture",
@@ -567,12 +794,11 @@ def test_origin_request_owns_nested_inputs() -> None:
     }
     future = pd.DataFrame({"feature": [1.0]})
     positions = {"a": InventoryPosition(1.0, 2.0, 0.0)}
+    session = _session(model_config=config)
     request = OriginRequest(
-        session=_session(),
+        session=session,
         origin=pd.Timestamp("2026-01-05"),
-        horizon=1,
         scope=Scope.LOCAL,
-        model_config=config,
         future_exogenous=future,
         inventory_positions=positions,
     )

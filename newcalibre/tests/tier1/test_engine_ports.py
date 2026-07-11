@@ -21,7 +21,7 @@ from newcalibre.domain import (
     Panel,
     SessionIdentity,
 )
-from newcalibre.engine import ForecastWrite, OriginCommit
+from newcalibre.engine import CommitReceipt, ForecastWrite, OriginCommit
 from newcalibre.engine import ports as engine_ports
 from newcalibre.engine.ports.memory import (
     InMemoryActualsSource,
@@ -31,7 +31,7 @@ from newcalibre.engine.ports.memory import (
     InMemoryPanelSource,
     InProcessDispatch,
 )
-from newcalibre.ledger import Ledger, LedgerError, OrderRow
+from newcalibre.ledger import LedgerError, OrderRow
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ORIGIN_DATE = pd.Timestamp("2026-01-05")
@@ -104,8 +104,17 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
 
     states = InMemoryCalibrationStateStore()
     session = _session()
-    states.save(session, "series:a", b"state")
+    states.save(session, "series:a", b"state", origin=ORIGIN_DATE)
     assert states.load(session, "series:a") == b"state"
+    states.save(
+        session,
+        "series:a",
+        b"stale",
+        origin=pd.Timestamp("2026-01-04"),
+    )
+    assert states.load(session, "series:a") == b"state"
+    with pytest.raises(ValueError, match="already holds different bytes"):
+        states.save(session, "series:a", b"conflict", origin=ORIGIN_DATE)
 
     dispatch = InProcessDispatch()
     assert dispatch.map(lambda value: value * 2, (3, 1, 2)) == (6, 2, 4)
@@ -129,9 +138,9 @@ def test_engine_declares_exactly_the_six_chapter_03_ports() -> None:
     }
 
 
-def test_ledger_sink_rejects_a_partial_cross_family_commit() -> None:
+def test_ledger_sink_rejects_a_misattributed_origin_without_a_partial_commit() -> None:
     session = _session()
-    sink = InMemoryLedgerSink(Ledger(session=session, calendar=CALENDAR))
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
     key = ("a", ORIGIN_DATE, 1, "fixture")
     forecast = ForecastWrite(_forecast_frame(), {key: {}})
     sink.commit(OriginCommit(session=session, origin=ORIGIN_DATE, forecasts=(forecast,)))
@@ -144,7 +153,7 @@ def test_ledger_sink_rejects_a_partial_cross_family_commit() -> None:
         quantity=1.0,
         arrival_period=pd.Timestamp("2026-01-06"),
     )
-    with pytest.raises(LedgerError, match="duplicate forecast key"):
+    with pytest.raises(LedgerError, match="forecast row origin must match"):
         sink.commit(
             OriginCommit(
                 session=session,
@@ -156,3 +165,62 @@ def test_ledger_sink_rejects_a_partial_cross_family_commit() -> None:
 
     assert len(sink.forecasts) == 1
     assert sink.orders == ()
+
+
+def test_commit_digest_frames_state_key_and_value_boundaries() -> None:
+    session = _session()
+    origin = pd.Timestamp("2026-01-06")
+    first = OriginCommit(
+        session=session,
+        origin=origin,
+        state_updates={"a": b"bc"},
+    )
+    shifted = OriginCommit(
+        session=session,
+        origin=origin,
+        state_updates={"ab": b"c"},
+    )
+    assert first.digest != shifted.digest
+
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    sink.commit(first)
+    with pytest.raises(LedgerError, match="different committed write"):
+        sink.commit(shifted)
+
+
+@pytest.mark.parametrize("digest", ["a" * 63, "A" * 64, "g" * 64])
+def test_commit_receipt_rejects_noncanonical_digests(digest: str) -> None:
+    with pytest.raises(ValueError, match="SHA-256 hex string"):
+        CommitReceipt(
+            session=_session(),
+            origin=ORIGIN_DATE,
+            digest=digest,
+            state_updates={},
+        )
+
+
+def test_commit_receipt_validates_and_freezes_state_updates() -> None:
+    state_updates = {"series:a": b"state"}
+    receipt = CommitReceipt(
+        session=_session(),
+        origin=ORIGIN_DATE,
+        digest="a" * 64,
+        state_updates=state_updates,
+    )
+    state_updates["series:a"] = b"mutated"
+    assert receipt.state_updates == {"series:a": b"state"}
+
+    with pytest.raises(ValueError, match="non-empty trimmed string"):
+        CommitReceipt(
+            session=_session(),
+            origin=ORIGIN_DATE,
+            digest="a" * 64,
+            state_updates={" untrimmed": b"state"},
+        )
+    with pytest.raises(TypeError, match="must contain bytes"):
+        CommitReceipt(
+            session=_session(),
+            origin=ORIGIN_DATE,
+            digest="a" * 64,
+            state_updates={"series:a": "state"},  # type: ignore[dict-item]
+        )
