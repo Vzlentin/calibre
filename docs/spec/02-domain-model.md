@@ -63,7 +63,12 @@ while unresolved), point forecast (float), horizon step (integer), origin
   once; quantile forecasts as numeric columns suffixed by quantile level.
 - `[FRA-3]` A frame either passes schema validation (columns present, types
   exact) or is rejected before any stage consumes it. There is no partially
-  valid frame.
+  valid frame. The required, interval, and quantile columns are the only
+  columns this spec attaches meaning to, but the column set is open: a frame
+  may carry additional columns. Extras must have flat primitive or string
+  dtypes, must not collide with the reserved column vocabulary, and are
+  semantically inert — no stage defined by this spec reads them. Validation
+  stays atomic: an invalid extra column rejects the whole frame.
 - `[FRA-4]` Every forecast value in a row is a function only of information
   admissible at that row's origin (see temporal hygiene).
 - `[FRA-5]` In-sample **fitted values** (historical predictions consumed by
