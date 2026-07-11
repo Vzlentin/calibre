@@ -24,7 +24,6 @@ from newcalibre.domain import (
     TIMESTAMP,
     Calendar,
     CostStructure,
-    DecisionTiming,
     ForecastTask,
     InventoryPosition,
     Panel,
@@ -50,7 +49,6 @@ from newcalibre.engine import (
     Phase,
     PhaseError,
     PhaseEvent,
-    SettlementRequest,
     Spine,
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
@@ -416,27 +414,14 @@ def test_unconfigured_stages_are_exact_identities() -> None:
         )
     )
     forecasts = engine.predict(fitted)
-    snapshot = sink.snapshot()
     order_request = OrderRequest(
         session=session,
         origin=pd.Timestamp("2026-01-05"),
         forecasts=forecasts,
     )
-    settlement_request = SettlementRequest(
-        session=session,
-        origin=pd.Timestamp("2026-01-05"),
-        ledger=snapshot,
-        actuals={},
-        inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
-        timing=DecisionTiming(lead_time=1, review_period=1),
-        stockout_rule="lost-sales",
-        actuals_semantics="demand",
-    )
-
     assert engine.reconcile(forecasts) is forecasts
     assert engine.calibrate(forecasts, session=session).forecasts is forecasts
     assert engine.order(order_request) == ()
-    assert engine.settle(settlement_request) == ()
 
 
 def test_phase_failure_is_observable_and_commits_no_origin() -> None:

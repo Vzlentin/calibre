@@ -604,6 +604,7 @@ class SettlementRecord:
     series_key: str
     period: pd.Timestamp
     arrivals: float
+    actuals_semantics: str
     transition: StockoutTransition
     holding: BookedCost
     shortage: BookedCost
@@ -617,6 +618,7 @@ class SettlementRecord:
             "arrivals",
             _finite_nonnegative(self.arrivals, name="settlement arrivals"),
         )
+        _require_text(self.actuals_semantics, name="actuals semantics")
         if not isinstance(self.transition, StockoutTransition):
             raise LedgerError("settlement transition must be a StockoutTransition")
         if not isinstance(self.holding, BookedCost):

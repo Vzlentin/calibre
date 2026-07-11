@@ -157,6 +157,7 @@ def _settlement(
         series_key="sku-a",
         period=period,
         arrivals=3.0,
+        actuals_semantics="demand",
         transition=StockoutTransition(
             rule="lost-sales",
             demand=5.0,

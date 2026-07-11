@@ -1,5 +1,6 @@
-"""Expose the chapter-03 engine spine and its six ports."""
+"""Expose the chapter-03 engine spine, settlement core, and six ports."""
 
+from newcalibre.engine.errors import EngineError
 from newcalibre.engine.ports import (
     ActualKey,
     ActualsSource,
@@ -21,11 +22,18 @@ from newcalibre.engine.ports.memory import (
     InMemoryPanelSource,
     InProcessDispatch,
 )
+from newcalibre.engine.settlement import (
+    ActualsSemantics,
+    SettlementError,
+    SettlementRequest,
+    SettlementResult,
+    StockoutRule,
+    settle,
+)
 from newcalibre.engine.spine import (
     ENGINE_VERBS,
     CalibrationResult,
     Engine,
-    EngineError,
     FittedTask,
     ForecastBatch,
     ObservationResult,
@@ -35,13 +43,13 @@ from newcalibre.engine.spine import (
     Phase,
     PhaseError,
     PhaseEvent,
-    SettlementRequest,
     Spine,
 )
 
 __all__ = [
     "ENGINE_VERBS",
     "ActualKey",
+    "ActualsSemantics",
     "ActualsSource",
     "ArtifactStore",
     "CalibrationResult",
@@ -70,6 +78,10 @@ __all__ = [
     "Phase",
     "PhaseError",
     "PhaseEvent",
+    "SettlementError",
     "SettlementRequest",
+    "SettlementResult",
+    "StockoutRule",
     "Spine",
+    "settle",
 ]
