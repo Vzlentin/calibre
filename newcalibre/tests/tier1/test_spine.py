@@ -24,11 +24,13 @@ from newcalibre.domain import (
     TIMESTAMP,
     Calendar,
     CostStructure,
+    DecisionTiming,
     ForecastTask,
     InventoryPosition,
     Panel,
     Scope,
     SessionIdentity,
+    StockoutRule,
     target_timestamp,
 )
 from newcalibre.engine import (
@@ -58,6 +60,7 @@ CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
 COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
 ORDERING_POLICY = {"name": "fixture"}
+TIMING = DecisionTiming(lead_time=1, review_period=1)
 
 
 def _panel() -> Panel:
@@ -88,6 +91,8 @@ def _session(
         model_config=model_config,
         ordering_policy=ORDERING_POLICY if with_decision else None,
         cost_structure=COST_STRUCTURE if with_decision else None,
+        decision_timing=TIMING if with_decision else None,
+        stockout_rule=StockoutRule.LOST_SALES if with_decision else None,
     )
 
 
@@ -311,6 +316,8 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         assert request.session == session
         assert request.inventory_positions["a"].value == 0.0
         assert request.cost_structure is not None
+        assert request.timing == TIMING
+        assert request.stockout_rule is StockoutRule.LOST_SALES
         return (
             OrderRow(
                 session=request.session,

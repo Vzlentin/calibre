@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -17,16 +18,18 @@ from newcalibre.domain import (
     SERIES_KEY,
     TARGET_TIMESTAMP,
     TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     CostStructure,
     DecisionTiming,
     InventoryPosition,
     Panel,
     SessionIdentity,
+    StockoutRule,
 )
 from newcalibre.engine import (
-    ActualsSemantics,
     Engine,
+    EngineError,
     InMemoryActualsSource,
     InMemoryArtifactStore,
     InMemoryCalibrationStateStore,
@@ -37,12 +40,12 @@ from newcalibre.engine import (
     OriginCommit,
     SettlementError,
     SettlementRequest,
-    StockoutRule,
     settle,
 )
 from newcalibre.ledger import (
     BookedCost,
     Ledger,
+    LedgerError,
     OrderRow,
     SettlementRecord,
     StockoutTransition,
@@ -62,8 +65,19 @@ def _session(
     tenant: str = "tenant-a",
     with_decision: bool = True,
     cost: CostStructure = COST,
+    timing: DecisionTiming = TIMING,
+    stockout_rule: StockoutRule = StockoutRule.LOST_SALES,
 ) -> SessionIdentity:
-    decision = {"ordering_policy": ORDERING_POLICY, "cost_structure": cost} if with_decision else {}
+    decision = (
+        {
+            "ordering_policy": ORDERING_POLICY,
+            "cost_structure": cost,
+            "decision_timing": timing,
+            "stockout_rule": stockout_rule,
+        }
+        if with_decision
+        else {}
+    )
     return SessionIdentity.derive(
         tenant=tenant,
         series_keys=series_keys,
@@ -98,7 +112,6 @@ def _order(
     series_key: str = "sku-a",
     model_name: str = "policy",
     arrival_period: pd.Timestamp | None = None,
-    timing: DecisionTiming = TIMING,
 ) -> OrderRow:
     return OrderRow(
         session=session,
@@ -107,7 +120,7 @@ def _order(
         model_name=model_name,
         quantity=quantity,
         arrival_period=(
-            CALENDAR.advance(origin, timing.lead_time) if arrival_period is None else arrival_period
+            CALENDAR.advance(origin, TIMING.lead_time) if arrival_period is None else arrival_period
         ),
     )
 
@@ -120,8 +133,6 @@ def _request(
     positions: Mapping[str, InventoryPosition],
     ledger: LedgerSnapshot | None = None,
     orders: Sequence[OrderRow] = (),
-    timing: DecisionTiming = TIMING,
-    stockout_rule: StockoutRule = StockoutRule.LOST_SALES,
     actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
 ) -> SettlementRequest:
     return SettlementRequest(
@@ -131,8 +142,6 @@ def _request(
         actuals=actuals,
         inventory_positions=positions,
         orders=orders,
-        timing=timing,
-        stockout_rule=stockout_rule,
         actuals_semantics=actuals_semantics,
     )
 
@@ -149,26 +158,33 @@ def _prior_settlement(
     *,
     period: pd.Timestamp,
     series_key: str = "sku-a",
-    actuals_semantics: str = ActualsSemantics.DEMAND.value,
-    rule: str = StockoutRule.LOST_SALES.value,
+    actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
+    rule: StockoutRule = StockoutRule.LOST_SALES,
     holding_rate: float = COST.holding,
+    arrivals: float = 0.0,
+    closing_on_hand: float = 0.0,
 ) -> SettlementRecord:
     transition = StockoutTransition(
         rule=rule,
         demand=0.0,
         fulfilled_demand=0.0,
         unmet_demand=0.0,
-        closing_on_hand=0.0,
+        closing_on_hand=closing_on_hand,
         closing_backorders=0.0,
     )
     return SettlementRecord(
         session=session,
         series_key=series_key,
         period=period,
-        arrivals=0.0,
+        arrivals=arrivals,
         actuals_semantics=actuals_semantics,
         transition=transition,
-        holding=BookedCost(rate=holding_rate, basis=0.0, amount=0.0),
+        inventory_position=InventoryPosition(closing_on_hand, 0.0, 0.0),
+        holding=BookedCost(
+            rate=holding_rate,
+            basis=closing_on_hand,
+            amount=holding_rate * closing_on_hand,
+        ),
         shortage=BookedCost(rate=COST.shortage, basis=0.0, amount=0.0),
     )
 
@@ -223,15 +239,16 @@ def test_settlement_applies_arrivals_before_demand_and_books_traceable_costs() -
     assert len(result.records) == 1
     record = result.records[0]
     assert record.arrivals == 4.0
-    assert record.actuals_semantics == "demand"
+    assert record.actuals_semantics is ActualsSemantics.DEMAND
     assert record.transition == StockoutTransition(
-        rule="lost-sales",
+        rule=StockoutRule.LOST_SALES,
         demand=12.0,
         fulfilled_demand=9.0,
         unmet_demand=3.0,
         closing_on_hand=0.0,
         closing_backorders=0.0,
     )
+    assert record.inventory_position == InventoryPosition(0.0, 3.0, 0.0)
     assert record.holding == BookedCost(rate=0.5, basis=0.0, amount=0.0)
     assert record.shortage == BookedCost(rate=2.0, basis=3.0, amount=6.0)
     assert record.realized_cost == 6.0
@@ -380,6 +397,21 @@ def test_records_are_period_then_stable_series_order() -> None:
     ]
 
 
+def test_settlement_preserves_nonempty_series_keys_verbatim() -> None:
+    series_key = " sku-a "
+    session = _session(series_keys=(series_key,))
+    result = settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            actuals={(series_key, PERIODS[0]): 0.0},
+            positions={series_key: InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+
+    assert result.records[0].series_key == series_key
+
+
 def test_forecast_history_cannot_change_settlement_arithmetic() -> None:
     session = _session()
     forecast_ledger = Ledger(session=session, calendar=CALENDAR)
@@ -433,7 +465,7 @@ def test_actuals_semantics_is_carried_by_every_derived_row(
         )
     )
 
-    assert {record.actuals_semantics for record in result.records} == {semantics.value}
+    assert {record.actuals_semantics for record in result.records} == {semantics}
 
 
 def test_semantics_label_changes_no_inventory_or_cost_arithmetic() -> None:
@@ -498,6 +530,7 @@ def test_request_owns_inputs_and_settlement_is_deterministic() -> None:
     )
 
     assert first == second == permuted
+    assert tuple(first.inventory_positions) == ("sku-a", "sku-b")
     with pytest.raises(TypeError):
         request.actuals[("sku-a", PERIODS[0])] = 3.0  # type: ignore[index]
     with pytest.raises(TypeError):
@@ -512,6 +545,34 @@ def test_nonfinite_or_negative_demand_is_refused(demand: float) -> None:
             session,
             periods=(PERIODS[0],),
             actuals={("sku-a", PERIODS[0]): demand},
+            positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+
+
+def test_fractional_shortage_preserves_float_conservation() -> None:
+    session = _session()
+    result = settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            actuals={("sku-a", PERIODS[0]): 457.8931265964433},
+            positions={"sku-a": InventoryPosition(170.79992387036359, 0.0, 0.0)},
+        )
+    )
+
+    transition = result.records[0].transition
+    assert transition.fulfilled_demand == 170.79992387036359
+    assert transition.closing_on_hand == 0.0
+    assert transition.unmet_demand > 0.0
+
+
+def test_demand_that_overflows_float_is_refused_as_nonfinite() -> None:
+    session = _session()
+    with pytest.raises(SettlementError, match="finite and non-negative"):
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            actuals={("sku-a", PERIODS[0]): 10**10000},
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
         )
 
@@ -576,17 +637,19 @@ def test_period_window_must_be_nonempty_contiguous_calendar_members() -> None:
         )
 
 
-def test_lost_sales_refuses_zero_lead_time_backorders_and_unknown_rules() -> None:
+def test_lost_sales_refuses_zero_lead_time_and_backorder_state_or_rule() -> None:
     session = _session()
     common = {
         "periods": (PERIODS[0],),
         "actuals": {("sku-a", PERIODS[0]): 0.0},
     }
+    zero_lead_session = _session(
+        timing=DecisionTiming(lead_time=0, review_period=1),
+    )
     with pytest.raises(SettlementError, match="lead time must be at least one"):
         _request(
-            session,
+            zero_lead_session,
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
-            timing=DecisionTiming(lead_time=0, review_period=1),
             **common,
         )
     with pytest.raises(SettlementError, match="zero opening backorders"):
@@ -595,13 +658,11 @@ def test_lost_sales_refuses_zero_lead_time_backorders_and_unknown_rules() -> Non
             positions={"sku-a": InventoryPosition(0.0, 0.0, 1.0)},
             **common,
         )
-    with pytest.raises(ValueError, match="backorder"):
-        StockoutRule("backorder")
-    with pytest.raises(TypeError, match="must be a StockoutRule"):
+    backorder_session = _session(stockout_rule=StockoutRule.BACKORDER)
+    with pytest.raises(SettlementError, match="unsupported.*backorder"):
         _request(
-            session,
+            backorder_session,
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
-            stockout_rule="lost-sales",  # type: ignore[arg-type]
             **common,
         )
     with pytest.raises(TypeError, match="must be ActualsSemantics"):
@@ -738,6 +799,41 @@ def test_settlement_window_and_opening_state_continue_the_ledger_frontier() -> N
     assert continued.records[0].period == PERIODS[1]
 
 
+def test_historical_arrivals_must_equal_all_orders_due_at_the_frontier() -> None:
+    session = _session()
+    order = _order(session, origin=PERIODS[0], quantity=5.0)
+    missing_arrival = _prior_settlement(session, period=PERIODS[2])
+    with pytest.raises(SettlementError, match="arrivals.*do not match due orders"):
+        _request(
+            session,
+            periods=(PERIODS[3],),
+            ledger=_snapshot(
+                session,
+                orders=(order,),
+                settlements=(missing_arrival,),
+            ),
+            actuals={("sku-a", PERIODS[3]): 0.0},
+            positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+
+    credited = _prior_settlement(
+        session,
+        period=PERIODS[2],
+        arrivals=5.0,
+        closing_on_hand=5.0,
+    )
+    result = settle(
+        _request(
+            session,
+            periods=(PERIODS[3],),
+            ledger=_snapshot(session, orders=(order,), settlements=(credited,)),
+            actuals={("sku-a", PERIODS[3]): 0.0},
+            positions={"sku-a": InventoryPosition(5.0, 0.0, 0.0)},
+        )
+    )
+    assert result.inventory_positions["sku-a"] == InventoryPosition(5.0, 0.0, 0.0)
+
+
 def test_prior_settlement_history_must_be_complete_and_contiguous() -> None:
     session = _session(series_keys=("sku-a", "sku-b"))
     incomplete = _prior_settlement(session, period=PERIODS[0], series_key="sku-a")
@@ -775,7 +871,7 @@ def test_prior_settlement_history_must_be_complete_and_contiguous() -> None:
             lambda session: _prior_settlement(
                 session,
                 period=PERIODS[0],
-                actuals_semantics="unlabeled-surrogate",
+                actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
             ),
             "actuals semantics",
         ),
@@ -783,7 +879,7 @@ def test_prior_settlement_history_must_be_complete_and_contiguous() -> None:
             lambda session: _prior_settlement(
                 session,
                 period=PERIODS[0],
-                rule="backorder",
+                rule=StockoutRule.BACKORDER,
             ),
             "stock-out rule",
         ),
@@ -845,9 +941,9 @@ def test_any_already_booked_series_refuses_the_whole_window() -> None:
         )
 
 
-def test_session_without_decision_cost_structure_cannot_settle() -> None:
+def test_session_without_decision_configuration_cannot_settle() -> None:
     session = _session(with_decision=False)
-    with pytest.raises(SettlementError, match="no decision cost structure"):
+    with pytest.raises(SettlementError, match="no decision configuration"):
         _request(
             session,
             periods=(PERIODS[0],),
@@ -873,6 +969,14 @@ def test_engine_uses_the_same_settlement_core_and_commit_is_exactly_once() -> No
     through_engine = engine.settle(request)
     assert through_engine == direct
 
+    missing_order = OriginCommit(
+        session=session,
+        origin=PERIODS[0],
+        settlements=through_engine.records,
+    )
+    with pytest.raises(LedgerError, match="on_order.*durable open orders"):
+        engine.commit(missing_order)
+
     write = OriginCommit(
         session=session,
         origin=PERIODS[0],
@@ -892,3 +996,419 @@ def test_engine_uses_the_same_settlement_core_and_commit_is_exactly_once() -> No
             actuals={("sku-a", PERIODS[0]): 1.0},
             positions=through_engine.inventory_positions,
         )
+
+
+def test_sink_reconciles_orders_across_same_write_and_later_settlement_windows() -> None:
+    session = _session()
+    order = _order(session, origin=PERIODS[0], quantity=3.0)
+
+    same_write_engine, same_write_sink = _engine(session)
+    same_write = same_write_engine.settle(
+        _request(
+            session,
+            periods=PERIODS[0:3],
+            ledger=same_write_sink.snapshot(),
+            orders=(order,),
+            actuals=_zero_actuals(("sku-a",), PERIODS[0:3]),
+            positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+    same_write_engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            orders=(order,),
+            settlements=same_write.records,
+        )
+    )
+    assert [record.arrivals for record in same_write_sink.settlements] == [0.0, 0.0, 3.0]
+
+    later_engine, later_sink = _engine(session)
+    later_engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(order,)))
+    later = later_engine.settle(
+        _request(
+            session,
+            periods=PERIODS[1:3],
+            ledger=later_sink.snapshot(),
+            actuals=_zero_actuals(("sku-a",), PERIODS[1:3]),
+            positions={"sku-a": InventoryPosition(0.0, 3.0, 0.0)},
+        )
+    )
+    later_engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[2],
+            settlements=later.records,
+        )
+    )
+    assert [record.arrivals for record in later_sink.settlements] == [0.0, 3.0]
+
+
+def test_sink_refuses_forged_timing_and_orders_for_already_settled_arrivals() -> None:
+    session = _session()
+    engine, sink = _engine(session)
+    forged = _order(
+        session,
+        origin=PERIODS[0],
+        quantity=2.0,
+        arrival_period=PERIODS[1],
+    )
+    with pytest.raises(LedgerError, match="calendar.advance"):
+        engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(forged,)))
+    unknown_series = _order(
+        session,
+        origin=PERIODS[0],
+        quantity=2.0,
+        series_key="sku-unknown",
+    )
+    with pytest.raises(LedgerError, match="series does not belong"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                orders=(unknown_series,),
+            )
+        )
+    assert sink.orders == ()
+
+    settled = engine.settle(
+        _request(
+            session,
+            periods=(PERIODS[2],),
+            ledger=sink.snapshot(),
+            actuals={("sku-a", PERIODS[2]): 0.0},
+            positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[2],
+            settlements=settled.records,
+        )
+    )
+
+    late_repair = _order(session, origin=PERIODS[0], quantity=2.0)
+    with pytest.raises(LedgerError, match="already settled"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                orders=(late_repair,),
+            )
+        )
+    assert sink.orders == ()
+
+
+def test_sink_refuses_orders_without_supported_session_timing() -> None:
+    no_decision = _session(with_decision=False)
+    no_decision_engine, no_decision_sink = _engine(no_decision)
+    order = _order(no_decision, origin=PERIODS[0], quantity=1.0)
+    with pytest.raises(LedgerError, match="decision configuration"):
+        no_decision_engine.commit(
+            OriginCommit(session=no_decision, origin=PERIODS[0], orders=(order,))
+        )
+    assert no_decision_sink.orders == ()
+
+    zero_lead = _session(timing=DecisionTiming(lead_time=0, review_period=1))
+    zero_lead_engine, zero_lead_sink = _engine(zero_lead)
+    zero_lead_order = _order(
+        zero_lead,
+        origin=PERIODS[0],
+        quantity=1.0,
+        arrival_period=PERIODS[0],
+    )
+    with pytest.raises(LedgerError, match="positive decision lead time"):
+        zero_lead_engine.commit(
+            OriginCommit(
+                session=zero_lead,
+                origin=PERIODS[0],
+                orders=(zero_lead_order,),
+            )
+        )
+    assert zero_lead_sink.orders == ()
+
+    backorder = _session(stockout_rule=StockoutRule.BACKORDER)
+    backorder_engine, backorder_sink = _engine(backorder)
+    backorder_order = _order(backorder, origin=PERIODS[0], quantity=1.0)
+    with pytest.raises(LedgerError, match="stock-out rule is not supported"):
+        backorder_engine.commit(
+            OriginCommit(
+                session=backorder,
+                origin=PERIODS[0],
+                orders=(backorder_order,),
+            )
+        )
+    assert backorder_sink.orders == ()
+
+
+def test_sink_refuses_an_order_whose_origin_is_already_settled() -> None:
+    session = _session()
+    engine, sink = _engine(session)
+    settled = engine.settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            ledger=sink.snapshot(),
+            actuals={("sku-a", PERIODS[0]): 0.0},
+            positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[1],
+            settlements=settled.records,
+        )
+    )
+    late_order = _order(session, origin=PERIODS[0], quantity=5.0)
+
+    with pytest.raises(LedgerError, match="order origin is already settled"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                orders=(late_order,),
+            )
+        )
+    assert sink.orders == ()
+
+
+def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
+    session = _session()
+    engine, sink = _engine(session)
+    due = _order(session, origin=PERIODS[0], quantity=10.0)
+    disappearing_arrival = _prior_settlement(
+        session,
+        period=PERIODS[2],
+        arrivals=10.0,
+    )
+    with pytest.raises(LedgerError, match="continue durable inventory"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                orders=(due,),
+                settlements=(disappearing_arrival,),
+            )
+        )
+    assert sink.orders == ()
+    assert sink.settlements == ()
+
+    first = engine.settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            ledger=sink.snapshot(),
+            actuals={("sku-a", PERIODS[0]): 0.0},
+            positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+    record = first.records[0]
+    wrong_rule = replace(
+        record,
+        transition=replace(record.transition, rule=StockoutRule.BACKORDER),
+    )
+    with pytest.raises(LedgerError, match="stock-out rule"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                settlements=(wrong_rule,),
+            )
+        )
+
+    wrong_rate = replace(
+        record,
+        holding=BookedCost(
+            rate=9.0,
+            basis=record.holding.basis,
+            amount=9.0 * record.holding.basis,
+        ),
+    )
+    with pytest.raises(LedgerError, match="cost rates"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                settlements=(wrong_rate,),
+            )
+        )
+    assert sink.settlements == ()
+
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            settlements=first.records,
+        )
+    )
+    second = engine.settle(
+        _request(
+            session,
+            periods=(PERIODS[1],),
+            ledger=sink.snapshot(),
+            actuals={("sku-a", PERIODS[1]): 0.0},
+            positions=first.inventory_positions,
+        )
+    )
+    changed_semantics = replace(
+        second.records[0],
+        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+    )
+    with pytest.raises(LedgerError, match="actuals semantics changed"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[1],
+                settlements=(changed_semantics,),
+            )
+        )
+
+    forged_transition = _prior_settlement(
+        session,
+        period=PERIODS[1],
+        closing_on_hand=100.0,
+    )
+    with pytest.raises(LedgerError, match="continue durable inventory"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[1],
+                settlements=(forged_transition,),
+            )
+        )
+    assert sink.settlements == first.records
+
+
+def test_sink_requires_complete_session_series_for_every_settlement_period() -> None:
+    series_keys = ("sku-a", "sku-b")
+    session = _session(series_keys=series_keys)
+    engine, sink = _engine(session, series_keys=series_keys)
+    result = engine.settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            ledger=sink.snapshot(),
+            actuals=_zero_actuals(series_keys, (PERIODS[0],)),
+            positions={series_key: InventoryPosition(0.0, 0.0, 0.0) for series_key in series_keys},
+        )
+    )
+
+    with pytest.raises(LedgerError, match="complete session series"):
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                settlements=(result.records[0],),
+            )
+        )
+    assert sink.settlements == ()
+
+
+def test_failed_multi_period_accounting_does_not_consume_open_orders() -> None:
+    session = _session()
+    engine, sink = _engine(session)
+    first_order = _order(session, origin=PERIODS[0], quantity=3.0)
+    second_order = _order(session, origin=PERIODS[1], quantity=4.0)
+    engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(first_order,)))
+    engine.commit(OriginCommit(session=session, origin=PERIODS[1], orders=(second_order,)))
+    result = engine.settle(
+        _request(
+            session,
+            periods=PERIODS[2:4],
+            ledger=sink.snapshot(),
+            actuals=_zero_actuals(("sku-a",), PERIODS[2:4]),
+            positions={"sku-a": InventoryPosition(0.0, 7.0, 0.0)},
+        )
+    )
+    bad_final = replace(
+        result.records[-1],
+        inventory_position=replace(
+            result.records[-1].inventory_position,
+            on_order=1.0,
+        ),
+    )
+    bad_write = OriginCommit(
+        session=session,
+        origin=PERIODS[3],
+        settlements=(result.records[0], bad_final),
+    )
+
+    with pytest.raises(LedgerError, match="on_order.*durable open orders"):
+        engine.commit(bad_write)
+    assert sink.settlements == ()
+
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[3],
+            settlements=result.records,
+        )
+    )
+    assert [record.arrivals for record in sink.settlements] == [3.0, 4.0]
+
+
+def test_engine_refuses_a_settlement_snapshot_from_another_calendar_grid() -> None:
+    session = _session()
+    engine, _sink = _engine(session)
+    foreign_calendar = Calendar("W-MON", phase=PERIODS[1])
+    foreign_ledger = LedgerSnapshot(
+        session=session,
+        calendar=foreign_calendar,
+        forecasts=(),
+        orders=(),
+        settlements=(),
+    )
+    request = _request(
+        session,
+        periods=(PERIODS[1],),
+        ledger=foreign_ledger,
+        actuals={("sku-a", PERIODS[1]): 0.0},
+        positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+    )
+
+    with pytest.raises(EngineError, match="calendar"):
+        engine.settle(request)
+
+
+def test_engine_refuses_forged_facts_on_the_owned_calendar_grid() -> None:
+    session = _session()
+    engine, sink = _engine(session)
+    first = engine.settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            ledger=sink.snapshot(),
+            actuals={("sku-a", PERIODS[0]): 0.0},
+            positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            settlements=first.records,
+        )
+    )
+
+    forged_ledger = _snapshot(
+        session,
+        settlements=(
+            _prior_settlement(
+                session,
+                period=PERIODS[0],
+                closing_on_hand=100.0,
+            ),
+        ),
+    )
+    forged_request = _request(
+        session,
+        periods=(PERIODS[1],),
+        ledger=forged_ledger,
+        actuals={("sku-a", PERIODS[1]): 0.0},
+        positions={"sku-a": InventoryPosition(100.0, 0.0, 0.0)},
+    )
+
+    with pytest.raises(EngineError, match="snapshot"):
+        engine.settle(forged_request)

@@ -9,10 +9,12 @@ from typing import cast
 from newcalibre.domain import (
     Calendar,
     CostStructure,
+    DecisionTiming,
     ForecastTask,
     Panel,
     Scope,
     SessionIdentity,
+    StockoutRule,
 )
 from newcalibre.domain._canonical_json import canonical_json_bytes
 from newcalibre.engine.errors import EngineError
@@ -44,16 +46,21 @@ def session_origin_inputs(
         dict(model_config),
         path="session model configuration",
     )
-    return horizon, encoded_config, cost_from_definition(definition)
+    decision = decision_from_definition(definition)
+    return horizon, encoded_config, None if decision is None else decision[0]
 
 
-def session_cost_structure(session: SessionIdentity) -> CostStructure | None:
-    """Return the decision cost fixed by a session, when ordering is configured."""
-    return cost_from_definition(session_definition(session))
+def session_decision_inputs(
+    session: SessionIdentity,
+) -> tuple[CostStructure, DecisionTiming, StockoutRule] | None:
+    """Return the decision facts that callers may not redefine outside a session."""
+    return decision_from_definition(session_definition(session))
 
 
-def cost_from_definition(definition: Mapping[str, object]) -> CostStructure | None:
-    """Rebuild the typed cost value from a canonical session definition."""
+def decision_from_definition(
+    definition: Mapping[str, object],
+) -> tuple[CostStructure, DecisionTiming, StockoutRule] | None:
+    """Rebuild the complete typed decision configuration from a session definition."""
     decision = definition.get("decision")
     if decision is None:
         return None
@@ -62,16 +69,43 @@ def cost_from_definition(definition: Mapping[str, object]) -> CostStructure | No
     cost = decision.get("cost_structure")
     if not isinstance(cost, Mapping):
         raise EngineError("session identity has an invalid cost structure")
+    timing = decision.get("timing")
+    if not isinstance(timing, Mapping):
+        raise EngineError("session identity has invalid decision timing")
+    rule = decision.get("stockout_rule")
     cost_values = dict(cost)
+    timing_values = dict(timing)
     try:
-        return CostStructure(
+        cost_structure = CostStructure(
             underage=cast(float, cost_values["underage_cost"]),
             overage=cast(float, cost_values["overage_cost"]),
             holding=cast(float, cost_values["holding_cost"]),
             shortage=cast(float, cost_values["shortage_cost"]),
         )
+        decision_timing = DecisionTiming(
+            lead_time=cast(int, timing_values["lead_time"]),
+            review_period=cast(int, timing_values["review_period"]),
+        )
+        stockout_rule = StockoutRule(rule)
     except (KeyError, TypeError, ValueError) as error:
-        raise EngineError("session identity has an invalid cost structure") from error
+        raise EngineError("session identity has invalid decision configuration") from error
+    return cost_structure, decision_timing, stockout_rule
+
+
+def session_series_and_frequency(
+    definition: Mapping[str, object],
+) -> tuple[tuple[str, ...], str]:
+    """Return the canonical series order and calendar frequency from a session."""
+    series_set = definition.get("series_set")
+    frequency = definition.get("calendar_frequency")
+    if not isinstance(series_set, list) or not series_set or not isinstance(frequency, str):
+        raise EngineError("session identity has an invalid series/calendar definition")
+    series_keys: list[str] = []
+    for series_key in series_set:
+        if not isinstance(series_key, str):
+            raise EngineError("session identity has an invalid series/calendar definition")
+        series_keys.append(series_key)
+    return tuple(series_keys), frequency
 
 
 def require_panel_session_binding(
@@ -82,13 +116,8 @@ def require_panel_session_binding(
 ) -> None:
     """Reject a panel or ledger calendar outside the engine session."""
     definition = session_definition(session)
-    series_set = definition.get("series_set")
-    frequency = definition.get("calendar_frequency")
-    if not isinstance(series_set, list) or any(
-        not isinstance(series_key, str) for series_key in series_set
-    ):
-        raise EngineError("session identity has an invalid series set")
-    if tuple(series_set) != panel.series_keys:
+    series_keys, frequency = session_series_and_frequency(definition)
+    if series_keys != panel.series_keys:
         raise EngineError("panel series set does not match the engine session")
     if frequency != ledger_calendar.frequency:
         raise EngineError("ledger calendar does not match the engine session")
@@ -105,11 +134,10 @@ def require_task_session_binding(
     definition = session_definition(session)
     expected_horizon = definition.get("horizon")
     expected_model = definition.get("model_config")
-    expected_series = definition.get("series_set")
-    expected_frequency = definition.get("calendar_frequency")
+    expected_series, expected_frequency = session_series_and_frequency(definition)
     if task.horizon != expected_horizon or task.model_config != expected_model:
         raise EngineError("fitted task configuration does not match its session")
-    if not isinstance(expected_series, list) or not set(task.series_keys) <= set(expected_series):
+    if not set(task.series_keys) <= set(expected_series):
         raise EngineError("fitted task series do not belong to its session")
     if task.scope is Scope.GLOBAL and tuple(expected_series) != task.series_keys:
         raise EngineError("global fitted task must cover its session series set")
@@ -118,10 +146,11 @@ def require_task_session_binding(
 
 
 __all__ = [
-    "cost_from_definition",
+    "decision_from_definition",
     "require_panel_session_binding",
     "require_task_session_binding",
-    "session_cost_structure",
+    "session_decision_inputs",
     "session_definition",
     "session_origin_inputs",
+    "session_series_and_frequency",
 ]

@@ -1,11 +1,13 @@
 """Define the demand-planning domain vocabulary and contracts."""
 
+from newcalibre.domain.actuals import ActualsSemantics
 from newcalibre.domain.calendar import Calendar, CalendarError
 from newcalibre.domain.cost import CostStructure, CostStructureError
 from newcalibre.domain.decision import (
     DecisionError,
     DecisionTiming,
     InventoryPosition,
+    StockoutRule,
 )
 from newcalibre.domain.descriptor import (
     DecisionScope,
@@ -75,6 +77,7 @@ __all__ = [
     "ACTUAL_VALUE",
     "AGGREGATE_NODE_PREFIX",
     "AVAILABILITY_BOUND",
+    "ActualsSemantics",
     "CENSOR_STATUS",
     "CostStructure",
     "CostStructureError",
@@ -126,6 +129,7 @@ __all__ = [
     "ScoredSeries",
     "SessionIdentity",
     "SessionIdentityError",
+    "StockoutRule",
     "forecast_bound_groups",
     "interval_columns",
     "quantile_column",

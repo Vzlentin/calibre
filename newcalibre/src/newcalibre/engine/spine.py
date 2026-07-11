@@ -21,10 +21,12 @@ from newcalibre.domain import (
     SERIES_KEY,
     Calendar,
     CostStructure,
+    DecisionTiming,
     ForecastTask,
     InventoryPosition,
     Scope,
     SessionIdentity,
+    StockoutRule,
     forecast_bound_groups,
     validate_forecast_frame,
 )
@@ -34,13 +36,11 @@ from newcalibre.engine._session import (
 from newcalibre.engine._session import (
     require_task_session_binding as _require_task_session_binding,
 )
-from newcalibre.engine._session import (
-    session_cost_structure as _session_cost_structure,
-)
+from newcalibre.engine._session import session_decision_inputs as _session_decision_inputs
 from newcalibre.engine._session import (
     session_origin_inputs as _session_origin_inputs,
 )
-from newcalibre.engine.errors import EngineError
+from newcalibre.engine.errors import EngineError as _EngineError
 from newcalibre.engine.ports import (
     ActualsSource,
     ArtifactStore,
@@ -52,7 +52,9 @@ from newcalibre.engine.ports import (
     OriginCommit,
     PanelSource,
 )
-from newcalibre.engine.settlement import SettlementRequest, SettlementResult, settle
+from newcalibre.engine.settlement import SettlementRequest as _SettlementRequest
+from newcalibre.engine.settlement import SettlementResult as _SettlementResult
+from newcalibre.engine.settlement import settle as _settle
 from newcalibre.forecasting import AdapterCapability, ForecastAdapter, resolve_adapter
 from newcalibre.ledger import (
     BoundKey,
@@ -123,14 +125,14 @@ class ForecastBatch:
         keys = _forecast_keys(validated)
         if issuances is None:
             if forecast_bound_groups(validated.columns):
-                raise EngineError("forecast bound columns require explicit issuance metadata")
+                raise _EngineError("forecast bound columns require explicit issuance metadata")
             supplied: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]] = {
                 key: {} for key in keys
             }
         else:
             supplied = issuances
         if set(supplied) != set(keys):
-            raise EngineError("forecast issuance keys must exactly match the frame keys")
+            raise _EngineError("forecast issuance keys must exactly match the frame keys")
         frozen = {key: MappingProxyType(dict(supplied[key])) for key in keys}
         object.__setattr__(self, "_frame", validated)
         object.__setattr__(self, "_calendar", calendar)
@@ -203,6 +205,8 @@ class OrderRequest:
     forecasts: ForecastBatch
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     cost_structure: CostStructure | None = field(init=False)
+    timing: DecisionTiming | None = field(init=False)
+    stockout_rule: StockoutRule | None = field(init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
@@ -213,7 +217,14 @@ class OrderRequest:
             raise TypeError("order request forecasts must be a ForecastBatch")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
-        object.__setattr__(self, "cost_structure", _session_cost_structure(self.session))
+        decision = _session_decision_inputs(self.session)
+        if decision is None:
+            cost_structure = timing = stockout_rule = None
+        else:
+            cost_structure, timing, stockout_rule = decision
+        object.__setattr__(self, "cost_structure", cost_structure)
+        object.__setattr__(self, "timing", timing)
+        object.__setattr__(self, "stockout_rule", stockout_rule)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -380,7 +391,7 @@ class Engine:
         """Predict fitted tasks in deterministic dispatch order."""
         tasks = tuple(fitted_tasks)
         if not tasks:
-            raise EngineError("predict requires at least one fitted task")
+            raise _EngineError("predict requires at least one fitted task")
         for fitted in tasks:
             if not isinstance(fitted, FittedTask):
                 raise TypeError("predict requires FittedTask values")
@@ -397,7 +408,7 @@ class Engine:
             return forecasts
         reconciled = self._reconciler(forecasts)
         if not isinstance(reconciled, ForecastBatch):
-            raise EngineError("reconciler must return a ForecastBatch")
+            raise _EngineError("reconciler must return a ForecastBatch")
         return reconciled
 
     def calibrate(
@@ -427,7 +438,7 @@ class Engine:
         states.update(observed_updates)
         result = self._calibrator(forecasts, states)
         if not isinstance(result, CalibrationResult):
-            raise EngineError("calibrator must return a CalibrationResult")
+            raise _EngineError("calibrator must return a CalibrationResult")
         _reject_undeclared_state_updates(
             result.state_updates,
             requested,
@@ -446,7 +457,7 @@ class Engine:
             return ()
         orders = tuple(self._orderer(request))
         if any(not isinstance(order, OrderRow) for order in orders):
-            raise EngineError("orderer must return only OrderRow values")
+            raise _EngineError("orderer must return only OrderRow values")
         return orders
 
     def observe(
@@ -496,12 +507,16 @@ class Engine:
         )
         return result
 
-    def settle(self, request: SettlementRequest) -> SettlementResult:
+    def settle(self, request: _SettlementRequest) -> _SettlementResult:
         """Apply the engine's single pure settlement implementation."""
-        if not isinstance(request, SettlementRequest):
+        if not isinstance(request, _SettlementRequest):
             raise TypeError("settle requires a SettlementRequest")
         self._require_session(request.session)
-        return settle(request)
+        if request.ledger.calendar != self._ledger_sink.calendar:
+            raise _EngineError("settlement ledger calendar does not match the engine ledger")
+        if request.ledger != self._ledger_sink.snapshot():
+            raise _EngineError("settlement ledger snapshot does not match the engine ledger")
+        return _settle(request)
 
     def commit(self, request: OriginCommit | CommitReceipt) -> CommitReceipt:
         """Persist an origin's ledger and monotone calibration-state mutations."""
@@ -512,13 +527,13 @@ class Engine:
             expected = CommitReceipt.from_commit(request)
             receipt = self._ledger_sink.commit(request)
             if receipt != expected:
-                raise EngineError("ledger sink returned a mismatched commit receipt")
+                raise _EngineError("ledger sink returned a mismatched commit receipt")
         else:
             receipt = self._ledger_sink.receipt(request.origin)
             if receipt is None:
-                raise EngineError("commit receipt is not journaled by the ledger sink")
+                raise _EngineError("commit receipt is not journaled by the ledger sink")
             if receipt != request:
-                raise EngineError("commit receipt does not match the ledger journal")
+                raise _EngineError("commit receipt does not match the ledger journal")
         for partition, value in receipt.state_updates.items():
             self._calibration_state_store.save(
                 receipt.session,
@@ -530,7 +545,7 @@ class Engine:
 
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:
-            raise EngineError("engine session does not match its ledger sink")
+            raise _EngineError("engine session does not match its ledger sink")
 
     def _fit_one(self, fitted: FittedTask) -> FittedTask:
         adapter = self._adapter_resolver(fitted.task.model_config)
@@ -554,7 +569,7 @@ class Engine:
             artifact_key = _artifact_key(fitted.session, fitted.task)
             stored = self._artifact_store.load(artifact_key)
             if stored is None:
-                raise EngineError("fitted model artifact is missing")
+                raise _EngineError("fitted model artifact is missing")
             adapter.load_state(stored)
         else:
             adapter.fit(fitted.task)
@@ -702,7 +717,7 @@ def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:
 def _validated_partitions(partitions: Sequence[str]) -> tuple[str, ...]:
     requested = tuple(partitions)
     if len(set(requested)) != len(requested):
-        raise EngineError("calibration partitions must be unique")
+        raise _EngineError("calibration partitions must be unique")
     for partition in requested:
         _require_identifier(partition, name="calibration partition")
     return requested
@@ -742,7 +757,7 @@ def _reject_undeclared_state_updates(
 ) -> None:
     unknown = set(updates) - set(partitions)
     if unknown:
-        raise EngineError(f"{producer} updated undeclared partitions: {sorted(unknown)!r}")
+        raise _EngineError(f"{producer} updated undeclared partitions: {sorted(unknown)!r}")
 
 
 def _validated_inventory_positions(
@@ -761,14 +776,13 @@ def _validated_inventory_positions(
 
 def _require_identifier(value: object, *, name: str) -> None:
     if not isinstance(value, str) or not value or value != value.strip():
-        raise EngineError(f"{name} must be a non-empty trimmed string")
+        raise _EngineError(f"{name} must be a non-empty trimmed string")
 
 
 __all__ = [
     "ENGINE_VERBS",
     "CalibrationResult",
     "Engine",
-    "EngineError",
     "FittedTask",
     "ForecastBatch",
     "ObservationResult",
@@ -778,7 +792,5 @@ __all__ = [
     "Phase",
     "PhaseError",
     "PhaseEvent",
-    "SettlementRequest",
-    "SettlementResult",
     "Spine",
 ]

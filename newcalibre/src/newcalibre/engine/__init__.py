@@ -23,11 +23,9 @@ from newcalibre.engine.ports.memory import (
     InProcessDispatch,
 )
 from newcalibre.engine.settlement import (
-    ActualsSemantics,
     SettlementError,
     SettlementRequest,
     SettlementResult,
-    StockoutRule,
     settle,
 )
 from newcalibre.engine.spine import (
@@ -49,7 +47,6 @@ from newcalibre.engine.spine import (
 __all__ = [
     "ENGINE_VERBS",
     "ActualKey",
-    "ActualsSemantics",
     "ActualsSource",
     "ArtifactStore",
     "CalibrationResult",
@@ -81,7 +78,6 @@ __all__ = [
     "SettlementError",
     "SettlementRequest",
     "SettlementResult",
-    "StockoutRule",
     "Spine",
     "settle",
 ]
