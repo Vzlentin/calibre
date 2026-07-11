@@ -28,19 +28,26 @@ Always prefix Python tooling with `uv run` — never invoke `python`, `pytest`,
 
 ## How we work
 
-Calibre ships its roadmap as **one small PR per item**, each independently
-mergeable and **independently deployable**, merged to `main` before the next
-starts. No mega-branches. `main` stays deployable at every merge.
+Calibre ships **one small PR per item**, each independently mergeable and
+revertible, merged to `main` before the next starts. No mega-branches. This
+cadence exists because a single 77-file branch once passed CI green yet broke
+on first deploy.
 
-The full cadence, the Definition of Done, and the **four CI gates**
-(migration↔ORM parity · Postgres in CI · deploy smoke · behavioral DoD) are
-documented in [docs/development-workflow.md](docs/development-workflow.md). Read
-it before opening your first PR — it exists because a single 77-file branch
-passed CI green yet broke on first deploy.
+Two tracks coexist during the rewrite:
+
+- **`calibre/` (frozen engine)** — maintenance-only; it serves as the behavior
+  oracle for the rewrite. Changes are limited to sanctioned carve-outs. Its CI
+  enforces the deployability gates directly: migration↔ORM parity, tests
+  against real Postgres, and a deploy smoke run — schema changes must show the
+  parity test red first, then green.
+- **`newcalibre/` (successor)** — built to `docs/spec/`
+  (start at `docs/spec/00-overview.md`), conformance-first: a chapter's
+  conformance items land as failing tests before the implementation. It has
+  its own lockfile, tooling, and required CI lanes.
 
 The key rule that surprises people: **Done is proven by a behavioral test that
 asserts the production path**, never by `grep` or `wc -l`. A green lint+unit run
-is not "done"; deployable is.
+is not "done".
 
 ## Opening a pull request
 
