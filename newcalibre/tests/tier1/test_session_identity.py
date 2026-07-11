@@ -14,9 +14,13 @@ import pytest
 from newcalibre.domain import (
     Calendar,
     CostStructure,
+    DecisionTiming,
     SessionIdentity,
     SessionIdentityError,
+    StockoutRule,
 )
+
+TIMING = DecisionTiming(lead_time=2, review_period=3)
 
 
 def _costs(**overrides: float) -> CostStructure:
@@ -35,6 +39,8 @@ def _derive(**overrides: object) -> SessionIdentity:
         "conformal_config": {"method": "split", "levels": [0.8, 0.9]},
         "ordering_policy": {"name": "order-up-to", "params": {"mode": "window"}},
         "cost_structure": _costs(),
+        "decision_timing": TIMING,
+        "stockout_rule": StockoutRule.LOST_SALES,
     }
     values.update(overrides)
     return SessionIdentity.derive(**values)  # type: ignore[arg-type]
@@ -52,10 +58,11 @@ def test_identity_is_full_sha256_of_a_versioned_canonical_payload() -> None:
         b'{"calendar_frequency":"D","conformal_config":{"levels":[0.8,0.9],'
         b'"method":"split"},"decision":{"cost_structure":{"holding_cost":0.5,'
         b'"overage_cost":1.0,"shortage_cost":2.0,"underage_cost":4.0},'
-        b'"ordering_policy":{"name":"order-up-to","params":{"mode":"window"}}},'
+        b'"ordering_policy":{"name":"order-up-to","params":{"mode":"window"}},'
+        b'"stockout_rule":"lost-sales","timing":{"lead_time":2,"review_period":3}},'
         b'"horizon":4,"model_config":{"backend":"seasonal","params":{"season":7}},'
         b'"schema":"newcalibre.session-identity","series_set":["sku-a","sku-b"],'
-        b'"tenant":"tenant-a","version":1}'
+        b'"tenant":"tenant-a","version":2}'
     )
 
 
@@ -67,7 +74,12 @@ def test_identity_can_only_be_created_from_defining_inputs() -> None:
 def test_absent_optional_configurations_are_encoded_distinctly() -> None:
     absent_conformal = _derive(conformal_config=None)
     present_conformal = _derive(conformal_config={})
-    absent_decision = _derive(ordering_policy=None, cost_structure=None)
+    absent_decision = _derive(
+        ordering_policy=None,
+        cost_structure=None,
+        decision_timing=None,
+        stockout_rule=None,
+    )
     present_decision = _derive()
 
     assert absent_conformal != present_conformal
@@ -77,18 +89,14 @@ def test_absent_optional_configurations_are_encoded_distinctly() -> None:
 
 
 @pytest.mark.parametrize(
-    ("ordering_policy", "cost_structure"),
-    [(None, _costs()), ({}, None)],
+    "missing",
+    ["ordering_policy", "cost_structure", "decision_timing", "stockout_rule"],
 )
 def test_decision_configuration_is_present_or_absent_as_a_unit(
-    ordering_policy: Mapping[str, object] | None,
-    cost_structure: CostStructure | None,
+    missing: str,
 ) -> None:
-    with pytest.raises(SessionIdentityError, match="both"):
-        _derive(
-            ordering_policy=ordering_policy,
-            cost_structure=cost_structure,
-        )
+    with pytest.raises(SessionIdentityError, match="all be supplied"):
+        _derive(**{missing: None})
 
 
 def test_series_permutation_and_mapping_order_do_not_change_identity() -> None:
@@ -122,6 +130,9 @@ def test_calendar_phase_is_not_a_session_defining_input() -> None:
         {"model_config": {"backend": "other"}},
         {"conformal_config": {"method": "adaptive"}},
         {"ordering_policy": {"name": "newsvendor"}},
+        {"decision_timing": DecisionTiming(lead_time=3, review_period=3)},
+        {"decision_timing": DecisionTiming(lead_time=2, review_period=4)},
+        {"stockout_rule": StockoutRule.BACKORDER},
         {"cost_structure": _costs(underage=5.0)},
         {"cost_structure": _costs(overage=2.0)},
         {"cost_structure": _costs(holding=1.5)},
@@ -156,6 +167,7 @@ def test_identity_is_stable_across_process_hash_seeds() -> None:
     script = """
 from newcalibre.domain.calendar import Calendar
 from newcalibre.domain.cost import CostStructure
+from newcalibre.domain.decision import DecisionTiming, StockoutRule
 from newcalibre.domain.session import SessionIdentity
 
 identity = SessionIdentity.derive(
@@ -167,6 +179,8 @@ identity = SessionIdentity.derive(
     conformal_config={"levels": [0.8, 0.9], "method": "split"},
     ordering_policy={"params": {"mode": "window"}, "name": "order-up-to"},
     cost_structure=CostStructure(underage=4, overage=1, holding=0.5, shortage=2),
+    decision_timing=DecisionTiming(lead_time=2, review_period=3),
+    stockout_rule=StockoutRule.LOST_SALES,
 )
 print(identity.value)
 """
@@ -204,6 +218,8 @@ print(identity.value)
         ({"ordering_policy": {1: "bad"}}, "non-string"),
         ({"ordering_policy": {"params": (1, 2)}}, "non-JSON"),
         ({"cost_structure": object()}, "CostStructure"),
+        ({"decision_timing": object()}, "DecisionTiming"),
+        ({"stockout_rule": "lost-sales"}, "StockoutRule"),
     ],
 )
 def test_rejects_invalid_defining_inputs(

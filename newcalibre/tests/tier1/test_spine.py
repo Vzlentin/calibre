@@ -30,6 +30,7 @@ from newcalibre.domain import (
     Panel,
     Scope,
     SessionIdentity,
+    StockoutRule,
     target_timestamp,
 )
 from newcalibre.engine import (
@@ -50,7 +51,6 @@ from newcalibre.engine import (
     Phase,
     PhaseError,
     PhaseEvent,
-    SettlementRequest,
     Spine,
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
@@ -60,6 +60,7 @@ CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
 COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
 ORDERING_POLICY = {"name": "fixture"}
+TIMING = DecisionTiming(lead_time=1, review_period=1)
 
 
 def _panel() -> Panel:
@@ -90,6 +91,8 @@ def _session(
         model_config=model_config,
         ordering_policy=ORDERING_POLICY if with_decision else None,
         cost_structure=COST_STRUCTURE if with_decision else None,
+        decision_timing=TIMING if with_decision else None,
+        stockout_rule=StockoutRule.LOST_SALES if with_decision else None,
     )
 
 
@@ -313,6 +316,8 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         assert request.session == session
         assert request.inventory_positions["a"].value == 0.0
         assert request.cost_structure is not None
+        assert request.timing == TIMING
+        assert request.stockout_rule is StockoutRule.LOST_SALES
         return (
             OrderRow(
                 session=request.session,
@@ -416,27 +421,14 @@ def test_unconfigured_stages_are_exact_identities() -> None:
         )
     )
     forecasts = engine.predict(fitted)
-    snapshot = sink.snapshot()
     order_request = OrderRequest(
         session=session,
         origin=pd.Timestamp("2026-01-05"),
         forecasts=forecasts,
     )
-    settlement_request = SettlementRequest(
-        session=session,
-        origin=pd.Timestamp("2026-01-05"),
-        ledger=snapshot,
-        actuals={},
-        inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
-        timing=DecisionTiming(lead_time=1, review_period=1),
-        stockout_rule="lost-sales",
-        actuals_semantics="demand",
-    )
-
     assert engine.reconcile(forecasts) is forecasts
     assert engine.calibrate(forecasts, session=session).forecasts is forecasts
     assert engine.order(order_request) == ()
-    assert engine.settle(settlement_request) == ()
 
 
 def test_phase_failure_is_observable_and_commits_no_origin() -> None:

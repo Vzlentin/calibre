@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from numbers import Real
 from types import MappingProxyType
 from typing import cast
 
@@ -26,15 +24,24 @@ from newcalibre.domain import (
     DecisionTiming,
     ForecastTask,
     InventoryPosition,
-    Panel,
     Scope,
     SessionIdentity,
+    StockoutRule,
     forecast_bound_groups,
     validate_forecast_frame,
 )
-from newcalibre.domain._canonical_json import canonical_json_bytes
+from newcalibre.engine._session import (
+    require_panel_session_binding as _require_panel_session_binding,
+)
+from newcalibre.engine._session import (
+    require_task_session_binding as _require_task_session_binding,
+)
+from newcalibre.engine._session import session_decision_inputs as _session_decision_inputs
+from newcalibre.engine._session import (
+    session_origin_inputs as _session_origin_inputs,
+)
+from newcalibre.engine.errors import EngineError as _EngineError
 from newcalibre.engine.ports import (
-    ActualKey,
     ActualsSource,
     ArtifactStore,
     CalibrationStateStore,
@@ -42,17 +49,18 @@ from newcalibre.engine.ports import (
     DispatchBackend,
     ForecastWrite,
     LedgerSink,
-    LedgerSnapshot,
     OriginCommit,
     PanelSource,
 )
+from newcalibre.engine.settlement import SettlementRequest as _SettlementRequest
+from newcalibre.engine.settlement import SettlementResult as _SettlementResult
+from newcalibre.engine.settlement import settle as _settle
 from newcalibre.forecasting import AdapterCapability, ForecastAdapter, resolve_adapter
 from newcalibre.ledger import (
     BoundKey,
     ForecastIssuance,
     ForecastKey,
     OrderRow,
-    SettlementRecord,
 )
 
 ENGINE_VERBS = (
@@ -65,10 +73,6 @@ ENGINE_VERBS = (
     "settle",
     "commit",
 )
-
-
-class EngineError(ValueError):
-    """Report an invalid engine input or stage result."""
 
 
 class Phase(StrEnum):
@@ -121,14 +125,14 @@ class ForecastBatch:
         keys = _forecast_keys(validated)
         if issuances is None:
             if forecast_bound_groups(validated.columns):
-                raise EngineError("forecast bound columns require explicit issuance metadata")
+                raise _EngineError("forecast bound columns require explicit issuance metadata")
             supplied: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]] = {
                 key: {} for key in keys
             }
         else:
             supplied = issuances
         if set(supplied) != set(keys):
-            raise EngineError("forecast issuance keys must exactly match the frame keys")
+            raise _EngineError("forecast issuance keys must exactly match the frame keys")
         frozen = {key: MappingProxyType(dict(supplied[key])) for key in keys}
         object.__setattr__(self, "_frame", validated)
         object.__setattr__(self, "_calendar", calendar)
@@ -201,6 +205,8 @@ class OrderRequest:
     forecasts: ForecastBatch
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     cost_structure: CostStructure | None = field(init=False)
+    timing: DecisionTiming | None = field(init=False)
+    stockout_rule: StockoutRule | None = field(init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
@@ -211,44 +217,14 @@ class OrderRequest:
             raise TypeError("order request forecasts must be a ForecastBatch")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
-        object.__setattr__(self, "cost_structure", _session_cost_structure(self.session))
-
-
-@dataclass(frozen=True, slots=True)
-class SettlementRequest:
-    """Give the settlement module immutable facts and declared configuration."""
-
-    session: SessionIdentity
-    origin: pd.Timestamp
-    ledger: LedgerSnapshot
-    actuals: Mapping[ActualKey, float]
-    inventory_positions: Mapping[str, InventoryPosition]
-    timing: DecisionTiming
-    cost_structure: CostStructure = field(init=False)
-    stockout_rule: str
-    actuals_semantics: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.session, SessionIdentity):
-            raise TypeError("settlement request session must be a SessionIdentity")
-        if not isinstance(self.origin, pd.Timestamp):
-            raise TypeError("settlement request origin must be a pandas Timestamp")
-        if not isinstance(self.ledger, LedgerSnapshot):
-            raise TypeError("settlement request ledger must be a LedgerSnapshot")
-        if self.ledger.session != self.session:
-            raise EngineError("settlement request session must match its ledger snapshot")
-        actuals = _validated_actuals(self.actuals)
-        object.__setattr__(self, "actuals", MappingProxyType(actuals))
-        positions = _validated_inventory_positions(self.inventory_positions)
-        object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
-        if not isinstance(self.timing, DecisionTiming):
-            raise TypeError("settlement request timing must be DecisionTiming")
-        cost_structure = _session_cost_structure(self.session)
-        if cost_structure is None:
-            raise EngineError("settlement request session has no decision cost structure")
+        decision = _session_decision_inputs(self.session)
+        if decision is None:
+            cost_structure = timing = stockout_rule = None
+        else:
+            cost_structure, timing, stockout_rule = decision
         object.__setattr__(self, "cost_structure", cost_structure)
-        _require_identifier(self.stockout_rule, name="stock-out transition rule")
-        _require_identifier(self.actuals_semantics, name="actuals semantics")
+        object.__setattr__(self, "timing", timing)
+        object.__setattr__(self, "stockout_rule", stockout_rule)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -337,7 +313,6 @@ type Observer = Callable[
     Mapping[str, bytes],
 ]
 type Orderer = Callable[[OrderRequest], Sequence[OrderRow]]
-type Settler = Callable[[SettlementRequest], Sequence[SettlementRecord]]
 type PhaseReporter = Callable[[PhaseEvent], None]
 
 
@@ -358,7 +333,6 @@ class Engine:
         reconciler: Reconciler | None = None,
         calibrator: Calibrator | None = None,
         orderer: Orderer | None = None,
-        settler: Settler | None = None,
     ) -> None:
         ports = (
             (panel_source, PanelSource, "panel source"),
@@ -377,7 +351,6 @@ class Engine:
             (reconciler, "reconciler"),
             (calibrator, "calibrator"),
             (orderer, "orderer"),
-            (settler, "settler"),
         )
         for hook, name in callables:
             if hook is not None and not callable(hook):
@@ -393,7 +366,6 @@ class Engine:
         self._reconciler = reconciler
         self._calibrator = calibrator
         self._orderer = orderer
-        self._settler = settler
         _require_panel_session_binding(
             self._panel,
             session=self._ledger_sink.session,
@@ -419,7 +391,7 @@ class Engine:
         """Predict fitted tasks in deterministic dispatch order."""
         tasks = tuple(fitted_tasks)
         if not tasks:
-            raise EngineError("predict requires at least one fitted task")
+            raise _EngineError("predict requires at least one fitted task")
         for fitted in tasks:
             if not isinstance(fitted, FittedTask):
                 raise TypeError("predict requires FittedTask values")
@@ -436,7 +408,7 @@ class Engine:
             return forecasts
         reconciled = self._reconciler(forecasts)
         if not isinstance(reconciled, ForecastBatch):
-            raise EngineError("reconciler must return a ForecastBatch")
+            raise _EngineError("reconciler must return a ForecastBatch")
         return reconciled
 
     def calibrate(
@@ -466,7 +438,7 @@ class Engine:
         states.update(observed_updates)
         result = self._calibrator(forecasts, states)
         if not isinstance(result, CalibrationResult):
-            raise EngineError("calibrator must return a CalibrationResult")
+            raise _EngineError("calibrator must return a CalibrationResult")
         _reject_undeclared_state_updates(
             result.state_updates,
             requested,
@@ -485,7 +457,7 @@ class Engine:
             return ()
         orders = tuple(self._orderer(request))
         if any(not isinstance(order, OrderRow) for order in orders):
-            raise EngineError("orderer must return only OrderRow values")
+            raise _EngineError("orderer must return only OrderRow values")
         return orders
 
     def observe(
@@ -535,17 +507,16 @@ class Engine:
         )
         return result
 
-    def settle(self, request: SettlementRequest) -> tuple[SettlementRecord, ...]:
-        """Invoke the configured settlement hook, or emit no records."""
-        if not isinstance(request, SettlementRequest):
+    def settle(self, request: _SettlementRequest) -> _SettlementResult:
+        """Apply the engine's single pure settlement implementation."""
+        if not isinstance(request, _SettlementRequest):
             raise TypeError("settle requires a SettlementRequest")
         self._require_session(request.session)
-        if self._settler is None:
-            return ()
-        settlements = tuple(self._settler(request))
-        if any(not isinstance(record, SettlementRecord) for record in settlements):
-            raise EngineError("settler must return only SettlementRecord values")
-        return settlements
+        if request.ledger.calendar != self._ledger_sink.calendar:
+            raise _EngineError("settlement ledger calendar does not match the engine ledger")
+        if request.ledger != self._ledger_sink.snapshot():
+            raise _EngineError("settlement ledger snapshot does not match the engine ledger")
+        return _settle(request)
 
     def commit(self, request: OriginCommit | CommitReceipt) -> CommitReceipt:
         """Persist an origin's ledger and monotone calibration-state mutations."""
@@ -556,13 +527,13 @@ class Engine:
             expected = CommitReceipt.from_commit(request)
             receipt = self._ledger_sink.commit(request)
             if receipt != expected:
-                raise EngineError("ledger sink returned a mismatched commit receipt")
+                raise _EngineError("ledger sink returned a mismatched commit receipt")
         else:
             receipt = self._ledger_sink.receipt(request.origin)
             if receipt is None:
-                raise EngineError("commit receipt is not journaled by the ledger sink")
+                raise _EngineError("commit receipt is not journaled by the ledger sink")
             if receipt != request:
-                raise EngineError("commit receipt does not match the ledger journal")
+                raise _EngineError("commit receipt does not match the ledger journal")
         for partition, value in receipt.state_updates.items():
             self._calibration_state_store.save(
                 receipt.session,
@@ -574,7 +545,7 @@ class Engine:
 
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:
-            raise EngineError("engine session does not match its ledger sink")
+            raise _EngineError("engine session does not match its ledger sink")
 
     def _fit_one(self, fitted: FittedTask) -> FittedTask:
         adapter = self._adapter_resolver(fitted.task.model_config)
@@ -598,7 +569,7 @@ class Engine:
             artifact_key = _artifact_key(fitted.session, fitted.task)
             stored = self._artifact_store.load(artifact_key)
             if stored is None:
-                raise EngineError("fitted model artifact is missing")
+                raise _EngineError("fitted model artifact is missing")
             adapter.load_state(stored)
         else:
             adapter.fit(fitted.task)
@@ -718,99 +689,6 @@ class Spine:
                 return
 
 
-def _session_definition(session: SessionIdentity) -> dict[str, object]:
-    try:
-        definition = json.loads(session.to_bytes())
-    except (TypeError, ValueError) as error:
-        raise EngineError("session identity has an invalid canonical definition") from error
-    if not isinstance(definition, dict):
-        raise EngineError("session identity definition must be an object")
-    return definition
-
-
-def _session_origin_inputs(
-    session: SessionIdentity,
-) -> tuple[int, bytes, CostStructure | None]:
-    definition = _session_definition(session)
-    horizon = definition.get("horizon")
-    model_config = definition.get("model_config")
-    if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
-        raise EngineError("session identity has an invalid horizon")
-    if not isinstance(model_config, Mapping):
-        raise EngineError("session identity has an invalid model configuration")
-    encoded_config = canonical_json_bytes(
-        dict(model_config),
-        path="session model configuration",
-    )
-    return horizon, encoded_config, _cost_from_definition(definition)
-
-
-def _session_cost_structure(session: SessionIdentity) -> CostStructure | None:
-    return _cost_from_definition(_session_definition(session))
-
-
-def _cost_from_definition(definition: Mapping[str, object]) -> CostStructure | None:
-    decision = definition.get("decision")
-    if decision is None:
-        return None
-    if not isinstance(decision, Mapping):
-        raise EngineError("session identity has an invalid decision configuration")
-    cost = decision.get("cost_structure")
-    if not isinstance(cost, Mapping):
-        raise EngineError("session identity has an invalid cost structure")
-    cost_values = dict(cost)
-    try:
-        return CostStructure(
-            underage=cast(float, cost_values["underage_cost"]),
-            overage=cast(float, cost_values["overage_cost"]),
-            holding=cast(float, cost_values["holding_cost"]),
-            shortage=cast(float, cost_values["shortage_cost"]),
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise EngineError("session identity has an invalid cost structure") from error
-
-
-def _require_panel_session_binding(
-    panel: Panel,
-    *,
-    session: SessionIdentity,
-    ledger_calendar: Calendar,
-) -> None:
-    definition = _session_definition(session)
-    series_set = definition.get("series_set")
-    frequency = definition.get("calendar_frequency")
-    if not isinstance(series_set, list) or any(
-        not isinstance(series_key, str) for series_key in series_set
-    ):
-        raise EngineError("session identity has an invalid series set")
-    if tuple(series_set) != panel.series_keys:
-        raise EngineError("panel series set does not match the engine session")
-    if frequency != ledger_calendar.frequency:
-        raise EngineError("ledger calendar does not match the engine session")
-    if panel.calendar != ledger_calendar:
-        raise EngineError("panel calendar does not match the ledger calendar")
-
-
-def _require_task_session_binding(
-    task: ForecastTask,
-    *,
-    session: SessionIdentity,
-) -> None:
-    definition = _session_definition(session)
-    expected_horizon = definition.get("horizon")
-    expected_model = definition.get("model_config")
-    expected_series = definition.get("series_set")
-    expected_frequency = definition.get("calendar_frequency")
-    if task.horizon != expected_horizon or task.model_config != expected_model:
-        raise EngineError("fitted task configuration does not match its session")
-    if not isinstance(expected_series, list) or not set(task.series_keys) <= set(expected_series):
-        raise EngineError("fitted task series do not belong to its session")
-    if task.scope is Scope.GLOBAL and tuple(expected_series) != task.series_keys:
-        raise EngineError("global fitted task must cover its session series set")
-    if task.calendar.frequency != expected_frequency:
-        raise EngineError("fitted task calendar does not match its session")
-
-
 def _artifact_key(session: SessionIdentity, task: ForecastTask) -> str:
     digest = hashlib.sha256()
     for payload in (
@@ -839,7 +717,7 @@ def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:
 def _validated_partitions(partitions: Sequence[str]) -> tuple[str, ...]:
     requested = tuple(partitions)
     if len(set(requested)) != len(requested):
-        raise EngineError("calibration partitions must be unique")
+        raise _EngineError("calibration partitions must be unique")
     for partition in requested:
         _require_identifier(partition, name="calibration partition")
     return requested
@@ -879,7 +757,7 @@ def _reject_undeclared_state_updates(
 ) -> None:
     unknown = set(updates) - set(partitions)
     if unknown:
-        raise EngineError(f"{producer} updated undeclared partitions: {sorted(unknown)!r}")
+        raise _EngineError(f"{producer} updated undeclared partitions: {sorted(unknown)!r}")
 
 
 def _validated_inventory_positions(
@@ -896,38 +774,15 @@ def _validated_inventory_positions(
     return positions
 
 
-def _validated_actuals(value: Mapping[ActualKey, float]) -> dict[ActualKey, float]:
-    if not isinstance(value, Mapping):
-        raise TypeError("settlement request actuals must be a mapping")
-    actuals: dict[ActualKey, float] = {}
-    for key, raw_actual in value.items():
-        if (
-            not isinstance(key, tuple)
-            or len(key) != 2
-            or not isinstance(key[0], str)
-            or not isinstance(key[1], pd.Timestamp)
-        ):
-            raise TypeError("settlement actual keys must be (series key, Timestamp) pairs")
-        _require_identifier(key[0], name="settlement actual series key")
-        if isinstance(raw_actual, bool) or not isinstance(raw_actual, Real):
-            raise TypeError("settlement actuals must be real numbers")
-        actual = float(raw_actual)
-        if not math.isfinite(actual):
-            raise EngineError("settlement actuals must be finite")
-        actuals[key] = actual
-    return actuals
-
-
 def _require_identifier(value: object, *, name: str) -> None:
     if not isinstance(value, str) or not value or value != value.strip():
-        raise EngineError(f"{name} must be a non-empty trimmed string")
+        raise _EngineError(f"{name} must be a non-empty trimmed string")
 
 
 __all__ = [
     "ENGINE_VERBS",
     "CalibrationResult",
     "Engine",
-    "EngineError",
     "FittedTask",
     "ForecastBatch",
     "ObservationResult",
@@ -937,6 +792,5 @@ __all__ = [
     "Phase",
     "PhaseError",
     "PhaseEvent",
-    "SettlementRequest",
     "Spine",
 ]

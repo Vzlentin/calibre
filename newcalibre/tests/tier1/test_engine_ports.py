@@ -18,8 +18,11 @@ from newcalibre.domain import (
     TARGET_TIMESTAMP,
     TIMESTAMP,
     Calendar,
+    CostStructure,
+    DecisionTiming,
     Panel,
     SessionIdentity,
+    StockoutRule,
 )
 from newcalibre.engine import CommitReceipt, ForecastWrite, OriginCommit
 from newcalibre.engine import ports as engine_ports
@@ -57,6 +60,10 @@ def _session() -> SessionIdentity:
         calendar=CALENDAR,
         horizon=1,
         model_config={"backend": "fixture", "name": "fixture"},
+        ordering_policy={"name": "fixture"},
+        cost_structure=CostStructure(1.0, 1.0, 1.0, 1.0),
+        decision_timing=DecisionTiming(lead_time=1, review_period=1),
+        stockout_rule=StockoutRule.LOST_SALES,
     )
 
 

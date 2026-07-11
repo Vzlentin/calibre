@@ -74,6 +74,13 @@ sidecar, or forecast rows. `predict` therefore fails loudly when that retained
 season is short or has a missing phase, and otherwise repeats the phase lookup
 deterministically for every horizon step.
 
+The settlement core is one pure, typed implementation shared by every engine
+driver. It advances explicit contiguous calendar periods, credits orders only
+at their declared lead-time arrival, applies the lost-sales transition, and
+emits one traceable holding/shortage cost record per session series and period.
+Requests refuse missing demand, discontinuous ledger state, or facts whose
+session, calendar, transition rule, cost structure, or actuals semantics drift.
+
 ## Development
 
 Run every command from this directory against the successor lockfile:

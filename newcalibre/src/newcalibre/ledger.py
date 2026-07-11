@@ -24,13 +24,16 @@ from newcalibre.domain import (
     REQUIRED_FRAME_COLUMNS,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     CalendarError,
     ForecastFrameError,
     GuaranteeClaim,
     GuaranteeCurrency,
     GuaranteeDescriptor,
+    InventoryPosition,
     SessionIdentity,
+    StockoutRule,
     forecast_bound_groups,
     interval_columns,
     quantile_column,
@@ -541,7 +544,7 @@ class OrderRow:
 class StockoutTransition:
     """Record demand consumption and the configured stock-out transition result."""
 
-    rule: str
+    rule: StockoutRule
     demand: float
     fulfilled_demand: float
     unmet_demand: float
@@ -549,7 +552,8 @@ class StockoutTransition:
     closing_backorders: float
 
     def __post_init__(self) -> None:
-        _require_text(self.rule, name="stock-out transition rule")
+        if not isinstance(self.rule, StockoutRule):
+            raise LedgerError("stock-out transition rule must be a StockoutRule")
         for name in (
             "demand",
             "fulfilled_demand",
@@ -562,8 +566,86 @@ class StockoutTransition:
                 name,
                 _finite_nonnegative(getattr(self, name), name=name.replace("_", " ")),
             )
-        if math.fsum((self.fulfilled_demand, self.unmet_demand)) != self.demand:
+        try:
+            accounted_demand = math.fsum((self.fulfilled_demand, self.unmet_demand))
+        except OverflowError as error:
+            raise LedgerError("fulfilled demand plus unmet demand must be finite") from error
+        if not math.isclose(
+            accounted_demand,
+            self.demand,
+            rel_tol=0.0,
+            abs_tol=math.ulp(self.demand),
+        ):
             raise LedgerError("fulfilled demand plus unmet demand must equal demand")
+
+
+def lost_sales_transition(
+    *,
+    opening: InventoryPosition,
+    arrivals: float,
+    demand: float,
+) -> StockoutTransition:
+    """Apply the single lost-sales inventory transition."""
+    if not isinstance(opening, InventoryPosition):
+        raise LedgerError("lost-sales opening state must be an InventoryPosition")
+    if opening.backorders != 0.0:
+        raise LedgerError("lost-sales settlement requires zero opening backorders")
+    normalized_arrivals = _finite_nonnegative(arrivals, name="settlement arrivals")
+    normalized_demand = _finite_nonnegative(demand, name="settlement demand")
+    try:
+        available = math.fsum((opening.on_hand, normalized_arrivals))
+    except OverflowError as error:
+        raise LedgerError("available settlement inventory must be finite") from error
+    if not math.isfinite(available):
+        raise LedgerError("available settlement inventory must be finite")
+    fulfilled = min(available, normalized_demand)
+    return StockoutTransition(
+        rule=StockoutRule.LOST_SALES,
+        demand=normalized_demand,
+        fulfilled_demand=fulfilled,
+        unmet_demand=normalized_demand - fulfilled,
+        closing_on_hand=available - fulfilled,
+        closing_backorders=0.0,
+    )
+
+
+def validate_lost_sales_transition(
+    *,
+    transition: StockoutTransition,
+    arrivals: float,
+    opening: InventoryPosition | None = None,
+) -> None:
+    """Prove a transition is reachable from a non-negative lost-sales opening."""
+    if not isinstance(transition, StockoutTransition):
+        raise LedgerError("lost-sales transition must be a StockoutTransition")
+    if transition.rule is not StockoutRule.LOST_SALES:
+        raise LedgerError("lost-sales transition must use the lost-sales rule")
+    if transition.closing_backorders != 0.0:
+        raise LedgerError("lost-sales transition must close with zero backorders")
+    normalized_arrivals = _finite_nonnegative(arrivals, name="settlement arrivals")
+    try:
+        available = math.fsum((transition.fulfilled_demand, transition.closing_on_hand))
+    except OverflowError as error:
+        raise LedgerError("available settlement inventory must be finite") from error
+    if not math.isfinite(available):
+        raise LedgerError("available settlement inventory must be finite")
+    if available < normalized_arrivals and not _quantities_equal(
+        available,
+        normalized_arrivals,
+    ):
+        raise LedgerError("settlement arrivals cannot disappear from inventory")
+    implied_opening = max(0.0, available - normalized_arrivals)
+    expected_fulfilled = min(available, transition.demand)
+    if not _quantities_equal(transition.fulfilled_demand, expected_fulfilled):
+        raise LedgerError("lost-sales transition must fulfill all available demand")
+    if opening is None:
+        return
+    if not isinstance(opening, InventoryPosition):
+        raise LedgerError("lost-sales opening state must be an InventoryPosition")
+    if opening.backorders != 0.0:
+        raise LedgerError("lost-sales settlement requires zero opening backorders")
+    if not _quantities_equal(implied_opening, opening.on_hand):
+        raise LedgerError("lost-sales transition does not match opening on-hand inventory")
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,7 +686,9 @@ class SettlementRecord:
     series_key: str
     period: pd.Timestamp
     arrivals: float
+    actuals_semantics: ActualsSemantics
     transition: StockoutTransition
+    inventory_position: InventoryPosition
     holding: BookedCost
     shortage: BookedCost
 
@@ -617,8 +701,18 @@ class SettlementRecord:
             "arrivals",
             _finite_nonnegative(self.arrivals, name="settlement arrivals"),
         )
+        if not isinstance(self.actuals_semantics, ActualsSemantics):
+            raise LedgerError("settlement actuals semantics must be ActualsSemantics")
         if not isinstance(self.transition, StockoutTransition):
             raise LedgerError("settlement transition must be a StockoutTransition")
+        if not isinstance(self.inventory_position, InventoryPosition):
+            raise LedgerError("settlement inventory position must be an InventoryPosition")
+        if self.inventory_position.on_hand != self.transition.closing_on_hand:
+            raise LedgerError("settlement inventory on_hand must equal transition closing on hand")
+        if self.inventory_position.backorders != self.transition.closing_backorders:
+            raise LedgerError(
+                "settlement inventory backorders must equal transition closing backorders"
+            )
         if not isinstance(self.holding, BookedCost):
             raise LedgerError("settlement holding cost must be a BookedCost")
         if not isinstance(self.shortage, BookedCost):
@@ -746,6 +840,11 @@ class Ledger:
         for row in staged:
             if row.session != self._session:
                 raise LedgerError("order row session does not match the ledger session")
+            try:
+                self._calendar.require_member(row.origin, name="order origin")
+                self._calendar.require_member(row.arrival_period, name="order arrival period")
+            except CalendarError as error:
+                raise LedgerError(str(error)) from error
             key = row.key
             if key in self._orders or key in staged_rows:
                 raise LedgerError(f"duplicate order key: {key!r}")
@@ -759,6 +858,10 @@ class Ledger:
         for row in staged:
             if row.session != self._session:
                 raise LedgerError("settlement row session does not match the ledger session")
+            try:
+                self._calendar.require_member(row.period, name="settlement period")
+            except CalendarError as error:
+                raise LedgerError(str(error)) from error
             key = row.key
             if key in self._settlements or key in staged_rows:
                 raise LedgerError(f"duplicate settlement key: {key!r}")
@@ -1162,6 +1265,15 @@ def _finite_nonnegative(value: object, *, name: str) -> float:
     return normalized
 
 
+def _quantities_equal(left: float, right: float) -> bool:
+    return math.isclose(
+        left,
+        right,
+        rel_tol=0.0,
+        abs_tol=max(math.ulp(left), math.ulp(right)),
+    )
+
+
 def _require_session(session: object) -> None:
     if not isinstance(session, SessionIdentity):
         raise LedgerError("session must be a SessionIdentity")
@@ -1220,4 +1332,6 @@ __all__ = [
     "SettlementKey",
     "SettlementRecord",
     "StockoutTransition",
+    "lost_sales_transition",
+    "validate_lost_sales_transition",
 ]

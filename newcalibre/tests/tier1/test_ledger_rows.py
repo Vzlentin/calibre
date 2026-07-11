@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from typing import Any, cast
 
 import pandas as pd
@@ -17,6 +17,7 @@ from newcalibre.domain import (
     POINT_FORECAST,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     DecisionScope,
     DecisionScopeKind,
@@ -25,8 +26,10 @@ from newcalibre.domain import (
     GuaranteeCurrency,
     GuaranteeDescriptor,
     GuaranteeType,
+    InventoryPosition,
     ScoredSeries,
     SessionIdentity,
+    StockoutRule,
     interval_columns,
     quantile_column,
 )
@@ -157,13 +160,19 @@ def _settlement(
         series_key="sku-a",
         period=period,
         arrivals=3.0,
+        actuals_semantics=ActualsSemantics.DEMAND,
         transition=StockoutTransition(
-            rule="lost-sales",
+            rule=StockoutRule.LOST_SALES,
             demand=5.0,
             fulfilled_demand=4.0,
             unmet_demand=1.0,
             closing_on_hand=2.0,
             closing_backorders=0.0,
+        ),
+        inventory_position=InventoryPosition(
+            on_hand=2.0,
+            on_order=0.0,
+            backorders=0.0,
         ),
         holding=BookedCost(
             rate=0.5,
@@ -467,9 +476,11 @@ def test_settlement_shape_recomputes_costs_and_is_immutable() -> None:
 
 
 def test_settlement_rejects_inconsistent_transition_or_cost_booking() -> None:
+    with pytest.raises(LedgerError, match="must be ActualsSemantics"):
+        replace(_settlement(), actuals_semantics="demand")  # type: ignore[arg-type]
     with pytest.raises(LedgerError, match="fulfilled.*unmet"):
         StockoutTransition(
-            rule="lost-sales",
+            rule=StockoutRule.LOST_SALES,
             demand=5.0,
             fulfilled_demand=3.0,
             unmet_demand=1.0,
@@ -482,6 +493,32 @@ def test_settlement_rejects_inconsistent_transition_or_cost_booking() -> None:
         _settlement(holding_basis=3.0)
     with pytest.raises(LedgerError, match="shortage cost basis"):
         _settlement(shortage_basis=2.0)
+
+
+def test_stockout_transition_accepts_one_ulp_float_conservation_drift() -> None:
+    demand = 457.8931265964433
+    fulfilled = 170.79992387036359
+
+    transition = StockoutTransition(
+        rule=StockoutRule.LOST_SALES,
+        demand=demand,
+        fulfilled_demand=fulfilled,
+        unmet_demand=demand - fulfilled,
+        closing_on_hand=0.0,
+        closing_backorders=0.0,
+    )
+
+    assert transition.demand == demand
+
+    with pytest.raises(LedgerError, match="must be a StockoutRule"):
+        StockoutTransition(
+            rule="lost-sales",  # type: ignore[arg-type]
+            demand=0.0,
+            fulfilled_demand=0.0,
+            unmet_demand=0.0,
+            closing_on_hand=0.0,
+            closing_backorders=0.0,
+        )
 
 
 def test_settlement_keys_are_unique_atomic_and_session_scoped() -> None:
