@@ -11,9 +11,10 @@ from numbers import Integral
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.domain.calendar import Calendar
 from newcalibre.domain.cost import CostStructure
+from newcalibre.domain.decision import DecisionTiming, StockoutRule
 
 _IDENTITY_SCHEMA = "newcalibre.session-identity"
-_IDENTITY_VERSION = 1
+_IDENTITY_VERSION = 2
 
 
 class SessionIdentityError(ValueError):
@@ -42,6 +43,8 @@ class SessionIdentity:
         conformal_config: Mapping[str, object] | None = None,
         ordering_policy: Mapping[str, object] | None = None,
         cost_structure: CostStructure | None = None,
+        decision_timing: DecisionTiming | None = None,
+        stockout_rule: StockoutRule | None = None,
     ) -> SessionIdentity:
         """Return the same identity for the same canonical defining inputs."""
         normalized_tenant = _require_text(tenant, name="tenant")
@@ -64,6 +67,8 @@ class SessionIdentity:
         normalized_decision = _canonical_decision_config(
             ordering_policy=ordering_policy,
             cost_structure=cost_structure,
+            decision_timing=decision_timing,
+            stockout_rule=stockout_rule,
         )
 
         payload = {
@@ -115,15 +120,24 @@ def _canonical_decision_config(
     *,
     ordering_policy: Mapping[str, object] | None,
     cost_structure: CostStructure | None,
+    decision_timing: DecisionTiming | None,
+    stockout_rule: StockoutRule | None,
 ) -> dict[str, object] | None:
-    if ordering_policy is None and cost_structure is None:
+    values = (ordering_policy, cost_structure, decision_timing, stockout_rule)
+    if all(value is None for value in values):
         return None
-    if ordering_policy is None or cost_structure is None:
+    if any(value is None for value in values):
         raise SessionIdentityError(
-            "ordering_policy and cost_structure must both be supplied or both be absent"
+            "ordering_policy, cost_structure, decision_timing, and stockout_rule "
+            "must all be supplied or all be absent"
         )
+    assert ordering_policy is not None
     if not isinstance(cost_structure, CostStructure):
         raise SessionIdentityError("cost_structure must be a CostStructure")
+    if not isinstance(decision_timing, DecisionTiming):
+        raise SessionIdentityError("decision_timing must be a DecisionTiming")
+    if not isinstance(stockout_rule, StockoutRule):
+        raise SessionIdentityError("stockout_rule must be a StockoutRule")
 
     return {
         "cost_structure": {
@@ -136,6 +150,11 @@ def _canonical_decision_config(
             ordering_policy,
             name="ordering_policy",
         ),
+        "stockout_rule": stockout_rule.value,
+        "timing": {
+            "lead_time": decision_timing.lead_time,
+            "review_period": decision_timing.review_period,
+        },
     }
 
 

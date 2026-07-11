@@ -2,11 +2,19 @@
 
 import math
 from dataclasses import dataclass, field
+from enum import StrEnum
 from numbers import Integral, Real
 
 
 class DecisionError(ValueError):
     """Report invalid decision timing or inventory-position data."""
+
+
+class StockoutRule(StrEnum):
+    """Name the supported transition for demand that inventory cannot serve."""
+
+    BACKORDER = "backorder"
+    LOST_SALES = "lost-sales"
 
 
 def _integer_period(value: object, *, name: str, minimum: int) -> int:

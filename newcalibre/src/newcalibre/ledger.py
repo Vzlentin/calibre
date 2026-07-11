@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Real
 from types import MappingProxyType
@@ -20,13 +21,19 @@ from newcalibre.domain import (
     MODEL_NAME,
     ORIGIN,
     POINT_FORECAST,
+    REQUIRED_FRAME_COLUMNS,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    ActualsSemantics,
     Calendar,
+    CalendarError,
     ForecastFrameError,
     GuaranteeClaim,
+    GuaranteeCurrency,
     GuaranteeDescriptor,
+    InventoryPosition,
     SessionIdentity,
+    StockoutRule,
     forecast_bound_groups,
     interval_columns,
     quantile_column,
@@ -37,6 +44,20 @@ type ForecastKey = tuple[str, pd.Timestamp, int, str]
 type BoundKey = tuple[str, ...]
 type OrderKey = tuple[SessionIdentity, str, pd.Timestamp, str]
 type SettlementKey = tuple[SessionIdentity, str, pd.Timestamp]
+type PredicateKey = tuple[GuaranteeClaim, GuaranteeCurrency | None]
+
+_ROW_EVENT_PREDICATE_KEYS: frozenset[PredicateKey] = frozenset(
+    {
+        (
+            GuaranteeClaim.ONE_SIDED_COVERAGE,
+            GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+        ),
+        (
+            GuaranteeClaim.TWO_SIDED_COVERAGE,
+            GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+        ),
+    }
+)
 
 
 class LedgerError(ValueError):
@@ -81,6 +102,359 @@ class ForecastIssuance:
             raise LedgerError("one-sided coverage requires a guaranteed side")
         if not one_sided and self.guaranteed_side is not None:
             raise LedgerError("only one-sided coverage may declare a guaranteed side")
+
+
+@dataclass(frozen=True, slots=True)
+class PredicateResult:
+    """Return one finite numeric predicate value and optional coverage event."""
+
+    value: float
+    covered: bool | None
+
+    def __post_init__(self) -> None:
+        value = _finite_real(self.value, name="predicate result value")
+        if self.covered is not None and not isinstance(self.covered, bool):
+            raise LedgerError("predicate result covered must be a boolean or not applicable")
+        if self.covered is not None and value != float(self.covered):
+            raise LedgerError("a coverage predicate value must equal its boolean indicator")
+        object.__setattr__(self, "value", value)
+
+
+type Predicate = Callable[
+    [float, tuple[float, ...], ForecastIssuance],
+    PredicateResult,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class PredicateRegistration:
+    """Bind one supported finite-sample row-event pair to a predicate."""
+
+    key: PredicateKey
+    predicate: Predicate
+
+    def __post_init__(self) -> None:
+        _validate_predicate_key(self.key)
+        if self.key not in _ROW_EVENT_PREDICATE_KEYS:
+            raise LedgerError(
+                "callable row-event predicates support only finite-sample "
+                "one- and two-sided coverage"
+            )
+        if not callable(self.predicate):
+            raise LedgerError("registered predicate must be callable")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PredicateRegistry:
+    """Hold one immutable predicate per supported finite-sample row-event pair."""
+
+    _registrations: tuple[PredicateRegistration, ...]
+    _by_key: Mapping[PredicateKey, PredicateRegistration] = field(repr=False)
+
+    def __init__(self, registrations: Iterable[PredicateRegistration]) -> None:
+        if isinstance(registrations, (str, bytes)):
+            raise LedgerError("predicate registrations must be an iterable")
+        try:
+            iterator = iter(registrations)
+        except TypeError as error:
+            raise LedgerError("predicate registrations must be iterable") from error
+
+        staged: list[PredicateRegistration] = []
+        by_key: dict[PredicateKey, PredicateRegistration] = {}
+        for registration in iterator:
+            if not isinstance(registration, PredicateRegistration):
+                raise LedgerError("every predicate registration must be a PredicateRegistration")
+            if registration.key in by_key:
+                raise LedgerError(f"duplicate predicate key: {registration.key!r}")
+            staged.append(registration)
+            by_key[registration.key] = registration
+
+        object.__setattr__(self, "_registrations", tuple(staged))
+        object.__setattr__(self, "_by_key", MappingProxyType(by_key))
+
+    @property
+    def registrations(self) -> tuple[PredicateRegistration, ...]:
+        """Return registrations in their declared order."""
+        return self._registrations
+
+    @classmethod
+    def gate_a(cls) -> PredicateRegistry:
+        """Return the complete Gate-A row-event predicate registry."""
+        return cls(
+            (
+                PredicateRegistration(
+                    key=(
+                        GuaranteeClaim.ONE_SIDED_COVERAGE,
+                        GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+                    ),
+                    predicate=_one_sided_coverage_predicate,
+                ),
+                PredicateRegistration(
+                    key=(
+                        GuaranteeClaim.TWO_SIDED_COVERAGE,
+                        GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+                    ),
+                    predicate=_two_sided_coverage_predicate,
+                ),
+            )
+        )
+
+    def _registration_for(self, key: PredicateKey) -> PredicateRegistration | None:
+        return self._by_key.get(key)
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageTarget:
+    """Identify one descriptor-and-bound scoring denominator."""
+
+    descriptor: GuaranteeDescriptor
+    guaranteed_side: GuaranteedSide | None
+    bound_key: BoundKey
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.descriptor, GuaranteeDescriptor):
+            raise LedgerError("coverage target descriptor must be a GuaranteeDescriptor")
+        if self.guaranteed_side is not None and not isinstance(
+            self.guaranteed_side, GuaranteedSide
+        ):
+            raise LedgerError("coverage target side must be a GuaranteedSide or not applicable")
+        if (
+            not isinstance(self.bound_key, tuple)
+            or not self.bound_key
+            or any(not isinstance(column, str) or not column for column in self.bound_key)
+        ):
+            raise LedgerError("coverage target bound key must name forecast bound columns")
+        object.__setattr__(self, "bound_key", tuple(self.bound_key))
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreOutcome:
+    """Record one row-and-bound evaluation with total unscored attribution."""
+
+    forecast_key: ForecastKey
+    target: CoverageTarget
+    resolved: bool
+    scored: bool
+    value: float | None
+    covered: bool | None
+    unscored_reason: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, CoverageTarget):
+            raise LedgerError("score outcome target must be a CoverageTarget")
+        if not isinstance(self.resolved, bool) or not isinstance(self.scored, bool):
+            raise LedgerError("score outcome state flags must be boolean")
+        if not self.resolved:
+            if self.scored or any(
+                value is not None for value in (self.value, self.covered, self.unscored_reason)
+            ):
+                raise LedgerError("pending score outcomes cannot carry scoring results")
+            return
+        if self.scored:
+            value = _finite_real(self.value, name="scored outcome value")
+            if self.covered is not None and not isinstance(self.covered, bool):
+                raise LedgerError("scored outcome coverage must be boolean or not applicable")
+            if self.unscored_reason is not None:
+                raise LedgerError("scored outcomes cannot carry an unscored reason")
+            object.__setattr__(self, "value", value)
+            return
+        if self.value is not None or self.covered is not None:
+            raise LedgerError("unscored outcomes cannot carry predicate results")
+        _require_text(self.unscored_reason, name="resolved unscored reason")
+
+    @property
+    def bound_key(self) -> BoundKey:
+        """Return the explicit bound key evaluated by this outcome."""
+        return self.target.bound_key
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageSummary:
+    """Summarize one coverage target with scored-only denominator discipline."""
+
+    total: int
+    pending: int
+    resolved: int
+    scored: int
+    covered: int
+    unscored: int
+    unscored_by_reason: Mapping[str, int]
+    coverage_ratio: float | None
+
+    def __post_init__(self) -> None:
+        counts = {
+            name: _nonnegative_count(getattr(self, name), name=name)
+            for name in ("total", "pending", "resolved", "scored", "covered", "unscored")
+        }
+        if counts["total"] != counts["pending"] + counts["resolved"]:
+            raise LedgerError("coverage summary total must equal pending plus resolved")
+        if counts["resolved"] != counts["scored"] + counts["unscored"]:
+            raise LedgerError("coverage summary resolved must equal scored plus unscored")
+        if counts["covered"] > counts["scored"]:
+            raise LedgerError("coverage summary covered cannot exceed scored")
+        reasons = _validated_reason_counts(self.unscored_by_reason)
+        if sum(reasons.values()) != counts["unscored"]:
+            raise LedgerError("coverage summary reason counts must equal unscored")
+
+        ratio = self.coverage_ratio
+        if ratio is not None:
+            normalized_ratio = _finite_real(ratio, name="coverage ratio")
+            if not 0.0 <= normalized_ratio <= 1.0:
+                raise LedgerError("coverage ratio must lie between zero and one")
+            if not counts["scored"]:
+                raise LedgerError("coverage ratio requires a scored denominator")
+            if normalized_ratio != counts["covered"] / counts["scored"]:
+                raise LedgerError("coverage ratio must equal covered divided by scored")
+            object.__setattr__(self, "coverage_ratio", normalized_ratio)
+
+        object.__setattr__(
+            self,
+            "unscored_by_reason",
+            MappingProxyType(reasons),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageReport:
+    """Expose immutable per-bound outcomes, target summaries, and global counts."""
+
+    outcomes: tuple[ScoreOutcome, ...]
+    summaries: Mapping[CoverageTarget, CoverageSummary]
+    unscored_by_reason: Mapping[str, int]
+    bound_count: int
+    pending_bound_count: int
+    resolved_bound_count: int
+    scored_bound_count: int
+    covered_bound_count: int
+    unscored_bound_count: int
+
+    def __post_init__(self) -> None:
+        outcomes = tuple(self.outcomes)
+        if any(not isinstance(outcome, ScoreOutcome) for outcome in outcomes):
+            raise LedgerError("coverage report outcomes must be ScoreOutcome values")
+        if not isinstance(self.summaries, Mapping):
+            raise LedgerError("coverage report summaries must be a mapping")
+        summaries = dict(self.summaries)
+        if any(
+            not isinstance(target, CoverageTarget) or not isinstance(summary, CoverageSummary)
+            for target, summary in summaries.items()
+        ):
+            raise LedgerError("coverage report summaries must map targets to summaries")
+
+        count_names = (
+            "bound_count",
+            "pending_bound_count",
+            "resolved_bound_count",
+            "scored_bound_count",
+            "covered_bound_count",
+            "unscored_bound_count",
+        )
+        counts = {name: _nonnegative_count(getattr(self, name), name=name) for name in count_names}
+        if counts["bound_count"] != (
+            counts["pending_bound_count"] + counts["resolved_bound_count"]
+        ):
+            raise LedgerError("coverage report bound count must equal pending plus resolved")
+        if counts["resolved_bound_count"] != (
+            counts["scored_bound_count"] + counts["unscored_bound_count"]
+        ):
+            raise LedgerError("coverage report resolved count must equal scored plus unscored")
+        if counts["covered_bound_count"] > counts["scored_bound_count"]:
+            raise LedgerError("coverage report covered count cannot exceed scored")
+        reasons = _validated_reason_counts(self.unscored_by_reason)
+        if sum(reasons.values()) != counts["unscored_bound_count"]:
+            raise LedgerError("coverage report reason counts must equal unscored")
+
+        derived = _derive_report_facts(outcomes)
+        if counts != derived.counts:
+            raise LedgerError("coverage report counts must match its outcomes")
+        if reasons != derived.unscored_by_reason:
+            raise LedgerError("coverage report reasons must match its outcomes")
+        if summaries != derived.summaries:
+            raise LedgerError("coverage report summaries must match its outcomes")
+
+        object.__setattr__(self, "outcomes", outcomes)
+        object.__setattr__(self, "summaries", MappingProxyType(summaries))
+        object.__setattr__(
+            self,
+            "unscored_by_reason",
+            MappingProxyType(reasons),
+        )
+
+
+@dataclass(slots=True)
+class _SummaryAccumulator:
+    total: int = 0
+    pending: int = 0
+    resolved: int = 0
+    scored: int = 0
+    covered: int = 0
+    unscored: int = 0
+    coverage_observations: int = 0
+    unscored_by_reason: Counter[str] = field(default_factory=Counter)
+
+    def add(self, outcome: ScoreOutcome) -> None:
+        self.total += 1
+        if not outcome.resolved:
+            self.pending += 1
+            return
+        self.resolved += 1
+        if outcome.scored:
+            self.scored += 1
+            if outcome.covered is not None:
+                self.coverage_observations += 1
+                self.covered += int(outcome.covered)
+            return
+        self.unscored += 1
+        reason = cast(str, outcome.unscored_reason)
+        self.unscored_by_reason[reason] += 1
+
+    def freeze(self) -> CoverageSummary:
+        ratio = (
+            self.covered / self.scored
+            if self.scored and self.coverage_observations == self.scored
+            else None
+        )
+        return CoverageSummary(
+            total=self.total,
+            pending=self.pending,
+            resolved=self.resolved,
+            scored=self.scored,
+            covered=self.covered,
+            unscored=self.unscored,
+            unscored_by_reason=self.unscored_by_reason,
+            coverage_ratio=ratio,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivedReportFacts:
+    counts: dict[str, int]
+    summaries: dict[CoverageTarget, CoverageSummary]
+    unscored_by_reason: dict[str, int]
+
+
+def _derive_report_facts(outcomes: tuple[ScoreOutcome, ...]) -> _DerivedReportFacts:
+    accumulators: dict[CoverageTarget, _SummaryAccumulator] = {}
+    overall = _SummaryAccumulator()
+    for outcome in outcomes:
+        overall.add(outcome)
+        accumulator = accumulators.get(outcome.target)
+        if accumulator is None:
+            accumulator = _SummaryAccumulator()
+            accumulators[outcome.target] = accumulator
+        accumulator.add(outcome)
+    return _DerivedReportFacts(
+        counts={
+            "bound_count": overall.total,
+            "pending_bound_count": overall.pending,
+            "resolved_bound_count": overall.resolved,
+            "scored_bound_count": overall.scored,
+            "covered_bound_count": overall.covered,
+            "unscored_bound_count": overall.unscored,
+        },
+        summaries={target: summary.freeze() for target, summary in accumulators.items()},
+        unscored_by_reason=dict(overall.unscored_by_reason),
+    )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -131,6 +505,11 @@ class ForecastRow:
         """Return a read-only snapshot of every validated frame value."""
         return MappingProxyType(dict(self._values))
 
+    def _with_actual_value(self, actual_value: float) -> ForecastRow:
+        values = dict(self._values)
+        values[ACTUAL_VALUE] = actual_value
+        return self._from_validated_values(values, issuances=self.issuances)
+
 
 @dataclass(frozen=True, slots=True)
 class OrderRow:
@@ -165,7 +544,7 @@ class OrderRow:
 class StockoutTransition:
     """Record demand consumption and the configured stock-out transition result."""
 
-    rule: str
+    rule: StockoutRule
     demand: float
     fulfilled_demand: float
     unmet_demand: float
@@ -173,7 +552,8 @@ class StockoutTransition:
     closing_backorders: float
 
     def __post_init__(self) -> None:
-        _require_text(self.rule, name="stock-out transition rule")
+        if not isinstance(self.rule, StockoutRule):
+            raise LedgerError("stock-out transition rule must be a StockoutRule")
         for name in (
             "demand",
             "fulfilled_demand",
@@ -186,8 +566,86 @@ class StockoutTransition:
                 name,
                 _finite_nonnegative(getattr(self, name), name=name.replace("_", " ")),
             )
-        if math.fsum((self.fulfilled_demand, self.unmet_demand)) != self.demand:
+        try:
+            accounted_demand = math.fsum((self.fulfilled_demand, self.unmet_demand))
+        except OverflowError as error:
+            raise LedgerError("fulfilled demand plus unmet demand must be finite") from error
+        if not math.isclose(
+            accounted_demand,
+            self.demand,
+            rel_tol=0.0,
+            abs_tol=math.ulp(self.demand),
+        ):
             raise LedgerError("fulfilled demand plus unmet demand must equal demand")
+
+
+def lost_sales_transition(
+    *,
+    opening: InventoryPosition,
+    arrivals: float,
+    demand: float,
+) -> StockoutTransition:
+    """Apply the single lost-sales inventory transition."""
+    if not isinstance(opening, InventoryPosition):
+        raise LedgerError("lost-sales opening state must be an InventoryPosition")
+    if opening.backorders != 0.0:
+        raise LedgerError("lost-sales settlement requires zero opening backorders")
+    normalized_arrivals = _finite_nonnegative(arrivals, name="settlement arrivals")
+    normalized_demand = _finite_nonnegative(demand, name="settlement demand")
+    try:
+        available = math.fsum((opening.on_hand, normalized_arrivals))
+    except OverflowError as error:
+        raise LedgerError("available settlement inventory must be finite") from error
+    if not math.isfinite(available):
+        raise LedgerError("available settlement inventory must be finite")
+    fulfilled = min(available, normalized_demand)
+    return StockoutTransition(
+        rule=StockoutRule.LOST_SALES,
+        demand=normalized_demand,
+        fulfilled_demand=fulfilled,
+        unmet_demand=normalized_demand - fulfilled,
+        closing_on_hand=available - fulfilled,
+        closing_backorders=0.0,
+    )
+
+
+def validate_lost_sales_transition(
+    *,
+    transition: StockoutTransition,
+    arrivals: float,
+    opening: InventoryPosition | None = None,
+) -> None:
+    """Prove a transition is reachable from a non-negative lost-sales opening."""
+    if not isinstance(transition, StockoutTransition):
+        raise LedgerError("lost-sales transition must be a StockoutTransition")
+    if transition.rule is not StockoutRule.LOST_SALES:
+        raise LedgerError("lost-sales transition must use the lost-sales rule")
+    if transition.closing_backorders != 0.0:
+        raise LedgerError("lost-sales transition must close with zero backorders")
+    normalized_arrivals = _finite_nonnegative(arrivals, name="settlement arrivals")
+    try:
+        available = math.fsum((transition.fulfilled_demand, transition.closing_on_hand))
+    except OverflowError as error:
+        raise LedgerError("available settlement inventory must be finite") from error
+    if not math.isfinite(available):
+        raise LedgerError("available settlement inventory must be finite")
+    if available < normalized_arrivals and not _quantities_equal(
+        available,
+        normalized_arrivals,
+    ):
+        raise LedgerError("settlement arrivals cannot disappear from inventory")
+    implied_opening = max(0.0, available - normalized_arrivals)
+    expected_fulfilled = min(available, transition.demand)
+    if not _quantities_equal(transition.fulfilled_demand, expected_fulfilled):
+        raise LedgerError("lost-sales transition must fulfill all available demand")
+    if opening is None:
+        return
+    if not isinstance(opening, InventoryPosition):
+        raise LedgerError("lost-sales opening state must be an InventoryPosition")
+    if opening.backorders != 0.0:
+        raise LedgerError("lost-sales settlement requires zero opening backorders")
+    if not _quantities_equal(implied_opening, opening.on_hand):
+        raise LedgerError("lost-sales transition does not match opening on-hand inventory")
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +686,9 @@ class SettlementRecord:
     series_key: str
     period: pd.Timestamp
     arrivals: float
+    actuals_semantics: ActualsSemantics
     transition: StockoutTransition
+    inventory_position: InventoryPosition
     holding: BookedCost
     shortage: BookedCost
 
@@ -241,8 +701,18 @@ class SettlementRecord:
             "arrivals",
             _finite_nonnegative(self.arrivals, name="settlement arrivals"),
         )
+        if not isinstance(self.actuals_semantics, ActualsSemantics):
+            raise LedgerError("settlement actuals semantics must be ActualsSemantics")
         if not isinstance(self.transition, StockoutTransition):
             raise LedgerError("settlement transition must be a StockoutTransition")
+        if not isinstance(self.inventory_position, InventoryPosition):
+            raise LedgerError("settlement inventory position must be an InventoryPosition")
+        if self.inventory_position.on_hand != self.transition.closing_on_hand:
+            raise LedgerError("settlement inventory on_hand must equal transition closing on hand")
+        if self.inventory_position.backorders != self.transition.closing_backorders:
+            raise LedgerError(
+                "settlement inventory backorders must equal transition closing backorders"
+            )
         if not isinstance(self.holding, BookedCost):
             raise LedgerError("settlement holding cost must be a BookedCost")
         if not isinstance(self.shortage, BookedCost):
@@ -272,6 +742,7 @@ class Ledger:
         "_calendar",
         "_forecasts",
         "_orders",
+        "_pending_forecasts",
         "_session",
         "_settlements",
     )
@@ -282,6 +753,7 @@ class Ledger:
         self._session = session
         self._calendar = calendar
         self._forecasts: dict[ForecastKey, ForecastRow] = {}
+        self._pending_forecasts: dict[ForecastKey, ForecastRow] = {}
         self._orders: dict[OrderKey, OrderRow] = {}
         self._settlements: dict[SettlementKey, SettlementRecord] = {}
 
@@ -359,6 +831,7 @@ class Ledger:
             )
 
         self._forecasts.update(staged_rows)
+        self._pending_forecasts.update(staged_rows)
 
     def append_orders(self, rows: Iterable[OrderRow]) -> None:
         """Validate one input chunk once, then append it atomically."""
@@ -367,6 +840,11 @@ class Ledger:
         for row in staged:
             if row.session != self._session:
                 raise LedgerError("order row session does not match the ledger session")
+            try:
+                self._calendar.require_member(row.origin, name="order origin")
+                self._calendar.require_member(row.arrival_period, name="order arrival period")
+            except CalendarError as error:
+                raise LedgerError(str(error)) from error
             key = row.key
             if key in self._orders or key in staged_rows:
                 raise LedgerError(f"duplicate order key: {key!r}")
@@ -380,11 +858,234 @@ class Ledger:
         for row in staged:
             if row.session != self._session:
                 raise LedgerError("settlement row session does not match the ledger session")
+            try:
+                self._calendar.require_member(row.period, name="settlement period")
+            except CalendarError as error:
+                raise LedgerError(str(error)) from error
             key = row.key
             if key in self._settlements or key in staged_rows:
                 raise LedgerError(f"duplicate settlement key: {key!r}")
             staged_rows[key] = row
         self._settlements.update(staged_rows)
+
+    def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
+        """Return a fresh append-ordered snapshot of pending rows due before origin."""
+        self._require_calendar_origin(origin)
+        due_values: list[dict[str, object]] = []
+        for row in self._pending_forecasts.values():
+            if row.target_timestamp < origin:
+                due_values.append(dict(row._values))
+        if not due_values:
+            return _empty_forecast_frame()
+
+        due_frame = pd.DataFrame(due_values)
+        due_frame[SERIES_KEY] = due_frame[SERIES_KEY].astype("string")
+        due_frame[MODEL_NAME] = due_frame[MODEL_NAME].astype("string")
+        due_frame[ACTUAL_VALUE] = due_frame[ACTUAL_VALUE].astype("float64")
+        return due_frame
+
+    def apply_resolutions(
+        self,
+        resolutions: Mapping[ForecastKey, object],
+        *,
+        origin: pd.Timestamp,
+    ) -> None:
+        """Atomically resolve a due subset once without changing append order."""
+        self._require_calendar_origin(origin)
+        if not isinstance(resolutions, Mapping):
+            raise LedgerError("forecast resolutions must be keyed by forecast row key")
+
+        staged: dict[ForecastKey, ForecastRow] = {}
+        for key, actual_value in resolutions.items():
+            try:
+                row = self._forecasts[key]
+            except (KeyError, TypeError) as error:
+                raise LedgerError(f"unknown forecast key: {key!r}") from error
+            if row.actual_value is not None:
+                raise LedgerError(f"forecast row is already resolved: {key!r}")
+            if row.target_timestamp >= origin:
+                raise LedgerError(f"forecast row is not yet due: {key!r}")
+            normalized_actual = _finite_real(actual_value, name="resolved actual value")
+            staged[key] = row._with_actual_value(normalized_actual)
+
+        self._forecasts.update(staged)
+        for key in staged:
+            del self._pending_forecasts[key]
+
+    def coverage_report(self, registry: PredicateRegistry) -> CoverageReport:
+        """Score each forecast-bound fact once under its registered descriptor pair."""
+        if not isinstance(registry, PredicateRegistry):
+            raise LedgerError("coverage reporting requires a PredicateRegistry")
+
+        outcomes: list[ScoreOutcome] = []
+        for forecast_key, row in self._forecasts.items():
+            for bound_key, issuance in row.issuances.items():
+                target = CoverageTarget(
+                    descriptor=issuance.descriptor,
+                    guaranteed_side=issuance.guaranteed_side,
+                    bound_key=bound_key,
+                )
+                outcome = _score_bound(
+                    forecast_key=forecast_key,
+                    row=row,
+                    target=target,
+                    issuance=issuance,
+                    registry=registry,
+                )
+                outcomes.append(outcome)
+
+        frozen_outcomes = tuple(outcomes)
+        derived = _derive_report_facts(frozen_outcomes)
+        return CoverageReport(
+            outcomes=frozen_outcomes,
+            summaries=derived.summaries,
+            unscored_by_reason=derived.unscored_by_reason,
+            **derived.counts,
+        )
+
+    def _require_calendar_origin(self, origin: pd.Timestamp) -> None:
+        try:
+            self._calendar.require_member(origin, name="ledger origin")
+        except CalendarError as error:
+            raise LedgerError(f"ledger origin must lie on the owned calendar: {error}") from error
+
+
+def _score_bound(
+    *,
+    forecast_key: ForecastKey,
+    row: ForecastRow,
+    target: CoverageTarget,
+    issuance: ForecastIssuance,
+    registry: PredicateRegistry,
+) -> ScoreOutcome:
+    if row.actual_value is None:
+        return ScoreOutcome(
+            forecast_key=forecast_key,
+            target=target,
+            resolved=False,
+            scored=False,
+            value=None,
+            covered=None,
+            unscored_reason=None,
+        )
+
+    claim = issuance.descriptor.type.claim
+    if claim is not GuaranteeClaim.NONE and not issuance.calibration_ready:
+        return _unscored_outcome(forecast_key, target, reason="warm-up")
+    if not issuance.bounds_finite:
+        return _unscored_outcome(
+            forecast_key,
+            target,
+            reason=cast(str, issuance.bounds_null_reason),
+        )
+    if claim is GuaranteeClaim.NONE:
+        return _unscored_outcome(
+            forecast_key,
+            target,
+            reason="not-engine-calibrated",
+        )
+
+    predicate_key: PredicateKey = (
+        claim,
+        issuance.descriptor.type.currency,
+    )
+    registration = registry._registration_for(predicate_key)
+    if registration is None:
+        return _unscored_outcome(
+            forecast_key,
+            target,
+            reason="predicate-unregistered",
+        )
+
+    values = dict(row._values)
+    bound_values = tuple(
+        _finite_real(values[column], name="issued bound value") for column in target.bound_key
+    )
+    result = registration.predicate(row.actual_value, bound_values, issuance)
+    if not isinstance(result, PredicateResult):
+        raise LedgerError("registered predicate must return a PredicateResult")
+    return ScoreOutcome(
+        forecast_key=forecast_key,
+        target=target,
+        resolved=True,
+        scored=True,
+        value=result.value,
+        covered=result.covered,
+        unscored_reason=None,
+    )
+
+
+def _unscored_outcome(
+    forecast_key: ForecastKey,
+    target: CoverageTarget,
+    *,
+    reason: str,
+) -> ScoreOutcome:
+    return ScoreOutcome(
+        forecast_key=forecast_key,
+        target=target,
+        resolved=True,
+        scored=False,
+        value=None,
+        covered=None,
+        unscored_reason=reason,
+    )
+
+
+def _one_sided_coverage_predicate(
+    actual_value: float,
+    bound_values: tuple[float, ...],
+    issuance: ForecastIssuance,
+) -> PredicateResult:
+    if len(bound_values) != 1:
+        raise LedgerError("one-sided predicate requires exactly one bound value")
+    if issuance.guaranteed_side is GuaranteedSide.LOWER:
+        covered = bound_values[0] <= actual_value
+    elif issuance.guaranteed_side is GuaranteedSide.UPPER:
+        covered = actual_value <= bound_values[0]
+    else:
+        raise LedgerError("one-sided predicate requires a guaranteed side")
+    return PredicateResult(value=float(covered), covered=covered)
+
+
+def _two_sided_coverage_predicate(
+    actual_value: float,
+    bound_values: tuple[float, ...],
+    issuance: ForecastIssuance,
+) -> PredicateResult:
+    if len(bound_values) != 2:
+        raise LedgerError("two-sided predicate requires a lower/upper bound pair")
+    if issuance.descriptor.type.claim is not GuaranteeClaim.TWO_SIDED_COVERAGE:
+        raise LedgerError("two-sided predicate requires a two-sided descriptor")
+    covered = bound_values[0] <= actual_value <= bound_values[1]
+    return PredicateResult(value=float(covered), covered=covered)
+
+
+def _validate_predicate_key(key: object) -> None:
+    if not isinstance(key, tuple) or len(key) != 2:
+        raise LedgerError("predicate key must be an exact (claim, currency) pair")
+    claim, currency = key
+    if not isinstance(claim, GuaranteeClaim):
+        raise LedgerError("predicate key claim must be a GuaranteeClaim")
+    if claim is GuaranteeClaim.NONE:
+        if currency is not None:
+            raise LedgerError("the none claim cannot carry a predicate currency")
+        raise LedgerError("the none claim cannot register a scoring predicate")
+    if not isinstance(currency, GuaranteeCurrency):
+        raise LedgerError("a non-none predicate key requires a GuaranteeCurrency")
+
+
+def _empty_forecast_frame() -> pd.DataFrame:
+    columns = {
+        SERIES_KEY: pd.Series(dtype="string"),
+        TARGET_TIMESTAMP: pd.Series(dtype="datetime64[ns]"),
+        ACTUAL_VALUE: pd.Series(dtype="float64"),
+        POINT_FORECAST: pd.Series(dtype="float64"),
+        HORIZON_STEP: pd.Series(dtype="int64"),
+        ORIGIN: pd.Series(dtype="datetime64[ns]"),
+        MODEL_NAME: pd.Series(dtype="string"),
+    }
+    return pd.DataFrame({column: columns[column] for column in REQUIRED_FRAME_COLUMNS})
 
 
 def _stage_rows[T](
@@ -526,7 +1227,26 @@ def _is_finite_real(value: object) -> bool:
         return False
 
 
-def _finite_nonnegative(value: object, *, name: str) -> float:
+def _nonnegative_count(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise LedgerError(f"{name.replace('_', ' ')} must be a non-negative integer")
+    return value
+
+
+def _validated_reason_counts(value: object) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise LedgerError("unscored reason counts must be a mapping")
+    reasons: dict[str, int] = {}
+    for reason, count in value.items():
+        _require_text(reason, name="unscored reason")
+        normalized_count = _nonnegative_count(count, name="unscored reason count")
+        if normalized_count == 0:
+            raise LedgerError("unscored reason counts must be positive")
+        reasons[cast(str, reason)] = normalized_count
+    return reasons
+
+
+def _finite_real(value: object, *, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise LedgerError(f"{name} must be a finite real number")
     try:
@@ -535,9 +1255,23 @@ def _finite_nonnegative(value: object, *, name: str) -> float:
         raise LedgerError(f"{name} must be a finite real number") from error
     if not math.isfinite(normalized):
         raise LedgerError(f"{name} must be a finite real number")
+    return 0.0 if normalized == 0.0 else normalized
+
+
+def _finite_nonnegative(value: object, *, name: str) -> float:
+    normalized = _finite_real(value, name=name)
     if normalized < 0.0:
         raise LedgerError(f"{name} must be non-negative")
-    return 0.0 if normalized == 0.0 else normalized
+    return normalized
+
+
+def _quantities_equal(left: float, right: float) -> bool:
+    return math.isclose(
+        left,
+        right,
+        rel_tol=0.0,
+        abs_tol=max(math.ulp(left), math.ulp(right)),
+    )
 
 
 def _require_session(session: object) -> None:
@@ -578,6 +1312,9 @@ def _require_timestamp(value: object, *, name: str) -> None:
 __all__ = [
     "BoundKey",
     "BookedCost",
+    "CoverageReport",
+    "CoverageSummary",
+    "CoverageTarget",
     "ForecastKey",
     "ForecastIssuance",
     "ForecastRow",
@@ -586,7 +1323,15 @@ __all__ = [
     "LedgerError",
     "OrderKey",
     "OrderRow",
+    "Predicate",
+    "PredicateKey",
+    "PredicateRegistration",
+    "PredicateRegistry",
+    "PredicateResult",
+    "ScoreOutcome",
     "SettlementKey",
     "SettlementRecord",
     "StockoutTransition",
+    "lost_sales_transition",
+    "validate_lost_sales_transition",
 ]
