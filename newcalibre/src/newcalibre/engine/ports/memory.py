@@ -15,10 +15,11 @@ from newcalibre.domain import (
     SERIES_KEY,
     TIMESTAMP,
     Calendar,
+    CalendarError,
     Panel,
     SessionIdentity,
 )
-from newcalibre.engine.ports import ActualKey, LedgerSnapshot, OriginCommit
+from newcalibre.engine.ports import ActualKey, CommitReceipt, LedgerSnapshot, OriginCommit
 from newcalibre.ledger import ForecastRow, Ledger, LedgerError, OrderRow, SettlementRecord
 
 _Input = TypeVar("_Input")
@@ -45,17 +46,24 @@ class InMemoryActualsSource:
         if not isinstance(panel, Panel):
             raise TypeError("in-memory actuals source requires a Panel")
         self._calendar = panel.calendar
-        self._actuals = panel.frame[[SERIES_KEY, TIMESTAMP, OBSERVED_VALUE]]
-
-    def before(self, origin: pd.Timestamp) -> Mapping[ActualKey, float]:
-        """Return only observations admissible before ``origin``."""
-        self._calendar.require_member(origin, name="actuals origin")
-        eligible = self._actuals[
-            self._actuals[TIMESTAMP].lt(origin) & self._actuals[OBSERVED_VALUE].notna()
-        ]
-        actuals = {
+        observed = panel.frame[[SERIES_KEY, TIMESTAMP, OBSERVED_VALUE]].dropna(
+            subset=[OBSERVED_VALUE]
+        )
+        self._actuals = {
             (str(series_key), pd.Timestamp(timestamp)): float(value)
-            for series_key, timestamp, value in eligible.itertuples(index=False, name=None)
+            for series_key, timestamp, value in observed.itertuples(index=False, name=None)
+        }
+
+    def for_keys(
+        self,
+        keys: Sequence[ActualKey],
+        *,
+        before: pd.Timestamp,
+    ) -> Mapping[ActualKey, float]:
+        """Look up only requested observations admissible before an origin."""
+        self._calendar.require_member(before, name="actuals origin")
+        actuals = {
+            key: self._actuals[key] for key in keys if key[1] < before and key in self._actuals
         }
         return MappingProxyType(actuals)
 
@@ -121,7 +129,7 @@ class InMemoryLedgerSink:
         self._forecast_rows = {row.key: row for row in ledger.forecasts}
         self._order_keys = {row.key for row in ledger.orders}
         self._settlement_keys = {row.key for row in ledger.settlements}
-        self._commits: dict[pd.Timestamp, OriginCommit] = {}
+        self._commits: dict[pd.Timestamp, CommitReceipt] = {}
 
     @property
     def session(self) -> SessionIdentity:
@@ -147,12 +155,12 @@ class InMemoryLedgerSink:
             settlements=self._ledger.settlements,
         )
 
-    def receipt(self, origin: pd.Timestamp) -> OriginCommit | None:
+    def receipt(self, origin: pd.Timestamp) -> CommitReceipt | None:
         """Return the exact immutable receipt for a committed origin."""
         self._ledger.calendar.require_member(origin, name="commit-receipt origin")
         return self._commits.get(origin)
 
-    def commit(self, write: OriginCommit) -> OriginCommit:
+    def commit(self, write: OriginCommit) -> CommitReceipt:
         """Journal and publish a write atomically; return its repair receipt."""
         if not isinstance(write, OriginCommit):
             raise TypeError("ledger sink commit requires an OriginCommit")
@@ -160,7 +168,7 @@ class InMemoryLedgerSink:
             raise LedgerError("ledger commit session does not match the sink session")
         previous = self._commits.get(write.origin)
         if previous is not None:
-            if _same_commit(previous, write):
+            if previous.digest == write.digest:
                 return previous
             raise LedgerError(f"origin {write.origin} already has a different committed write")
 
@@ -186,11 +194,15 @@ class InMemoryLedgerSink:
         self._forecast_rows.update((row.key, row) for row in staged.forecasts)
         self._order_keys.update(row.key for row in write.orders)
         self._settlement_keys.update(row.key for row in write.settlements)
-        self._commits[write.origin] = write
-        return write
+        receipt = CommitReceipt.from_commit(write)
+        self._commits[write.origin] = receipt
+        return receipt
 
     def _validate_resolutions(self, write: OriginCommit) -> None:
-        self._ledger.due_frame(write.origin)
+        try:
+            self._ledger.calendar.require_member(write.origin, name="ledger origin")
+        except CalendarError as error:
+            raise LedgerError(f"ledger origin must lie on the owned calendar: {error}") from error
         for key, value in write.resolutions.items():
             row = self._forecast_rows.get(key)
             if row is None:
@@ -249,24 +261,6 @@ def _reject_collision(existing: Container[object], staged: Iterable[object], fam
     duplicate = next((key for key in staged if key in existing), None)
     if duplicate is not None:
         raise LedgerError(f"duplicate {family} key: {duplicate!r}")
-
-
-def _same_commit(left: OriginCommit, right: OriginCommit) -> bool:
-    if (
-        left.session != right.session
-        or left.origin != right.origin
-        or left.resolutions != right.resolutions
-        or left.orders != right.orders
-        or left.settlements != right.settlements
-        or left.artifacts != right.artifacts
-        or left.state_updates != right.state_updates
-        or len(left.forecasts) != len(right.forecasts)
-    ):
-        return False
-    return all(
-        left_write.issuances == right_write.issuances and left_write.frame.equals(right_write.frame)
-        for left_write, right_write in zip(left.forecasts, right.forecasts, strict=True)
-    )
 
 
 def _require_key(value: object, *, name: str) -> None:

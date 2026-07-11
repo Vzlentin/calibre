@@ -34,6 +34,7 @@ from newcalibre.domain import (
 from newcalibre.engine import (
     ENGINE_VERBS,
     CalibrationResult,
+    CommitReceipt,
     Engine,
     ForecastBatch,
     InMemoryActualsSource,
@@ -81,7 +82,7 @@ def _session() -> SessionIdentity:
 
 
 class PersistentFixtureAdapter:
-    """Small native-persistence adapter used to make every U5a port observable."""
+    """Native-persistence fixture that makes every engine port observable."""
 
     def __init__(self, events: list[str]) -> None:
         self._events = events
@@ -154,6 +155,18 @@ class RecordingDispatch:
         return tuple(function(item) for item in items)
 
 
+class RecordingPanelSource(InMemoryPanelSource):
+    """Count immutable panel loads across origins."""
+
+    def __init__(self, panel: Panel) -> None:
+        super().__init__(panel)
+        self.loads = 0
+
+    def load(self) -> Panel:
+        self.loads += 1
+        return super().load()
+
+
 class FailOnceArtifactStore(InMemoryArtifactStore):
     """Raise before the first artifact write, then behave normally."""
 
@@ -182,6 +195,18 @@ class FailOnceStateStore(InMemoryCalibrationStateStore):
         super().save(session, partition, value)
 
 
+class RecordingStateStore(InMemoryCalibrationStateStore):
+    """Count state reads across Resolve and Calibrate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loads = 0
+
+    def load(self, session: SessionIdentity, partition: str) -> bytes | None:
+        self.loads += 1
+        return super().load(session, partition)
+
+
 class FailAfterCommitLedgerSink(InMemoryLedgerSink):
     """Lose the first response after the atomic ledger receipt exists."""
 
@@ -189,7 +214,7 @@ class FailAfterCommitLedgerSink(InMemoryLedgerSink):
         super().__init__(ledger)
         self._fail = True
 
-    def commit(self, write: OriginCommit) -> OriginCommit:
+    def commit(self, write: OriginCommit) -> CommitReceipt:
         receipt = super().commit(write)
         if self._fail:
             self._fail = False
@@ -209,9 +234,10 @@ def _engine(
     reconciler=None,
     calibrator=None,
     orderer=None,
+    panel_source=None,
 ) -> Engine:
     return Engine(
-        panel_source=InMemoryPanelSource(panel),
+        panel_source=panel_source or InMemoryPanelSource(panel),
         actuals_source=InMemoryActualsSource(panel),
         artifact_store=artifacts,
         calibration_state_store=states,
@@ -231,12 +257,12 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     panel = _panel()
     session = _session()
     artifacts = InMemoryArtifactStore()
-    states = InMemoryCalibrationStateStore()
+    states = RecordingStateStore()
     sink = InMemoryLedgerSink(Ledger(session=session, calendar=CALENDAR))
     dispatch = RecordingDispatch()
     events: list[str] = []
     calibration_inputs: list[bytes | None] = []
-    order_ledger_sizes: list[int] = []
+    panel_source = RecordingPanelSource(panel)
 
     def observe(
         _due: pd.DataFrame,
@@ -268,7 +294,6 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         assert request.session == session
         assert request.inventory_positions["a"].value == 0.0
         assert request.cost_structure is not None
-        order_ledger_sizes.append(len(request.ledger.forecasts))
         return (
             OrderRow(
                 session=request.session,
@@ -291,6 +316,7 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         reconciler=reconcile,
         calibrator=calibrate,
         orderer=order,
+        panel_source=panel_source,
     )
     phase_events: list[PhaseEvent] = []
     spine = Spine(engine, reporter=phase_events.append)
@@ -327,6 +353,7 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     assert [event.phase for event in phase_events] == expected_phases
     assert all(event.error is None and event.duration_seconds >= 0.0 for event in phase_events)
     assert dispatch.batch_sizes == [1, 1, 1, 1]
+    assert panel_source.loads == 1
     assert events == [
         "observe",
         "fit",
@@ -342,8 +369,8 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         "order",
     ]
     assert calibration_inputs == [None, b"observed:5.0"]
-    assert order_ledger_sizes == [0, 1]
-    assert states.load(session, "global") == b"observed:5.0"
+    assert states.loads == 2
+    assert states.states[(session, "global")] == b"observed:5.0"
     assert len(artifacts.artifacts) == 2
     assert len(sink.forecasts) == 2
     assert sink.forecasts[0].actual_value == 5.0
@@ -375,7 +402,6 @@ def test_unconfigured_stages_are_exact_identities() -> None:
         session=session,
         origin=pd.Timestamp("2026-01-05"),
         forecasts=forecasts,
-        ledger=snapshot,
     )
     settlement_request = SettlementRequest(
         session=session,
@@ -484,6 +510,7 @@ def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> Non
 
     receipt = sink.receipt(request.origin)
     assert receipt is not None
+    assert not hasattr(receipt, "forecasts")
     engine.commit(receipt)
     engine.commit(receipt)
     assert len(sink.forecasts) == 1

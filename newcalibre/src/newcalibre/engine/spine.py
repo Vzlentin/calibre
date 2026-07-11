@@ -25,6 +25,7 @@ from newcalibre.domain import (
     DecisionTiming,
     ForecastTask,
     InventoryPosition,
+    Panel,
     Scope,
     SessionIdentity,
     forecast_bound_groups,
@@ -37,6 +38,7 @@ from newcalibre.engine.ports import (
     ArtifactStore,
     ArtifactWrite,
     CalibrationStateStore,
+    CommitReceipt,
     DispatchBackend,
     ForecastWrite,
     LedgerSink,
@@ -158,6 +160,7 @@ class ObservationResult:
 
     resolutions: Mapping[ForecastKey, float]
     state_updates: Mapping[str, bytes] = field(default_factory=dict)
+    prior_states: Mapping[str, bytes | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.resolutions, Mapping):
@@ -165,6 +168,8 @@ class ObservationResult:
         object.__setattr__(self, "resolutions", MappingProxyType(dict(self.resolutions)))
         updates = _validated_state_updates(self.state_updates)
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        prior_states = _validated_state_snapshot(self.prior_states)
+        object.__setattr__(self, "prior_states", MappingProxyType(prior_states))
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +193,6 @@ class OrderRequest:
     session: SessionIdentity
     origin: pd.Timestamp
     forecasts: ForecastBatch
-    ledger: LedgerSnapshot
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     cost_structure: CostStructure | None = None
 
@@ -199,10 +203,6 @@ class OrderRequest:
             raise TypeError("order request origin must be a pandas Timestamp")
         if not isinstance(self.forecasts, ForecastBatch):
             raise TypeError("order request forecasts must be a ForecastBatch")
-        if not isinstance(self.ledger, LedgerSnapshot):
-            raise TypeError("order request ledger must be a LedgerSnapshot")
-        if self.ledger.session != self.session:
-            raise EngineError("order request session must match its ledger snapshot")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         if self.cost_structure is not None and not isinstance(self.cost_structure, CostStructure):
@@ -288,11 +288,7 @@ class OriginRequest:
             )
         except CanonicalJsonError as error:
             raise EngineError(str(error)) from error
-        partitions = tuple(calibration_partitions)
-        if len(set(partitions)) != len(partitions):
-            raise EngineError("calibration partitions must be unique")
-        for partition in partitions:
-            _require_identifier(partition, name="calibration partition")
+        partitions = _validated_partitions(calibration_partitions)
         if future_exogenous is not None and not isinstance(future_exogenous, pd.DataFrame):
             raise TypeError("future exogenous input must be a pandas DataFrame")
         positions = _validated_inventory_positions(inventory_positions or {})
@@ -396,6 +392,7 @@ class Engine:
             if hook is not None and not callable(hook):
                 raise TypeError(f"engine {name} must be callable")
         self._panel_source = panel_source
+        self._panel: Panel | None = None
         self._actuals_source = actuals_source
         self._artifact_store = artifact_store
         self._calibration_state_store = calibration_state_store
@@ -418,7 +415,10 @@ class Engine:
         future_exogenous: pd.DataFrame | None = None,
     ) -> tuple[FittedTask, ...]:
         """Build deterministic tasks and fit or restore their adapters."""
-        panel = self._panel_source.load()
+        panel = self._panel
+        if panel is None:
+            panel = self._panel_source.load()
+            self._panel = panel
         tasks = panel.forecast_tasks(
             origin=origin,
             horizon=horizon,
@@ -462,24 +462,25 @@ class Engine:
         self._require_session(session)
         requested = _validated_partitions(partitions)
         observed_updates = {} if observation is None else dict(observation.state_updates)
-        unknown_observed = set(observed_updates) - set(requested)
-        if unknown_observed:
-            raise EngineError(
-                f"observer updated undeclared partitions: {sorted(unknown_observed)!r}"
-            )
-        states = {
-            partition: self._calibration_state_store.load(session, partition)
-            for partition in requested
-        }
-        states.update(observed_updates)
+        _reject_undeclared_state_updates(observed_updates, requested, producer="observer")
         if self._calibrator is None:
             return CalibrationResult(forecasts, observed_updates)
+        if observation is not None and set(observation.prior_states) == set(requested):
+            states = dict(observation.prior_states)
+        else:
+            states = {
+                partition: self._calibration_state_store.load(session, partition)
+                for partition in requested
+            }
+        states.update(observed_updates)
         result = self._calibrator(forecasts, states)
         if not isinstance(result, CalibrationResult):
             raise EngineError("calibrator must return a CalibrationResult")
-        unknown = set(result.state_updates) - set(requested)
-        if unknown:
-            raise EngineError(f"calibrator updated undeclared partitions: {sorted(unknown)!r}")
+        _reject_undeclared_state_updates(
+            result.state_updates,
+            requested,
+            producer="calibrator",
+        )
         merged_updates = observed_updates
         merged_updates.update(result.state_updates)
         return CalibrationResult(result.forecasts, merged_updates)
@@ -507,9 +508,14 @@ class Engine:
         self._require_session(session)
         requested = _validated_partitions(partitions)
         due = self._ledger_sink.due_frame(origin)
-        actuals = self._actuals_source.before(origin)
+        due_rows = tuple(due.itertuples(index=False))
+        actual_keys = tuple(
+            (cast(str, row.series_key), cast(pd.Timestamp, row.target_timestamp))
+            for row in due_rows
+        )
+        actuals = self._actuals_source.for_keys(actual_keys, before=origin)
         resolutions: dict[ForecastKey, float] = {}
-        for row in due.itertuples(index=False):
+        for row in due_rows:
             series_key = cast(str, row.series_key)
             target_timestamp = cast(pd.Timestamp, row.target_timestamp)
             actual = actuals.get((series_key, target_timestamp))
@@ -530,10 +536,12 @@ class Engine:
             }
         )
         updates = self._observer(due, MappingProxyType(resolutions), states)
-        result = ObservationResult(resolutions, updates)
-        unknown = set(result.state_updates) - set(requested)
-        if unknown:
-            raise EngineError(f"observer updated undeclared partitions: {sorted(unknown)!r}")
+        result = ObservationResult(resolutions, updates, states)
+        _reject_undeclared_state_updates(
+            result.state_updates,
+            requested,
+            producer="observer",
+        )
         return result
 
     def settle(self, request: SettlementRequest) -> tuple[SettlementRecord, ...]:
@@ -548,12 +556,14 @@ class Engine:
             raise EngineError("settler must return only SettlementRecord values")
         return settlements
 
-    def commit(self, request: OriginCommit) -> None:
+    def commit(self, request: OriginCommit | CommitReceipt) -> None:
         """Persist the origin's staged ledger, artifact, and state mutations."""
-        if not isinstance(request, OriginCommit):
-            raise TypeError("commit requires an OriginCommit")
+        if not isinstance(request, (OriginCommit, CommitReceipt)):
+            raise TypeError("commit requires an OriginCommit or CommitReceipt")
         self._require_session(request.session)
-        receipt = self._ledger_sink.commit(request)
+        receipt = (
+            self._ledger_sink.commit(request) if isinstance(request, OriginCommit) else request
+        )
         for artifact in receipt.artifacts:
             self._artifact_store.save(artifact.key, artifact.value)
         for partition, value in receipt.state_updates.items():
@@ -577,7 +587,6 @@ class Engine:
             session=session,
             origin=origin,
             forecasts=forecasts,
-            ledger=self._ledger_sink.snapshot(),
             inventory_positions=inventory_positions,
             cost_structure=cost_structure,
         )
@@ -752,6 +761,31 @@ def _validated_state_updates(value: Mapping[str, bytes]) -> dict[str, bytes]:
             raise TypeError("calibration state updates must contain bytes")
         updates[partition] = state
     return updates
+
+
+def _validated_state_snapshot(
+    value: Mapping[str, bytes | None],
+) -> dict[str, bytes | None]:
+    if not isinstance(value, Mapping):
+        raise TypeError("calibration state snapshot must be a mapping")
+    states: dict[str, bytes | None] = {}
+    for partition, state in value.items():
+        _require_identifier(partition, name="calibration partition")
+        if state is not None and not isinstance(state, bytes):
+            raise TypeError("calibration state snapshot must contain bytes or None")
+        states[partition] = state
+    return states
+
+
+def _reject_undeclared_state_updates(
+    updates: Mapping[str, bytes],
+    partitions: Sequence[str],
+    *,
+    producer: str,
+) -> None:
+    unknown = set(updates) - set(partitions)
+    if unknown:
+        raise EngineError(f"{producer} updated undeclared partitions: {sorted(unknown)!r}")
 
 
 def _validated_inventory_positions(

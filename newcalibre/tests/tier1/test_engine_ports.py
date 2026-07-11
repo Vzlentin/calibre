@@ -82,7 +82,14 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
     mutated.loc[:, OBSERVED_VALUE] = 99.0
     assert panel_source.load().frame[OBSERVED_VALUE].tolist() == [1.0, 2.0, 3.0]
 
-    actuals = InMemoryActualsSource(panel).before(pd.Timestamp("2026-01-02"))
+    actuals = InMemoryActualsSource(panel).for_keys(
+        (
+            ("a", pd.Timestamp("2026-01-01")),
+            ("b", pd.Timestamp("2026-01-01")),
+            ("a", pd.Timestamp("2026-01-02")),
+        ),
+        before=pd.Timestamp("2026-01-02"),
+    )
     assert actuals == {
         ("a", pd.Timestamp("2026-01-01")): 1.0,
         ("b", pd.Timestamp("2026-01-01")): 3.0,
