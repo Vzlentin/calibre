@@ -66,7 +66,7 @@ from newcalibre.ordering import OrderingConfigError
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
 COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
-ORDERING_POLICY = {"name": "order-up-to"}
+ORDERING_POLICY = {"name": "newsvendor"}
 TIMING = DecisionTiming(lead_time=1, review_period=1)
 
 
@@ -554,6 +554,33 @@ def test_unconfigured_stages_are_exact_identities() -> None:
     assert engine.order(order_request) is None
 
 
+def test_order_request_rejects_forecasts_from_any_other_origin() -> None:
+    panel = _panel()
+    session = _session()
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    request = OriginRequest(session=session, origin=origin, scope=Scope.LOCAL)
+    forecasts = engine.predict(engine.fit(request))
+    foreign = forecasts.frame
+    foreign[ORIGIN] = foreign[ORIGIN] + pd.Timedelta(days=1)
+    foreign[TARGET_TIMESTAMP] = foreign[TARGET_TIMESTAMP] + pd.Timedelta(days=1)
+
+    for frame in (foreign, pd.concat([forecasts.frame, foreign], ignore_index=True)):
+        with pytest.raises(EngineError, match="all match its origin"):
+            OrderRequest(
+                session=session,
+                origin=origin,
+                forecasts=ForecastBatch(frame, calendar=CALENDAR),
+            )
+
+
 @pytest.mark.parametrize(
     ("proposals", "expected_quantity"),
     [
@@ -632,6 +659,98 @@ def test_commit_materializes_missing_decision_groups_as_zero_rows() -> None:
         ("b", 3.0),
     )
     assert result.orders == sink.orders
+
+
+def test_ordering_excludes_reconciled_aggregate_nodes_before_policy_and_commit() -> None:
+    panel = _panel()
+    session = _session(with_decision=True)
+    seen_series: list[tuple[str, ...]] = []
+
+    def add_aggregate(forecasts: ForecastBatch) -> ForecastBatch:
+        frame = forecasts.frame
+        aggregate = frame.copy(deep=True)
+        aggregate[SERIES_KEY] = "aggregate"
+        combined = pd.concat([frame, aggregate], ignore_index=True)
+        combined[SERIES_KEY] = combined[SERIES_KEY].astype("string")
+        return ForecastBatch(combined, calendar=CALENDAR)
+
+    def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
+        seen_series.append(tuple(request.forecasts.frame[SERIES_KEY].unique()))
+        return ()
+
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+        reconciler=add_aggregate,
+        orderer=order,
+    )
+
+    result = Spine(engine).run_origin(
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.LOCAL,
+        )
+    )
+
+    assert seen_series == [("a",)]
+    assert tuple((row.series_key, row.quantity) for row in result.orders) == (("a", 0.0),)
+
+
+def test_ordering_refuses_inventory_for_a_nondecision_series() -> None:
+    panel = _panel()
+    session = _session(with_decision=True)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+        orderer=lambda _request: (),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    fitted = engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
+
+    with pytest.raises(EngineError, match="non-decision series"):
+        engine.order(
+            OrderRequest(
+                session=session,
+                origin=origin,
+                forecasts=engine.predict(fitted),
+                inventory_positions={"aggregate": InventoryPosition(0.0, 0.0, 0.0)},
+            )
+        )
+
+
+def test_whitespace_bearing_series_key_materializes_without_rewriting() -> None:
+    series_key = " sku "
+    panel = _panel(series_keys=(series_key,))
+    session = _session(with_decision=True, series_keys=(series_key,))
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+        orderer=lambda _request: (OrderProposal(series_key, "fixture", 1.0),),
+    )
+
+    result = Spine(engine).run_origin(
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.LOCAL,
+            inventory_positions={series_key: InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+
+    assert tuple(row.series_key for row in result.orders) == (series_key,)
 
 
 @pytest.mark.parametrize(
@@ -719,6 +838,24 @@ def test_order_returns_a_canonical_immutable_decision_batch() -> None:
 def test_order_proposal_requires_a_finite_real_quantity(quantity: object) -> None:
     with pytest.raises(EngineError, match="finite real"):
         OrderProposal("a", "fixture", cast(Any, quantity))
+
+
+@pytest.mark.parametrize(
+    ("series_key", "model_name", "match"),
+    [
+        ("", "fixture", "non-empty"),
+        ("a", "", "non-empty"),
+        (chr(0xD800), "fixture", "valid UTF-8"),
+        ("a", chr(0xD800), "valid UTF-8"),
+    ],
+)
+def test_order_proposal_requires_nonempty_utf8_key_parts(
+    series_key: str,
+    model_name: str,
+    match: str,
+) -> None:
+    with pytest.raises(EngineError, match=match):
+        OrderProposal(series_key, model_name, 1.0)
 
 
 def test_phase_failure_is_observable_and_commits_no_origin() -> None:

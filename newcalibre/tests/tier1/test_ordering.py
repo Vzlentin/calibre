@@ -89,7 +89,8 @@ def test_compile_snapshots_per_series_cost_mapping() -> None:
     configuration = compile_ordering(_setup(cost_structure=costs))
     costs["sku-a"] = CostStructure(1.0, 1.0, 0.0, 0.0)
 
-    assert configuration.costs_by_series["sku-a"] is COST
+    assert tuple(configuration.costs_by_series) == configuration.series_keys
+    assert configuration.costs_by_series["sku-a"] == COST
 
 
 @pytest.mark.parametrize(
@@ -105,16 +106,15 @@ def test_per_series_cost_mapping_must_match_the_series_set_exactly(costs: object
         compile_ordering(_setup(cost_structure=cast(Any, costs)))
 
 
-@pytest.mark.parametrize("policy", ["order-up-to", "newsvendor", "rs", "rss"])
+@pytest.mark.parametrize("policy", ["newsvendor", "rs", "rss"])
 def test_policy_names_are_closed(policy: str) -> None:
-    changes: dict[str, object] = {"policy": policy}
-    if policy in {"rs", "rss"}:
-        changes["calibration_coverage"] = 0.9
+    assert compile_ordering(_setup(policy=policy)).policy == policy
 
-    assert compile_ordering(_setup(**changes)).policy == policy
 
+@pytest.mark.parametrize("policy", ["order-up-to", "base-stock"])
+def test_unknown_policy_is_rejected(policy: str) -> None:
     with pytest.raises(OrderingConfigError, match="policy must be one of"):
-        compile_ordering(_setup(policy="base-stock"))
+        compile_ordering(_setup(policy=policy))
 
 
 def test_newsvendor_requires_one_strict_shared_cost_fractile() -> None:
@@ -203,24 +203,18 @@ def test_rs_explicit_quantile_is_the_only_coverage_sync_exemption() -> None:
     assert configuration.explicit_quantile == 0.7
     assert configuration.coverage is None
 
-    for policy in ("order-up-to", "newsvendor", "rss"):
+    for policy in ("newsvendor", "rss"):
         with pytest.raises(OrderingConfigError, match="only.*rs"):
             compile_ordering(_setup(policy=policy, explicit_quantile=0.7))
 
 
 def test_explicit_decision_fractile_is_only_for_newsvendor() -> None:
-    for policy in ("order-up-to", "rs", "rss"):
+    for policy in ("rs", "rss"):
         with pytest.raises(OrderingConfigError, match="only.*newsvendor"):
             compile_ordering(_setup(policy=policy, explicit_decision_fractile=0.6))
 
 
-@pytest.mark.parametrize("policy", ["rs", "rss"])
-def test_window_policies_reject_a_horizon_shorter_than_protection_period(policy: str) -> None:
-    with pytest.raises(OrderingConfigError, match="complete.*window"):
-        compile_ordering(_setup(policy=policy, task_horizon=4))
-
-
-@pytest.mark.parametrize("policy", ["order-up-to", "newsvendor"])
+@pytest.mark.parametrize("policy", ["newsvendor", "rs", "rss"])
 def test_every_ordering_run_requires_the_complete_protection_horizon(policy: str) -> None:
     with pytest.raises(OrderingConfigError, match="complete.*window"):
         compile_ordering(_setup(policy=policy, task_horizon=4))

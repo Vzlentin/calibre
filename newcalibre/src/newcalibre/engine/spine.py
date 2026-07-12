@@ -224,6 +224,8 @@ class OrderRequest:
             raise TypeError("order request origin must be a pandas Timestamp")
         if not isinstance(self.forecasts, ForecastBatch):
             raise TypeError("order request forecasts must be a ForecastBatch")
+        if any(key[1] != self.origin for key in self.forecasts.issuances):
+            raise _EngineError("order request forecasts must all match its origin")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         decision = _session_decision_inputs(self.session)
@@ -248,8 +250,8 @@ class OrderProposal:
     quantity: float
 
     def __post_init__(self) -> None:
-        _require_identifier(self.series_key, name="proposal series key")
-        _require_identifier(self.model_name, name="proposal model name")
+        _require_utf8_identifier(self.series_key, name="proposal series key")
+        _require_utf8_identifier(self.model_name, name="proposal model name")
         object.__setattr__(self, "quantity", _finite_real(self.quantity, name="proposal quantity"))
 
     @property
@@ -440,7 +442,8 @@ class Engine:
                 raise TypeError(f"engine {name} must be callable")
         # Resolve configuration before the panel port can perform any data load.
         adapter_resolver(_session_model_config(ledger_sink.session))
-        self._ordering_configuration = _session_ordering_configuration(ledger_sink.session)
+        ordering_configuration = _session_ordering_configuration(ledger_sink.session)
+        self._ordering_configuration = ordering_configuration
         self._panel = panel_source.load()
         self._actuals_source = actuals_source
         self._artifact_store = artifact_store
@@ -541,11 +544,18 @@ class Engine:
         self._require_session(request.session)
         if self._orderer is None:
             return None
-        proposals = tuple(self._orderer(request))
+        configuration = self._ordering_configuration
+        if configuration is None:
+            raise _EngineError("order requires session ordering configuration")
+        decision_request = _bottom_node_order_request(
+            request,
+            series_keys=configuration.series_keys,
+        )
+        proposals = tuple(self._orderer(decision_request))
         return DecisionBatch(
             session=request.session,
             origin=request.origin,
-            requested=_decision_keys(request.forecasts.frame),
+            requested=_decision_keys(decision_request.forecasts),
             proposals=proposals,
         )
 
@@ -655,10 +665,10 @@ class Engine:
         if not isinstance(decisions, DecisionBatch):
             raise TypeError("order materialization requires a DecisionBatch or None")
         self._require_session(decisions.session)
-        decision = _session_decision_inputs(decisions.session)
-        if decision is None:
-            raise _EngineError("order materialization requires decision timing")
-        _cost_structure, timing, _stockout_rule = decision
+        configuration = self._ordering_configuration
+        if configuration is None:
+            raise _EngineError("order materialization requires ordering configuration")
+        timing = configuration.decision_timing
         arrival = self._ledger_sink.calendar.advance(decisions.origin, timing.lead_time)
         proposed = {proposal.key: proposal.quantity for proposal in decisions.proposals}
         return tuple(
@@ -871,17 +881,45 @@ def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:
     )
 
 
-def _decision_keys(frame: pd.DataFrame) -> tuple[DecisionKey, ...]:
+def _bottom_node_order_request(
+    request: OrderRequest,
+    *,
+    series_keys: tuple[str, ...],
+) -> OrderRequest:
+    allowed = frozenset(series_keys)
+    foreign_positions = set(request.inventory_positions) - allowed
+    if foreign_positions:
+        raise _EngineError(
+            f"inventory positions contain non-decision series: {sorted(foreign_positions)!r}"
+        )
+    if all(key[0] in allowed for key in request.forecasts.issuances):
+        return request
+
+    frame = request.forecasts.frame
+    filtered = frame.loc[frame[SERIES_KEY].isin(allowed)].reset_index(drop=True)
+    issuances = {
+        key: value for key, value in request.forecasts.issuances.items() if key[0] in allowed
+    }
+    return OrderRequest(
+        session=request.session,
+        origin=request.origin,
+        forecasts=ForecastBatch(
+            filtered,
+            calendar=request.forecasts.calendar,
+            issuances=issuances,
+        ),
+        inventory_positions=request.inventory_positions,
+    )
+
+
+def _decision_keys(forecasts: ForecastBatch) -> tuple[DecisionKey, ...]:
     return tuple(
         sorted(
             {
-                (str(series_key), str(model_name))
-                for series_key, model_name in zip(
-                    frame[SERIES_KEY],
-                    frame[MODEL_NAME],
-                    strict=True,
-                )
-            }
+                (series_key, model_name)
+                for series_key, _origin, _step, model_name in forecasts.issuances
+            },
+            key=lambda key: (key[0].encode(), key[1].encode()),
         )
     )
 
@@ -890,8 +928,8 @@ def _validate_decision_key(key: object) -> None:
     if not isinstance(key, tuple) or len(key) != 2:
         raise _EngineError("decision key must be an exact (series key, model name) pair")
     series_key, model_name = key
-    _require_identifier(series_key, name="decision-key series key")
-    _require_identifier(model_name, name="decision-key model name")
+    _require_utf8_identifier(series_key, name="decision-key series key")
+    _require_utf8_identifier(model_name, name="decision-key model name")
 
 
 def _finite_real(value: object, *, name: str) -> float:
@@ -918,7 +956,7 @@ def _validated_partitions(partitions: Sequence[str]) -> tuple[str, ...]:
     if len(set(requested)) != len(requested):
         raise _EngineError("calibration partitions must be unique")
     for partition in requested:
-        _require_identifier(partition, name="calibration partition")
+        _require_trimmed_identifier(partition, name="calibration partition")
     return requested
 
 
@@ -927,7 +965,7 @@ def _validated_state_updates(value: Mapping[str, bytes]) -> dict[str, bytes]:
         raise TypeError("calibration state updates must be a mapping")
     updates: dict[str, bytes] = {}
     for partition, state in value.items():
-        _require_identifier(partition, name="calibration partition")
+        _require_trimmed_identifier(partition, name="calibration partition")
         if not isinstance(state, bytes):
             raise TypeError("calibration state updates must contain bytes")
         updates[partition] = state
@@ -941,7 +979,7 @@ def _validated_state_snapshot(
         raise TypeError("calibration state snapshot must be a mapping")
     states: dict[str, bytes | None] = {}
     for partition, state in value.items():
-        _require_identifier(partition, name="calibration partition")
+        _require_trimmed_identifier(partition, name="calibration partition")
         if state is not None and not isinstance(state, bytes):
             raise TypeError("calibration state snapshot must contain bytes or None")
         states[partition] = state
@@ -966,15 +1004,26 @@ def _validated_inventory_positions(
         raise TypeError("inventory positions must be a mapping")
     positions: dict[str, InventoryPosition] = {}
     for series_key, position in value.items():
-        _require_identifier(series_key, name="inventory-position series key")
+        _require_utf8_identifier(series_key, name="inventory-position series key")
         if not isinstance(position, InventoryPosition):
             raise TypeError("inventory positions must contain InventoryPosition values")
         positions[series_key] = position
     return positions
 
 
-def _require_identifier(value: object, *, name: str) -> None:
-    if not isinstance(value, str) or not value or value != value.strip():
+def _require_utf8_identifier(value: object, *, name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise _EngineError(f"{name} must be a non-empty string")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as error:
+        raise _EngineError(f"{name} must be valid UTF-8") from error
+
+
+def _require_trimmed_identifier(value: object, *, name: str) -> None:
+    _require_utf8_identifier(value, name=name)
+    assert isinstance(value, str)
+    if value != value.strip():
         raise _EngineError(f"{name} must be a non-empty trimmed string")
 
 

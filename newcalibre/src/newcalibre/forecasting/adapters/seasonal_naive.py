@@ -84,6 +84,9 @@ class SeasonalNaiveAdapter:
             raise AdapterConfigurationError("collect_fitted_values must be a boolean")
         if collect_fitted_values:
             self._raise_unsupported(AdapterCapability.FITTED_VALUES)
+        unsupported = self.requested_capabilities - self.capabilities
+        if unsupported:
+            self._raise_unsupported(min(unsupported, key=lambda capability: capability.value))
 
         retained = self._extract_retained_season(task)
         self._fit_origin = task.origin

@@ -428,10 +428,18 @@ def test_collecting_fitted_values_fails_at_fit_instead_of_degrading() -> None:
         (_config(censoring_aware=True), AdapterCapability.CENSORING_AWARE_FIT),
     ],
 )
-def test_configuration_requests_are_exposed_immutably_before_fit(
+def test_direct_fit_refuses_unsupported_configuration_without_degrading(
     config: Mapping[str, object], capability: AdapterCapability
 ) -> None:
+    task = _task(
+        _history({"sku-a": [float(value) for value in range(1, 15)]}),
+        config=config,
+    )
     adapter = SeasonalNaiveAdapter(config)
 
     assert isinstance(adapter.requested_capabilities, frozenset)
     assert adapter.requested_capabilities == frozenset({capability})
+    with pytest.raises(AdapterCapabilityError, match=capability.value):
+        adapter.fit(task)
+    with pytest.raises(AdapterLifecycleError, match="successful fit"):
+        adapter.predict(task)

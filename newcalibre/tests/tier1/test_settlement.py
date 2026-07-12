@@ -49,7 +49,7 @@ PERIODS = tuple(pd.date_range("2026-01-05", periods=8, freq="W-MON"))
 TIMING = DecisionTiming(lead_time=2, review_period=3)
 COST = CostStructure(underage=7.0, overage=3.0, holding=0.5, shortage=2.0)
 MODEL_CONFIG = {"backend": "seasonal-naive", "m": 1}
-ORDERING_POLICY = {"name": "order-up-to"}
+ORDERING_POLICY = {"name": "newsvendor"}
 
 
 def _session(

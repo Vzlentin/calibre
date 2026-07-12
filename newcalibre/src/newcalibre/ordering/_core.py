@@ -19,7 +19,7 @@ from newcalibre.domain import (
     InventoryPosition,
 )
 
-_POLICY_NAMES = frozenset({"order-up-to", "newsvendor", "rs", "rss"})
+_POLICY_NAMES = frozenset({"newsvendor", "rs", "rss"})
 _WINDOW_POLICIES = frozenset({"rs", "rss"})
 _EXPLICIT_FRACTILE_BINDING = "explicit_decision_fractile"
 
@@ -74,7 +74,6 @@ class OrderingConfiguration:
     series_keys: tuple[str, ...]
     costs_by_series: Mapping[str, CostStructure] = field(repr=False)
     decision_timing: DecisionTiming
-    task_horizon: int
     coverage: float | None
     explicit_quantile: float | None
     decision_fractile: float | None
@@ -181,7 +180,6 @@ def compile_ordering(setup: OrderingSetup) -> OrderingConfiguration:
     object.__setattr__(instance, "series_keys", series_keys)
     object.__setattr__(instance, "costs_by_series", costs_by_series)
     object.__setattr__(instance, "decision_timing", timing)
-    object.__setattr__(instance, "task_horizon", horizon)
     object.__setattr__(instance, "coverage", coverage)
     object.__setattr__(instance, "explicit_quantile", explicit_quantile)
     object.__setattr__(instance, "decision_fractile", decision_fractile)

@@ -33,18 +33,24 @@ def _config(**overrides: object) -> dict[str, object]:
 
 
 class _CapabilitySpyAdapter:
-    def __init__(self, model_config: Mapping[str, object]) -> None:
+    def __init__(
+        self,
+        model_config: Mapping[str, object],
+        *,
+        declared: frozenset[AdapterCapability] = frozenset(),
+    ) -> None:
         requested: set[AdapterCapability] = set()
         if model_config.get("native_quantiles") is True:
             requested.add(AdapterCapability.NATIVE_QUANTILES)
         if model_config.get("censoring_aware") is True:
             requested.add(AdapterCapability.CENSORING_AWARE_FIT)
         self._requested_capabilities = frozenset(requested)
+        self._declared_capabilities = declared
         self.fit_calls = 0
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
-        return frozenset()
+        return self._declared_capabilities
 
     @property
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
@@ -156,8 +162,23 @@ def test_registry_validates_extension_capabilities_without_backend_special_cases
         )
 
     assert len(created) == 1
-    assert isinstance(created[0], ForecastAdapter)
     assert created[0].fit_calls == 0
+
+
+def test_registry_accepts_extension_capabilities_that_are_declared() -> None:
+    registry = AdapterRegistry()
+
+    def factory(model_config: Mapping[str, object]) -> ForecastAdapter:
+        return _CapabilitySpyAdapter(
+            model_config,
+            declared=frozenset({AdapterCapability.NATIVE_QUANTILES}),
+        )
+
+    registry.register("extension", factory)
+
+    adapter = registry.resolve({"backend": "extension", "native_quantiles": True})
+
+    assert adapter.requested_capabilities <= adapter.capabilities
 
 
 @pytest.mark.parametrize("season_length", [None, 0, -1, True, 1.5])

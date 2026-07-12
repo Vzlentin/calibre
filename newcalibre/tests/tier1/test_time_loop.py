@@ -54,7 +54,7 @@ from newcalibre.ledger import ForecastKey
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
 COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
-ORDERING_POLICY = {"name": "order-up-to"}
+ORDERING_POLICY = {"name": "newsvendor"}
 TIMING = DecisionTiming(lead_time=2, review_period=2)
 ORIGINS = (
     pd.Timestamp("2026-01-04"),

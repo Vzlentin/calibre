@@ -179,7 +179,7 @@ def _session(seed: int) -> SessionIdentity:
         horizon=_TIMING.protection_period,
         model_config={"backend": _MODEL_NAME, "seed": seed},
         conformal_config={"name": "tier2-counter"},
-        ordering_policy={"name": "order-up-to"},
+        ordering_policy={"name": "newsvendor"},
         cost_structure=CostStructure(underage=3.0, overage=1.0, holding=0.5, shortage=4.0),
         decision_timing=_TIMING,
         stockout_rule=StockoutRule.LOST_SALES,

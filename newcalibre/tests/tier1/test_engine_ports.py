@@ -61,7 +61,7 @@ def _session() -> SessionIdentity:
         calendar=CALENDAR,
         horizon=2,
         model_config={"backend": "fixture", "name": "fixture"},
-        ordering_policy={"name": "order-up-to"},
+        ordering_policy={"name": "newsvendor"},
         cost_structure=CostStructure(1.0, 1.0, 1.0, 1.0),
         decision_timing=DecisionTiming(lead_time=1, review_period=1),
         stockout_rule=StockoutRule.LOST_SALES,
