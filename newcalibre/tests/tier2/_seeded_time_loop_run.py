@@ -79,6 +79,10 @@ class SeededFixtureAdapter:
     def capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset()
 
+    @property
+    def requested_capabilities(self) -> frozenset[AdapterCapability]:
+        return frozenset()
+
     def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
         if collect_fitted_values:
             raise AdapterCapabilityError("tier-2 fixture has no fitted-values capability")
@@ -180,6 +184,7 @@ def _session(seed: int) -> SessionIdentity:
         model_config={"backend": _MODEL_NAME, "seed": seed},
         conformal_config={"name": "tier2-counter"},
         ordering_policy={"name": "newsvendor"},
+        decision_series_keys=_SERIES,
         cost_structure=CostStructure(underage=3.0, overage=1.0, holding=0.5, shortage=4.0),
         decision_timing=_TIMING,
         stockout_rule=StockoutRule.LOST_SALES,

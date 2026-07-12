@@ -31,6 +31,8 @@ from newcalibre.engine.settlement import (
 from newcalibre.engine.spine import (
     ENGINE_VERBS,
     CalibrationResult,
+    CommitRequest,
+    CommitResult,
     DecisionBatch,
     Engine,
     FittedTask,
@@ -61,6 +63,8 @@ __all__ = [
     "CalibrationResult",
     "CalibrationStateStore",
     "CommitReceipt",
+    "CommitRequest",
+    "CommitResult",
     "DecisionBatch",
     "DispatchBackend",
     "Engine",

@@ -179,17 +179,19 @@ class TimeLoop:
             except CalendarError as error:
                 raise TimeLoopError(str(error)) from error
         definition = session_definition(request.session)
-        series_keys, frequency = session_series_and_frequency(definition)
+        _session_series, frequency = session_series_and_frequency(definition)
         if frequency != calendar.frequency:
             raise TimeLoopError("time-loop calendar does not match its session")
-        if set(request.initial_inventory_positions) != set(series_keys):
-            raise TimeLoopError(
-                "initial inventory positions must exactly match the session series set"
-            )
         decision = decision_from_definition(definition)
         if decision is None:
             raise TimeLoopError("time loop requires a complete decision configuration")
-        _cost_structure, timing, stockout_rule = decision
+        series_keys = decision.series_keys
+        if set(request.initial_inventory_positions) != set(series_keys):
+            raise TimeLoopError(
+                "initial inventory positions must exactly match the decision series set"
+            )
+        timing = decision.timing
+        stockout_rule = decision.stockout_rule
         if timing.lead_time < 1:
             raise TimeLoopError("time loop requires a positive decision lead time")
         if stockout_rule is not StockoutRule.LOST_SALES:

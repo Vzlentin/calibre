@@ -62,6 +62,7 @@ def _session() -> SessionIdentity:
         horizon=2,
         model_config={"backend": "fixture", "name": "fixture"},
         ordering_policy={"name": "newsvendor"},
+        decision_series_keys=("a", "b"),
         cost_structure=CostStructure(1.0, 1.0, 1.0, 1.0),
         decision_timing=DecisionTiming(lead_time=1, review_period=1),
         stockout_rule=StockoutRule.LOST_SALES,

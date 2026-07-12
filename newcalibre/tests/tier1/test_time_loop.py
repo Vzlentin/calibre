@@ -67,27 +67,50 @@ type FitHistory = tuple[pd.Timestamp, tuple[pd.Timestamp, ...], tuple[float, ...
 type ResolutionSnapshot = Mapping[ForecastKey, float]
 
 
-def _panel(values: Sequence[float | None]) -> Panel:
+def _panel(
+    values: Sequence[float | None],
+    *,
+    series_keys: Sequence[str] = ("a",),
+) -> Panel:
+    frozen_values = tuple(values)
+    timestamps = tuple(pd.date_range("2026-01-01", periods=len(frozen_values), freq="D"))
     return Panel.from_frame(
         pd.DataFrame(
             {
-                SERIES_KEY: pd.Series(["a"] * len(values), dtype="string"),
-                TIMESTAMP: pd.date_range("2026-01-01", periods=len(values), freq="D"),
-                OBSERVED_VALUE: pd.Series(values, dtype="float64"),
+                SERIES_KEY: pd.Series(
+                    [series_key for series_key in series_keys for _value in frozen_values],
+                    dtype="string",
+                ),
+                TIMESTAMP: pd.to_datetime(
+                    [timestamp for _series_key in series_keys for timestamp in timestamps]
+                ),
+                OBSERVED_VALUE: pd.Series(
+                    [value for _series_key in series_keys for value in frozen_values],
+                    dtype="float64",
+                ),
             }
         ),
         calendar=CALENDAR,
     )
 
 
-def _session(*, timing: DecisionTiming = TIMING, with_decision: bool = True) -> SessionIdentity:
+def _session(
+    *,
+    timing: DecisionTiming = TIMING,
+    with_decision: bool = True,
+    series_keys: tuple[str, ...] = ("a",),
+    decision_series_keys: tuple[str, ...] | None = None,
+) -> SessionIdentity:
     return SessionIdentity.derive(
         tenant="tenant-a",
-        series_keys=("a",),
+        series_keys=series_keys,
         calendar=CALENDAR,
         horizon=timing.protection_period if with_decision else 1,
         model_config=MODEL_CONFIG,
         ordering_policy=ORDERING_POLICY if with_decision else None,
+        decision_series_keys=(
+            series_keys if with_decision and decision_series_keys is None else decision_series_keys
+        ),
         cost_structure=COST_STRUCTURE if with_decision else None,
         decision_timing=timing if with_decision else None,
         stockout_rule=StockoutRule.LOST_SALES if with_decision else None,
@@ -109,6 +132,10 @@ class DeterministicFixtureAdapter:
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset({AdapterCapability.ARTIFACT_PERSISTENCE})
+
+    @property
+    def requested_capabilities(self) -> frozenset[AdapterCapability]:
+        return frozenset()
 
     def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
         assert not collect_fitted_values
@@ -243,6 +270,7 @@ def _runtime(
     artifacts: InMemoryArtifactStore | None = None,
     states: InMemoryCalibrationStateStore | None = None,
     sink: InMemoryLedgerSink | None = None,
+    decision_series_key: str = "a",
 ) -> Runtime:
     actuals = actuals or RecordingActualsSource(forecast_panel)
     artifacts = artifacts or InMemoryArtifactStore()
@@ -277,10 +305,10 @@ def _runtime(
 
     def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
         order_origins.append(request.origin)
-        order_positions[request.origin] = request.inventory_positions["a"]
+        order_positions[request.origin] = request.inventory_positions[decision_series_key]
         return (
             OrderProposal(
-                series_key="a",
+                series_key=decision_series_key,
                 model_name="fixture",
                 quantity=4.0,
             ),
@@ -397,7 +425,7 @@ def test_constructor_rejects_off_grid_and_partial_configuration_before_effects()
     assert incomplete.actuals.calls == []
     _assert_no_effects(incomplete)
 
-    with pytest.raises(TimeLoopError, match="exactly match the session series"):
+    with pytest.raises(TimeLoopError, match="exactly match the decision series"):
         TimeLoop(
             engine=runtime.engine,
             actuals_source=runtime.actuals,
@@ -518,6 +546,45 @@ def test_gapped_origins_use_sequence_cadence_and_settle_the_calendar_through_dra
     assert runtime.states.states[(session, "global")] == b"observed:6.0|calibrated"
     assert len(result.receipts) == len(expected_periods)
     assert all(runtime.sink.receipt(period) is not None for period in expected_periods)
+
+
+def test_time_loop_requests_actuals_and_settles_only_the_session_decision_series() -> None:
+    series_keys = ("aggregate", "bottom")
+    session = _session(
+        series_keys=series_keys,
+        decision_series_keys=("bottom",),
+    )
+    forecast_panel = _panel(range(101, 112), series_keys=series_keys)
+    actuals = RecordingActualsSource(_panel(range(1, 12), series_keys=series_keys))
+    runtime = _runtime(
+        session=session,
+        forecast_panel=forecast_panel,
+        actuals=actuals,
+        decision_series_key="bottom",
+    )
+    origins = (ORIGINS[0],)
+
+    result = TimeLoop(
+        engine=runtime.engine,
+        actuals_source=actuals,
+        ledger_sink=runtime.sink,
+        request=_request(
+            session,
+            origins=origins,
+            positions={"bottom": INITIAL_POSITION},
+        ),
+    ).run()
+
+    expected_periods = tuple(pd.date_range("2026-01-04", "2026-01-06", freq="D"))
+    assert actuals.calls[0] == (
+        tuple(("bottom", period) for period in expected_periods),
+        pd.Timestamp("2026-01-07"),
+    )
+    assert result.settlement_periods == expected_periods
+    assert {row.series_key for row in runtime.sink.forecasts} == {"aggregate", "bottom"}
+    assert {row.series_key for row in runtime.sink.orders} == {"bottom"}
+    assert {row.series_key for row in runtime.sink.settlements} == {"bottom"}
+    assert tuple(result.inventory_positions) == ("bottom",)
 
 
 def test_request_ending_before_the_durable_frontier_is_rejected() -> None:
