@@ -43,6 +43,7 @@ from newcalibre.engine import (
     InMemoryLedgerSink,
     InMemoryPanelSource,
     InProcessDispatch,
+    OrderProposal,
     OrderRequest,
     OriginCommit,
     PhaseError,
@@ -178,7 +179,7 @@ def _session(seed: int) -> SessionIdentity:
         horizon=_TIMING.protection_period,
         model_config={"backend": _MODEL_NAME, "seed": seed},
         conformal_config={"name": "tier2-counter"},
-        ordering_policy={"name": "tier2-order-to-forecast"},
+        ordering_policy={"name": "order-up-to"},
         cost_structure=CostStructure(underage=3.0, overage=1.0, holding=0.5, shortage=4.0),
         decision_timing=_TIMING,
         stockout_rule=StockoutRule.LOST_SALES,
@@ -194,22 +195,19 @@ def _calibrate(
     return CalibrationResult(forecasts, {_PARTITION: str(count + 1).encode("ascii")})
 
 
-def _order(request: OrderRequest) -> tuple[OrderRow, ...]:
+def _order(request: OrderRequest) -> tuple[OrderProposal, ...]:
     assert request.timing == _TIMING
     frame = request.forecasts.frame
-    orders: list[OrderRow] = []
+    orders: list[OrderProposal] = []
     for series_key in _SERIES:
         series_frame = frame[frame[SERIES_KEY] == series_key].sort_values(HORIZON_STEP)
         target = float(series_frame[POINT_FORECAST].iloc[-1])
         position = request.inventory_positions[series_key]
         orders.append(
-            OrderRow(
-                session=request.session,
+            OrderProposal(
                 series_key=series_key,
-                origin=request.origin,
                 model_name=_MODEL_NAME,
                 quantity=max(0.0, target - position.value),
-                arrival_period=_CALENDAR.advance(request.origin, _TIMING.lead_time),
             )
         )
     return tuple(orders)

@@ -48,8 +48,8 @@ CALENDAR = Calendar("W-MON", phase=pd.Timestamp("2026-01-05"))
 PERIODS = tuple(pd.date_range("2026-01-05", periods=8, freq="W-MON"))
 TIMING = DecisionTiming(lead_time=2, review_period=3)
 COST = CostStructure(underage=7.0, overage=3.0, holding=0.5, shortage=2.0)
-MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
-ORDERING_POLICY = {"name": "fixture"}
+MODEL_CONFIG = {"backend": "seasonal-naive", "m": 1}
+ORDERING_POLICY = {"name": "order-up-to"}
 
 
 def _session(
@@ -75,7 +75,7 @@ def _session(
         tenant=tenant,
         series_keys=series_keys,
         calendar=CALENDAR,
-        horizon=3,
+        horizon=timing.protection_period if with_decision else 3,
         model_config=MODEL_CONFIG,
         **decision,
     )

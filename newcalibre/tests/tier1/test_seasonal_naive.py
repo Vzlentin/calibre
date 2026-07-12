@@ -30,6 +30,7 @@ from newcalibre.domain import (
     validate_forecast_frame,
 )
 from newcalibre.forecasting import (
+    AdapterCapability,
     AdapterCapabilityError,
     AdapterConfigurationError,
     AdapterDataError,
@@ -420,34 +421,17 @@ def test_collecting_fitted_values_fails_at_fit_instead_of_degrading() -> None:
         _adapter().fit(task, collect_fitted_values=True)
 
 
-def test_failed_fit_does_not_satisfy_the_predict_lifecycle() -> None:
-    config = _config(quantile_levels=[0.5])
-    task = _task(
-        _history({"sku-a": [float(value) for value in range(1, 15)]}),
-        config=config,
-    )
-    adapter = _adapter(config)
-
-    with pytest.raises(AdapterCapabilityError, match="native_quantiles"):
-        adapter.fit(task)
-    with pytest.raises(AdapterLifecycleError, match="successful fit"):
-        adapter.predict(task)
-
-
 @pytest.mark.parametrize(
     ("config", "capability"),
     [
-        (_config(quantile_levels=[0.5]), "native_quantiles"),
-        (_config(censoring_aware=True), "censoring_aware_fit"),
+        (_config(quantile_levels=[0.5]), AdapterCapability.NATIVE_QUANTILES),
+        (_config(censoring_aware=True), AdapterCapability.CENSORING_AWARE_FIT),
     ],
 )
-def test_unsupported_fit_behaviors_fail_loudly(
-    config: Mapping[str, object], capability: str
+def test_configuration_requests_are_exposed_immutably_before_fit(
+    config: Mapping[str, object], capability: AdapterCapability
 ) -> None:
-    task = _task(
-        _history({"sku-a": [float(value) for value in range(1, 15)]}),
-        config=config,
-    )
+    adapter = SeasonalNaiveAdapter(config)
 
-    with pytest.raises(AdapterCapabilityError, match=capability):
-        _adapter(config).fit(task)
+    assert isinstance(adapter.requested_capabilities, frozenset)
+    assert adapter.requested_capabilities == frozenset({capability})

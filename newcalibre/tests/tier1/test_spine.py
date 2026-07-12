@@ -7,6 +7,7 @@ import pickle
 import socket
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import FrozenInstanceError
 from typing import Any, cast
 
 import pandas as pd
@@ -38,6 +39,7 @@ from newcalibre.engine import (
     ENGINE_VERBS,
     CalibrationResult,
     CommitReceipt,
+    DecisionBatch,
     Engine,
     EngineError,
     ForecastBatch,
@@ -46,6 +48,7 @@ from newcalibre.engine import (
     InMemoryCalibrationStateStore,
     InMemoryLedgerSink,
     InMemoryPanelSource,
+    OrderProposal,
     OrderRequest,
     OriginCommit,
     OriginRequest,
@@ -58,23 +61,29 @@ from newcalibre.engine import (
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
 from newcalibre.ledger import OrderRow
+from newcalibre.ordering import OrderingConfigError
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
 COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
-ORDERING_POLICY = {"name": "fixture"}
+ORDERING_POLICY = {"name": "order-up-to"}
 TIMING = DecisionTiming(lead_time=1, review_period=1)
 
 
-def _panel() -> Panel:
+def _panel(*, series_keys: tuple[str, ...] = ("a",)) -> Panel:
+    timestamps = pd.date_range("2026-01-01", periods=7, freq="D")
     return Panel.from_frame(
-        pd.DataFrame(
-            {
-                SERIES_KEY: pd.Series(["a"] * 7, dtype="string"),
-                TIMESTAMP: pd.date_range("2026-01-01", periods=7, freq="D"),
-                OBSERVED_VALUE: pd.Series(range(1, 8), dtype="float64"),
-            }
-        ),
+        pd.DataFrame.from_records(
+            [
+                {
+                    SERIES_KEY: series_key,
+                    TIMESTAMP: timestamp,
+                    OBSERVED_VALUE: float(index),
+                }
+                for series_key in series_keys
+                for index, timestamp in enumerate(timestamps, start=1)
+            ]
+        ).astype({SERIES_KEY: "string", OBSERVED_VALUE: "float64"}),
         calendar=CALENDAR,
     )
 
@@ -83,14 +92,15 @@ def _session(
     *,
     tenant: str = "tenant-a",
     model_config: Mapping[str, object] = MODEL_CONFIG,
-    horizon: int = 1,
+    horizon: int | None = None,
     with_decision: bool = False,
+    series_keys: tuple[str, ...] = ("a",),
 ) -> SessionIdentity:
     return SessionIdentity.derive(
         tenant=tenant,
-        series_keys=("a",),
+        series_keys=series_keys,
         calendar=CALENDAR,
-        horizon=horizon,
+        horizon=(TIMING.protection_period if with_decision else 1) if horizon is None else horizon,
         model_config=model_config,
         ordering_policy=ORDERING_POLICY if with_decision else None,
         cost_structure=COST_STRUCTURE if with_decision else None,
@@ -183,6 +193,68 @@ class RecordingPanelSource(InMemoryPanelSource):
     def load(self) -> Panel:
         self.loads += 1
         return super().load()
+
+
+def _engine_with_default_resolver(
+    *,
+    session: SessionIdentity,
+    panel: Panel,
+    panel_source: RecordingPanelSource,
+) -> Engine:
+    return Engine(
+        panel_source=panel_source,
+        actuals_source=InMemoryActualsSource(panel),
+        artifact_store=InMemoryArtifactStore(),
+        calibration_state_store=InMemoryCalibrationStateStore(),
+        ledger_sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch_backend=RecordingDispatch(),
+    )
+
+
+def test_adapter_capabilities_refuse_before_panel_load_or_fit() -> None:
+    panel = _panel()
+    panel_source = RecordingPanelSource(panel)
+    session = _session(
+        model_config={
+            "backend": "seasonal-naive",
+            "m": 1,
+            "quantile_levels": [0.5],
+        }
+    )
+
+    with pytest.raises(AdapterCapabilityError, match="native_quantiles"):
+        _engine_with_default_resolver(
+            session=session,
+            panel=panel,
+            panel_source=panel_source,
+        )
+
+    assert panel_source.loads == 0
+
+
+def test_ordering_configuration_refuses_before_panel_load_or_fit() -> None:
+    panel = _panel()
+    panel_source = RecordingPanelSource(panel)
+    session = SessionIdentity.derive(
+        tenant="tenant-a",
+        series_keys=("a",),
+        calendar=CALENDAR,
+        horizon=TIMING.protection_period,
+        model_config={"backend": "seasonal-naive", "m": 1},
+        ordering_policy={"name": "rs"},
+        cost_structure=COST_STRUCTURE,
+        decision_timing=TIMING,
+        stockout_rule=StockoutRule.LOST_SALES,
+    )
+
+    with pytest.raises(OrderingConfigError, match="requires conformal coverage"):
+        _engine_with_default_resolver(
+            session=session,
+            panel=panel,
+            panel_source=panel_source,
+        )
+
+    assert panel_source.loads == 0
 
 
 class FailOnceArtifactStore(InMemoryArtifactStore):
@@ -314,7 +386,7 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         assert state is not None
         return CalibrationResult(forecasts, {"global": state})
 
-    def order(request: OrderRequest) -> tuple[OrderRow, ...]:
+    def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
         events.append("order")
         assert request.session == session
         assert request.inventory_positions["a"].value == 0.0
@@ -322,13 +394,10 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         assert request.timing == TIMING
         assert request.stockout_rule is StockoutRule.LOST_SALES
         return (
-            OrderRow(
-                session=request.session,
+            OrderProposal(
                 series_key="a",
-                origin=request.origin,
                 model_name="fixture",
                 quantity=1.0,
-                arrival_period=CALENDAR.advance(request.origin, 1),
             ),
         )
 
@@ -398,9 +467,9 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     assert states.loads == 2
     assert states.states[(session, "global")] == b"observed:5.0"
     assert len(artifacts.artifacts) == 2
-    assert len(sink.forecasts) == 2
+    assert len(sink.forecasts) == 4
     assert sink.forecasts[0].actual_value == 5.0
-    assert sink.forecasts[1].actual_value is None
+    assert all(row.actual_value is None for row in sink.forecasts[1:])
     assert len(sink.orders) == 2
 
 
@@ -482,7 +551,174 @@ def test_unconfigured_stages_are_exact_identities() -> None:
     )
     assert engine.reconcile(forecasts) is forecasts
     assert engine.calibrate(forecasts, session=session).forecasts is forecasts
-    assert engine.order(order_request) == ()
+    assert engine.order(order_request) is None
+
+
+@pytest.mark.parametrize(
+    ("proposals", "expected_quantity"),
+    [
+        ((OrderProposal("a", "fixture", 1.2),), 2.0),
+        ((OrderProposal("a", "fixture", -0.2),), 0.0),
+        ((), 0.0),
+    ],
+)
+def test_commit_materializes_fractional_negative_and_empty_proposals(
+    proposals: tuple[OrderProposal, ...],
+    expected_quantity: float,
+) -> None:
+    panel = _panel()
+    session = _session(with_decision=True)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=sink,
+        dispatch=RecordingDispatch(),
+        orderer=lambda _request: proposals,
+    )
+
+    result = Spine(engine).run_origin(
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.LOCAL,
+            inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+
+    assert result.orders == sink.orders
+    assert result.orders == (
+        OrderRow(
+            session=session,
+            series_key="a",
+            origin=pd.Timestamp("2026-01-05"),
+            model_name="fixture",
+            quantity=expected_quantity,
+            arrival_period=pd.Timestamp("2026-01-06"),
+        ),
+    )
+
+
+def test_commit_materializes_missing_decision_groups_as_zero_rows() -> None:
+    series_keys = ("b", "a")
+    panel = _panel(series_keys=series_keys)
+    session = _session(with_decision=True, series_keys=series_keys)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=sink,
+        dispatch=RecordingDispatch(),
+        orderer=lambda _request: (OrderProposal("b", "fixture", 3.0),),
+    )
+
+    result = Spine(engine).run_origin(
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.LOCAL,
+            inventory_positions={
+                series_key: InventoryPosition(0.0, 0.0, 0.0) for series_key in series_keys
+            },
+        )
+    )
+
+    assert tuple((row.series_key, row.quantity) for row in result.orders) == (
+        ("a", 0.0),
+        ("b", 3.0),
+    )
+    assert result.orders == sink.orders
+
+
+@pytest.mark.parametrize(
+    ("proposals", "match"),
+    [
+        (
+            (
+                OrderProposal("a", "fixture", 1.0),
+                OrderProposal("a", "fixture", 2.0),
+            ),
+            "duplicate",
+        ),
+        ((OrderProposal("foreign", "fixture", 1.0),), "not requested"),
+    ],
+)
+def test_order_rejects_duplicate_and_foreign_proposals_atomically(
+    proposals: tuple[OrderProposal, ...],
+    match: str,
+) -> None:
+    panel = _panel()
+    session = _session(with_decision=True)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=sink,
+        dispatch=RecordingDispatch(),
+        orderer=lambda _request: proposals,
+    )
+    fitted = engine.fit(
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.LOCAL,
+        )
+    )
+    request = OrderRequest(
+        session=session,
+        origin=pd.Timestamp("2026-01-05"),
+        forecasts=engine.predict(fitted),
+    )
+
+    with pytest.raises(EngineError, match=match):
+        engine.order(request)
+
+    assert sink.orders == ()
+
+
+def test_order_returns_a_canonical_immutable_decision_batch() -> None:
+    panel = _panel()
+    session = _session(with_decision=True)
+    proposal = OrderProposal("a", "fixture", 1.25)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+        orderer=lambda _request: (proposal,),
+    )
+    request = OriginRequest(
+        session=session,
+        origin=pd.Timestamp("2026-01-05"),
+        scope=Scope.LOCAL,
+    )
+    forecasts = engine.predict(engine.fit(request))
+
+    result = engine.order(OrderRequest(session=session, origin=request.origin, forecasts=forecasts))
+
+    assert isinstance(result, DecisionBatch)
+    assert result.session == session
+    assert result.origin == request.origin
+    assert result.requested == (("a", "fixture"),)
+    assert result.proposals == (proposal,)
+    with pytest.raises(FrozenInstanceError):
+        cast(Any, result).proposals = ()
+    with pytest.raises(FrozenInstanceError):
+        cast(Any, proposal).quantity = 2.0
+
+
+@pytest.mark.parametrize("quantity", [float("nan"), float("inf"), True])
+def test_order_proposal_requires_a_finite_real_quantity(quantity: object) -> None:
+    with pytest.raises(EngineError, match="finite real"):
+        OrderProposal("a", "fixture", cast(Any, quantity))
 
 
 def test_phase_failure_is_observable_and_commits_no_origin() -> None:
@@ -557,6 +793,7 @@ def test_fit_artifact_failure_is_retryable_before_any_origin_commit() -> None:
     spine.run_origin(request)
     assert len(artifacts.artifacts) == 1
     assert len(sink.forecasts) == 1
+    assert sink.orders == ()
 
 
 @pytest.mark.parametrize("failing_port", ["state", "ledger"])

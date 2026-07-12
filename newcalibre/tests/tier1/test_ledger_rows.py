@@ -447,6 +447,13 @@ def test_order_quantity_must_be_finite_nonnegative(quantity: object) -> None:
         _order(quantity=cast(Any, quantity))
 
 
+def test_durable_order_quantity_must_be_whole_units() -> None:
+    with pytest.raises(LedgerError, match="whole units"):
+        _order(quantity=1.2)
+
+    assert _order(quantity=2.0).quantity == 2.0
+
+
 def test_order_keys_are_unique_immutable_and_session_scoped() -> None:
     ledger = Ledger(session=_session(), calendar=CALENDAR)
     first = _order()

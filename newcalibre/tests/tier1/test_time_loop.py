@@ -40,6 +40,7 @@ from newcalibre.engine import (
     InMemoryLedgerSink,
     InMemoryPanelSource,
     InProcessDispatch,
+    OrderProposal,
     OrderRequest,
     OriginCommit,
     PhaseError,
@@ -48,12 +49,12 @@ from newcalibre.engine import (
 from newcalibre.engine.ports import ActualKey
 from newcalibre.engine.time_loop import TimeLoop, TimeLoopError, TimeLoopRequest
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
-from newcalibre.ledger import ForecastKey, OrderRow
+from newcalibre.ledger import ForecastKey
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
 COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
-ORDERING_POLICY = {"name": "fixture"}
+ORDERING_POLICY = {"name": "order-up-to"}
 TIMING = DecisionTiming(lead_time=2, review_period=2)
 ORIGINS = (
     pd.Timestamp("2026-01-04"),
@@ -84,7 +85,7 @@ def _session(*, timing: DecisionTiming = TIMING, with_decision: bool = True) -> 
         tenant="tenant-a",
         series_keys=("a",),
         calendar=CALENDAR,
-        horizon=1,
+        horizon=timing.protection_period if with_decision else 1,
         model_config=MODEL_CONFIG,
         ordering_policy=ORDERING_POLICY if with_decision else None,
         cost_structure=COST_STRUCTURE if with_decision else None,
@@ -274,17 +275,14 @@ def _runtime(
         next_value = b"warmup" if value is None else value
         return CalibrationResult(forecasts, {"global": next_value + b"|calibrated"})
 
-    def order(request: OrderRequest) -> tuple[OrderRow, ...]:
+    def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
         order_origins.append(request.origin)
         order_positions[request.origin] = request.inventory_positions["a"]
         return (
-            OrderRow(
-                session=request.session,
+            OrderProposal(
                 series_key="a",
-                origin=request.origin,
                 model_name="fixture",
                 quantity=4.0,
-                arrival_period=CALENDAR.advance(request.origin, TIMING.lead_time),
             ),
         )
 
@@ -499,11 +497,22 @@ def test_gapped_origins_use_sequence_cadence_and_settle_the_calendar_through_dra
     ]
     assert runtime.predicted_origins == list(ORIGINS)
 
-    resolved_by_origin = {row.origin: row.actual_value for row in runtime.sink.forecasts}
-    assert resolved_by_origin == {
-        ORIGINS[0]: 4.0,
-        ORIGINS[1]: 6.0,
-        ORIGINS[2]: None,
+    resolved_by_origin_and_horizon = {
+        (row.origin, row.horizon_step): row.actual_value for row in runtime.sink.forecasts
+    }
+    assert resolved_by_origin_and_horizon == {
+        (ORIGINS[0], 1): 4.0,
+        (ORIGINS[0], 2): 5.0,
+        (ORIGINS[0], 3): 6.0,
+        (ORIGINS[0], 4): 7.0,
+        (ORIGINS[1], 1): 6.0,
+        (ORIGINS[1], 2): 7.0,
+        (ORIGINS[1], 3): 8.0,
+        (ORIGINS[1], 4): None,
+        (ORIGINS[2], 1): None,
+        (ORIGINS[2], 2): None,
+        (ORIGINS[2], 3): None,
+        (ORIGINS[2], 4): None,
     }
     assert runtime.calibration_inputs == [None, b"observed:4.0", b"observed:6.0"]
     assert runtime.states.states[(session, "global")] == b"observed:6.0|calibrated"
@@ -706,7 +715,7 @@ def test_reconstructed_loop_repairs_lost_commit_without_callbacks_or_rebooking()
 
     first_receipt = sink.receipt(ORIGINS[0])
     assert first_receipt is not None
-    assert len(sink.forecasts) == 1
+    assert len(sink.forecasts) == TIMING.protection_period
     assert len(sink.orders) == 1
     assert len(sink.settlements) == 1
     assert states.states == {}
@@ -747,7 +756,7 @@ def test_reconstructed_loop_repairs_lost_commit_without_callbacks_or_rebooking()
     ]
     assert resumed.predicted_origins == [ORIGINS[1], ORIGINS[2]]
     assert resumed.order_origins == [ORIGINS[2]]
-    assert len(sink.forecasts) == 3
+    assert len(sink.forecasts) == len(ORIGINS) * TIMING.protection_period
     assert tuple(order.origin for order in sink.orders) == result.decision_origins
     assert tuple(record.period for record in sink.settlements) == result.settlement_periods
     assert len({record.key for record in sink.settlements}) == len(sink.settlements)

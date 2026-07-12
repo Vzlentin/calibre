@@ -18,6 +18,21 @@ from newcalibre.domain import (
 )
 from newcalibre.domain._canonical_json import canonical_json_bytes
 from newcalibre.engine.errors import EngineError
+from newcalibre.ordering import (
+    OrderingConfigError,
+    OrderingConfiguration,
+    OrderingSetup,
+    compile_ordering,
+)
+
+_ORDERING_POLICY_FIELDS = frozenset(
+    {
+        "coverage",
+        "explicit_decision_fractile",
+        "name",
+        "quantile",
+    }
+)
 
 
 def session_definition(session: SessionIdentity) -> dict[str, object]:
@@ -48,6 +63,70 @@ def session_origin_inputs(
     )
     decision = decision_from_definition(definition)
     return horizon, encoded_config, None if decision is None else decision[0]
+
+
+def session_model_config(session: SessionIdentity) -> dict[str, object]:
+    """Return an isolated model configuration for pre-execution validation."""
+    definition = session_definition(session)
+    model_config = definition.get("model_config")
+    if not isinstance(model_config, Mapping):
+        raise EngineError("session identity has an invalid model configuration")
+    return dict(cast(Mapping[str, object], model_config))
+
+
+def session_ordering_configuration(
+    session: SessionIdentity,
+) -> OrderingConfiguration | None:
+    """Compile session-owned ordering facts without loading execution data."""
+    definition = session_definition(session)
+    decision = definition.get("decision")
+    if decision is None:
+        return None
+    if not isinstance(decision, Mapping):
+        raise EngineError("session identity has an invalid decision configuration")
+    raw_policy = decision.get("ordering_policy")
+    if not isinstance(raw_policy, Mapping):
+        raise EngineError("session identity has an invalid ordering policy")
+    policy = dict(raw_policy)
+    unsupported = sorted(set(policy) - _ORDERING_POLICY_FIELDS)
+    if unsupported:
+        fields = ", ".join(unsupported)
+        raise OrderingConfigError(f"ordering policy has unsupported fields: {fields}")
+
+    horizon = definition.get("horizon")
+    if not isinstance(horizon, int) or isinstance(horizon, bool) or horizon < 1:
+        raise EngineError("session identity has an invalid horizon")
+    series_keys, _frequency = session_series_and_frequency(definition)
+    decision_inputs = decision_from_definition(definition)
+    if decision_inputs is None:
+        raise EngineError("session identity has an incomplete decision configuration")
+    cost_structure, timing, _stockout_rule = decision_inputs
+
+    conformal = definition.get("conformal_config")
+    if conformal is not None and not isinstance(conformal, Mapping):
+        raise EngineError("session identity has an invalid conformal configuration")
+    calibration_coverage = None if conformal is None else conformal.get("coverage")
+
+    return compile_ordering(
+        OrderingSetup(
+            policy=cast(str, policy.get("name")),
+            series_keys=series_keys,
+            cost_structure=cost_structure,
+            decision_timing=timing,
+            task_horizon=horizon,
+            calibration_coverage=cast(float | None, calibration_coverage),
+            calibration_protection_period=cast(
+                int | None,
+                None if conformal is None else conformal.get("protection_period"),
+            ),
+            policy_coverage=cast(float | None, policy.get("coverage")),
+            explicit_quantile=cast(float | None, policy.get("quantile")),
+            explicit_decision_fractile=cast(
+                float | None,
+                policy.get("explicit_decision_fractile"),
+            ),
+        )
+    )
 
 
 def session_decision_inputs(
@@ -151,6 +230,8 @@ __all__ = [
     "require_task_session_binding",
     "session_decision_inputs",
     "session_definition",
+    "session_model_config",
+    "session_ordering_configuration",
     "session_origin_inputs",
     "session_series_and_frequency",
 ]

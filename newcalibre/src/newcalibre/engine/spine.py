@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Real
 from types import MappingProxyType
 from typing import cast
 
@@ -38,6 +40,10 @@ from newcalibre.engine._session import (
     require_task_session_binding as _require_task_session_binding,
 )
 from newcalibre.engine._session import session_decision_inputs as _session_decision_inputs
+from newcalibre.engine._session import session_model_config as _session_model_config
+from newcalibre.engine._session import (
+    session_ordering_configuration as _session_ordering_configuration,
+)
 from newcalibre.engine._session import (
     session_origin_inputs as _session_origin_inputs,
 )
@@ -230,6 +236,62 @@ class OrderRequest:
         object.__setattr__(self, "stockout_rule", stockout_rule)
 
 
+type DecisionKey = tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class OrderProposal:
+    """Propose one finite real-valued quantity for a decision group."""
+
+    series_key: str
+    model_name: str
+    quantity: float
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.series_key, name="proposal series key")
+        _require_identifier(self.model_name, name="proposal model name")
+        object.__setattr__(self, "quantity", _finite_real(self.quantity, name="proposal quantity"))
+
+    @property
+    def key(self) -> DecisionKey:
+        """Return the exact decision group addressed by this proposal."""
+        return self.series_key, self.model_name
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionBatch:
+    """Carry one atomically validated policy result into Commit."""
+
+    session: SessionIdentity
+    origin: pd.Timestamp
+    requested: tuple[DecisionKey, ...]
+    proposals: tuple[OrderProposal, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session, SessionIdentity):
+            raise TypeError("decision batch session must be a SessionIdentity")
+        _require_timestamp(self.origin, name="decision batch origin")
+        requested = tuple(self.requested)
+        for key in requested:
+            _validate_decision_key(key)
+        if len(set(requested)) != len(requested):
+            raise _EngineError("decision batch requested keys must be unique")
+
+        proposals = tuple(self.proposals)
+        if any(not isinstance(proposal, OrderProposal) for proposal in proposals):
+            raise _EngineError("orderer must return only OrderProposal values")
+        proposal_keys = tuple(proposal.key for proposal in proposals)
+        if len(set(proposal_keys)) != len(proposal_keys):
+            raise _EngineError("orderer returned a duplicate decision proposal")
+        foreign = set(proposal_keys) - set(requested)
+        if foreign:
+            raise _EngineError(
+                f"orderer proposed decision groups that were not requested: {sorted(foreign)!r}"
+            )
+        object.__setattr__(self, "requested", requested)
+        object.__setattr__(self, "proposals", proposals)
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class OriginRequest:
     """Declare every input needed to compute one origin."""
@@ -333,7 +395,7 @@ type Observer = Callable[
     [pd.DataFrame, Mapping[ForecastKey, float], Mapping[str, bytes | None]],
     Mapping[str, bytes],
 ]
-type Orderer = Callable[[OrderRequest], Sequence[OrderRow]]
+type Orderer = Callable[[OrderRequest], Sequence[OrderProposal]]
 type PhaseReporter = Callable[[PhaseEvent], None]
 
 
@@ -376,6 +438,9 @@ class Engine:
         for hook, name in callables:
             if hook is not None and not callable(hook):
                 raise TypeError(f"engine {name} must be callable")
+        # Resolve configuration before the panel port can perform any data load.
+        adapter_resolver(_session_model_config(ledger_sink.session))
+        self._ordering_configuration = _session_ordering_configuration(ledger_sink.session)
         self._panel = panel_source.load()
         self._actuals_source = actuals_source
         self._artifact_store = artifact_store
@@ -469,17 +534,20 @@ class Engine:
         merged_updates.update(result.state_updates)
         return CalibrationResult(result.forecasts, merged_updates)
 
-    def order(self, request: OrderRequest) -> tuple[OrderRow, ...]:
-        """Apply the configured orderer, or emit no orders."""
+    def order(self, request: OrderRequest) -> DecisionBatch | None:
+        """Apply the configured orderer, or report that decisions are disabled."""
         if not isinstance(request, OrderRequest):
             raise TypeError("order requires an OrderRequest")
         self._require_session(request.session)
         if self._orderer is None:
-            return ()
-        orders = tuple(self._orderer(request))
-        if any(not isinstance(order, OrderRow) for order in orders):
-            raise _EngineError("orderer must return only OrderRow values")
-        return orders
+            return None
+        proposals = tuple(self._orderer(request))
+        return DecisionBatch(
+            session=request.session,
+            origin=request.origin,
+            requested=_decision_keys(request.forecasts.frame),
+            proposals=proposals,
+        )
 
     def observe(
         self,
@@ -581,6 +649,30 @@ class Engine:
         if ledger_sink is not self._ledger_sink:
             raise _EngineError("time loop ledger sink does not belong to the engine")
 
+    def _materialize_orders(self, decisions: DecisionBatch | None) -> tuple[OrderRow, ...]:
+        if decisions is None:
+            return ()
+        if not isinstance(decisions, DecisionBatch):
+            raise TypeError("order materialization requires a DecisionBatch or None")
+        self._require_session(decisions.session)
+        decision = _session_decision_inputs(decisions.session)
+        if decision is None:
+            raise _EngineError("order materialization requires decision timing")
+        _cost_structure, timing, _stockout_rule = decision
+        arrival = self._ledger_sink.calendar.advance(decisions.origin, timing.lead_time)
+        proposed = {proposal.key: proposal.quantity for proposal in decisions.proposals}
+        return tuple(
+            OrderRow(
+                session=decisions.session,
+                series_key=series_key,
+                origin=decisions.origin,
+                model_name=model_name,
+                quantity=float(max(math.ceil(proposed.get((series_key, model_name), 0.0)), 0)),
+                arrival_period=arrival,
+            )
+            for series_key, model_name in decisions.requested
+        )
+
     def _fit_one(self, fitted: FittedTask) -> FittedTask:
         adapter = self._adapter_resolver(fitted.task.model_config)
         if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
@@ -671,13 +763,14 @@ class Spine:
             forecasts=calibrated.forecasts,
             inventory_positions=request.inventory_positions,
         )
-        orders = self._phase(
+        decisions = self._phase(
             Phase.ORDER,
             request.origin,
-            lambda: self._engine.order(order_request) if decision_origin else (),
+            lambda: self._engine.order(order_request) if decision_origin else None,
         )
 
-        def commit_phase() -> None:
+        def commit_phase() -> tuple[OrderRow, ...]:
+            orders = self._engine._materialize_orders(decisions)
             settlement_result: _SettlementResult | None = None
             if settlement is not None:
                 settlement_result = self._engine.settle(
@@ -705,8 +798,9 @@ class Spine:
                 state_updates=calibrated.state_updates,
             )
             self._engine.commit(commit_request)
+            return orders
 
-        self._phase(
+        orders = self._phase(
             Phase.COMMIT,
             request.origin,
             commit_phase,
@@ -777,6 +871,48 @@ def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:
     )
 
 
+def _decision_keys(frame: pd.DataFrame) -> tuple[DecisionKey, ...]:
+    return tuple(
+        sorted(
+            {
+                (str(series_key), str(model_name))
+                for series_key, model_name in zip(
+                    frame[SERIES_KEY],
+                    frame[MODEL_NAME],
+                    strict=True,
+                )
+            }
+        )
+    )
+
+
+def _validate_decision_key(key: object) -> None:
+    if not isinstance(key, tuple) or len(key) != 2:
+        raise _EngineError("decision key must be an exact (series key, model name) pair")
+    series_key, model_name = key
+    _require_identifier(series_key, name="decision-key series key")
+    _require_identifier(model_name, name="decision-key model name")
+
+
+def _finite_real(value: object, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise _EngineError(f"{name} must be a finite real number")
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise _EngineError(f"{name} must be a finite real number") from error
+    if not math.isfinite(normalized):
+        raise _EngineError(f"{name} must be a finite real number")
+    return 0.0 if normalized == 0.0 else normalized
+
+
+def _require_timestamp(value: object, *, name: str) -> None:
+    if not isinstance(value, pd.Timestamp) or pd.isna(value):
+        raise _EngineError(f"{name} must be a non-missing pandas Timestamp")
+    if value.tz is not None:
+        raise _EngineError(f"{name} must be timezone-naive")
+
+
 def _validated_partitions(partitions: Sequence[str]) -> tuple[str, ...]:
     requested = tuple(partitions)
     if len(set(requested)) != len(requested):
@@ -845,10 +981,12 @@ def _require_identifier(value: object, *, name: str) -> None:
 __all__ = [
     "ENGINE_VERBS",
     "CalibrationResult",
+    "DecisionBatch",
     "Engine",
     "FittedTask",
     "ForecastBatch",
     "ObservationResult",
+    "OrderProposal",
     "OrderRequest",
     "OriginRequest",
     "OriginResult",
