@@ -12,13 +12,13 @@ import pandas as pd
 
 from newcalibre.domain import (
     ActualsSemantics,
-    CostStructure,
     DecisionTiming,
     InventoryPosition,
     SessionIdentity,
     StockoutRule,
 )
 from newcalibre.engine._session import (
+    SessionCosts,
     decision_from_definition,
     session_definition,
     session_series_and_frequency,
@@ -49,7 +49,7 @@ class SettlementRequest:
     inventory_positions: Mapping[str, InventoryPosition]
     orders: tuple[OrderRow, ...]
     actuals_semantics: ActualsSemantics
-    cost_structure: CostStructure = field(init=False)
+    costs_by_series: SessionCosts = field(init=False)
     _series_keys: tuple[str, ...] = field(repr=False)
 
     def __init__(
@@ -72,20 +72,23 @@ class SettlementRequest:
             raise TypeError("settlement actuals semantics must be ActualsSemantics")
 
         definition = session_definition(session)
-        series_keys, frequency = session_series_and_frequency(definition)
+        _session_series, frequency = session_series_and_frequency(definition)
         if frequency != snapshot.calendar.frequency:
             raise SettlementError("settlement snapshot calendar must match its session")
+        decision = decision_from_definition(definition)
+        if decision is None:
+            raise SettlementError("settlement session has no decision configuration")
+        series_keys = decision.series_keys
         series_key_set = set(series_keys)
         period_set = set(snapshot.periods)
         positions = _validated_positions(inventory_positions)
         if set(positions) != series_key_set:
             raise SettlementError(
-                "settlement inventory series must exactly match the session series set"
+                "settlement inventory series must exactly match the decision series set"
             )
-        decision = decision_from_definition(definition)
-        if decision is None:
-            raise SettlementError("settlement session has no decision configuration")
-        cost_structure, timing, stockout_rule = decision
+        costs_by_series = decision.costs_by_series
+        timing = decision.timing
+        stockout_rule = decision.stockout_rule
         if timing.lead_time < 1:
             raise SettlementError("settlement lead time must be at least one period")
         if stockout_rule is not StockoutRule.LOST_SALES:
@@ -115,7 +118,7 @@ class SettlementRequest:
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         object.__setattr__(self, "orders", staged_orders)
         object.__setattr__(self, "actuals_semantics", actuals_semantics)
-        object.__setattr__(self, "cost_structure", cost_structure)
+        object.__setattr__(self, "costs_by_series", costs_by_series)
         object.__setattr__(self, "_series_keys", series_keys)
 
 
@@ -158,6 +161,7 @@ def settle(request: SettlementRequest) -> SettlementResult:
         staged_origin_by_series = staged_by_origin.get(period, {})
         staged_arrival_by_series = staged_by_arrival.get(period, {})
         for series_key in series_keys:
+            cost_structure = request.costs_by_series[series_key]
             opening = positions[series_key]
             arrivals = _finite_sum(
                 (
@@ -199,11 +203,11 @@ def settle(request: SettlementRequest) -> SettlementResult:
                     transition=transition,
                     inventory_position=next_position,
                     holding=_book_cost(
-                        request.cost_structure.holding,
+                        cost_structure.holding,
                         transition.closing_on_hand,
                     ),
                     shortage=_book_cost(
-                        request.cost_structure.shortage,
+                        cost_structure.shortage,
                         transition.unmet_demand,
                     ),
                 )
@@ -222,7 +226,7 @@ def validate_snapshot_state(
     series_key_set = set(series_keys)
     if set(snapshot.open_order_quantities) != series_key_set:
         raise SettlementError(
-            "settlement snapshot open quantities must exactly match the session series set"
+            "settlement snapshot open quantities must exactly match the decision series set"
         )
     unknown_due_series = sorted(
         {series_key for series_key, _period in snapshot.due_arrivals} - series_key_set,
@@ -244,7 +248,7 @@ def validate_snapshot_state(
             )
         if set(snapshot.latest_positions) != series_key_set:
             raise SettlementError(
-                "settlement snapshot latest positions must cover every session series"
+                "settlement snapshot latest positions must cover every decision series"
             )
         if dict(positions) != dict(snapshot.latest_positions):
             raise SettlementError(

@@ -45,8 +45,7 @@ class _EffectiveConfig:
     backend: str
     season_length: int
     model_name: str
-    requests_native_quantiles: bool
-    requests_censoring_aware_fit: bool
+    requested_capabilities: frozenset[AdapterCapability]
 
 
 class SeasonalNaiveAdapter:
@@ -73,6 +72,11 @@ class SeasonalNaiveAdapter:
         """Declare that this library-free brick has no optional capabilities."""
         return frozenset()
 
+    @property
+    def requested_capabilities(self) -> frozenset[AdapterCapability]:
+        """Return immutable capability requests derived from model configuration."""
+        return self._config.requested_capabilities
+
     def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
         """Retain only the final pre-origin season for each task series."""
         self._require_matching_config(task)
@@ -80,10 +84,9 @@ class SeasonalNaiveAdapter:
             raise AdapterConfigurationError("collect_fitted_values must be a boolean")
         if collect_fitted_values:
             self._raise_unsupported(AdapterCapability.FITTED_VALUES)
-        if self._config.requests_native_quantiles:
-            self._raise_unsupported(AdapterCapability.NATIVE_QUANTILES)
-        if self._config.requests_censoring_aware_fit:
-            self._raise_unsupported(AdapterCapability.CENSORING_AWARE_FIT)
+        unsupported = self.requested_capabilities - self.capabilities
+        if unsupported:
+            self._raise_unsupported(min(unsupported, key=lambda capability: capability.value))
 
         retained = self._extract_retained_season(task)
         self._fit_origin = task.origin
@@ -209,12 +212,16 @@ class SeasonalNaiveAdapter:
         censoring_aware = model_config.get("censoring_aware", False)
         if not isinstance(censoring_aware, bool):
             raise AdapterConfigurationError("censoring_aware must be a boolean")
+        requested_capabilities: set[AdapterCapability] = set()
+        if cls._requests_native_quantiles(model_config):
+            requested_capabilities.add(AdapterCapability.NATIVE_QUANTILES)
+        if censoring_aware:
+            requested_capabilities.add(AdapterCapability.CENSORING_AWARE_FIT)
         return _EffectiveConfig(
             backend=backend,
             season_length=int(season_length),
             model_name=model_name,
-            requests_native_quantiles=cls._requests_native_quantiles(model_config),
-            requests_censoring_aware_fit=censoring_aware,
+            requested_capabilities=frozenset(requested_capabilities),
         )
 
     def _extract_retained_season(self, task: ForecastTask) -> dict[str, _RetainedSeason]:

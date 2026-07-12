@@ -56,6 +56,11 @@ class ForecastAdapter(Protocol):
         """Return the optional capabilities this adapter declares."""
         ...
 
+    @property
+    def requested_capabilities(self) -> frozenset[AdapterCapability]:
+        """Return capabilities requested by the construction configuration."""
+        ...
+
     def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
         """Fit and retain only the adapter's documented minimal predictive state."""
         ...

@@ -532,6 +532,8 @@ class OrderRow:
             "quantity",
             _finite_nonnegative(self.quantity, name="order quantity"),
         )
+        if not self.quantity.is_integer():
+            raise LedgerError("order quantity must be recorded in whole units")
         _require_timestamp(self.arrival_period, name="arrival period")
 
     @property

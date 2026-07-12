@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from newcalibre.forecasting.protocol import ForecastAdapter
+from newcalibre.forecasting.protocol import AdapterCapabilityError, ForecastAdapter
 
 AdapterFactory = Callable[[Mapping[str, object]], ForecastAdapter]
 
@@ -35,7 +35,7 @@ class AdapterRegistry:
         self._factories[backend] = factory
 
     def resolve(self, model_config: Mapping[str, object]) -> ForecastAdapter:
-        """Construct the explicitly configured backend adapter."""
+        """Construct and validate the explicitly configured backend adapter."""
         if not isinstance(model_config, Mapping):
             raise AdapterRegistryError("model configuration must be a mapping")
 
@@ -57,7 +57,14 @@ class AdapterRegistry:
             raise AdapterRegistryError(
                 f"unknown backend {backend!r}; available backends: {available}"
             ) from error
-        return factory(model_config)
+        adapter = factory(model_config)
+        unsupported = adapter.requested_capabilities - adapter.capabilities
+        if unsupported:
+            capability_text = ", ".join(sorted(capability.value for capability in unsupported))
+            raise AdapterCapabilityError(
+                f"backend {backend!r} does not declare requested capabilities: {capability_text}"
+            )
+        return adapter
 
     def _available_text(self) -> str:
         return ", ".join(self.available_backends) or "<none>"

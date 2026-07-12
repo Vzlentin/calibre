@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import heapq
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 
@@ -19,6 +19,7 @@ from newcalibre.domain import (
     SessionIdentity,
     StockoutRule,
 )
+from newcalibre.engine._session import SessionCosts
 from newcalibre.engine.ports import ActualKey, SettlementSnapshot
 from newcalibre.ledger import (
     LedgerError,
@@ -70,7 +71,7 @@ class SettlementIndex:
         session: SessionIdentity,
         calendar: Calendar,
         series_keys: Sequence[str],
-        cost_structure: CostStructure,
+        costs_by_series: SessionCosts,
         timing: DecisionTiming,
         stockout_rule: StockoutRule,
     ) -> None:
@@ -78,7 +79,10 @@ class SettlementIndex:
         self._calendar = calendar
         self._series_keys = tuple(series_keys)
         self._series_key_set = set(self._series_keys)
-        self._cost_structure = cost_structure
+        self._costs_by_series = _costs_by_series(
+            costs_by_series,
+            series_keys=self._series_keys,
+        )
         self._timing = timing
         self._stockout_rule = stockout_rule
         self._active_orders: set[OrderKey] = set()
@@ -98,7 +102,7 @@ class SettlementIndex:
         session: SessionIdentity,
         calendar: Calendar,
         series_keys: Sequence[str],
-        cost_structure: CostStructure,
+        costs_by_series: SessionCosts,
         timing: DecisionTiming,
         stockout_rule: StockoutRule,
         orders: Sequence[OrderRow],
@@ -109,7 +113,7 @@ class SettlementIndex:
             session=session,
             calendar=calendar,
             series_keys=series_keys,
-            cost_structure=cost_structure,
+            costs_by_series=costs_by_series,
             timing=timing,
             stockout_rule=stockout_rule,
         )
@@ -368,7 +372,7 @@ class SettlementIndex:
             records[record.series_key] = record
         for records in records_by_period.values():
             if set(records) != self._series_key_set:
-                raise LedgerError("settlement periods must cover the complete session series set")
+                raise LedgerError("settlement periods must cover the complete decision series set")
         return records_by_period
 
     def _require_frontier_extension(self, periods: tuple[pd.Timestamp, ...]) -> None:
@@ -386,8 +390,8 @@ class SettlementIndex:
         if record.transition.rule is not self._stockout_rule:
             raise LedgerError("settlement stock-out rule does not match the session")
         if (
-            record.holding.rate != self._cost_structure.holding
-            or record.shortage.rate != self._cost_structure.shortage
+            record.holding.rate != self._costs_by_series[record.series_key].holding
+            or record.shortage.rate != self._costs_by_series[record.series_key].shortage
         ):
             raise LedgerError("settlement cost rates do not match the session")
 
@@ -415,6 +419,18 @@ def _finite_quantity_sum(
     if nonnegative and total < 0.0:
         raise LedgerError(f"{name} must be non-negative")
     return 0.0 if total == 0.0 else total
+
+
+def _costs_by_series(
+    value: SessionCosts,
+    *,
+    series_keys: tuple[str, ...],
+) -> dict[str, CostStructure]:
+    if not isinstance(value, Mapping) or set(value) != set(series_keys):
+        raise LedgerError("settlement costs must exactly match the decision series set")
+    if any(not isinstance(cost, CostStructure) for cost in value.values()):
+        raise LedgerError("settlement costs must contain CostStructure values")
+    return {series_key: value[series_key] for series_key in series_keys}
 
 
 __all__ = ["SettlementIndex", "SettlementIndexAudit", "SettlementIndexWork"]

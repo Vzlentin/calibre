@@ -165,7 +165,8 @@ class InMemoryLedgerSink:
         self._settlement_keys: set[object] = set()
         self._commits: dict[pd.Timestamp, CommitReceipt] = {}
         self._decision = session_decision_inputs(session)
-        self._series_keys, _frequency = session_series_and_frequency(session_definition(session))
+        session_series, _frequency = session_series_and_frequency(session_definition(session))
+        self._series_keys = session_series if self._decision is None else self._decision.series_keys
         self._settlement_index = (
             None
             if self._decision is None
@@ -173,9 +174,9 @@ class InMemoryLedgerSink:
                 session=session,
                 calendar=calendar,
                 series_keys=self._series_keys,
-                cost_structure=self._decision[0],
-                timing=self._decision[1],
-                stockout_rule=self._decision[2],
+                costs_by_series=self._decision.costs_by_series,
+                timing=self._decision.timing,
+                stockout_rule=self._decision.stockout_rule,
             )
         )
 
@@ -210,9 +211,9 @@ class InMemoryLedgerSink:
             session=self._ledger.session,
             calendar=self._ledger.calendar,
             series_keys=self._series_keys,
-            cost_structure=self._decision[0],
-            timing=self._decision[1],
-            stockout_rule=self._decision[2],
+            costs_by_series=self._decision.costs_by_series,
+            timing=self._decision.timing,
+            stockout_rule=self._decision.stockout_rule,
             orders=self._ledger.orders,
             settlements=self._ledger.settlements,
         )
@@ -301,7 +302,8 @@ class InMemoryLedgerSink:
         if self._decision is None or self._settlement_index is None:
             noun = "orders" if write.orders else "settlements"
             raise LedgerError(f"durable {noun} require a session decision configuration")
-        _cost_structure, timing, stockout_rule = self._decision
+        timing = self._decision.timing
+        stockout_rule = self._decision.stockout_rule
         if timing.lead_time < 1:
             noun = "orders" if write.orders else "settlements"
             raise LedgerError(f"durable {noun} require a positive decision lead time")

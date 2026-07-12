@@ -48,22 +48,26 @@ CALENDAR = Calendar("W-MON", phase=pd.Timestamp("2026-01-05"))
 PERIODS = tuple(pd.date_range("2026-01-05", periods=8, freq="W-MON"))
 TIMING = DecisionTiming(lead_time=2, review_period=3)
 COST = CostStructure(underage=7.0, overage=3.0, holding=0.5, shortage=2.0)
-MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
-ORDERING_POLICY = {"name": "fixture"}
+MODEL_CONFIG = {"backend": "seasonal-naive", "m": 1}
+ORDERING_POLICY = {"name": "newsvendor"}
 
 
 def _session(
     *,
     series_keys: Sequence[str] = ("sku-a",),
+    decision_series_keys: Sequence[str] | None = None,
     tenant: str = "tenant-a",
     with_decision: bool = True,
-    cost: CostStructure = COST,
+    cost: CostStructure | Mapping[str, CostStructure] = COST,
     timing: DecisionTiming = TIMING,
     stockout_rule: StockoutRule = StockoutRule.LOST_SALES,
 ) -> SessionIdentity:
     decision = (
         {
             "ordering_policy": ORDERING_POLICY,
+            "decision_series_keys": (
+                series_keys if decision_series_keys is None else decision_series_keys
+            ),
             "cost_structure": cost,
             "decision_timing": timing,
             "stockout_rule": stockout_rule,
@@ -75,7 +79,7 @@ def _session(
         tenant=tenant,
         series_keys=series_keys,
         calendar=CALENDAR,
-        horizon=3,
+        horizon=timing.protection_period if with_decision else 3,
         model_config=MODEL_CONFIG,
         **decision,
     )
@@ -272,6 +276,80 @@ def test_settlement_applies_arrivals_before_demand_and_books_traceable_costs() -
     assert record.shortage == BookedCost(rate=2.0, basis=3.0, amount=6.0)
     assert record.realized_cost == 6.0
     assert result.inventory_positions == {"sku-a": InventoryPosition(0.0, 3.0, 0.0)}
+
+
+def test_per_series_costs_price_each_record_and_survive_index_rebuild() -> None:
+    costs = {
+        "sku-a": CostStructure(1.0, 1.0, 0.25, 9.0),
+        "sku-b": CostStructure(2.0, 2.0, 7.0, 5.0),
+    }
+    session = _session(series_keys=("sku-a", "sku-b"), cost=costs)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    positions = {
+        "sku-a": InventoryPosition(4.0, 0.0, 0.0),
+        "sku-b": InventoryPosition(1.0, 0.0, 0.0),
+    }
+    result = settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            snapshot=sink.settlement_snapshot((PERIODS[0],)),
+            actuals={
+                ("sku-a", PERIODS[0]): 1.0,
+                ("sku-b", PERIODS[0]): 3.0,
+            },
+            positions=positions,
+        )
+    )
+
+    records = {record.series_key: record for record in result.records}
+    assert records["sku-a"].holding == BookedCost(rate=0.25, basis=3.0, amount=0.75)
+    assert records["sku-a"].shortage == BookedCost(rate=9.0, basis=0.0, amount=0.0)
+    assert records["sku-b"].holding == BookedCost(rate=7.0, basis=0.0, amount=0.0)
+    assert records["sku-b"].shortage == BookedCost(rate=5.0, basis=2.0, amount=10.0)
+
+    sink.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            settlements=result.records,
+        )
+    )
+    sink.rebuild_settlement_index()
+
+
+def test_settlement_and_rebuild_use_only_the_session_decision_series() -> None:
+    bottom_cost = CostStructure(1.0, 1.0, 0.25, 9.0)
+    session = _session(
+        series_keys=("aggregate", "bottom"),
+        decision_series_keys=("bottom",),
+        cost={"bottom": bottom_cost},
+    )
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    position = InventoryPosition(4.0, 0.0, 0.0)
+    result = settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            snapshot=sink.settlement_snapshot((PERIODS[0],)),
+            actuals={("bottom", PERIODS[0]): 1.0},
+            positions={"bottom": position},
+        )
+    )
+
+    assert tuple(record.series_key for record in result.records) == ("bottom",)
+    assert tuple(result.inventory_positions) == ("bottom",)
+    sink.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            settlements=result.records,
+        )
+    )
+    sink.rebuild_settlement_index()
+    rebuilt = sink.settlement_snapshot((PERIODS[1],))
+    assert tuple(rebuilt.latest_positions) == ("bottom",)
+    assert tuple(rebuilt.open_order_quantities) == ("bottom",)
 
 
 def test_order_arrives_at_calendar_advance_once_and_remains_open_until_then() -> None:
@@ -758,9 +836,9 @@ def test_staged_orders_must_be_current_window_facts_with_exact_arrivals() -> Non
         _request(session, orders=(foreign,), **common)
 
 
-def test_inventory_positions_must_cover_the_session_series_exactly() -> None:
+def test_inventory_positions_must_cover_the_decision_series_exactly() -> None:
     session = _session(series_keys=("sku-a", "sku-b"))
-    with pytest.raises(SettlementError, match="exactly match the session series set"):
+    with pytest.raises(SettlementError, match="exactly match the decision series set"):
         _request(
             session,
             periods=(PERIODS[0],),
@@ -1220,7 +1298,7 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
     assert sink.settlements == first.records
 
 
-def test_sink_requires_complete_session_series_for_every_settlement_period() -> None:
+def test_sink_requires_complete_decision_series_for_every_settlement_period() -> None:
     series_keys = ("sku-a", "sku-b")
     session = _session(series_keys=series_keys)
     engine, sink = _engine(session, series_keys=series_keys)
@@ -1234,7 +1312,7 @@ def test_sink_requires_complete_session_series_for_every_settlement_period() -> 
         )
     )
 
-    with pytest.raises(LedgerError, match="complete session series"):
+    with pytest.raises(LedgerError, match="complete decision series"):
         engine.commit(
             OriginCommit(
                 session=session,
@@ -1360,6 +1438,7 @@ def test_compact_index_work_stays_flat_across_64_growing_origins_and_rebuild() -
         horizon=3,
         model_config=MODEL_CONFIG,
         ordering_policy=ORDERING_POLICY,
+        decision_series_keys=("sku-a",),
         cost_structure=COST,
         decision_timing=timing,
         stockout_rule=StockoutRule.LOST_SALES,

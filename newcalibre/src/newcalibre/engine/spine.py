@@ -6,11 +6,12 @@ import hashlib
 import json
 import time
 import warnings
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from itertools import islice
 from types import MappingProxyType
-from typing import cast
+from typing import cast, overload
 
 import pandas as pd
 
@@ -21,7 +22,6 @@ from newcalibre.domain import (
     SERIES_KEY,
     ActualsSemantics,
     Calendar,
-    CostStructure,
     DecisionTiming,
     ForecastTask,
     InventoryPosition,
@@ -31,6 +31,17 @@ from newcalibre.domain import (
     forecast_bound_groups,
     validate_forecast_frame,
 )
+from newcalibre.engine._ordering_runtime import (
+    DecisionBatch,
+    DecisionKey,
+    OrderProposal,
+)
+from newcalibre.engine._ordering_runtime import (
+    materialize_decisions as _materialize_decisions,
+)
+from newcalibre.engine._session import (
+    SessionCosts,
+)
 from newcalibre.engine._session import (
     require_panel_session_binding as _require_panel_session_binding,
 )
@@ -38,6 +49,10 @@ from newcalibre.engine._session import (
     require_task_session_binding as _require_task_session_binding,
 )
 from newcalibre.engine._session import session_decision_inputs as _session_decision_inputs
+from newcalibre.engine._session import session_model_config as _session_model_config
+from newcalibre.engine._session import (
+    session_ordering_configuration as _session_ordering_configuration,
+)
 from newcalibre.engine._session import (
     session_origin_inputs as _session_origin_inputs,
 )
@@ -115,6 +130,8 @@ class ForecastBatch:
 
     _frame: pd.DataFrame = field(repr=False)
     _calendar: Calendar = field(repr=False)
+    _session: SessionIdentity | None = field(repr=False)
+    _engine_token: object | None = field(repr=False, compare=False)
     issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]]
 
     def __init__(
@@ -124,7 +141,8 @@ class ForecastBatch:
         calendar: Calendar,
         issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]] | None = None,
     ) -> None:
-        validated = validate_forecast_frame(frame, calendar=calendar)
+        owned_frame = pd.DataFrame(frame, copy=True)
+        validated = validate_forecast_frame(owned_frame, calendar=calendar)
         keys = _forecast_keys(validated)
         if issuances is None:
             if forecast_bound_groups(validated.columns):
@@ -139,6 +157,8 @@ class ForecastBatch:
         frozen = {key: MappingProxyType(dict(supplied[key])) for key in keys}
         object.__setattr__(self, "_frame", validated)
         object.__setattr__(self, "_calendar", calendar)
+        object.__setattr__(self, "_session", None)
+        object.__setattr__(self, "_engine_token", None)
         object.__setattr__(self, "issuances", MappingProxyType(frozen))
 
     @property
@@ -150,6 +170,11 @@ class ForecastBatch:
     def calendar(self) -> Calendar:
         """Return the bound calendar used to validate this batch."""
         return self._calendar
+
+    @property
+    def session(self) -> SessionIdentity | None:
+        """Return immutable engine provenance, if this batch has been bound."""
+        return self._session
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +199,9 @@ class ObservationResult:
     resolutions: Mapping[ForecastKey, float]
     state_updates: Mapping[str, bytes] = field(default_factory=dict)
     prior_states: Mapping[str, bytes | None] = field(default_factory=dict)
+    session: SessionIdentity | None = None
+    origin: pd.Timestamp | None = None
+    _engine_token: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.resolutions, Mapping):
@@ -183,6 +211,11 @@ class ObservationResult:
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
         prior_states = _validated_state_snapshot(self.prior_states)
         object.__setattr__(self, "prior_states", MappingProxyType(prior_states))
+        _validate_optional_provenance(
+            self.session,
+            self.origin,
+            name="observation result",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,12 +224,26 @@ class CalibrationResult:
 
     forecasts: ForecastBatch
     state_updates: Mapping[str, bytes] = field(default_factory=dict)
+    session: SessionIdentity | None = None
+    origin: pd.Timestamp | None = None
+    _engine_token: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.forecasts, ForecastBatch):
             raise TypeError("calibration result forecasts must be a ForecastBatch")
         updates = _validated_state_updates(self.state_updates)
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        _validate_optional_provenance(
+            self.session,
+            self.origin,
+            name="calibration result",
+        )
+        if self.session is not None:
+            if self.forecasts.session != self.session:
+                raise _EngineError("calibration result forecasts must match its session")
+            assert self.origin is not None
+            if any(key[1] != self.origin for key in self.forecasts.issuances):
+                raise _EngineError("calibration result forecasts must match its origin")
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +254,7 @@ class OrderRequest:
     origin: pd.Timestamp
     forecasts: ForecastBatch
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
-    cost_structure: CostStructure | None = field(init=False)
+    costs_by_series: SessionCosts | None = field(init=False)
     timing: DecisionTiming | None = field(init=False)
     stockout_rule: StockoutRule | None = field(init=False)
 
@@ -218,14 +265,20 @@ class OrderRequest:
             raise TypeError("order request origin must be a pandas Timestamp")
         if not isinstance(self.forecasts, ForecastBatch):
             raise TypeError("order request forecasts must be a ForecastBatch")
+        if any(key[1] != self.origin for key in self.forecasts.issuances):
+            raise _EngineError("order request forecasts must all match its origin")
+        if self.forecasts.session != self.session:
+            raise _EngineError("order request forecasts must match its session")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         decision = _session_decision_inputs(self.session)
         if decision is None:
-            cost_structure = timing = stockout_rule = None
+            costs_by_series = timing = stockout_rule = None
         else:
-            cost_structure, timing, stockout_rule = decision
-        object.__setattr__(self, "cost_structure", cost_structure)
+            costs_by_series = decision.costs_by_series
+            timing = decision.timing
+            stockout_rule = decision.stockout_rule
+        object.__setattr__(self, "costs_by_series", costs_by_series)
         object.__setattr__(self, "timing", timing)
         object.__setattr__(self, "stockout_rule", stockout_rule)
 
@@ -239,7 +292,6 @@ class OriginRequest:
     horizon: int
     scope: Scope
     calibration_partitions: tuple[str, ...]
-    cost_structure: CostStructure | None
     _model_config: bytes = field(repr=False)
     _future_exogenous: pd.DataFrame | None = field(repr=False)
     _inventory_positions: Mapping[str, InventoryPosition] = field(repr=False)
@@ -260,7 +312,7 @@ class OriginRequest:
             raise TypeError("origin request origin must be a pandas Timestamp")
         if not isinstance(scope, Scope):
             raise TypeError("origin request scope must be a Scope")
-        horizon, encoded_config, cost_structure = _session_origin_inputs(session)
+        horizon, encoded_config = _session_origin_inputs(session)
         partitions = _validated_partitions(calibration_partitions)
         if future_exogenous is not None and not isinstance(future_exogenous, pd.DataFrame):
             raise TypeError("future exogenous input must be a pandas DataFrame")
@@ -270,7 +322,6 @@ class OriginRequest:
         object.__setattr__(self, "horizon", horizon)
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "calibration_partitions", partitions)
-        object.__setattr__(self, "cost_structure", cost_structure)
         object.__setattr__(self, "_model_config", encoded_config)
         object.__setattr__(
             self,
@@ -323,6 +374,67 @@ class SettlementWindow:
         object.__setattr__(self, "actuals", MappingProxyType(dict(self.actuals)))
 
 
+@dataclass(frozen=True, slots=True)
+class CommitRequest:
+    """Carry typed phase results into the one materializing Commit boundary."""
+
+    session: SessionIdentity
+    origin: pd.Timestamp
+    observation: ObservationResult
+    calibration: CalibrationResult
+    inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
+    decisions: DecisionBatch | None = None
+    settlement: SettlementWindow | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session, SessionIdentity):
+            raise TypeError("commit request session must be a SessionIdentity")
+        _require_timestamp(self.origin, name="commit request origin")
+        if not isinstance(self.observation, ObservationResult):
+            raise TypeError("commit request observation must be an ObservationResult")
+        if not isinstance(self.calibration, CalibrationResult):
+            raise TypeError("commit request calibration must be a CalibrationResult")
+        if self.observation.session != self.session or self.observation.origin != self.origin:
+            raise _EngineError("commit request observation must match its session and origin")
+        if self.calibration.session != self.session or self.calibration.origin != self.origin:
+            raise _EngineError("commit request calibration must match its session and origin")
+        if any(key[1] != self.origin for key in self.calibration.forecasts.issuances):
+            raise _EngineError("commit request forecasts must all match its origin")
+        if self.decisions is not None:
+            if not isinstance(self.decisions, DecisionBatch):
+                raise TypeError("commit request decisions must be a DecisionBatch or None")
+            if self.decisions.session != self.session or self.decisions.origin != self.origin:
+                raise _EngineError("commit request decisions must match its session and origin")
+        if self.settlement is not None:
+            if not isinstance(self.settlement, SettlementWindow):
+                raise TypeError("commit request settlement must be a SettlementWindow or None")
+            if self.settlement.snapshot.session != self.session:
+                raise _EngineError("commit request settlement must match its session")
+            if self.settlement.snapshot.periods != (self.origin,):
+                raise _EngineError("commit request settlement must contain exactly its origin")
+        positions = _validated_inventory_positions(self.inventory_positions)
+        object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
+
+
+@dataclass(frozen=True, slots=True)
+class CommitResult:
+    """Return the durable receipt and the exact rows materialized by Commit."""
+
+    receipt: CommitReceipt
+    orders: tuple[OrderRow, ...]
+    settlement: _SettlementResult | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.receipt, CommitReceipt):
+            raise TypeError("commit result receipt must be a CommitReceipt")
+        orders = tuple(self.orders)
+        if any(not isinstance(order, OrderRow) for order in orders):
+            raise TypeError("commit result orders must contain OrderRow values")
+        if self.settlement is not None and not isinstance(self.settlement, _SettlementResult):
+            raise TypeError("commit result settlement must be a SettlementResult or None")
+        object.__setattr__(self, "orders", orders)
+
+
 type AdapterResolver = Callable[[Mapping[str, object]], ForecastAdapter]
 type Reconciler = Callable[[ForecastBatch], ForecastBatch]
 type Calibrator = Callable[
@@ -333,7 +445,7 @@ type Observer = Callable[
     [pd.DataFrame, Mapping[ForecastKey, float], Mapping[str, bytes | None]],
     Mapping[str, bytes],
 ]
-type Orderer = Callable[[OrderRequest], Sequence[OrderRow]]
+type Orderer = Callable[[OrderRequest], Iterable[OrderProposal]]
 type PhaseReporter = Callable[[PhaseEvent], None]
 
 
@@ -376,6 +488,10 @@ class Engine:
         for hook, name in callables:
             if hook is not None and not callable(hook):
                 raise TypeError(f"engine {name} must be callable")
+        # Resolve configuration before the panel port can perform any data load.
+        adapter_resolver(_session_model_config(ledger_sink.session))
+        ordering_configuration = _session_ordering_configuration(ledger_sink.session)
+        self._ordering_configuration = ordering_configuration
         self._panel = panel_source.load()
         self._actuals_source = actuals_source
         self._artifact_store = artifact_store
@@ -387,6 +503,7 @@ class Engine:
         self._reconciler = reconciler
         self._calibrator = calibrator
         self._orderer = orderer
+        self._phase_token = object()
         _require_panel_session_binding(
             self._panel,
             session=self._ledger_sink.session,
@@ -419,18 +536,37 @@ class Engine:
             self._require_session(fitted.session)
         frames = self._dispatch_backend.map(self._predict_one, tasks)
         combined = pd.concat(frames, ignore_index=True)
-        return ForecastBatch(combined, calendar=self._ledger_sink.calendar)
+        return _bind_forecast_batch(
+            ForecastBatch(
+                combined,
+                calendar=self._ledger_sink.calendar,
+            ),
+            session=tasks[0].session,
+            engine_token=self._phase_token,
+        )
 
     def reconcile(self, forecasts: ForecastBatch) -> ForecastBatch:
         """Apply the configured reconciler, or return the input identity."""
         if not isinstance(forecasts, ForecastBatch):
             raise TypeError("reconcile requires a ForecastBatch")
+        self._require_forecast_batch(forecasts)
         if self._reconciler is None:
             return forecasts
-        reconciled = self._reconciler(forecasts)
-        if not isinstance(reconciled, ForecastBatch):
+        callback_result = self._reconciler(forecasts)
+        if not isinstance(callback_result, ForecastBatch):
             raise _EngineError("reconciler must return a ForecastBatch")
-        return reconciled
+        reconciled = _snapshot_forecast_batch(callback_result)
+        if reconciled.calendar != forecasts.calendar:
+            raise _EngineError("reconciler changed the forecast calendar")
+        removed = set(forecasts.issuances) - set(reconciled.issuances)
+        if removed:
+            raise _EngineError("reconciler removed or changed forecast row keys")
+        assert forecasts.session is not None
+        return _bind_forecast_batch(
+            reconciled,
+            session=forecasts.session,
+            engine_token=self._phase_token,
+        )
 
     def calibrate(
         self,
@@ -444,11 +580,27 @@ class Engine:
         if not isinstance(forecasts, ForecastBatch):
             raise TypeError("calibrate requires a ForecastBatch")
         self._require_session(session)
+        self._require_forecast_batch(forecasts)
+        if forecasts.session != session:
+            raise _EngineError("calibration forecasts do not match its session")
+        origin = _forecast_batch_origin(forecasts)
+        if observation is not None and (
+            observation.session != session or observation.origin != origin
+        ):
+            raise _EngineError("calibration observation does not match its session and origin")
+        if observation is not None and observation._engine_token is not self._phase_token:
+            raise _EngineError("calibration observation was not produced by this engine")
         requested = _validated_partitions(partitions)
         observed_updates = {} if observation is None else dict(observation.state_updates)
         _reject_undeclared_state_updates(observed_updates, requested, producer="observer")
         if self._calibrator is None:
-            return CalibrationResult(forecasts, observed_updates)
+            return _bind_calibration_result(
+                forecasts,
+                observed_updates,
+                session=session,
+                origin=origin,
+                engine_token=self._phase_token,
+            )
         if observation is not None and set(observation.prior_states) == set(requested):
             states = dict(observation.prior_states)
         else:
@@ -457,9 +609,28 @@ class Engine:
                 for partition in requested
             }
         states.update(observed_updates)
-        result = self._calibrator(forecasts, states)
-        if not isinstance(result, CalibrationResult):
+        callback_result = self._calibrator(forecasts, states)
+        if not isinstance(callback_result, CalibrationResult):
             raise _EngineError("calibrator must return a CalibrationResult")
+        result = CalibrationResult(
+            _snapshot_forecast_batch(callback_result.forecasts),
+            dict(callback_result.state_updates),
+            session=callback_result.session,
+            origin=callback_result.origin,
+        )
+        if result.session is not None and (result.session != session or result.origin != origin):
+            raise _EngineError("calibrator result does not match its session and origin")
+        if result.forecasts.calendar != forecasts.calendar:
+            raise _EngineError("calibrator changed the forecast calendar")
+        if set(result.forecasts.issuances) != set(forecasts.issuances):
+            raise _EngineError("calibrator changed forecast row keys")
+        calibrated = _bind_forecast_batch(
+            result.forecasts,
+            session=session,
+            engine_token=self._phase_token,
+        )
+        if _forecast_batch_origin(calibrated) != origin:
+            raise _EngineError("calibrator changed the forecast origin")
         _reject_undeclared_state_updates(
             result.state_updates,
             requested,
@@ -467,19 +638,47 @@ class Engine:
         )
         merged_updates = observed_updates
         merged_updates.update(result.state_updates)
-        return CalibrationResult(result.forecasts, merged_updates)
+        return _bind_calibration_result(
+            calibrated,
+            merged_updates,
+            session=session,
+            origin=origin,
+            engine_token=self._phase_token,
+        )
 
-    def order(self, request: OrderRequest) -> tuple[OrderRow, ...]:
-        """Apply the configured orderer, or emit no orders."""
+    def order(self, request: OrderRequest) -> DecisionBatch | None:
+        """Apply the configured orderer, or report that decisions are disabled."""
         if not isinstance(request, OrderRequest):
             raise TypeError("order requires an OrderRequest")
         self._require_session(request.session)
         if self._orderer is None:
-            return ()
-        orders = tuple(self._orderer(request))
-        if any(not isinstance(order, OrderRow) for order in orders):
-            raise _EngineError("orderer must return only OrderRow values")
-        return orders
+            return None
+        self._require_forecast_batch(request.forecasts)
+        configuration = self._ordering_configuration
+        if configuration is None:
+            raise _EngineError("order requires session ordering configuration")
+        decision_request = _bottom_node_order_request(
+            request,
+            series_keys=configuration.series_keys,
+            engine_token=self._phase_token,
+        )
+        task_horizon, _model_config = _session_origin_inputs(request.session)
+        _require_decision_series_coverage(
+            decision_request.forecasts,
+            series_keys=configuration.series_keys,
+            task_horizon=task_horizon,
+        )
+        requested = _decision_keys(decision_request.forecasts)
+        _require_inventory_coverage(decision_request.inventory_positions, requested=requested)
+        proposals = tuple(islice(self._orderer(decision_request), len(requested) + 1))
+        decisions = DecisionBatch(
+            session=request.session,
+            origin=request.origin,
+            requested=requested,
+            proposals=proposals,
+        )
+        object.__setattr__(decisions, "_engine_token", self._phase_token)
+        return decisions
 
     def observe(
         self,
@@ -512,7 +711,12 @@ class Engine:
                 )
                 resolutions[key] = actual
         if self._observer is None:
-            return ObservationResult(resolutions)
+            return _bind_observation_result(
+                resolutions,
+                session=session,
+                origin=origin,
+                engine_token=self._phase_token,
+            )
         states = MappingProxyType(
             {
                 partition: self._calibration_state_store.load(session, partition)
@@ -520,7 +724,14 @@ class Engine:
             }
         )
         updates = self._observer(due, MappingProxyType(resolutions), states)
-        result = ObservationResult(resolutions, updates, states)
+        result = _bind_observation_result(
+            resolutions,
+            updates,
+            states,
+            session=session,
+            origin=origin,
+            engine_token=self._phase_token,
+        )
         _reject_undeclared_state_updates(
             result.state_updates,
             requested,
@@ -540,20 +751,32 @@ class Engine:
             raise _EngineError("settlement snapshot does not match the engine ledger")
         return _settle(request)
 
-    def commit(self, request: OriginCommit | CommitReceipt) -> CommitReceipt:
+    @overload
+    def commit(self, request: CommitRequest) -> CommitResult: ...
+
+    @overload
+    def commit(self, request: OriginCommit | CommitReceipt) -> CommitReceipt: ...
+
+    def commit(
+        self,
+        request: CommitRequest | OriginCommit | CommitReceipt,
+    ) -> CommitResult | CommitReceipt:
         """Persist an origin's ledger and monotone calibration-state mutations."""
+        if isinstance(request, CommitRequest):
+            return self._commit_request(request)
         if not isinstance(request, (OriginCommit, CommitReceipt)):
-            raise TypeError("commit requires an OriginCommit or CommitReceipt")
+            raise TypeError("commit requires a CommitRequest, OriginCommit, or CommitReceipt")
         self._require_session(request.session)
         if isinstance(request, OriginCommit):
             expected = CommitReceipt.from_commit(request)
-            receipt = self._ledger_sink.commit(request)
+            receipt = _snapshot_commit_receipt(self._ledger_sink.commit(request))
             if receipt != expected:
                 raise _EngineError("ledger sink returned a mismatched commit receipt")
         else:
-            receipt = self._ledger_sink.receipt(request.origin)
-            if receipt is None:
+            callback_receipt = self._ledger_sink.receipt(request.origin)
+            if callback_receipt is None:
                 raise _EngineError("commit receipt is not journaled by the ledger sink")
+            receipt = _snapshot_commit_receipt(callback_receipt)
             if receipt != request:
                 raise _EngineError("commit receipt does not match the ledger journal")
         for partition, value in receipt.state_updates.items():
@@ -565,9 +788,90 @@ class Engine:
             )
         return receipt
 
+    def _commit_request(self, request: CommitRequest) -> CommitResult:
+        self._require_session(request.session)
+        if request.observation._engine_token is not self._phase_token:
+            raise _EngineError("commit observation was not produced by this engine")
+        if request.calibration._engine_token is not self._phase_token:
+            raise _EngineError("commit calibration was not produced by this engine")
+        if (
+            request.decisions is not None
+            and request.decisions._engine_token is not self._phase_token
+        ):
+            raise _EngineError("commit decisions were not produced by this engine")
+        self._require_forecast_batch(request.calibration.forecasts)
+        configuration = self._ordering_configuration
+        if request.decisions is not None:
+            if configuration is None:
+                raise _EngineError("commit decisions require ordering configuration")
+            decision_request = _bottom_node_order_request(
+                OrderRequest(
+                    session=request.session,
+                    origin=request.origin,
+                    forecasts=request.calibration.forecasts,
+                    inventory_positions=request.inventory_positions,
+                ),
+                series_keys=configuration.series_keys,
+                engine_token=self._phase_token,
+            )
+            task_horizon, _model_config = _session_origin_inputs(request.session)
+            _require_decision_series_coverage(
+                decision_request.forecasts,
+                series_keys=configuration.series_keys,
+                task_horizon=task_horizon,
+            )
+            expected = _decision_keys(decision_request.forecasts)
+            _require_inventory_coverage(decision_request.inventory_positions, requested=expected)
+            if request.decisions.requested != expected:
+                raise _EngineError("commit decisions do not match calibrated decision groups")
+        orders = _materialize_decisions(
+            request.decisions,
+            configuration=configuration,
+            calendar=self._ledger_sink.calendar,
+        )
+        settlement_result: _SettlementResult | None = None
+        if request.settlement is not None:
+            settlement_request = _SettlementRequest(
+                session=request.session,
+                snapshot=request.settlement.snapshot,
+                actuals=request.settlement.actuals,
+                inventory_positions=request.inventory_positions,
+                orders=orders,
+                actuals_semantics=request.settlement.actuals_semantics,
+            )
+            settlement_result = (
+                self.settle(settlement_request)
+                if self._ledger_sink.receipt(request.origin) is None
+                else _settle(settlement_request)
+            )
+        receipt = self.commit(
+            OriginCommit(
+                session=request.session,
+                origin=request.origin,
+                resolutions=request.observation.resolutions,
+                forecasts=(
+                    ForecastWrite(
+                        request.calibration.forecasts.frame,
+                        request.calibration.forecasts.issuances,
+                    ),
+                ),
+                orders=orders,
+                settlements=() if settlement_result is None else settlement_result.records,
+                state_updates=request.calibration.state_updates,
+            )
+        )
+        return CommitResult(receipt=receipt, orders=orders, settlement=settlement_result)
+
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:
             raise _EngineError("engine session does not match its ledger sink")
+
+    def _require_forecast_batch(self, forecasts: ForecastBatch) -> None:
+        if forecasts._engine_token is not self._phase_token or forecasts.session is None:
+            raise _EngineError("forecast batch was not produced by this engine")
+        self._require_session(forecasts.session)
+        if forecasts.calendar != self._ledger_sink.calendar:
+            raise _EngineError("forecast batch calendar does not match the engine ledger")
 
     def _require_time_loop_ports(
         self,
@@ -671,42 +975,27 @@ class Spine:
             forecasts=calibrated.forecasts,
             inventory_positions=request.inventory_positions,
         )
-        orders = self._phase(
+        decisions = self._phase(
             Phase.ORDER,
             request.origin,
-            lambda: self._engine.order(order_request) if decision_origin else (),
+            lambda: self._engine.order(order_request) if decision_origin else None,
         )
 
-        def commit_phase() -> None:
-            settlement_result: _SettlementResult | None = None
-            if settlement is not None:
-                settlement_result = self._engine.settle(
-                    _SettlementRequest(
-                        session=request.session,
-                        snapshot=settlement.snapshot,
-                        actuals=settlement.actuals,
-                        inventory_positions=request.inventory_positions,
-                        orders=orders,
-                        actuals_semantics=settlement.actuals_semantics,
-                    )
+        def commit_phase() -> tuple[OrderRow, ...]:
+            committed = self._engine.commit(
+                CommitRequest(
+                    session=request.session,
+                    origin=request.origin,
+                    observation=observation,
+                    calibration=calibrated,
+                    inventory_positions=request.inventory_positions,
+                    decisions=decisions,
+                    settlement=settlement,
                 )
-            commit_request = OriginCommit(
-                session=request.session,
-                origin=request.origin,
-                resolutions=observation.resolutions,
-                forecasts=(
-                    ForecastWrite(
-                        calibrated.forecasts.frame,
-                        calibrated.forecasts.issuances,
-                    ),
-                ),
-                orders=orders,
-                settlements=() if settlement_result is None else settlement_result.records,
-                state_updates=calibrated.state_updates,
             )
-            self._engine.commit(commit_request)
+            return committed.orders
 
-        self._phase(
+        orders = self._phase(
             Phase.COMMIT,
             request.origin,
             commit_phase,
@@ -752,6 +1041,112 @@ class Spine:
                 return
 
 
+def _bind_forecast_batch(
+    forecasts: ForecastBatch,
+    *,
+    session: SessionIdentity,
+    engine_token: object,
+) -> ForecastBatch:
+    if forecasts._engine_token is not None and forecasts._engine_token is not engine_token:
+        raise _EngineError("forecast batch was produced by another engine")
+    if forecasts.session is not None and forecasts.session != session:
+        raise _EngineError("forecast batch belongs to another engine session")
+    if forecasts.session == session and forecasts._engine_token is engine_token:
+        return forecasts
+    bound = ForecastBatch(
+        forecasts.frame,
+        calendar=forecasts.calendar,
+        issuances=forecasts.issuances,
+    )
+    object.__setattr__(bound, "_session", session)
+    object.__setattr__(bound, "_engine_token", engine_token)
+    return bound
+
+
+def _snapshot_forecast_batch(forecasts: ForecastBatch) -> ForecastBatch:
+    """Collapse callback subclasses into one stable, exact forecast value."""
+    frame = forecasts.frame
+    calendar = forecasts.calendar
+    issuances = {key: dict(bounds) for key, bounds in forecasts.issuances.items()}
+    session = forecasts.session
+    engine_token = forecasts._engine_token
+    snapshot = ForecastBatch(frame, calendar=calendar, issuances=issuances)
+    object.__setattr__(snapshot, "_session", session)
+    object.__setattr__(snapshot, "_engine_token", engine_token)
+    return snapshot
+
+
+def _snapshot_commit_receipt(receipt: object) -> CommitReceipt:
+    """Collapse a ledger callback result into one stable, exact receipt."""
+    if not isinstance(receipt, CommitReceipt):
+        raise _EngineError("ledger sink must return a CommitReceipt")
+    return CommitReceipt(
+        session=receipt.session,
+        origin=receipt.origin,
+        digest=receipt.digest,
+        state_updates=dict(receipt.state_updates),
+        settlement_periods=tuple(receipt.settlement_periods),
+    )
+
+
+def _bind_observation_result(
+    resolutions: Mapping[ForecastKey, float],
+    state_updates: Mapping[str, bytes] | None = None,
+    prior_states: Mapping[str, bytes | None] | None = None,
+    *,
+    session: SessionIdentity,
+    origin: pd.Timestamp,
+    engine_token: object,
+) -> ObservationResult:
+    result = ObservationResult(
+        resolutions,
+        {} if state_updates is None else state_updates,
+        {} if prior_states is None else prior_states,
+        session=session,
+        origin=origin,
+    )
+    object.__setattr__(result, "_engine_token", engine_token)
+    return result
+
+
+def _bind_calibration_result(
+    forecasts: ForecastBatch,
+    state_updates: Mapping[str, bytes],
+    *,
+    session: SessionIdentity,
+    origin: pd.Timestamp,
+    engine_token: object,
+) -> CalibrationResult:
+    result = CalibrationResult(
+        forecasts,
+        state_updates,
+        session=session,
+        origin=origin,
+    )
+    object.__setattr__(result, "_engine_token", engine_token)
+    return result
+
+
+def _forecast_batch_origin(forecasts: ForecastBatch) -> pd.Timestamp:
+    origins = {key[1] for key in forecasts.issuances}
+    if len(origins) != 1:
+        raise _EngineError("forecast batch must contain exactly one origin")
+    return next(iter(origins))
+
+
+def _validate_optional_provenance(
+    session: SessionIdentity | None,
+    origin: pd.Timestamp | None,
+    *,
+    name: str,
+) -> None:
+    if session is None and origin is None:
+        return
+    if not isinstance(session, SessionIdentity):
+        raise TypeError(f"{name} session must be a SessionIdentity")
+    _require_timestamp(origin, name=f"{name} origin")
+
+
 def _artifact_key(session: SessionIdentity, task: ForecastTask) -> str:
     digest = hashlib.sha256()
     for payload in (
@@ -777,12 +1172,117 @@ def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:
     )
 
 
+def _bottom_node_order_request(
+    request: OrderRequest,
+    *,
+    series_keys: tuple[str, ...],
+    engine_token: object,
+) -> OrderRequest:
+    allowed = frozenset(series_keys)
+    foreign_positions = set(request.inventory_positions) - allowed
+    if foreign_positions:
+        raise _EngineError(
+            f"inventory positions contain non-decision series: {sorted(foreign_positions)!r}"
+        )
+    if all(key[0] in allowed for key in request.forecasts.issuances):
+        return request
+
+    frame = request.forecasts.frame
+    filtered = frame.loc[frame[SERIES_KEY].isin(allowed)].reset_index(drop=True)
+    issuances = {
+        key: value for key, value in request.forecasts.issuances.items() if key[0] in allowed
+    }
+    filtered_forecasts = _bind_forecast_batch(
+        ForecastBatch(
+            filtered,
+            calendar=request.forecasts.calendar,
+            issuances=issuances,
+        ),
+        session=request.session,
+        engine_token=engine_token,
+    )
+    return OrderRequest(
+        session=request.session,
+        origin=request.origin,
+        forecasts=filtered_forecasts,
+        inventory_positions=request.inventory_positions,
+    )
+
+
+def _decision_keys(forecasts: ForecastBatch) -> tuple[DecisionKey, ...]:
+    return tuple(
+        sorted(
+            {
+                (series_key, model_name)
+                for series_key, _origin, _step, model_name in forecasts.issuances
+            },
+            key=lambda key: (key[0].encode(), key[1].encode()),
+        )
+    )
+
+
+def _require_decision_series_coverage(
+    forecasts: ForecastBatch,
+    *,
+    series_keys: tuple[str, ...],
+    task_horizon: int,
+) -> None:
+    expected = set(series_keys)
+    supplied = {series_key for series_key, _origin, _step, _model in forecasts.issuances}
+    if supplied == expected:
+        expected_steps = set(range(1, task_horizon + 1))
+        steps_by_group: dict[DecisionKey, set[int]] = {}
+        for series_key, _origin, step, model_name in forecasts.issuances:
+            steps_by_group.setdefault((series_key, model_name), set()).add(step)
+        incomplete = sorted(
+            (group, sorted(steps))
+            for group, steps in steps_by_group.items()
+            if steps != expected_steps
+        )
+        if not incomplete:
+            return
+        raise _EngineError(
+            "ordering forecast horizons must exactly cover the session horizon per "
+            f"decision group; invalid={incomplete!r}"
+        )
+    missing = sorted(expected - supplied, key=str.encode)
+    unexpected = sorted(supplied - expected, key=str.encode)
+    raise _EngineError(
+        "ordering forecasts must exactly cover configured decision series; "
+        f"missing={missing!r}, unexpected={unexpected!r}"
+    )
+
+
+def _require_inventory_coverage(
+    inventory_positions: Mapping[str, InventoryPosition],
+    *,
+    requested: tuple[DecisionKey, ...],
+) -> None:
+    expected = {series_key for series_key, _model_name in requested}
+    supplied = set(inventory_positions)
+    if supplied == expected:
+        return
+    missing = sorted(expected - supplied, key=str.encode)
+    unexpected = sorted(supplied - expected, key=str.encode)
+    raise _EngineError(
+        "inventory positions must exactly cover requested decision series; "
+        f"missing={missing!r}, unexpected={unexpected!r}"
+    )
+
+
+def _require_timestamp(value: object, *, name: str) -> None:
+    if not isinstance(value, pd.Timestamp) or pd.isna(value):
+        raise _EngineError(f"{name} must be a non-missing pandas Timestamp")
+    if value.tz is not None:
+        raise _EngineError(f"{name} must be timezone-naive")
+
+
 def _validated_partitions(partitions: Sequence[str]) -> tuple[str, ...]:
     requested = tuple(partitions)
     if len(set(requested)) != len(requested):
         raise _EngineError("calibration partitions must be unique")
     for partition in requested:
-        _require_identifier(partition, name="calibration partition")
+        _require_trimmed_identifier(partition, name="calibration partition")
     return requested
 
 
@@ -791,7 +1291,7 @@ def _validated_state_updates(value: Mapping[str, bytes]) -> dict[str, bytes]:
         raise TypeError("calibration state updates must be a mapping")
     updates: dict[str, bytes] = {}
     for partition, state in value.items():
-        _require_identifier(partition, name="calibration partition")
+        _require_trimmed_identifier(partition, name="calibration partition")
         if not isinstance(state, bytes):
             raise TypeError("calibration state updates must contain bytes")
         updates[partition] = state
@@ -805,7 +1305,7 @@ def _validated_state_snapshot(
         raise TypeError("calibration state snapshot must be a mapping")
     states: dict[str, bytes | None] = {}
     for partition, state in value.items():
-        _require_identifier(partition, name="calibration partition")
+        _require_trimmed_identifier(partition, name="calibration partition")
         if state is not None and not isinstance(state, bytes):
             raise TypeError("calibration state snapshot must contain bytes or None")
         states[partition] = state
@@ -830,25 +1330,40 @@ def _validated_inventory_positions(
         raise TypeError("inventory positions must be a mapping")
     positions: dict[str, InventoryPosition] = {}
     for series_key, position in value.items():
-        _require_identifier(series_key, name="inventory-position series key")
+        _require_utf8_identifier(series_key, name="inventory-position series key")
         if not isinstance(position, InventoryPosition):
             raise TypeError("inventory positions must contain InventoryPosition values")
         positions[series_key] = position
     return positions
 
 
-def _require_identifier(value: object, *, name: str) -> None:
-    if not isinstance(value, str) or not value or value != value.strip():
+def _require_utf8_identifier(value: object, *, name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise _EngineError(f"{name} must be a non-empty string")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as error:
+        raise _EngineError(f"{name} must be valid UTF-8") from error
+
+
+def _require_trimmed_identifier(value: object, *, name: str) -> None:
+    _require_utf8_identifier(value, name=name)
+    assert isinstance(value, str)
+    if value != value.strip():
         raise _EngineError(f"{name} must be a non-empty trimmed string")
 
 
 __all__ = [
     "ENGINE_VERBS",
     "CalibrationResult",
+    "CommitRequest",
+    "CommitResult",
+    "DecisionBatch",
     "Engine",
     "FittedTask",
     "ForecastBatch",
     "ObservationResult",
+    "OrderProposal",
     "OrderRequest",
     "OriginRequest",
     "OriginResult",
