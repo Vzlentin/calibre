@@ -257,10 +257,14 @@ class TimeLoop:
         )
         self._resume_receipt = frontier_receipt
         self._spine = Spine(engine, reporter=reporter)
-        drain_window = tuple(
-            calendar.advance(final_decision, step) for step in range(1, timing.lead_time + 1)
+        uncommitted_periods = tuple(
+            period
+            for period in self._settlement_periods
+            if initial_snapshot.frontier is None or period > initial_snapshot.frontier
         )
-        self._preflight_drain(drain_window)
+        self._actuals_by_key = MappingProxyType(
+            self._preflight_settlement_actuals(uncommitted_periods)
+        )
 
     def run(self) -> TimeLoopResult:
         """Run or resume the complete schedule from its first uncommitted period."""
@@ -333,32 +337,29 @@ class TimeLoop:
             inventory_positions=final_snapshot.latest_positions,
         )
 
-    def _preflight_drain(self, periods: tuple[pd.Timestamp, ...]) -> None:
+    def _preflight_settlement_actuals(
+        self,
+        periods: tuple[pd.Timestamp, ...],
+    ) -> dict[ActualKey, float]:
+        if not periods:
+            return {}
         keys = tuple((series_key, period) for period in periods for series_key in self._series_keys)
         before = self._calendar.advance(periods[-1], 1)
         supplied = self._actuals_source.for_keys(keys, before=before)
         try:
-            validate_actuals_window(
+            return validate_actuals_window(
                 supplied,
                 periods=periods,
                 series_keys=self._series_keys,
             )
         except (SettlementError, TypeError) as error:
-            raise TimeLoopError(f"drain actuals do not cover a valid window: {error}") from error
+            raise TimeLoopError(
+                f"settlement actuals do not cover a valid window: {error}"
+            ) from error
 
     def _settlement_actuals(self, period: pd.Timestamp) -> Mapping[ActualKey, float]:
         keys = tuple((series_key, period) for series_key in self._series_keys)
-        expected = set(keys)
-        before = self._calendar.advance(period, 1)
-        supplied = self._actuals_source.for_keys(keys, before=before)
-        if set(supplied) != expected:
-            missing = tuple(key for key in keys if key not in supplied)
-            extra = tuple(key for key in supplied if key not in expected)
-            raise TimeLoopError(
-                "settlement actuals must come exactly from the authoritative source; "
-                f"missing={missing!r}, extra={extra!r}"
-            )
-        return supplied
+        return MappingProxyType({key: self._actuals_by_key[key] for key in keys})
 
     def _receipt_prefix(self) -> dict[pd.Timestamp, CommitReceipt]:
         receipts: dict[pd.Timestamp, CommitReceipt] = {}

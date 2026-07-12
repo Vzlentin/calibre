@@ -64,7 +64,7 @@ def _point_forecasts(payload: bytes) -> tuple[str, ...]:
     )
 
 
-def test_resumed_run_matches_uninterrupted_run(tmp_path: Path) -> None:
+def test_resumed_runs_match_uninterrupted_run(tmp_path: Path) -> None:
     seed = 611
     uninterrupted = _run_fixture(
         mode="uninterrupted",
@@ -72,15 +72,22 @@ def test_resumed_run_matches_uninterrupted_run(tmp_path: Path) -> None:
         hash_seed="17",
         output=tmp_path / "uninterrupted.bin",
     )
-    resumed = _run_fixture(
-        mode="resumed",
+    resumed_before_commit = _run_fixture(
+        mode="resumed-before-commit",
         seed=seed,
         hash_seed="8675309",
-        output=tmp_path / "resumed.bin",
+        output=tmp_path / "resumed-before-commit.bin",
+    )
+    resumed_after_commit = _run_fixture(
+        mode="resumed-after-commit",
+        seed=seed,
+        hash_seed="314159",
+        output=tmp_path / "resumed-after-commit.bin",
     )
 
-    assert resumed == uninterrupted
-    _artifact_path(tmp_path, "resumed-ledger.bin").write_bytes(resumed)
+    assert resumed_before_commit == uninterrupted
+    assert resumed_after_commit == uninterrupted
+    _artifact_path(tmp_path, "resumed-ledger.bin").write_bytes(resumed_after_commit)
 
 
 @pytest.mark.xfail(

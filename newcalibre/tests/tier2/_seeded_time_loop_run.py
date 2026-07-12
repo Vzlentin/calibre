@@ -127,8 +127,8 @@ class SeededFixtureAdapter:
         raise AdapterCapabilityError("tier-2 fixture has no incremental-update capability")
 
 
-class LostCommitResponseLedgerSink(InMemoryLedgerSink):
-    """Publish one selected commit and then simulate losing only its response."""
+class InterruptingLedgerSink(InMemoryLedgerSink):
+    """Interrupt one selected commit immediately before or after publication."""
 
     def __init__(
         self,
@@ -136,17 +136,21 @@ class LostCommitResponseLedgerSink(InMemoryLedgerSink):
         session: SessionIdentity,
         calendar: Calendar,
         fail_origin: pd.Timestamp,
+        commit_before_failure: bool,
     ) -> None:
         super().__init__(session=session, calendar=calendar)
         self._fail_origin = fail_origin
+        self._commit_before_failure = commit_before_failure
         self._failed = False
 
     def commit(self, write: OriginCommit) -> CommitReceipt:
-        receipt = super().commit(write)
-        if write.origin == self._fail_origin and not self._failed:
-            self._failed = True
-            raise RuntimeError("tier-2 fixture lost the durable commit response")
-        return receipt
+        if write.origin != self._fail_origin or self._failed:
+            return super().commit(write)
+        self._failed = True
+        if not self._commit_before_failure:
+            raise RuntimeError("tier-2 fixture interrupted before the durable commit")
+        super().commit(write)
+        raise RuntimeError("tier-2 fixture lost the durable commit response")
 
 
 def _panel() -> Panel:
@@ -261,14 +265,19 @@ def _run_uninterrupted(seed: int) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
     return sink, result
 
 
-def _run_resumed(seed: int) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
+def _run_resumed(
+    seed: int,
+    *,
+    commit_before_failure: bool,
+) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
     panel = _panel()
     session = _session(seed)
     actuals = InMemoryActualsSource(panel)
-    sink = LostCommitResponseLedgerSink(
+    sink = InterruptingLedgerSink(
         session=session,
         calendar=_CALENDAR,
         fail_origin=_FAIL_ORIGIN,
+        commit_before_failure=commit_before_failure,
     )
     interrupted_states = InMemoryCalibrationStateStore()
     interrupted = TimeLoop(
@@ -285,10 +294,15 @@ def _run_resumed(seed: int) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
     try:
         interrupted.run()
     except PhaseError as error:
-        assert "lost the durable commit response" in str(error)
+        expected_error = (
+            "lost the durable commit response"
+            if commit_before_failure
+            else "interrupted before the durable commit"
+        )
+        assert expected_error in str(error)
     else:
         raise AssertionError("tier-2 interruption fixture did not interrupt")
-    assert sink.receipt(_FAIL_ORIGIN) is not None
+    assert (sink.receipt(_FAIL_ORIGIN) is not None) is commit_before_failure
     assert interrupted_states.load(session, _PARTITION) == b"1"
 
     resumed_states = InMemoryCalibrationStateStore()
@@ -402,7 +416,15 @@ def _ledger_bytes(sink: InMemoryLedgerSink, result: TimeLoopResult) -> bytes:
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("uninterrupted", "resumed"), required=True)
+    parser.add_argument(
+        "--mode",
+        choices=(
+            "uninterrupted",
+            "resumed-before-commit",
+            "resumed-after-commit",
+        ),
+        required=True,
+    )
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args(argv)
@@ -414,7 +436,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.mode == "uninterrupted":
         sink, result = _run_uninterrupted(args.seed)
     else:
-        sink, result = _run_resumed(args.seed)
+        sink, result = _run_resumed(
+            args.seed,
+            commit_before_failure=args.mode == "resumed-after-commit",
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(_ledger_bytes(sink, result))
 

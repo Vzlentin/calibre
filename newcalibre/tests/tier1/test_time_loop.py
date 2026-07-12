@@ -537,6 +537,34 @@ def test_request_ending_before_the_durable_frontier_is_rejected() -> None:
     assert tuple(runtime.actuals.calls) == calls_before
 
 
+def test_missing_non_drain_actual_fails_at_construction_without_engine_effects() -> None:
+    session = _session()
+    missing = ("a", pd.Timestamp("2026-01-05"))
+    actuals = RecordingActualsSource(_panel(range(1, 12)), omitted=(missing,))
+    runtime = _runtime(
+        session=session,
+        forecast_panel=_panel(range(101, 112)),
+        actuals=actuals,
+    )
+
+    with pytest.raises(TimeLoopError, match="settlement actuals.*missing.*2026-01-05"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(session),
+        )
+
+    expected_periods = tuple(pd.date_range("2026-01-04", "2026-01-11", freq="D"))
+    assert runtime.actuals.calls == [
+        (
+            tuple(("a", period) for period in expected_periods),
+            pd.Timestamp("2026-01-12"),
+        )
+    ]
+    _assert_no_effects(runtime)
+
+
 def test_missing_drain_actual_fails_at_construction_without_engine_effects() -> None:
     session = _session()
     missing = ("a", pd.Timestamp("2026-01-11"))
@@ -547,7 +575,7 @@ def test_missing_drain_actual_fails_at_construction_without_engine_effects() -> 
         actuals=actuals,
     )
 
-    with pytest.raises(TimeLoopError, match="drain actuals.*missing.*2026-01-11"):
+    with pytest.raises(TimeLoopError, match="settlement actuals.*missing.*2026-01-11"):
         TimeLoop(
             engine=runtime.engine,
             actuals_source=runtime.actuals,
@@ -555,12 +583,10 @@ def test_missing_drain_actual_fails_at_construction_without_engine_effects() -> 
             request=_request(session),
         )
 
+    expected_periods = tuple(pd.date_range("2026-01-04", "2026-01-11", freq="D"))
     assert runtime.actuals.calls == [
         (
-            (
-                ("a", pd.Timestamp("2026-01-10")),
-                ("a", pd.Timestamp("2026-01-11")),
-            ),
+            tuple(("a", period) for period in expected_periods),
             pd.Timestamp("2026-01-12"),
         )
     ]
@@ -580,7 +606,7 @@ def test_invalid_drain_actual_fails_at_construction_without_engine_effects() -> 
         actuals=actuals,
     )
 
-    with pytest.raises(TimeLoopError, match="drain actuals.*2026-01-11.*finite"):
+    with pytest.raises(TimeLoopError, match="settlement actuals.*2026-01-11.*finite"):
         TimeLoop(
             engine=runtime.engine,
             actuals_source=runtime.actuals,
@@ -685,22 +711,34 @@ def test_reconstructed_loop_repairs_lost_commit_without_callbacks_or_rebooking()
     assert len(sink.settlements) == 1
     assert states.states == {}
 
+    resumed_actuals = RecordingActualsSource(
+        _panel(range(1, 12)),
+        omitted=(("a", ORIGINS[0]),),
+    )
     resumed = _runtime(
         session=session,
         forecast_panel=forecast_panel,
-        actuals=actuals,
+        actuals=resumed_actuals,
         artifacts=artifacts,
         states=states,
         sink=sink,
     )
     phase_events: list[PhaseEvent] = []
-    result = TimeLoop(
+    loop = TimeLoop(
         engine=resumed.engine,
-        actuals_source=actuals,
+        actuals_source=resumed_actuals,
         ledger_sink=sink,
         request=_request(session),
         reporter=phase_events.append,
-    ).run()
+    )
+    expected_uncommitted = tuple(pd.date_range("2026-01-05", "2026-01-11", freq="D"))
+    assert resumed_actuals.calls == [
+        (
+            tuple(("a", period) for period in expected_uncommitted),
+            pd.Timestamp("2026-01-12"),
+        )
+    ]
+    result = loop.run()
 
     assert all(event.origin != ORIGINS[0] for event in phase_events)
     assert [origin for origin, _history, _values in resumed.fit_histories] == [
