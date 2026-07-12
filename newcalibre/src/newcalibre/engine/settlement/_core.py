@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from itertools import pairwise
 from numbers import Real
 from types import MappingProxyType
 
@@ -25,30 +24,19 @@ from newcalibre.engine._session import (
     session_series_and_frequency,
 )
 from newcalibre.engine.errors import EngineError
-from newcalibre.engine.ports import ActualKey, LedgerSnapshot
+from newcalibre.engine.ports import ActualKey, SettlementSnapshot
 from newcalibre.ledger import (
     BookedCost,
     LedgerError,
     OrderKey,
     OrderRow,
-    SettlementKey,
     SettlementRecord,
     lost_sales_transition,
 )
 
-type SettlementPeriodKey = tuple[str, pd.Timestamp]
-
 
 class SettlementError(EngineError):
     """Report a settlement request that cannot produce honest durable facts."""
-
-
-@dataclass(frozen=True, slots=True)
-class _LedgerOrderIndex:
-    """Retain validated order identity and the open pipeline once per request."""
-
-    existing_keys: frozenset[OrderKey]
-    open_by_series: Mapping[str, tuple[OrderRow, ...]]
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -56,24 +44,19 @@ class SettlementRequest:
     """Declare an immutable, calendar-ordered settlement window."""
 
     session: SessionIdentity
-    periods: tuple[pd.Timestamp, ...]
-    ledger: LedgerSnapshot
+    snapshot: SettlementSnapshot
     actuals: Mapping[ActualKey, float]
     inventory_positions: Mapping[str, InventoryPosition]
     orders: tuple[OrderRow, ...]
-    timing: DecisionTiming = field(init=False)
-    stockout_rule: StockoutRule = field(init=False)
     actuals_semantics: ActualsSemantics
     cost_structure: CostStructure = field(init=False)
     _series_keys: tuple[str, ...] = field(repr=False)
-    _open_orders: Mapping[str, tuple[OrderRow, ...]] = field(repr=False)
 
     def __init__(
         self,
         *,
         session: SessionIdentity,
-        periods: Sequence[pd.Timestamp],
-        ledger: LedgerSnapshot,
+        snapshot: SettlementSnapshot,
         actuals: Mapping[ActualKey, float],
         inventory_positions: Mapping[str, InventoryPosition],
         orders: Sequence[OrderRow] = (),
@@ -81,20 +64,19 @@ class SettlementRequest:
     ) -> None:
         if not isinstance(session, SessionIdentity):
             raise TypeError("settlement session must be a SessionIdentity")
-        if not isinstance(ledger, LedgerSnapshot):
-            raise TypeError("settlement ledger must be a LedgerSnapshot")
-        if ledger.session != session:
-            raise SettlementError("settlement session must match its ledger snapshot")
+        if not isinstance(snapshot, SettlementSnapshot):
+            raise TypeError("settlement snapshot must be a SettlementSnapshot")
+        if snapshot.session != session:
+            raise SettlementError("settlement session must match its snapshot")
         if not isinstance(actuals_semantics, ActualsSemantics):
             raise TypeError("settlement actuals semantics must be ActualsSemantics")
 
         definition = session_definition(session)
         series_keys, frequency = session_series_and_frequency(definition)
-        if frequency != ledger.calendar.frequency:
-            raise SettlementError("settlement ledger calendar must match its session")
+        if frequency != snapshot.calendar.frequency:
+            raise SettlementError("settlement snapshot calendar must match its session")
         series_key_set = set(series_keys)
-        frozen_periods = _validated_periods(periods, ledger=ledger)
-        period_set = set(frozen_periods)
+        period_set = set(snapshot.periods)
         positions = _validated_positions(inventory_positions)
         if set(positions) != series_key_set:
             raise SettlementError(
@@ -108,20 +90,11 @@ class SettlementRequest:
             raise SettlementError("settlement lead time must be at least one period")
         if stockout_rule is not StockoutRule.LOST_SALES:
             raise SettlementError(f"unsupported settlement stock-out rule: {stockout_rule!r}")
-        settled_arrivals = _validated_settlement_history(
-            ledger=ledger,
-            periods=frozen_periods,
+        validate_snapshot_state(
+            snapshot=snapshot,
             positions=positions,
-            stockout_rule=stockout_rule,
+            series_keys=series_keys,
             actuals_semantics=actuals_semantics,
-            cost_structure=cost_structure,
-        )
-        ledger_orders = _validated_ledger_orders(
-            ledger=ledger,
-            periods=frozen_periods,
-            positions=positions,
-            timing=timing,
-            settled_arrivals=settled_arrivals,
         )
         staged_orders = _validated_orders(
             orders,
@@ -129,28 +102,21 @@ class SettlementRequest:
             period_set=period_set,
             series_keys=series_key_set,
             timing=timing,
-            ledger=ledger,
-            existing_keys=ledger_orders.existing_keys,
+            snapshot=snapshot,
         )
-        frozen_actuals = _validated_actuals(
+        frozen_actuals = validate_actuals_window(
             actuals,
-            periods=frozen_periods,
-            period_set=period_set,
+            periods=snapshot.periods,
             series_keys=series_keys,
-            series_key_set=series_key_set,
         )
         object.__setattr__(self, "session", session)
-        object.__setattr__(self, "periods", frozen_periods)
-        object.__setattr__(self, "ledger", ledger)
+        object.__setattr__(self, "snapshot", snapshot)
         object.__setattr__(self, "actuals", MappingProxyType(frozen_actuals))
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         object.__setattr__(self, "orders", staged_orders)
-        object.__setattr__(self, "timing", timing)
-        object.__setattr__(self, "stockout_rule", stockout_rule)
         object.__setattr__(self, "actuals_semantics", actuals_semantics)
         object.__setattr__(self, "cost_structure", cost_structure)
         object.__setattr__(self, "_series_keys", series_keys)
-        object.__setattr__(self, "_open_orders", ledger_orders.open_by_series)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,19 +142,28 @@ def settle(request: SettlementRequest) -> SettlementResult:
 
     series_keys = request._series_keys
     positions = {series_key: request.inventory_positions[series_key] for series_key in series_keys}
-    open_orders = {series_key: list(request._open_orders[series_key]) for series_key in series_keys}
-    staged_by_period: dict[pd.Timestamp, dict[str, list[OrderRow]]] = {}
+    staged_by_origin: dict[pd.Timestamp, dict[str, list[float]]] = {}
+    staged_by_arrival: dict[pd.Timestamp, dict[str, list[float]]] = {}
     for order in request.orders:
-        staged_by_period.setdefault(order.origin, {}).setdefault(order.series_key, []).append(order)
+        staged_by_origin.setdefault(order.origin, {}).setdefault(order.series_key, []).append(
+            order.quantity
+        )
+        staged_by_arrival.setdefault(order.arrival_period, {}).setdefault(
+            order.series_key,
+            [],
+        ).append(order.quantity)
 
     records: list[SettlementRecord] = []
-    for period in request.periods:
-        staged_by_series = staged_by_period.get(period, {})
+    for period in request.snapshot.periods:
+        staged_origin_by_series = staged_by_origin.get(period, {})
+        staged_arrival_by_series = staged_by_arrival.get(period, {})
         for series_key in series_keys:
             opening = positions[series_key]
-            due, future = _partition_orders(open_orders[series_key], period=period)
             arrivals = _finite_sum(
-                (order.quantity for order in due),
+                (
+                    request.snapshot.due_arrivals.get((series_key, period), 0.0),
+                    *staged_arrival_by_series.get(series_key, ()),
+                ),
                 name="settlement arrivals",
             )
             demand = request.actuals[(series_key, period)]
@@ -200,10 +175,12 @@ def settle(request: SettlementRequest) -> SettlementResult:
                 )
             except LedgerError as error:
                 raise SettlementError(str(error)) from error
-            current_orders = staged_by_series.get(series_key, ())
-            next_open = [*future, *current_orders]
-            on_order = _finite_sum(
-                (order.quantity for order in next_open),
+            current_quantity = _finite_sum(
+                staged_origin_by_series.get(series_key, ()),
+                name="current-order quantity",
+            )
+            on_order = _finite_nonnegative_sum(
+                (opening.on_order, -arrivals, current_quantity),
                 name="open-order quantity",
             )
             next_position = InventoryPosition(
@@ -231,29 +208,62 @@ def settle(request: SettlementRequest) -> SettlementResult:
                     ),
                 )
             )
-            open_orders[series_key] = next_open
 
     return SettlementResult(records=tuple(records), inventory_positions=positions)
 
 
-def _validated_periods(
-    periods: Sequence[pd.Timestamp],
+def validate_snapshot_state(
     *,
-    ledger: LedgerSnapshot,
-) -> tuple[pd.Timestamp, ...]:
-    if isinstance(periods, (str, bytes)):
-        raise TypeError("settlement periods must be a sequence of timestamps")
-    frozen = tuple(periods)
-    if not frozen:
-        raise SettlementError("settlement periods must not be empty")
-    for index, period in enumerate(frozen):
-        try:
-            ledger.calendar.require_member(period, name="settlement period")
-        except (TypeError, ValueError) as error:
-            raise SettlementError(str(error)) from error
-        if index and period != ledger.calendar.advance(frozen[index - 1], 1):
-            raise SettlementError("settlement periods must be contiguous calendar members")
-    return frozen
+    snapshot: SettlementSnapshot,
+    positions: Mapping[str, InventoryPosition],
+    series_keys: tuple[str, ...],
+    actuals_semantics: ActualsSemantics,
+) -> None:
+    series_key_set = set(series_keys)
+    if set(snapshot.open_order_quantities) != series_key_set:
+        raise SettlementError(
+            "settlement snapshot open quantities must exactly match the session series set"
+        )
+    unknown_due_series = sorted(
+        {series_key for series_key, _period in snapshot.due_arrivals} - series_key_set,
+        key=lambda value: value.encode(),
+    )
+    if unknown_due_series:
+        raise SettlementError(
+            f"settlement snapshot due arrivals contain unknown series: {unknown_due_series!r}"
+        )
+    if snapshot.frontier is None:
+        if snapshot.latest_positions:
+            raise SettlementError(
+                "settlement snapshot cannot expose latest positions without a frontier"
+            )
+    else:
+        if snapshot.periods[0] != snapshot.calendar.advance(snapshot.frontier, 1):
+            raise SettlementError(
+                "settlement window must immediately follow the ledger settlement frontier"
+            )
+        if set(snapshot.latest_positions) != series_key_set:
+            raise SettlementError(
+                "settlement snapshot latest positions must cover every session series"
+            )
+        if dict(positions) != dict(snapshot.latest_positions):
+            raise SettlementError(
+                "settlement opening inventory must match the durable settlement frontier"
+            )
+        if snapshot.actuals_semantics is None:
+            raise SettlementError("settlement snapshot frontier is missing actuals semantics")
+    if (
+        snapshot.actuals_semantics is not None
+        and snapshot.actuals_semantics is not actuals_semantics
+    ):
+        raise SettlementError("settlement actuals semantics must match the durable session")
+    for series_key, position in positions.items():
+        if position.backorders != 0.0:
+            raise SettlementError("lost-sales settlement requires zero opening backorders")
+        if position.on_order != snapshot.open_order_quantities[series_key]:
+            raise SettlementError(
+                f"inventory on_order for {series_key!r} does not match the compact ledger index"
+            )
 
 
 def _validated_positions(
@@ -272,16 +282,17 @@ def _validated_positions(
     return positions
 
 
-def _validated_actuals(
+def validate_actuals_window(
     value: Mapping[ActualKey, float],
     *,
     periods: tuple[pd.Timestamp, ...],
-    period_set: set[pd.Timestamp],
     series_keys: tuple[str, ...],
-    series_key_set: set[str],
 ) -> dict[ActualKey, float]:
+    """Validate and normalize one exact settlement-demand window."""
     if not isinstance(value, Mapping):
         raise TypeError("settlement actuals must be a mapping")
+    period_set = set(periods)
+    series_key_set = set(series_keys)
     expected_count = len(periods) * len(series_keys)
     exact_window = len(value) == expected_count and all(
         _actual_key_in_window(
@@ -309,15 +320,17 @@ def _validated_actuals(
             key = (series_key, period)
             raw = value[key]
             if isinstance(raw, bool) or not isinstance(raw, Real):
-                raise TypeError("settlement demand must be a real number")
+                raise TypeError(f"settlement demand for {key!r} must be a real number")
             try:
                 demand = float(raw)
             except (OverflowError, TypeError, ValueError) as error:
                 raise SettlementError(
-                    "settlement demand must be finite and non-negative"
+                    f"settlement demand for {key!r} must be finite and non-negative"
                 ) from error
             if not math.isfinite(demand) or demand < 0.0:
-                raise SettlementError("settlement demand must be finite and non-negative")
+                raise SettlementError(
+                    f"settlement demand for {key!r} must be finite and non-negative"
+                )
             actuals[key] = 0.0 if demand == 0.0 else demand
     return actuals
 
@@ -343,8 +356,7 @@ def _validated_orders(
     period_set: set[pd.Timestamp],
     series_keys: set[str],
     timing: DecisionTiming,
-    ledger: LedgerSnapshot,
-    existing_keys: frozenset[OrderKey],
+    snapshot: SettlementSnapshot,
 ) -> tuple[OrderRow, ...]:
     if isinstance(value, (str, bytes)):
         raise TypeError("settlement staged orders must be a sequence")
@@ -359,168 +371,21 @@ def _validated_orders(
             raise SettlementError("staged order has no opening inventory position")
         if order.origin not in period_set:
             raise SettlementError("staged order origin must lie inside the settlement window")
-        _require_arrival_law(order, timing=timing, ledger=ledger)
-        if order.key in existing_keys or order.key in staged_keys:
+        _require_arrival_law(order, timing=timing, snapshot=snapshot)
+        if order.key in staged_keys:
             raise SettlementError(f"duplicate staged order key: {order.key!r}")
         staged_keys.add(order.key)
     return orders
-
-
-def _validated_settlement_history(
-    *,
-    ledger: LedgerSnapshot,
-    periods: tuple[pd.Timestamp, ...],
-    positions: Mapping[str, InventoryPosition],
-    stockout_rule: StockoutRule,
-    actuals_semantics: ActualsSemantics,
-    cost_structure: CostStructure,
-) -> Mapping[SettlementPeriodKey, float]:
-    settled_arrivals: dict[SettlementPeriodKey, float] = {}
-    settlement_series: dict[pd.Timestamp, set[str]] = {}
-    latest_by_series: dict[str, SettlementRecord | None] = {
-        series_key: None for series_key in positions
-    }
-    requested_periods = set(periods)
-    duplicate: SettlementKey | None = None
-    for record in ledger.settlements:
-        if not isinstance(record, SettlementRecord):
-            raise TypeError("ledger settlements must contain SettlementRecord values")
-        if record.session != ledger.session:
-            raise SettlementError("ledger settlement session must match its snapshot")
-        if record.series_key not in positions:
-            raise SettlementError("ledger settlement series must belong to its session")
-        if record.transition.rule is not stockout_rule:
-            raise SettlementError("ledger settlement stock-out rule must match the request")
-        if record.actuals_semantics is not actuals_semantics:
-            raise SettlementError("ledger settlement actuals semantics must match the request")
-        if (
-            record.holding.rate != cost_structure.holding
-            or record.shortage.rate != cost_structure.shortage
-        ):
-            raise SettlementError("ledger settlement cost rates must match the session")
-        try:
-            ledger.calendar.require_member(record.period, name="ledger settlement period")
-        except (TypeError, ValueError) as error:
-            raise SettlementError(str(error)) from error
-        period_key = (record.series_key, record.period)
-        if period_key in settled_arrivals:
-            raise SettlementError(f"duplicate ledger settlement key: {record.key!r}")
-        settled_arrivals[period_key] = record.arrivals
-        if duplicate is None and record.period in requested_periods:
-            duplicate = record.key
-        settlement_series.setdefault(record.period, set()).add(record.series_key)
-        latest = latest_by_series[record.series_key]
-        if latest is None or record.period > latest.period:
-            latest_by_series[record.series_key] = record
-
-    if duplicate is not None:
-        raise SettlementError(f"settlement period is already booked: {duplicate!r}")
-
-    if settlement_series:
-        expected_series = set(positions)
-        if any(series != expected_series for series in settlement_series.values()):
-            raise SettlementError("ledger settlement history must contain every session series")
-        history_periods = tuple(sorted(settlement_series))
-        if any(
-            period != ledger.calendar.advance(previous, 1)
-            for previous, period in pairwise(history_periods)
-        ):
-            raise SettlementError("ledger settlement history must be calendar-contiguous")
-        frontier_periods = {
-            record.period for record in latest_by_series.values() if record is not None
-        }
-        if len(frontier_periods) != 1:
-            raise SettlementError("ledger settlement history must share one series frontier")
-        frontier = next(iter(frontier_periods))
-        if periods[0] != ledger.calendar.advance(frontier, 1):
-            raise SettlementError(
-                "settlement window must immediately follow the ledger settlement frontier"
-            )
-        for series_key, latest in latest_by_series.items():
-            if latest is None:
-                raise SettlementError("ledger settlement history is missing a session series")
-            opening = positions[series_key]
-            if opening.on_hand != latest.transition.closing_on_hand:
-                raise SettlementError(
-                    f"opening on_hand for {series_key!r} must match the settlement frontier"
-                )
-            if opening.backorders != latest.transition.closing_backorders:
-                raise SettlementError(
-                    f"opening backorders for {series_key!r} must match the settlement frontier"
-                )
-    return MappingProxyType(settled_arrivals)
-
-
-def _validated_ledger_orders(
-    *,
-    ledger: LedgerSnapshot,
-    periods: tuple[pd.Timestamp, ...],
-    positions: Mapping[str, InventoryPosition],
-    timing: DecisionTiming,
-    settled_arrivals: Mapping[SettlementPeriodKey, float],
-) -> _LedgerOrderIndex:
-    open_by_series: dict[str, list[OrderRow]] = {series_key: [] for series_key in positions}
-    due_quantities: dict[SettlementPeriodKey, list[float]] = {}
-    order_keys: set[OrderKey] = set()
-    for order in ledger.orders:
-        if not isinstance(order, OrderRow):
-            raise TypeError("ledger orders must contain OrderRow values")
-        if order.session != ledger.session:
-            raise SettlementError("ledger order session must match its snapshot")
-        if order.series_key not in positions:
-            raise SettlementError("ledger order series must belong to its session")
-        if order.key in order_keys:
-            raise SettlementError(f"duplicate ledger order key: {order.key!r}")
-        order_keys.add(order.key)
-        if order.origin >= periods[0]:
-            raise SettlementError("ledger orders must predate the settlement window")
-        _require_arrival_law(order, timing=timing, ledger=ledger)
-        period_key = (order.series_key, order.arrival_period)
-        if period_key in settled_arrivals:
-            due_quantities.setdefault(period_key, []).append(order.quantity)
-            continue
-        if order.arrival_period < periods[0]:
-            raise SettlementError("open order is overdue before the settlement window")
-        open_by_series[order.series_key].append(order)
-
-    for period_key, booked_arrivals in settled_arrivals.items():
-        due = _finite_sum(
-            due_quantities.get(period_key, ()),
-            name="historical settlement arrivals",
-        )
-        if booked_arrivals != due:
-            raise SettlementError(
-                f"ledger settlement arrivals for {period_key!r} do not match due orders"
-            )
-
-    for series_key, position in positions.items():
-        if position.backorders != 0.0:
-            raise SettlementError("lost-sales settlement requires zero opening backorders")
-        derived_on_order = _finite_sum(
-            (order.quantity for order in open_by_series[series_key]),
-            name="open-order quantity",
-        )
-        if position.on_order != derived_on_order:
-            raise SettlementError(
-                f"inventory on_order for {series_key!r} does not match ledger open orders"
-            )
-    frozen_open = MappingProxyType(
-        {series_key: tuple(orders) for series_key, orders in open_by_series.items()}
-    )
-    return _LedgerOrderIndex(
-        existing_keys=frozenset(order_keys),
-        open_by_series=frozen_open,
-    )
 
 
 def _require_arrival_law(
     order: OrderRow,
     *,
     timing: DecisionTiming,
-    ledger: LedgerSnapshot,
+    snapshot: SettlementSnapshot,
 ) -> None:
     try:
-        expected = ledger.calendar.advance(order.origin, timing.lead_time)
+        expected = snapshot.calendar.advance(order.origin, timing.lead_time)
     except (TypeError, ValueError) as error:
         raise SettlementError(
             f"order origin is invalid for the ledger calendar: {error}"
@@ -530,19 +395,6 @@ def _require_arrival_law(
             f"order arrival {order.arrival_period!s} must equal calendar.advance"
             f"({order.origin!s}, {timing.lead_time})"
         )
-
-
-def _partition_orders(
-    orders: Sequence[OrderRow],
-    *,
-    period: pd.Timestamp,
-) -> tuple[list[OrderRow], list[OrderRow]]:
-    overdue = next((order for order in orders if order.arrival_period < period), None)
-    if overdue is not None:
-        raise SettlementError(f"open order is overdue at {period}: {overdue.key!r}")
-    due = [order for order in orders if order.arrival_period == period]
-    future = [order for order in orders if order.arrival_period > period]
-    return due, future
 
 
 def _book_cost(rate: float, basis: float) -> BookedCost:
@@ -565,6 +417,13 @@ def _finite_sum(values: Iterable[float], *, name: str) -> float:
     return 0.0 if result == 0.0 else result
 
 
+def _finite_nonnegative_sum(values: Iterable[float], *, name: str) -> float:
+    result = _finite_sum(values, name=name)
+    if result < 0.0:
+        raise SettlementError(f"{name} must be non-negative")
+    return result
+
+
 def _require_identifier(value: object, *, name: str) -> None:
     if not isinstance(value, str) or not value:
         raise SettlementError(f"{name} must be a non-empty string")
@@ -579,4 +438,6 @@ __all__ = [
     "SettlementRequest",
     "SettlementResult",
     "settle",
+    "validate_actuals_window",
+    "validate_snapshot_state",
 ]

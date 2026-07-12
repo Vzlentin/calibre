@@ -26,6 +26,7 @@ from newcalibre.domain import (
 )
 from newcalibre.engine import CommitReceipt, ForecastWrite, OriginCommit
 from newcalibre.engine import ports as engine_ports
+from newcalibre.engine.ports import SettlementSnapshot
 from newcalibre.engine.ports.memory import (
     InMemoryActualsSource,
     InMemoryArtifactStore,
@@ -143,6 +144,24 @@ def test_engine_declares_exactly_the_six_chapter_03_ports() -> None:
         "LedgerSink",
         "DispatchBackend",
     }
+
+
+def test_ledger_sink_exposes_only_a_period_bound_compact_settlement_snapshot() -> None:
+    session = _session()
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+
+    snapshot = sink.settlement_snapshot((ORIGIN_DATE,))
+
+    assert isinstance(snapshot, SettlementSnapshot)
+    assert snapshot.periods == (ORIGIN_DATE,)
+    assert snapshot.frontier is None
+    assert snapshot.latest_positions == {}
+    assert snapshot.open_order_quantities == {"a": 0.0, "b": 0.0}
+    assert snapshot.due_arrivals == {}
+    assert snapshot.actuals_semantics is None
+    assert not hasattr(snapshot, "forecasts")
+    assert not hasattr(snapshot, "orders")
+    assert not hasattr(snapshot, "settlements")
 
 
 def test_ledger_sink_rejects_a_misattributed_origin_without_a_partial_commit() -> None:

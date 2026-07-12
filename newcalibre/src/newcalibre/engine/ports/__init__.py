@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import pairwise
+from numbers import Real
 from types import MappingProxyType
 from typing import Protocol, TypeVar, runtime_checkable
 
 import pandas as pd
 
-from newcalibre.domain import Calendar, Panel, SessionIdentity
+from newcalibre.domain import (
+    ActualsSemantics,
+    Calendar,
+    InventoryPosition,
+    Panel,
+    SessionIdentity,
+)
 from newcalibre.ledger import (
     BoundKey,
     ForecastIssuance,
     ForecastKey,
-    ForecastRow,
     OrderRow,
     SettlementRecord,
 )
@@ -111,6 +119,7 @@ class CommitReceipt:
     origin: pd.Timestamp
     digest: str
     state_updates: Mapping[str, bytes]
+    settlement_periods: tuple[pd.Timestamp, ...] = ()
 
     @classmethod
     def from_commit(cls, commit: OriginCommit) -> CommitReceipt:
@@ -120,6 +129,7 @@ class CommitReceipt:
             origin=commit.origin,
             digest=commit.digest,
             state_updates=commit.state_updates,
+            settlement_periods=tuple(sorted({record.period for record in commit.settlements})),
         )
 
     def __post_init__(self) -> None:
@@ -143,27 +153,88 @@ class CommitReceipt:
             if not isinstance(value, bytes):
                 raise TypeError("commit receipt state updates must contain bytes")
             updates[partition] = value
+        settlement_periods = tuple(self.settlement_periods)
+        for period in settlement_periods:
+            if not isinstance(period, pd.Timestamp) or pd.isna(period):
+                raise TypeError("commit receipt settlement periods must be pandas Timestamps")
+            if period.tz is not None:
+                raise ValueError("commit receipt settlement periods must be timezone-naive")
+        if any(current <= previous for previous, current in pairwise(settlement_periods)):
+            raise ValueError(
+                "commit receipt settlement periods must be strictly increasing and unique"
+            )
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        object.__setattr__(self, "settlement_periods", settlement_periods)
 
 
 @dataclass(frozen=True, slots=True)
-class LedgerSnapshot:
-    """Expose immutable ledger facts without leaking its mutable owner."""
+class SettlementSnapshot:
+    """Project only the indexed durable facts needed by one settlement window."""
 
     session: SessionIdentity
     calendar: Calendar
-    forecasts: tuple[ForecastRow, ...]
-    orders: tuple[OrderRow, ...]
-    settlements: tuple[SettlementRecord, ...]
+    periods: tuple[pd.Timestamp, ...]
+    frontier: pd.Timestamp | None
+    latest_positions: Mapping[str, InventoryPosition]
+    open_order_quantities: Mapping[str, float]
+    due_arrivals: Mapping[ActualKey, float]
+    actuals_semantics: ActualsSemantics | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
-            raise TypeError("ledger snapshot session must be a SessionIdentity")
+            raise TypeError("settlement snapshot session must be a SessionIdentity")
         if not isinstance(self.calendar, Calendar):
-            raise TypeError("ledger snapshot calendar must be a Calendar")
-        object.__setattr__(self, "forecasts", tuple(self.forecasts))
-        object.__setattr__(self, "orders", tuple(self.orders))
-        object.__setattr__(self, "settlements", tuple(self.settlements))
+            raise TypeError("settlement snapshot calendar must be a Calendar")
+        periods = tuple(self.periods)
+        if not periods:
+            raise ValueError("settlement snapshot periods must not be empty")
+        for index, period in enumerate(periods):
+            self.calendar.require_member(period, name="settlement snapshot period")
+            if index and period != self.calendar.advance(periods[index - 1], 1):
+                raise ValueError("settlement snapshot periods must be calendar-contiguous")
+        if self.frontier is not None:
+            self.calendar.require_member(self.frontier, name="settlement snapshot frontier")
+        if not isinstance(self.latest_positions, Mapping):
+            raise TypeError("settlement snapshot latest positions must be a mapping")
+        latest_positions: dict[str, InventoryPosition] = {}
+        for series_key, position in self.latest_positions.items():
+            if not isinstance(series_key, str) or not series_key:
+                raise ValueError("settlement snapshot series keys must be non-empty strings")
+            if not isinstance(position, InventoryPosition):
+                raise TypeError(
+                    "settlement snapshot latest positions must contain InventoryPosition values"
+                )
+            latest_positions[series_key] = position
+        open_quantities = _frozen_nonnegative_quantities(
+            self.open_order_quantities,
+            name="settlement snapshot open-order quantities",
+        )
+        due_arrivals = _frozen_nonnegative_quantities(
+            self.due_arrivals,
+            name="settlement snapshot due arrivals",
+        )
+        period_set = set(periods)
+        if any(
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or not isinstance(key[0], str)
+            or not key[0]
+            or not isinstance(key[1], pd.Timestamp)
+            or key[1] not in period_set
+            for key in due_arrivals
+        ):
+            raise ValueError("settlement snapshot due arrivals must be keyed inside its window")
+        if self.actuals_semantics is not None and not isinstance(
+            self.actuals_semantics,
+            ActualsSemantics,
+        ):
+            raise TypeError(
+                "settlement snapshot actuals semantics must be ActualsSemantics or None"
+            )
+        object.__setattr__(self, "periods", periods)
+        object.__setattr__(self, "latest_positions", MappingProxyType(latest_positions))
+        object.__setattr__(self, "open_order_quantities", MappingProxyType(open_quantities))
+        object.__setattr__(self, "due_arrivals", MappingProxyType(due_arrivals))
 
 
 @runtime_checkable
@@ -240,8 +311,11 @@ class LedgerSink(Protocol):
         """Return pending rows due strictly before ``origin``."""
         ...
 
-    def snapshot(self) -> LedgerSnapshot:
-        """Return immutable forecast, order, and settlement facts."""
+    def settlement_snapshot(
+        self,
+        periods: Sequence[pd.Timestamp],
+    ) -> SettlementSnapshot:
+        """Return the compact indexed facts needed by ``periods``."""
         ...
 
     def receipt(self, origin: pd.Timestamp) -> CommitReceipt | None:
@@ -327,6 +401,27 @@ def _update_digest(digest, label: bytes, payload: bytes) -> None:
     digest.update(payload)
 
 
+def _frozen_nonnegative_quantities[Key](
+    values: Mapping[Key, float],
+    *,
+    name: str,
+) -> dict[Key, float]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    normalized: dict[Key, float] = {}
+    for key, raw in values.items():
+        if isinstance(raw, bool) or not isinstance(raw, Real):
+            raise TypeError(f"{name} must contain real numbers")
+        try:
+            quantity = float(raw)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise ValueError(f"{name} must contain finite non-negative values") from error
+        if not math.isfinite(quantity) or quantity < 0.0:
+            raise ValueError(f"{name} must contain finite non-negative values")
+        normalized[key] = 0.0 if quantity == 0.0 else quantity
+    return normalized
+
+
 __all__ = [
     "ActualKey",
     "ActualsSource",
@@ -335,8 +430,8 @@ __all__ = [
     "CommitReceipt",
     "DispatchBackend",
     "ForecastWrite",
-    "LedgerSnapshot",
     "LedgerSink",
     "OriginCommit",
     "PanelSource",
+    "SettlementSnapshot",
 ]

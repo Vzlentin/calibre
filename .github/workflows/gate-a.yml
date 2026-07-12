@@ -69,16 +69,22 @@ jobs:
       - name: Verify HEAD equals candidate
         run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
       - uses: astral-sh/setup-uv@v4
-      - name: Tier 2 double-run byte identity at C1
+      - name: Tier 2 double run at C1
         working-directory: newcalibre
         run: |
           set -euo pipefail
           uv sync --locked --group dev
           NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run1" uv run --locked pytest tests/tier2
           NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run2" uv run --locked pytest tests/tier2
-          if [ -d "${RUNNER_TEMP}/tier2-run1" ] || [ -d "${RUNNER_TEMP}/tier2-run2" ]; then
-            diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
-          fi
+      - name: Require Tier-2 artifacts and compare executions
+        run: |
+          set -euo pipefail
+          for run in tier2-run1 tier2-run2; do
+            for artifact in resumed-ledger.bin same-seed-ledger.bin; do
+              test -s "${RUNNER_TEMP}/${run}/${artifact}"
+            done
+          done
+          diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
 
   oracle:
     runs-on: ubuntu-24.04

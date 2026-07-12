@@ -19,6 +19,7 @@ from newcalibre.domain import (
     MODEL_NAME,
     ORIGIN,
     SERIES_KEY,
+    ActualsSemantics,
     Calendar,
     CostStructure,
     DecisionTiming,
@@ -42,6 +43,7 @@ from newcalibre.engine._session import (
 )
 from newcalibre.engine.errors import EngineError as _EngineError
 from newcalibre.engine.ports import (
+    ActualKey,
     ActualsSource,
     ArtifactStore,
     CalibrationStateStore,
@@ -51,6 +53,7 @@ from newcalibre.engine.ports import (
     LedgerSink,
     OriginCommit,
     PanelSource,
+    SettlementSnapshot,
 )
 from newcalibre.engine.settlement import SettlementRequest as _SettlementRequest
 from newcalibre.engine.settlement import SettlementResult as _SettlementResult
@@ -302,6 +305,24 @@ class OriginResult:
     orders: tuple[OrderRow, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SettlementWindow:
+    """Carry authoritative actuals and the compact ledger projection for one cycle."""
+
+    snapshot: SettlementSnapshot
+    actuals: Mapping[ActualKey, float]
+    actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.snapshot, SettlementSnapshot):
+            raise TypeError("settlement window snapshot must be a SettlementSnapshot")
+        if not isinstance(self.actuals, Mapping):
+            raise TypeError("settlement window actuals must be a mapping")
+        if not isinstance(self.actuals_semantics, ActualsSemantics):
+            raise TypeError("settlement window semantics must be ActualsSemantics")
+        object.__setattr__(self, "actuals", MappingProxyType(dict(self.actuals)))
+
+
 type AdapterResolver = Callable[[Mapping[str, object]], ForecastAdapter]
 type Reconciler = Callable[[ForecastBatch], ForecastBatch]
 type Calibrator = Callable[
@@ -512,10 +533,11 @@ class Engine:
         if not isinstance(request, _SettlementRequest):
             raise TypeError("settle requires a SettlementRequest")
         self._require_session(request.session)
-        if request.ledger.calendar != self._ledger_sink.calendar:
-            raise _EngineError("settlement ledger calendar does not match the engine ledger")
-        if request.ledger != self._ledger_sink.snapshot():
-            raise _EngineError("settlement ledger snapshot does not match the engine ledger")
+        if request.snapshot.calendar != self._ledger_sink.calendar:
+            raise _EngineError("settlement snapshot calendar does not match the engine ledger")
+        owned_snapshot = self._ledger_sink.settlement_snapshot(request.snapshot.periods)
+        if request.snapshot != owned_snapshot:
+            raise _EngineError("settlement snapshot does not match the engine ledger")
         return _settle(request)
 
     def commit(self, request: OriginCommit | CommitReceipt) -> CommitReceipt:
@@ -546,6 +568,18 @@ class Engine:
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:
             raise _EngineError("engine session does not match its ledger sink")
+
+    def _require_time_loop_ports(
+        self,
+        *,
+        actuals_source: ActualsSource,
+        ledger_sink: LedgerSink,
+    ) -> None:
+        """Reject a driver wired to different ports than this engine."""
+        if actuals_source is not self._actuals_source:
+            raise _EngineError("time loop actuals source does not belong to the engine")
+        if ledger_sink is not self._ledger_sink:
+            raise _EngineError("time loop ledger sink does not belong to the engine")
 
     def _fit_one(self, fitted: FittedTask) -> FittedTask:
         adapter = self._adapter_resolver(fitted.task.model_config)
@@ -585,10 +619,22 @@ class Spine:
         self._engine = engine
         self._reporter = reporter
 
-    def run_origin(self, request: OriginRequest) -> OriginResult:
+    def run_origin(
+        self,
+        request: OriginRequest,
+        *,
+        decision_origin: bool = True,
+        settlement: SettlementWindow | None = None,
+    ) -> OriginResult:
         """Run Resolve through Commit once for a declared origin."""
         if not isinstance(request, OriginRequest):
             raise TypeError("spine requires an OriginRequest")
+        if not isinstance(decision_origin, bool):
+            raise TypeError("decision_origin must be boolean")
+        if settlement is not None and not isinstance(settlement, SettlementWindow):
+            raise TypeError("settlement must be a SettlementWindow or None")
+        if settlement is not None and settlement.snapshot.periods != (request.origin,):
+            raise ValueError("spine settlement window must contain exactly its origin")
         observation = self._phase(
             Phase.RESOLVE,
             request.origin,
@@ -628,25 +674,42 @@ class Spine:
         orders = self._phase(
             Phase.ORDER,
             request.origin,
-            lambda: self._engine.order(order_request),
+            lambda: self._engine.order(order_request) if decision_origin else (),
         )
-        commit_request = OriginCommit(
-            session=request.session,
-            origin=request.origin,
-            resolutions=observation.resolutions,
-            forecasts=(
-                ForecastWrite(
-                    calibrated.forecasts.frame,
-                    calibrated.forecasts.issuances,
+
+        def commit_phase() -> None:
+            settlement_result: _SettlementResult | None = None
+            if settlement is not None:
+                settlement_result = self._engine.settle(
+                    _SettlementRequest(
+                        session=request.session,
+                        snapshot=settlement.snapshot,
+                        actuals=settlement.actuals,
+                        inventory_positions=request.inventory_positions,
+                        orders=orders,
+                        actuals_semantics=settlement.actuals_semantics,
+                    )
+                )
+            commit_request = OriginCommit(
+                session=request.session,
+                origin=request.origin,
+                resolutions=observation.resolutions,
+                forecasts=(
+                    ForecastWrite(
+                        calibrated.forecasts.frame,
+                        calibrated.forecasts.issuances,
+                    ),
                 ),
-            ),
-            orders=orders,
-            state_updates=calibrated.state_updates,
-        )
+                orders=orders,
+                settlements=() if settlement_result is None else settlement_result.records,
+                state_updates=calibrated.state_updates,
+            )
+            self._engine.commit(commit_request)
+
         self._phase(
             Phase.COMMIT,
             request.origin,
-            lambda: self._engine.commit(commit_request),
+            commit_phase,
         )
         return OriginResult(forecasts=calibrated.forecasts, orders=orders)
 
@@ -792,5 +855,6 @@ __all__ = [
     "Phase",
     "PhaseError",
     "PhaseEvent",
+    "SettlementWindow",
     "Spine",
 ]

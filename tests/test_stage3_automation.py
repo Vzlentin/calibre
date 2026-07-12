@@ -17,6 +17,15 @@ SCRIPTS_DIR = Path(__file__).parents[1] / ".github" / "scripts"
 GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.yml"
 CLOCK_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "stage3-clock.yml"
 SUCCESSOR_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "newcalibre.yml"
+TIER2_ARTIFACT_CHECK = (
+    "set -euo pipefail\n"
+    "for run in tier2-run1 tier2-run2; do\n"
+    "  for artifact in resumed-ledger.bin same-seed-ledger.bin; do\n"
+    '    test -s "${RUNNER_TEMP}/${run}/${artifact}"\n'
+    "  done\n"
+    "done\n"
+    'diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"'
+)
 
 ACTIVATION_BODY = (
     "<!-- s3-clock-activation -->\n"
@@ -447,6 +456,27 @@ def test_gate_workflow_grants_report_read_access_and_uploads_negative_reports() 
     assert '"${RUNNER_TEMP}/gate-report.json"' in emit["run"]
     assert upload["if"] == "always()"
     assert upload["with"]["path"] == "${{ runner.temp }}/gate-report.json"
+
+
+@pytest.mark.parametrize(
+    ("workflow_path", "job_name"),
+    [
+        (SUCCESSOR_WORKFLOW, "newcalibre-consistency"),
+        (GATE_WORKFLOW, "consistency"),
+    ],
+)
+def test_consistency_workflows_require_nonempty_tier2_artifacts_before_diff(
+    workflow_path: Path,
+    job_name: str,
+) -> None:
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    comparison = next(
+        step
+        for step in workflow["jobs"][job_name]["steps"]
+        if step.get("name") == "Require Tier-2 artifacts and compare executions"
+    )
+
+    assert comparison["run"].strip() == TIER2_ARTIFACT_CHECK
 
 
 def test_clock_manual_triggers_execute_only_the_default_branch_workflow() -> None:

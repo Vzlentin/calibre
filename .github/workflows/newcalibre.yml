@@ -165,15 +165,16 @@ jobs:
         if: steps.present.outputs.exists == 'true'
         working-directory: newcalibre
         run: NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run2" uv run --locked pytest tests/tier2
-      - name: Byte identity across executions
+      - name: Require Tier-2 artifacts and compare executions
         if: steps.present.outputs.exists == 'true'
         run: |
           set -euo pipefail
-          if [ -d "${RUNNER_TEMP}/tier2-run1" ] || [ -d "${RUNNER_TEMP}/tier2-run2" ]; then
-            diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
-          else
-            echo "no tier-2 artifacts emitted yet (skeleton phase)"
-          fi
+          for run in tier2-run1 tier2-run2; do
+            for artifact in resumed-ledger.bin same-seed-ledger.bin; do
+              test -s "${RUNNER_TEMP}/${run}/${artifact}"
+            done
+          done
+          diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
       - name: Report lane result
         run: echo "newcalibre-consistency complete (successor present=${{ steps.present.outputs.exists }})"
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
-from dataclasses import dataclass
 from numbers import Real
 from types import MappingProxyType
 from typing import TypeVar
@@ -15,10 +14,8 @@ from newcalibre.domain import (
     OBSERVED_VALUE,
     SERIES_KEY,
     TIMESTAMP,
-    ActualsSemantics,
     Calendar,
     CalendarError,
-    InventoryPosition,
     Panel,
     SessionIdentity,
     StockoutRule,
@@ -28,29 +25,23 @@ from newcalibre.engine._session import (
     session_definition,
     session_series_and_frequency,
 )
-from newcalibre.engine.ports import ActualKey, CommitReceipt, LedgerSnapshot, OriginCommit
+from newcalibre.engine.ports import (
+    ActualKey,
+    CommitReceipt,
+    OriginCommit,
+    SettlementSnapshot,
+)
+from newcalibre.engine.settlement._state import SettlementIndex, SettlementIndexAudit
 from newcalibre.ledger import (
     ForecastRow,
     Ledger,
     LedgerError,
-    OrderKey,
     OrderRow,
     SettlementRecord,
-    validate_lost_sales_transition,
 )
 
 _Input = TypeVar("_Input")
 _Output = TypeVar("_Output")
-
-
-@dataclass(frozen=True, slots=True)
-class _SettlementAccountingState:
-    """Hold the next atomic settlement frontier and order pipeline."""
-
-    open_orders: dict[str, dict[OrderKey, OrderRow]]
-    frontier: pd.Timestamp | None
-    actuals_semantics: ActualsSemantics | None
-    inventory_positions: dict[str, InventoryPosition]
 
 
 class InMemoryPanelSource:
@@ -172,13 +163,21 @@ class InMemoryLedgerSink:
         self._forecast_rows: dict[object, ForecastRow] = {}
         self._order_keys: set[object] = set()
         self._settlement_keys: set[object] = set()
-        self._open_orders: dict[str, dict[OrderKey, OrderRow]] = {}
         self._commits: dict[pd.Timestamp, CommitReceipt] = {}
         self._decision = session_decision_inputs(session)
         self._series_keys, _frequency = session_series_and_frequency(session_definition(session))
-        self._settlement_frontier: pd.Timestamp | None = None
-        self._actuals_semantics: ActualsSemantics | None = None
-        self._inventory_positions: dict[str, InventoryPosition] = {}
+        self._settlement_index = (
+            None
+            if self._decision is None
+            else SettlementIndex(
+                session=session,
+                calendar=calendar,
+                series_keys=self._series_keys,
+                cost_structure=self._decision[0],
+                timing=self._decision[1],
+                stockout_rule=self._decision[2],
+            )
+        )
 
     @property
     def session(self) -> SessionIdentity:
@@ -194,15 +193,36 @@ class InMemoryLedgerSink:
         """Return the ledger's defensive due-row snapshot."""
         return self._ledger.due_frame(origin)
 
-    def snapshot(self) -> LedgerSnapshot:
-        """Return immutable facts from all three ledger row families."""
-        return LedgerSnapshot(
+    def settlement_snapshot(
+        self,
+        periods: Sequence[pd.Timestamp],
+    ) -> SettlementSnapshot:
+        """Return the compact incremental projection for one settlement window."""
+        if self._settlement_index is None:
+            raise LedgerError("settlement snapshots require a session decision configuration")
+        return self._settlement_index.snapshot(periods)
+
+    def rebuild_settlement_index(self) -> SettlementIndexAudit:
+        """Rebuild and audit compact settlement state once from durable rows."""
+        if self._decision is None:
+            raise LedgerError("settlement index rebuild requires a decision configuration")
+        self._settlement_index = SettlementIndex.rebuild(
             session=self._ledger.session,
             calendar=self._ledger.calendar,
-            forecasts=self._ledger.forecasts,
+            series_keys=self._series_keys,
+            cost_structure=self._decision[0],
+            timing=self._decision[1],
+            stockout_rule=self._decision[2],
             orders=self._ledger.orders,
             settlements=self._ledger.settlements,
         )
+        return self._settlement_index.audit()
+
+    def settlement_index_audit(self) -> SettlementIndexAudit:
+        """Return deterministic work and active-state counts for diagnostics."""
+        if self._settlement_index is None:
+            raise LedgerError("settlement index audit requires a decision configuration")
+        return self._settlement_index.audit()
 
     def receipt(self, origin: pd.Timestamp) -> CommitReceipt | None:
         """Return the exact immutable receipt for a committed origin."""
@@ -231,7 +251,7 @@ class InMemoryLedgerSink:
             (row.key for row in staged.settlements),
             "settlement",
         )
-        next_accounting = self._validated_settlement_accounting(write)
+        settlement_delta = self._validated_settlement_delta(write)
 
         # Resolution validates atomically inside Ledger and runs first. Every
         # append below was already validated against a scratch ledger and the
@@ -245,10 +265,9 @@ class InMemoryLedgerSink:
         self._forecast_rows.update((row.key, row) for row in staged.forecasts)
         self._order_keys.update(row.key for row in write.orders)
         self._settlement_keys.update(row.key for row in write.settlements)
-        self._open_orders = next_accounting.open_orders
-        self._settlement_frontier = next_accounting.frontier
-        self._actuals_semantics = next_accounting.actuals_semantics
-        self._inventory_positions = next_accounting.inventory_positions
+        if settlement_delta is not None:
+            assert self._settlement_index is not None
+            self._settlement_index.apply(settlement_delta)
         receipt = CommitReceipt.from_commit(write)
         self._commits[write.origin] = receipt
         return receipt
@@ -275,130 +294,23 @@ class InMemoryLedgerSink:
             if not math.isfinite(normalized):
                 raise LedgerError("resolved actual value must be finite")
 
-    def _validated_settlement_accounting(
-        self,
-        write: OriginCommit,
-    ) -> _SettlementAccountingState:
-        """Validate the complete settlement history against an isolated next state."""
-        open_orders = {series_key: dict(by_key) for series_key, by_key in self._open_orders.items()}
-        if write.orders:
-            if self._decision is None:
-                raise LedgerError("durable orders require a session decision configuration")
-            _cost_structure, timing, stockout_rule = self._decision
-            if timing.lead_time < 1:
-                raise LedgerError("durable orders require a positive decision lead time")
-            if stockout_rule is not StockoutRule.LOST_SALES:
-                raise LedgerError("configured order stock-out rule is not supported")
-            for order in write.orders:
-                if order.series_key not in self._series_keys:
-                    raise LedgerError("order series does not belong to the session")
-                expected_arrival = self._ledger.calendar.advance(
-                    order.origin,
-                    timing.lead_time,
-                )
-                if order.arrival_period != expected_arrival:
-                    raise LedgerError(
-                        "order arrival period must equal calendar.advance(origin, lead_time)"
-                    )
-                settlement_key = (order.session, order.series_key, order.arrival_period)
-                if settlement_key in self._settlement_keys:
-                    raise LedgerError("order arrival period is already settled")
-                if (
-                    self._settlement_frontier is not None
-                    and order.origin <= self._settlement_frontier
-                ):
-                    raise LedgerError("order origin is already settled")
-                open_orders.setdefault(order.series_key, {})[order.key] = order
-
-        records = sorted(
-            write.settlements,
-            key=lambda record: (record.period, record.series_key.encode()),
-        )
-        frontier = self._settlement_frontier
-        actuals_semantics = self._actuals_semantics
-        inventory_positions = dict(self._inventory_positions)
-        if records:
-            if self._decision is None:
-                raise LedgerError("settlements require a session decision configuration")
-            cost_structure, timing, stockout_rule = self._decision
-            if timing.lead_time < 1:
-                raise LedgerError("settlements require a positive decision lead time")
-            if stockout_rule is not StockoutRule.LOST_SALES:
-                raise LedgerError("configured settlement stock-out rule is not supported")
-            periods = sorted({record.period for record in records})
-            expected_series = set(self._series_keys)
-            for period in periods:
-                period_series = {record.series_key for record in records if record.period == period}
-                if period_series != expected_series:
-                    raise LedgerError(
-                        "settlement periods must cover the complete session series set"
-                    )
-            previous_period = frontier
-            for period in periods:
-                if previous_period is not None and period != self._ledger.calendar.advance(
-                    previous_period,
-                    1,
-                ):
-                    raise LedgerError("settlement periods must extend the durable frontier")
-                previous_period = period
-            frontier = periods[-1]
-
-            for record in records:
-                if record.transition.rule is not stockout_rule:
-                    raise LedgerError("settlement stock-out rule does not match the session")
-                if (
-                    record.holding.rate != cost_structure.holding
-                    or record.shortage.rate != cost_structure.shortage
-                ):
-                    raise LedgerError("settlement cost rates do not match the session")
-                if actuals_semantics is None:
-                    actuals_semantics = record.actuals_semantics
-                elif record.actuals_semantics is not actuals_semantics:
-                    raise LedgerError("settlement actuals semantics changed within the session")
-
-                previous_position = inventory_positions.get(record.series_key)
-                try:
-                    validate_lost_sales_transition(
-                        transition=record.transition,
-                        arrivals=record.arrivals,
-                        opening=previous_position,
-                    )
-                except LedgerError as error:
-                    raise LedgerError(
-                        "settlement transition does not continue durable inventory"
-                    ) from error
-
-                by_key = open_orders.setdefault(record.series_key, {})
-                overdue = next(
-                    (order for order in by_key.values() if order.arrival_period < record.period),
-                    None,
-                )
-                if overdue is not None:
-                    raise LedgerError(f"open order is overdue at settlement: {overdue.key!r}")
-                due = [order for order in by_key.values() if order.arrival_period == record.period]
-                arrivals = _finite_quantity_sum(
-                    (order.quantity for order in due),
-                    name="settlement arrivals",
-                )
-                if record.arrivals != arrivals:
-                    raise LedgerError("settlement arrivals do not match durable due orders")
-                for order in due:
-                    del by_key[order.key]
-                on_order = _finite_quantity_sum(
-                    (order.quantity for order in by_key.values() if order.origin <= record.period),
-                    name="settlement on_order",
-                )
-                if record.inventory_position.on_order != on_order:
-                    raise LedgerError(
-                        "settlement inventory on_order does not match durable open orders"
-                    )
-                inventory_positions[record.series_key] = record.inventory_position
-
-        return _SettlementAccountingState(
-            open_orders=open_orders,
-            frontier=frontier,
-            actuals_semantics=actuals_semantics,
-            inventory_positions=inventory_positions,
+    def _validated_settlement_delta(self, write: OriginCommit):
+        """Validate only newly appended settlement facts against the compact index."""
+        if not write.orders and not write.settlements:
+            return None
+        if self._decision is None or self._settlement_index is None:
+            noun = "orders" if write.orders else "settlements"
+            raise LedgerError(f"durable {noun} require a session decision configuration")
+        _cost_structure, timing, stockout_rule = self._decision
+        if timing.lead_time < 1:
+            noun = "orders" if write.orders else "settlements"
+            raise LedgerError(f"durable {noun} require a positive decision lead time")
+        if stockout_rule is not StockoutRule.LOST_SALES:
+            noun = "order" if write.orders else "settlement"
+            raise LedgerError(f"configured {noun} stock-out rule is not supported")
+        return self._settlement_index.validate_delta(
+            orders=write.orders,
+            settlements=write.settlements,
         )
 
     @property
@@ -460,16 +372,6 @@ def _require_session_partition(session: object, partition: object) -> None:
     if not isinstance(session, SessionIdentity):
         raise TypeError("calibration state session must be a SessionIdentity")
     _require_key(partition, name="calibration partition")
-
-
-def _finite_quantity_sum(values: Iterable[float], *, name: str) -> float:
-    try:
-        total = math.fsum(values)
-    except OverflowError as error:
-        raise LedgerError(f"{name} must be finite") from error
-    if not math.isfinite(total):
-        raise LedgerError(f"{name} must be finite")
-    return 0.0 if total == 0.0 else total
 
 
 __all__ = [
