@@ -9,6 +9,11 @@ from newcalibre.domain.decision import (
     InventoryPosition,
     StockoutRule,
 )
+from newcalibre.domain.decision_evidence import (
+    AppliedBinding,
+    DecisionEvidence,
+    DecisionEvidenceError,
+)
 from newcalibre.domain.descriptor import (
     DecisionScope,
     DecisionScopeKind,
@@ -78,10 +83,13 @@ __all__ = [
     "AGGREGATE_NODE_PREFIX",
     "AVAILABILITY_BOUND",
     "ActualsSemantics",
+    "AppliedBinding",
     "CENSOR_STATUS",
     "CostStructure",
     "CostStructureError",
     "DecisionError",
+    "DecisionEvidence",
+    "DecisionEvidenceError",
     "DecisionScope",
     "DecisionScopeKind",
     "DecisionTiming",

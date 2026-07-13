@@ -302,6 +302,19 @@ def test_forecast_issuance_fact_is_closed_and_matches_the_bound_payload() -> Non
         "calibration warm-up",
         "calibration warm-up",
     ]
+    assert [row.values[quantile[0]] for row in ledger.forecasts] == [None, None]
+
+    for infinite in (float("inf"), float("-inf")):
+        invalid = _frame()
+        invalid[quantile[0]] = infinite
+        with pytest.raises(LedgerError, match="finiteness/nullability"):
+            Ledger(session=_session(), calendar=CALENDAR).append_forecasts(
+                invalid,
+                issuances={
+                    key: {quantile: _issuance(finite=False, reason="calibration warm-up")}
+                    for key in _issuances()
+                },
+            )
 
 
 def test_forecast_bound_issuances_account_for_multiple_groups_and_sides() -> None:

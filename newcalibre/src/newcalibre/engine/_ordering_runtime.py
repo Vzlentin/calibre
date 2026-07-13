@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Real
 
 import pandas as pd
 
-from newcalibre.domain import Calendar, SessionIdentity
+from newcalibre.domain import Calendar, DecisionEvidence, InventoryPosition, SessionIdentity
 from newcalibre.engine.errors import EngineError
-from newcalibre.ledger import OrderRow
-from newcalibre.ordering import OrderingConfiguration
+from newcalibre.ledger import BoundKey, ForecastIssuance, ForecastKey, OrderRow
+from newcalibre.ordering import OrderingConfiguration, PolicyRequest, dispatch_policy
 
 type DecisionKey = tuple[str, str]
 
@@ -23,16 +24,53 @@ class OrderProposal:
     series_key: str
     model_name: str
     quantity: float
+    evidence: DecisionEvidence | None = None
 
     def __post_init__(self) -> None:
         _require_utf8_identifier(self.series_key, name="proposal series key")
         _require_utf8_identifier(self.model_name, name="proposal model name")
         object.__setattr__(self, "quantity", _finite_real(self.quantity, name="proposal quantity"))
+        if self.evidence is not None:
+            if not isinstance(self.evidence, DecisionEvidence):
+                raise EngineError("proposal evidence must be DecisionEvidence or omitted")
+            object.__setattr__(self, "evidence", DecisionEvidence.snapshot(self.evidence))
 
     @property
     def key(self) -> DecisionKey:
         """Return the exact decision group addressed by this proposal."""
         return self.series_key, self.model_name
+
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredPolicyOrderer:
+    """Adapt the engine request facts to the built-in pure policy dispatcher."""
+
+    def propose(
+        self,
+        *,
+        frame: pd.DataFrame,
+        issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]],
+        inventory_positions: Mapping[str, InventoryPosition],
+        configuration: OrderingConfiguration,
+    ) -> tuple[OrderProposal, ...]:
+        """Return evidence-complete proposals without mutating engine inputs."""
+        decisions = dispatch_policy(
+            PolicyRequest(
+                frame=frame,
+                issuances=issuances,
+                inventory_positions=inventory_positions,
+                configuration=configuration,
+            )
+        )
+        return tuple(
+            OrderProposal(
+                series_key=decision.series_key,
+                model_name=decision.model_name,
+                quantity=decision.quantity,
+                evidence=decision.evidence,
+            )
+            for decision in decisions
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,10 +100,15 @@ class DecisionBatch:
         if any(not isinstance(proposal, OrderProposal) for proposal in supplied):
             raise EngineError("orderer must return only OrderProposal values")
         proposals = tuple(
-            OrderProposal(
-                series_key=proposal.series_key,
-                model_name=proposal.model_name,
-                quantity=proposal.quantity,
+            (
+                proposal
+                if type(proposal) is OrderProposal
+                else OrderProposal(
+                    series_key=proposal.series_key,
+                    model_name=proposal.model_name,
+                    quantity=proposal.quantity,
+                    evidence=proposal.evidence,
+                )
             )
             for proposal in supplied
         )
@@ -106,15 +149,29 @@ def materialize_decisions(
         )
 
     arrival = calendar.advance(decisions.origin, configuration.decision_timing.lead_time)
-    proposed = {proposal.key: proposal.quantity for proposal in decisions.proposals}
+    proposed = {proposal.key: proposal for proposal in decisions.proposals}
     return tuple(
         OrderRow(
             session=decisions.session,
             series_key=series_key,
             origin=decisions.origin,
             model_name=model_name,
-            quantity=float(max(math.ceil(proposed.get((series_key, model_name), 0.0)), 0)),
+            quantity=float(
+                max(
+                    math.ceil(
+                        proposed[(series_key, model_name)].quantity
+                        if (series_key, model_name) in proposed
+                        else 0.0
+                    ),
+                    0,
+                )
+            ),
             arrival_period=arrival,
+            evidence=(
+                proposed[(series_key, model_name)].evidence
+                if (series_key, model_name) in proposed
+                else None
+            ),
         )
         for series_key, model_name in decisions.requested
     )
@@ -157,6 +214,8 @@ def _require_timestamp(value: object, *, name: str) -> None:
 
 
 __all__ = [
+    "ConfiguredPolicyOrderer",
+    "DecisionEvidence",
     "DecisionBatch",
     "DecisionKey",
     "OrderProposal",

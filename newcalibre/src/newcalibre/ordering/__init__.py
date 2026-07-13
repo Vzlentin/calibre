@@ -1,7 +1,7 @@
 """Compile ordering configuration and expose pure ordering arithmetic."""
 
+from newcalibre.domain import AppliedBinding
 from newcalibre.ordering._core import (
-    AppliedBinding,
     OrderingConfigError,
     OrderingConfiguration,
     OrderingInputError,
@@ -9,6 +9,7 @@ from newcalibre.ordering._core import (
     compile_ordering,
     order_up_to,
 )
+from newcalibre.ordering._policies import PolicyDecision, PolicyRequest, dispatch_policy
 
 __all__ = [
     "AppliedBinding",
@@ -16,6 +17,9 @@ __all__ = [
     "OrderingConfigError",
     "OrderingInputError",
     "OrderingSetup",
+    "PolicyDecision",
+    "PolicyRequest",
     "compile_ordering",
+    "dispatch_policy",
     "order_up_to",
 ]

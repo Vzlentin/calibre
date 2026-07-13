@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from newcalibre.domain import (
+    AppliedBinding,
     CostStructure,
     DecisionScope,
     DecisionScopeKind,
@@ -38,6 +39,11 @@ COST = CostStructure(underage=3.0, overage=1.0, holding=0.5, shortage=2.0)
 
 
 def _setup(**changes: object) -> OrderingSetup:
+    if changes.get("policy") == "rss" and not {
+        "reorder_point",
+        "reorder_point_scale",
+    }.intersection(changes):
+        changes["reorder_point"] = 1.0
     setup = OrderingSetup(
         policy="newsvendor",
         series_keys=("sku-b", "sku-a"),
@@ -62,6 +68,21 @@ def _descriptor() -> GuaranteeDescriptor:
         scope=DecisionScope(
             kind=DecisionScopeKind.PER_DECISION_NODE,
             class_system_name=None,
+        ),
+    )
+
+
+def _class_conditional_descriptor() -> GuaranteeDescriptor:
+    return replace(
+        _descriptor(),
+        type=GuaranteeType(
+            claim=GuaranteeClaim.CLASS_CONDITIONAL_COVERAGE,
+            currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            declared_slack=None,
+        ),
+        scope=DecisionScope(
+            kind=DecisionScopeKind.PER_DECISION_NODE,
+            class_system_name="hierarchy-levels-v1",
         ),
     )
 
@@ -131,7 +152,7 @@ def test_newsvendor_requires_one_strict_shared_cost_fractile() -> None:
             compile_ordering(_setup(cost_structure=boundary_cost))
 
 
-def test_explicit_decision_fractile_records_binding_and_voids_only_the_claim() -> None:
+def test_explicit_fractile_voids_class_conditional_claim_and_class_system() -> None:
     heterogeneous_costs = {
         "sku-a": CostStructure(0.0, 0.0, 0.0, 0.0),
         "sku-b": CostStructure(1.0, 3.0, 0.0, 0.0),
@@ -139,7 +160,7 @@ def test_explicit_decision_fractile_records_binding_and_voids_only_the_claim() -
     configuration = compile_ordering(
         _setup(cost_structure=heterogeneous_costs, explicit_decision_fractile=0.6)
     )
-    descriptor = _descriptor()
+    descriptor = _class_conditional_descriptor()
 
     rewritten = configuration.descriptor_for_decision(descriptor)
 
@@ -152,7 +173,44 @@ def test_explicit_decision_fractile_records_binding_and_voids_only_the_claim() -
         currency=None,
         declared_slack=None,
     )
-    assert replace(rewritten, type=descriptor.type) == descriptor
+    assert rewritten.scope == DecisionScope(
+        kind=descriptor.scope.kind,
+        class_system_name=None,
+    )
+    assert replace(rewritten, type=descriptor.type, scope=descriptor.scope) == descriptor
+
+
+def test_bound_modifier_voids_class_conditional_claim_and_class_system() -> None:
+    configuration = compile_ordering(_setup(target_cap=1.0))
+    descriptor = _class_conditional_descriptor()
+
+    rewritten = configuration.descriptor_for_decision(
+        descriptor,
+        bindings=(AppliedBinding(name="target_cap", value=1.0, bound=True),),
+    )
+
+    assert rewritten.type == GuaranteeType(
+        claim=GuaranteeClaim.NONE,
+        currency=None,
+        declared_slack=None,
+    )
+    assert rewritten.scope == DecisionScope(
+        kind=descriptor.scope.kind,
+        class_system_name=None,
+    )
+    assert replace(rewritten, type=descriptor.type, scope=descriptor.scope) == descriptor
+
+
+def test_unbound_modifier_preserves_class_conditional_descriptor_identity() -> None:
+    configuration = compile_ordering(_setup(target_cap=1.0))
+    descriptor = _class_conditional_descriptor()
+
+    rewritten = configuration.descriptor_for_decision(
+        descriptor,
+        bindings=(AppliedBinding(name="target_cap", value=1.0, bound=False),),
+    )
+
+    assert rewritten is descriptor
 
 
 def test_override_off_path_has_no_binding_and_returns_descriptor_unchanged() -> None:
@@ -206,6 +264,16 @@ def test_rs_explicit_quantile_is_the_only_coverage_sync_exemption() -> None:
     for policy in ("newsvendor", "rss"):
         with pytest.raises(OrderingConfigError, match="only.*rs"):
             compile_ordering(_setup(policy=policy, explicit_quantile=0.7))
+
+
+def test_rss_reorder_point_scale_cannot_exceed_the_target() -> None:
+    configuration = compile_ordering(
+        _setup(policy="rss", reorder_point=None, reorder_point_scale=1.0)
+    )
+
+    assert configuration.reorder_point_scale == 1.0
+    with pytest.raises(OrderingConfigError, match="reorder_point_scale must be at most 1"):
+        compile_ordering(_setup(policy="rss", reorder_point=None, reorder_point_scale=1.01))
 
 
 def test_explicit_decision_fractile_is_only_for_newsvendor() -> None:
