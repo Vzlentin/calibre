@@ -33,17 +33,7 @@ class OrderProposal:
         if self.evidence is not None:
             if not isinstance(self.evidence, DecisionEvidence):
                 raise EngineError("proposal evidence must be DecisionEvidence or omitted")
-            if type(self.evidence) is not DecisionEvidence:
-                evidence = DecisionEvidence(
-                    raw_target=self.evidence.raw_target,
-                    target=self.evidence.target,
-                    source_columns=self.evidence.source_columns,
-                    source_descriptor=self.evidence.source_descriptor,
-                    effective_descriptor=self.evidence.effective_descriptor,
-                    bindings=self.evidence.bindings,
-                    reorder_point=self.evidence.reorder_point,
-                )
-                object.__setattr__(self, "evidence", evidence)
+            object.__setattr__(self, "evidence", DecisionEvidence.snapshot(self.evidence))
 
     @property
     def key(self) -> DecisionKey:

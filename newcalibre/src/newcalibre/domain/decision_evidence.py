@@ -57,6 +57,23 @@ class DecisionEvidence:
     bindings: tuple[AppliedBinding, ...] = ()
     reorder_point: float | None = None
 
+    @classmethod
+    def snapshot(cls, evidence: DecisionEvidence) -> DecisionEvidence:
+        """Return an exact immutable snapshot of decision evidence."""
+        if not isinstance(evidence, cls):
+            raise DecisionEvidenceError("evidence must be DecisionEvidence")
+        if type(evidence) is cls:
+            return evidence
+        return cls(
+            raw_target=evidence.raw_target,
+            target=evidence.target,
+            source_columns=evidence.source_columns,
+            source_descriptor=evidence.source_descriptor,
+            effective_descriptor=evidence.effective_descriptor,
+            bindings=evidence.bindings,
+            reorder_point=evidence.reorder_point,
+        )
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw_target", _finite_real(self.raw_target, name="raw target"))
         object.__setattr__(self, "target", _finite_real(self.target, name="target"))

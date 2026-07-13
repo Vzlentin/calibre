@@ -111,20 +111,7 @@ class PolicyDecision:
             raise OrderingInputError("decision quantity must be nonnegative")
         if not isinstance(self.evidence, DecisionEvidence):
             raise OrderingInputError("decision evidence must be DecisionEvidence")
-        if type(self.evidence) is not DecisionEvidence:
-            object.__setattr__(
-                self,
-                "evidence",
-                DecisionEvidence(
-                    raw_target=self.evidence.raw_target,
-                    target=self.evidence.target,
-                    source_columns=self.evidence.source_columns,
-                    source_descriptor=self.evidence.source_descriptor,
-                    effective_descriptor=self.evidence.effective_descriptor,
-                    bindings=self.evidence.bindings,
-                    reorder_point=self.evidence.reorder_point,
-                ),
-            )
+        object.__setattr__(self, "evidence", DecisionEvidence.snapshot(self.evidence))
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,13 +140,22 @@ def dispatch_policy(request: PolicyRequest) -> tuple[PolicyDecision, ...]:
         raise OrderingInputError("dispatch requires a PolicyRequest")
     groups = _decision_groups(request)
     configuration = request.configuration
+    explicit_quantile_descriptor = (
+        _nonengine_quantile_descriptor(configuration.explicit_quantile)
+        if configuration.policy in {"rs", "rss"} and configuration.explicit_quantile is not None
+        else None
+    )
 
     staged: list[PolicyDecision] = []
     for group in groups:
         if configuration.policy == "newsvendor":
             raw_target, source = _newsvendor_target(group, configuration)
         elif configuration.policy in {"rs", "rss"}:
-            raw_target, source = _window_target(group, configuration)
+            raw_target, source = _window_target(
+                group,
+                configuration,
+                explicit_quantile_descriptor=explicit_quantile_descriptor,
+            )
         else:  # pragma: no cover - compile_ordering owns the closed policy set.
             raise OrderingInputError("compiled policy is not supported")
 
@@ -348,11 +344,19 @@ def _newsvendor_target(
 def _window_target(
     group: _DecisionGroup,
     configuration: OrderingConfiguration,
+    *,
+    explicit_quantile_descriptor: GuaranteeDescriptor | None,
 ) -> tuple[float, _Source]:
     required_steps = tuple(configuration.decision_timing.protection_window)
     _require_steps(group, required_steps)
     if configuration.explicit_quantile is not None:
-        return _explicit_quantile_target(group, configuration, required_steps)
+        assert explicit_quantile_descriptor is not None
+        return _explicit_quantile_target(
+            group,
+            configuration,
+            required_steps,
+            fallback_descriptor=explicit_quantile_descriptor,
+        )
 
     coverage = configuration.coverage
     if coverage is None:
@@ -411,6 +415,8 @@ def _explicit_quantile_target(
     group: _DecisionGroup,
     configuration: OrderingConfiguration,
     required_steps: tuple[int, ...],
+    *,
+    fallback_descriptor: GuaranteeDescriptor,
 ) -> tuple[float, _Source]:
     level = cast(float, configuration.explicit_quantile)
     column = quantile_column(level)
@@ -451,7 +457,7 @@ def _explicit_quantile_target(
                 consumed_columns=(column,),
             )
     else:
-        descriptor = _nonengine_quantile_descriptor(level)
+        descriptor = fallback_descriptor
     return _finite_sum(values, name="explicit quantile target"), _Source(
         (column,),
         descriptor,
