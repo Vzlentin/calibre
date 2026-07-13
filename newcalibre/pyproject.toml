@@ -33,6 +33,7 @@ packages = ["src/newcalibre"]
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
+pythonpath = ["tests"]
 xfail_strict = true
 markers = [
     "tier0: static gates - lint, types, and schema validation (every commit)",
@@ -40,6 +41,8 @@ markers = [
     "tier2: tolerance-class-4 self-consistency (every merge)",
     "tier3: conditional replay against promoted oracle captures (scheduled/manual)",
     "tier4: protocol acceptance at scale (scheduled verify-only/manual evidence)",
+    "oracle_gate(id): numeric gate with one same-tier stable witness ID",
+    "oracle_witness(id): smallest-drift witness paired to one same-tier numeric gate",
 ]
 
 [tool.ruff]

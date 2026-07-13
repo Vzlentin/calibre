@@ -20,6 +20,11 @@ env:
   ORACLE_TAG: oracle-freeze-2026-07-06
   ORACLE_COMMIT: 686a1b284a4f4879123b4095d306f07b88d2ddc3
   ORACLE_LOCK_SHA256: 5cc585d347195861d81760e16a675bd2a05b51777cf90c13d9af0ab05bb743f3
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  VECLIB_MAXIMUM_THREADS: "1"
 
 jobs:
   capture:
@@ -35,6 +40,17 @@ jobs:
           fetch-depth: 0
       - name: Verify checked-out HEAD equals the candidate input
         run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - name: Refuse a non-ratified capture runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64" \
+            || { echo "capture runner must be x86_64"; exit 1; }
+          test "${ImageOS:-}" = "ubuntu24" \
+            || { echo "capture runner image OS must be ubuntu24"; exit 1; }
+          test -n "${ImageVersion:-}" \
+            || { echo "capture runner image version is unavailable"; exit 1; }
+          python3 -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' \
+            || { echo "capture runner Python must be 3.12"; exit 1; }
       - name: Fetch and verify the oracle tag
         run: |
           set -euo pipefail
@@ -73,12 +89,29 @@ jobs:
           "${RUNNER_TEMP}/oracle-tag/.venv/bin/python" .github/scripts/stage3_oracle_extract.py \
             --worktree "${RUNNER_TEMP}/oracle-tag" \
             --out "${RUNNER_TEMP}/bundle/orders"
+      - name: Record oracle numeric environment from the synced venv
+        run: |
+          "${RUNNER_TEMP}/oracle-tag/.venv/bin/python" newcalibre/scripts/capture_oracle_vn2.py \
+            environment --out "${RUNNER_TEMP}/bundle/environment.json"
       - name: Assemble the manifest-complete bundle
         env:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           python3 .github/scripts/stage3_capture_manifest.py \
             --bundle "${RUNNER_TEMP}/bundle" \
+            --config "${RUNNER_TEMP}/oracle-tag/benchmarks/vn2/config/vn2-winning-loop.yaml" \
+            --input-inventory stage3/evidence/vn2-input-digests.json \
+            --environment "${RUNNER_TEMP}/bundle/environment.json" \
+            --actuals-semantics censored_sales_surrogate
+      - name: Validate the minted bytes with the candidate runner
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          python3 newcalibre/scripts/capture_oracle_vn2.py validate \
+            --bundle "${RUNNER_TEMP}/bundle" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
             --config "${RUNNER_TEMP}/oracle-tag/benchmarks/vn2/config/vn2-winning-loop.yaml" \
             --input-inventory stage3/evidence/vn2-input-digests.json
       - name: Upload capture bundle
