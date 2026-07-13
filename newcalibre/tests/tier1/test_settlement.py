@@ -232,7 +232,10 @@ def _engine(
     return (
         Engine(
             panel_source=InMemoryPanelSource(panel),
-            actuals_source=InMemoryActualsSource(panel),
+            actuals_source=InMemoryActualsSource(
+                panel,
+                actuals_semantics=ActualsSemantics.DEMAND,
+            ),
             artifact_store=InMemoryArtifactStore(),
             calibration_state_store=InMemoryCalibrationStateStore(),
             ledger_sink=sink,

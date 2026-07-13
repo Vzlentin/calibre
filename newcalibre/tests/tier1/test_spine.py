@@ -65,6 +65,7 @@ from newcalibre.engine import (
     OrderRequest,
     OriginCommit,
     OriginRequest,
+    OriginResult,
     Phase,
     PhaseError,
     PhaseEvent,
@@ -263,7 +264,10 @@ def _engine_with_default_resolver(
 ) -> Engine:
     return Engine(
         panel_source=panel_source,
-        actuals_source=InMemoryActualsSource(panel),
+        actuals_source=InMemoryActualsSource(
+            panel,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        ),
         artifact_store=InMemoryArtifactStore(),
         calibration_state_store=InMemoryCalibrationStateStore(),
         ledger_sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
@@ -420,7 +424,10 @@ def _engine(
 ) -> Engine:
     return Engine(
         panel_source=panel_source or InMemoryPanelSource(panel),
-        actuals_source=InMemoryActualsSource(panel),
+        actuals_source=InMemoryActualsSource(
+            panel,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        ),
         artifact_store=artifacts,
         calibration_state_store=states,
         ledger_sink=sink,
@@ -623,6 +630,26 @@ def test_forecast_batch_collapses_dataframe_subclasses_before_validation() -> No
 
     with pytest.raises(ForecastFrameError, match="target timestamp must equal"):
         ForecastBatch(MaskingFrame(malformed), calendar=CALENDAR)
+
+
+def test_settlement_window_requires_explicit_actuals_semantics() -> None:
+    origin = pd.Timestamp("2026-01-05")
+    snapshot = SettlementSnapshot(
+        session=_session(with_decision=True),
+        calendar=CALENDAR,
+        periods=(origin,),
+        frontier=None,
+        latest_positions={},
+        open_order_quantities={"a": 0.0},
+        due_arrivals={},
+        actuals_semantics=None,
+    )
+
+    with pytest.raises(TypeError, match="actuals_semantics"):
+        SettlementWindow(
+            snapshot=snapshot,
+            actuals={("a", origin): 0.0},
+        )  # type: ignore[call-arg]
 
 
 def test_spine_rejects_a_settlement_window_beyond_its_origin_before_phases() -> None:
@@ -962,6 +989,114 @@ def _policy_calibrator(
     )
 
 
+def test_decision_layer_is_additive_to_forecasts_and_calibration_state() -> None:
+    panel = _panel()
+    enabled_session = _session(
+        with_decision=True,
+        ordering_policy={"name": "rs", "coverage": 0.8},
+        conformal_config={"coverage": 0.8, "protection_period": 2},
+    )
+    disabled_session = _session(horizon=TIMING.protection_period)
+    origin = pd.Timestamp("2026-01-05")
+    positions = {"a": InventoryPosition(0.0, 0.0, 0.0)}
+
+    def calibrator(
+        *,
+        emit_decision_bound: bool,
+    ) -> Callable[[ForecastBatch, Mapping[str, bytes | None]], CalibrationResult]:
+        def calibrate(
+            forecasts: ForecastBatch,
+            prior: Mapping[str, bytes | None],
+        ) -> CalibrationResult:
+            assert prior == {"global": None}
+            point_bytes = (
+                forecasts.frame[POINT_FORECAST].to_numpy(dtype="float64", copy=True).tobytes()
+            )
+            bounded = (
+                _policy_calibrator(forecasts, prior).forecasts if emit_decision_bound else forecasts
+            )
+            return CalibrationResult(bounded, {"global": point_bytes})
+
+        return calibrate
+
+    def exercise(
+        session: SessionIdentity,
+        *,
+        emit_decision_bound: bool,
+        orderer: ConfiguredPolicyOrderer | None,
+    ) -> tuple[OriginResult, bytes | None, Engine, InMemoryLedgerSink]:
+        states = InMemoryCalibrationStateStore()
+        sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+        engine = _engine(
+            panel=panel,
+            events=[],
+            artifacts=InMemoryArtifactStore(),
+            states=states,
+            sink=sink,
+            dispatch=RecordingDispatch(),
+            calibrator=calibrator(emit_decision_bound=emit_decision_bound),
+            orderer=orderer,
+        )
+        result = Spine(engine).run_origin(
+            OriginRequest(
+                session=session,
+                origin=origin,
+                scope=Scope.LOCAL,
+                calibration_partitions=("global",),
+                inventory_positions=positions,
+            )
+        )
+        return result, states.load(session, "global"), engine, sink
+
+    enabled = exercise(
+        enabled_session,
+        emit_decision_bound=True,
+        orderer=ConfiguredPolicyOrderer(),
+    )
+    disabled = exercise(
+        disabled_session,
+        emit_decision_bound=False,
+        orderer=None,
+    )
+    enabled_result, enabled_state, enabled_engine, _enabled_sink = enabled
+    disabled_result, disabled_state, disabled_engine, disabled_sink = disabled
+    enabled_points = enabled_result.forecasts.frame[POINT_FORECAST].to_numpy(
+        dtype="float64",
+        copy=True,
+    )
+    disabled_points = disabled_result.forecasts.frame[POINT_FORECAST].to_numpy(
+        dtype="float64",
+        copy=True,
+    )
+
+    assert enabled_points.tobytes() == disabled_points.tobytes()
+    assert enabled_state == disabled_state == enabled_points.tobytes()
+    enabled_decisions = enabled_engine.order(
+        OrderRequest(
+            session=enabled_session,
+            origin=origin,
+            forecasts=enabled_result.forecasts,
+            inventory_positions=positions,
+        )
+    )
+    disabled_decisions = disabled_engine.order(
+        OrderRequest(
+            session=disabled_session,
+            origin=origin,
+            forecasts=disabled_result.forecasts,
+            inventory_positions=positions,
+        )
+    )
+    assert enabled_decisions is not None
+    assert enabled_decisions.proposals[0].evidence is not None
+    assert enabled_result.orders
+    assert disabled_decisions is None
+    assert all(not bounds for bounds in disabled_result.forecasts.issuances.values())
+    assert all(column not in disabled_result.forecasts.frame for column in interval_columns(0.8))
+    assert disabled_result.orders == ()
+    assert disabled_sink.orders == ()
+
+
 @pytest.mark.parametrize(
     ("target_cap", "expected_target", "expected_quantity", "bound", "expected_claim"),
     [
@@ -1145,7 +1280,7 @@ def test_configured_policy_exception_propagates_and_commits_no_partial_origin() 
         )
     )
 
-    with pytest.raises(OrderingInputError, match="issuance provenance"):
+    with pytest.raises(OrderingInputError, match="issuance provenance") as failure:
         spine.run_origin(
             OriginRequest(
                 session=session,
@@ -1157,6 +1292,7 @@ def test_configured_policy_exception_propagates_and_commits_no_partial_origin() 
             )
         )
 
+    assert type(failure.value) is OrderingInputError
     assert sink.forecasts == ()
     assert sink.orders == ()
     assert sink.receipt(pd.Timestamp("2026-01-05")) is None
@@ -1306,6 +1442,7 @@ def test_commit_request_retry_replays_settlement_without_duplicate_rows() -> Non
         settlement=SettlementWindow(
             snapshot=sink.settlement_snapshot((origin,)),
             actuals={("a", origin): 0.0},
+            actuals_semantics=ActualsSemantics.DEMAND,
         ),
     )
 

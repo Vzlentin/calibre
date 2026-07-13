@@ -68,8 +68,8 @@ class TimeLoopRequest:
         origins: Sequence[pd.Timestamp],
         scope: Scope,
         initial_inventory_positions: Mapping[str, InventoryPosition],
+        actuals_semantics: ActualsSemantics,
         calibration_partitions: Sequence[str] = (),
-        actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
     ) -> None:
         if not isinstance(session, SessionIdentity):
             raise TypeError("time-loop session must be a SessionIdentity")
@@ -165,6 +165,8 @@ class TimeLoop:
             raise TypeError("time loop requires a TimeLoopRequest")
         if reporter is not None and not callable(reporter):
             raise TypeError("time loop reporter must be callable")
+        if actuals_source.actuals_semantics is not request.actuals_semantics:
+            raise TimeLoopError("time-loop actuals semantics do not match the actuals source")
         engine._require_time_loop_ports(
             actuals_source=actuals_source,
             ledger_sink=ledger_sink,
@@ -206,6 +208,13 @@ class TimeLoop:
         drain_target = calendar.advance(final_decision, timing.lead_time)
         final_period = max(request.origins[-1], drain_target)
         initial_snapshot = ledger_sink.settlement_snapshot((request.origins[0],))
+        if (
+            initial_snapshot.frontier is not None
+            and initial_snapshot.actuals_semantics is not request.actuals_semantics
+        ):
+            raise TimeLoopError(
+                "time-loop actuals semantics do not match the durable settlement state"
+            )
         if initial_snapshot.frontier is None:
             try:
                 validate_snapshot_state(

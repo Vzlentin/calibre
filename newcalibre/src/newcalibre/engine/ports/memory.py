@@ -14,6 +14,7 @@ from newcalibre.domain import (
     OBSERVED_VALUE,
     SERIES_KEY,
     TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     CalendarError,
     Panel,
@@ -60,10 +61,20 @@ class InMemoryPanelSource:
 class InMemoryActualsSource:
     """Reveal non-missing panel observations strictly before an origin."""
 
-    def __init__(self, panel: Panel) -> None:
+    def __init__(
+        self,
+        panel: Panel,
+        *,
+        actuals_semantics: ActualsSemantics,
+    ) -> None:
         if not isinstance(panel, Panel):
             raise TypeError("in-memory actuals source requires a Panel")
+        if not isinstance(actuals_semantics, ActualsSemantics):
+            raise TypeError("in-memory actuals semantics must be ActualsSemantics")
+        if panel.has_censoring_facts and actuals_semantics is ActualsSemantics.DEMAND:
+            raise ValueError("a panel with censoring facts cannot supply demand-honest actuals")
         self._calendar = panel.calendar
+        self._actuals_semantics = actuals_semantics
         observed = panel.frame[[SERIES_KEY, TIMESTAMP, OBSERVED_VALUE]].dropna(
             subset=[OBSERVED_VALUE]
         )
@@ -71,6 +82,11 @@ class InMemoryActualsSource:
             (str(series_key), pd.Timestamp(timestamp)): float(value)
             for series_key, timestamp, value in observed.itertuples(index=False, name=None)
         }
+
+    @property
+    def actuals_semantics(self) -> ActualsSemantics:
+        """Return the explicitly bound meaning of the observed values."""
+        return self._actuals_semantics
 
     def for_keys(
         self,

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 import pytest
 
 from newcalibre.domain import (
     ACTUAL_VALUE,
+    CENSOR_STATUS,
     HORIZON_STEP,
     MODEL_NAME,
     OBSERVED_VALUE,
@@ -18,6 +19,7 @@ from newcalibre.domain import (
     SERIES_KEY,
     TARGET_TIMESTAMP,
     TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     CostStructure,
     DecisionTiming,
@@ -194,10 +196,11 @@ class RecordingActualsSource(InMemoryActualsSource):
         self,
         panel: Panel,
         *,
+        actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
         omitted: Sequence[ActualKey] = (),
         overrides: Mapping[ActualKey, float] | None = None,
     ) -> None:
-        super().__init__(panel)
+        super().__init__(panel, actuals_semantics=actuals_semantics)
         self.calls: list[tuple[tuple[ActualKey, ...], pd.Timestamp]] = []
         self._omitted = frozenset(omitted)
         self._overrides = {} if overrides is None else dict(overrides)
@@ -349,6 +352,7 @@ def _request(
     *,
     origins: Sequence[pd.Timestamp] = ORIGINS,
     positions: Mapping[str, InventoryPosition] | None = None,
+    actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
 ) -> TimeLoopRequest:
     return TimeLoopRequest(
         session=session,
@@ -356,6 +360,7 @@ def _request(
         scope=Scope.LOCAL,
         calibration_partitions=("global",),
         initial_inventory_positions={"a": INITIAL_POSITION} if positions is None else positions,
+        actuals_semantics=actuals_semantics,
     )
 
 
@@ -370,6 +375,23 @@ def _assert_no_effects(runtime: Runtime) -> None:
     assert runtime.sink.forecasts == ()
     assert runtime.sink.orders == ()
     assert runtime.sink.settlements == ()
+
+
+def test_request_requires_explicit_actuals_semantics_before_effects() -> None:
+    session = _session()
+    runtime = _runtime(session=session, forecast_panel=_panel(range(101, 112)))
+
+    with pytest.raises(TypeError, match="actuals_semantics"):
+        TimeLoopRequest(
+            session=session,
+            origins=ORIGINS,
+            scope=Scope.LOCAL,
+            calibration_partitions=("global",),
+            initial_inventory_positions={"a": INITIAL_POSITION},
+        )  # type: ignore[call-arg]
+
+    assert runtime.actuals.calls == []
+    _assert_no_effects(runtime)
 
 
 @pytest.mark.parametrize(
@@ -546,6 +568,146 @@ def test_gapped_origins_use_sequence_cadence_and_settle_the_calendar_through_dra
     assert runtime.states.states[(session, "global")] == b"observed:6.0|calibrated"
     assert len(result.receipts) == len(expected_periods)
     assert all(runtime.sink.receipt(period) is not None for period in expected_periods)
+
+
+def test_explicit_surrogate_semantics_labels_settlement_without_changing_arithmetic() -> None:
+    session = _session()
+    forecast_panel = _panel(range(101, 112))
+    authoritative_panel = _panel(range(1, 12))
+    censored_frame = authoritative_panel.frame
+    censored_frame[CENSOR_STATUS] = pd.Series(
+        ["censored"] * len(censored_frame),
+        dtype="string",
+    )
+    censored_panel = Panel.from_frame(censored_frame, calendar=CALENDAR)
+    demand = _runtime(
+        session=session,
+        forecast_panel=forecast_panel,
+        actuals=RecordingActualsSource(authoritative_panel),
+    )
+    surrogate = _runtime(
+        session=session,
+        forecast_panel=forecast_panel,
+        actuals=RecordingActualsSource(
+            censored_panel,
+            actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+        ),
+    )
+
+    demand_result = TimeLoop(
+        engine=demand.engine,
+        actuals_source=demand.actuals,
+        ledger_sink=demand.sink,
+        request=_request(session, actuals_semantics=ActualsSemantics.DEMAND),
+    ).run()
+    surrogate_result = TimeLoop(
+        engine=surrogate.engine,
+        actuals_source=surrogate.actuals,
+        ledger_sink=surrogate.sink,
+        request=_request(
+            session,
+            actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+        ),
+    ).run()
+
+    assert {row.actuals_semantics for row in demand.sink.settlements} == {ActualsSemantics.DEMAND}
+    assert {row.actuals_semantics for row in surrogate.sink.settlements} == {
+        ActualsSemantics.CENSORED_SALES_SURROGATE
+    }
+    assert surrogate_result.settlement_periods == demand_result.settlement_periods
+    assert surrogate_result.decision_origins == demand_result.decision_origins
+    assert surrogate_result.inventory_positions == demand_result.inventory_positions
+    assert (
+        tuple(
+            replace(row, actuals_semantics=ActualsSemantics.DEMAND)
+            for row in surrogate.sink.settlements
+        )
+        == demand.sink.settlements
+    )
+
+
+def test_time_loop_refuses_semantics_that_do_not_match_the_actuals_source() -> None:
+    session = _session()
+    actuals = RecordingActualsSource(
+        _panel(range(1, 12)),
+        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+    )
+    runtime = _runtime(
+        session=session,
+        forecast_panel=_panel(range(101, 112)),
+        actuals=actuals,
+    )
+
+    with pytest.raises(TimeLoopError, match="do not match the actuals source"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=actuals,
+            ledger_sink=runtime.sink,
+            request=_request(session, actuals_semantics=ActualsSemantics.DEMAND),
+        )
+
+    assert actuals.calls == []
+    _assert_no_effects(runtime)
+
+
+@pytest.mark.parametrize("committed_origins", (ORIGINS[:1], ORIGINS))
+def test_resume_refuses_changed_actuals_semantics_before_reading_actuals(
+    committed_origins: Sequence[pd.Timestamp],
+) -> None:
+    session = _session()
+    forecast_panel = _panel(range(101, 112))
+    authoritative_panel = _panel(range(1, 12))
+    artifacts = InMemoryArtifactStore()
+    states = InMemoryCalibrationStateStore()
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    demand_actuals = RecordingActualsSource(authoritative_panel)
+    initial = _runtime(
+        session=session,
+        forecast_panel=forecast_panel,
+        actuals=demand_actuals,
+        artifacts=artifacts,
+        states=states,
+        sink=sink,
+    )
+    TimeLoop(
+        engine=initial.engine,
+        actuals_source=demand_actuals,
+        ledger_sink=sink,
+        request=_request(session, origins=committed_origins),
+    ).run()
+    durable_counts = (len(sink.forecasts), len(sink.orders), len(sink.settlements))
+    durable_states = dict(states.states)
+
+    surrogate_actuals = RecordingActualsSource(
+        authoritative_panel,
+        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+    )
+    resumed = _runtime(
+        session=session,
+        forecast_panel=forecast_panel,
+        actuals=surrogate_actuals,
+        artifacts=artifacts,
+        states=states,
+        sink=sink,
+    )
+
+    with pytest.raises(TimeLoopError, match="durable settlement state"):
+        TimeLoop(
+            engine=resumed.engine,
+            actuals_source=surrogate_actuals,
+            ledger_sink=sink,
+            request=_request(
+                session,
+                actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+            ),
+        )
+
+    assert surrogate_actuals.calls == []
+    assert (len(sink.forecasts), len(sink.orders), len(sink.settlements)) == durable_counts
+    assert states.states == durable_states
+    assert resumed.fit_histories == []
+    assert resumed.predicted_origins == []
+    assert resumed.order_origins == []
 
 
 def test_time_loop_requests_actuals_and_settles_only_the_session_decision_series() -> None:
