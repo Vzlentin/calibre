@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from numbers import Real
 from types import MappingProxyType
@@ -23,6 +23,14 @@ DecisionCostKey = tuple[str, pd.Timestamp]
 
 class ObjectiveError(ValueError):
     """Report objective input that cannot produce honest realized-cost facts."""
+
+
+class CandidateInfeasible(Exception):
+    """Signal a statistically infeasible or degenerate candidate evaluation."""
+
+    def __init__(self, reason: str) -> None:
+        _require_reason(reason)
+        super().__init__(reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,8 +184,9 @@ class SettlementObjective:
 
     session: SessionIdentity | None
     actuals_semantics: ActualsSemantics
-    by_decision: Mapping[DecisionCostKey, CostComponents] = field(repr=False)
+    components_by_decision: Mapping[DecisionCostKey, CostComponents] = field(repr=False)
     infeasible_reason: str | None = None
+    by_decision: Mapping[DecisionCostKey, CostValue] = field(init=False, repr=False)
     by_origin: Mapping[pd.Timestamp, CostValue] = field(init=False, repr=False)
     by_series: Mapping[str, CostValue] = field(init=False, repr=False)
     partials: tuple[OriginPartial, ...] = field(init=False)
@@ -188,21 +197,28 @@ class SettlementObjective:
 
     def __post_init__(self) -> None:
         _require_semantics(self.actuals_semantics)
-        by_decision = dict(self.by_decision)
-        if any(not isinstance(value, CostComponents) for value in by_decision.values()):
-            raise TypeError("settlement decision costs must contain CostComponents")
-        for key in by_decision:
+        components_by_decision = dict(self.components_by_decision)
+        for key in components_by_decision:
             _require_decision_key(key, name="settlement decision cost key")
-        for components in by_decision.values():
+        components_by_decision = dict(
+            sorted(
+                components_by_decision.items(),
+                key=lambda item: _decision_sort_key(item[0]),
+            )
+        )
+        if any(not isinstance(value, CostComponents) for value in components_by_decision.values()):
+            raise TypeError("settlement decision costs must contain CostComponents")
+        for components in components_by_decision.values():
             if components.total.actuals_semantics is not self.actuals_semantics:
                 raise ObjectiveError("settlement derived costs must preserve actuals semantics")
-        if by_decision:
+        by_decision = {key: components.total for key, components in components_by_decision.items()}
+        if components_by_decision:
             if not isinstance(self.session, SessionIdentity):
                 raise TypeError("a feasible settlement objective requires one session")
             if self.infeasible_reason is not None:
                 raise ObjectiveError("a feasible settlement objective has no failure reason")
             aggregates = _aggregate_settlement_costs(
-                by_decision,
+                components_by_decision,
                 actuals_semantics=self.actuals_semantics,
             )
             feasible = True
@@ -220,6 +236,11 @@ class SettlementObjective:
                 total=CostValue(math.inf, self.actuals_semantics),
             )
             feasible = False
+        object.__setattr__(
+            self,
+            "components_by_decision",
+            MappingProxyType(components_by_decision),
+        )
         object.__setattr__(self, "by_decision", MappingProxyType(by_decision))
         object.__setattr__(self, "by_origin", aggregates.by_origin)
         object.__setattr__(self, "by_series", aggregates.by_series)
@@ -324,7 +345,7 @@ def settle_path_cost(
         return SettlementObjective(
             session=None,
             actuals_semantics=actuals_semantics,
-            by_decision={},
+            components_by_decision={},
             infeasible_reason="candidate emitted no settlement records",
         )
     if any(not isinstance(record, SettlementRecord) for record in staged):
@@ -353,8 +374,38 @@ def settle_path_cost(
     return SettlementObjective(
         session=session,
         actuals_semantics=actuals_semantics,
-        by_decision=by_decision,
+        components_by_decision=by_decision,
     )
+
+
+def evaluate_settlement_candidate(
+    evaluate: Callable[[], Iterable[SettlementRecord]],
+    *,
+    actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
+) -> SettlementObjective:
+    """Evaluate one settlement-record callback with explicit candidate failures."""
+    _require_semantics(actuals_semantics)
+    if not callable(evaluate):
+        raise TypeError("settlement candidate evaluator must be callable")
+    try:
+        records = evaluate()
+        return settle_path_cost(records, actuals_semantics=actuals_semantics)
+    except CandidateInfeasible as error:
+        return SettlementObjective(
+            session=None,
+            actuals_semantics=actuals_semantics,
+            components_by_decision={},
+            infeasible_reason=str(error),
+        )
+
+
+def realized_cost(
+    records: Iterable[SettlementRecord],
+    *,
+    actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
+) -> CostValue:
+    """Return the labeled scalar realized cost used by the tuning default."""
+    return settle_path_cost(records, actuals_semantics=actuals_semantics).total
 
 
 def key_aligned_regret(
@@ -440,48 +491,47 @@ def _aggregate_settlement_costs(
     *,
     actuals_semantics: ActualsSemantics,
 ) -> _SettlementAggregates:
-    origin_components: dict[pd.Timestamp, list[float]] = {}
-    series_components: dict[str, list[float]] = {}
+    origin_totals: dict[pd.Timestamp, list[float]] = {}
+    series_totals: dict[str, list[float]] = {}
     holding_values: list[float] = []
     shortage_values: list[float] = []
     for (series_key, origin), costs in sorted(
         by_decision.items(),
         key=lambda item: _decision_sort_key(item[0]),
     ):
-        components = (costs.holding.value, costs.shortage.value)
-        origin_components.setdefault(origin, []).extend(components)
-        series_components.setdefault(series_key, []).extend(components)
+        origin_totals.setdefault(origin, []).append(costs.total.value)
+        series_totals.setdefault(series_key, []).append(costs.total.value)
         holding_values.append(costs.holding.value)
         shortage_values.append(costs.shortage.value)
 
     by_origin = {
         origin: CostValue(
-            _finite_sum(components, name="settlement origin cost"),
+            _finite_sum(values, name="settlement origin cost"),
             actuals_semantics,
         )
-        for origin, components in sorted(origin_components.items())
+        for origin, values in sorted(origin_totals.items())
     }
     by_series = {
         series_key: CostValue(
-            _finite_sum(components, name="settlement series cost"),
+            _finite_sum(values, name="settlement series cost"),
             actuals_semantics,
         )
-        for series_key, components in sorted(
-            series_components.items(),
+        for series_key, values in sorted(
+            series_totals.items(),
             key=lambda item: item[0].encode(),
         )
     }
     partials: list[OriginPartial] = []
-    cumulative_components: list[float] = []
-    for origin, components in sorted(origin_components.items()):
-        cumulative_components.extend(components)
+    cumulative = 0.0
+    for origin, cost in by_origin.items():
+        cumulative = _finite_sum(
+            (cumulative, cost.value),
+            name="settlement partial cost",
+        )
         partials.append(
             OriginPartial(
                 origin=origin,
-                cost=CostValue(
-                    _finite_sum(cumulative_components, name="settlement partial cost"),
-                    actuals_semantics,
-                ),
+                cost=CostValue(cumulative, actuals_semantics),
             )
         )
 
@@ -497,10 +547,7 @@ def _aggregate_settlement_costs(
             _finite_sum(shortage_values, name="settlement shortage total"),
             actuals_semantics,
         ),
-        total=CostValue(
-            _finite_sum(cumulative_components, name="settlement objective total"),
-            actuals_semantics,
-        ),
+        total=partials[-1].cost,
     )
 
 
@@ -518,9 +565,10 @@ def _snapshot_iterable[T](value: Iterable[T], *, name: str) -> tuple[T, ...]:
     if isinstance(value, (str, bytes)):
         raise TypeError(f"{name} must be an iterable of values")
     try:
-        return tuple(value)
+        iterator = iter(value)
     except TypeError as error:
         raise TypeError(f"{name} must be an iterable of values") from error
+    return tuple(iterator)
 
 
 def _finite_vector(value: Iterable[object], *, name: str) -> tuple[float, ...]:
@@ -599,11 +647,12 @@ def _require_reason(value: object) -> None:
         raise ObjectiveError("infeasible objective reason must be valid UTF-8") from error
 
 
-DEFAULT_OBJECTIVE = settle_path_cost
+DEFAULT_OBJECTIVE = realized_cost
 
 
 __all__ = [
     "DEFAULT_OBJECTIVE",
+    "CandidateInfeasible",
     "CostComponents",
     "CostValue",
     "DecisionCostKey",
@@ -614,6 +663,8 @@ __all__ = [
     "RegretObjective",
     "SettlementObjective",
     "diagnostic_cost",
+    "evaluate_settlement_candidate",
     "key_aligned_regret",
+    "realized_cost",
     "settle_path_cost",
 ]

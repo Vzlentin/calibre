@@ -11,6 +11,7 @@ from newcalibre.ordering._core import (
 )
 from newcalibre.ordering._objective import (
     DEFAULT_OBJECTIVE,
+    CandidateInfeasible,
     CostComponents,
     CostValue,
     DecisionCostKey,
@@ -21,7 +22,9 @@ from newcalibre.ordering._objective import (
     RegretObjective,
     SettlementObjective,
     diagnostic_cost,
+    evaluate_settlement_candidate,
     key_aligned_regret,
+    realized_cost,
     settle_path_cost,
 )
 from newcalibre.ordering._policies import PolicyDecision, PolicyRequest, dispatch_policy
@@ -29,6 +32,7 @@ from newcalibre.ordering._policies import PolicyDecision, PolicyRequest, dispatc
 __all__ = [
     "DEFAULT_OBJECTIVE",
     "AppliedBinding",
+    "CandidateInfeasible",
     "CostComponents",
     "CostValue",
     "DecisionCostKey",
@@ -47,7 +51,9 @@ __all__ = [
     "compile_ordering",
     "dispatch_policy",
     "diagnostic_cost",
+    "evaluate_settlement_candidate",
     "key_aligned_regret",
     "order_up_to",
+    "realized_cost",
     "settle_path_cost",
 ]

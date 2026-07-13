@@ -14,14 +14,17 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "newcalibre"
 PACKAGE_INIT = PACKAGE_ROOT / "__init__.py"
 ORDERING_ROOT = PACKAGE_ROOT / "ordering"
 OBJECTIVE_MODULE = PACKAGE_ROOT / "ordering" / "_objective.py"
-FORBIDDEN_OBJECTIVE_SYMBOLS = frozenset(
+ENGINE_IMPORT_ROOT = "newcalibre.engine"
+SETTLE_PATH_ALLOWED_ATTRIBUTES = frozenset(
     {
-        "InventoryPosition",
-        "OrderRow",
-        "SettlementRequest",
-        "StockoutTransition",
-        "lost_sales_transition",
-        "settle",
+        "actuals_semantics",
+        "amount",
+        "holding",
+        "key",
+        "period",
+        "series_key",
+        "session",
+        "shortage",
     }
 )
 
@@ -50,13 +53,117 @@ def _find_violations(root: Path) -> tuple[list[Path], list[str]]:
     return sources, violations
 
 
-def _engine_import_violations(root: Path) -> list[str]:
-    return [
-        f"{path.relative_to(root).as_posix()}:{line}: import {module}"
-        for path in sorted(root.rglob("*.py"))
-        for line, module in _absolute_imports(path)
-        if module == "newcalibre.engine" or module.startswith("newcalibre.engine.")
+def _engine_import_violations(
+    root: Path,
+    *,
+    root_package: str = "newcalibre.ordering",
+) -> list[str]:
+    violations: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        relative_path = path.relative_to(root)
+        package = ".".join((root_package, *relative_path.parent.parts))
+        for line, module in _engine_imports(path, package=package):
+            violations.append(f"{relative_path.as_posix()}:{line}: import {module}")
+    return violations
+
+
+def _engine_imports(path: Path, *, package: str) -> list[tuple[int, str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imports: list[tuple[int, str]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(
+                (node.lineno, alias.name) for alias in node.names if _is_engine_module(alias.name)
+            )
+        elif isinstance(node, ast.ImportFrom):
+            candidates = _resolved_from_imports(node, package=package)
+            if engine_module := next(
+                (candidate for candidate in candidates if _is_engine_module(candidate)),
+                None,
+            ):
+                imports.append((node.lineno, engine_module))
+        elif (
+            isinstance(node, ast.Call)
+            and (module := _literal_dynamic_import(node)) is not None
+            and _is_engine_module(module)
+        ):
+            imports.append((node.lineno, module))
+
+    return sorted(set(imports))
+
+
+def _resolved_from_imports(node: ast.ImportFrom, *, package: str) -> list[str]:
+    if node.level:
+        package_parts = package.split(".")
+        retained_parts = package_parts[: max(len(package_parts) - node.level + 1, 0)]
+        module_parts = node.module.split(".") if node.module else []
+        resolved_module = ".".join((*retained_parts, *module_parts))
+    else:
+        resolved_module = node.module or ""
+
+    candidates = [resolved_module] if resolved_module else []
+    candidates.extend(
+        ".".join(part for part in (resolved_module, alias.name) if part)
+        for alias in node.names
+        if alias.name != "*"
+    )
+    return candidates
+
+
+def _literal_dynamic_import(node: ast.Call) -> str | None:
+    is_importlib_call = (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "importlib"
+        and node.func.attr == "import_module"
+    )
+    is_builtin_call = isinstance(node.func, ast.Name) and node.func.id == "__import__"
+    if not (is_importlib_call or is_builtin_call):
+        return None
+
+    argument = (
+        node.args[0]
+        if node.args
+        else next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "name"),
+            None,
+        )
+    )
+    return (
+        argument.value
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+        else None
+    )
+
+
+def _is_engine_module(module: str) -> bool:
+    return module == ENGINE_IMPORT_ROOT or module.startswith(f"{ENGINE_IMPORT_ROOT}.")
+
+
+def _settle_path_boundary_violations(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    reducers = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "settle_path_cost"
     ]
+    relative_name = path.name
+    if len(reducers) != 1:
+        return [f"{relative_name}: expected exactly one top-level settle_path_cost definition"]
+
+    violations: set[tuple[int, str]] = set()
+    for statement in reducers[0].body:
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Attribute) and node.attr not in SETTLE_PATH_ALLOWED_ATTRIBUTES:
+                violations.add(
+                    (node.lineno, f"attribute {node.attr!r} is not a booked settlement fact")
+                )
+            elif isinstance(node, (ast.BinOp, ast.AugAssign)):
+                violations.add((node.lineno, "accounting arithmetic is forbidden"))
+
+    return [f"{relative_name}:{line}: {message}" for line, message in sorted(violations)]
 
 
 def test_successor_package_never_imports_frozen_surfaces() -> None:
@@ -93,27 +200,52 @@ def test_ordering_has_no_engine_import_dependency() -> None:
     assert not _engine_import_violations(ORDERING_ROOT)
 
 
-def test_ordering_engine_import_detector_bites_on_aliases(tmp_path: Path) -> None:
+def test_ordering_engine_import_detector_bites_on_supported_forms(tmp_path: Path) -> None:
     probe = tmp_path / "ordering" / "objective.py"
     probe.parent.mkdir(parents=True)
     probe.write_text(
         "from newcalibre.engine import settle as reduce\n"
-        "import newcalibre.engine.settlement as runtime\n",
+        "import newcalibre.engine.settlement as runtime\n"
+        "from newcalibre import engine as hidden\n"
+        "from ..engine import settle as relative_reduce\n"
+        "from .. import engine as relative_hidden\n"
+        "importlib.import_module('newcalibre.engine.settlement')\n"
+        "__import__('newcalibre.engine')\n"
+        "importlib.import_module('unrelated.engine')\n"
+        "__import__('another_runtime')\n",
         encoding="utf-8",
     )
 
-    assert _engine_import_violations(tmp_path) == [
+    assert _engine_import_violations(tmp_path, root_package="newcalibre") == [
         "ordering/objective.py:1: import newcalibre.engine",
         "ordering/objective.py:2: import newcalibre.engine.settlement",
+        "ordering/objective.py:3: import newcalibre.engine",
+        "ordering/objective.py:4: import newcalibre.engine",
+        "ordering/objective.py:5: import newcalibre.engine",
+        "ordering/objective.py:6: import newcalibre.engine.settlement",
+        "ordering/objective.py:7: import newcalibre.engine",
     ]
 
 
-def test_ordering_objective_contains_no_transition_or_booking_vocabulary() -> None:
-    tree = ast.parse(OBJECTIVE_MODULE.read_text(encoding="utf-8"), filename=str(OBJECTIVE_MODULE))
-    referenced = {
-        node.id if isinstance(node, ast.Name) else node.attr
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Attribute, ast.Name))
-    }
+def test_settle_path_reads_only_booked_settlement_facts() -> None:
+    assert not _settle_path_boundary_violations(OBJECTIVE_MODULE)
 
-    assert not (referenced & FORBIDDEN_OBJECTIVE_SYMBOLS)
+
+def test_settle_path_boundary_bites_on_renamed_accounting_arithmetic(
+    tmp_path: Path,
+) -> None:
+    probe = tmp_path / "_objective.py"
+    probe.write_text(
+        "def settle_path_cost(entries):\n"
+        "    for booked in entries:\n"
+        "        copied = booked.holding.amount\n"
+        "        recalculated = booked.carrying_charge * booked.stock_level\n"
+        "    return recalculated\n",
+        encoding="utf-8",
+    )
+
+    assert _settle_path_boundary_violations(probe) == [
+        "_objective.py:4: accounting arithmetic is forbidden",
+        "_objective.py:4: attribute 'carrying_charge' is not a booked settlement fact",
+        "_objective.py:4: attribute 'stock_level' is not a booked settlement fact",
+    ]

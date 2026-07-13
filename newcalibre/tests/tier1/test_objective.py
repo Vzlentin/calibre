@@ -22,11 +22,16 @@ from newcalibre.engine import SettlementError, SettlementRequest, SettlementSnap
 from newcalibre.ledger import OrderRow, SettlementRecord
 from newcalibre.ordering import (
     DEFAULT_OBJECTIVE,
+    CandidateInfeasible,
+    CostComponents,
     CostValue,
     DiagnosticWindow,
     ObjectiveError,
+    SettlementObjective,
     diagnostic_cost,
+    evaluate_settlement_candidate,
     key_aligned_regret,
+    realized_cost,
     settle_path_cost,
 )
 
@@ -98,6 +103,25 @@ def _settled_records(
             session=session,
             snapshot=_snapshot(session, periods=periods, positions=positions),
             actuals=actuals,
+            inventory_positions=positions,
+            actuals_semantics=actuals_semantics,
+        )
+    ).records
+
+
+def _single_series_records(
+    demand: float,
+    *,
+    actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
+) -> tuple[SettlementRecord, ...]:
+    session = _session(series_keys=("a",))
+    positions = {"a": InventoryPosition(0.0, 0.0, 0.0)}
+    periods = PERIODS[:1]
+    return settle(
+        SettlementRequest(
+            session=session,
+            snapshot=_snapshot(session, periods=periods, positions=positions),
+            actuals={("a", periods[0]): demand},
             inventory_positions=positions,
             actuals_semantics=actuals_semantics,
         )
@@ -229,7 +253,8 @@ def test_obj2_reduces_only_booked_settlement_components() -> None:
 
     objective = settle_path_cost(records)
 
-    assert DEFAULT_OBJECTIVE is settle_path_cost
+    assert DEFAULT_OBJECTIVE is realized_cost
+    assert DEFAULT_OBJECTIVE(records) == objective.total
     assert objective.feasible
     assert objective.session == records[0].session
     assert [cost.value for cost in objective.by_origin.values()] == [5.0, 2.0]
@@ -241,10 +266,10 @@ def test_obj2_reduces_only_booked_settlement_components() -> None:
     assert objective.holding.value == 1.0
     assert objective.shortage.value == 6.0
     assert objective.total.value == 7.0
-    assert objective.total.value == sum(
-        components.holding.value + components.shortage.value
-        for components in objective.by_decision.values()
-    )
+    assert objective.total.value == sum(cost.value for cost in objective.by_decision.values())
+    assert objective.by_decision == {
+        key: components.total for key, components in objective.components_by_decision.items()
+    }
 
 
 def test_obj2_every_derived_number_preserves_actuals_semantics() -> None:
@@ -266,9 +291,10 @@ def test_obj2_every_derived_number_preserves_actuals_semantics() -> None:
         *objective.by_origin.values(),
         *objective.by_series.values(),
         *(partial.cost for partial in objective.partials),
+        *objective.by_decision.values(),
         *(
             component
-            for costs in objective.by_decision.values()
+            for costs in objective.components_by_decision.values()
             for component in (
                 costs.holding,
                 costs.shortage,
@@ -303,6 +329,66 @@ def test_obj2_empty_candidate_is_an_explicit_labeled_infeasible_score() -> None:
     assert objective.total.is_infeasible
     assert objective.infeasible_reason == "candidate emitted no settlement records"
     assert objective.by_decision == {}
+    assert objective.components_by_decision == {}
+
+
+def test_obj2_tuning_default_returns_a_labeled_scalar_for_surrogate_actuals() -> None:
+    records = _single_series_records(
+        1.0,
+        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+    )
+
+    objective = DEFAULT_OBJECTIVE(
+        records,
+        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+    )
+
+    assert objective == CostValue(2.0, ActualsSemantics.CENSORED_SALES_SURROGATE)
+
+
+def test_obj2_aggregates_canonical_decision_totals_without_reassociating_components() -> None:
+    semantics = ActualsSemantics.DEMAND
+    components_by_decision = {
+        ("a", PERIODS[0]): CostComponents(
+            holding=CostValue(1e16, semantics),
+            shortage=CostValue(1.0, semantics),
+        ),
+        ("b", PERIODS[0]): CostComponents(
+            holding=CostValue(1.0, semantics),
+            shortage=CostValue(0.0, semantics),
+        ),
+    }
+
+    objective = SettlementObjective(
+        session=_session(),
+        actuals_semantics=semantics,
+        components_by_decision=components_by_decision,
+    )
+    canonical_total = math.fsum(
+        components.total.value for components in components_by_decision.values()
+    )
+    reassociated_total = math.fsum(
+        component.value
+        for components in components_by_decision.values()
+        for component in (components.holding, components.shortage)
+    )
+
+    assert canonical_total != reassociated_total
+    assert objective.total.value == canonical_total
+    assert objective.by_origin[PERIODS[0]].value == canonical_total
+    assert objective.partials[-1].cost is objective.total
+
+
+def test_obj2_one_booked_cost_quantum_changes_the_objective_once() -> None:
+    lower_records = _single_series_records(1.0)
+    higher_records = _single_series_records(1.5)
+
+    lower = settle_path_cost(lower_records)
+    higher = settle_path_cost(higher_records)
+    booked_delta = higher_records[0].shortage.amount - lower_records[0].shortage.amount
+
+    assert booked_delta == 1.0
+    assert higher.total.value - lower.total.value == booked_delta
 
 
 def test_obj2_is_deterministic_and_snapshots_the_record_iterable() -> None:
@@ -336,6 +422,74 @@ def test_obj2_propagates_infrastructure_errors_instead_of_scoring_infinity() -> 
 
     with pytest.raises(RuntimeError, match="infrastructure failed"):
         settle_path_cost(failing_stream())
+
+
+def test_obj2_preserves_iterator_type_error_identity() -> None:
+    failure = TypeError("settlement source failed")
+
+    def failing_stream():
+        yield _settled_records()[0]
+        raise failure
+
+    with pytest.raises(TypeError) as captured:
+        settle_path_cost(failing_stream())
+
+    assert captured.value is failure
+
+
+def test_obj5_scores_only_typed_candidate_infeasibility_as_infinity() -> None:
+    failure = CandidateInfeasible("candidate parameters are degenerate")
+
+    def infeasible_candidate() -> tuple[SettlementRecord, ...]:
+        raise failure
+
+    objective = evaluate_settlement_candidate(infeasible_candidate)
+
+    assert not objective.feasible
+    assert objective.total == CostValue(math.inf, ActualsSemantics.DEMAND)
+    assert objective.infeasible_reason == str(failure)
+
+
+@pytest.mark.parametrize("failure", [SettlementError("engine failed"), RuntimeError("I/O failed")])
+def test_obj5_candidate_evaluator_preserves_engine_and_infrastructure_error_identity(
+    failure: Exception,
+) -> None:
+    def failing_candidate() -> tuple[SettlementRecord, ...]:
+        raise failure
+
+    with pytest.raises(type(failure)) as captured:
+        evaluate_settlement_candidate(failing_candidate)
+
+    assert captured.value is failure
+
+
+@pytest.mark.parametrize(
+    "actuals_semantics",
+    [ActualsSemantics.DEMAND, ActualsSemantics.CENSORED_SALES_SURROGATE],
+)
+def test_obj7_composes_directly_with_settlement_totals_and_preserves_semantics(
+    actuals_semantics: ActualsSemantics,
+) -> None:
+    candidate = settle_path_cost(
+        _single_series_records(2.0, actuals_semantics=actuals_semantics),
+        actuals_semantics=actuals_semantics,
+    )
+    oracle = settle_path_cost(
+        _single_series_records(1.0, actuals_semantics=actuals_semantics),
+        actuals_semantics=actuals_semantics,
+    )
+
+    regret = key_aligned_regret(
+        candidate.by_decision,
+        oracle.by_decision,
+        actuals_semantics=actuals_semantics,
+    )
+
+    assert candidate.by_decision == {
+        key: components.total for key, components in candidate.components_by_decision.items()
+    }
+    assert list(regret.by_decision.values()) == [CostValue(2.0, actuals_semantics)]
+    assert regret.total == CostValue(2.0, actuals_semantics)
 
 
 def test_obj7_aligns_by_key_not_position_and_clips_negative_regret() -> None:
