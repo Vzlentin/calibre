@@ -12,6 +12,7 @@ from newcalibre.oracle.capture import (
     OracleEvidenceError,
     validate_capture_bundle,
     validate_capture_receipt,
+    validate_promoted_capture,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "OracleEvidenceError",
     "validate_capture_bundle",
     "validate_capture_receipt",
+    "validate_promoted_capture",
 ]

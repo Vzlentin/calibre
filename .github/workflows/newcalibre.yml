@@ -141,6 +141,86 @@ jobs:
       - name: Report lane result
         run: echo "s3-activation-gate complete"
 
+  capture-promotion:
+    # U7b promotion guard: capture PRs are evidence-only, and live GitHub
+    # artifact metadata must bind the exact bytes and committed receipt.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect and path-confine capture promotion
+        id: promotion
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD)
+          capture_changes=()
+          outside_changes=()
+          for path in "${changed[@]}"; do
+            if [[ "$path" == stage3/evidence/captures/* ]]; then
+              capture_changes+=("$path")
+            else
+              outside_changes+=("$path")
+            fi
+          done
+          if (( ${#capture_changes[@]} == 0 )); then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if (( ${#outside_changes[@]} != 0 )); then
+            echo "capture promotion PRs must contain evidence/receipt changes only"
+            printf 'outside allowlist: %s\n' "${outside_changes[@]}"
+            exit 1
+          fi
+          receipts=()
+          for path in "${capture_changes[@]}"; do
+            if [[ "$path" =~ ^stage3/evidence/captures/[0-9a-f]{40}-receipt\.json$ ]]; then
+              receipts+=("$path")
+            fi
+          done
+          if (( ${#receipts[@]} != 1 )); then
+            echo "capture promotion must add or update exactly one canonical receipt"
+            exit 1
+          fi
+          receipt="${receipts[0]}"
+          candidate="${receipt#stage3/evidence/captures/}"
+          candidate="${candidate%-receipt.json}"
+          bundle="stage3/evidence/captures/$candidate"
+          test -f "$receipt" && test -d "$bundle"
+          for path in "${capture_changes[@]}"; do
+            if [[ "$path" != "$receipt" && "$path" != "$bundle/"* ]]; then
+              echo "capture promotion mixes candidate identities: $path"
+              exit 1
+            fi
+          done
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "receipt=$receipt" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.promotion.outputs.present == 'true'
+      - name: Locked sync (promotion validator)
+        if: steps.promotion.outputs.present == 'true'
+        run: uv sync --project newcalibre --locked --group dev
+      - name: Validate exact promoted bytes against GitHub artifact metadata
+        if: steps.promotion.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv run --project newcalibre --locked python newcalibre/scripts/capture_oracle_vn2.py promote \
+            --bundle "${{ steps.promotion.outputs.bundle }}" \
+            --receipt "${{ steps.promotion.outputs.receipt }}" \
+            --config benchmarks/vn2/config/vn2-winning-loop.yaml \
+            --input-inventory stage3/evidence/vn2-input-digests.json \
+            --repository "$GITHUB_REPOSITORY"
+      - name: Report lane result
+        run: echo "capture-promotion complete (promotion present=${{ steps.promotion.outputs.present }})"
+
   newcalibre-consistency:
     # Tier 2 — per merge to main: byte identity across two executions inside
     # one job; later class-4 legs stay visibly pending, never green-washed.

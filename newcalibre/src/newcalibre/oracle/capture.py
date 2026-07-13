@@ -34,6 +34,7 @@ THREAD_VARIABLES = (
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 _RUN_ID = re.compile(r"[1-9][0-9]*")
+_ARTIFACT_NAME = re.compile(r"oracle-capture-([0-9a-f]{40})")
 _MANIFEST_KEYS = frozenset(
     {
         "schema",
@@ -75,6 +76,7 @@ _RECEIPT_KEYS = frozenset(
     {
         "schema",
         "artifact_id",
+        "artifact_digest",
         "artifact_name",
         "producer_sha",
         "workflow_sha",
@@ -150,6 +152,7 @@ class CaptureReceipt:
     """Bind promoted bytes to the GitHub artifact that supplied them."""
 
     artifact_id: str
+    artifact_digest: str
     artifact_name: str
     producer_sha: str
     workflow_sha: str
@@ -316,6 +319,7 @@ def validate_capture_receipt(
     *,
     bundle: CaptureBundle,
     expected_artifact_id: str,
+    expected_artifact_digest: str,
     expected_artifact_name: str,
     expected_producer_sha: str,
     expected_workflow_sha: str,
@@ -327,6 +331,12 @@ def validate_capture_receipt(
     _require_exact_int(value["schema"], expected=1, name="capture receipt schema")
     artifact_id = _require_run_id(value["artifact_id"], name="artifact_id")
     _require_expected(artifact_id, expected_artifact_id, name="artifact_id")
+    artifact_digest = _require_sha256(value["artifact_digest"], name="artifact_digest")
+    _require_expected(
+        artifact_digest,
+        expected_artifact_digest,
+        name="artifact_digest",
+    )
     artifact_name = _require_text(value["artifact_name"], name="artifact_name")
     producer_sha = _require_commit_sha(value["producer_sha"], name="producer_sha")
     workflow_sha = _require_commit_sha(value["workflow_sha"], name="workflow_sha")
@@ -361,6 +371,7 @@ def validate_capture_receipt(
             raise OracleEvidenceError(f"capture receipt {name} does not match the bundle")
     return CaptureReceipt(
         artifact_id=artifact_id,
+        artifact_digest=artifact_digest,
         artifact_name=artifact_name,
         producer_sha=producer_sha,
         workflow_sha=workflow_sha,
@@ -370,6 +381,102 @@ def validate_capture_receipt(
         inner_bundle_digest=inner_bundle_digest,
         environment_digest=environment_digest,
     )
+
+
+def validate_promoted_capture(
+    bundle_root: Path,
+    receipt_path: Path,
+    *,
+    artifact_metadata: object,
+    run_metadata: object,
+    expected_config_path: Path,
+    expected_input_inventory_path: Path,
+) -> tuple[CaptureBundle, CaptureReceipt]:
+    """Validate promoted bytes against live GitHub artifact metadata."""
+    metadata = _require_object(artifact_metadata, name="GitHub artifact metadata")
+    artifact_id = str(_require_positive_int(metadata.get("id"), name="artifact metadata id"))
+    artifact_name = _require_text(metadata.get("name"), name="artifact metadata name")
+    name_match = _ARTIFACT_NAME.fullmatch(artifact_name)
+    if name_match is None:
+        raise OracleEvidenceError("artifact metadata name must bind a full candidate SHA")
+    candidate_sha = name_match.group(1)
+    digest_value = _require_text(metadata.get("digest"), name="artifact metadata digest")
+    if not digest_value.startswith("sha256:"):
+        raise OracleEvidenceError("artifact metadata digest must use the sha256 algorithm")
+    artifact_digest = _require_sha256(
+        digest_value.removeprefix("sha256:"),
+        name="artifact metadata digest",
+    )
+    if metadata.get("expired") is not False:
+        raise OracleEvidenceError("GitHub artifact must exist and be unexpired")
+    workflow_run = _require_object(
+        metadata.get("workflow_run"),
+        name="artifact metadata workflow_run",
+    )
+    workflow_run_id = str(
+        _require_positive_int(
+            workflow_run.get("id"),
+            name="artifact metadata workflow run id",
+        )
+    )
+    artifact_workflow_sha = _require_commit_sha(
+        workflow_run.get("head_sha"),
+        name="artifact metadata workflow head_sha",
+    )
+    if workflow_run.get("head_branch") != "main":
+        raise OracleEvidenceError("artifact metadata workflow must have run from main")
+
+    run = _require_object(run_metadata, name="GitHub workflow-run metadata")
+    run_id = str(_require_positive_int(run.get("id"), name="workflow-run metadata id"))
+    if run_id != workflow_run_id:
+        raise OracleEvidenceError("artifact and workflow-run metadata IDs do not match")
+    workflow_sha = _require_commit_sha(
+        run.get("head_sha"),
+        name="workflow-run metadata head_sha",
+    )
+    if workflow_sha != artifact_workflow_sha:
+        raise OracleEvidenceError("artifact and workflow-run metadata SHAs do not match")
+    run_expectations = {
+        "event": "workflow_dispatch",
+        "path": ".github/workflows/oracle-capture.yml",
+        "head_branch": "main",
+        "status": "completed",
+        "conclusion": "success",
+    }
+    for name, expected in run_expectations.items():
+        if run.get(name) != expected:
+            raise OracleEvidenceError(f"workflow-run metadata {name} must equal {expected!r}")
+    repository = _require_object(
+        run.get("repository"),
+        name="workflow-run metadata repository",
+    )
+    if repository.get("full_name") != GITHUB_REPOSITORY:
+        raise OracleEvidenceError(
+            f"workflow-run metadata repository must equal {GITHUB_REPOSITORY!r}"
+        )
+    run_url = _validate_run_url(run.get("html_url"), run_id=run_id)
+
+    bundle = validate_capture_bundle(
+        bundle_root,
+        expected_candidate_sha=candidate_sha,
+        expected_workflow_sha=workflow_sha,
+        expected_run_id=workflow_run_id,
+        expected_config_path=expected_config_path,
+        expected_input_inventory_path=expected_input_inventory_path,
+    )
+    receipt = validate_capture_receipt(
+        receipt_path,
+        bundle=bundle,
+        expected_artifact_id=artifact_id,
+        expected_artifact_digest=artifact_digest,
+        expected_artifact_name=artifact_name,
+        expected_producer_sha=candidate_sha,
+        expected_workflow_sha=workflow_sha,
+        expected_workflow_run_id=workflow_run_id,
+    )
+    if bundle.manifest.run_url != run_url:
+        raise OracleEvidenceError("promoted capture run_url does not match GitHub metadata")
+    return bundle, receipt
 
 
 def _validate_environment(value: object) -> CaptureEnvironment:
@@ -612,6 +719,12 @@ def _require_exact_int(value: object, *, expected: int, name: str) -> int:
     return value
 
 
+def _require_positive_int(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise OracleEvidenceError(f"{name} must be a positive integer")
+    return value
+
+
 def _require_commit_sha(value: object, *, name: str) -> str:
     text = _require_text(value, name=name)
     if _COMMIT_SHA.fullmatch(text) is None:
@@ -742,4 +855,5 @@ __all__ = [
     "OracleEvidenceError",
     "validate_capture_bundle",
     "validate_capture_receipt",
+    "validate_promoted_capture",
 ]
