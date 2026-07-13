@@ -9,6 +9,7 @@ import pytest
 
 from newcalibre.domain import (
     ACTUAL_VALUE,
+    CENSOR_STATUS,
     HORIZON_STEP,
     MODEL_NAME,
     OBSERVED_VALUE,
@@ -17,6 +18,7 @@ from newcalibre.domain import (
     SERIES_KEY,
     TARGET_TIMESTAMP,
     TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     CostStructure,
     DecisionTiming,
@@ -91,7 +93,10 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
     mutated.loc[:, OBSERVED_VALUE] = 99.0
     assert panel_source.load().frame[OBSERVED_VALUE].tolist() == [1.0, 2.0, 3.0]
 
-    actuals = InMemoryActualsSource(panel).for_keys(
+    actuals = InMemoryActualsSource(
+        panel,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    ).for_keys(
         (
             ("a", pd.Timestamp("2026-01-01")),
             ("b", pd.Timestamp("2026-01-01")),
@@ -127,6 +132,31 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
 
     dispatch = InProcessDispatch()
     assert dispatch.map(lambda value: value * 2, (3, 1, 2)) == (6, 2, 4)
+
+
+def test_actuals_source_requires_and_enforces_observation_semantics() -> None:
+    panel = _panel()
+    with pytest.raises(TypeError, match="actuals_semantics"):
+        InMemoryActualsSource(panel)  # type: ignore[call-arg]
+
+    censored_frame = panel.frame
+    censored_frame[CENSOR_STATUS] = pd.Series(
+        ["censored", "uncensored", "uncensored"],
+        dtype="string",
+    )
+    censored_panel = Panel.from_frame(censored_frame, calendar=CALENDAR)
+
+    with pytest.raises(ValueError, match="cannot supply demand-honest actuals"):
+        InMemoryActualsSource(
+            censored_panel,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
+
+    surrogate = InMemoryActualsSource(
+        censored_panel,
+        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+    )
+    assert surrogate.actuals_semantics is ActualsSemantics.CENSORED_SALES_SURROGATE
 
 
 def test_engine_declares_exactly_the_six_chapter_03_ports() -> None:

@@ -255,7 +255,10 @@ def _request(*, session: SessionIdentity) -> TimeLoopRequest:
 def _run_uninterrupted(seed: int) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
     panel = _panel()
     session = _session(seed)
-    actuals = InMemoryActualsSource(panel)
+    actuals = InMemoryActualsSource(
+        panel,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     sink = InMemoryLedgerSink(session=session, calendar=_CALENDAR)
     states = InMemoryCalibrationStateStore()
     result = TimeLoop(
@@ -275,7 +278,10 @@ def _run_resumed(
 ) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
     panel = _panel()
     session = _session(seed)
-    actuals = InMemoryActualsSource(panel)
+    actuals = InMemoryActualsSource(
+        panel,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     sink = InterruptingLedgerSink(
         session=session,
         calendar=_CALENDAR,

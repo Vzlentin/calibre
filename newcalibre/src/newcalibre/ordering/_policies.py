@@ -294,9 +294,7 @@ def _newsvendor_target(
     group: _DecisionGroup,
     configuration: OrderingConfiguration,
 ) -> tuple[float, _Source]:
-    row = group.rows.get(1)
-    if row is None:
-        raise OrderingInputError("newsvendor requires the decision-period row h=1")
+    row = group.rows[1]
     fractile = configuration.decision_fractile
     if fractile is None:
         raise OrderingInputError("newsvendor requires a compiled decision fractile")

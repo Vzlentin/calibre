@@ -365,7 +365,7 @@ class SettlementWindow:
 
     snapshot: SettlementSnapshot
     actuals: Mapping[ActualKey, float]
-    actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND
+    actuals_semantics: ActualsSemantics
 
     def __post_init__(self) -> None:
         if not isinstance(self.snapshot, SettlementSnapshot):

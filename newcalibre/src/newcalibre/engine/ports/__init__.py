@@ -250,6 +250,11 @@ class PanelSource(Protocol):
 class ActualsSource(Protocol):
     """Reveal actuals admissible strictly before an origin."""
 
+    @property
+    def actuals_semantics(self) -> ActualsSemantics:
+        """Return the meaning of every observation exposed by this source."""
+        ...
+
     def for_keys(
         self,
         keys: Sequence[ActualKey],

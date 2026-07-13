@@ -220,6 +220,53 @@ def test_newsvendor_interpolates_h1_and_ignores_later_horizons() -> None:
     assert decision.evidence.source_descriptor.window is EmissionScope.PER_STEP
 
 
+def test_newsvendor_refuses_an_absent_nominal_interval_column_atomically() -> None:
+    lower, upper = interval_columns(0.8)
+    frame = _frame(columns={lower: [10.0] * 3})
+    descriptor = replace(
+        _descriptor(),
+        type=GuaranteeType(
+            claim=GuaranteeClaim.TWO_SIDED_COVERAGE,
+            currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            declared_slack=None,
+        ),
+    )
+    issuances = {
+        _key("sku-a", step): {(lower, upper): _issuance(descriptor, side=None)}
+        for step in range(1, 4)
+    }
+    decisions = []
+
+    with pytest.raises(OrderingInputError, match="requested interval column is absent"):
+        decisions.extend(dispatch_policy(_request(_configuration("newsvendor"), frame, issuances)))
+
+    assert decisions == []
+
+
+def test_policy_dispatch_refuses_an_incomplete_task_horizon_atomically() -> None:
+    lower, upper = interval_columns(0.8)
+    frame = _frame(columns={lower: [10.0] * 3, upper: [18.0] * 3})
+    frame = frame.loc[frame[HORIZON_STEP] != 1].reset_index(drop=True)
+    descriptor = replace(
+        _descriptor(),
+        type=GuaranteeType(
+            claim=GuaranteeClaim.TWO_SIDED_COVERAGE,
+            currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            declared_slack=None,
+        ),
+    )
+    issuances = {
+        _key("sku-a", step): {(lower, upper): _issuance(descriptor, side=None)}
+        for step in range(2, 4)
+    }
+    decisions = []
+
+    with pytest.raises(OrderingInputError, match=r"complete task horizon.*missing=\[1\]"):
+        decisions.extend(dispatch_policy(_request(_configuration("newsvendor"), frame, issuances)))
+
+    assert decisions == []
+
+
 def test_newsvendor_interpolates_canonical_split_one_sided_interval() -> None:
     lower, upper = interval_columns(0.8)
     frame = _frame(columns={lower: [10.0] * 3, upper: [18.0] * 3})
