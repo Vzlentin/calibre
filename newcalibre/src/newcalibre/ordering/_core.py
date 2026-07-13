@@ -9,6 +9,7 @@ from numbers import Integral, Real
 from types import MappingProxyType
 
 from newcalibre.domain import (
+    AppliedBinding,
     CostStructure,
     CostStructureError,
     DecisionError,
@@ -33,24 +34,6 @@ class OrderingInputError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class AppliedBinding:
-    """Record one named configuration value that modified a decision."""
-
-    name: str
-    value: float
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
-            raise OrderingConfigError("binding name must be a non-empty string")
-        try:
-            self.name.encode("utf-8")
-        except UnicodeError as error:
-            raise OrderingConfigError("binding name must be valid UTF-8") from error
-        value = _finite_real(self.value, name="binding value")
-        object.__setattr__(self, "value", value)
-
-
-@dataclass(frozen=True, slots=True)
 class OrderingSetup:
     """Carry caller-supplied ordering facts until they are compiled."""
 
@@ -64,6 +47,11 @@ class OrderingSetup:
     policy_coverage: float | None = None
     explicit_quantile: float | None = None
     explicit_decision_fractile: float | None = None
+    reorder_point: float | None = None
+    reorder_point_scale: float | None = None
+    target_cap: float | None = None
+    target_floor: float | None = None
+    target_scale: float | None = None
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -74,9 +62,15 @@ class OrderingConfiguration:
     series_keys: tuple[str, ...]
     costs_by_series: Mapping[str, CostStructure] = field(repr=False)
     decision_timing: DecisionTiming
+    task_horizon: int
     coverage: float | None
     explicit_quantile: float | None
     decision_fractile: float | None
+    reorder_point: float | None
+    reorder_point_scale: float | None
+    target_cap: float | None
+    target_floor: float | None
+    target_scale: float | None
     applied_bindings: tuple[AppliedBinding, ...]
 
     def __init__(self) -> None:
@@ -90,11 +84,19 @@ class OrderingConfiguration:
     def descriptor_for_decision(
         self,
         descriptor: GuaranteeDescriptor,
+        *,
+        bindings: Iterable[AppliedBinding] = (),
     ) -> GuaranteeDescriptor:
         """Return the descriptor after applying claim-voiding configuration."""
         if not isinstance(descriptor, GuaranteeDescriptor):
             raise OrderingInputError("descriptor must be a GuaranteeDescriptor")
-        if not self.applied_bindings:
+        try:
+            decision_bindings = tuple(bindings)
+        except TypeError as error:
+            raise OrderingInputError("decision bindings must be iterable") from error
+        if any(not isinstance(binding, AppliedBinding) for binding in decision_bindings):
+            raise OrderingInputError("decision bindings must contain AppliedBinding values")
+        if not self.applied_bindings and not any(binding.bound for binding in decision_bindings):
             return descriptor
         return replace(
             descriptor,
@@ -144,12 +146,37 @@ def compile_ordering(setup: OrderingSetup) -> OrderingConfiguration:
         setup.explicit_decision_fractile,
         name="explicit_decision_fractile",
     )
+    reorder_point = _optional_nonnegative_real(
+        setup.reorder_point,
+        name="reorder_point",
+    )
+    reorder_point_scale = _optional_positive_real(
+        setup.reorder_point_scale,
+        name="reorder_point_scale",
+    )
+    target_cap = _optional_nonnegative_real(setup.target_cap, name="target_cap")
+    target_floor = _optional_nonnegative_real(setup.target_floor, name="target_floor")
+    target_scale = _optional_positive_real(setup.target_scale, name="target_scale")
 
     if explicit_quantile is not None and policy != "rs":
         raise OrderingConfigError("explicit_quantile is valid only for the rs policy")
     if explicit_fractile is not None and policy != "newsvendor":
         raise OrderingConfigError(
             "explicit_decision_fractile is valid only for a cost-driven newsvendor policy"
+        )
+    gate_count = sum(value is not None for value in (reorder_point, reorder_point_scale))
+    if policy == "rss":
+        if gate_count != 1:
+            raise OrderingConfigError(
+                "rss requires exactly one of reorder_point or reorder_point_scale"
+            )
+    elif gate_count:
+        raise OrderingConfigError("reorder gates are valid only for the rss policy")
+
+    modifier_count = sum(value is not None for value in (target_cap, target_floor, target_scale))
+    if modifier_count > 1:
+        raise OrderingConfigError(
+            "simultaneous target modifiers are incompatible; configure at most one"
         )
 
     coverage = _consumed_coverage(
@@ -171,7 +198,13 @@ def compile_ordering(setup: OrderingSetup) -> OrderingConfiguration:
     if policy == "newsvendor":
         if explicit_fractile is not None:
             decision_fractile = explicit_fractile
-            bindings = (AppliedBinding(name=_EXPLICIT_FRACTILE_BINDING, value=explicit_fractile),)
+            bindings = (
+                AppliedBinding(
+                    name=_EXPLICIT_FRACTILE_BINDING,
+                    value=explicit_fractile,
+                    bound=True,
+                ),
+            )
         else:
             decision_fractile = _shared_critical_ratio(costs_by_series)
 
@@ -180,9 +213,15 @@ def compile_ordering(setup: OrderingSetup) -> OrderingConfiguration:
     object.__setattr__(instance, "series_keys", series_keys)
     object.__setattr__(instance, "costs_by_series", costs_by_series)
     object.__setattr__(instance, "decision_timing", timing)
+    object.__setattr__(instance, "task_horizon", horizon)
     object.__setattr__(instance, "coverage", coverage)
     object.__setattr__(instance, "explicit_quantile", explicit_quantile)
     object.__setattr__(instance, "decision_fractile", decision_fractile)
+    object.__setattr__(instance, "reorder_point", reorder_point)
+    object.__setattr__(instance, "reorder_point_scale", reorder_point_scale)
+    object.__setattr__(instance, "target_cap", target_cap)
+    object.__setattr__(instance, "target_floor", target_floor)
+    object.__setattr__(instance, "target_scale", target_scale)
     object.__setattr__(instance, "applied_bindings", bindings)
     return instance
 
@@ -297,6 +336,24 @@ def _optional_probability(value: object, *, name: str) -> float | None:
     normalized = _finite_real(value, name=name)
     if not 0.0 < normalized < 1.0:
         raise OrderingConfigError(f"{name} must lie strictly inside (0, 1)")
+    return normalized
+
+
+def _optional_nonnegative_real(value: object, *, name: str) -> float | None:
+    if value is None:
+        return None
+    normalized = _finite_real(value, name=name)
+    if normalized < 0.0:
+        raise OrderingConfigError(f"{name} must be nonnegative")
+    return normalized
+
+
+def _optional_positive_real(value: object, *, name: str) -> float | None:
+    if value is None:
+        return None
+    normalized = _finite_real(value, name=name)
+    if normalized <= 0.0:
+        raise OrderingConfigError(f"{name} must be positive")
     return normalized
 
 

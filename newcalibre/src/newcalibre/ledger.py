@@ -27,6 +27,7 @@ from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
     CalendarError,
+    DecisionEvidence,
     ForecastFrameError,
     GuaranteeClaim,
     GuaranteeCurrency,
@@ -521,6 +522,7 @@ class OrderRow:
     model_name: str
     quantity: float
     arrival_period: pd.Timestamp
+    evidence: DecisionEvidence | None = None
 
     def __post_init__(self) -> None:
         _require_session(self.session)
@@ -535,6 +537,8 @@ class OrderRow:
         if not self.quantity.is_integer():
             raise LedgerError("order quantity must be recorded in whole units")
         _require_timestamp(self.arrival_period, name="arrival period")
+        if self.evidence is not None and not isinstance(self.evidence, DecisionEvidence):
+            raise LedgerError("order evidence must be DecisionEvidence or omitted")
 
     @property
     def key(self) -> OrderKey:

@@ -38,6 +38,11 @@ COST = CostStructure(underage=3.0, overage=1.0, holding=0.5, shortage=2.0)
 
 
 def _setup(**changes: object) -> OrderingSetup:
+    if changes.get("policy") == "rss" and not {
+        "reorder_point",
+        "reorder_point_scale",
+    }.intersection(changes):
+        changes["reorder_point"] = 1.0
     setup = OrderingSetup(
         policy="newsvendor",
         series_keys=("sku-b", "sku-a"),

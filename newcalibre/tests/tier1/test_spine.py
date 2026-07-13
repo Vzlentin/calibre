@@ -7,7 +7,7 @@ import pickle
 import socket
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from typing import Any, cast
 
 import pandas as pd
@@ -26,14 +26,23 @@ from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
     CostStructure,
+    DecisionScope,
+    DecisionScopeKind,
     DecisionTiming,
+    EmissionScope,
     ForecastFrameError,
     ForecastTask,
+    GuaranteeClaim,
+    GuaranteeCurrency,
+    GuaranteeDescriptor,
+    GuaranteeType,
     InventoryPosition,
     Panel,
     Scope,
+    ScoredSeries,
     SessionIdentity,
     StockoutRule,
+    interval_columns,
     target_timestamp,
 )
 from newcalibre.engine import (
@@ -42,6 +51,7 @@ from newcalibre.engine import (
     CommitReceipt,
     CommitRequest,
     CommitResult,
+    ConfiguredPolicyOrderer,
     DecisionBatch,
     Engine,
     EngineError,
@@ -63,8 +73,8 @@ from newcalibre.engine import (
     Spine,
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
-from newcalibre.ledger import OrderRow
-from newcalibre.ordering import OrderingConfigError
+from newcalibre.ledger import ForecastIssuance, GuaranteedSide, OrderRow
+from newcalibre.ordering import OrderingConfigError, OrderingInputError
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
@@ -101,6 +111,7 @@ def _session(
     decision_series_keys: tuple[str, ...] | None = None,
     ordering_policy: Mapping[str, object] = ORDERING_POLICY,
     cost_structure: CostStructure | Mapping[str, CostStructure] = COST_STRUCTURE,
+    conformal_config: Mapping[str, object] | None = None,
 ) -> SessionIdentity:
     return SessionIdentity.derive(
         tenant=tenant,
@@ -108,6 +119,7 @@ def _session(
         calendar=CALENDAR,
         horizon=(TIMING.protection_period if with_decision else 1) if horizon is None else horizon,
         model_config=model_config,
+        conformal_config=conformal_config,
         ordering_policy=ordering_policy if with_decision else None,
         decision_series_keys=(
             series_keys if with_decision and decision_series_keys is None else decision_series_keys
@@ -887,6 +899,201 @@ def test_commit_materializes_fractional_negative_and_empty_proposals(
             arrival_period=pd.Timestamp("2026-01-06"),
         ),
     )
+
+
+def _policy_descriptor() -> GuaranteeDescriptor:
+    return GuaranteeDescriptor(
+        type=GuaranteeType(
+            claim=GuaranteeClaim.ONE_SIDED_COVERAGE,
+            currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            declared_slack=None,
+        ),
+        level=0.8,
+        scored_series=ScoredSeries.DEMAND_HONEST,
+        window=EmissionScope.PER_STEP,
+        scope=DecisionScope(
+            kind=DecisionScopeKind.PER_DECISION_NODE,
+            class_system_name=None,
+        ),
+    )
+
+
+def _policy_calibrator(
+    forecasts: ForecastBatch,
+    _prior: Mapping[str, bytes | None],
+) -> CalibrationResult:
+    frame = forecasts.frame
+    lower, upper = interval_columns(0.8)
+    frame[lower] = pd.Series([0.0, 0.0], dtype="float64")
+    frame[upper] = frame[HORIZON_STEP].map({1: 1.2, 2: 2.0}).astype("float64")
+    descriptor = _policy_descriptor()
+    issuance = ForecastIssuance(
+        descriptor=descriptor,
+        guaranteed_side=GuaranteedSide.UPPER,
+        calibration_ready=True,
+        bounds_finite=True,
+        bounds_null_reason=None,
+    )
+    support_issuance = ForecastIssuance(
+        descriptor=replace(
+            descriptor,
+            type=GuaranteeType(
+                claim=GuaranteeClaim.NONE,
+                currency=None,
+                declared_slack=None,
+            ),
+        ),
+        guaranteed_side=None,
+        calibration_ready=False,
+        bounds_finite=True,
+        bounds_null_reason=None,
+    )
+    issuances = {
+        (
+            str(row.series_key),
+            pd.Timestamp(row.origin),
+            int(row.horizon_step),
+            str(row.model_name),
+        ): {(lower,): support_issuance, (upper,): issuance}
+        for row in frame.itertuples(index=False)
+    }
+    return CalibrationResult(
+        ForecastBatch(frame, calendar=CALENDAR, issuances=issuances),
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_cap", "expected_target", "expected_quantity", "bound", "expected_claim"),
+    [
+        (3.0, 3.0, 3.0, True, GuaranteeClaim.NONE),
+        (4.0, 3.2, 4.0, False, GuaranteeClaim.ONE_SIDED_COVERAGE),
+    ],
+)
+def test_configured_policy_orderer_persists_policy_evidence_through_commit(
+    target_cap: float,
+    expected_target: float,
+    expected_quantity: float,
+    bound: bool,
+    expected_claim: GuaranteeClaim,
+) -> None:
+    panel = _panel()
+    session = _session(
+        with_decision=True,
+        ordering_policy={"name": "rs", "coverage": 0.8, "target_cap": target_cap},
+        conformal_config={"coverage": 0.8, "protection_period": 2},
+    )
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=sink,
+        dispatch=RecordingDispatch(),
+        calibrator=_policy_calibrator,
+        orderer=ConfiguredPolicyOrderer(),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    origin_request = OriginRequest(
+        session=session,
+        origin=origin,
+        scope=Scope.LOCAL,
+        inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
+    )
+    observation = engine.observe(origin, session=session)
+    predicted = engine.predict(engine.fit(origin_request))
+    calibrated = engine.calibrate(
+        engine.reconcile(predicted),
+        session=session,
+        observation=observation,
+    )
+    decisions = engine.order(
+        OrderRequest(
+            session=session,
+            origin=origin,
+            forecasts=calibrated.forecasts,
+            inventory_positions=origin_request.inventory_positions,
+        )
+    )
+
+    assert decisions is not None
+    assert decisions.proposals[0].quantity == pytest.approx(expected_target)
+    evidence = decisions.proposals[0].evidence
+    assert evidence is not None
+    assert evidence.raw_target == pytest.approx(3.2)
+    assert evidence.target == pytest.approx(expected_target)
+    assert evidence.source_descriptor == _policy_descriptor()
+    assert evidence.effective_descriptor.type.claim is expected_claim
+    assert [(binding.name, binding.value, binding.bound) for binding in evidence.bindings] == [
+        ("target_cap", target_cap, bound)
+    ]
+
+    committed = engine.commit(
+        CommitRequest(
+            session=session,
+            origin=origin,
+            observation=observation,
+            calibration=calibrated,
+            inventory_positions=origin_request.inventory_positions,
+            decisions=decisions,
+        )
+    )
+
+    assert isinstance(committed, CommitResult)
+    assert committed.orders[0].quantity == expected_quantity
+    assert committed.orders[0].evidence is evidence
+    assert sink.orders[0].quantity == expected_quantity
+    assert sink.orders[0].evidence is evidence
+
+
+def test_configured_policy_exception_propagates_and_commits_no_partial_origin() -> None:
+    panel = _panel()
+    session = _session(
+        with_decision=True,
+        ordering_policy={"name": "rs", "coverage": 0.8},
+        conformal_config={"coverage": 0.8, "protection_period": 2},
+    )
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+
+    def missing_provenance(
+        forecasts: ForecastBatch,
+        _prior: Mapping[str, bytes | None],
+    ) -> CalibrationResult:
+        frame = forecasts.frame
+        lower, upper = interval_columns(0.8)
+        frame[lower] = pd.Series([0.0, 0.0], dtype="float64")
+        frame[upper] = pd.Series([1.2, 2.0], dtype="float64")
+        empty = {key: {} for key in forecasts.issuances}
+        return CalibrationResult(
+            ForecastBatch(frame, calendar=CALENDAR, issuances=empty),
+        )
+
+    spine = Spine(
+        _engine(
+            panel=panel,
+            events=[],
+            artifacts=InMemoryArtifactStore(),
+            states=InMemoryCalibrationStateStore(),
+            sink=sink,
+            dispatch=RecordingDispatch(),
+            calibrator=missing_provenance,
+            orderer=ConfiguredPolicyOrderer(),
+        )
+    )
+
+    with pytest.raises(OrderingInputError, match="issuance provenance"):
+        spine.run_origin(
+            OriginRequest(
+                session=session,
+                origin=pd.Timestamp("2026-01-05"),
+                scope=Scope.LOCAL,
+                inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
+            )
+        )
+
+    assert sink.forecasts == ()
+    assert sink.orders == ()
+    assert sink.receipt(pd.Timestamp("2026-01-05")) is None
 
 
 def test_public_verb_results_reach_commit_without_private_order_math() -> None:

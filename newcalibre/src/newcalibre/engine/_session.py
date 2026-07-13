@@ -33,6 +33,11 @@ _ORDERING_POLICY_FIELDS = frozenset(
         "explicit_decision_fractile",
         "name",
         "quantile",
+        "reorder_point",
+        "reorder_point_scale",
+        "target_cap",
+        "target_floor",
+        "target_scale",
     }
 )
 _COST_FIELDS = frozenset(
@@ -144,6 +149,14 @@ def session_ordering_configuration(
                 float | None,
                 policy.get("explicit_decision_fractile"),
             ),
+            reorder_point=cast(float | None, policy.get("reorder_point")),
+            reorder_point_scale=cast(
+                float | None,
+                policy.get("reorder_point_scale"),
+            ),
+            target_cap=cast(float | None, policy.get("target_cap")),
+            target_floor=cast(float | None, policy.get("target_floor")),
+            target_scale=cast(float | None, policy.get("target_scale")),
         )
     )
 

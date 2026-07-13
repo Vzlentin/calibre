@@ -32,7 +32,9 @@ from newcalibre.domain import (
     validate_forecast_frame,
 )
 from newcalibre.engine._ordering_runtime import (
+    ConfiguredPolicyOrderer,
     DecisionBatch,
+    DecisionEvidence,
     DecisionKey,
     OrderProposal,
 )
@@ -80,6 +82,7 @@ from newcalibre.ledger import (
     ForecastKey,
     OrderRow,
 )
+from newcalibre.ordering import OrderingInputError
 
 ENGINE_VERBS = (
     "fit",
@@ -445,7 +448,8 @@ type Observer = Callable[
     [pd.DataFrame, Mapping[ForecastKey, float], Mapping[str, bytes | None]],
     Mapping[str, bytes],
 ]
-type Orderer = Callable[[OrderRequest], Iterable[OrderProposal]]
+type CustomOrderer = Callable[[OrderRequest], Iterable[OrderProposal]]
+type Orderer = CustomOrderer | ConfiguredPolicyOrderer
 type PhaseReporter = Callable[[PhaseEvent], None]
 
 
@@ -483,11 +487,14 @@ class Engine:
             (observer, "observer"),
             (reconciler, "reconciler"),
             (calibrator, "calibrator"),
-            (orderer, "orderer"),
         )
         for hook, name in callables:
             if hook is not None and not callable(hook):
                 raise TypeError(f"engine {name} must be callable")
+        if orderer is not None and not (
+            callable(orderer) or isinstance(orderer, ConfiguredPolicyOrderer)
+        ):
+            raise TypeError("engine orderer must be callable or a ConfiguredPolicyOrderer")
         # Resolve configuration before the panel port can perform any data load.
         adapter_resolver(_session_model_config(ledger_sink.session))
         ordering_configuration = _session_ordering_configuration(ledger_sink.session)
@@ -670,7 +677,16 @@ class Engine:
         )
         requested = _decision_keys(decision_request.forecasts)
         _require_inventory_coverage(decision_request.inventory_positions, requested=requested)
-        proposals = tuple(islice(self._orderer(decision_request), len(requested) + 1))
+        if isinstance(self._orderer, ConfiguredPolicyOrderer):
+            produced = self._orderer.propose(
+                frame=decision_request.forecasts._frame,
+                issuances=decision_request.forecasts.issuances,
+                inventory_positions=decision_request.inventory_positions,
+                configuration=configuration,
+            )
+        else:
+            produced = self._orderer(decision_request)
+        proposals = tuple(islice(produced, len(requested) + 1))
         decisions = DecisionBatch(
             session=request.session,
             origin=request.origin,
@@ -979,6 +995,7 @@ class Spine:
             Phase.ORDER,
             request.origin,
             lambda: self._engine.order(order_request) if decision_origin else None,
+            unwrapped=(OrderingInputError,),
         )
 
         def commit_phase() -> tuple[OrderRow, ...]:
@@ -1002,12 +1019,21 @@ class Spine:
         )
         return OriginResult(forecasts=calibrated.forecasts, orders=orders)
 
-    def _phase(self, phase: Phase, origin: pd.Timestamp, action):
+    def _phase(
+        self,
+        phase: Phase,
+        origin: pd.Timestamp,
+        action,
+        *,
+        unwrapped: tuple[type[Exception], ...] = (),
+    ):
         started = time.perf_counter()
         try:
             result = action()
         except Exception as error:
             self._report(phase, origin, started, error)
+            if isinstance(error, unwrapped):
+                raise
             raise PhaseError(phase, origin, error) from error
         self._report(phase, origin, started, None)
         return result
@@ -1358,7 +1384,9 @@ __all__ = [
     "CalibrationResult",
     "CommitRequest",
     "CommitResult",
+    "ConfiguredPolicyOrderer",
     "DecisionBatch",
+    "DecisionEvidence",
     "Engine",
     "FittedTask",
     "ForecastBatch",
