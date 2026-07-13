@@ -1,0 +1,13 @@
+{
+  "artifact_digest": "03b41985ac36f4a865a3489879ebccf19010dffabe36c463e0e48517bdbc962b",
+  "artifact_id": "8295964148",
+  "artifact_name": "oracle-capture-ba45e9463e6b9d2921ca0d9e9692d2645a228058",
+  "environment_digest": "67f80c40b85eb1c478327470156c0e180bdb97277e4d954eec5caefc05a2770e",
+  "inner_bundle_digest": "3e5664e07b823315c8bc90e8d3f5a30d4ec83cb282043411fade8224bf2596bf",
+  "manifest_sha256": "a5f298d1cefba0fad9b88e651b52a6d687bf06c518e95ad7e6ef918d739279e1",
+  "producer_sha": "ba45e9463e6b9d2921ca0d9e9692d2645a228058",
+  "run_url": "https://github.com/Vzlentin/calibre/actions/runs/29293635537",
+  "schema": 1,
+  "workflow_run_id": "29293635537",
+  "workflow_sha": "ba45e9463e6b9d2921ca0d9e9692d2645a228058"
+}
