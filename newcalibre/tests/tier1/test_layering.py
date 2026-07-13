@@ -12,6 +12,17 @@ pytestmark = pytest.mark.tier1
 FORBIDDEN_IMPORT_ROOTS = frozenset({"benchmarks", "calibre"})
 PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "newcalibre"
 PACKAGE_INIT = PACKAGE_ROOT / "__init__.py"
+OBJECTIVE_MODULE = PACKAGE_ROOT / "ordering" / "_objective.py"
+FORBIDDEN_OBJECTIVE_SYMBOLS = frozenset(
+    {
+        "InventoryPosition",
+        "OrderRow",
+        "SettlementRequest",
+        "StockoutTransition",
+        "lost_sales_transition",
+        "settle",
+    }
+)
 
 
 def _absolute_import_roots(path: Path) -> list[tuple[int, str]]:
@@ -66,3 +77,11 @@ def test_layering_detector_bites_on_forbidden_import_forms(tmp_path: Path) -> No
         "src/newcalibre/probe.py:3: import calibre",
         "src/newcalibre/probe.py:4: import benchmarks",
     ]
+
+
+def test_ordering_objective_contains_no_simulator_or_settlement_arithmetic() -> None:
+    tree = ast.parse(OBJECTIVE_MODULE.read_text(encoding="utf-8"), filename=str(OBJECTIVE_MODULE))
+    imported_or_referenced = {name.id for name in ast.walk(tree) if isinstance(name, ast.Name)}
+
+    assert OBJECTIVE_MODULE.is_file()
+    assert not (imported_or_referenced & FORBIDDEN_OBJECTIVE_SYMBOLS)
