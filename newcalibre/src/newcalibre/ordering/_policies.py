@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from numbers import Integral, Real
 from types import MappingProxyType
 from typing import cast
@@ -321,14 +321,11 @@ def _newsvendor_target(
         )
     lower, upper = interval_columns(coverage)
     _require_columns(group, (lower, upper), family="interval")
-    issued = _matching_issuance(row, (lower, upper), exact=True)
-    assert issued is not None
-    _validate_issuance(
-        issued,
-        expected_level=coverage,
-        expected_window=EmissionScope.PER_STEP,
-        values=row.values,
-        consumed_columns=(lower, upper),
+    descriptor = _newsvendor_interval_descriptor(
+        row,
+        lower=lower,
+        upper=upper,
+        coverage=coverage,
     )
     lower_value = _finite_value(row.values[lower], name="newsvendor lower bound")
     upper_value = _finite_value(row.values[upper], name="newsvendor upper bound")
@@ -337,8 +334,81 @@ def _newsvendor_target(
     target = lower_value + fractile * (upper_value - lower_value)
     return _finite_value(target, name="newsvendor interpolated target"), _Source(
         (lower, upper),
-        issued.descriptor,
+        descriptor,
     )
+
+
+def _newsvendor_interval_descriptor(
+    row: _PolicyRow,
+    *,
+    lower: str,
+    upper: str,
+    coverage: float,
+) -> GuaranteeDescriptor:
+    joint = _matching_issuance(row, (lower, upper), exact=True, missing_ok=True)
+    support = _matching_issuance(row, (lower,), exact=True, missing_ok=True)
+    guaranteed = _matching_issuance(row, (upper,), exact=True, missing_ok=True)
+
+    if joint is not None:
+        if support is not None or guaranteed is not None:
+            raise OrderingInputError(
+                "newsvendor interval provenance cannot mix joint and split issuances"
+            )
+        if joint.descriptor.type.claim is not GuaranteeClaim.TWO_SIDED_COVERAGE:
+            raise OrderingInputError(
+                "newsvendor joint interval requires two-sided coverage provenance"
+            )
+        _validate_issuance(
+            joint,
+            expected_level=coverage,
+            expected_window=EmissionScope.PER_STEP,
+            values=row.values,
+            consumed_columns=(lower, upper),
+        )
+        return joint.descriptor
+
+    if support is None or guaranteed is None:
+        raise OrderingInputError(
+            "newsvendor requires either joint two-sided or canonical split interval provenance"
+        )
+    if support.descriptor.type.claim is not GuaranteeClaim.NONE:
+        raise OrderingInputError(
+            "newsvendor split interval requires claim-none lower support provenance"
+        )
+    if (
+        guaranteed.descriptor.type.claim is not GuaranteeClaim.ONE_SIDED_COVERAGE
+        or guaranteed.guaranteed_side is not GuaranteedSide.UPPER
+    ):
+        raise OrderingInputError(
+            "newsvendor split interval requires one-sided upper guarantee provenance"
+        )
+    _validate_issuance(
+        support,
+        expected_level=coverage,
+        expected_window=EmissionScope.PER_STEP,
+        values=row.values,
+        consumed_columns=(lower,),
+    )
+    _validate_issuance(
+        guaranteed,
+        expected_level=coverage,
+        expected_window=EmissionScope.PER_STEP,
+        values=row.values,
+        consumed_columns=(upper,),
+    )
+    expected_support_descriptor = replace(
+        guaranteed.descriptor,
+        type=GuaranteeType(
+            claim=GuaranteeClaim.NONE,
+            currency=None,
+            declared_slack=None,
+        ),
+    )
+    if support.descriptor != expected_support_descriptor:
+        raise OrderingInputError(
+            "newsvendor split interval descriptors must share one emission context"
+        )
+    return guaranteed.descriptor
 
 
 def _window_target(
@@ -388,7 +458,8 @@ def _window_target(
     if window is EmissionScope.WINDOW_SUM:
         terminal = required_steps[-1]
         for step, _bound_key, issuance in issued_by_step:
-            value_is_finite = _is_finite_real(group.rows[step].values[upper])
+            value = group.rows[step].values[upper]
+            value_is_finite = _is_finite_real(value)
             if step == terminal:
                 if not issuance.bounds_finite or not value_is_finite:
                     raise OrderingInputError("terminal window bound must be finite")
@@ -399,7 +470,7 @@ def _window_target(
                     values=group.rows[step].values,
                     consumed_columns=(upper,),
                 )
-            elif issuance.bounds_finite or value_is_finite:
+            elif issuance.bounds_finite or not _is_missing_scalar(value):
                 raise OrderingInputError(
                     "window-sum mode requires intentionally null non-terminal bounds"
                 )
@@ -609,11 +680,15 @@ def _rss_reorder_point(
     configuration: OrderingConfiguration,
 ) -> float:
     if configuration.reorder_point is not None:
-        return configuration.reorder_point
-    scale = configuration.reorder_point_scale
-    if scale is None:  # pragma: no cover - compile_ordering owns this invariant.
-        raise OrderingInputError("rss configuration requires a reorder gate")
-    return _finite_value(scale * target, name="scaled reorder point")
+        reorder_point = configuration.reorder_point
+    else:
+        scale = configuration.reorder_point_scale
+        if scale is None:  # pragma: no cover - compile_ordering owns this invariant.
+            raise OrderingInputError("rss configuration requires a reorder gate")
+        reorder_point = _finite_value(scale * target, name="scaled reorder point")
+    if not 0.0 <= reorder_point <= target:
+        raise OrderingInputError("rss reorder point must satisfy 0 <= s <= target")
+    return reorder_point
 
 
 def _nonengine_quantile_descriptor(level: float) -> GuaranteeDescriptor:
@@ -657,6 +732,17 @@ def _is_finite_real(value: object) -> bool:
         return False
     try:
         return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _is_missing_scalar(value: object) -> bool:
+    if value is None or value is pd.NA or value is pd.NaT:
+        return True
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    try:
+        return math.isnan(float(value))
     except (OverflowError, TypeError, ValueError):
         return False
 

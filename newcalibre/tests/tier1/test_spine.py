@@ -1046,10 +1046,49 @@ def test_configured_policy_orderer_persists_policy_evidence_through_commit(
     assert sink.orders[0].evidence is evidence
 
 
-def test_configured_policy_exception_propagates_and_commits_no_partial_origin() -> None:
+def test_configured_newsvendor_consumes_split_interval_through_commit() -> None:
     panel = _panel()
     session = _session(
         with_decision=True,
+        ordering_policy={"name": "newsvendor", "coverage": 0.8},
+        conformal_config={"coverage": 0.8, "protection_period": 2},
+    )
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=sink,
+        dispatch=RecordingDispatch(),
+        calibrator=_policy_calibrator,
+        orderer=ConfiguredPolicyOrderer(),
+    )
+
+    result = Spine(engine).run_origin(
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.LOCAL,
+            inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+
+    assert result.orders == sink.orders
+    assert result.orders[0].quantity == 1.0
+    evidence = result.orders[0].evidence
+    assert evidence is not None
+    assert evidence.raw_target == pytest.approx(0.6)
+    assert evidence.source_columns == interval_columns(0.8)
+    assert evidence.source_descriptor == _policy_descriptor()
+
+
+def test_configured_policy_exception_propagates_and_commits_no_partial_origin() -> None:
+    series_keys = ("a", "b")
+    panel = _panel(series_keys=series_keys)
+    session = _session(
+        with_decision=True,
+        series_keys=series_keys,
         ordering_policy={"name": "rs", "coverage": 0.8},
         conformal_config={"coverage": 0.8, "protection_period": 2},
     )
@@ -1061,11 +1100,36 @@ def test_configured_policy_exception_propagates_and_commits_no_partial_origin() 
     ) -> CalibrationResult:
         frame = forecasts.frame
         lower, upper = interval_columns(0.8)
-        frame[lower] = pd.Series([0.0, 0.0], dtype="float64")
-        frame[upper] = pd.Series([1.2, 2.0], dtype="float64")
-        empty = {key: {} for key in forecasts.issuances}
+        frame[lower] = pd.Series(0.0, index=frame.index, dtype="float64")
+        frame[upper] = frame[HORIZON_STEP].map({1: 1.2, 2: 2.0}).astype("float64")
+        descriptor = _policy_descriptor()
+        issuance = ForecastIssuance(
+            descriptor=descriptor,
+            guaranteed_side=GuaranteedSide.UPPER,
+            calibration_ready=True,
+            bounds_finite=True,
+            bounds_null_reason=None,
+        )
+        support_issuance = ForecastIssuance(
+            descriptor=replace(
+                descriptor,
+                type=GuaranteeType(
+                    claim=GuaranteeClaim.NONE,
+                    currency=None,
+                    declared_slack=None,
+                ),
+            ),
+            guaranteed_side=None,
+            calibration_ready=False,
+            bounds_finite=True,
+            bounds_null_reason=None,
+        )
+        issuances = {
+            key: ({(lower,): support_issuance, (upper,): issuance} if key[0] == "a" else {})
+            for key in forecasts.issuances
+        }
         return CalibrationResult(
-            ForecastBatch(frame, calendar=CALENDAR, issuances=empty),
+            ForecastBatch(frame, calendar=CALENDAR, issuances=issuances),
         )
 
     spine = Spine(
@@ -1087,7 +1151,9 @@ def test_configured_policy_exception_propagates_and_commits_no_partial_origin() 
                 session=session,
                 origin=pd.Timestamp("2026-01-05"),
                 scope=Scope.LOCAL,
-                inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
+                inventory_positions={
+                    series_key: InventoryPosition(0.0, 0.0, 0.0) for series_key in series_keys
+                },
             )
         )
 

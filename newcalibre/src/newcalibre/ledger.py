@@ -1142,9 +1142,14 @@ def _validate_row_issuances(
         if not isinstance(issuance, ForecastIssuance):
             raise LedgerError("each bound issuance must be a ForecastIssuance")
         _validate_bound_descriptor(bound_key, issuance)
-        payload_is_finite = all(_is_finite_real(values[column]) for column in bound_key)
-        if payload_is_finite is not issuance.bounds_finite:
-            raise LedgerError("issued bounds finiteness does not match the forecast payload")
+        if issuance.bounds_finite:
+            payload_matches = all(_is_finite_real(values[column]) for column in bound_key)
+        else:
+            payload_matches = all(_is_missing_scalar(values[column]) for column in bound_key)
+        if not payload_matches:
+            raise LedgerError(
+                "issued bounds finiteness/nullability does not match the forecast payload"
+            )
 
     if accounted_columns != expected_columns:
         raise LedgerError(
@@ -1213,15 +1218,21 @@ def _validate_bound_descriptor(
 
 
 def _snapshot_scalar(value: object) -> object:
-    if value is pd.NA or value is pd.NaT or value is None:
+    if _is_missing_scalar(value):
         return None
     if isinstance(value, pd.Timestamp):
         return value
     if isinstance(value, np.generic):
         value = value.item()
-    if isinstance(value, float) and math.isnan(value):
-        return None
     return value
+
+
+def _is_missing_scalar(value: object) -> bool:
+    if value is None or value is pd.NA or value is pd.NaT:
+        return True
+    if isinstance(value, np.generic):
+        value = value.item()
+    return isinstance(value, float) and math.isnan(value)
 
 
 def _is_finite_real(value: object) -> bool:

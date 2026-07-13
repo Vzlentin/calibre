@@ -220,6 +220,165 @@ def test_newsvendor_interpolates_h1_and_ignores_later_horizons() -> None:
     assert decision.evidence.source_descriptor.window is EmissionScope.PER_STEP
 
 
+def test_newsvendor_interpolates_canonical_split_one_sided_interval() -> None:
+    lower, upper = interval_columns(0.8)
+    frame = _frame(columns={lower: [10.0] * 3, upper: [18.0] * 3})
+    guaranteed_descriptor = _descriptor()
+    support_descriptor = replace(
+        guaranteed_descriptor,
+        type=GuaranteeType(
+            claim=GuaranteeClaim.NONE,
+            currency=None,
+            declared_slack=None,
+        ),
+    )
+    support_issuance = ForecastIssuance(
+        descriptor=support_descriptor,
+        guaranteed_side=None,
+        calibration_ready=False,
+        bounds_finite=True,
+        bounds_null_reason=None,
+    )
+    issuances = {
+        _key("sku-a", step): {
+            (lower,): support_issuance,
+            (upper,): _issuance(guaranteed_descriptor),
+        }
+        for step in range(1, 4)
+    }
+
+    decision = dispatch_policy(_request(_configuration("newsvendor"), frame, issuances))[0]
+
+    assert decision.evidence.raw_target == 16.0
+    assert decision.evidence.source_columns == (lower, upper)
+    assert decision.evidence.source_descriptor == guaranteed_descriptor
+
+
+@pytest.mark.parametrize(
+    ("malformation", "message"),
+    [
+        ("lower-claim", "claim-none lower support"),
+        ("upper-side", "one-sided upper guarantee"),
+        ("lower-window", "wrong emission scope"),
+        ("upper-level", "level does not match"),
+        ("mixed-context", "share one emission context"),
+    ],
+)
+def test_newsvendor_refuses_malformed_split_interval_provenance(
+    malformation: str,
+    message: str,
+) -> None:
+    lower, upper = interval_columns(0.8)
+    frame = _frame(columns={lower: [10.0] * 3, upper: [18.0] * 3})
+    guaranteed_descriptor = _descriptor()
+    support_descriptor = replace(
+        guaranteed_descriptor,
+        type=GuaranteeType(
+            claim=GuaranteeClaim.NONE,
+            currency=None,
+            declared_slack=None,
+        ),
+    )
+    lower_side: GuaranteedSide | None = None
+    upper_side = GuaranteedSide.UPPER
+    if malformation == "lower-claim":
+        support_descriptor = guaranteed_descriptor
+        lower_side = GuaranteedSide.LOWER
+    elif malformation == "upper-side":
+        upper_side = GuaranteedSide.LOWER
+    elif malformation == "lower-window":
+        support_descriptor = replace(support_descriptor, window=EmissionScope.WINDOW_SUM)
+    elif malformation == "upper-level":
+        guaranteed_descriptor = replace(guaranteed_descriptor, level=0.9)
+    elif malformation == "mixed-context":
+        support_descriptor = replace(
+            support_descriptor,
+            scored_series=ScoredSeries.RECORDED_SALES,
+        )
+    issuances = {
+        _key("sku-a", step): {
+            (lower,): _issuance(support_descriptor, side=lower_side),
+            (upper,): _issuance(guaranteed_descriptor, side=upper_side),
+        }
+        for step in range(1, 4)
+    }
+
+    with pytest.raises(OrderingInputError, match=message):
+        dispatch_policy(_request(_configuration("newsvendor"), frame, issuances))
+
+
+def test_newsvendor_refuses_a_non_two_sided_joint_interval() -> None:
+    lower, upper = interval_columns(0.8)
+    frame = _frame(columns={lower: [10.0] * 3, upper: [18.0] * 3})
+    descriptor = _descriptor(claim=GuaranteeClaim.NONE)
+    issuances = {
+        _key("sku-a", step): {(lower, upper): _issuance(descriptor, side=None)}
+        for step in range(1, 4)
+    }
+
+    with pytest.raises(OrderingInputError, match="two-sided coverage provenance"):
+        dispatch_policy(_request(_configuration("newsvendor"), frame, issuances))
+
+
+@pytest.mark.parametrize("provenance", ["joint", "split"])
+@pytest.mark.parametrize("endpoint", ["lower", "upper"])
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_newsvendor_refuses_every_nonfinite_interval_endpoint(
+    provenance: str,
+    endpoint: str,
+    value: float,
+) -> None:
+    lower, upper = interval_columns(0.8)
+    columns = {lower: [10.0] * 3, upper: [18.0] * 3}
+    columns[lower if endpoint == "lower" else upper][0] = value
+    frame = _frame(columns=columns)
+    guaranteed_descriptor = _descriptor()
+    support_descriptor = replace(
+        guaranteed_descriptor,
+        type=GuaranteeType(
+            claim=GuaranteeClaim.NONE,
+            currency=None,
+            declared_slack=None,
+        ),
+    )
+    issuances: dict[ForecastKey, dict[BoundKey, ForecastIssuance]] = {}
+    for step in range(1, 4):
+        lower_is_finite = step != 1 or endpoint != "lower"
+        upper_is_finite = step != 1 or endpoint != "upper"
+        if provenance == "joint":
+            joint_descriptor = replace(
+                guaranteed_descriptor,
+                type=GuaranteeType(
+                    claim=GuaranteeClaim.TWO_SIDED_COVERAGE,
+                    currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+                    declared_slack=None,
+                ),
+            )
+            issuances[_key("sku-a", step)] = {
+                (lower, upper): _issuance(
+                    joint_descriptor,
+                    finite=lower_is_finite and upper_is_finite,
+                    side=None,
+                )
+            }
+        else:
+            issuances[_key("sku-a", step)] = {
+                (lower,): ForecastIssuance(
+                    descriptor=support_descriptor,
+                    guaranteed_side=None,
+                    calibration_ready=False,
+                    bounds_finite=lower_is_finite,
+                    bounds_null_reason=None if lower_is_finite else "method-returned-nonfinite",
+                ),
+                (upper,): _issuance(guaranteed_descriptor, finite=upper_is_finite),
+            }
+
+    decisions = []
+    with pytest.raises(OrderingInputError, match="finite"):
+        decisions.extend(dispatch_policy(_request(_configuration("newsvendor"), frame, issuances)))
+    assert decisions == []
+
+
 def test_newsvendor_prefers_the_exact_issued_critical_ratio_quantile() -> None:
     lower, upper = interval_columns(0.8)
     quantile = quantile_column(0.75)
@@ -252,6 +411,23 @@ def test_newsvendor_prefers_the_exact_issued_critical_ratio_quantile() -> None:
     assert decision.evidence.raw_target == 20.0
     assert decision.evidence.source_columns == (quantile,)
     assert decision.evidence.source_descriptor == quantile_descriptor
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_newsvendor_refuses_every_nonfinite_issued_dense_quantile(value: float) -> None:
+    quantile = quantile_column(0.75)
+    values = [value, math.nan, math.nan]
+    frame = _frame(columns={quantile: values})
+    descriptor = _descriptor(level=0.75, claim=GuaranteeClaim.RISK_CONTROL)
+    issuances = {
+        _key("sku-a", step): {(quantile,): _issuance(descriptor, finite=False)}
+        for step in range(1, 4)
+    }
+
+    decisions = []
+    with pytest.raises(OrderingInputError, match="finite"):
+        decisions.extend(dispatch_policy(_request(_configuration("newsvendor"), frame, issuances)))
+    assert decisions == []
 
 
 def test_newsvendor_does_not_treat_an_unissued_dense_column_as_calibrated() -> None:
@@ -416,6 +592,54 @@ def test_rs_explicit_quantile_preserves_genuine_engine_issuance() -> None:
 
 
 @pytest.mark.parametrize(
+    "issued_step",
+    TIMING.protection_window,
+    ids=("earlier-only", "later-only"),
+)
+def test_rs_refuses_partial_explicit_quantile_issuance_provenance(
+    issued_step: int,
+) -> None:
+    quantile = quantile_column(0.6)
+    frame = _frame(columns={quantile: [4.5, 5.5, math.inf]})
+    descriptor = _descriptor(level=0.6, claim=GuaranteeClaim.RISK_CONTROL)
+    issuances = {_key("sku-a", step): {} for step in range(1, 4)}
+    issuances[_key("sku-a", issued_step)] = {(quantile,): _issuance(descriptor)}
+    configuration = _configuration(
+        "rs",
+        calibration_coverage=None,
+        explicit_quantile=0.6,
+    )
+
+    decisions = []
+    with pytest.raises(OrderingInputError, match="mixed or incomplete"):
+        decisions.extend(dispatch_policy(_request(configuration, frame, issuances)))
+    assert decisions == []
+
+
+@pytest.mark.parametrize("step", TIMING.protection_window)
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_rs_refuses_every_nonfinite_explicit_quantile_window_step(
+    step: int,
+    value: float,
+) -> None:
+    quantile = quantile_column(0.6)
+    values = [4.5, 5.5, math.inf]
+    values[step - 1] = value
+    frame = _frame(columns={quantile: values})
+    issuances = {_key("sku-a", horizon): {} for horizon in range(1, 4)}
+    configuration = _configuration(
+        "rs",
+        calibration_coverage=None,
+        explicit_quantile=0.6,
+    )
+
+    decisions = []
+    with pytest.raises(OrderingInputError, match="finite"):
+        decisions.extend(dispatch_policy(_request(configuration, frame, issuances)))
+    assert decisions == []
+
+
+@pytest.mark.parametrize(
     ("position", "expected"),
     [(8.0, 10.0), (9.0, 0.0), (10.0, 0.0)],
 )
@@ -465,6 +689,41 @@ def test_rss_target_scale_gate_is_inclusive_and_not_a_modifier(
     assert decision.quantity == expected
     assert decision.evidence.bindings == ()
     assert decision.evidence.effective_descriptor == decision.evidence.source_descriptor
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        _configuration("rss", reorder_point=20.0),
+        _configuration("rss", reorder_point=16.0, target_cap=15.0),
+    ],
+)
+def test_rss_refuses_absolute_reorder_point_above_final_target(configuration: object) -> None:
+    upper = interval_columns(0.8)[1]
+    frame = _frame(columns={upper: [7.0, 11.0, math.inf]})
+
+    with pytest.raises(OrderingInputError, match="0 <= s <= target"):
+        dispatch_policy(
+            _request(
+                cast(Any, configuration),
+                frame,
+                _upper_issuances(_descriptor()),
+                positions={"sku-a": InventoryPosition(19.0, 0.0, 0.0)},
+            )
+        )
+
+
+def test_rss_refuses_scaled_reorder_point_below_zero() -> None:
+    upper = interval_columns(0.8)[1]
+    frame = _frame(columns={upper: [-7.0, -11.0, math.inf]})
+    configuration = _configuration(
+        "rss",
+        reorder_point=None,
+        reorder_point_scale=0.5,
+    )
+
+    with pytest.raises(OrderingInputError, match="0 <= s <= target"):
+        dispatch_policy(_request(configuration, frame, _upper_issuances(_descriptor())))
 
 
 @pytest.mark.parametrize(
@@ -670,6 +929,17 @@ def test_cumulative_refuses_a_nonfinite_terminal_without_consuming_null_prefix()
     issuances = _upper_issuances(descriptor, finite=(False, False, False))
 
     with pytest.raises(OrderingInputError, match="terminal.*finite"):
+        dispatch_policy(_request(_configuration("rs"), frame, issuances))
+
+
+@pytest.mark.parametrize("prefix", [math.inf, -math.inf])
+def test_cumulative_refuses_infinite_nonterminal_prefix(prefix: float) -> None:
+    upper = interval_columns(0.8)[1]
+    descriptor = _descriptor(window=EmissionScope.WINDOW_SUM)
+    frame = _frame(columns={upper: [prefix, 15.0, math.nan]})
+    issuances = _upper_issuances(descriptor, finite=(False, True, False))
+
+    with pytest.raises(OrderingInputError, match="intentionally null non-terminal"):
         dispatch_policy(_request(_configuration("rs"), frame, issuances))
 
 

@@ -105,6 +105,7 @@ class OrderingConfiguration:
                 currency=None,
                 declared_slack=None,
             ),
+            scope=replace(descriptor.scope, class_system_name=None),
         )
 
 
@@ -170,6 +171,8 @@ def compile_ordering(setup: OrderingSetup) -> OrderingConfiguration:
             raise OrderingConfigError(
                 "rss requires exactly one of reorder_point or reorder_point_scale"
             )
+        if reorder_point_scale is not None and reorder_point_scale > 1.0:
+            raise OrderingConfigError("reorder_point_scale must be at most 1")
     elif gate_count:
         raise OrderingConfigError("reorder gates are valid only for the rss policy")
 
