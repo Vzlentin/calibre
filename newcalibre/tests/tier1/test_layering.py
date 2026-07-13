@@ -12,6 +12,7 @@ pytestmark = pytest.mark.tier1
 FORBIDDEN_IMPORT_ROOTS = frozenset({"benchmarks", "calibre"})
 PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "newcalibre"
 PACKAGE_INIT = PACKAGE_ROOT / "__init__.py"
+ORDERING_ROOT = PACKAGE_ROOT / "ordering"
 OBJECTIVE_MODULE = PACKAGE_ROOT / "ordering" / "_objective.py"
 FORBIDDEN_OBJECTIVE_SYMBOLS = frozenset(
     {
@@ -25,17 +26,17 @@ FORBIDDEN_OBJECTIVE_SYMBOLS = frozenset(
 )
 
 
-def _absolute_import_roots(path: Path) -> list[tuple[int, str]]:
+def _absolute_imports(path: Path) -> list[tuple[int, str]]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    roots: list[tuple[int, str]] = []
+    imports: list[tuple[int, str]] = []
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            roots.extend((node.lineno, alias.name.partition(".")[0]) for alias in node.names)
+            imports.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            roots.append((node.lineno, node.module.partition(".")[0]))
+            imports.append((node.lineno, node.module))
 
-    return roots
+    return imports
 
 
 def _find_violations(root: Path) -> tuple[list[Path], list[str]]:
@@ -43,10 +44,19 @@ def _find_violations(root: Path) -> tuple[list[Path], list[str]]:
     violations = [
         f"{path.relative_to(root).as_posix()}:{line}: import {import_root}"
         for path in sources
-        for line, import_root in _absolute_import_roots(path)
-        if import_root in FORBIDDEN_IMPORT_ROOTS
+        for line, module in _absolute_imports(path)
+        if (import_root := module.partition(".")[0]) in FORBIDDEN_IMPORT_ROOTS
     ]
     return sources, violations
+
+
+def _engine_import_violations(root: Path) -> list[str]:
+    return [
+        f"{path.relative_to(root).as_posix()}:{line}: import {module}"
+        for path in sorted(root.rglob("*.py"))
+        for line, module in _absolute_imports(path)
+        if module == "newcalibre.engine" or module.startswith("newcalibre.engine.")
+    ]
 
 
 def test_successor_package_never_imports_frozen_surfaces() -> None:
@@ -79,9 +89,31 @@ def test_layering_detector_bites_on_forbidden_import_forms(tmp_path: Path) -> No
     ]
 
 
-def test_ordering_objective_contains_no_simulator_or_settlement_arithmetic() -> None:
-    tree = ast.parse(OBJECTIVE_MODULE.read_text(encoding="utf-8"), filename=str(OBJECTIVE_MODULE))
-    imported_or_referenced = {name.id for name in ast.walk(tree) if isinstance(name, ast.Name)}
+def test_ordering_has_no_engine_import_dependency() -> None:
+    assert not _engine_import_violations(ORDERING_ROOT)
 
-    assert OBJECTIVE_MODULE.is_file()
-    assert not (imported_or_referenced & FORBIDDEN_OBJECTIVE_SYMBOLS)
+
+def test_ordering_engine_import_detector_bites_on_aliases(tmp_path: Path) -> None:
+    probe = tmp_path / "ordering" / "objective.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text(
+        "from newcalibre.engine import settle as reduce\n"
+        "import newcalibre.engine.settlement as runtime\n",
+        encoding="utf-8",
+    )
+
+    assert _engine_import_violations(tmp_path) == [
+        "ordering/objective.py:1: import newcalibre.engine",
+        "ordering/objective.py:2: import newcalibre.engine.settlement",
+    ]
+
+
+def test_ordering_objective_contains_no_transition_or_booking_vocabulary() -> None:
+    tree = ast.parse(OBJECTIVE_MODULE.read_text(encoding="utf-8"), filename=str(OBJECTIVE_MODULE))
+    referenced = {
+        node.id if isinstance(node, ast.Name) else node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Attribute, ast.Name))
+    }
+
+    assert not (referenced & FORBIDDEN_OBJECTIVE_SYMBOLS)
