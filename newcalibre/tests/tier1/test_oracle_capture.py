@@ -14,9 +14,11 @@ from newcalibre.oracle import (
     ORACLE_COMMIT,
     ORACLE_LOCK_SHA256,
     ORACLE_TAG,
+    CaptureBundle,
     OracleEvidenceError,
     validate_capture_bundle,
     validate_capture_receipt,
+    validate_promoted_capture,
 )
 
 pytestmark = pytest.mark.tier1
@@ -25,6 +27,7 @@ CANDIDATE_SHA = "a" * 40
 WORKFLOW_SHA = "b" * 40
 RUN_ID = "123456"
 ARTIFACT_ID = "789012"
+ARTIFACT_DIGEST = "1" * 64
 CONFIG_IDENTITY = "benchmarks/vn2/config/vn2-winning-loop.yaml"
 INVENTORY_IDENTITY = "stage3/evidence/vn2-input-digests.json"
 
@@ -495,6 +498,7 @@ def test_capture_receipt_binds_github_artifact_and_exact_promoted_bytes(tmp_path
     bundle = _validate(root)
     receipt_path = tmp_path / "receipt.json"
     receipt = {
+        "artifact_digest": ARTIFACT_DIGEST,
         "artifact_id": ARTIFACT_ID,
         "artifact_name": bundle.manifest.artifact_name,
         "inner_bundle_digest": bundle.manifest.inner_bundle_digest,
@@ -512,6 +516,7 @@ def test_capture_receipt_binds_github_artifact_and_exact_promoted_bytes(tmp_path
         receipt_path,
         bundle=bundle,
         expected_artifact_id=ARTIFACT_ID,
+        expected_artifact_digest=ARTIFACT_DIGEST,
         expected_artifact_name=bundle.manifest.artifact_name,
         expected_producer_sha=CANDIDATE_SHA,
         expected_workflow_sha=WORKFLOW_SHA,
@@ -526,6 +531,7 @@ def test_capture_receipt_binds_github_artifact_and_exact_promoted_bytes(tmp_path
             receipt_path,
             bundle=bundle,
             expected_artifact_id=ARTIFACT_ID,
+            expected_artifact_digest=ARTIFACT_DIGEST,
             expected_artifact_name=bundle.manifest.artifact_name,
             expected_producer_sha=CANDIDATE_SHA,
             expected_workflow_sha=WORKFLOW_SHA,
@@ -537,11 +543,149 @@ def test_capture_receipt_binds_github_artifact_and_exact_promoted_bytes(tmp_path
             receipt_path,
             bundle=bundle,
             expected_artifact_id=ARTIFACT_ID,
+            expected_artifact_digest=ARTIFACT_DIGEST,
             expected_artifact_name=bundle.manifest.artifact_name,
             expected_producer_sha="e" * 40,
             expected_workflow_sha=WORKFLOW_SHA,
             expected_workflow_run_id=RUN_ID,
         )
+
+
+def test_promoted_capture_binds_live_github_artifact_metadata(tmp_path: Path) -> None:
+    root = _valid_bundle(tmp_path / "bundle")
+    bundle = _validate(root)
+    receipt_path = tmp_path / "receipt.json"
+    _write_json(receipt_path, _receipt_value(bundle))
+
+    promoted_bundle, receipt = validate_promoted_capture(
+        root,
+        receipt_path,
+        artifact_metadata=_artifact_metadata(),
+        run_metadata=_run_metadata(),
+        expected_config_path=_trusted_inputs(root)[0],
+        expected_input_inventory_path=_trusted_inputs(root)[1],
+    )
+
+    assert promoted_bundle.manifest.candidate_sha == CANDIDATE_SHA
+    assert receipt.artifact_digest == ARTIFACT_DIGEST
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"expired": True}, "unexpired"),
+        ({"id": True}, "positive integer"),
+        ({"name": f"oracle-capture-{'c' * 40}"}, "candidate_sha"),
+        ({"digest": f"sha256:{'2' * 64}"}, "artifact_digest"),
+        ({"workflow_run": {"head_branch": "feature"}}, "from main"),
+    ],
+)
+def test_promoted_capture_refuses_untrusted_artifact_metadata(
+    tmp_path: Path,
+    mutation: dict[str, object],
+    message: str,
+) -> None:
+    root = _valid_bundle(tmp_path / "bundle")
+    bundle = _validate(root)
+    receipt_path = tmp_path / "receipt.json"
+    _write_json(receipt_path, _receipt_value(bundle))
+    metadata = _artifact_metadata()
+    if "workflow_run" in mutation:
+        workflow_run = metadata["workflow_run"]
+        assert isinstance(workflow_run, dict)
+        nested = mutation["workflow_run"]
+        assert isinstance(nested, dict)
+        workflow_run.update(nested)
+    else:
+        metadata.update(mutation)
+
+    with pytest.raises(OracleEvidenceError, match=message):
+        validate_promoted_capture(
+            root,
+            receipt_path,
+            artifact_metadata=metadata,
+            run_metadata=_run_metadata(),
+            expected_config_path=_trusted_inputs(root)[0],
+            expected_input_inventory_path=_trusted_inputs(root)[1],
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"event": "push"}, "event"),
+        ({"path": ".github/workflows/other.yml"}, "path"),
+        ({"conclusion": "failure"}, "conclusion"),
+        ({"head_sha": "c" * 40}, "SHAs do not match"),
+        ({"repository": {"full_name": "other/repository"}}, "Vzlentin/calibre"),
+    ],
+)
+def test_promoted_capture_refuses_wrong_workflow_run(
+    tmp_path: Path,
+    mutation: dict[str, object],
+    message: str,
+) -> None:
+    root = _valid_bundle(tmp_path / "bundle")
+    bundle = _validate(root)
+    receipt_path = tmp_path / "receipt.json"
+    _write_json(receipt_path, _receipt_value(bundle))
+    run_metadata = _run_metadata()
+    run_metadata.update(mutation)
+
+    with pytest.raises(OracleEvidenceError, match=message):
+        validate_promoted_capture(
+            root,
+            receipt_path,
+            artifact_metadata=_artifact_metadata(),
+            run_metadata=run_metadata,
+            expected_config_path=_trusted_inputs(root)[0],
+            expected_input_inventory_path=_trusted_inputs(root)[1],
+        )
+
+
+def _receipt_value(bundle: CaptureBundle) -> dict[str, object]:
+    manifest = bundle.manifest
+    return {
+        "artifact_digest": ARTIFACT_DIGEST,
+        "artifact_id": ARTIFACT_ID,
+        "artifact_name": manifest.artifact_name,
+        "environment_digest": manifest.environment_digest,
+        "inner_bundle_digest": manifest.inner_bundle_digest,
+        "manifest_sha256": bundle.manifest_sha256,
+        "producer_sha": manifest.candidate_sha,
+        "run_url": manifest.run_url,
+        "schema": 1,
+        "workflow_run_id": manifest.run_id,
+        "workflow_sha": manifest.workflow_sha,
+    }
+
+
+def _artifact_metadata() -> dict[str, object]:
+    return {
+        "digest": f"sha256:{ARTIFACT_DIGEST}",
+        "expired": False,
+        "id": int(ARTIFACT_ID),
+        "name": f"oracle-capture-{CANDIDATE_SHA}",
+        "workflow_run": {
+            "head_branch": "main",
+            "head_sha": WORKFLOW_SHA,
+            "id": int(RUN_ID),
+        },
+    }
+
+
+def _run_metadata() -> dict[str, object]:
+    return {
+        "conclusion": "success",
+        "event": "workflow_dispatch",
+        "head_branch": "main",
+        "head_sha": WORKFLOW_SHA,
+        "html_url": f"https://github.com/Vzlentin/calibre/actions/runs/{RUN_ID}",
+        "id": int(RUN_ID),
+        "path": ".github/workflows/oracle-capture.yml",
+        "repository": {"full_name": "Vzlentin/calibre"},
+        "status": "completed",
+    }
 
 
 def _rebind_payload(root: Path, relative_path: str) -> None:
