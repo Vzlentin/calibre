@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from tests.vn2_fixtures import EXPECTED_FILES, write_dataset
 import newcalibre.protocols.vn2.inventory as inventory_module
 from newcalibre.protocols import vn2 as vn2_module
 from newcalibre.protocols.vn2 import (
+    EXPECTED_INPUT_COUNT,
     VN2InputError,
     download_vn2_inputs,
     load_vn2_inventory,
@@ -42,6 +44,8 @@ def test_committed_inventory_is_the_exact_approved_inventory_blob() -> None:
 
     assert hashlib.sha256(payload).hexdigest() == APPROVED_LF_SHA256
     inventory = load_vn2_inventory(APPROVED_INVENTORY)
+    assert EXPECTED_INPUT_COUNT == 12
+    assert len(inventory.files) == EXPECTED_INPUT_COUNT
     assert tuple(entry.name for entry in inventory.files) == (
         "week_0_initial_state.csv",
         "week_0_master.csv",
@@ -66,25 +70,20 @@ def test_verifier_accepts_only_the_exact_file_set_and_every_digest(tmp_path: Pat
     assert {entry.name for entry in inventory.files} == set(EXPECTED_FILES)
 
 
-def test_selected_read_reverifies_the_exact_directory_and_selected_entry(
-    tmp_path: Path,
-) -> None:
+def test_selected_read_rehashes_only_its_approved_entry(tmp_path: Path) -> None:
     data, inventory_path, _config = write_dataset(tmp_path)
+    inventory = verify_vn2_inputs(data, inventory_path)
     selected = data / "week_4_sales.csv"
     expected = selected.read_bytes()
 
     (data / "late-extra.txt").write_text("not consumed", encoding="utf-8")
-    with pytest.raises(VN2InputError, match=r"file-set mismatch.*extra=.*late-extra\.txt"):
-        read_verified_vn2_input(data, selected.name, inventory_path)
-    (data / "late-extra.txt").unlink()
-
-    assert read_verified_vn2_input(data, selected.name, inventory_path) == expected
+    assert read_verified_vn2_input(data, selected.name, inventory) == expected
 
     mutated = bytearray(expected)
     mutated[-2] ^= 1
     selected.write_bytes(bytes(mutated))
     with pytest.raises(VN2InputError, match=r"week_4_sales\.csv.*sha256"):
-        read_verified_vn2_input(data, selected.name, inventory_path)
+        read_verified_vn2_input(data, selected.name, inventory)
 
 
 @pytest.mark.parametrize("fault", ["missing", "extra", "size", "digest"])
@@ -113,12 +112,27 @@ def test_verifier_refuses_attributable_file_set_and_content_faults(
         verify_vn2_inputs(data, inventory_path)
 
 
+def test_verifier_refuses_symlinked_approved_destination(tmp_path: Path) -> None:
+    data, inventory_path, _config = write_dataset(tmp_path)
+    victim = data / EXPECTED_FILES[0]
+    backing = tmp_path / "backing.csv"
+    backing.write_bytes(victim.read_bytes())
+    victim.unlink()
+    try:
+        victim.symlink_to(backing)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symbolic links are unavailable: {error}")
+
+    with pytest.raises(VN2InputError, match=rf"{victim.name}.*regular file"):
+        verify_vn2_inputs(data, inventory_path)
+
+
 @pytest.mark.parametrize(
     ("mutation", "pattern"),
     [
         (lambda payload: payload.update(schema=2), "schema"),
         (lambda payload: payload.update(dataset="other"), "dataset"),
-        (lambda payload: payload["files"].pop(), "exactly 12"),
+        (lambda payload: payload.update(files=[]), "non-empty"),
         (lambda payload: payload["files"][1].update(name=payload["files"][0]["name"]), "unique"),
         (lambda payload: payload["files"][0].update(name="../escape.csv"), "basename"),
         (lambda payload: payload["files"][0].update(bytes=-1), "positive"),
@@ -128,7 +142,7 @@ def test_verifier_refuses_attributable_file_set_and_content_faults(
     ids=[
         "schema",
         "dataset",
-        "count",
+        "empty-files",
         "duplicate-name",
         "unsafe-name",
         "negative-size",
@@ -148,6 +162,43 @@ def test_inventory_schema_refuses_malformed_or_unsafe_facts(
     inventory_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(VN2InputError, match=pattern):
+        load_vn2_inventory(inventory_path)
+
+
+def test_generic_inventory_accepts_an_arbitrary_nonempty_compatible_file_list(
+    tmp_path: Path,
+) -> None:
+    _data, inventory_path, _config = write_dataset(tmp_path)
+    payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+    payload["files"] = [payload["files"][0]]
+    inventory_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    inventory = load_vn2_inventory(inventory_path)
+
+    assert tuple(entry.name for entry in inventory.files) == (EXPECTED_FILES[0],)
+
+
+@pytest.mark.parametrize(
+    ("marker", "key"),
+    [
+        ('"dataset": "vn2",', "dataset"),
+        (f'"name": "{EXPECTED_FILES[0]}",', "name"),
+    ],
+    ids=["top-level", "nested"],
+)
+def test_inventory_refuses_duplicate_json_keys_at_every_depth(
+    tmp_path: Path,
+    marker: str,
+    key: str,
+) -> None:
+    _data, inventory_path, _config = write_dataset(tmp_path)
+    text = inventory_path.read_text(encoding="utf-8")
+    inventory_path.write_text(
+        text.replace(marker, f"{marker}\n{marker}", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(VN2InputError, match=rf"duplicate JSON key '{key}'"):
         load_vn2_inventory(inventory_path)
 
 
@@ -178,6 +229,87 @@ def test_downloader_validates_source_names_and_consumed_bytes(tmp_path: Path) ->
             inventory_path,
             fetcher=fetch,
         )
+
+
+def test_default_downloader_bounds_urllib_read_to_approved_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_data, inventory_path, _config = write_dataset(tmp_path / "source")
+    source_payload = (source_data / EXPECTED_FILES[0]).read_bytes()
+    inventory_payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory_payload["files"] = [inventory_payload["files"][0]]
+    inventory_path.write_text(json.dumps(inventory_payload), encoding="utf-8")
+    read_limits: list[int] = []
+    opened: list[tuple[str, int]] = []
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, limit: int) -> bytes:
+            read_limits.append(limit)
+            return source_payload
+
+    def open_url(url: str, *, timeout: int) -> Response:
+        opened.append((url, timeout))
+        return Response()
+
+    monkeypatch.setattr(inventory_module.urllib.request, "urlopen", open_url)
+    target = tmp_path / "target"
+
+    download_vn2_inputs(
+        target,
+        {EXPECTED_FILES[0]: "https://approved.example/input.csv"},
+        inventory_path,
+    )
+
+    assert opened == [("https://approved.example/input.csv", 120)]
+    assert read_limits == [len(source_payload) + 1]
+    assert (target / EXPECTED_FILES[0]).read_bytes() == source_payload
+
+
+def test_default_downloader_refuses_oversized_response_after_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_data, inventory_path, _config = write_dataset(tmp_path / "source")
+    source_payload = (source_data / EXPECTED_FILES[0]).read_bytes()
+    inventory_payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory_payload["files"] = [inventory_payload["files"][0]]
+    inventory_path.write_text(json.dumps(inventory_payload), encoding="utf-8")
+    read_limits: list[int] = []
+
+    class OversizedResponse:
+        def __enter__(self) -> OversizedResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, limit: int) -> bytes:
+            read_limits.append(limit)
+            return source_payload + b"x"
+
+    monkeypatch.setattr(
+        inventory_module.urllib.request,
+        "urlopen",
+        lambda _url, *, timeout: OversizedResponse(),
+    )
+    target = tmp_path / "target"
+
+    with pytest.raises(VN2InputError, match=rf"{EXPECTED_FILES[0]}.*size"):
+        download_vn2_inputs(
+            target,
+            {EXPECTED_FILES[0]: "https://approved.example/input.csv"},
+            inventory_path,
+        )
+
+    assert read_limits == [len(source_payload) + 1]
+    assert list(target.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -226,18 +358,61 @@ def test_downloader_atomic_install_failure_preserves_destination_and_cleans_temp
     data, inventory_path, _config = write_dataset(tmp_path)
     victim = data / EXPECTED_FILES[0]
     original = victim.read_bytes()
-    temporary = data / f".{victim.name}.part"
+    temporaries: list[Path] = []
 
-    def fail_install(self: Path, _target: Path) -> Path:
-        assert self == temporary
+    def fail_install(source: Path, target: Path) -> None:
+        temporary = Path(source)
+        temporaries.append(temporary)
+        assert temporary.parent == data
+        assert temporary.name.startswith(f".{victim.name}.")
+        assert temporary.name.endswith(".part")
+        assert temporary.is_file()
+        assert Path(target) == victim
         raise OSError("disk full")
 
-    monkeypatch.setattr(Path, "replace", fail_install)
+    monkeypatch.setattr(os, "replace", fail_install)
 
-    with pytest.raises(
-        VN2InputError,
-        match=r"cannot install downloaded input week_0_master\.csv",
-    ):
+    for _attempt in range(2):
+        with pytest.raises(
+            VN2InputError,
+            match=r"cannot install downloaded input week_0_master\.csv",
+        ):
+            download_vn2_inputs(
+                data,
+                {name: f"memory://{name}" for name in EXPECTED_FILES},
+                inventory_path,
+                fetcher=lambda _url: original,
+            )
+
+    assert victim.read_bytes() == original
+    assert len({temporary.name for temporary in temporaries}) == 2
+    assert not any(temporary.exists() for temporary in temporaries)
+
+
+def test_downloader_reports_install_and_cleanup_failures_without_masking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data, inventory_path, _config = write_dataset(tmp_path)
+    victim = data / EXPECTED_FILES[0]
+    original = victim.read_bytes()
+    temporaries: list[Path] = []
+
+    def fail_install(source: Path, _target: Path) -> None:
+        temporaries.append(Path(source))
+        raise OSError("disk full")
+
+    original_unlink = Path.unlink
+
+    def fail_cleanup(self: Path, *, missing_ok: bool = False) -> None:
+        if temporaries and self == temporaries[-1]:
+            raise OSError("permission denied")
+        original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(os, "replace", fail_install)
+    monkeypatch.setattr(Path, "unlink", fail_cleanup)
+
+    with pytest.raises(VN2InputError) as raised:
         download_vn2_inputs(
             data,
             {name: f"memory://{name}" for name in EXPECTED_FILES},
@@ -245,8 +420,13 @@ def test_downloader_atomic_install_failure_preserves_destination_and_cleans_temp
             fetcher=lambda _url: original,
         )
 
+    message = str(raised.value)
+    assert "cannot install downloaded input week_0_master.csv: disk full" in message
+    assert "cleanup failed" in message
+    assert "temporary file: permission denied" in message
     assert victim.read_bytes() == original
-    assert not temporary.exists()
+    assert len(temporaries) == 1
+    os.unlink(temporaries[0])
 
 
 @pytest.mark.parametrize(
@@ -277,6 +457,29 @@ def test_source_mapping_refuses_malformed_or_duplicate_entries(
     source_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(VN2InputError, match=pattern):
+        vn2_data._sources(source_path)
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ('{"files": [], "files": []}', "files"),
+        (
+            '{"files": [{"name": "a.csv", "name": "a.csv", "url": "memory://a"}]}',
+            "name",
+        ),
+    ],
+    ids=["top-level", "nested"],
+)
+def test_source_mapping_refuses_duplicate_json_keys_at_every_depth(
+    tmp_path: Path,
+    text: str,
+    key: str,
+) -> None:
+    source_path = tmp_path / "sources.json"
+    source_path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(VN2InputError, match=rf"duplicate JSON key '{key}'"):
         vn2_data._sources(source_path)
 
 

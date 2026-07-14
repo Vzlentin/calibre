@@ -27,6 +27,7 @@ from newcalibre.protocols.vn2.loader import (
     VN2DataError,
     VN2Dataset,
     VN2RoundInput,
+    VN2WeeklyActuals,
     load_vn2_dataset,
 )
 
@@ -45,6 +46,7 @@ __all__ = [
     "VN2ProtocolConfig",
     "VN2RoundInput",
     "VN2SeasonalNaiveQuantileAdapter",
+    "VN2WeeklyActuals",
     "available_vn2_backends",
     "download_vn2_inputs",
     "load_vn2_config",

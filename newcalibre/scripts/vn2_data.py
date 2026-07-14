@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import cast
@@ -16,19 +15,21 @@ from newcalibre.protocols.vn2 import (  # noqa: E402
     download_vn2_inputs,
     verify_vn2_inputs,
 )
+from newcalibre.protocols.vn2.inventory import load_unique_json  # noqa: E402
 
 DEFAULT_INVENTORY = PROJECT_ROOT / "benchmarks" / "vn2" / "vn2-input-digests.json"
 
 
 def _sources(path: Path) -> dict[str, str]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise VN2InputError(f"source mapping is not readable JSON: {path}") from error
-    if not isinstance(raw, dict) or set(raw) != {"files"} or not isinstance(raw["files"], list):
+    raw = load_unique_json(path, subject=f"source mapping {path}")
+    if not isinstance(raw, dict) or set(raw) != {"files"}:
+        raise VN2InputError("source mapping must contain exactly one 'files' list")
+    source_payload = cast(dict[str, object], raw)
+    files = source_payload["files"]
+    if not isinstance(files, list):
         raise VN2InputError("source mapping must contain exactly one 'files' list")
     sources: dict[str, str] = {}
-    for entry in raw["files"]:
+    for entry in files:
         if not isinstance(entry, dict) or set(entry) != {"name", "url"}:
             raise VN2InputError("each source entry must contain exact name/url keys")
         payload = cast(dict[str, object], entry)

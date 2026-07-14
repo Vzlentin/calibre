@@ -93,6 +93,48 @@ class VN2ConfigError(ValueError):
     """Report an incomplete, ambiguous, or inconsistent VN2 configuration."""
 
 
+class _DuplicateYAMLKey(yaml.YAMLError):
+    """Retain one duplicate mapping key refused during YAML construction."""
+
+    def __init__(self, key: object) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Construct safe YAML while refusing duplicate mappings recursively."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeyLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise _DuplicateYAMLKey(key)
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class VN2HistoryConfig:
     """Describe the round-zero weekly history shape."""
@@ -141,6 +183,7 @@ class VN2ProtocolConfig:
     task_horizon: int
     drain_periods: int
     decision_origins: tuple[pd.Timestamp, ...]
+    realized_periods: tuple[pd.Timestamp, ...]
     currency: str
     cost_structure: CostStructure
     actuals_semantics: ActualsSemantics
@@ -180,7 +223,11 @@ def load_vn2_config(path: Path) -> VN2ProtocolConfig:
     if not isinstance(path, Path):
         raise VN2ConfigError("configuration path must be a pathlib.Path")
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
+    except _DuplicateYAMLKey as error:
+        raise VN2ConfigError(
+            f"VN2 configuration contains duplicate YAML key {error.key!r}"
+        ) from error
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         raise VN2ConfigError(f"VN2 configuration is unreadable: {path}") from error
     top = _exact_mapping(raw, keys=_TOP_LEVEL_KEYS, surface="top-level configuration")
@@ -195,7 +242,7 @@ def load_vn2_config(path: Path) -> VN2ProtocolConfig:
         raise VN2ConfigError("VN2 calendar_frequency must be the Monday anchor 'W-MON'")
     calendar, history = _parse_history(top["history"], frequency=frequency)
     decision = _parse_decision(top["decision"], calendar=calendar, history=history)
-    round_count, timing, horizon, drains, origins = decision
+    round_count, timing, horizon, drains, origins, realized_periods, expected_reveals = decision
     currency, cost_structure = _parse_cost(top["cost"])
 
     try:
@@ -213,7 +260,7 @@ def load_vn2_config(path: Path) -> VN2ProtocolConfig:
 
     files = _parse_files(
         top["files"],
-        expected_reveals=round_count + drains + 1,
+        expected_reveals=expected_reveals,
     )
     columns = _parse_columns(top["columns"], lead_time=timing.lead_time)
     model = _parse_model_config(top["model_config"])
@@ -231,6 +278,7 @@ def load_vn2_config(path: Path) -> VN2ProtocolConfig:
     object.__setattr__(config, "task_horizon", horizon)
     object.__setattr__(config, "drain_periods", drains)
     object.__setattr__(config, "decision_origins", origins)
+    object.__setattr__(config, "realized_periods", realized_periods)
     object.__setattr__(config, "currency", currency)
     object.__setattr__(config, "cost_structure", cost_structure)
     object.__setattr__(config, "actuals_semantics", actuals_semantics)
@@ -258,7 +306,13 @@ def _parse_history(value: object, *, frequency: str) -> tuple[Calendar, VN2Histo
         calendar=calendar,
     )
     periods = _positive_integer(payload["initial_periods"], name="history initial_periods")
-    if calendar.advance(first, periods - 1) != last:
+    expected_last = _advance_calendar(
+        calendar,
+        first,
+        periods - 1,
+        field="history initial_periods",
+    )
+    if expected_last != last:
         raise VN2ConfigError(
             "history first_week, initial_periods, and initial_last_week must describe one cadence"
         )
@@ -274,7 +328,15 @@ def _parse_decision(
     *,
     calendar: Calendar,
     history: VN2HistoryConfig,
-) -> tuple[int, DecisionTiming, int, int, tuple[pd.Timestamp, ...]]:
+) -> tuple[
+    int,
+    DecisionTiming,
+    int,
+    int,
+    tuple[pd.Timestamp, ...],
+    tuple[pd.Timestamp, ...],
+    int,
+]:
     payload = _exact_mapping(value, keys=_DECISION_KEYS, surface="decision")
     rounds = _positive_integer(payload["round_count"], name="decision round_count")
     lead_time = _nonnegative_integer(payload["lead_time"], name="decision lead_time")
@@ -300,15 +362,83 @@ def _parse_decision(
         _timestamp(raw, name=f"decision origin {index + 1}", calendar=calendar)
         for index, raw in enumerate(raw_origins)
     )
-    expected_first = calendar.advance(history.initial_last_week, review_period)
+    expected_first = _advance_calendar(
+        calendar,
+        history.initial_last_week,
+        review_period,
+        field="decision review_period",
+    )
     if origins[0] != expected_first:
         raise VN2ConfigError("first decision origin must follow the round-zero reveal cadence")
-    expected = tuple(
-        calendar.advance(expected_first, index * review_period) for index in range(rounds)
-    )
+    try:
+        expected = tuple(
+            calendar.advance(expected_first, index * review_period) for index in range(rounds)
+        )
+    except CalendarError as error:
+        raise VN2ConfigError("decision origins exceed configured calendar bounds") from error
     if origins != expected:
         raise VN2ConfigError("decision origins must follow the configured review cadence")
-    return rounds, timing, horizon, drains, origins
+
+    realized_end = _advance_calendar(
+        calendar,
+        origins[-1],
+        review_period + drains - 1,
+        field="decision review_period and drain_periods",
+    )
+    realized_periods = _weekly_periods(
+        calendar,
+        start=origins[0],
+        end=realized_end,
+        field="decision review_period and drain_periods",
+    )
+    required_end = _advance_calendar(
+        calendar,
+        origins[-1],
+        max(horizon, review_period + drains) - 1,
+        field="decision task_horizon and drain_periods",
+    )
+    first_post_history = _advance_calendar(
+        calendar,
+        history.initial_last_week,
+        1,
+        field="history initial_last_week",
+    )
+    required_sales_periods = _weekly_periods(
+        calendar,
+        start=first_post_history,
+        end=required_end,
+        field="decision task_horizon and origins",
+    )
+    expected_reveals = len(required_sales_periods) + 1
+    return rounds, timing, horizon, drains, origins, realized_periods, expected_reveals
+
+
+def _advance_calendar(
+    calendar: Calendar,
+    timestamp: pd.Timestamp,
+    periods: int,
+    *,
+    field: str,
+) -> pd.Timestamp:
+    try:
+        return calendar.advance(timestamp, periods)
+    except CalendarError as error:
+        raise VN2ConfigError(f"{field} exceeds configured calendar bounds") from error
+
+
+def _weekly_periods(
+    calendar: Calendar,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    field: str,
+) -> tuple[pd.Timestamp, ...]:
+    if end < start:
+        raise VN2ConfigError(f"{field} must describe a non-empty weekly horizon")
+    periods = [start]
+    while periods[-1] != end:
+        periods.append(_advance_calendar(calendar, periods[-1], 1, field=field))
+    return tuple(periods)
 
 
 def _parse_cost(value: object) -> tuple[str, CostStructure]:

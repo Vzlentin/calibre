@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from tests.vn2_fixtures import synthetic_config_payload, write_config
 
 from newcalibre.domain import ActualsSemantics, StockoutRule
@@ -219,3 +220,75 @@ def test_loaded_configuration_does_not_retain_mutable_yaml_values(tmp_path: Path
     payload["model_config"]["m"] = 1
 
     assert config.model_config == snapshot
+
+
+@pytest.mark.parametrize(
+    ("duplicate", "pattern"),
+    [
+        ("dataset: other\n", r"duplicate.*dataset"),
+        ("cost:\n  currency: USD\n", r"duplicate.*currency"),
+    ],
+    ids=["top-level", "nested"],
+)
+def test_protocol_configuration_refuses_duplicate_yaml_keys_at_every_depth(
+    tmp_path: Path,
+    duplicate: str,
+    pattern: str,
+) -> None:
+    rendered = yaml.safe_dump(synthetic_config_payload(), sort_keys=False)
+    if duplicate.startswith("cost:"):
+        rendered = rendered.replace("cost:\n", duplicate, 1)
+    else:
+        rendered = duplicate + rendered
+    path = tmp_path / "duplicate.yaml"
+    path.write_text(rendered, encoding="utf-8")
+
+    with pytest.raises(VN2ConfigError, match=pattern):
+        load_vn2_config(path)
+
+
+@pytest.mark.parametrize(
+    ("history", "decision", "pattern"),
+    [
+        (
+            {
+                "first_week": "2024-04-08",
+                "initial_last_week": "2024-04-08",
+                "initial_periods": 10**12,
+            },
+            None,
+            r"history initial_periods.*calendar bounds",
+        ),
+        (
+            {
+                "first_week": "2024-04-08",
+                "initial_last_week": "2024-04-08",
+                "initial_periods": 1,
+            },
+            {
+                "round_count": 1,
+                "lead_time": 0,
+                "review_period": 10**12,
+                "protection_period": 10**12,
+                "task_horizon": 10**12,
+                "drain_periods": 0,
+                "origins": ["2024-04-15"],
+            },
+            r"decision review_period.*calendar bounds",
+        ),
+    ],
+    ids=["history", "decision-review-period"],
+)
+def test_calendar_arithmetic_failures_are_attributed_to_configuration_fields(
+    tmp_path: Path,
+    history: dict[str, object],
+    decision: dict[str, object] | None,
+    pattern: str,
+) -> None:
+    payload = synthetic_config_payload()
+    payload["history"] = history
+    if decision is not None:
+        payload["decision"] = decision
+
+    with pytest.raises(VN2ConfigError, match=pattern):
+        load_vn2_config(write_config(tmp_path / "calendar-boundary.yaml", payload))

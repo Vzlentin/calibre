@@ -17,11 +17,14 @@ from newcalibre.domain import CalendarError
 from newcalibre.protocols.vn2.config import VN2ProtocolConfig
 from newcalibre.protocols.vn2.inventory import (
     VN2InputError,
+    VN2InputInventory,
     read_verified_vn2_input,
     verify_vn2_inputs,
 )
 
 _DATE_COLUMN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_INTEGER_KEY = re.compile(r"[0-9]+")
+_SIGNED_INT64_MAX = 2**63 - 1
 
 
 class VN2DataError(VN2InputError):
@@ -39,6 +42,15 @@ class VN2RoundInput:
     master: pd.DataFrame = field(repr=False)
     in_stock: pd.DataFrame = field(repr=False)
     initial_state: pd.DataFrame = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class VN2WeeklyActuals:
+    """Expose one realized protocol week without carrying later reveals."""
+
+    week_number: int
+    period: pd.Timestamp
+    sales: pd.DataFrame = field(repr=False)
 
 
 class VN2Dataset:
@@ -77,7 +89,7 @@ class VN2Dataset:
         return self._config
 
     def round_input(self, round_number: int) -> VN2RoundInput:
-        """Return reveal ``r-1`` and static facts safe at decision round ``r``."""
+        """Return all reveals before the configured origin and its static facts."""
         if (
             isinstance(round_number, bool)
             or not isinstance(round_number, Integral)
@@ -85,22 +97,41 @@ class VN2Dataset:
         ):
             raise VN2DataError(f"round must be an integer in 1..{self._config.round_count}")
         normalized = int(round_number)
-        reveal_number = normalized - 1
         key_count = len(self._config.columns.series_keys)
-        prefix_end = key_count + self._config.history.initial_periods + reveal_number
-        sales = self._sales.iloc[:, :prefix_end].copy(deep=True)
-        date_columns = tuple(sales.columns[key_count:])
-        in_stock = self._in_stock[[*self._config.columns.series_keys, *date_columns]].copy(
-            deep=True
+        origin = self._config.decision_origins[normalized - 1]
+        visible_dates = tuple(
+            column for column in self._sales.columns[key_count:] if pd.Timestamp(column) < origin
         )
+        reveal_number = len(visible_dates) - self._config.history.initial_periods
+        sales = self._sales[[*self._config.columns.series_keys, *visible_dates]].copy(deep=True)
         return VN2RoundInput(
             round_number=normalized,
             reveal_number=reveal_number,
-            origin=self._config.decision_origins[reveal_number],
+            origin=origin,
             sales=sales,
             master=self._master.copy(deep=True),
-            in_stock=in_stock,
+            in_stock=self._in_stock.copy(deep=True),
             initial_state=self._initial_state.copy(deep=True),
+        )
+
+    def weekly_actuals(self, week_number: int) -> VN2WeeklyActuals:
+        """Return one realized decision or drain week as an isolated long slice."""
+        final_week = len(self._config.realized_periods)
+        if (
+            isinstance(week_number, bool)
+            or not isinstance(week_number, Integral)
+            or not 1 <= int(week_number) <= final_week
+        ):
+            raise VN2DataError(f"week must be an integer in 1..{final_week}")
+        normalized = int(week_number)
+        period = self._config.realized_periods[normalized - 1]
+        period_column = period.strftime("%Y-%m-%d")
+        sales = self._sales[[*self._config.columns.series_keys, period_column]].copy(deep=True)
+        sales.rename(columns={period_column: "sales"}, inplace=True)
+        return VN2WeeklyActuals(
+            week_number=normalized,
+            period=period,
+            sales=sales,
         )
 
 
@@ -109,7 +140,7 @@ def load_vn2_dataset(
     inventory_path: Path,
     config: VN2ProtocolConfig,
 ) -> VN2Dataset:
-    """Verify all twelve inputs, then validate and retain challenge tables."""
+    """Verify the configured inventory, then validate and retain challenge tables."""
     if not isinstance(config, VN2ProtocolConfig):
         raise VN2DataError("config must be a VN2ProtocolConfig")
     try:
@@ -131,7 +162,12 @@ def load_vn2_dataset(
         for offset in range(config.history.initial_periods)
     )
     for reveal_number, name in enumerate(config.files.sales_reveals):
-        frame = _read_csv(data_directory, inventory_path, name)
+        frame = _read_csv(
+            data_directory,
+            inventory,
+            name,
+            key_columns=config.columns.series_keys,
+        )
         normalized = _normalize_sales(
             frame,
             config=config,
@@ -145,18 +181,34 @@ def load_vn2_dataset(
     sales = previous
     reference_keys = _key_rows(sales, config=config)
     master = _normalize_master(
-        _read_csv(data_directory, inventory_path, config.files.master),
+        _read_csv(
+            data_directory,
+            inventory,
+            config.files.master,
+            key_columns=config.columns.series_keys,
+        ),
         config=config,
         reference_keys=reference_keys,
     )
     in_stock = _normalize_in_stock(
-        _read_csv(data_directory, inventory_path, config.files.in_stock),
+        _read_csv(
+            data_directory,
+            inventory,
+            config.files.in_stock,
+            key_columns=config.columns.series_keys,
+        ),
         config=config,
         reference_keys=reference_keys,
-        expected_dates=tuple(sales.columns[len(config.columns.series_keys) :]),
+        expected_base_dates=expected_base_dates,
+        allowed_dates=tuple(sales.columns[len(config.columns.series_keys) :]),
     )
     initial_state = _normalize_initial_state(
-        _read_csv(data_directory, inventory_path, config.files.initial_state),
+        _read_csv(
+            data_directory,
+            inventory,
+            config.files.initial_state,
+            key_columns=config.columns.series_keys,
+        ),
         config=config,
         reference_keys=reference_keys,
     )
@@ -171,15 +223,20 @@ def load_vn2_dataset(
 
 def _read_csv(
     data_directory: Path,
-    inventory_path: Path,
+    inventory: VN2InputInventory,
     name: str,
+    *,
+    key_columns: tuple[str, str],
 ) -> pd.DataFrame:
     try:
-        payload = read_verified_vn2_input(data_directory, name, inventory_path)
-        return pd.read_csv(io.BytesIO(payload))
+        payload = read_verified_vn2_input(data_directory, name, inventory)
+        return pd.read_csv(
+            io.BytesIO(payload),
+            dtype={column: "string" for column in key_columns},
+        )
     except VN2InputError as error:
         raise VN2DataError(str(error)) from error
-    except (OSError, UnicodeError, pd.errors.ParserError) as error:
+    except (OSError, UnicodeError, ValueError, pd.errors.ParserError) as error:
         raise VN2DataError(f"{name}: CSV parse failed") from error
 
 
@@ -262,21 +319,34 @@ def _normalize_in_stock(
     *,
     config: VN2ProtocolConfig,
     reference_keys: tuple[tuple[int, int], ...],
-    expected_dates: tuple[str, ...],
+    expected_base_dates: tuple[str, ...],
+    allowed_dates: tuple[str, ...],
 ) -> pd.DataFrame:
     surface = "in-stock table"
-    expected = (*config.columns.series_keys, *expected_dates)
-    _require_exact_columns(frame, expected=expected, surface=surface)
-    _validate_date_columns(expected_dates, config=config, surface=surface)
+    _require_unique_columns(frame, surface=surface)
+    key_columns = config.columns.series_keys
+    if tuple(frame.columns[: len(key_columns)]) != key_columns:
+        raise VN2DataError("in-stock table must begin with exact Store/Product key columns")
+    supplied_dates = tuple(frame.columns[len(key_columns) :])
+    _validate_date_columns(supplied_dates, config=config, surface=surface)
+    if (
+        len(supplied_dates) < len(expected_base_dates)
+        or supplied_dates[: len(expected_base_dates)] != expected_base_dates
+        or len(supplied_dates) > len(allowed_dates)
+        or supplied_dates != allowed_dates[: len(supplied_dates)]
+    ):
+        raise VN2DataError(
+            "in-stock date columns must be a prefix of sales containing the complete base history"
+        )
     normalized = frame.copy(deep=True)
     if _normalize_keys(normalized, config=config, surface=surface) != reference_keys:
         raise VN2DataError("in-stock table Store/Product key order differs from sales")
-    for column in expected_dates:
+    for column in supplied_dates:
         values = normalized[column].tolist()
         if any(not isinstance(value, (bool, np.bool_)) for value in values):
             raise VN2DataError(f"in-stock column {column} must contain exact boolean values")
         normalized[column] = pd.Series(values, dtype="bool")
-    return normalized
+    return normalized[[*key_columns, *expected_base_dates]].copy(deep=True)
 
 
 def _normalize_initial_state(
@@ -313,20 +383,30 @@ def _normalize_keys(
     if frame[list(key_columns)].isna().any(axis=None):
         raise VN2DataError(f"{surface} Store/Product key cannot contain missing values")
     for column in key_columns:
-        try:
-            values = pd.to_numeric(frame[column], errors="raise").to_numpy(dtype="float64")
-        except (TypeError, ValueError) as error:
-            raise VN2DataError(f"{surface} {column} key must be a non-negative integer") from error
-        if (
-            not np.isfinite(values).all()
-            or (values < 0.0).any()
-            or not np.equal(values, np.floor(values)).all()
-        ):
-            raise VN2DataError(f"{surface} {column} key must be a non-negative integer")
-        frame[column] = pd.Series(values.astype("int64"), index=frame.index)
+        values = [
+            _exact_integer_key(value, surface=surface, column=column) for value in frame[column]
+        ]
+        frame[column] = pd.Series(values, index=frame.index, dtype="int64")
     if frame.duplicated(subset=list(key_columns)).any():
         raise VN2DataError(f"{surface} contains duplicate Store/Product keys")
     return _key_rows(frame, config=config)
+
+
+def _exact_integer_key(value: object, *, surface: str, column: str) -> int:
+    if isinstance(value, Integral) and not isinstance(value, (bool, np.bool_)):
+        normalized = int(value)
+    elif isinstance(value, str) and _INTEGER_KEY.fullmatch(value) is not None:
+        significant_digits = value.lstrip("0") or "0"
+        if len(significant_digits) > 19:
+            raise VN2DataError(
+                f"{surface} {column} key must be a non-negative signed 64-bit integer"
+            )
+        normalized = int(significant_digits, 10)
+    else:
+        raise VN2DataError(f"{surface} {column} key must be a non-negative signed 64-bit integer")
+    if not 0 <= normalized <= _SIGNED_INT64_MAX:
+        raise VN2DataError(f"{surface} {column} key must be a non-negative signed 64-bit integer")
+    return normalized
 
 
 def _key_rows(

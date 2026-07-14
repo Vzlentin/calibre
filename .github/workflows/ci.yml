@@ -11,11 +11,11 @@ permissions:
   contents: read
   packages: write
 
-# Frozen-engine lanes. Successor-only PRs (newcalibre/**, stage3/**, and the
-# Stage 3 workflows/scripts) skip the heavy frozen work but still report every
-# required context; pushes and the nightly schedule always run the full frozen
-# suite. The guard is a changed-files step, never a workflow-level paths
-# filter, so required checks can never disappear from a PR.
+# Frozen-engine lanes. Successor-only PRs (newcalibre/**, stage3/**, the
+# Stage 3 workflows/scripts, and their root automation contract) skip the heavy
+# frozen work but still report every required context; pushes and the nightly
+# schedule always run the full frozen suite. The guard is a changed-files step,
+# never a workflow-level paths filter, so required checks cannot disappear.
 jobs:
   lint-and-type-check:
     runs-on: ubuntu-latest
@@ -34,6 +34,7 @@ jobs:
             .github/workflows/gate-a.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
+            tests/test_stage3_automation.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
@@ -87,6 +88,7 @@ jobs:
             .github/workflows/gate-a.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
+            tests/test_stage3_automation.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
@@ -110,6 +112,21 @@ jobs:
       - name: Report lane result
         run: echo "test complete (frozen work run=${{ steps.gate.outputs.run_frozen }})"
 
+  stage3-automation-contract:
+    # Lightweight cross-workflow guard: these static contracts must run on
+    # every PR even when successor-only changes skip the frozen test suite.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Locked successor dev sync
+        run: uv sync --project newcalibre --locked --group dev
+      - name: Run Stage 3 automation contracts
+        run: uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py
+
   s3-ingestion:
     runs-on: ubuntu-latest
     steps:
@@ -127,6 +144,7 @@ jobs:
             .github/workflows/gate-a.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
+            tests/test_stage3_automation.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
@@ -190,6 +208,7 @@ jobs:
             .github/workflows/gate-a.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
+            tests/test_stage3_automation.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"

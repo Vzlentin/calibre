@@ -167,10 +167,15 @@ def write_dataset(
     return data, inventory, config
 
 
-def refresh_inventory(data: Path, path: Path) -> Path:
+def refresh_inventory(
+    data: Path,
+    path: Path,
+    *,
+    names: tuple[str, ...] = EXPECTED_FILES,
+) -> Path:
     """Mint only a synthetic test inventory for fixture bytes."""
     entries = []
-    for name in EXPECTED_FILES:
+    for name in names:
         payload = (data / name).read_bytes()
         entries.append(
             {

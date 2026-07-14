@@ -16,6 +16,7 @@ import yaml
 SCRIPTS_DIR = Path(__file__).parents[1] / ".github" / "scripts"
 GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.yml"
 CLOCK_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "stage3-clock.yml"
+ROOT_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
 SUCCESSOR_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "newcalibre.yml"
 BOOTSTRAP_VN2_INVENTORY = (
     Path(__file__).parents[1] / "stage3" / "evidence" / "vn2-input-digests.json"
@@ -487,7 +488,8 @@ def test_consistency_workflows_require_nonempty_tier2_artifacts_before_diff(
 
 def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> None:
     workflow = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["vn2-acceptance"]["steps"]
+    job = workflow["jobs"]["vn2-acceptance"]
+    steps = job["steps"]
     presence = next(step for step in steps if step.get("name") == "Successor + harness presence")
     skipped = next(step for step in steps if step.get("name") == "Tier 4 visibly skipped")
     tier4_index = next(
@@ -497,6 +499,10 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     verify = steps[tier4_index - 1]
     tier4 = steps[tier4_index]
 
+    assert job["if"] == (
+        "github.event_name == 'schedule' || "
+        "(github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))"
+    )
     assert presence["run"].strip() == (
         "ready=false\n"
         "[ -f newcalibre/pyproject.toml ] && "
@@ -507,6 +513,23 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     assert skipped["run"] == (
         'echo "::notice::tier 4 skipped — acceptance contract or digest inventory absent"'
     )
+    assert skipped["if"] == "steps.present.outputs.ready != 'true'"
+    guarded_tail = {
+        "astral-sh/setup-uv@v4": "steps.present.outputs.ready == 'true'",
+        "Restore VN2 data (exact digest-inventory key, no fallback)": (
+            "steps.present.outputs.ready == 'true'"
+        ),
+        "Acquire VN2 inputs with bootstrap tooling": "steps.present.outputs.ready == 'true'",
+        "Verify VN2 inputs with successor tooling": "steps.present.outputs.ready == 'true'",
+        "Tier 4 run": "steps.present.outputs.ready == 'true'",
+        "Upload digest-bound bundle": (
+            "steps.present.outputs.ready == 'true' && github.event_name == 'workflow_dispatch'"
+        ),
+    }
+    for step in steps[steps.index(skipped) + 1 :]:
+        identity = step.get("name", step.get("uses"))
+        assert step["if"] == guarded_tail[identity]
+
     assert acquire["name"] == "Acquire VN2 inputs with bootstrap tooling"
     assert acquire["run"] == (
         "uv run --no-project python .github/scripts/stage3_vn2_data.py download "
@@ -522,6 +545,56 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     )
     assert tier4["working-directory"] == "newcalibre"
     assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
+
+
+def test_stage3_contract_lane_covers_every_relevant_pull_request_surface() -> None:
+    workflow = yaml.safe_load(ROOT_WORKFLOW.read_text(encoding="utf-8"))
+    triggers = workflow[True]  # PyYAML 1.1 parses the YAML key `on` as boolean true.
+    pull_request = triggers["pull_request"]
+    contract = workflow["jobs"]["stage3-automation-contract"]
+
+    assert pull_request == {"branches": ["main"]}
+    assert "paths" not in pull_request
+    assert "paths-ignore" not in pull_request
+    assert contract["if"] == "github.event_name == 'pull_request'"
+    assert contract["permissions"] == {"contents": "read"}
+    assert "needs" not in contract
+    assert all("if" not in step for step in contract["steps"])
+    assert not any("tj-actions/changed-files" in step.get("uses", "") for step in contract["steps"])
+    contract_run = next(
+        step for step in contract["steps"] if step.get("name") == "Run Stage 3 automation contracts"
+    )
+    assert contract_run["run"] == (
+        "uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py"
+    )
+
+    expected_successor_only_patterns = {
+        "newcalibre/**",
+        "stage3/**",
+        ".github/workflows/newcalibre.yml",
+        ".github/scripts/stage3_*.py",
+        "tests/test_stage3_automation.py",
+    }
+    scoped_job_names = {
+        "lint-and-type-check",
+        "test",
+        "s3-ingestion",
+        "docker-build",
+    }
+    assert {
+        name
+        for name, job in workflow["jobs"].items()
+        if any(step.get("name") == "Detect successor-only change" for step in job["steps"])
+    } == scoped_job_names
+    for name in scoped_job_names:
+        scoped_job = workflow["jobs"][name]
+        scope = next(
+            step
+            for step in scoped_job["steps"]
+            if step.get("name") == "Detect successor-only change"
+        )
+        configured_patterns = set(scope["with"]["files"].splitlines())
+        assert expected_successor_only_patterns <= configured_patterns
 
 
 def test_successor_vn2_inventory_is_the_exact_bootstrap_approved_blob() -> None:
