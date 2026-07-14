@@ -147,6 +147,21 @@ def test_verdict_green() -> None:
     assert report["verdict"] == "green"
 
 
+def test_verdict_green_with_skipped_and_neutral_conditional_jobs() -> None:
+    payload = json.dumps(
+        {
+            "check_runs": [
+                {"name": "tests", "status": "completed", "conclusion": "success"},
+                {"name": "vn2-acceptance", "status": "completed", "conclusion": "skipped"},
+                {"name": "oracle", "status": "completed", "conclusion": "neutral"},
+            ]
+        }
+    )
+    code, report = ci_verdict.evaluate(payload)
+    assert code == ci_verdict.EXIT_GREEN
+    assert report["verdict"] == "green"
+
+
 def test_verdict_pending_when_any_run_incomplete() -> None:
     code, report = ci_verdict.evaluate(_fixture("check_runs_pending.json"))
     assert code == ci_verdict.EXIT_PENDING

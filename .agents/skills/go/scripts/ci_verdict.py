@@ -4,11 +4,12 @@
 reduces it to one verdict:
 
 - **pending** — any run with ``status != "completed"``.
-- **green** — every run completed with ``conclusion == "success"``.
-- **failure** — any completed run with a non-``success`` (or unrecognized)
-  conclusion; failed workflow-run IDs are parsed from each ``details_url`` and
-  a stable failure signature is printed so a repeated, unchanged failure is a
-  string comparison rather than a judgment call.
+- **green** — every run completed with a passing conclusion (``success``, or
+  the non-blocking ``skipped``/``neutral`` that conditional jobs produce).
+- **failure** — any completed run with another (or unrecognized) conclusion;
+  failed workflow-run IDs are parsed from each ``details_url`` and a stable
+  failure signature is printed so a repeated, unchanged failure is a string
+  comparison rather than a judgment call.
 - **non-verdict** — empty check set, malformed JSON, or a failed ``gh`` call.
   A non-verdict is never green.
 
@@ -30,6 +31,10 @@ EXIT_GREEN = 0
 EXIT_PENDING = 1
 EXIT_FAILURE = 2
 EXIT_NON_VERDICT = 3
+
+# Conditional jobs conclude as skipped/neutral on runs where they don't apply;
+# GitHub treats both as non-blocking, so they must not read as red.
+PASSING_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 
 _RUN_ID_RE = re.compile(r"/runs/(\d+)")
 
@@ -84,7 +89,7 @@ def evaluate(payload_text: str) -> tuple[int, dict]:
     if any(run.get("status") != "completed" for run in check_runs):
         return EXIT_PENDING, {"verdict": "pending"}
 
-    failed = [run for run in check_runs if run.get("conclusion") != "success"]
+    failed = [run for run in check_runs if run.get("conclusion") not in PASSING_CONCLUSIONS]
     if not failed:
         return EXIT_GREEN, {"verdict": "green"}
 
