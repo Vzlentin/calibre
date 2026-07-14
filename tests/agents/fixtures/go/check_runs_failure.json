@@ -1,0 +1,26 @@
+{
+  "total_count": 3,
+  "check_runs": [
+    {
+      "name": "tests",
+      "status": "completed",
+      "conclusion": "failure",
+      "details_url": "https://github.com/Vzlentin/calibre/actions/runs/311/job/1",
+      "output": {"title": "Process completed with exit code 1.", "summary": "1 failed"}
+    },
+    {
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/Vzlentin/calibre/actions/runs/312/job/1",
+      "output": {"title": "ok", "summary": ""}
+    },
+    {
+      "name": "typecheck",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "details_url": "https://github.com/Vzlentin/calibre/actions/runs/313/job/1",
+      "output": {"title": null, "summary": null}
+    }
+  ]
+}

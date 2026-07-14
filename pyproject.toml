@@ -122,6 +122,8 @@ select = [
 "calibre/cli/**" = ["T20"]
 # CI automation scripts talk to workflow logs via stdout.
 ".github/scripts/**" = ["T20"]
+# /go skill CLIs report to the orchestrating agent via stdout/stderr.
+".agents/skills/go/scripts/**" = ["T20"]
 # Test modules carry only D100 (a module docstring). Per-function (D103),
 # grouping-class (D101), and package (D104) docstrings are not external-reader
 # API, so they are exempt to honor the minimal intent.

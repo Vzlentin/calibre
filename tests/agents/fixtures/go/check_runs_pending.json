@@ -1,0 +1,19 @@
+{
+  "total_count": 2,
+  "check_runs": [
+    {
+      "name": "tests",
+      "status": "in_progress",
+      "conclusion": null,
+      "details_url": "https://github.com/Vzlentin/calibre/actions/runs/211/job/1",
+      "output": {"title": null, "summary": null}
+    },
+    {
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "success",
+      "details_url": "https://github.com/Vzlentin/calibre/actions/runs/212/job/1",
+      "output": {"title": "ok", "summary": ""}
+    }
+  ]
+}
