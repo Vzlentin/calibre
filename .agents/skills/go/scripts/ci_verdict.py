@@ -1,0 +1,145 @@
+"""CI verdict over the GitHub check-runs API, plus failed-run log pull.
+
+``verdict <sha>`` fetches ``gh api repos/<repo>/commits/<sha>/check-runs`` and
+reduces it to one verdict:
+
+- **pending** — any run with ``status != "completed"``.
+- **green** — every run completed with ``conclusion == "success"``.
+- **failure** — any completed run with a non-``success`` (or unrecognized)
+  conclusion; failed workflow-run IDs are parsed from each ``details_url`` and
+  a stable failure signature is printed so a repeated, unchanged failure is a
+  string comparison rather than a judgment call.
+- **non-verdict** — empty check set, malformed JSON, or a failed ``gh`` call.
+  A non-verdict is never green.
+
+Exit codes: 0 green, 1 pending, 2 failure, 3 non-verdict.
+
+``logs <run-id>`` wraps ``gh run view <run-id> --log-failed``.
+"""
+
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+import sys
+
+REPO = "Vzlentin/calibre"
+
+EXIT_GREEN = 0
+EXIT_PENDING = 1
+EXIT_FAILURE = 2
+EXIT_NON_VERDICT = 3
+
+_RUN_ID_RE = re.compile(r"/runs/(\d+)")
+
+
+def parse_run_id(details_url: str) -> str | None:
+    """Extract the workflow-run ID from a check run's ``details_url``."""
+    match = _RUN_ID_RE.search(details_url)
+    return match.group(1) if match else None
+
+
+def failure_signature(failed_runs: list[dict]) -> str:
+    """Compute a stable signature for a set of failed check runs.
+
+    The signature is a short hash over the sorted failed check names and the
+    first line of each check's output title/summary, so an identical failure
+    recurring across fix iterations produces an identical string.
+    """
+    parts = []
+    for run in sorted(failed_runs, key=lambda r: str(r.get("name", ""))):
+        output = run.get("output") or {}
+        first_line = str(output.get("title") or output.get("summary") or "").splitlines()
+        parts.append(
+            f"{run.get('name', '')}|{run.get('conclusion', '')}|"
+            f"{first_line[0] if first_line else ''}"
+        )
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
+    return digest
+
+
+def evaluate(payload_text: str) -> tuple[int, dict]:
+    """Reduce a raw check-runs API payload to a verdict.
+
+    Args:
+        payload_text: The JSON text returned by the check-runs API.
+
+    Returns:
+        A ``(exit_code, report)`` pair; ``report`` carries ``verdict`` plus,
+        on failure, ``failed`` entries (name, conclusion, run_id) and a
+        ``signature``.
+    """
+    try:
+        payload = json.loads(payload_text)
+        check_runs = payload["check_runs"]
+        if not isinstance(check_runs, list):
+            raise TypeError("check_runs is not a list")
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return EXIT_NON_VERDICT, {"verdict": "non-verdict", "reason": f"malformed payload: {exc}"}
+
+    if not check_runs:
+        return EXIT_NON_VERDICT, {"verdict": "non-verdict", "reason": "empty check set"}
+
+    if any(run.get("status") != "completed" for run in check_runs):
+        return EXIT_PENDING, {"verdict": "pending"}
+
+    failed = [run for run in check_runs if run.get("conclusion") != "success"]
+    if not failed:
+        return EXIT_GREEN, {"verdict": "green"}
+
+    return EXIT_FAILURE, {
+        "verdict": "failure",
+        "failed": [
+            {
+                "name": run.get("name", ""),
+                "conclusion": run.get("conclusion", ""),
+                "run_id": parse_run_id(str(run.get("details_url", ""))),
+            }
+            for run in failed
+        ],
+        "signature": failure_signature(failed),
+    }
+
+
+def cmd_verdict(sha: str) -> int:
+    """Fetch check-runs for a commit and print the verdict report as JSON."""
+    proc = subprocess.run(
+        ["gh", "api", f"repos/{REPO}/commits/{sha}/check-runs"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        report = {"verdict": "non-verdict", "reason": f"gh api failed: {proc.stderr.strip()}"}
+        print(json.dumps(report, indent=2))
+        return EXIT_NON_VERDICT
+    code, report = evaluate(proc.stdout)
+    print(json.dumps(report, indent=2))
+    return code
+
+
+def cmd_logs(run_id: str) -> int:
+    """Stream the failed-step logs of one workflow run."""
+    return subprocess.run(["gh", "run", "view", run_id, "--log-failed"], check=False).returncode
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse arguments and dispatch to a CI command."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_verdict = sub.add_parser("verdict", help="print the CI verdict for a commit SHA")
+    p_verdict.add_argument("sha")
+
+    p_logs = sub.add_parser("logs", help="pull failed logs for a workflow run")
+    p_logs.add_argument("run_id")
+
+    args = parser.parse_args(argv)
+    if args.command == "verdict":
+        return cmd_verdict(args.sha)
+    return cmd_logs(args.run_id)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
