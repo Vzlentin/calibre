@@ -1,7 +1,9 @@
 # Stage 1 — implementation subagent brief
 
-Spawn **one** foreground agent (no model override — inherit) with the brief
-below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
+Spawn **one** foreground agent (model per the Stage 0a routing classification —
+routine work on the `sidekick` profile, judgment-heavy work inheriting the
+frontier model) with the brief below, filling in `#N`, `<type>/<slug>`,
+`<WORKDIR>`, and the pasted plan text.
 
 ---
 
@@ -17,6 +19,15 @@ below, filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the pasted plan text.
 >   `<WORKDIR>` (the absolute worktree path) and implement on the existing
 >   `<type>/<slug>` branch — do **not** create a branch, do **not** touch the
 >   main checkout.
+>
+> You may delegate internally per the Fusion policy: mechanical sub-steps (test
+> runs, scaffolding, applying already-specified fixes) go to `sidekick`, recon
+> to `fast_scan`; keep every judgment call — spec interpretation, design, and
+> acceptance of delegated output — to yourself. `sidekick` (luna) has no native
+> auto-delegation, so internal delegation is manual spawn-based. After
+> delegating, block on the agent's terminal completion (the wait primitive) —
+> never busy-poll or repeatedly inspect partial output. Delegates never
+> weaken tests, skip gates, or touch frozen surfaces beyond their brief.
 >
 > Run the `uv run` quality gates — `uv run pytest` (scoped), `uv run ruff check .`,
 > and `uv run ty check calibre/` — in the **FOREGROUND**, blocking on each gate's
