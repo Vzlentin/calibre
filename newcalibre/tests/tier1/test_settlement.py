@@ -281,6 +281,19 @@ def test_settlement_applies_arrivals_before_demand_and_books_traceable_costs() -
     assert result.inventory_positions == {"sku-a": InventoryPosition(0.0, 3.0, 0.0)}
 
 
+def test_stockout_transition_exposes_booked_available_inventory() -> None:
+    transition = StockoutTransition(
+        rule=StockoutRule.LOST_SALES,
+        demand=7.0,
+        fulfilled_demand=7.0,
+        unmet_demand=0.0,
+        closing_on_hand=3.0,
+        closing_backorders=0.0,
+    )
+
+    assert transition.available_inventory == 10.0
+
+
 def test_per_series_costs_price_each_record_and_survive_index_rebuild() -> None:
     costs = {
         "sku-a": CostStructure(1.0, 1.0, 0.25, 9.0),

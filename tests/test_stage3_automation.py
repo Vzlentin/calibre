@@ -24,6 +24,13 @@ BOOTSTRAP_VN2_INVENTORY = (
 SUCCESSOR_VN2_INVENTORY = (
     Path(__file__).parents[1] / "newcalibre" / "benchmarks" / "vn2" / "vn2-input-digests.json"
 )
+VN2_THREAD_ENV = {
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
 TIER2_ARTIFACT_CHECK = (
     "set -euo pipefail\n"
     "for run in tier2-run1 tier2-run2; do\n"
@@ -519,21 +526,69 @@ def test_consistency_workflows_require_nonempty_tier2_artifacts_before_diff(
 
 def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> None:
     workflow = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
+    triggers = workflow[True]  # PyYAML 1.1 parses the YAML key `on` as boolean true.
     job = workflow["jobs"]["vn2-acceptance"]
     steps = job["steps"]
+    checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
+    checked_out_head = next(
+        step for step in steps if step.get("name") == "Verify checked-out HEAD equals candidate"
+    )
+    preflight = next(
+        step for step in steps if step.get("name") == "Preflight — evidence environment (ADR 0001)"
+    )
     presence = next(step for step in steps if step.get("name") == "Successor + harness presence")
     skipped = next(step for step in steps if step.get("name") == "Tier 4 visibly skipped")
-    tier4_index = next(
-        index for index, step in enumerate(steps) if step.get("name") == "Tier 4 run"
+    acquire = next(
+        step for step in steps if step.get("name") == "Acquire VN2 inputs with bootstrap tooling"
     )
-    acquire = steps[tier4_index - 2]
-    verify = steps[tier4_index - 1]
-    tier4 = steps[tier4_index]
+    verify = next(
+        step for step in steps if step.get("name") == "Verify VN2 inputs with successor tooling"
+    )
+    provenance = next(step for step in steps if step.get("name") == "Record numerical provenance")
+    tier4 = next(step for step in steps if step.get("name") == "Tier 4 run")
+    mutation = next(
+        step for step in steps if step.get("name") == "Refuse tracked checkout mutation"
+    )
+    upload = next(step for step in steps if step.get("name") == "Upload digest-bound bundle")
 
     assert job["if"] == (
         "github.event_name == 'schedule' || "
         "(github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))"
     )
+    assert triggers["schedule"] == [{"cron": "0 5 * * *"}]
+    dispatch_inputs = triggers["workflow_dispatch"]["inputs"]
+    assert dispatch_inputs["candidate_sha"]["required"] is True
+    assert dispatch_inputs["lane"]["options"] == ["oracle", "vn2-verify", "vn2-mint"]
+    assert checkout["with"]["ref"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
+    )
+    assert "if" not in checked_out_head
+    assert checked_out_head["run"] == ('test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"')
+    assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
+    assert job["env"]["VN2_CANDIDATE_SHA"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
+    )
+    assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
+    assert job["env"]["VN2_RUN_ID"] == "${{ github.run_id }}"
+    assert job["env"]["VN2_RUN_URL"] == (
+        "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    )
+    assert job["env"]["VN2_MODE"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' "
+        "&& 'mint' || 'verify' }}"
+    )
+    assert "github.workflow_sha" not in job["env"]["VN2_CANDIDATE_SHA"]
+    preflight_script = preflight["run"]
+    for required in (
+        'test "$ID" = "ubuntu"',
+        'test "$VERSION_ID" = "24.04"',
+        'test "$(uname -m)" = "x86_64"',
+        'test "${ImageOS:-}" = "ubuntu24"',
+        'test -n "${ImageVersion:-}"',
+        "sys.version_info[:2] == (3, 12)",
+        "sha256sum newcalibre/uv.lock",
+    ):
+        assert required in preflight_script
     assert presence["run"].strip() == (
         "ready=false\n"
         "[ -f newcalibre/pyproject.toml ] && "
@@ -552,7 +607,9 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
         ),
         "Acquire VN2 inputs with bootstrap tooling": "steps.present.outputs.ready == 'true'",
         "Verify VN2 inputs with successor tooling": "steps.present.outputs.ready == 'true'",
+        "Record numerical provenance": "steps.present.outputs.ready == 'true'",
         "Tier 4 run": "steps.present.outputs.ready == 'true'",
+        "Refuse tracked checkout mutation": "steps.present.outputs.ready == 'true'",
         "Upload digest-bound bundle": (
             "steps.present.outputs.ready == 'true' && github.event_name == 'workflow_dispatch'"
         ),
@@ -576,6 +633,61 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     )
     assert tier4["working-directory"] == "newcalibre"
     assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
+    assert "numpy.__version__" in provenance["run"]
+    assert "numpy.show_config()" in provenance["run"]
+    assert 'Path("uv.lock").read_bytes()' in provenance["run"]
+    assert "sha256" in provenance["run"]
+    assert steps.index(tier4) < steps.index(mutation) < steps.index(upload)
+    assert "git status --porcelain --untracked-files=no" in mutation["run"]
+    assert upload["with"]["name"] == "vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}"
+    assert upload["with"]["if-no-files-found"] == "error"
+
+
+def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() -> None:
+    workflow = yaml.safe_load(GATE_WORKFLOW.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["vn2-verify"]
+    steps = job["steps"]
+    checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
+    preflight = next(
+        step for step in steps if step.get("name") == "Preflight — evidence environment (ADR 0001)"
+    )
+    provenance = next(step for step in steps if step.get("name") == "Record numerical provenance")
+    tier4 = next(
+        step
+        for step in steps
+        if step.get("name")
+        == "Tier 4 verify-only at C1 (recompute and self-validate)"
+    )
+    mutation = next(
+        step for step in steps if step.get("name") == "Refuse tracked checkout mutation"
+    )
+
+    assert checkout["with"]["ref"] == "${{ inputs.candidate_sha }}"
+    assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
+    assert job["env"]["VN2_CANDIDATE_SHA"] == "${{ inputs.candidate_sha }}"
+    assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
+    assert job["env"]["VN2_RUN_ID"] == "${{ github.run_id }}"
+    assert job["env"]["VN2_RUN_URL"] == (
+        "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    )
+    assert job["env"]["VN2_MODE"] == "verify"
+    assert "github.workflow_sha" not in job["env"]["VN2_CANDIDATE_SHA"]
+    for required in (
+        'test "$ID" = "ubuntu"',
+        'test "$VERSION_ID" = "24.04"',
+        'test "$(uname -m)" = "x86_64"',
+        'test "${ImageOS:-}" = "ubuntu24"',
+        'test -n "${ImageVersion:-}"',
+        "sys.version_info[:2] == (3, 12)",
+        "sha256sum newcalibre/uv.lock",
+    ):
+        assert required in preflight["run"]
+    assert "numpy.__version__" in provenance["run"]
+    assert "numpy.show_config()" in provenance["run"]
+    assert 'Path("uv.lock").read_bytes()' in provenance["run"]
+    assert "sha256" in provenance["run"]
+    assert steps.index(tier4) < steps.index(mutation)
+    assert "git status --porcelain --untracked-files=no" in mutation["run"]
 
 
 def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> None:

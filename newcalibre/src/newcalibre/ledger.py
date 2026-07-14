@@ -584,6 +584,17 @@ class StockoutTransition:
         ):
             raise LedgerError("fulfilled demand plus unmet demand must equal demand")
 
+    @property
+    def available_inventory(self) -> float:
+        """Return the engine-booked inventory available before demand consumption."""
+        try:
+            available = math.fsum((self.fulfilled_demand, self.closing_on_hand))
+        except OverflowError as error:
+            raise LedgerError("available settlement inventory must be finite") from error
+        if not math.isfinite(available):
+            raise LedgerError("available settlement inventory must be finite")
+        return available
+
 
 def lost_sales_transition(
     *,
@@ -629,12 +640,7 @@ def validate_lost_sales_transition(
     if transition.closing_backorders != 0.0:
         raise LedgerError("lost-sales transition must close with zero backorders")
     normalized_arrivals = _finite_nonnegative(arrivals, name="settlement arrivals")
-    try:
-        available = math.fsum((transition.fulfilled_demand, transition.closing_on_hand))
-    except OverflowError as error:
-        raise LedgerError("available settlement inventory must be finite") from error
-    if not math.isfinite(available):
-        raise LedgerError("available settlement inventory must be finite")
+    available = transition.available_inventory
     if available < normalized_arrivals and not _quantities_equal(
         available,
         normalized_arrivals,

@@ -346,7 +346,7 @@ def test_obj2_tuning_default_returns_a_labeled_scalar_for_surrogate_actuals() ->
     assert objective == CostValue(2.0, ActualsSemantics.CENSORED_SALES_SURROGATE)
 
 
-def test_obj2_aggregates_canonical_decision_totals_without_reassociating_components() -> None:
+def test_obj2_preserves_canonical_origin_totals_while_binding_final_components() -> None:
     semantics = ActualsSemantics.DEMAND
     components_by_decision = {
         ("a", PERIODS[0]): CostComponents(
@@ -374,8 +374,29 @@ def test_obj2_aggregates_canonical_decision_totals_without_reassociating_compone
     )
 
     assert canonical_total != reassociated_total
-    assert objective.total.value == canonical_total
     assert objective.by_origin[PERIODS[0]].value == canonical_total
+    assert objective.total.value == objective.holding.value + objective.shortage.value
+    assert objective.partials[-1].cost is objective.total
+
+
+def test_obj2_final_total_is_exactly_bound_to_exported_component_totals() -> None:
+    semantics = ActualsSemantics.DEMAND
+    objective = SettlementObjective(
+        session=_session(),
+        actuals_semantics=semantics,
+        components_by_decision={
+            ("a", PERIODS[0]): CostComponents(
+                holding=CostValue(1.3, semantics),
+                shortage=CostValue(1.0, semantics),
+            ),
+            ("a", PERIODS[1]): CostComponents(
+                holding=CostValue(1.1, semantics),
+                shortage=CostValue(0.4, semantics),
+            ),
+        },
+    )
+
+    assert objective.total.value == objective.holding.value + objective.shortage.value
     assert objective.partials[-1].cost is objective.total
 
 

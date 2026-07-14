@@ -521,8 +521,26 @@ def _aggregate_settlement_costs(
             key=lambda item: item[0].encode(),
         )
     }
+    holding = CostValue(
+        _finite_sum(holding_values, name="settlement holding total"),
+        actuals_semantics,
+    )
+    shortage = CostValue(
+        _finite_sum(shortage_values, name="settlement shortage total"),
+        actuals_semantics,
+    )
+    # The exported final triple is one contract: its total is reduced from the
+    # two exported components, rather than through a differently grouped path.
+    total = CostValue(
+        _finite_sum(
+            (holding.value, shortage.value),
+            name="settlement component total",
+        ),
+        actuals_semantics,
+    )
     partials: list[OriginPartial] = []
     cumulative = 0.0
+    final_origin = next(reversed(by_origin))
     for origin, cost in by_origin.items():
         cumulative = _finite_sum(
             (cumulative, cost.value),
@@ -531,7 +549,9 @@ def _aggregate_settlement_costs(
         partials.append(
             OriginPartial(
                 origin=origin,
-                cost=CostValue(cumulative, actuals_semantics),
+                cost=(
+                    total if origin == final_origin else CostValue(cumulative, actuals_semantics)
+                ),
             )
         )
 
@@ -539,15 +559,9 @@ def _aggregate_settlement_costs(
         by_origin=MappingProxyType(by_origin),
         by_series=MappingProxyType(by_series),
         partials=tuple(partials),
-        holding=CostValue(
-            _finite_sum(holding_values, name="settlement holding total"),
-            actuals_semantics,
-        ),
-        shortage=CostValue(
-            _finite_sum(shortage_values, name="settlement shortage total"),
-            actuals_semantics,
-        ),
-        total=partials[-1].cost,
+        holding=holding,
+        shortage=shortage,
+        total=total,
     )
 
 

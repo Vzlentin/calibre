@@ -105,6 +105,17 @@ jobs:
 
   vn2-verify:
     runs-on: ubuntu-24.04
+    env:
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      VN2_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      VN2_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      VN2_RUN_ID: ${{ github.run_id }}
+      VN2_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      VN2_MODE: verify
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,7 +123,23 @@ jobs:
       - name: Verify HEAD equals candidate
         run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
       - name: Preflight — evidence environment (ADR 0001)
-        run: test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = "ubuntu" || { echo "non-Ubuntu runner refused"; exit 1; }
+          test "$VERSION_ID" = "24.04" || { echo "Ubuntu release $VERSION_ID refused"; exit 1; }
+          test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+          test "${ImageOS:-}" = "ubuntu24" || { echo "runner image OS must be ubuntu24"; exit 1; }
+          test -n "${ImageVersion:-}" || { echo "ImageVersion is required"; exit 1; }
+          python3 - <<'PY'
+          import sys
+
+          assert sys.version_info[:2] == (3, 12), sys.version
+          print(f"bootstrap_python={sys.version}")
+          PY
+          sha256sum newcalibre/uv.lock
+          printf 'runner_image=%s/%s\n' "$ImageOS" "$ImageVersion"
+          printf 'os_release=%s arch=%s\n' "$PRETTY_NAME" "$(uname -m)"
       - uses: astral-sh/setup-uv@v4
       - name: Restore VN2 data (exact digest-inventory key, no fallback)
         uses: actions/cache@v4
@@ -127,13 +154,36 @@ jobs:
           python3 .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
           python3 .github/scripts/stage3_vn2_data.py verify --target newcalibre/data/vn2 \
             --inventory stage3/evidence/vn2-input-digests.json
-      - name: Tier 4 verify-only at C1 (recompute; must equal the promoted record)
+      - name: Record numerical provenance
         working-directory: newcalibre
-        env:
-          VN2_MODE: verify
         run: |
           uv sync --locked --group dev
-          uv run --locked pytest tests/tier4
+          uv run --locked --no-sync python - <<'PY'
+          import platform
+          import sys
+          from hashlib import sha256
+          from pathlib import Path
+
+          import numpy
+
+          print(f"python={sys.version}")
+          print(f"cpu={platform.processor()}")
+          print(f"numpy={numpy.__version__}")
+          lock_digest = sha256(Path("uv.lock").read_bytes()).hexdigest()
+          print(f"lock_sha256={lock_digest}")
+          numpy.show_config()
+          PY
+      - name: Tier 4 verify-only at C1 (recompute and self-validate)
+        working-directory: newcalibre
+        run: uv run --locked --no-sync pytest tests/tier4
+      - name: Refuse tracked checkout mutation
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=no)" || {
+            echo "Tier 4 modified tracked checkout content"
+            git status --short --untracked-files=no
+            exit 1
+          }
 
   aggregate:
     needs: [lint, unit-isolated, consistency, oracle, vn2-verify]
