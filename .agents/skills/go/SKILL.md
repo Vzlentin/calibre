@@ -67,6 +67,72 @@ the fan-out:
 
 ---
 
+## Model routing
+
+`/go` routes work between the frontier main model and the cheap `sidekick`
+profile (luna; with `deep_worker` — terra — as the escalation tier) per the
+Fusion sidekick pattern: the main agent delegates and monitors, reads only
+what it needs to decide, and keeps the plan, interpretation of ambiguity, and
+final review for itself.
+
+The harness runs the main model at the native `ultra` effort (automatic task
+delegation); this section is the steering policy for that delegator — the
+routing table below is the *what-goes-where*, ultra is the *how*.
+
+**Routing classifier.** At Stage 0a, classify the work item — and re-check
+per stage — on these signals:
+
+- **Mechanical** (→ `sidekick`): promotion/evidence PRs (U7b/U9b-shaped),
+  receipts and execution-log updates, carve-out/config edits, data plumbing,
+  applying an already-specified fix, CI log retrieval.
+- **Judgment** (→ frontier, inherit): new spec-conformance derivation, witness
+  design, gate/clock semantics, anything interpreting `docs/spec/` or
+  touching frozen surfaces.
+
+A mixed item routes its implementation by the dominant signal and its
+mechanical satellites (receipts, CI babysit, log updates) to the sidekick
+regardless.
+
+**Persistent sidekick.** Spawn one `sidekick` thread at the start of the run
+and send it subsequent sequential tasks rather than spawning fresh agents —
+its warm context is the cost saving. Fresh spawns only for parallel fan-out
+or isolation. Verified mechanics (2026-07-14): interactive Codex sessions
+expose `spawn_agent`, `followup_task` (new task to an existing thread),
+`send_message`, `wait_agent`, `interrupt_agent`, `list_agents` — use
+`followup_task` for sequential reuse and `wait_agent` as the blocking wait.
+Collab tools are **not** exposed in `codex exec` non-interactive mode; there,
+fall back to per-task runs with minimal briefs.
+
+**Escalation ladder.** The sidekick gets one self-retry per failure; on a
+second failure, an `ESCALATE:` return, or a repeated failure signature, move
+the task to `deep_worker` — or take it over inline when judgment is the
+blocker — then demote remaining mechanical work back to the sidekick.
+
+**Delegation discipline.** After delegating, block on the agent's terminal
+completion token (the wait primitive); never busy-poll or repeatedly inspect
+partial output — polling burns frontier tokens and defeats the cost purpose
+of delegation.
+
+**Guardrail.** Routing never relaxes a gate: locked Ruff/ty/tier suites,
+conformance-first discipline, witness pairing, tripwires, and the VN2
+baseline bind identically for every model; escalation re-runs never skip
+gates; Stage 3 review is frontier-only, never routed down.
+
+Per-stage routing:
+
+| Stage | Route |
+|---|---|
+| 0a–0c classify/plan/issue | main agent inline (plan + ambiguity territory) |
+| 0d provisioning | sidekick |
+| 1 implement | by classification: routine → ce-work subagent on `sidekick`; judgment → inherit frontier |
+| 2 simplify | inline as today; its fan-out subagents use `sidekick` |
+| 3 review | frontier only, never routed down |
+| 4 resolve feedback | validity verdicts stay with the main agent; accepted fixes execute on the sidekick |
+| 5 CI loop | sidekick babysits (poll checks, pull failed logs, mechanical fixes); escalate on repeated signature or non-mechanical root cause |
+| 6 persist | sidekick for mechanical vault/log writes; main agent owns the GATE check |
+
+---
+
 ## Stage 0a— Classify the input
 
 Classify the work-item input (after removing `--no-merge`, if present) into one
@@ -91,6 +157,9 @@ of three kinds, in this order — first match wins:
 
 Derive a short slug (e.g. `u3-parser-coverage`) from the chosen artifact for
 branch naming and memory.
+
+Classify the work item on the Model routing signals (mechanical vs judgment)
+and record the classification — Stage 1 spawns its implementation agent on it.
 
 **GATE:** the input resolved to exactly one of {plan-file, issue, idea}. If it is
 ambiguous — a `.md` path that does not exist, or a number/code that resolves to
@@ -157,7 +226,7 @@ failed, stop and report.
 Stages 1–5 run against a working directory `WORKDIR`, picked with a smart-worktree
 gate so the user's current checkout — their branch *and* any uncommitted work —
 is never disturbed. Read git state in the main checkout and decide the mode — see
-`.claude/skills/go/references/worktree-provisioning.md` for the git-state read,
+`.agents/skills/go/references/worktree-provisioning.md` for the git-state read,
 the provisioning bash, and the worktree caveats:
 
 - **On `main` AND clean** → **DIRECT mode**: `WORKTREE_MODE=false`,
@@ -193,10 +262,15 @@ into a later runtime failure. Non-M5 items impose no such requirement.
 
 ## Stage 1 — Implement + open the PR
 
-Spawn **one** implementation-capable agent (foreground, no model override —
-inherit) to implement the plan and open the PR — a subagent per the Invocation
-model, instructed to follow `ce-work`. Give it the brief in
-`.claude/skills/go/references/ce-work-brief.md` (mode-specific setup clauses,
+Spawn **one** implementation-capable agent (foreground, model per the Stage 0a
+routing classification — routine work on the `sidekick` profile, judgment-heavy
+work inheriting the frontier model) to implement the plan and open the PR — a
+subagent per the Invocation model, instructed to follow `ce-work`. The brief
+authorizes it to delegate internally per the same Fusion policy (mechanical
+sub-steps to `sidekick`/`fast_scan`, judgment kept to itself) — this nesting is
+why the harness runs `[agents] max_depth = 2`. Give it the
+brief in
+`.agents/skills/go/references/ce-work-brief.md` (mode-specific setup clauses,
 `uv run` quality gates, the private-context guard, the `closes #N` PR finish),
 filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan path.
 
@@ -228,7 +302,8 @@ yourself.
 ## Stage 2 — Simplify the diff (`ce-simplify-code`, inline)
 
 Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — see Invocation
-model; it spawns its own subagents). Scope is the branch diff vs `main`. If it
+model; it spawns its own subagents, which should use the `sidekick` profile).
+Scope is the branch diff vs `main`. If it
 changes anything, **rerun the quality gates in the foreground and commit + push
 only on green** — do not chain the commit unconditionally after the gate, or a
 simplify pass that broke a test lands anyway:
@@ -249,7 +324,8 @@ green rerun.
 ## Stage 3 — Review the PR (`ce-code-review`, inline)
 
 Invoke the `ce-code-review` skill from `WORKDIR` (inline — see Invocation model;
-it spawns its own subagents) against this PR. Ensure its **actionable findings
+it spawns its own subagents) against this PR. Review is **frontier-only** — never
+route it to the sidekick; it is the safety net for cheap-model implementation. Ensure its **actionable findings
 land as inline PR review comments** (resolvable threads) so Stage 4 has something
 to resolve — pass the PR and have it post comments rather than only printing a
 report. If it commits safe fixes inline, **push them only after a green
@@ -275,6 +351,8 @@ Invoke the `ce-resolve-pr-feedback` skill from `WORKDIR` (inline — see Invocat
 model; it spawns its own subagents) for this PR. It evaluates every unresolved
 thread (Stage 3's findings plus any human/bot comments that arrived), fixes the
 valid ones in `WORKDIR`, commits + pushes, then replies and resolves each thread.
+Thread-validity verdicts stay with the main agent; accepted fixes execute on the
+`sidekick`.
 
 **GATE:** no unresolved review threads remain except ones it explicitly tagged
 `needs-human`. Surface any `needs-human` threads in the final report; they do not
@@ -298,7 +376,10 @@ vocabulary (`deferred-pre-existing` / `out-of-scope` / `named-follow-up` /
 ## Stage 5 — Loop on CI, then squash-merge on green
 
 Stage 5 owns an **inline CI watch-and-autofix loop** — there is no external CI
-skill to delegate to. Capture the head SHA
+skill to delegate to. The `sidekick` babysits it: polling checks, pulling failed
+logs, and applying mechanical fixes run on the sidekick thread; escalate to the
+main agent on a repeated failure signature or a non-mechanical root cause.
+Capture the head SHA
 (`HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`) and poll the typed
 check-runs API, the only reliable CI source on this host — the local
 check-status wrapper is broken (see `references/environment.md`):
@@ -384,7 +465,11 @@ reporting.
 
 Stage 6 always runs from the main checkout (`$MAIN`), never from `WORKDIR` — by now
 the worktree may be removed by Stage 5 cleanup, and persistence is independent of
-execution mode. **Delegate persistence to `/project-memory`** and persist exactly
+execution mode. Mechanical vault/log writes run on the `sidekick`; the main agent
+owns the GATE check. Every landing receipt (execution log + tracker) carries a
+one-line **model mix** note — e.g. `model mix: impl sidekick, review sol, CI
+sidekick, 1 escalation` — so the cost claim is checkable run-over-run.
+**Delegate persistence to `/project-memory`** and persist exactly
 one outcome:
 
 - **shipped** — the PR squash-merged: flip the plan's `status: active → shipped` in
