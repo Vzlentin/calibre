@@ -378,6 +378,100 @@ def test_order_arrives_at_calendar_advance_once_and_remains_open_until_then() ->
     assert result.inventory_positions["sku-a"] == InventoryPosition(4.0, 0.0, 0.0)
 
 
+def test_initial_arrivals_seed_pipeline_without_order_rows_and_survive_rebuild() -> None:
+    session = _session()
+    initial_arrivals = {
+        ("sku-a", PERIODS[0]): 5.0,
+        ("sku-a", PERIODS[1]): 7.0,
+    }
+    sink = InMemoryLedgerSink(
+        session=session,
+        calendar=CALENDAR,
+        initial_arrivals=initial_arrivals,
+    )
+    positions = {"sku-a": InventoryPosition(1.0, 12.0, 0.0)}
+
+    first_snapshot = sink.settlement_snapshot(PERIODS[:2])
+    assert first_snapshot.open_order_quantities == {"sku-a": 12.0}
+    assert first_snapshot.due_arrivals == initial_arrivals
+    first = settle(
+        _request(
+            session,
+            periods=(PERIODS[0],),
+            snapshot=sink.settlement_snapshot((PERIODS[0],)),
+            actuals={("sku-a", PERIODS[0]): 4.0},
+            positions=positions,
+        )
+    )
+    sink.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            settlements=first.records,
+        )
+    )
+    assert first.records[0].arrivals == 5.0
+    assert first.inventory_positions["sku-a"] == InventoryPosition(2.0, 7.0, 0.0)
+    assert sink.orders == ()
+
+    mid_rebuild_snapshot = sink.settlement_snapshot((PERIODS[1],))
+    assert mid_rebuild_snapshot.open_order_quantities == {"sku-a": 7.0}
+    assert mid_rebuild_snapshot.due_arrivals == {("sku-a", PERIODS[1]): 7.0}
+    sink.rebuild_settlement_index()
+    assert sink.settlement_snapshot((PERIODS[1],)) == mid_rebuild_snapshot
+
+    second = settle(
+        _request(
+            session,
+            periods=(PERIODS[1],),
+            snapshot=sink.settlement_snapshot((PERIODS[1],)),
+            actuals={("sku-a", PERIODS[1]): 10.0},
+            positions=first.inventory_positions,
+        )
+    )
+    sink.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[1],
+            settlements=second.records,
+        )
+    )
+    assert second.records[0].arrivals == 7.0
+    assert second.records[0].transition.unmet_demand == 1.0
+    assert second.inventory_positions["sku-a"] == InventoryPosition(0.0, 0.0, 0.0)
+    assert sink.orders == ()
+
+    before_rebuild = sink.settlement_snapshot((PERIODS[2],))
+    assert before_rebuild.open_order_quantities == {"sku-a": 0.0}
+    assert before_rebuild.due_arrivals == {}
+    sink.rebuild_settlement_index()
+    assert sink.settlement_snapshot((PERIODS[2],)) == before_rebuild
+    assert sink.orders == ()
+
+
+@pytest.mark.parametrize(
+    ("initial_arrivals", "match"),
+    [
+        ({("sku-a", PERIODS[0]): -1.0}, "non-negative"),
+        ({("sku-a", PERIODS[0]): True}, "real"),
+        ({("sku-a", PERIODS[0]): float("nan")}, "finite"),
+        ({("sku-a", PERIODS[0]): float("inf")}, "finite"),
+        ({("unknown", PERIODS[0]): 1.0}, "series"),
+        ({("sku-a", pd.Timestamp("2026-01-06")): 1.0}, "calendar|grid|member"),
+    ],
+)
+def test_initial_arrivals_refuse_invalid_pipeline_facts(
+    initial_arrivals: Mapping[tuple[str, pd.Timestamp], float],
+    match: str,
+) -> None:
+    with pytest.raises(LedgerError, match=match):
+        InMemoryLedgerSink(
+            session=_session(),
+            calendar=CALENDAR,
+            initial_arrivals=initial_arrivals,
+        )
+
+
 def test_order_placed_in_period_cannot_serve_that_period_demand() -> None:
     session = _session()
     order = _order(session, origin=PERIODS[0], quantity=3.0)

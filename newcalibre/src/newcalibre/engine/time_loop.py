@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import pairwise
@@ -56,6 +57,7 @@ class TimeLoopRequest:
 
     session: SessionIdentity
     origins: tuple[pd.Timestamp, ...]
+    settlement_end: pd.Timestamp
     scope: Scope
     calibration_partitions: tuple[str, ...]
     initial_inventory_positions: Mapping[str, InventoryPosition]
@@ -66,6 +68,7 @@ class TimeLoopRequest:
         *,
         session: SessionIdentity,
         origins: Sequence[pd.Timestamp],
+        settlement_end: pd.Timestamp,
         scope: Scope,
         initial_inventory_positions: Mapping[str, InventoryPosition],
         actuals_semantics: ActualsSemantics,
@@ -85,6 +88,12 @@ class TimeLoopRequest:
                 raise TimeLoopError("time-loop origins must be timezone-naive")
         if any(current <= previous for previous, current in pairwise(frozen_origins)):
             raise TimeLoopError("time-loop origins must be strictly increasing and unique")
+        if not isinstance(settlement_end, pd.Timestamp) or pd.isna(settlement_end):
+            raise TypeError("time-loop settlement end must be a pandas Timestamp")
+        if settlement_end.tz is not None:
+            raise TimeLoopError("time-loop settlement end must be timezone-naive")
+        if settlement_end < frozen_origins[-1]:
+            raise TimeLoopError("time-loop settlement end must be at or after the last origin")
         if not isinstance(scope, Scope):
             raise TypeError("time-loop scope must be a Scope")
         partitions = tuple(calibration_partitions)
@@ -107,6 +116,7 @@ class TimeLoopRequest:
 
         object.__setattr__(self, "session", session)
         object.__setattr__(self, "origins", frozen_origins)
+        object.__setattr__(self, "settlement_end", settlement_end)
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "calibration_partitions", partitions)
         object.__setattr__(
@@ -180,6 +190,10 @@ class TimeLoop:
                 calendar.require_member(origin, name="time-loop origin")
             except CalendarError as error:
                 raise TimeLoopError(str(error)) from error
+        try:
+            calendar.require_member(request.settlement_end, name="time-loop settlement end")
+        except CalendarError as error:
+            raise TimeLoopError(str(error)) from error
         definition = session_definition(request.session)
         _session_series, frequency = session_series_and_frequency(definition)
         if frequency != calendar.frequency:
@@ -206,7 +220,11 @@ class TimeLoop:
         )
         final_decision = decision_origins[-1]
         drain_target = calendar.advance(final_decision, timing.lead_time)
-        final_period = max(request.origins[-1], drain_target)
+        if request.settlement_end < drain_target:
+            raise TimeLoopError(
+                "time-loop settlement end must be at or after the final decision plus lead time"
+            )
+        final_period = request.settlement_end
         initial_snapshot = ledger_sink.settlement_snapshot((request.origins[0],))
         if (
             initial_snapshot.frontier is not None
@@ -272,6 +290,16 @@ class TimeLoop:
             period
             for period in self._settlement_periods
             if initial_snapshot.frontier is None or period > initial_snapshot.frontier
+        )
+        window_due_arrivals = (
+            {}
+            if not uncommitted_periods
+            else ledger_sink.settlement_snapshot(uncommitted_periods).due_arrivals
+        )
+        _require_open_orders_inside_window(
+            open_quantities=initial_snapshot.open_order_quantities,
+            due_arrivals=window_due_arrivals,
+            series_keys=series_keys,
         )
         self._actuals_by_key = MappingProxyType(
             self._preflight_settlement_actuals(uncommitted_periods)
@@ -406,6 +434,22 @@ def _calendar_window(
     if not periods or periods[-1] != end:
         raise TimeLoopError("time-loop end period does not lie on its calendar")
     return tuple(periods)
+
+
+def _require_open_orders_inside_window(
+    *,
+    open_quantities: Mapping[str, float],
+    due_arrivals: Mapping[ActualKey, float],
+    series_keys: Sequence[str],
+) -> None:
+    covered_quantities = {series_key: [] for series_key in series_keys}
+    for (series_key, _period), quantity in due_arrivals.items():
+        if series_key in covered_quantities:
+            covered_quantities[series_key].append(quantity)
+    for series_key in series_keys:
+        covered_quantity = math.fsum(covered_quantities[series_key])
+        if covered_quantity != open_quantities[series_key]:
+            raise TimeLoopError("time-loop settlement window must contain every open-order arrival")
 
 
 def _require_text(value: object, *, name: str, trimmed: bool = False) -> None:

@@ -43,6 +43,7 @@ from newcalibre.domain import (
     SessionIdentity,
     StockoutRule,
     interval_columns,
+    quantile_column,
     target_timestamp,
 )
 from newcalibre.engine import (
@@ -75,7 +76,7 @@ from newcalibre.engine import (
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
 from newcalibre.ledger import ForecastIssuance, GuaranteedSide, OrderRow
-from newcalibre.ordering import OrderingConfigError, OrderingInputError
+from newcalibre.ordering import OrderingConfigError
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
@@ -630,6 +631,105 @@ def test_forecast_batch_collapses_dataframe_subclasses_before_validation() -> No
 
     with pytest.raises(ForecastFrameError, match="target timestamp must equal"):
         ForecastBatch(MaskingFrame(malformed), calendar=CALENDAR)
+
+
+def test_forecast_batch_materializes_empty_issuance_maps_for_native_quantiles() -> None:
+    panel = _panel()
+    session = _session()
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    predicted = engine.predict(
+        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
+    )
+    frame = predicted.frame
+    quantile = quantile_column(0.5)
+    frame[quantile] = frame[POINT_FORECAST] + 1.0
+
+    forecasts = ForecastBatch(frame, calendar=CALENDAR)
+
+    assert forecasts.frame[quantile].tolist() == [5.0]
+    assert {key: dict(row_issuances) for key, row_issuances in forecasts.issuances.items()} == {
+        ("a", origin, 1, "fixture"): {}
+    }
+
+
+def test_forecast_batch_refuses_partially_issued_native_quantiles() -> None:
+    series_keys = ("a", "b")
+    panel = _panel(series_keys=series_keys)
+    session = _session(series_keys=series_keys)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    predicted = engine.predict(
+        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
+    )
+    frame = predicted.frame
+    quantile = quantile_column(0.5)
+    frame[quantile] = frame[POINT_FORECAST]
+    keys = tuple(predicted.issuances)
+    issuances = {key: {} for key in keys}
+    descriptor = replace(
+        _policy_descriptor(),
+        type=GuaranteeType(
+            claim=GuaranteeClaim.NONE,
+            currency=None,
+            declared_slack=None,
+        ),
+        level=0.5,
+    )
+    issuances[keys[0]] = {
+        (quantile,): ForecastIssuance(
+            descriptor=descriptor,
+            guaranteed_side=None,
+            calibration_ready=False,
+            bounds_finite=True,
+            bounds_null_reason=None,
+        )
+    }
+
+    with pytest.raises(EngineError, match="quantile issuance.*every row or no rows"):
+        ForecastBatch(frame, calendar=CALENDAR, issuances=issuances)
+
+
+def test_forecast_batch_refuses_empty_issuance_maps_for_intervals() -> None:
+    panel = _panel()
+    session = _session()
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    predicted = engine.predict(
+        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
+    )
+    frame = predicted.frame
+    lower, upper = interval_columns(0.8)
+    frame[lower] = frame[POINT_FORECAST] - 1.0
+    frame[upper] = frame[POINT_FORECAST] + 1.0
+
+    with pytest.raises(EngineError, match="interval.*issuance"):
+        ForecastBatch(
+            frame,
+            calendar=CALENDAR,
+            issuances=predicted.issuances,
+        )
 
 
 def test_settlement_window_requires_explicit_actuals_semantics() -> None:
@@ -1218,7 +1318,7 @@ def test_configured_newsvendor_consumes_split_interval_through_commit() -> None:
     assert evidence.source_descriptor == _policy_descriptor()
 
 
-def test_configured_policy_exception_propagates_and_commits_no_partial_origin() -> None:
+def test_incomplete_interval_provenance_refuses_before_partial_origin() -> None:
     series_keys = ("a", "b")
     panel = _panel(series_keys=series_keys)
     session = _session(
@@ -1280,7 +1380,10 @@ def test_configured_policy_exception_propagates_and_commits_no_partial_origin() 
         )
     )
 
-    with pytest.raises(OrderingInputError, match="issuance provenance") as failure:
+    with pytest.raises(
+        PhaseError,
+        match="Calibrate.*interval columns require explicit issuance metadata",
+    ) as failure:
         spine.run_origin(
             OriginRequest(
                 session=session,
@@ -1292,7 +1395,7 @@ def test_configured_policy_exception_propagates_and_commits_no_partial_origin() 
             )
         )
 
-    assert type(failure.value) is OrderingInputError
+    assert type(failure.value.__cause__) is EngineError
     assert sink.forecasts == ()
     assert sink.orders == ()
     assert sink.receipt(pd.Timestamp("2026-01-05")) is None

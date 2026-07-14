@@ -147,9 +147,11 @@ class ForecastBatch:
         owned_frame = pd.DataFrame(frame, copy=True)
         validated = validate_forecast_frame(owned_frame, calendar=calendar)
         keys = _forecast_keys(validated)
+        bound_groups = forecast_bound_groups(validated.columns)
+        interval_groups = tuple(group for group in bound_groups if len(group) == 2)
         if issuances is None:
-            if forecast_bound_groups(validated.columns):
-                raise _EngineError("forecast bound columns require explicit issuance metadata")
+            if interval_groups:
+                raise _EngineError("forecast interval columns require explicit issuance metadata")
             supplied: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]] = {
                 key: {} for key in keys
             }
@@ -157,7 +159,22 @@ class ForecastBatch:
             supplied = issuances
         if set(supplied) != set(keys):
             raise _EngineError("forecast issuance keys must exactly match the frame keys")
-        frozen = {key: MappingProxyType(dict(supplied[key])) for key in keys}
+        frozen: dict[ForecastKey, Mapping[BoundKey, ForecastIssuance]] = {}
+        for key in keys:
+            row_issuances = dict(supplied[key])
+            intervals_issued = all(
+                group in row_issuances or all((column,) in row_issuances for column in group)
+                for group in interval_groups
+            )
+            if not intervals_issued:
+                raise _EngineError("forecast interval columns require explicit issuance metadata")
+            frozen[key] = MappingProxyType(row_issuances)
+        for quantile_group in (group for group in bound_groups if len(group) == 1):
+            issued = [quantile_group in row_issuances for row_issuances in frozen.values()]
+            if any(issued) and not all(issued):
+                raise _EngineError(
+                    "forecast quantile issuance metadata must cover every row or no rows"
+                )
         object.__setattr__(self, "_frame", validated)
         object.__setattr__(self, "_calendar", calendar)
         object.__setattr__(self, "_session", None)

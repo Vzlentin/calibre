@@ -231,6 +231,44 @@ def test_forecast_append_requires_pending_rows_and_exact_issuance_keys() -> None
     assert ledger.forecasts == ()
 
 
+def test_forecast_append_accepts_unissued_native_quantiles() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    empty_issuances = {key: {} for key in _issuances()}
+
+    ledger.append_forecasts(_frame(), issuances=empty_issuances)
+
+    quantile = quantile_column(0.5)
+    assert [row.values[quantile] for row in ledger.forecasts] == [10.0, 20.0]
+    assert [dict(row.issuances) for row in ledger.forecasts] == [{}, {}]
+
+
+def test_forecast_append_refuses_partially_issued_native_quantiles() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    mixed_issuances = _issuances()
+    mixed_issuances[_forecast_key("sku-b", 2)] = {}
+
+    with pytest.raises(LedgerError, match="every supplied quantile group"):
+        ledger.append_forecasts(_frame(), issuances=mixed_issuances)
+
+    assert ledger.forecasts == ()
+
+
+def test_forecast_append_refuses_unissued_intervals() -> None:
+    frame = _frame().drop(columns=quantile_column(0.5))
+    lower, upper = interval_columns(0.8)
+    frame[lower] = pd.Series([9.0, 19.0], dtype="float64")
+    frame[upper] = pd.Series([11.0, 21.0], dtype="float64")
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+
+    with pytest.raises(LedgerError, match="exactly account"):
+        ledger.append_forecasts(
+            frame,
+            issuances={key: {} for key in _issuances()},
+        )
+
+    assert ledger.forecasts == ()
+
+
 def test_forecast_append_is_atomic_and_rejects_existing_keys() -> None:
     ledger = Ledger(session=_session(), calendar=CALENDAR)
     ledger.append_forecasts(_frame(), issuances=_issuances())
@@ -283,6 +321,10 @@ def test_forecast_issuance_fact_is_closed_and_matches_the_bound_payload() -> Non
 
     ledger = Ledger(session=_session(), calendar=CALENDAR)
     quantile: BoundKey = (quantile_column(0.5),)
+    mismatched_descriptor = {key: {quantile: _issuance(level=0.9)} for key in _issuances()}
+    with pytest.raises(LedgerError, match="bound key level"):
+        ledger.append_forecasts(_frame(), issuances=mismatched_descriptor)
+
     inconsistent = {
         key: {quantile: _issuance(finite=False, reason="warm-up")} for key in _issuances()
     }

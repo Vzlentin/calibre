@@ -6,6 +6,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from tests.import_inspection import imported_modules
 
 pytestmark = pytest.mark.tier1
 
@@ -70,73 +71,13 @@ def _engine_import_violations(
 
 
 def _engine_imports(path: Path, *, package: str) -> list[tuple[int, str]]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imports: list[tuple[int, str]] = []
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.extend(
-                (node.lineno, alias.name) for alias in node.names if _is_engine_module(alias.name)
-            )
-        elif isinstance(node, ast.ImportFrom):
-            candidates = _resolved_from_imports(node, package=package)
-            if engine_module := next(
-                (candidate for candidate in candidates if _is_engine_module(candidate)),
-                None,
-            ):
-                imports.append((node.lineno, engine_module))
-        elif (
-            isinstance(node, ast.Call)
-            and (module := _literal_dynamic_import(node)) is not None
-            and _is_engine_module(module)
-        ):
-            imports.append((node.lineno, module))
-
-    return sorted(set(imports))
-
-
-def _resolved_from_imports(node: ast.ImportFrom, *, package: str) -> list[str]:
-    if node.level:
-        package_parts = package.split(".")
-        retained_parts = package_parts[: max(len(package_parts) - node.level + 1, 0)]
-        module_parts = node.module.split(".") if node.module else []
-        resolved_module = ".".join((*retained_parts, *module_parts))
-    else:
-        resolved_module = node.module or ""
-
-    candidates = [resolved_module] if resolved_module else []
-    candidates.extend(
-        ".".join(part for part in (resolved_module, alias.name) if part)
-        for alias in node.names
-        if alias.name != "*"
-    )
-    return candidates
-
-
-def _literal_dynamic_import(node: ast.Call) -> str | None:
-    is_importlib_call = (
-        isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "importlib"
-        and node.func.attr == "import_module"
-    )
-    is_builtin_call = isinstance(node.func, ast.Name) and node.func.id == "__import__"
-    if not (is_importlib_call or is_builtin_call):
-        return None
-
-    argument = (
-        node.args[0]
-        if node.args
-        else next(
-            (keyword.value for keyword in node.keywords if keyword.arg == "name"),
-            None,
-        )
-    )
-    return (
-        argument.value
-        if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
-        else None
-    )
+    imported_lines: set[int] = set()
+    for line, module in imported_modules(path.read_text(encoding="utf-8"), package=package):
+        if _is_engine_module(module) and line not in imported_lines:
+            imports.append((line, module))
+            imported_lines.add(line)
+    return imports
 
 
 def _is_engine_module(module: str) -> bool:

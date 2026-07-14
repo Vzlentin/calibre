@@ -242,6 +242,7 @@ def _request(*, session: SessionIdentity) -> TimeLoopRequest:
     return TimeLoopRequest(
         session=session,
         origins=_ORIGINS,
+        settlement_end=_CALENDAR.advance(_ORIGINS[-1], _TIMING.lead_time),
         scope=Scope.GLOBAL,
         calibration_partitions=(_PARTITION,),
         initial_inventory_positions={

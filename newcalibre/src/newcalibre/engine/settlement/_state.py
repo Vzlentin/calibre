@@ -7,6 +7,8 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
+from numbers import Real
+from types import MappingProxyType
 
 import pandas as pd
 
@@ -74,6 +76,7 @@ class SettlementIndex:
         costs_by_series: SessionCosts,
         timing: DecisionTiming,
         stockout_rule: StockoutRule,
+        initial_arrivals: Mapping[ActualKey, float] | None = None,
     ) -> None:
         self._session = session
         self._calendar = calendar
@@ -85,10 +88,29 @@ class SettlementIndex:
         )
         self._timing = timing
         self._stockout_rule = stockout_rule
+        self._initial_arrival_seed = _validated_initial_arrivals(
+            initial_arrivals,
+            calendar=calendar,
+            series_keys=self._series_key_set,
+        )
+        self._initial_due_arrivals = dict(self._initial_arrival_seed)
         self._active_orders: set[OrderKey] = set()
         self._due_orders: dict[ActualKey, dict[OrderKey, float]] = {}
-        self._due_heap: list[tuple[pd.Timestamp, str]] = []
-        self._open_quantities = {series_key: 0.0 for series_key in self._series_keys}
+        self._due_heap: list[tuple[pd.Timestamp, str]] = [
+            (period, series_key) for series_key, period in self._initial_due_arrivals
+        ]
+        heapq.heapify(self._due_heap)
+        initial_quantities = {series_key: [] for series_key in self._series_keys}
+        for (series_key, _period), quantity in self._initial_due_arrivals.items():
+            initial_quantities[series_key].append(quantity)
+        self._open_quantities = {
+            series_key: _finite_quantity_sum(
+                initial_quantities[series_key],
+                name="initial settlement on_order",
+                nonnegative=True,
+            )
+            for series_key in self._series_keys
+        }
         self._inventory_positions: dict[str, InventoryPosition] = {}
         self._frontier: pd.Timestamp | None = None
         self._actuals_semantics: ActualsSemantics | None = None
@@ -105,6 +127,7 @@ class SettlementIndex:
         costs_by_series: SessionCosts,
         timing: DecisionTiming,
         stockout_rule: StockoutRule,
+        initial_arrivals: Mapping[ActualKey, float] | None,
         orders: Sequence[OrderRow],
         settlements: Sequence[SettlementRecord],
     ) -> SettlementIndex:
@@ -116,6 +139,7 @@ class SettlementIndex:
             costs_by_series=costs_by_series,
             timing=timing,
             stockout_rule=stockout_rule,
+            initial_arrivals=initial_arrivals,
         )
         delta = rebuilt.validate_delta(orders=orders, settlements=settlements)
         rebuilt.apply(delta)
@@ -131,9 +155,13 @@ class SettlementIndex:
             for series_key in self._series_keys:
                 key = (series_key, period)
                 bucket = self._due_orders.get(key)
-                if bucket is not None:
+                initial = self._initial_due_arrivals.get(key)
+                if bucket is not None or initial is not None:
                     due_arrivals[key] = _finite_quantity_sum(
-                        bucket.values(),
+                        (
+                            *((initial,) if initial is not None else ()),
+                            *(bucket.values() if bucket is not None else ()),
+                        ),
                         name="settlement snapshot due arrivals",
                     )
         return SettlementSnapshot(
@@ -146,6 +174,11 @@ class SettlementIndex:
             due_arrivals=due_arrivals,
             actuals_semantics=self._actuals_semantics,
         )
+
+    @property
+    def initial_arrivals(self) -> Mapping[ActualKey, float]:
+        """Return the immutable pipeline seed used to construct this index."""
+        return MappingProxyType(self._initial_arrival_seed)
 
     def validate_delta(
         self,
@@ -209,10 +242,16 @@ class SettlementIndex:
 
                 due_key = (series_key, period)
                 durable_due = self._due_orders.get(due_key, {})
+                initial_due = self._initial_due_arrivals.get(due_key)
                 staged_due_orders = by_arrival.get(due_key, ())
-                due_order_count += len(durable_due) + len(staged_due_orders)
+                due_order_count += (
+                    len(durable_due)
+                    + len(staged_due_orders)
+                    + (1 if initial_due is not None else 0)
+                )
                 arrivals = _finite_quantity_sum(
                     (
+                        *((initial_due,) if initial_due is not None else ()),
                         *durable_due.values(),
                         *(order.quantity for order in staged_due_orders),
                     ),
@@ -220,7 +259,7 @@ class SettlementIndex:
                 )
                 if record.arrivals != arrivals:
                     raise LedgerError("settlement arrivals do not match durable due orders")
-                if durable_due:
+                if durable_due or initial_due is not None:
                     consumed_due_keys.append(due_key)
 
                 previous_position = positions.get(series_key)
@@ -280,6 +319,7 @@ class SettlementIndex:
     def apply(self, delta: _SettlementDelta) -> None:
         """Apply a validated delta using only assignments and idempotent removals."""
         for due_key in delta.consumed_due_keys:
+            self._initial_due_arrivals.pop(due_key, None)
             bucket = self._due_orders.pop(due_key, {})
             for order_key in bucket:
                 self._active_orders.discard(order_key)
@@ -302,7 +342,7 @@ class SettlementIndex:
         """Return deterministic complexity evidence without exposing indexed rows."""
         return SettlementIndexAudit(
             active_orders=len(self._active_orders),
-            due_buckets=len(self._due_orders),
+            due_buckets=len(set(self._due_orders) | set(self._initial_due_arrivals)),
             last_work=self._last_work,
             rebuild_work=self._rebuild_work,
         )
@@ -398,7 +438,10 @@ class SettlementIndex:
     def _earliest_due_period(self) -> pd.Timestamp | None:
         while self._due_heap:
             period, series_key = self._due_heap[0]
-            if (series_key, period) in self._due_orders:
+            if (series_key, period) in self._due_orders or (
+                series_key,
+                period,
+            ) in self._initial_due_arrivals:
                 return period
             heapq.heappop(self._due_heap)
         return None
@@ -419,6 +462,39 @@ def _finite_quantity_sum(
     if nonnegative and total < 0.0:
         raise LedgerError(f"{name} must be non-negative")
     return 0.0 if total == 0.0 else total
+
+
+def _validated_initial_arrivals(
+    value: Mapping[ActualKey, float] | None,
+    *,
+    calendar: Calendar,
+    series_keys: set[str],
+) -> dict[ActualKey, float]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("initial arrivals must be a mapping")
+    normalized: dict[ActualKey, float] = {}
+    for key, quantity in value.items():
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise LedgerError("initial arrival keys must be (series_key, period) tuples")
+        series_key, period = key
+        if not isinstance(series_key, str) or series_key not in series_keys:
+            raise LedgerError("initial arrival series does not belong to the session")
+        try:
+            calendar.require_member(period, name="initial arrival period")
+        except (TypeError, ValueError) as error:
+            raise LedgerError(str(error)) from error
+        if isinstance(quantity, bool) or not isinstance(quantity, Real):
+            raise LedgerError("initial arrival quantity must be a finite non-negative real")
+        normalized_quantity = float(quantity)
+        if not math.isfinite(normalized_quantity):
+            raise LedgerError("initial arrival quantity must be finite")
+        if normalized_quantity < 0.0:
+            raise LedgerError("initial arrival quantity must be non-negative")
+        if normalized_quantity != 0.0:
+            normalized[(series_key, period)] = normalized_quantity
+    return normalized
 
 
 def _costs_by_series(
