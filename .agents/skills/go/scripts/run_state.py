@@ -1,4 +1,4 @@
-"""Per-run JSON state for /go runs, stored under the git common dir.
+"""Manage per-run JSON state for /go runs under the git common dir.
 
 Each run keeps one flat JSON dict at ``<git-common-dir>/go-runs/<slug>.json``.
 The common dir is shared between the main checkout and every linked worktree,

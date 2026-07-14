@@ -1,4 +1,4 @@
-"""Stage 0d mode decision and isolated-worktree provisioning for /go.
+"""Decide the /go execution mode and provision an isolated worktree.
 
 ``decide`` reads git state in the current checkout and prints the execution
 mode: ``direct`` when the checkout is on ``main`` with a clean tree, else
@@ -19,12 +19,30 @@ Exit codes: 0 success, 1 failure.
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 WORKTREES_DIR = ".worktrees"
 SETUP_KEY = "setup-worktree-unix"
+
+
+def _bash_executable() -> str:
+    """Resolve the bash used for setup steps, preferring Git Bash on Windows.
+
+    A bare ``bash`` on Windows PATH commonly resolves to the System32 WSL
+    launcher, which cannot run the MSYS-flavored setup steps (Windows-style
+    ``$ROOT_WORKTREE_PATH`` substitutions, ``uv`` on the Windows PATH). Derive
+    Git for Windows' own bash from the ``git`` executable's install root.
+    """
+    if sys.platform == "win32":
+        git = shutil.which("git")
+        if git is not None:
+            candidate = Path(git).parent.parent / "bin" / "bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return "bash"
 
 
 def _run(args: list[str], cwd: str | Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -66,7 +84,7 @@ def read_setup_steps(config_text: str, main_path: str) -> list[str]:
 
 def _run_step(step: str, cwd: Path) -> int:
     """Run one setup step through bash, streaming its output; return the exit code."""
-    return subprocess.run(["bash", "-c", step], cwd=cwd, check=False).returncode
+    return subprocess.run([_bash_executable(), "-c", step], cwd=cwd, check=False).returncode
 
 
 def _main_checkout() -> Path:
@@ -105,6 +123,15 @@ def cmd_provision(branch: str, require_m5: bool) -> int:
         print(f"refusing: branch already exists: {branch}", file=sys.stderr)
         return 1
 
+    # Read the setup config before creating anything: a malformed config must
+    # not strand a half-provisioned worktree.
+    config_path = main / ".cursor" / "worktrees.json"
+    try:
+        steps = read_setup_steps(config_path.read_text(encoding="utf-8"), main.as_posix())
+    except (OSError, json.JSONDecodeError, KeyError) as exc:
+        print(f"cannot read setup steps from {config_path}: {exc!r}", file=sys.stderr)
+        return 1
+
     fetch = _run(["git", "fetch", "origin", "main"], cwd=main)
     if fetch.returncode != 0:
         print(f"git fetch failed: {fetch.stderr.strip()}", file=sys.stderr)
@@ -114,21 +141,27 @@ def cmd_provision(branch: str, require_m5: bool) -> int:
         print(f"git worktree add failed: {add.stderr.strip()}", file=sys.stderr)
         return 1
 
-    config_path = main / ".cursor" / "worktrees.json"
-    steps = read_setup_steps(config_path.read_text(encoding="utf-8"), main.as_posix())
+    def _fail(message: str) -> int:
+        """Report a post-add failure with the recovery commands for the debris."""
+        print(message, file=sys.stderr)
+        print(
+            "the worktree and branch are preserved for debugging; to retry, remove them:\n"
+            f"  git worktree remove --force {WORKTREES_DIR}/{slug}\n"
+            f"  git branch -D {branch}",
+            file=sys.stderr,
+        )
+        return 1
+
     for step in steps:
         print(f"  -> {step}")
         if _run_step(step, cwd=worktree) != 0:
-            print(f"FAILED setup step: {step}", file=sys.stderr)
-            return 1
+            return _fail(f"FAILED setup step: {step}")
 
     gate = _run(["uv", "run", "python", "-c", "import calibre"], cwd=worktree)
     if gate.returncode != 0:
-        print(f"venv gate failed (import calibre): {gate.stderr.strip()}", file=sys.stderr)
-        return 1
+        return _fail(f"venv gate failed (import calibre): {gate.stderr.strip()}")
     if require_m5 and not (worktree / "data" / "m5").is_dir():
-        print(f"data gate failed: no data/m5 in {worktree}", file=sys.stderr)
-        return 1
+        return _fail(f"data gate failed: no data/m5 in {worktree}")
 
     print(json.dumps({"workdir": str(worktree), "branch": branch}, indent=2))
     return 0

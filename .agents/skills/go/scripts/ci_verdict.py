@@ -1,4 +1,4 @@
-"""CI verdict over the GitHub check-runs API, plus failed-run log pull.
+"""Compute a CI verdict over the GitHub check-runs API and pull failed-run logs.
 
 ``verdict <sha>`` fetches ``gh api repos/<repo>/commits/<sha>/check-runs`` and
 reduces it to one verdict:
@@ -10,8 +10,10 @@ reduces it to one verdict:
   failed workflow-run IDs are parsed from each ``details_url`` and a stable
   failure signature is printed so a repeated, unchanged failure is a string
   comparison rather than a judgment call.
-- **non-verdict** — empty check set, malformed JSON, or a failed ``gh`` call.
-  A non-verdict is never green.
+- **non-verdict** — empty check set, malformed JSON, a truncated payload
+  (``total_count`` disagreeing with the returned list — a red check beyond the
+  page limit must never read as green), a failed ``gh`` call, or any crash in
+  the command itself. A non-verdict is never green.
 
 Exit codes: 0 green, 1 pending, 2 failure, 3 non-verdict.
 
@@ -92,6 +94,22 @@ def evaluate(payload_text: str) -> tuple[int, dict]:
     if not check_runs:
         return EXIT_NON_VERDICT, {"verdict": "non-verdict", "reason": "empty check set"}
 
+    if any(not isinstance(run, dict) for run in check_runs):
+        return EXIT_NON_VERDICT, {
+            "verdict": "non-verdict",
+            "reason": "malformed check_runs entry (not an object)",
+        }
+
+    total_count = payload.get("total_count")
+    if isinstance(total_count, int) and total_count != len(check_runs):
+        return EXIT_NON_VERDICT, {
+            "verdict": "non-verdict",
+            "reason": (
+                f"truncated check-runs payload: total_count={total_count}, "
+                f"received {len(check_runs)}"
+            ),
+        }
+
     if any(run.get("status") != "completed" for run in check_runs):
         return EXIT_PENDING, {"verdict": "pending"}
 
@@ -115,7 +133,7 @@ def evaluate(payload_text: str) -> tuple[int, dict]:
 
 def cmd_verdict(sha: str) -> int:
     """Fetch check-runs for a commit and print the verdict report as JSON."""
-    proc = _run(["gh", "api", f"repos/{REPO}/commits/{sha}/check-runs"])
+    proc = _run(["gh", "api", f"repos/{REPO}/commits/{sha}/check-runs?per_page=100"])
     if proc.returncode != 0:
         report = {"verdict": "non-verdict", "reason": f"gh api failed: {proc.stderr.strip()}"}
         print(json.dumps(report, indent=2))
@@ -142,9 +160,18 @@ def main(argv: list[str] | None = None) -> int:
     p_logs.add_argument("run_id")
 
     args = parser.parse_args(argv)
-    if args.command == "verdict":
-        return cmd_verdict(args.sha)
-    return cmd_logs(args.run_id)
+    # A crash must not alias a verdict: unhandled exceptions would exit 1
+    # (= pending, which the CI loop would poll forever). Fail to non-verdict.
+    try:
+        if args.command == "verdict":
+            return cmd_verdict(args.sha)
+        return cmd_logs(args.run_id)
+    except Exception as exc:  # noqa: BLE001 — exit-code contract over traceback
+        print(
+            json.dumps({"verdict": "non-verdict", "reason": f"crash: {exc!r}"}, indent=2),
+            file=sys.stderr,
+        )
+        return EXIT_NON_VERDICT
 
 
 if __name__ == "__main__":

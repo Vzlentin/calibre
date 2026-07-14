@@ -158,15 +158,20 @@ of three kinds, in this order — first match wins:
 Derive a short slug (e.g. `u3-parser-coverage`) from the chosen artifact for
 branch naming and memory, then initialize the run state — one flat JSON dict
 per run at `<git-common-dir>/go-runs/<slug>.json` (private by construction,
-shared between the main checkout and worktrees). Each stage records progress
-into it at its GATE (`set <slug> stage <n>` plus the stage's own keys), so a
-new session resumes by reading the state instead of rediscovering the
-PR/branch/worktree:
+shared between the main checkout and worktrees). Stages record progress into
+it as they land (`mode`, `workdir`, `branch` at 0d; `pr` at 1; `head_sha` at
+5; `outcome` at 6), so a new session resumes by reading the state instead of
+rediscovering the PR/branch/worktree:
 
 ```bash
 uv run python .agents/skills/go/scripts/run_state.py init <slug>
 uv run python .agents/skills/go/scripts/run_state.py get <slug>   # resume: read prior state
+uv run python .agents/skills/go/scripts/run_state.py list         # forgot the slug? list runs
 ```
+
+On **resume**, only `get` — never `init --force`, which wipes the recorded
+PR/branch/worktree and defeats the resume. `init` without `--force` refuses an
+existing slug, so a plain re-`init` is safe.
 
 Classify the work item on the Model routing signals (mechanical vs judgment)
 and record the classification — Stage 1 spawns its implementation agent on it.
@@ -261,7 +266,10 @@ The script reads the setup steps dynamically from `.cursor/worktrees.json`,
 aborts on the first failed step, refuses an existing worktree/branch collision,
 never mutates the caller checkout, and runs the venv gate
 (`uv run python -c "import calibre"` in the worktree) itself. On success it
-prints the absolute `WORKDIR`.
+prints `{"workdir": <absolute path>, "branch": <type>/<slug>}` — take
+`WORKDIR` from the `workdir` field. On a failure after the worktree was
+created, it prints the recovery commands for the debris; run them before
+retrying.
 
 `WORKDIR` is where Stages 1–5 operate. From here on, every shell command for those
 stages uses an explicit `cd "$WORKDIR" && …` in worktree mode (a
@@ -428,8 +436,9 @@ Exit codes are the verdict — 0 **green**, 1 **pending**, 2 **failure**, 3
 - **green** — exit the loop and proceed to the on-green steps.
 - **failure** — enter the autofix branch; the report lists each failed check's
   name, conclusion, and workflow run-id, plus a stable `signature` string.
-- **non-verdict** (empty check set, malformed payload, or a failed `gh` call) —
-  never green, never merge; re-poll or escalate.
+- **non-verdict** (empty check set, malformed or truncated payload, a failed
+  `gh` call, or a crash in the script itself) — never green, never merge;
+  re-poll or escalate.
 
 **Autofix branch — the loop owns the cap and the stop.** For each failed run-id
 in the report, pull its logs
@@ -440,8 +449,10 @@ and re-poll. Bounded by:
 - **Max 3 fix iterations.** After the 3rd failed cycle, stop — do not loop again.
 - **Repeated-signature stop.** If the report's `signature` string is identical
   across 2+ iterations (the PR #38 pattern), stop immediately — re-running an
-  unchanged failure is not progress. This is a string comparison, not a
-  judgment call.
+  unchanged failure is not progress. The signature hashes check names plus each
+  failure's first output line, so distinct root causes can occasionally collide
+  on a stock title; on a repeated signature, glance at the logs to confirm it
+  is genuinely the same failure before stopping.
 
 On either stop, append a `## CI Failures Unresolved` section to the PR body
 (`gh pr edit <PR> --body-file <tmp>`), do **not** merge red, and take the
@@ -452,11 +463,14 @@ touch the VN2 `4992.20` baseline, or make unrelated workflow changes to turn CI
 green.
 
 **On green** (and Stage 4 gate satisfied), record progress
-(`run_state.py set <slug> head_sha $HEAD_SHA`, `set <slug> pr <PR>`) and hand
-merge + cleanup to the merge script — it verifies the PR body carries
-`closes #N` (refusing to merge otherwise; Stage 0c guarantees the issue
-exists), squash-merges, and runs the merge-gated cleanup for the mode
-(policy rationale in `references/ci-and-merge.md`).
+(`uv run python .agents/skills/go/scripts/run_state.py set <slug> head_sha
+$HEAD_SHA`, then `set <slug> pr <PR>`) and hand merge + cleanup to the merge
+script — it verifies the PR body carries `closes #N` (refusing to merge
+otherwise; pass `--issue <N>` so a stale template handle for a different issue
+cannot satisfy the gate), squash-merges pinned to the verified `HEAD_SHA`
+(GitHub refuses the merge if the branch head moved after the green verdict),
+and runs the merge-gated cleanup for the mode (policy rationale in
+`references/ci-and-merge.md`).
 
 In **handoff mode** (`--no-merge`), stop here before merge. Do not delete the
 remote branch, local branch, or worktree. Record the exact PR URL, head SHA, base
@@ -469,17 +483,26 @@ In **ship mode**, from `$MAIN`:
 
 ```bash
 uv run python .agents/skills/go/scripts/merge_cleanup.py merge <PR> \
-  --mode <direct|worktree> --branch <type>/<slug>
+  --mode <direct|worktree> --branch <type>/<slug> --head-sha $HEAD_SHA --issue <N>
 ```
 
-**Cleanup is merge-gated** — the script runs it only after the squash-merge
-command confirms success; every failure path preserves the branch, worktree,
-and PR. A squash-merged branch never shows as "merged" to git, so the script
-force-deletes with `git branch -D` (not `-d`). In **direct mode** it returns to
-`main`, fast-forwards, and drops the branch; in **worktree mode** it removes
-the worktree and drops the branch **without** `git checkout main`/`git pull` in
-the main checkout — preserving the user's branch and dirty tree is the whole
-point.
+**Cleanup is merge-gated** — the script runs it only after the merge is
+confirmed against the PR's actual state; every pre-merge failure path preserves
+the branch, worktree, and PR. Retries are idempotent: an already-merged PR
+skips straight to cleanup. A squash-merged branch never shows as "merged" to
+git, so the script force-deletes with `git branch -D` (not `-d`). In **direct
+mode** it returns to `main`, fast-forwards, and drops the branch; in
+**worktree mode** it removes the worktree (refusing, rather than destroying,
+uncommitted work inside it) and drops the branch **without**
+`git checkout main`/`git pull` in the main checkout — preserving the user's
+branch and dirty tree is the whole point. Both modes finish by deleting the
+remote branch.
+
+Read its exit code precisely: **0** merged + cleaned, **1** not merged
+(refused or failed — nothing deleted; take the preserve path), **2 merged but
+cleanup incomplete** — the PR **is** merged; do *not* report `failed` or
+re-merge, finish the printed failing step manually and continue to Stage 6 as
+`shipped`.
 
 **Preserve path (failure / any short-stop).** If the inline CI loop cannot get
 the PR green, or any stage stopped short of the mode's completion point, do **not** clean

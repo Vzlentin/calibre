@@ -1,4 +1,4 @@
-"""Unit tests for the /go skill scripts in .agents/skills/go/scripts.
+"""Exercise the /go skill scripts in .agents/skills/go/scripts.
 
 Fixture-driven — no test here touches the network. Verdict/decision logic is
 exercised as pure functions over canned payloads; the subprocess-facing
@@ -195,11 +195,54 @@ def test_verdict_empty_check_set_is_non_verdict_never_green() -> None:
     assert report["verdict"] == "non-verdict"
 
 
-@pytest.mark.parametrize("payload", ["not json at all", "{}", '{"check_runs": 3}'])
+@pytest.mark.parametrize(
+    "payload",
+    ["not json at all", "{}", '{"check_runs": 3}', '{"check_runs": ["not-a-dict"]}'],
+)
 def test_verdict_malformed_payload_is_non_verdict(payload: str) -> None:
     code, report = ci_verdict.evaluate(payload)
     assert code == ci_verdict.EXIT_NON_VERDICT
     assert report["verdict"] == "non-verdict"
+
+
+def test_verdict_truncated_payload_is_non_verdict_never_green() -> None:
+    payload = json.dumps(
+        {
+            "total_count": 31,
+            "check_runs": [{"name": "tests", "status": "completed", "conclusion": "success"}],
+        }
+    )
+    code, report = ci_verdict.evaluate(payload)
+    assert code == ci_verdict.EXIT_NON_VERDICT
+    assert "truncated" in report["reason"]
+
+
+def test_cmd_verdict_wires_gh_output_into_evaluate(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeRunner([(["gh", "api"], 0, _fixture("check_runs_green.json"))])
+    monkeypatch.setattr(ci_verdict, "_run", fake)
+    assert ci_verdict.cmd_verdict("abc123") == ci_verdict.EXIT_GREEN
+    assert json.loads(capsys.readouterr().out)["verdict"] == "green"
+    (api_call,) = fake.calls
+    assert "per_page=100" in api_call[-1]
+
+
+def test_cmd_verdict_gh_failure_is_non_verdict(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeRunner([(["gh", "api"], 1, "")])
+    monkeypatch.setattr(ci_verdict, "_run", fake)
+    assert ci_verdict.cmd_verdict("abc123") == ci_verdict.EXIT_NON_VERDICT
+    assert json.loads(capsys.readouterr().out)["verdict"] == "non-verdict"
+
+
+def test_main_crash_exits_non_verdict_not_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(sha: str) -> int:
+        raise FileNotFoundError("gh not on PATH")
+
+    monkeypatch.setattr(ci_verdict, "cmd_verdict", boom)
+    assert ci_verdict.main(["verdict", "abc123"]) == ci_verdict.EXIT_NON_VERDICT
 
 
 def test_failure_signature_stable_across_identical_failures() -> None:
@@ -278,6 +321,30 @@ def test_provision_rejects_branch_without_type_prefix(
     assert "<type>/<slug>" in capsys.readouterr().err
 
 
+def test_cmd_decide_prints_mode_and_main_path(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(scratch_repo)
+    assert provision_worktree.cmd_decide() == 0
+    decision = json.loads(capsys.readouterr().out)
+    assert decision["mode"] == "direct"
+    assert Path(decision["main"]) == scratch_repo
+
+    (scratch_repo / "dirty.txt").write_text("x\n", encoding="utf-8")
+    _git(["add", "dirty.txt"], cwd=scratch_repo)
+    assert provision_worktree.cmd_decide() == 0
+    assert json.loads(capsys.readouterr().out)["mode"] == "worktree"
+
+
+def test_cmd_decide_fails_when_git_state_unreadable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeRunner([(["git"], 1, "")])
+    monkeypatch.setattr(provision_worktree, "_run", fake)
+    assert provision_worktree.cmd_decide() == 1
+    assert capsys.readouterr().out == "", "no decision JSON may be printed on failure"
+
+
 def test_provision_aborts_on_first_failed_setup_step(
     scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -314,39 +381,230 @@ def test_provision_aborts_on_first_failed_setup_step(
     assert executed == ["step-one"], "a failed step must abort before later steps run"
 
 
+def _provision_fakes(
+    scratch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    venv_gate_rc: int = 0,
+    worktree_contents: tuple[str, ...] = (),
+) -> FakeRunner:
+    """Fake out git/uv and setup steps so cmd_provision reaches its gates.
+
+    The fake ``git worktree add`` creates the worktree directory (plus any
+    ``worktree_contents`` subpaths) like the real command would.
+    """
+    cursor_dir = scratch_repo / ".cursor"
+    cursor_dir.mkdir(exist_ok=True)
+    (cursor_dir / "worktrees.json").write_text(
+        json.dumps({"setup-worktree-unix": ["step-ok"]}), encoding="utf-8"
+    )
+    fake = FakeRunner(
+        [
+            (
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                0,
+                f"{(scratch_repo / '.git').as_posix()}\n",
+            ),
+            (["git", "rev-parse", "--verify"], 1, ""),
+            (["git", "fetch", "origin"], 0, ""),
+            (["uv", "run", "python"], venv_gate_rc, ""),
+        ]
+    )
+    original_call = fake.__call__
+
+    def call(args: list[str], cwd: object = None) -> subprocess.CompletedProcess[str]:
+        if args[:3] == ["git", "worktree", "add"]:
+            fake.calls.append(list(args))
+            worktree = Path(args[3])
+            for sub in worktree_contents or ("",):
+                (worktree / sub).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return original_call(args, cwd)
+
+    monkeypatch.setattr(provision_worktree, "_run", call)
+    monkeypatch.setattr(provision_worktree, "_run_step", lambda step, cwd: 0)
+    monkeypatch.chdir(scratch_repo)
+    return fake
+
+
+def test_provision_fails_when_venv_gate_fails(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _provision_fakes(scratch_repo, monkeypatch, venv_gate_rc=1)
+    assert provision_worktree.cmd_provision("feat/fresh", require_m5=False) == 1
+    assert "venv gate failed" in capsys.readouterr().err
+
+
+def test_provision_require_m5_fails_without_data(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _provision_fakes(scratch_repo, monkeypatch)
+    assert provision_worktree.cmd_provision("feat/fresh", require_m5=True) == 1
+    assert "no data/m5" in capsys.readouterr().err
+
+
+def test_provision_require_m5_passes_with_data(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _provision_fakes(scratch_repo, monkeypatch, worktree_contents=("data/m5",))
+    assert provision_worktree.cmd_provision("feat/fresh", require_m5=True) == 0
+
+
+def test_provision_success_prints_workdir_json(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _provision_fakes(scratch_repo, monkeypatch)
+    assert provision_worktree.cmd_provision("feat/fresh", require_m5=False) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{") :])
+    assert payload == {
+        "workdir": str(scratch_repo / ".worktrees" / "fresh"),
+        "branch": "feat/fresh",
+    }
+
+
 # --- merge_cleanup -----------------------------------------------------------
 
 
-def _merge_script(body: str, merge_rc: int = 0, current_branch: str = "feat/x") -> FakeRunner:
+HEAD_SHA = "a" * 40
+
+
+def _pr_view(body: str, state: str = "OPEN") -> str:
+    return json.dumps({"state": state, "body": body})
+
+
+def _merge_script(
+    body: str,
+    merge_rc: int = 0,
+    current_branch: str = "feat/x",
+    extra: list[tuple[list[str], int, str]] | None = None,
+) -> FakeRunner:
     return FakeRunner(
         [
-            (["gh", "pr", "view"], 0, body),
+            *(extra or []),
+            (["gh", "pr", "view"], 0, _pr_view(body)),
             (["gh", "pr", "merge"], merge_rc, ""),
             (["git", "branch", "--show-current"], 0, current_branch + "\n"),
         ]
     )
 
 
+def _merge(fake: FakeRunner, monkeypatch: pytest.MonkeyPatch, **kwargs: object) -> int:
+    monkeypatch.setattr(merge_cleanup, "_run", fake)
+    args = {
+        "pr": "12",
+        "mode": "worktree",
+        "branch": "feat/x",
+        "head_sha": HEAD_SHA,
+        "no_merge": False,
+    }
+    args.update(kwargs)
+    return merge_cleanup.cmd_merge(**args)  # type: ignore[arg-type]
+
+
 def test_merge_refuses_without_closes_handle(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _merge_script("A PR body that mentions #12 but carries no close handle.")
-    monkeypatch.setattr(merge_cleanup, "_run", fake)
-    assert merge_cleanup.cmd_merge("12", "direct", "feat/x", no_merge=False) == 1
-    assert ["gh", "pr", "merge", "12", "--squash", "--delete-branch"] not in fake.calls
+    assert _merge(fake, monkeypatch, mode="direct") == merge_cleanup.EXIT_NOT_MERGED
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in fake.calls)
+
+
+def test_merge_refuses_close_handle_for_wrong_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _merge_script("Template junk.\n\ncloses #12")
+    assert _merge(fake, monkeypatch, issue=34) == merge_cleanup.EXIT_NOT_MERGED
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in fake.calls)
+
+
+def test_merge_is_pinned_to_the_verified_head_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _merge_script("closes #12")
+    assert _merge(fake, monkeypatch) == merge_cleanup.EXIT_MERGED
+    assert [
+        "gh",
+        "pr",
+        "merge",
+        "12",
+        "--squash",
+        "--match-head-commit",
+        HEAD_SHA,
+    ] in fake.calls
+    assert not any("--delete-branch" in c for c in fake.calls), (
+        "gh's own local delete fights the script's cleanup (fails on worktree checkouts)"
+    )
 
 
 def test_cleanup_skipped_when_merge_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _merge_script("Body.\n\ncloses #12", merge_rc=1)
-    monkeypatch.setattr(merge_cleanup, "_run", fake)
-    assert merge_cleanup.cmd_merge("12", "worktree", "feat/x", no_merge=False) == 1
+    assert _merge(fake, monkeypatch) == merge_cleanup.EXIT_NOT_MERGED
     git_calls = [c for c in fake.calls if c[0] == "git"]
     assert git_calls == [], "no cleanup command may run after a failed merge"
 
 
+def test_merge_failure_rechecks_state_and_cleans_up_when_actually_merged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views = iter([_pr_view("closes #12", "OPEN"), _pr_view("closes #12", "MERGED")])
+    fake = FakeRunner(
+        [
+            (["gh", "pr", "merge"], 1, ""),
+            (["git", "branch", "--show-current"], 0, "docs/other\n"),
+        ]
+    )
+    original_call = fake.__call__
+
+    def call(args: list[str], cwd: object = None) -> subprocess.CompletedProcess[str]:
+        if args[:3] == ["gh", "pr", "view"]:
+            fake.calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, stdout=next(views), stderr="")
+        return original_call(args, cwd)
+
+    monkeypatch.setattr(merge_cleanup, "_run", call)
+    result = merge_cleanup.cmd_merge("12", "worktree", "feat/x", HEAD_SHA, no_merge=False)
+    assert result == merge_cleanup.EXIT_MERGED, (
+        "gh pr merge can exit non-zero after the API merge succeeded; trust the PR state"
+    )
+
+
+def test_already_merged_pr_retry_runs_cleanup_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRunner(
+        [
+            (["gh", "pr", "view"], 0, _pr_view("closes #12", "MERGED")),
+            (["git", "branch", "--show-current"], 0, "docs/other\n"),
+        ]
+    )
+    assert _merge(fake, monkeypatch) == merge_cleanup.EXIT_MERGED
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in fake.calls), (
+        "retry on a merged PR must be idempotent — cleanup only, no second merge"
+    )
+    assert ["git", "worktree", "remove", ".worktrees/x"] in fake.calls
+
+
+def test_cleanup_step_failure_reports_merged_but_incomplete(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _merge_script(
+        "closes #12",
+        current_branch="docs/other",
+        extra=[(["git", "worktree", "remove"], 1, "")],
+    )
+    assert _merge(fake, monkeypatch) == merge_cleanup.EXIT_CLEANUP_INCOMPLETE
+    assert ["git", "branch", "-D", "feat/x"] not in fake.calls, (
+        "a failed cleanup step must abort before later steps run"
+    )
+    assert "do not treat the PR as unmerged" in capsys.readouterr().err
+
+
+def test_dirty_worktree_refuses_removal_without_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands = merge_cleanup.cleanup_commands("worktree", "feat/x", main_on_main=False)
+    assert ["git", "worktree", "remove", ".worktrees/x"] in commands
+    assert not any("--force" in c for c in commands if c[:3] == ["git", "worktree", "remove"]), (
+        "removal must not force-destroy uncommitted work in the worktree"
+    )
+
+
 def test_no_merge_preserves_everything(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _merge_script("closes #12")
-    monkeypatch.setattr(merge_cleanup, "_run", fake)
-    assert merge_cleanup.cmd_merge("12", "worktree", "feat/x", no_merge=True) == 0
-    assert fake.calls == [["gh", "pr", "view", "12", "--json", "body", "--jq", ".body"]], (
+    assert _merge(fake, monkeypatch, no_merge=True) == merge_cleanup.EXIT_MERGED
+    assert fake.calls == [["gh", "pr", "view", "12", "--json", "state,body"]], (
         "--no-merge must stop after the close-handle check"
     )
 
@@ -355,24 +613,23 @@ def test_worktree_cleanup_never_touches_main_checkout_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _merge_script("closes #12", current_branch="docs/dirty-branch")
-    monkeypatch.setattr(merge_cleanup, "_run", fake)
-    assert merge_cleanup.cmd_merge("12", "worktree", "feat/x", no_merge=False) == 0
+    assert _merge(fake, monkeypatch) == merge_cleanup.EXIT_MERGED
 
     git_calls = [c for c in fake.calls if c[0] == "git" and c[1] != "branch"]
     commands = {tuple(c[:2]) for c in git_calls}
     assert ("git", "checkout") not in commands
     assert ("git", "pull") not in commands
-    assert ["git", "worktree", "remove", "--force", ".worktrees/x"] in fake.calls
+    assert ["git", "worktree", "remove", ".worktrees/x"] in fake.calls
     assert ["git", "branch", "-D", "feat/x"] in fake.calls, "squash merge requires -D"
     assert ["git", "fetch", "origin", "main:main"] in fake.calls
+    assert ["git", "push", "origin", "--delete", "feat/x"] in fake.calls
 
 
 def test_worktree_cleanup_skips_main_ref_update_when_user_on_main(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _merge_script("closes #12", current_branch="main")
-    monkeypatch.setattr(merge_cleanup, "_run", fake)
-    assert merge_cleanup.cmd_merge("12", "worktree", "feat/x", no_merge=False) == 0
+    assert _merge(fake, monkeypatch) == merge_cleanup.EXIT_MERGED
     assert ["git", "fetch", "origin", "main:main"] not in fake.calls
 
 
@@ -380,16 +637,34 @@ def test_direct_cleanup_returns_to_main_and_force_deletes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _merge_script("Closes #34")
-    monkeypatch.setattr(merge_cleanup, "_run", fake)
-    assert merge_cleanup.cmd_merge("34", "direct", "feat/y", no_merge=False) == 0
+    result = _merge(fake, monkeypatch, pr="34", mode="direct", branch="feat/y")
+    assert result == merge_cleanup.EXIT_MERGED
     git_calls = [
-        c for c in fake.calls if c[0] == "git" and c[:3] != ["git", "branch", "--show-current"]
+        c
+        for c in fake.calls
+        if c[0] == "git"
+        and c[:3] != ["git", "branch", "--show-current"]
+        and c[:2] != ["git", "push"]
     ]
     assert git_calls == [
         ["git", "checkout", "main"],
         ["git", "pull", "--ff-only"],
         ["git", "branch", "-D", "feat/y"],
     ]
+
+
+def test_remote_branch_delete_failure_only_warns(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _merge_script(
+        "closes #12",
+        current_branch="docs/other",
+        extra=[(["git", "push", "origin", "--delete"], 1, "")],
+    )
+    assert _merge(fake, monkeypatch) == merge_cleanup.EXIT_MERGED, (
+        "a leftover remote ref is litter, not a cleanup failure"
+    )
+    assert "warning" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -406,3 +681,16 @@ def test_direct_cleanup_returns_to_main_and_force_deletes(
 )
 def test_has_close_handle(body: str, expected: bool) -> None:
     assert merge_cleanup.has_close_handle(body) is expected
+
+
+@pytest.mark.parametrize(
+    ("body", "issue", "expected"),
+    [
+        ("closes #12", 12, True),
+        ("closes #12", 34, False),
+        ("closes #123", 12, False),
+        ("Closed #7 and closes #12", 7, True),
+    ],
+)
+def test_has_close_handle_pinned_to_issue(body: str, issue: int, expected: bool) -> None:
+    assert merge_cleanup.has_close_handle(body, issue) is expected

@@ -11,17 +11,25 @@ This file keeps the policy behind them.
 
 A verdict needs `status` **and** `conclusion` together: a still-pending run has
 no conclusion yet, so any filter that only looks for failures reads "pending"
-as "no failures → green" and merges early. Equally, an empty check set, a
-malformed payload, or a failed `gh` call is a **non-verdict** — never green.
-`ci_verdict.py` encodes exactly this; trust its exit code over any ad-hoc
-re-derivation.
+as "no failures → green" and merges early. `skipped` and `neutral` conclusions
+are non-blocking (conditional jobs produce them on runs where they don't
+apply) and must not read as red. Equally, an empty check set, a malformed or
+truncated payload (`total_count` disagreeing with the returned page), or a
+failed `gh` call is a **non-verdict** — never green. `ci_verdict.py` encodes
+exactly this; trust its exit code over any ad-hoc re-derivation.
 
 ## Cleanup policy (merge-gated)
 
-Preserving is the default; cleanup is the exception, run only after
-`gh pr merge --squash` confirms. A squash-merged branch never shows as
-"merged" to git, so the local branch is force-deleted (`git branch -D`, not
-`-d`).
+Preserving is the default; cleanup is the exception, run only after the merge
+is confirmed against the PR's actual state (`gh pr merge` can exit non-zero
+after the API merge succeeded, and an already-merged PR on retry skips
+straight to cleanup). The merge is pinned with `--match-head-commit` to the
+head SHA the green verdict was computed for, so a branch that moved after the
+verdict refuses to merge. A squash-merged branch never shows as "merged" to
+git, so the local branch is force-deleted (`git branch -D`, not `-d`) — but
+the worktree removal is **not** forced: uncommitted work inside the worktree
+refuses the removal (exit 2, merged-but-cleanup-incomplete) instead of being
+destroyed.
 
 - **Direct mode** (the main checkout is on the PR branch from Stage 1): return
   to `main`, fast-forward, drop the branch.
@@ -32,6 +40,14 @@ Preserving is the default; cleanup is the exception, run only after
   `git fetch origin main:main`, skipped when the user is sitting on `main`
   (a checked-out branch cannot be moved by fetch).
 
-**Preserve path.** `--no-merge`, a refused merge (no `closes #N` handle), a
-failed merge command, or any failed cleanup step leaves the branch, worktree,
-and PR intact for resume/debug.
+Both modes finish by deleting the remote branch (`gh pr merge
+--delete-branch` is deliberately not used: its local-delete half fails on
+worktree checkouts and misreports a successful merge as a failure). A failed
+remote delete only warns — a leftover remote ref is litter, not a safety
+problem.
+
+**Preserve path.** `--no-merge`, a refused merge (no `closes #N` handle), or a
+failed merge command leaves the branch, worktree, and PR intact for
+resume/debug (exit 1 — nothing was deleted). A cleanup step failing **after**
+the merge is exit 2: the PR is merged; finish the printed step manually rather
+than treating the run as unmerged.
