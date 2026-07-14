@@ -561,7 +561,8 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
     contract = next(
         step for step in unit["steps"] if step.get("name") == "Stage 3 automation contracts"
     )
-    assert contract["if"] == "steps.present.outputs.exists == 'true'"
+    assert "if" not in contract
+    assert "continue-on-error" not in contract
     assert contract["run"].strip() == (
         "uv sync --project newcalibre --locked --group dev\n"
         "uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py"
@@ -579,6 +580,18 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
 
     workflow = yaml.safe_load(ROOT_WORKFLOW.read_text(encoding="utf-8"))
     assert "stage3-automation-contract" not in workflow["jobs"]
+    root_test = workflow["jobs"]["test"]
+    root_contract = next(
+        step for step in root_test["steps"] if step.get("name") == "Stage 3 automation contracts"
+    )
+    assert "if" not in root_contract
+    assert "continue-on-error" not in root_contract
+    assert root_contract["run"].strip() == contract["run"].strip()
+    root_setup = next(
+        step for step in root_test["steps"] if step.get("uses") == "astral-sh/setup-uv@v4"
+    )
+    assert "if" not in root_setup
+    assert root_test["steps"].index(root_setup) < root_test["steps"].index(root_contract)
 
     expected_successor_only_patterns = {
         "newcalibre/**",

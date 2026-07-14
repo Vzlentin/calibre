@@ -88,7 +88,6 @@ jobs:
           rsync -a --exclude '.git' --exclude 'captures/' newcalibre/ "$export_root/newcalibre/"
           echo "EXPORT_ROOT=$export_root" >> "$GITHUB_ENV"
       - name: Stage 3 automation contracts
-        if: steps.present.outputs.exists == 'true'
         run: |
           uv sync --project newcalibre --locked --group dev
           uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py
