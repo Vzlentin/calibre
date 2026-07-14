@@ -558,6 +558,9 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
     assert "paths-ignore" not in pull_request
     assert unit["if"] == "github.event_name == 'push' || github.event_name == 'pull_request'"
     assert "needs" not in unit
+    assert "continue-on-error" not in unit
+    presence = next(step for step in unit["steps"] if step.get("name") == "Successor presence")
+    setup = next(step for step in unit["steps"] if step.get("uses") == "astral-sh/setup-uv@v4")
     contract = next(
         step for step in unit["steps"] if step.get("name") == "Stage 3 automation contracts"
     )
@@ -575,12 +578,39 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
         for step in unit["steps"]
         if step.get("name") == "Provision export venv (network still on)"
     )
-    assert unit["steps"].index(build_export) < unit["steps"].index(contract)
-    assert unit["steps"].index(contract) < unit["steps"].index(provision_export)
+    canaries = next(step for step in unit["steps"] if step.get("name") == "Isolation canaries")
+    tier1 = next(step for step in unit["steps"] if step.get("name") == "Tier 1 (network disabled)")
+    assert "if" not in presence
+    assert presence["run"] == (
+        'echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" '
+        '>> "$GITHUB_OUTPUT"'
+    )
+    guarded_steps = (setup, build_export, provision_export, canaries, tier1)
+    for step in guarded_steps:
+        assert step["if"] == "steps.present.outputs.exists == 'true'"
+        assert "continue-on-error" not in step
+    assert provision_export["working-directory"] == "${{ env.EXPORT_ROOT }}/newcalibre"
+    assert provision_export["run"] == "uv sync --locked --group dev"
+    assert canaries["working-directory"] == "${{ env.EXPORT_ROOT }}/newcalibre"
+    assert 'test ! -e "$EXPORT_ROOT/calibre"' in canaries["run"]
+    assert 'test ! -e "$EXPORT_ROOT/benchmarks"' in canaries["run"]
+    assert 'test ! -e "$EXPORT_ROOT/newcalibre/.git"' in canaries["run"]
+    assert 'find "$EXPORT_ROOT" -type d -name captures' in canaries["run"]
+    assert "importlib.util.find_spec('calibre')" in canaries["run"]
+    assert tier1["working-directory"] == "${{ env.EXPORT_ROOT }}/newcalibre"
+    assert "sudo unshare -n" in tier1["run"]
+    assert "uv run --no-sync pytest tests/tier1" in tier1["run"]
+    critical_order = (presence, setup, build_export, contract, provision_export, canaries, tier1)
+    assert [unit["steps"].index(step) for step in critical_order] == sorted(
+        unit["steps"].index(step) for step in critical_order
+    )
 
     workflow = yaml.safe_load(ROOT_WORKFLOW.read_text(encoding="utf-8"))
     assert "stage3-automation-contract" not in workflow["jobs"]
     root_test = workflow["jobs"]["test"]
+    assert "if" not in root_test
+    assert "needs" not in root_test
+    assert "continue-on-error" not in root_test
     root_contract = next(
         step for step in root_test["steps"] if step.get("name") == "Stage 3 automation contracts"
     )
