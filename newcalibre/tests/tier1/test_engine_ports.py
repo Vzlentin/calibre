@@ -195,6 +195,23 @@ def test_ledger_sink_exposes_only_a_period_bound_compact_settlement_snapshot() -
     assert not hasattr(snapshot, "settlements")
 
 
+def test_ledger_sink_refuses_initial_arrivals_without_a_decision_session() -> None:
+    session = SessionIdentity.derive(
+        tenant="tenant-a",
+        series_keys=("a",),
+        calendar=CALENDAR,
+        horizon=2,
+        model_config={"backend": "fixture", "name": "fixture"},
+    )
+
+    with pytest.raises(LedgerError, match="require a session decision configuration"):
+        InMemoryLedgerSink(
+            session=session,
+            calendar=CALENDAR,
+            initial_arrivals={("a", ORIGIN_DATE): 1.0},
+        )
+
+
 def test_ledger_sink_rejects_a_misattributed_origin_without_a_partial_commit() -> None:
     session = _session()
     sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)

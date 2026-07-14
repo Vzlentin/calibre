@@ -1,5 +1,6 @@
 """Expose the bounded VN2 data, configuration, and local forecasting seams."""
 
+from newcalibre.protocols.vn2.adapter import VN2RunResult, run_vn2
 from newcalibre.protocols.vn2.config import (
     VN2ColumnConfig,
     VN2ConfigError,
@@ -44,6 +45,7 @@ __all__ = [
     "VN2InputFile",
     "VN2InputInventory",
     "VN2ProtocolConfig",
+    "VN2RunResult",
     "VN2RoundInput",
     "VN2SeasonalNaiveQuantileAdapter",
     "VN2WeeklyActuals",
@@ -53,5 +55,6 @@ __all__ = [
     "load_vn2_dataset",
     "load_vn2_inventory",
     "resolve_vn2_adapter",
+    "run_vn2",
     "verify_vn2_inputs",
 ]

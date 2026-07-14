@@ -339,7 +339,7 @@ def _parse_decision(
 ]:
     payload = _exact_mapping(value, keys=_DECISION_KEYS, surface="decision")
     rounds = _positive_integer(payload["round_count"], name="decision round_count")
-    lead_time = _nonnegative_integer(payload["lead_time"], name="decision lead_time")
+    lead_time = _positive_integer(payload["lead_time"], name="decision lead_time")
     review_period = _positive_integer(payload["review_period"], name="decision review_period")
     timing = DecisionTiming(lead_time=lead_time, review_period=review_period)
     protection = _positive_integer(payload["protection_period"], name="decision protection_period")

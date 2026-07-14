@@ -63,6 +63,7 @@ ORIGINS = (
     pd.Timestamp("2026-01-06"),
     pd.Timestamp("2026-01-09"),
 )
+SETTLEMENT_END = pd.Timestamp("2026-01-11")
 INITIAL_POSITION = InventoryPosition(on_hand=100.0, on_order=0.0, backorders=0.0)
 
 type FitHistory = tuple[pd.Timestamp, tuple[pd.Timestamp, ...], tuple[float, ...]]
@@ -351,12 +352,14 @@ def _request(
     session: SessionIdentity,
     *,
     origins: Sequence[pd.Timestamp] = ORIGINS,
+    settlement_end: pd.Timestamp = SETTLEMENT_END,
     positions: Mapping[str, InventoryPosition] | None = None,
     actuals_semantics: ActualsSemantics = ActualsSemantics.DEMAND,
 ) -> TimeLoopRequest:
     return TimeLoopRequest(
         session=session,
         origins=origins,
+        settlement_end=settlement_end,
         scope=Scope.LOCAL,
         calibration_partitions=("global",),
         initial_inventory_positions={"a": INITIAL_POSITION} if positions is None else positions,
@@ -385,10 +388,70 @@ def test_request_requires_explicit_actuals_semantics_before_effects() -> None:
         TimeLoopRequest(
             session=session,
             origins=ORIGINS,
+            settlement_end=SETTLEMENT_END,
             scope=Scope.LOCAL,
             calibration_partitions=("global",),
             initial_inventory_positions={"a": INITIAL_POSITION},
         )  # type: ignore[call-arg]
+
+    assert runtime.actuals.calls == []
+    _assert_no_effects(runtime)
+
+
+def test_explicit_settlement_end_extends_drain_without_a_spurious_decision() -> None:
+    timing = DecisionTiming(lead_time=1, review_period=2)
+    session = _session(timing=timing)
+    origins = tuple(pd.date_range("2026-01-04", periods=4, freq="D"))
+    settlement_end = pd.Timestamp("2026-01-09")
+    runtime = _runtime(
+        session=session,
+        forecast_panel=_panel(range(101, 112)),
+        actuals=RecordingActualsSource(_panel(range(1, 12))),
+    )
+
+    result = TimeLoop(
+        engine=runtime.engine,
+        actuals_source=runtime.actuals,
+        ledger_sink=runtime.sink,
+        request=_request(
+            session,
+            origins=origins,
+            settlement_end=settlement_end,
+        ),
+    ).run()
+
+    assert result.settlement_periods == tuple(pd.date_range(origins[0], settlement_end, freq="D"))
+    assert result.decision_origins == (origins[0], origins[2])
+    assert tuple(order.origin for order in runtime.sink.orders) == result.decision_origins
+    assert all(order.origin < origins[-1] for order in runtime.sink.orders)
+    assert tuple(record.period for record in runtime.sink.settlements[-2:]) == (
+        pd.Timestamp("2026-01-08"),
+        settlement_end,
+    )
+
+
+@pytest.mark.parametrize(
+    ("settlement_end", "match"),
+    [
+        (pd.Timestamp("2026-01-09 12:00:00"), "calendar|grid|member"),
+        (pd.Timestamp("2026-01-08"), "last origin"),
+        (pd.Timestamp("2026-01-10"), "final decision.*lead"),
+    ],
+)
+def test_constructor_rejects_invalid_explicit_settlement_end_before_effects(
+    settlement_end: pd.Timestamp,
+    match: str,
+) -> None:
+    session = _session()
+    runtime = _runtime(session=session, forecast_panel=_panel(range(101, 112)))
+
+    with pytest.raises(TimeLoopError, match=match):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(session, settlement_end=settlement_end),
+        )
 
     assert runtime.actuals.calls == []
     _assert_no_effects(runtime)
@@ -485,6 +548,91 @@ def test_constructor_rejects_invalid_initial_inventory_before_effects(
             actuals_source=runtime.actuals,
             ledger_sink=runtime.sink,
             request=_request(session, positions={"a": position}),
+        )
+
+    assert runtime.actuals.calls == []
+    _assert_no_effects(runtime)
+
+
+def test_constructor_requires_initial_on_order_to_match_seeded_arrivals() -> None:
+    session = _session()
+    sink = InMemoryLedgerSink(
+        session=session,
+        calendar=CALENDAR,
+        initial_arrivals={
+            ("a", ORIGINS[0]): 2.0,
+            ("a", CALENDAR.advance(ORIGINS[0], 1)): 3.0,
+        },
+    )
+    runtime = _runtime(
+        session=session,
+        forecast_panel=_panel(range(101, 112)),
+        sink=sink,
+    )
+
+    with pytest.raises(TimeLoopError, match="does not match the compact ledger index"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(
+                session,
+                positions={"a": InventoryPosition(10.0, 4.0, 0.0)},
+            ),
+        )
+
+    assert runtime.actuals.calls == []
+    _assert_no_effects(runtime)
+
+
+@pytest.mark.parametrize(
+    ("settlement_end", "error", "match"),
+    [
+        ("2026-01-11", TypeError, "pandas Timestamp"),
+        (pd.Timestamp("2026-01-11", tz="UTC"), TimeLoopError, "timezone-naive"),
+    ],
+)
+def test_request_rejects_invalid_settlement_end_values(
+    settlement_end: object,
+    error: type[Exception],
+    match: str,
+) -> None:
+    session = _session()
+
+    with pytest.raises(error, match=match):
+        TimeLoopRequest(
+            session=session,
+            origins=ORIGINS,
+            settlement_end=settlement_end,  # type: ignore[arg-type]
+            scope=Scope.LOCAL,
+            calibration_partitions=("global",),
+            initial_inventory_positions={"a": INITIAL_POSITION},
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
+
+
+def test_constructor_rejects_seeded_arrival_beyond_settlement_end_before_effects() -> None:
+    session = _session()
+    sink = InMemoryLedgerSink(
+        session=session,
+        calendar=CALENDAR,
+        initial_arrivals={("a", CALENDAR.advance(SETTLEMENT_END, 1)): 2.0},
+    )
+    runtime = _runtime(
+        session=session,
+        forecast_panel=_panel(range(101, 112)),
+        sink=sink,
+    )
+
+    with pytest.raises(TimeLoopError, match="settlement window.*open-order arrival"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(
+                session,
+                positions={"a": InventoryPosition(100.0, 2.0, 0.0)},
+            ),
         )
 
     assert runtime.actuals.calls == []
@@ -673,7 +821,11 @@ def test_resume_refuses_changed_actuals_semantics_before_reading_actuals(
         engine=initial.engine,
         actuals_source=demand_actuals,
         ledger_sink=sink,
-        request=_request(session, origins=committed_origins),
+        request=_request(
+            session,
+            origins=committed_origins,
+            settlement_end=CALENDAR.advance(committed_origins[-1], TIMING.lead_time),
+        ),
     ).run()
     durable_counts = (len(sink.forecasts), len(sink.orders), len(sink.settlements))
     durable_states = dict(states.states)
@@ -733,6 +885,7 @@ def test_time_loop_requests_actuals_and_settles_only_the_session_decision_series
         request=_request(
             session,
             origins=origins,
+            settlement_end=pd.Timestamp("2026-01-06"),
             positions={"bottom": INITIAL_POSITION},
         ),
     ).run()
@@ -769,7 +922,11 @@ def test_request_ending_before_the_durable_frontier_is_rejected() -> None:
             engine=runtime.engine,
             actuals_source=runtime.actuals,
             ledger_sink=runtime.sink,
-            request=_request(session, origins=(ORIGINS[0],)),
+            request=_request(
+                session,
+                origins=(ORIGINS[0],),
+                settlement_end=pd.Timestamp("2026-01-06"),
+            ),
         )
 
     assert tuple(runtime.actuals.calls) == calls_before

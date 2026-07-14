@@ -836,6 +836,14 @@ class Ledger:
                 issuances=row_issuances,
             )
 
+        for quantile_group in (group for group in bound_groups if len(group) == 1):
+            issued = [quantile_group in row.issuances for row in staged_rows.values()]
+            if any(issued) and not all(issued):
+                raise LedgerError(
+                    "forecast bound issuance keys must exactly account for every supplied "
+                    "quantile group"
+                )
+
         self._forecasts.update(staged_rows)
         self._pending_forecasts.update(staged_rows)
 
@@ -1129,7 +1137,7 @@ def _validate_row_issuances(
         raise LedgerError("forecast bound issuance keys must be hashable") from error
 
     group_by_column = {column: group for group in bound_groups for column in group}
-    expected_columns = set(group_by_column)
+    required_columns = {column for group in bound_groups if len(group) == 2 for column in group}
     accounted_columns: set[str] = set()
     for bound_key, issuance in snapshot.items():
         _validate_bound_key(bound_key, group_by_column=group_by_column)
@@ -1151,9 +1159,9 @@ def _validate_row_issuances(
                 "issued bounds finiteness/nullability does not match the forecast payload"
             )
 
-    if accounted_columns != expected_columns:
+    if not required_columns.issubset(accounted_columns):
         raise LedgerError(
-            "forecast bound issuance keys must exactly account for every bound column"
+            "forecast bound issuance keys must exactly account for every interval column"
         )
     return snapshot
 

@@ -174,13 +174,24 @@ class InMemoryCalibrationStateStore:
 class InMemoryLedgerSink:
     """Apply each origin's ledger write atomically against an owned ledger."""
 
-    def __init__(self, *, session: SessionIdentity, calendar: Calendar) -> None:
+    def __init__(
+        self,
+        *,
+        session: SessionIdentity,
+        calendar: Calendar,
+        initial_arrivals: Mapping[ActualKey, float] | None = None,
+    ) -> None:
         self._ledger = Ledger(session=session, calendar=calendar)
         self._forecast_rows: dict[object, ForecastRow] = {}
         self._order_keys: set[object] = set()
         self._settlement_keys: set[object] = set()
         self._commits: dict[pd.Timestamp, CommitReceipt] = {}
         self._decision = session_decision_inputs(session)
+        if self._decision is None and initial_arrivals is not None:
+            if not isinstance(initial_arrivals, Mapping):
+                raise TypeError("initial arrivals must be a mapping")
+            if initial_arrivals:
+                raise LedgerError("initial arrivals require a session decision configuration")
         session_series, _frequency = session_series_and_frequency(session_definition(session))
         self._series_keys = session_series if self._decision is None else self._decision.series_keys
         self._settlement_index = (
@@ -193,7 +204,13 @@ class InMemoryLedgerSink:
                 costs_by_series=self._decision.costs_by_series,
                 timing=self._decision.timing,
                 stockout_rule=self._decision.stockout_rule,
+                initial_arrivals=initial_arrivals,
             )
+        )
+        self._initial_arrivals: Mapping[ActualKey, float] = (
+            MappingProxyType({})
+            if self._settlement_index is None
+            else self._settlement_index.initial_arrivals
         )
 
     @property
@@ -230,6 +247,7 @@ class InMemoryLedgerSink:
             costs_by_series=self._decision.costs_by_series,
             timing=self._decision.timing,
             stockout_rule=self._decision.stockout_rule,
+            initial_arrivals=self._initial_arrivals,
             orders=self._ledger.orders,
             settlements=self._ledger.settlements,
         )
