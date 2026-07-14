@@ -39,6 +39,11 @@ PASSING_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 _RUN_ID_RE = re.compile(r"/runs/(\d+)")
 
 
+def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a command, capturing text output without raising on failure."""
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
 def parse_run_id(details_url: str) -> str | None:
     """Extract the workflow-run ID from a check run's ``details_url``."""
     match = _RUN_ID_RE.search(details_url)
@@ -55,11 +60,9 @@ def failure_signature(failed_runs: list[dict]) -> str:
     parts = []
     for run in sorted(failed_runs, key=lambda r: str(r.get("name", ""))):
         output = run.get("output") or {}
-        first_line = str(output.get("title") or output.get("summary") or "").splitlines()
-        parts.append(
-            f"{run.get('name', '')}|{run.get('conclusion', '')}|"
-            f"{first_line[0] if first_line else ''}"
-        )
+        lines = str(output.get("title") or output.get("summary") or "").splitlines()
+        first_line = lines[0] if lines else ""
+        parts.append(f"{run.get('name', '')}|{run.get('conclusion', '')}|{first_line}")
     digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:12]
     return digest
 
@@ -77,11 +80,14 @@ def evaluate(payload_text: str) -> tuple[int, dict]:
     """
     try:
         payload = json.loads(payload_text)
-        check_runs = payload["check_runs"]
-        if not isinstance(check_runs, list):
-            raise TypeError("check_runs is not a list")
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except json.JSONDecodeError as exc:
         return EXIT_NON_VERDICT, {"verdict": "non-verdict", "reason": f"malformed payload: {exc}"}
+    check_runs = payload.get("check_runs") if isinstance(payload, dict) else None
+    if not isinstance(check_runs, list):
+        return EXIT_NON_VERDICT, {
+            "verdict": "non-verdict",
+            "reason": "payload carries no check_runs list",
+        }
 
     if not check_runs:
         return EXIT_NON_VERDICT, {"verdict": "non-verdict", "reason": "empty check set"}
@@ -109,12 +115,7 @@ def evaluate(payload_text: str) -> tuple[int, dict]:
 
 def cmd_verdict(sha: str) -> int:
     """Fetch check-runs for a commit and print the verdict report as JSON."""
-    proc = subprocess.run(
-        ["gh", "api", f"repos/{REPO}/commits/{sha}/check-runs"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    proc = _run(["gh", "api", f"repos/{REPO}/commits/{sha}/check-runs"])
     if proc.returncode != 0:
         report = {"verdict": "non-verdict", "reason": f"gh api failed: {proc.stderr.strip()}"}
         print(json.dumps(report, indent=2))

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 import yaml
+
+from tests.infra import load_script_module
 
 SCRIPTS_DIR = Path(__file__).parents[1] / ".github" / "scripts"
 GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.yml"
@@ -182,19 +182,8 @@ def _expiry_body() -> str:
     )
 
 
-def _load_script(name: str) -> ModuleType:
-    path = SCRIPTS_DIR / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-stage3_clock = _load_script("stage3_clock")
-stage3_gate_report = _load_script("stage3_gate_report")
+stage3_clock = load_script_module(SCRIPTS_DIR / "stage3_clock.py")
+stage3_gate_report = load_script_module(SCRIPTS_DIR / "stage3_gate_report.py")
 
 
 def test_gate_report_reads_the_real_multiline_activation_record(

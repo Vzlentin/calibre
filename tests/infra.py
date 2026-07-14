@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import sys
 from contextlib import contextmanager
+from pathlib import Path
+from types import ModuleType
 
 import numpy as np
+
+
+def load_script_module(path: Path) -> ModuleType:
+    """Import a standalone script (outside any package) as a module.
+
+    Used for repo automation scripts that tests exercise directly, e.g.
+    ``.github/scripts/`` and ``.agents/skills/go/scripts/``. The module is
+    registered in ``sys.modules`` under its stem so dataclasses and pickling
+    resolve it.
+    """
+    name = path.stem
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def closed_form_min_trace(S: np.ndarray, w_diag: np.ndarray, base: np.ndarray) -> np.ndarray:

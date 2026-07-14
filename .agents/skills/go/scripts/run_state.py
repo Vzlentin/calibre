@@ -31,13 +31,10 @@ def state_dir() -> Path:
         Absolute path of ``<git-common-dir>/go-runs`` for the repository
         containing the current working directory.
     """
-    proc = _run(["git", "rev-parse", "--git-common-dir"])
+    proc = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
     if proc.returncode != 0:
         raise SystemExit(f"not a git repository: {proc.stderr.strip()}")
-    common = Path(proc.stdout.strip())
-    if not common.is_absolute():
-        common = Path.cwd() / common
-    return common.resolve() / "go-runs"
+    return Path(proc.stdout.strip()) / "go-runs"
 
 
 def state_path(slug: str) -> Path:
@@ -49,9 +46,10 @@ def state_path(slug: str) -> Path:
 
 def load_state(path: Path) -> dict[str, str]:
     """Load a run-state file, failing clearly when it does not exist."""
-    if not path.is_file():
-        raise SystemExit(f"no run state at {path} (run `init` first)")
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"no run state at {path} (run `init` first)") from None
 
 
 def save_state(path: Path, state: dict[str, str]) -> None:

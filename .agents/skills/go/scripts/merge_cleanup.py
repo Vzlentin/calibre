@@ -94,8 +94,10 @@ def cmd_merge(pr: str, mode: str, branch: str, no_merge: bool) -> int:
         )
         return 1
 
-    current = _run(["git", "branch", "--show-current"])
-    main_on_main = current.stdout.strip() == "main"
+    main_on_main = False
+    if mode == "worktree":
+        current = _run(["git", "branch", "--show-current"])
+        main_on_main = current.stdout.strip() == "main"
     for command in cleanup_commands(mode, branch, main_on_main):
         proc = _run(command)
         if proc.returncode != 0:

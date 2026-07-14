@@ -7,35 +7,22 @@ covers the git-facing pieces of run-state path resolution and provisioning
 collision refusal.
 """
 
-import importlib.util
 import json
 import subprocess
-import sys
 from pathlib import Path
-from types import ModuleType
 
 import pytest
+
+from tests.infra import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / ".agents" / "skills" / "go" / "scripts"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "go"
 
-
-def _load_script(name: str) -> ModuleType:
-    path = SCRIPTS_DIR / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-run_state = _load_script("run_state")
-ci_verdict = _load_script("ci_verdict")
-provision_worktree = _load_script("provision_worktree")
-merge_cleanup = _load_script("merge_cleanup")
+run_state = load_script_module(SCRIPTS_DIR / "run_state.py")
+ci_verdict = load_script_module(SCRIPTS_DIR / "ci_verdict.py")
+provision_worktree = load_script_module(SCRIPTS_DIR / "provision_worktree.py")
+merge_cleanup = load_script_module(SCRIPTS_DIR / "merge_cleanup.py")
 
 
 def _fixture(name: str) -> str:
@@ -75,7 +62,7 @@ class FakeRunner:
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
 
-# --- U1: run_state -----------------------------------------------------------
+# --- run_state ---------------------------------------------------------------
 
 
 def test_run_state_init_set_get_roundtrip(
@@ -138,7 +125,7 @@ def test_run_state_rejects_path_traversal_slug(
         run_state.state_path("../escape")
 
 
-# --- U2: ci_verdict ----------------------------------------------------------
+# --- ci_verdict --------------------------------------------------------------
 
 
 def test_verdict_green() -> None:
@@ -232,7 +219,7 @@ def test_parse_run_id() -> None:
     assert ci_verdict.parse_run_id("https://example.com/no-run-here") is None
 
 
-# --- U3: provision_worktree --------------------------------------------------
+# --- provision_worktree ------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -303,9 +290,8 @@ def test_provision_aborts_on_first_failed_setup_step(
 
     fake = FakeRunner(
         [
-            (["git", "rev-parse", "--show-toplevel"], 0, f"{scratch_repo.as_posix()}\n"),
             (
-                ["git", "rev-parse", "--git-common-dir"],
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
                 0,
                 f"{(scratch_repo / '.git').as_posix()}\n",
             ),
@@ -318,17 +304,17 @@ def test_provision_aborts_on_first_failed_setup_step(
 
     executed: list[str] = []
 
-    def fake_setup_run(args, cwd=None, check=False):
-        executed.append(args[-1])
-        return subprocess.CompletedProcess(args, 1 if args[-1] == "step-one" else 0)
+    def fake_run_step(step: str, cwd: Path) -> int:
+        executed.append(step)
+        return 1 if step == "step-one" else 0
 
-    monkeypatch.setattr(provision_worktree.subprocess, "run", fake_setup_run)
+    monkeypatch.setattr(provision_worktree, "_run_step", fake_run_step)
 
     assert provision_worktree.cmd_provision("feat/fresh", require_m5=False) == 1
     assert executed == ["step-one"], "a failed step must abort before later steps run"
 
 
-# --- U4: merge_cleanup -------------------------------------------------------
+# --- merge_cleanup -----------------------------------------------------------
 
 
 def _merge_script(body: str, merge_rc: int = 0, current_branch: str = "feat/x") -> FakeRunner:

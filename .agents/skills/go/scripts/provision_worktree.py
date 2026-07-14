@@ -64,16 +64,17 @@ def read_setup_steps(config_text: str, main_path: str) -> list[str]:
     return [step.replace("$ROOT_WORKTREE_PATH", main_path) for step in steps]
 
 
+def _run_step(step: str, cwd: Path) -> int:
+    """Run one setup step through bash, streaming its output; return the exit code."""
+    return subprocess.run(["bash", "-c", step], cwd=cwd, check=False).returncode
+
+
 def _main_checkout() -> Path:
-    """Resolve the main checkout root, refusing to run from a linked worktree."""
-    top = _run(["git", "rev-parse", "--show-toplevel"])
-    if top.returncode != 0:
-        raise SystemExit(f"not a git repository: {top.stderr.strip()}")
-    common = _run(["git", "rev-parse", "--git-common-dir"])
-    common_path = Path(common.stdout.strip())
-    if not common_path.is_absolute():
-        common_path = Path(top.stdout.strip()) / common_path
-    return common_path.resolve().parent
+    """Resolve the main checkout root (the parent of the shared git common dir)."""
+    common = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if common.returncode != 0:
+        raise SystemExit(f"not a git repository: {common.stderr.strip()}")
+    return Path(common.stdout.strip()).parent
 
 
 def cmd_decide() -> int:
@@ -104,7 +105,7 @@ def cmd_provision(branch: str, require_m5: bool) -> int:
         print(f"refusing: branch already exists: {branch}", file=sys.stderr)
         return 1
 
-    fetch = _run(["git", "fetch", "origin"], cwd=main)
+    fetch = _run(["git", "fetch", "origin", "main"], cwd=main)
     if fetch.returncode != 0:
         print(f"git fetch failed: {fetch.stderr.strip()}", file=sys.stderr)
         return 1
@@ -117,8 +118,7 @@ def cmd_provision(branch: str, require_m5: bool) -> int:
     steps = read_setup_steps(config_path.read_text(encoding="utf-8"), main.as_posix())
     for step in steps:
         print(f"  -> {step}")
-        proc = subprocess.run(["bash", "-c", step], cwd=worktree, check=False)
-        if proc.returncode != 0:
+        if _run_step(step, cwd=worktree) != 0:
             print(f"FAILED setup step: {step}", file=sys.stderr)
             return 1
 
