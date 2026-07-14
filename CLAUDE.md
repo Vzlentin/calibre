@@ -126,7 +126,7 @@ New worktrees auto-run `setup-worktree-unix` from `.cursor/worktrees.json`
 ## Agent memory
 
 Long-lived project memory lives in an Obsidian vault and is governed by
-`.claude/skills/project-memory/SKILL.md`. Read it at the start of any
+`.agents/skills/project-memory/SKILL.md`. Read it at the start of any
 non-trivial task. Hermes agents: use the `obsidian` skill instead.
 
 The vault root is `$OBSIDIAN_VAULT_PATH` — but **on this machine that variable
