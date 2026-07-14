@@ -17,6 +17,12 @@ SCRIPTS_DIR = Path(__file__).parents[1] / ".github" / "scripts"
 GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.yml"
 CLOCK_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "stage3-clock.yml"
 SUCCESSOR_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "newcalibre.yml"
+BOOTSTRAP_VN2_INVENTORY = (
+    Path(__file__).parents[1] / "stage3" / "evidence" / "vn2-input-digests.json"
+)
+SUCCESSOR_VN2_INVENTORY = (
+    Path(__file__).parents[1] / "newcalibre" / "benchmarks" / "vn2" / "vn2-input-digests.json"
+)
 TIER2_ARTIFACT_CHECK = (
     "set -euo pipefail\n"
     "for run in tier2-run1 tier2-run2; do\n"
@@ -477,6 +483,49 @@ def test_consistency_workflows_require_nonempty_tier2_artifacts_before_diff(
     )
 
     assert comparison["run"].strip() == TIER2_ARTIFACT_CHECK
+
+
+def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> None:
+    workflow = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["vn2-acceptance"]["steps"]
+    presence = next(step for step in steps if step.get("name") == "Successor + harness presence")
+    skipped = next(step for step in steps if step.get("name") == "Tier 4 visibly skipped")
+    tier4_index = next(
+        index for index, step in enumerate(steps) if step.get("name") == "Tier 4 run"
+    )
+    acquire = steps[tier4_index - 2]
+    verify = steps[tier4_index - 1]
+    tier4 = steps[tier4_index]
+
+    assert presence["run"].strip() == (
+        "ready=false\n"
+        "[ -f newcalibre/pyproject.toml ] && "
+        "[ -f stage3/evidence/vn2-input-digests.json ] \\\n"
+        "  && [ -f newcalibre/tests/tier4/test_vn2_acceptance.py ] && ready=true\n"
+        'echo "ready=$ready" >> "$GITHUB_OUTPUT"'
+    )
+    assert skipped["run"] == (
+        'echo "::notice::tier 4 skipped — acceptance contract or digest inventory absent"'
+    )
+    assert acquire["name"] == "Acquire VN2 inputs with bootstrap tooling"
+    assert acquire["run"] == (
+        "uv run --no-project python .github/scripts/stage3_vn2_data.py download "
+        "--target newcalibre/data/vn2 --if-missing"
+    )
+    assert verify["name"] == "Verify VN2 inputs with successor tooling"
+    assert verify["run"].strip() == (
+        "uv sync --project newcalibre --locked --group dev\n"
+        "uv run --project newcalibre --locked --no-sync python "
+        "newcalibre/scripts/vn2_data.py verify "
+        "--target newcalibre/data/vn2 \\\n"
+        "  --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json"
+    )
+    assert tier4["working-directory"] == "newcalibre"
+    assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
+
+
+def test_successor_vn2_inventory_is_the_exact_bootstrap_approved_blob() -> None:
+    assert SUCCESSOR_VN2_INVENTORY.read_bytes() == BOOTSTRAP_VN2_INVENTORY.read_bytes()
 
 
 def test_clock_manual_triggers_execute_only_the_default_branch_workflow() -> None:

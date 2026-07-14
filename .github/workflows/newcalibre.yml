@@ -123,8 +123,8 @@ jobs:
         run: echo "newcalibre-unit complete (successor present=${{ steps.present.outputs.exists }})"
 
   s3-activation-gate:
-    # Required context: mechanically blocks post-U1a Stage 3 PRs while the
-    # Gate issue lacks a schema-complete clock activation record (KTD-A7).
+    # Required context: mechanically blocks Stage 3 PRs while the Gate issue
+    # lacks a schema-complete clock activation record.
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
@@ -142,7 +142,7 @@ jobs:
         run: echo "s3-activation-gate complete"
 
   capture-promotion:
-    # U7b promotion guard: capture PRs are evidence-only, and live GitHub
+    # Capture promotion guard: capture PRs are evidence-only, and live GitHub
     # artifact metadata must bind the exact bytes and committed receipt.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -284,7 +284,7 @@ jobs:
           echo "captures=$([ -d stage3/evidence/captures ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Tier 3 visibly skipped
         if: steps.present.outputs.exists != 'true' || steps.present.outputs.captures != 'true'
-        run: echo "::notice::tier 3 skipped — successor or promoted captures absent (pending U1/U7b)"
+        run: echo "::notice::tier 3 skipped — successor or promoted captures absent"
       - uses: astral-sh/setup-uv@v4
         if: steps.present.outputs.exists == 'true' && steps.present.outputs.captures == 'true'
       - name: Tier 3 replay + divergence + witness enforcement
@@ -319,11 +319,11 @@ jobs:
         run: |
           ready=false
           [ -f newcalibre/pyproject.toml ] && [ -f stage3/evidence/vn2-input-digests.json ] \
-            && [ -d newcalibre/src/newcalibre/protocols ] && ready=true
+            && [ -f newcalibre/tests/tier4/test_vn2_acceptance.py ] && ready=true
           echo "ready=$ready" >> "$GITHUB_OUTPUT"
       - name: Tier 4 visibly skipped
         if: steps.present.outputs.ready != 'true'
-        run: echo "::notice::tier 4 skipped — successor VN2 harness or digest inventory absent (pending U2d/U8)"
+        run: echo "::notice::tier 4 skipped — acceptance contract or digest inventory absent"
       - uses: astral-sh/setup-uv@v4
         if: steps.present.outputs.ready == 'true'
       - name: Restore VN2 data (exact digest-inventory key, no fallback)
@@ -332,23 +332,24 @@ jobs:
         with:
           path: newcalibre/data/vn2
           key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
-      - name: Acquire + unconditionally validate inputs
+      - name: Acquire VN2 inputs with bootstrap tooling
         if: steps.present.outputs.ready == 'true'
         env:
           DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
           GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
+        run: uv run --no-project python .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
+      - name: Verify VN2 inputs with successor tooling
+        if: steps.present.outputs.ready == 'true'
         run: |
-          python3 .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
-          python3 .github/scripts/stage3_vn2_data.py verify --target newcalibre/data/vn2 \
-            --inventory stage3/evidence/vn2-input-digests.json
+          uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify --target newcalibre/data/vn2 \
+            --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json
       - name: Tier 4 run
         if: steps.present.outputs.ready == 'true'
         working-directory: newcalibre
         env:
           VN2_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' && 'mint' || 'verify' }}
-        run: |
-          uv sync --locked --group dev
-          uv run --locked pytest tests/tier4
+        run: uv run --locked --no-sync pytest tests/tier4
       - name: Upload digest-bound bundle
         if: steps.present.outputs.ready == 'true' && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
