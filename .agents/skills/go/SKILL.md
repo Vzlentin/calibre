@@ -156,7 +156,17 @@ of three kinds, in this order — first match wins:
 3. **Idea** — else treat `$ARGUMENTS` as free text describing the work to do.
 
 Derive a short slug (e.g. `u3-parser-coverage`) from the chosen artifact for
-branch naming and memory.
+branch naming and memory, then initialize the run state — one flat JSON dict
+per run at `<git-common-dir>/go-runs/<slug>.json` (private by construction,
+shared between the main checkout and worktrees). Each stage records progress
+into it at its GATE (`set <slug> stage <n>` plus the stage's own keys), so a
+new session resumes by reading the state instead of rediscovering the
+PR/branch/worktree:
+
+```bash
+uv run python .agents/skills/go/scripts/run_state.py init <slug>
+uv run python .agents/skills/go/scripts/run_state.py get <slug>   # resume: read prior state
+```
 
 Classify the work item on the Model routing signals (mechanical vs judgment)
 and record the classification — Stage 1 spawns its implementation agent on it.
@@ -225,38 +235,61 @@ failed, stop and report.
 
 Stages 1–5 run against a working directory `WORKDIR`, picked with a smart-worktree
 gate so the user's current checkout — their branch *and* any uncommitted work —
-is never disturbed. Read git state in the main checkout and decide the mode — see
-`.agents/skills/go/references/worktree-provisioning.md` for the git-state read,
-the provisioning bash, and the worktree caveats:
+is never disturbed. Both the mode decision and the provisioning are owned by
+`.agents/skills/go/scripts/provision_worktree.py` (rationale and caveats in
+`references/worktree-provisioning.md`). From the main checkout:
 
-- **On `main` AND clean** → **DIRECT mode**: `WORKTREE_MODE=false`,
-  `WORKDIR="$MAIN"`. No provisioning — `ce-work` branches inside this checkout.
-- **Any other branch, detached HEAD, OR dirty tree** → **WORKTREE mode**:
-  `WORKTREE_MODE=true`. Provision an isolated worktree on a fresh branch cut from
-  `origin/main`, so neither the user's branch nor their dirty tree moves. The
-  setup steps are read dynamically from `.cursor/worktrees.json` (per the
-  reference) so config changes are picked up; `<type>` is the kind `ce-work`
-  would choose, `<slug>` is the Stage 0a slug.
+```bash
+uv run python .agents/skills/go/scripts/provision_worktree.py decide
+```
+
+prints `{"mode": "direct"|"worktree", "main": <MAIN path>}`:
+
+- **`direct`** (on `main` AND clean): `WORKTREE_MODE=false`, `WORKDIR="$MAIN"`.
+  No provisioning — `ce-work` branches inside this checkout.
+- **`worktree`** (any other branch, detached HEAD, or dirty tree):
+  `WORKTREE_MODE=true`. Provision an isolated worktree on a fresh branch cut
+  from `origin/main`, so neither the user's branch nor their dirty tree moves —
+  `<type>` is the kind `ce-work` would choose, `<slug>` is the Stage 0a slug:
+
+```bash
+uv run python .agents/skills/go/scripts/provision_worktree.py provision <type>/<slug>
+# add --require-m5 when the work item declares an M5 dependency (see the GATE)
+```
+
+The script reads the setup steps dynamically from `.cursor/worktrees.json`,
+aborts on the first failed step, refuses an existing worktree/branch collision,
+never mutates the caller checkout, and runs the venv gate
+(`uv run python -c "import calibre"` in the worktree) itself. On success it
+prints the absolute `WORKDIR`.
 
 `WORKDIR` is where Stages 1–5 operate. From here on, every shell command for those
 stages uses an explicit `cd "$WORKDIR" && …` in worktree mode (a
 `working_directory` arg can silently target the main repo); in direct mode the
 `cd` is a harmless no-op. Stage 6 is the exception — it always runs from `$MAIN`.
 
-**GATE (worktree mode):** the worktree exists (`git worktree list` shows
-`.worktrees/<slug>`) and its venv is usable
-(`cd "$WORKDIR" && uv run python -c "import calibre"`). If provisioning failed,
-stop and report — do **not** fall back to mutating the user's dirty checkout. In
-direct mode the worktree/venv part of this gate is automatically satisfied.
+Record the decision in the run state:
+
+```bash
+uv run python .agents/skills/go/scripts/run_state.py set <slug> mode <direct|worktree>
+uv run python .agents/skills/go/scripts/run_state.py set <slug> workdir "$WORKDIR"
+uv run python .agents/skills/go/scripts/run_state.py set <slug> branch <type>/<slug>
+```
+
+**GATE (worktree mode):** `provision` exited 0 — that exit code *is* the
+worktree + venv gate. If it exited non-zero, stop and report — do **not** fall
+back to mutating the user's dirty checkout. In direct mode this gate is
+automatically satisfied.
 
 **GATE (data presence — both modes, conditional).** When the work item declares
 an **M5 dependency** — its plan or issue references `data/m5` (e.g. its commands
-run a `benchmarks/m5/...` config) — additionally assert the data is present:
-`cd "$WORKDIR" && test -d data/m5` must pass. This catches the
-`|| true`-swallowed worktree link step (a failed `data/m5` junction leaves a
-data-less worktree that `import calibre` alone would not detect). If an
-M5-dependent item has no `data/m5` in `WORKDIR`, stop and report — do not run on
-into a later runtime failure. Non-M5 items impose no such requirement.
+run a `benchmarks/m5/...` config) — the data must be present in `WORKDIR`. In
+worktree mode pass `--require-m5` to `provision`, which adds the
+`data/m5` presence check (it catches the `|| true`-swallowed worktree link step —
+a failed `data/m5` junction leaves a data-less worktree that `import calibre`
+alone would not detect); in direct mode assert `test -d data/m5` in `$MAIN`. If
+an M5-dependent item has no `data/m5`, stop and report — do not run on into a
+later runtime failure. Non-M5 items impose no such requirement.
 
 ---
 
@@ -295,7 +328,8 @@ cd "$WORKDIR" && git pull --ff-only
 **GATE:** a PR exists for this branch (`gh pr view --json number,url,state`) and
 real code changed (`cd "$WORKDIR" && git diff main...HEAD --stat` is non-empty).
 If either is missing, stop and report — do not hand-write the implementation
-yourself.
+yourself. On pass, record it:
+`uv run python .agents/skills/go/scripts/run_state.py set <slug> pr <number>`.
 
 ---
 
@@ -379,38 +413,35 @@ Stage 5 owns an **inline CI watch-and-autofix loop** — there is no external CI
 skill to delegate to. The `sidekick` babysits it: polling checks, pulling failed
 logs, and applying mechanical fixes run on the sidekick thread; escalate to the
 main agent on a repeated failure signature or a non-mechanical root cause.
-Capture the head SHA
-(`HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`) and poll the typed
-check-runs API, the only reliable CI source on this host — the local
-check-status wrapper is broken (see `references/environment.md`):
+Capture the head SHA (`HEAD_SHA=$(cd "$WORKDIR" && git rev-parse HEAD)`) and
+poll the verdict script — it reads the typed check-runs API, the only reliable
+CI source on this host (see `references/environment.md`):
 
 ```bash
-gh api repos/Vzlentin/calibre/commits/$HEAD_SHA/check-runs \
-  --jq '.check_runs[] | {name, status, conclusion}'
+uv run python .agents/skills/go/scripts/ci_verdict.py verdict $HEAD_SHA
 ```
 
-Read the verdict from `status` **and** `conclusion` together. The
-`select(.conclusion=="failure")` filter in `ci-and-merge.md` is a failed-run
-**log filter**, not a verdict — using it as one reads a still-pending run as
-"no failures → green" and merges early. The verdict is:
+Exit codes are the verdict — 0 **green**, 1 **pending**, 2 **failure**, 3
+**non-verdict** — and the JSON report carries the detail:
 
-- **pending** — any run with `status != "completed"`: keep polling, do **not**
-  merge.
-- **green** — *every* run is `status == "completed"` **and**
-  `conclusion == "success"`: exit the loop and proceed to the on-green steps.
-- **failure** — any completed run with a non-`success` or unrecognized
-  conclusion (`failure`, `cancelled`, `timed_out`, `action_required`, …): enter
-  the autofix branch.
+- **pending** — keep polling, do **not** merge.
+- **green** — exit the loop and proceed to the on-green steps.
+- **failure** — enter the autofix branch; the report lists each failed check's
+  name, conclusion, and workflow run-id, plus a stable `signature` string.
+- **non-verdict** (empty check set, malformed payload, or a failed `gh` call) —
+  never green, never merge; re-poll or escalate.
 
-**Autofix branch — the loop owns the cap and the stop.** For each failed run,
-pull `gh run view <run-id> --log-failed` (run-id parsed from its `details_url`;
-recipe in `references/ci-and-merge.md`), find and fix the **root cause** in
-`WORKDIR`, commit + push, recapture `HEAD_SHA`, and re-poll. Bounded by:
+**Autofix branch — the loop owns the cap and the stop.** For each failed run-id
+in the report, pull its logs
+(`uv run python .agents/skills/go/scripts/ci_verdict.py logs <run-id>`), find
+and fix the **root cause** in `WORKDIR`, commit + push, recapture `HEAD_SHA`,
+and re-poll. Bounded by:
 
 - **Max 3 fix iterations.** After the 3rd failed cycle, stop — do not loop again.
-- **Repeated-signature stop.** If the same failure signature recurs across 2+
-  iterations (the PR #38 pattern), stop immediately — re-running an unchanged
-  failure is not progress.
+- **Repeated-signature stop.** If the report's `signature` string is identical
+  across 2+ iterations (the PR #38 pattern), stop immediately — re-running an
+  unchanged failure is not progress. This is a string comparison, not a
+  judgment call.
 
 On either stop, append a `## CI Failures Unresolved` section to the PR body
 (`gh pr edit <PR> --body-file <tmp>`), do **not** merge red, and take the
@@ -420,27 +451,35 @@ On either stop, append a `## CI Failures Unresolved` section to the PR body
 touch the VN2 `4992.20` baseline, or make unrelated workflow changes to turn CI
 green.
 
-**On green** (and Stage 4 gate satisfied), confirm the PR body carries `closes #N`
-— Stage 0c guarantees the issue exists, so verify only that the line is present.
+**On green** (and Stage 4 gate satisfied), record progress
+(`run_state.py set <slug> head_sha $HEAD_SHA`, `set <slug> pr <PR>`) and hand
+merge + cleanup to the merge script — it verifies the PR body carries
+`closes #N` (refusing to merge otherwise; Stage 0c guarantees the issue
+exists), squash-merges, and runs the merge-gated cleanup for the mode
+(policy rationale in `references/ci-and-merge.md`).
 
 In **handoff mode** (`--no-merge`), stop here before merge. Do not delete the
 remote branch, local branch, or worktree. Record the exact PR URL, head SHA, base
 branch, WORKDIR, branch name, CI evidence summary, and any unresolved
-`needs-human` review threads, then proceed to Stage 6 as `ready-for-external-gates`.
+`needs-human` review threads, then proceed to Stage 6 as
+`ready-for-external-gates`. (Passing `--no-merge` to the script below performs
+only the `closes #N` verification and preserves everything.)
 
-In **ship mode**, squash-merge (this also deletes the remote branch):
+In **ship mode**, from `$MAIN`:
 
 ```bash
-gh pr merge <PR> --squash --delete-branch
+uv run python .agents/skills/go/scripts/merge_cleanup.py merge <PR> \
+  --mode <direct|worktree> --branch <type>/<slug>
 ```
 
-**Cleanup is merge-gated** — run it only after that command confirms the
-squash-merge, using the cleanup-by-mode bash in `ci-and-merge.md`. A squash-merged
-branch never shows as "merged" to git, so the local branch must be force-deleted
-with `git branch -D` (not `-d`). In **direct mode** return to `main`,
-fast-forward, drop the branch; in **worktree mode** remove the worktree and drop
-the branch **without** `git checkout main`/`git pull` in the main checkout —
-preserving the user's branch and dirty tree is the whole point.
+**Cleanup is merge-gated** — the script runs it only after the squash-merge
+command confirms success; every failure path preserves the branch, worktree,
+and PR. A squash-merged branch never shows as "merged" to git, so the script
+force-deletes with `git branch -D` (not `-d`). In **direct mode** it returns to
+`main`, fast-forwards, and drops the branch; in **worktree mode** it removes
+the worktree and drops the branch **without** `git checkout main`/`git pull` in
+the main checkout — preserving the user's branch and dirty tree is the whole
+point.
 
 **Preserve path (failure / any short-stop).** If the inline CI loop cannot get
 the PR green, or any stage stopped short of the mode's completion point, do **not** clean
@@ -519,6 +558,10 @@ appended any deferred-findings rows this run, finalize them via `/project-memory
 with the terminal PR URL + merged SHA (or, on `failed`, the preserved-branch
 reference), so closeout is a read of the rolling register, not a scrape.
 Vault-absent → skip + note. **Non-blocking** — never fails the Stage-6 GATE.
+
+Record the terminal outcome in the run state:
+`uv run python .agents/skills/go/scripts/run_state.py set <slug> outcome
+<shipped|failed|ready-for-external-gates>`.
 
 **GATE:** the work item's plan reads exactly one of:
 
