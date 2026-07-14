@@ -16,7 +16,14 @@ import yaml
 SCRIPTS_DIR = Path(__file__).parents[1] / ".github" / "scripts"
 GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.yml"
 CLOCK_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "stage3-clock.yml"
+ROOT_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
 SUCCESSOR_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "newcalibre.yml"
+BOOTSTRAP_VN2_INVENTORY = (
+    Path(__file__).parents[1] / "stage3" / "evidence" / "vn2-input-digests.json"
+)
+SUCCESSOR_VN2_INVENTORY = (
+    Path(__file__).parents[1] / "newcalibre" / "benchmarks" / "vn2" / "vn2-input-digests.json"
+)
 TIER2_ARTIFACT_CHECK = (
     "set -euo pipefail\n"
     "for run in tier2-run1 tier2-run2; do\n"
@@ -25,6 +32,48 @@ TIER2_ARTIFACT_CHECK = (
     "  done\n"
     "done\n"
     'diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"'
+)
+STAGE3_AUTOMATION_CONTRACT = (
+    "uv sync --project newcalibre --locked --group dev\n"
+    "uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py"
+)
+SUCCESSOR_EXPORT = (
+    "set -euo pipefail\n"
+    'export_root="${RUNNER_TEMP}/successor-export"\n'
+    'mkdir -p "$export_root"\n'
+    "rsync -a --exclude '.git' --exclude 'captures/' newcalibre/ "
+    '"$export_root/newcalibre/"\n'
+    'echo "EXPORT_ROOT=$export_root" >> "$GITHUB_ENV"'
+)
+SUCCESSOR_ISOLATION_CANARIES = (
+    "set -euo pipefail\n"
+    'test ! -e "$EXPORT_ROOT/calibre" || '
+    '{ echo "frozen package present in export"; exit 1; }\n'
+    'test ! -e "$EXPORT_ROOT/benchmarks" || '
+    '{ echo "frozen benchmarks present in export"; exit 1; }\n'
+    'test ! -e "$EXPORT_ROOT/newcalibre/.git" || '
+    '{ echo "Git objects present in export"; exit 1; }\n'
+    'find "$EXPORT_ROOT" -type d -name captures | grep -q . && '
+    '{ echo "captures present in export"; exit 1; } || true\n'
+    'uv run --no-sync python -c "import importlib.util, sys; '
+    "sys.exit(1 if importlib.util.find_spec('calibre') else 0)\" \\\n"
+    "  || { echo \"frozen 'calibre' importable from export venv\"; exit 1; }"
+)
+SUCCESSOR_TIER1 = (
+    "set -euo pipefail\n"
+    'sudo unshare -n sudo -u "$USER" env "PATH=$PATH" "HOME=$HOME" '
+    '"UV_CACHE_DIR=${UV_CACHE_DIR:-$HOME/.cache/uv}" bash -c \'\n'
+    "  set -euo pipefail\n"
+    '  uv run --no-sync python -c "\n'
+    "import socket, sys\n"
+    "try:\n"
+    '    socket.create_connection((\\"1.1.1.1\\", 443), timeout=3)\n'
+    "except OSError:\n"
+    "    sys.exit(0)\n"
+    "sys.exit(1)\n"
+    '" || { echo "network canary failed: network reachable"; exit 1; }\n'
+    "  uv run --no-sync pytest tests/tier1\n"
+    "'"
 )
 
 ACTIVATION_BODY = (
@@ -477,6 +526,207 @@ def test_consistency_workflows_require_nonempty_tier2_artifacts_before_diff(
     )
 
     assert comparison["run"].strip() == TIER2_ARTIFACT_CHECK
+
+
+def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> None:
+    workflow = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["vn2-acceptance"]
+    steps = job["steps"]
+    presence = next(step for step in steps if step.get("name") == "Successor + harness presence")
+    skipped = next(step for step in steps if step.get("name") == "Tier 4 visibly skipped")
+    tier4_index = next(
+        index for index, step in enumerate(steps) if step.get("name") == "Tier 4 run"
+    )
+    acquire = steps[tier4_index - 2]
+    verify = steps[tier4_index - 1]
+    tier4 = steps[tier4_index]
+
+    assert job["if"] == (
+        "github.event_name == 'schedule' || "
+        "(github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))"
+    )
+    assert presence["run"].strip() == (
+        "ready=false\n"
+        "[ -f newcalibre/pyproject.toml ] && "
+        "[ -f stage3/evidence/vn2-input-digests.json ] \\\n"
+        "  && [ -f newcalibre/tests/tier4/test_vn2_acceptance.py ] && ready=true\n"
+        'echo "ready=$ready" >> "$GITHUB_OUTPUT"'
+    )
+    assert skipped["run"] == (
+        'echo "::notice::tier 4 skipped — acceptance contract or digest inventory absent"'
+    )
+    assert skipped["if"] == "steps.present.outputs.ready != 'true'"
+    guarded_tail = {
+        "astral-sh/setup-uv@v4": "steps.present.outputs.ready == 'true'",
+        "Restore VN2 data (exact digest-inventory key, no fallback)": (
+            "steps.present.outputs.ready == 'true'"
+        ),
+        "Acquire VN2 inputs with bootstrap tooling": "steps.present.outputs.ready == 'true'",
+        "Verify VN2 inputs with successor tooling": "steps.present.outputs.ready == 'true'",
+        "Tier 4 run": "steps.present.outputs.ready == 'true'",
+        "Upload digest-bound bundle": (
+            "steps.present.outputs.ready == 'true' && github.event_name == 'workflow_dispatch'"
+        ),
+    }
+    for step in steps[steps.index(skipped) + 1 :]:
+        identity = step.get("name", step.get("uses"))
+        assert step["if"] == guarded_tail[identity]
+
+    assert acquire["name"] == "Acquire VN2 inputs with bootstrap tooling"
+    assert acquire["run"] == (
+        "uv run --no-project python .github/scripts/stage3_vn2_data.py download "
+        "--target newcalibre/data/vn2 --if-missing"
+    )
+    assert verify["name"] == "Verify VN2 inputs with successor tooling"
+    assert verify["run"].strip() == (
+        "uv sync --project newcalibre --locked --group dev\n"
+        "uv run --project newcalibre --locked --no-sync python "
+        "newcalibre/scripts/vn2_data.py verify "
+        "--target newcalibre/data/vn2 \\\n"
+        "  --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json"
+    )
+    assert tier4["working-directory"] == "newcalibre"
+    assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
+
+
+def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> None:
+    successor = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
+    triggers = successor[True]  # PyYAML 1.1 parses the YAML key `on` as boolean true.
+    pull_request = triggers["pull_request"]
+    unit = successor["jobs"]["newcalibre-unit"]
+
+    assert pull_request == {"branches": ["main"]}
+    assert "paths" not in pull_request
+    assert "paths-ignore" not in pull_request
+    assert unit["if"] == "github.event_name == 'push' || github.event_name == 'pull_request'"
+    assert "needs" not in unit
+    assert "continue-on-error" not in unit
+    assert "shell" not in successor.get("defaults", {}).get("run", {})
+    assert "shell" not in unit.get("defaults", {}).get("run", {})
+    presence = next(step for step in unit["steps"] if step.get("name") == "Successor presence")
+    setup = next(step for step in unit["steps"] if step.get("uses") == "astral-sh/setup-uv@v4")
+    contract = next(
+        step for step in unit["steps"] if step.get("name") == "Stage 3 automation contracts"
+    )
+    assert "if" not in contract
+    assert "continue-on-error" not in contract
+    assert "shell" not in contract
+    assert contract["run"].strip() == STAGE3_AUTOMATION_CONTRACT
+    build_export = next(
+        step for step in unit["steps"] if step.get("name") == "Build successor-only export"
+    )
+    provision_export = next(
+        step
+        for step in unit["steps"]
+        if step.get("name") == "Provision export venv (network still on)"
+    )
+    canaries = next(step for step in unit["steps"] if step.get("name") == "Isolation canaries")
+    tier1 = next(step for step in unit["steps"] if step.get("name") == "Tier 1 (network disabled)")
+    assert "if" not in presence
+    assert "continue-on-error" not in presence
+    assert presence["run"] == (
+        'echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" '
+        '>> "$GITHUB_OUTPUT"'
+    )
+    guarded_steps = (setup, build_export, provision_export, canaries, tier1)
+    for step in guarded_steps:
+        assert step["if"] == "steps.present.outputs.exists == 'true'"
+        assert "continue-on-error" not in step
+    for step in (presence, build_export, contract, provision_export, canaries, tier1):
+        assert "shell" not in step
+    assert build_export["run"].strip() == SUCCESSOR_EXPORT
+    assert provision_export["working-directory"] == "${{ env.EXPORT_ROOT }}/newcalibre"
+    assert provision_export["run"] == "uv sync --locked --group dev"
+    assert canaries["working-directory"] == "${{ env.EXPORT_ROOT }}/newcalibre"
+    assert canaries["run"].strip() == SUCCESSOR_ISOLATION_CANARIES
+    assert tier1["working-directory"] == "${{ env.EXPORT_ROOT }}/newcalibre"
+    assert tier1["run"].strip() == SUCCESSOR_TIER1
+    critical_order = (presence, setup, build_export, contract, provision_export, canaries, tier1)
+    assert [unit["steps"].index(step) for step in critical_order] == sorted(
+        unit["steps"].index(step) for step in critical_order
+    )
+
+    workflow = yaml.safe_load(ROOT_WORKFLOW.read_text(encoding="utf-8"))
+    root_pull_request = workflow[True]["pull_request"]
+    assert root_pull_request == {"branches": ["main"]}
+    assert "paths" not in root_pull_request
+    assert "paths-ignore" not in root_pull_request
+    assert "stage3-automation-contract" not in workflow["jobs"]
+    root_test = workflow["jobs"]["test"]
+    assert "if" not in root_test
+    assert "needs" not in root_test
+    assert "continue-on-error" not in root_test
+    assert "shell" not in workflow.get("defaults", {}).get("run", {})
+    assert "shell" not in root_test.get("defaults", {}).get("run", {})
+    root_contract = next(
+        step for step in root_test["steps"] if step.get("name") == "Stage 3 automation contracts"
+    )
+    assert "if" not in root_contract
+    assert "continue-on-error" not in root_contract
+    assert "shell" not in root_contract
+    assert root_contract["run"].strip() == STAGE3_AUTOMATION_CONTRACT
+    root_setup = next(
+        step for step in root_test["steps"] if step.get("uses") == "astral-sh/setup-uv@v4"
+    )
+    root_gate = next(step for step in root_test["steps"] if step.get("name") == "Gate frozen work")
+    root_sync = next(
+        step
+        for step in root_test["steps"]
+        if step.get("run") == "uv sync --locked --extra dev --extra benchmarks --extra hierarchy"
+    )
+    root_pytest = next(step for step in root_test["steps"] if step.get("run") == "uv run pytest")
+    assert "if" not in root_setup
+    assert "continue-on-error" not in root_setup
+    assert "if" not in root_gate
+    assert root_gate["run"] == (
+        "echo \"run_frozen=${{ github.event_name != 'pull_request' || "
+        'steps.scope.outputs.only_changed != \'true\' }}" >> "$GITHUB_OUTPUT"'
+    )
+    assert root_sync["if"] == "steps.gate.outputs.run_frozen == 'true'"
+    assert root_pytest["if"] == "steps.gate.outputs.run_frozen == 'true'"
+    for step in root_test["steps"]:
+        if "run" in step:
+            assert "shell" not in step
+            assert "continue-on-error" not in step
+    assert root_test["steps"].index(root_setup) < root_test["steps"].index(root_contract)
+
+    expected_successor_only_patterns = {
+        "newcalibre/**",
+        "stage3/**",
+        ".github/workflows/newcalibre.yml",
+        ".github/workflows/oracle-capture.yml",
+        ".github/workflows/gate-a.yml",
+        ".github/workflows/stage3-clock.yml",
+        ".github/scripts/stage3_*.py",
+        "tests/test_stage3_automation.py",
+    }
+    scoped_job_names = {
+        "lint-and-type-check",
+        "test",
+        "s3-ingestion",
+        "docker-build",
+    }
+    assert {
+        name
+        for name, job in workflow["jobs"].items()
+        if any(step.get("name") == "Detect successor-only change" for step in job["steps"])
+    } == scoped_job_names
+    for name in scoped_job_names:
+        scoped_job = workflow["jobs"][name]
+        scope = next(
+            step
+            for step in scoped_job["steps"]
+            if step.get("name") == "Detect successor-only change"
+        )
+        assert scope["if"] == "github.event_name == 'pull_request'"
+        assert scope["uses"] == "tj-actions/changed-files@v45"
+        assert "continue-on-error" not in scope
+        configured_patterns = set(scope["with"]["files"].splitlines())
+        assert configured_patterns == expected_successor_only_patterns
+
+
+def test_successor_vn2_inventory_is_the_exact_bootstrap_approved_blob() -> None:
+    assert SUCCESSOR_VN2_INVENTORY.read_bytes() == BOOTSTRAP_VN2_INVENTORY.read_bytes()
 
 
 def test_clock_manual_triggers_execute_only_the_default_branch_workflow() -> None:

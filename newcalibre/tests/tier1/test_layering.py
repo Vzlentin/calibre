@@ -12,6 +12,8 @@ pytestmark = pytest.mark.tier1
 FORBIDDEN_IMPORT_ROOTS = frozenset({"benchmarks", "calibre"})
 PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "newcalibre"
 PACKAGE_INIT = PACKAGE_ROOT / "__init__.py"
+SCRIPT_ROOT = Path(__file__).resolve().parents[2] / "scripts"
+VN2_DATA_SCRIPT = SCRIPT_ROOT / "vn2_data.py"
 ORDERING_ROOT = PACKAGE_ROOT / "ordering"
 OBJECTIVE_MODULE = PACKAGE_ROOT / "ordering" / "_objective.py"
 ENGINE_IMPORT_ROOT = "newcalibre.engine"
@@ -167,9 +169,12 @@ def _settle_path_boundary_violations(path: Path) -> list[str]:
 
 
 def test_successor_package_never_imports_frozen_surfaces() -> None:
-    sources, violations = _find_violations(PACKAGE_ROOT)
+    package_sources, package_violations = _find_violations(PACKAGE_ROOT)
+    script_sources, script_violations = _find_violations(SCRIPT_ROOT)
 
-    assert PACKAGE_INIT in sources, "Successor AST guard did not scan its package initializer."
+    assert PACKAGE_INIT in package_sources, "Successor AST guard did not scan its package."
+    assert VN2_DATA_SCRIPT in script_sources, "Successor AST guard did not scan its scripts."
+    violations = [*package_violations, *script_violations]
     assert not violations, "Forbidden frozen-surface imports:\n" + "\n".join(violations)
 
 
@@ -193,6 +198,23 @@ def test_layering_detector_bites_on_forbidden_import_forms(tmp_path: Path) -> No
         "src/newcalibre/probe.py:2: import benchmarks",
         "src/newcalibre/probe.py:3: import calibre",
         "src/newcalibre/probe.py:4: import benchmarks",
+    ]
+
+
+def test_layering_detector_bites_for_successor_scripts(tmp_path: Path) -> None:
+    probe = tmp_path / "scripts" / "vn2_data.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text(
+        "from benchmarks.vn2 import download\nfrom calibre.execution import run\n",
+        encoding="utf-8",
+    )
+
+    sources, violations = _find_violations(probe.parent)
+
+    assert sources == [probe]
+    assert violations == [
+        "vn2_data.py:1: import benchmarks",
+        "vn2_data.py:2: import calibre",
     ]
 
 
