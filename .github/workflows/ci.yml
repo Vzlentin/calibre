@@ -112,21 +112,6 @@ jobs:
       - name: Report lane result
         run: echo "test complete (frozen work run=${{ steps.gate.outputs.run_frozen }})"
 
-  stage3-automation-contract:
-    # Lightweight cross-workflow guard: these static contracts must run on
-    # every PR even when successor-only changes skip the frozen test suite.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - name: Locked successor dev sync
-        run: uv sync --project newcalibre --locked --group dev
-      - name: Run Stage 3 automation contracts
-        run: uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py
-
   s3-ingestion:
     runs-on: ubuntu-latest
     steps:

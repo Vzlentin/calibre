@@ -547,26 +547,38 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
 
 
-def test_stage3_contract_lane_covers_every_relevant_pull_request_surface() -> None:
-    workflow = yaml.safe_load(ROOT_WORKFLOW.read_text(encoding="utf-8"))
-    triggers = workflow[True]  # PyYAML 1.1 parses the YAML key `on` as boolean true.
+def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> None:
+    successor = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
+    triggers = successor[True]  # PyYAML 1.1 parses the YAML key `on` as boolean true.
     pull_request = triggers["pull_request"]
-    contract = workflow["jobs"]["stage3-automation-contract"]
+    unit = successor["jobs"]["newcalibre-unit"]
 
     assert pull_request == {"branches": ["main"]}
     assert "paths" not in pull_request
     assert "paths-ignore" not in pull_request
-    assert contract["if"] == "github.event_name == 'pull_request'"
-    assert contract["permissions"] == {"contents": "read"}
-    assert "needs" not in contract
-    assert all("if" not in step for step in contract["steps"])
-    assert not any("tj-actions/changed-files" in step.get("uses", "") for step in contract["steps"])
-    contract_run = next(
-        step for step in contract["steps"] if step.get("name") == "Run Stage 3 automation contracts"
+    assert unit["if"] == "github.event_name == 'push' || github.event_name == 'pull_request'"
+    assert "needs" not in unit
+    contract = next(
+        step for step in unit["steps"] if step.get("name") == "Stage 3 automation contracts"
     )
-    assert contract_run["run"] == (
+    assert contract["if"] == "steps.present.outputs.exists == 'true'"
+    assert contract["run"].strip() == (
+        "uv sync --project newcalibre --locked --group dev\n"
         "uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py"
     )
+    build_export = next(
+        step for step in unit["steps"] if step.get("name") == "Build successor-only export"
+    )
+    provision_export = next(
+        step
+        for step in unit["steps"]
+        if step.get("name") == "Provision export venv (network still on)"
+    )
+    assert unit["steps"].index(build_export) < unit["steps"].index(contract)
+    assert unit["steps"].index(contract) < unit["steps"].index(provision_export)
+
+    workflow = yaml.safe_load(ROOT_WORKFLOW.read_text(encoding="utf-8"))
+    assert "stage3-automation-contract" not in workflow["jobs"]
 
     expected_successor_only_patterns = {
         "newcalibre/**",
