@@ -169,6 +169,8 @@ def test_comparison_is_informational_and_exact_key_mismatches_have_no_delta() ->
     changed_comparison = compare_tracking_records(changed, prior)
     assert changed_comparison.comparable
     assert changed_comparison.total_cost_delta == 1.0
+
+
 def test_append_idempotency_and_atomic_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
