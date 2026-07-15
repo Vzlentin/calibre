@@ -43,3 +43,32 @@ def require_exact_witnesses(
             f"missing={missing!r}, orphaned={orphaned!r}, "
             f"same_node={overlapping_nodes!r}"
         )
+
+
+def require_exact_inventory(
+    gates: Iterable[WitnessDeclaration],
+    witnesses: Iterable[WitnessDeclaration],
+    *,
+    required_gates: Iterable[WitnessDeclaration],
+    required_witnesses: Iterable[WitnessDeclaration],
+) -> None:
+    """Require the collected declarations to equal one stable named inventory."""
+
+    def counts(values: Iterable[WitnessDeclaration]) -> Counter[tuple[str, str, str]]:
+        return Counter((item.tier, item.identifier, item.nodeid) for item in values)
+
+    gate_counts = counts(gates)
+    witness_counts = counts(witnesses)
+    required_gate_counts = counts(required_gates)
+    required_witness_counts = counts(required_witnesses)
+    missing_gates = sorted((required_gate_counts - gate_counts).elements())
+    unexpected_gates = sorted((gate_counts - required_gate_counts).elements())
+    missing_witnesses = sorted((required_witness_counts - witness_counts).elements())
+    unexpected_witnesses = sorted((witness_counts - required_witness_counts).elements())
+    if missing_gates or unexpected_gates or missing_witnesses or unexpected_witnesses:
+        raise WitnessPairingError(
+            "required Tier 3 oracle inventory mismatch: "
+            f"missing_gates={missing_gates!r}, unexpected_gates={unexpected_gates!r}, "
+            f"missing_witnesses={missing_witnesses!r}, "
+            f"unexpected_witnesses={unexpected_witnesses!r}"
+        )

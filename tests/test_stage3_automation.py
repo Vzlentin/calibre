@@ -18,19 +18,6 @@ GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.ym
 CLOCK_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "stage3-clock.yml"
 ROOT_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
 SUCCESSOR_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "newcalibre.yml"
-BOOTSTRAP_VN2_INVENTORY = (
-    Path(__file__).parents[1] / "stage3" / "evidence" / "vn2-input-digests.json"
-)
-SUCCESSOR_VN2_INVENTORY = (
-    Path(__file__).parents[1] / "newcalibre" / "benchmarks" / "vn2" / "vn2-input-digests.json"
-)
-VN2_THREAD_ENV = {
-    "MKL_NUM_THREADS": "1",
-    "NUMEXPR_NUM_THREADS": "1",
-    "OMP_NUM_THREADS": "1",
-    "OPENBLAS_NUM_THREADS": "1",
-    "VECLIB_MAXIMUM_THREADS": "1",
-}
 TIER2_ARTIFACT_CHECK = (
     "set -euo pipefail\n"
     "for run in tier2-run1 tier2-run2; do\n"
@@ -42,7 +29,8 @@ TIER2_ARTIFACT_CHECK = (
 )
 STAGE3_AUTOMATION_CONTRACT = (
     "uv sync --project newcalibre --locked --group dev\n"
-    "uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py"
+    "uv run --project newcalibre --locked --no-sync pytest "
+    "tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py"
 )
 SUCCESSOR_EXPORT = (
     "set -euo pipefail\n"
@@ -524,168 +512,6 @@ def test_consistency_workflows_require_nonempty_tier2_artifacts_before_diff(
     assert comparison["run"].strip() == TIER2_ARTIFACT_CHECK
 
 
-def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> None:
-    workflow = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
-    triggers = workflow[True]  # PyYAML 1.1 parses the YAML key `on` as boolean true.
-    job = workflow["jobs"]["vn2-acceptance"]
-    steps = job["steps"]
-    checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
-    setup = next(step for step in steps if step.get("uses") == "astral-sh/setup-uv@v4")
-    checked_out_head = next(
-        step for step in steps if step.get("name") == "Verify checked-out HEAD equals candidate"
-    )
-    preflight = next(
-        step for step in steps if step.get("name") == "Preflight — evidence environment (ADR 0001)"
-    )
-    harness = next(
-        step for step in steps if step.get("name") == "Require successor + Tier 4 harness"
-    )
-    acquire = next(
-        step for step in steps if step.get("name") == "Acquire VN2 inputs with bootstrap tooling"
-    )
-    verify = next(
-        step for step in steps if step.get("name") == "Verify VN2 inputs with successor tooling"
-    )
-    provenance = next(step for step in steps if step.get("name") == "Record numerical provenance")
-    tier4 = next(step for step in steps if step.get("name") == "Tier 4 run")
-    mutation = next(
-        step for step in steps if step.get("name") == "Refuse tracked checkout mutation"
-    )
-    upload = next(step for step in steps if step.get("name") == "Upload digest-bound bundle")
-
-    assert job["if"] == (
-        "github.event_name == 'schedule' || "
-        "(github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))"
-    )
-    assert triggers["schedule"] == [{"cron": "0 5 * * *"}]
-    dispatch_inputs = triggers["workflow_dispatch"]["inputs"]
-    assert dispatch_inputs["candidate_sha"]["required"] is True
-    assert dispatch_inputs["lane"]["options"] == ["oracle", "vn2-verify", "vn2-mint"]
-    assert checkout["with"]["ref"] == (
-        "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
-    )
-    assert "if" not in checked_out_head
-    assert checked_out_head["run"] == ('test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"')
-    assert steps.index(setup) < steps.index(preflight)
-    assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
-    assert job["env"]["VN2_CANDIDATE_SHA"] == (
-        "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
-    )
-    assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
-    assert job["env"]["VN2_RUN_ID"] == "${{ github.run_id }}"
-    assert job["env"]["VN2_RUN_URL"] == (
-        "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-    )
-    assert job["env"]["VN2_MODE"] == (
-        "${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' "
-        "&& 'mint' || 'verify' }}"
-    )
-    assert "github.workflow_sha" not in job["env"]["VN2_CANDIDATE_SHA"]
-    preflight_script = preflight["run"]
-    for required in (
-        'test "$ID" = "ubuntu"',
-        'test "$VERSION_ID" = "24.04"',
-        'test "$(uname -m)" = "x86_64"',
-        'test "${ImageOS:-}" = "ubuntu24"',
-        'test -n "${ImageVersion:-}"',
-        "uv run --no-project --python 3.12 python - <<'PY'",
-        "sys.version_info[:2] == (3, 12)",
-        "sha256sum newcalibre/uv.lock",
-    ):
-        assert required in preflight_script
-    assert "python3 - <<'PY'" not in preflight_script
-    assert harness["run"].strip() == (
-        "set -euo pipefail\n"
-        "test -f newcalibre/pyproject.toml \\\n"
-        '  || { echo "missing successor project: newcalibre/pyproject.toml"; exit 1; }\n'
-        "test -f stage3/evidence/vn2-input-digests.json \\\n"
-        '  || { echo "missing VN2 digest inventory: '
-        'stage3/evidence/vn2-input-digests.json"; exit 1; }\n'
-        "test -f newcalibre/tests/tier4/test_vn2_acceptance.py \\\n"
-        '  || { echo "missing Tier 4 acceptance test: '
-        'newcalibre/tests/tier4/test_vn2_acceptance.py"; exit 1; }'
-    )
-    assert all(step.get("name") != "Tier 4 visibly skipped" for step in steps)
-    for step in steps[steps.index(harness) + 1 : -1]:
-        assert "if" not in step
-    assert upload["if"] == "github.event_name == 'workflow_dispatch'"
-
-    assert acquire["name"] == "Acquire VN2 inputs with bootstrap tooling"
-    assert acquire["run"] == (
-        "uv run --no-project python .github/scripts/stage3_vn2_data.py download "
-        "--target newcalibre/data/vn2 --if-missing"
-    )
-    assert verify["name"] == "Verify VN2 inputs with successor tooling"
-    assert verify["run"].strip() == (
-        "uv sync --project newcalibre --locked --group dev\n"
-        "uv run --project newcalibre --locked --no-sync python "
-        "newcalibre/scripts/vn2_data.py verify "
-        "--target newcalibre/data/vn2 \\\n"
-        "  --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json"
-    )
-    assert tier4["working-directory"] == "newcalibre"
-    assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
-    assert "numpy.__version__" in provenance["run"]
-    assert "numpy.show_config()" in provenance["run"]
-    assert 'Path("uv.lock").read_bytes()' in provenance["run"]
-    assert "sha256" in provenance["run"]
-    assert steps.index(tier4) < steps.index(mutation) < steps.index(upload)
-    assert "git status --porcelain --untracked-files=no" in mutation["run"]
-    assert upload["with"]["name"] == "vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}"
-    assert upload["with"]["if-no-files-found"] == "error"
-
-
-def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() -> None:
-    workflow = yaml.safe_load(GATE_WORKFLOW.read_text(encoding="utf-8"))
-    job = workflow["jobs"]["vn2-verify"]
-    steps = job["steps"]
-    checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
-    setup = next(step for step in steps if step.get("uses") == "astral-sh/setup-uv@v4")
-    preflight = next(
-        step for step in steps if step.get("name") == "Preflight — evidence environment (ADR 0001)"
-    )
-    provenance = next(step for step in steps if step.get("name") == "Record numerical provenance")
-    tier4 = next(
-        step
-        for step in steps
-        if step.get("name")
-        == "Tier 4 verify-only at C1 (recompute and self-validate)"
-    )
-    mutation = next(
-        step for step in steps if step.get("name") == "Refuse tracked checkout mutation"
-    )
-
-    assert checkout["with"]["ref"] == "${{ inputs.candidate_sha }}"
-    assert steps.index(setup) < steps.index(preflight)
-    assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
-    assert job["env"]["VN2_CANDIDATE_SHA"] == "${{ inputs.candidate_sha }}"
-    assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
-    assert job["env"]["VN2_RUN_ID"] == "${{ github.run_id }}"
-    assert job["env"]["VN2_RUN_URL"] == (
-        "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-    )
-    assert job["env"]["VN2_MODE"] == "verify"
-    assert "github.workflow_sha" not in job["env"]["VN2_CANDIDATE_SHA"]
-    for required in (
-        'test "$ID" = "ubuntu"',
-        'test "$VERSION_ID" = "24.04"',
-        'test "$(uname -m)" = "x86_64"',
-        'test "${ImageOS:-}" = "ubuntu24"',
-        'test -n "${ImageVersion:-}"',
-        "uv run --no-project --python 3.12 python - <<'PY'",
-        "sys.version_info[:2] == (3, 12)",
-        "sha256sum newcalibre/uv.lock",
-    ):
-        assert required in preflight["run"]
-    assert "python3 - <<'PY'" not in preflight["run"]
-    assert "numpy.__version__" in provenance["run"]
-    assert "numpy.show_config()" in provenance["run"]
-    assert 'Path("uv.lock").read_bytes()' in provenance["run"]
-    assert "sha256" in provenance["run"]
-    assert steps.index(tier4) < steps.index(mutation)
-    assert "git status --porcelain --untracked-files=no" in mutation["run"]
-
-
 def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> None:
     successor = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
     triggers = successor[True]  # PyYAML 1.1 parses the YAML key `on` as boolean true.
@@ -796,6 +622,7 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
         ".github/workflows/stage3-clock.yml",
         ".github/scripts/stage3_*.py",
         "tests/test_stage3_automation.py",
+        "tests/test_stage3_vn2_automation.py",
     }
     scoped_job_names = {
         "lint-and-type-check",
@@ -820,10 +647,6 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
         assert "continue-on-error" not in scope
         configured_patterns = set(scope["with"]["files"].splitlines())
         assert configured_patterns == expected_successor_only_patterns
-
-
-def test_successor_vn2_inventory_is_the_exact_bootstrap_approved_blob() -> None:
-    assert SUCCESSOR_VN2_INVENTORY.read_bytes() == BOOTSTRAP_VN2_INVENTORY.read_bytes()
 
 
 def test_clock_manual_triggers_execute_only_the_default_branch_workflow() -> None:
@@ -905,8 +728,11 @@ def test_negative_gate_report_is_written_before_main_returns_nonzero(
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["candidate_sha"] == "b" * 40
     assert report["problems"] == [
+        "Gate report requires every required lane result",
         "gate precondition unmet: no promoted tracking record (U9b)",
         "no schema-complete activation record on the Gate issue",
+        "aggregate checkout HEAD does not equal the Gate candidate",
+        f"promoted capture root is missing: {(tmp_path / 'missing-captures').as_posix()}",
     ]
 
 

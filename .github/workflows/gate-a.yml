@@ -88,20 +88,135 @@ jobs:
 
   oracle:
     runs-on: ubuntu-24.04
+    env:
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      ORACLE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
     steps:
+      - name: Validate candidate SHA
+        run: |
+          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.candidate_sha }}
-      - name: Verify HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
-      - name: Gate precondition — promoted captures present
-        run: test -d stage3/evidence/captures || { echo "no promoted captures at C1"; exit 1; }
+      - name: Verify checked-out HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "$ORACLE_CANDIDATE_SHA"
+      - name: Gate precondition - promoted captures present
+        run: |
+          test ! -L stage3/evidence/captures \
+            || { echo "symlinked promoted captures root refused at C1"; exit 1; }
+          test -d stage3/evidence/captures \
+            || { echo "no promoted captures at C1"; exit 1; }
+      - name: Require successor + Tier 3 harness
+        run: |
+          set -euo pipefail
+          test -f newcalibre/pyproject.toml \
+            || { echo "missing successor project: newcalibre/pyproject.toml"; exit 1; }
+          test -f stage3/evidence/vn2-input-digests.json \
+            || { echo "missing VN2 digest inventory: stage3/evidence/vn2-input-digests.json"; exit 1; }
+          test -f newcalibre/benchmarks/vn2/vn2-input-digests.json \
+            || { echo "missing successor VN2 inventory"; exit 1; }
+          test -f newcalibre/scripts/vn2_data.py \
+            || { echo "missing successor VN2 verifier"; exit 1; }
+          test -d newcalibre/tests/tier3 \
+            || { echo "missing Tier 3 harness"; exit 1; }
+          test -f newcalibre/tests/tier3/oracle_inventory.json \
+            || { echo "missing required Tier 3 oracle inventory"; exit 1; }
+          test -f newcalibre/tests/tier3/test_conditional_replay.py \
+            || { echo "missing required Tier 3 conditional replay"; exit 1; }
       - uses: astral-sh/setup-uv@v4
-      - name: Tier 3 at C1
+      - name: Preflight - evidence environment (ADR 0001)
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = "ubuntu" || { echo "non-Ubuntu runner refused"; exit 1; }
+          test "$VERSION_ID" = "24.04" || { echo "Ubuntu release $VERSION_ID refused"; exit 1; }
+          test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+          test "${ImageOS:-}" = "ubuntu24" || { echo "runner image OS must be ubuntu24"; exit 1; }
+          test -n "${ImageVersion:-}" || { echo "ImageVersion is required"; exit 1; }
+          uv run --no-project --python 3.12 python - <<'PY'
+          import sys
+
+          assert sys.version_info[:2] == (3, 12), sys.version
+          print(f"bootstrap_python={sys.version}")
+          PY
+          sha256sum newcalibre/uv.lock
+          printf 'runner_image=%s/%s\n' "$ImageOS" "$ImageVersion"
+          printf 'os_release=%s arch=%s\n' "$PRETTY_NAME" "$(uname -m)"
+      - name: Restore VN2 data (exact digest-inventory key, no fallback)
+        uses: actions/cache@v4
+        with:
+          path: newcalibre/data/vn2
+          key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
+      - name: Acquire VN2 inputs with bootstrap tooling
+        env:
+          DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
+          GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
+        run: uv run --no-project python .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
+      - name: Verify VN2 inputs with successor tooling
+        run: |
+          uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify --target newcalibre/data/vn2 \
+            --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json
+      - name: Record numerical provenance
         working-directory: newcalibre
         run: |
-          uv sync --locked --group dev
-          uv run --locked pytest tests/tier3
+          uv run --locked --no-sync python - <<'PY'
+          import platform
+          import sys
+          from hashlib import sha256
+          from pathlib import Path
+
+          import numpy
+
+          print(f"python={sys.version}")
+          print(f"cpu={platform.processor()}")
+          print(f"numpy={numpy.__version__}")
+          lock_digest = sha256(Path("uv.lock").read_bytes()).hexdigest()
+          print(f"lock_sha256={lock_digest}")
+          numpy.show_config()
+          PY
+          uv run --locked --no-sync python scripts/capture_oracle_vn2.py environment \
+            --out "${RUNNER_TEMP}/oracle-environment.json"
+          cat "${RUNNER_TEMP}/oracle-environment.json"
+          uv --version
+      - name: Tier 3 at C1
+        id: tier3
+        working-directory: newcalibre
+        run: >-
+          uv run --locked --no-sync pytest tests/tier3
+          --junitxml="${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml"
+      - name: Emit candidate-qualified oracle evidence
+        if: always()
+        env:
+          ORACLE_TEST_OUTCOME: ${{ steps.tier3.outcome }}
+        run: |
+          python3 .github/scripts/stage3_oracle_evidence.py emit \
+            --candidate-sha "$ORACLE_CANDIDATE_SHA" \
+            --environment "${RUNNER_TEMP}/oracle-environment.json" \
+            --junit "${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml" \
+            --out "${RUNNER_TEMP}/oracle-evidence-${ORACLE_CANDIDATE_SHA}.json" \
+            --test-outcome "$ORACLE_TEST_OUTCOME"
+      - name: Validate candidate-qualified oracle evidence
+        if: always()
+        run: |
+          python3 .github/scripts/stage3_oracle_evidence.py validate \
+            --evidence "${RUNNER_TEMP}/oracle-evidence-${ORACLE_CANDIDATE_SHA}.json" \
+            --junit "${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml" \
+            --allow-skipped false
+      - name: Upload oracle evidence and pytest outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-evidence-${{ env.ORACLE_CANDIDATE_SHA }}
+          path: |
+            ${{ runner.temp }}/oracle-evidence-${{ env.ORACLE_CANDIDATE_SHA }}.json
+            ${{ runner.temp }}/oracle-pytest-${{ env.ORACLE_CANDIDATE_SHA }}.xml
+          if-no-files-found: error
 
   vn2-verify:
     runs-on: ubuntu-24.04
@@ -187,6 +302,7 @@ jobs:
 
   aggregate:
     needs: [lint, unit-isolated, consistency, oracle, vn2-verify]
+    if: always()
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -199,11 +315,32 @@ jobs:
           fetch-depth: 0
       - name: Verify HEAD equals candidate
         run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - name: Download exact oracle evidence
+        id: oracle-evidence-download
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: oracle-evidence-${{ inputs.candidate_sha }}
+          path: ${{ runner.temp }}/oracle-evidence
       - name: Emit the single-SHA technical Gate report
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        run: python3 .github/scripts/stage3_gate_report.py --out "${RUNNER_TEMP}/gate-report.json"
+        run: |
+          python3 .github/scripts/stage3_gate_report.py \
+            --oracle-evidence \
+              "${RUNNER_TEMP}/oracle-evidence/oracle-evidence-${{ inputs.candidate_sha }}.json" \
+            --oracle-junit \
+              "${RUNNER_TEMP}/oracle-evidence/oracle-pytest-${{ inputs.candidate_sha }}.xml" \
+            --lane "lint=${{ needs.lint.result }}" \
+            --lane "unit-isolated=${{ needs['unit-isolated'].result }}" \
+            --lane "consistency=${{ needs.consistency.result }}" \
+            --lane "oracle=${{ needs.oracle.result }}" \
+            --lane "vn2-verify=${{ needs['vn2-verify'].result }}" \
+            --no-fail \
+            --out "${RUNNER_TEMP}/gate-report.json"
       - name: Upload Gate report
         if: always()
         uses: actions/upload-artifact@v4
@@ -211,3 +348,8 @@ jobs:
           name: gate-a-report-${{ inputs.candidate_sha }}
           path: ${{ runner.temp }}/gate-report.json
           if-no-files-found: error
+      - name: Enforce Gate report outcome after upload
+        if: always()
+        run: >-
+          python3 .github/scripts/stage3_gate_report.py
+          --check-report "${RUNNER_TEMP}/gate-report.json"

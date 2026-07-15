@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -163,6 +164,11 @@ class CaptureReceipt:
     environment_digest: str
 
 
+def validate_promoted_captures_root(root: Path) -> Path:
+    """Require a real directory at the promoted-captures trust boundary."""
+    return _require_nonsymlink_directory(Path(root), name="promoted captures root")
+
+
 def validate_capture_bundle(
     root: Path,
     *,
@@ -173,9 +179,7 @@ def validate_capture_bundle(
     expected_input_inventory_path: Path,
 ) -> CaptureBundle:
     """Validate identity, manifest completeness, payload shape, and every byte."""
-    bundle_root = Path(root)
-    if not bundle_root.is_dir():
-        raise OracleEvidenceError("capture bundle must be an existing directory")
+    bundle_root = _require_nonsymlink_directory(Path(root), name="capture bundle")
     manifest_path = bundle_root / "manifest.json"
     listing_path = bundle_root / "files.sha256"
     manifest_value, manifest_bytes = _load_json_object(manifest_path, name="capture manifest")
@@ -326,7 +330,8 @@ def validate_capture_receipt(
     expected_workflow_run_id: str,
 ) -> CaptureReceipt:
     """Validate a promotion receipt against already verified bundle bytes."""
-    value, _receipt_bytes = _load_json_object(path, name="capture receipt")
+    receipt_path = _require_nonsymlink_file(Path(path), name="capture receipt")
+    value, _receipt_bytes = _load_json_object(receipt_path, name="capture receipt")
     _require_exact_keys(value, _RECEIPT_KEYS, name="capture receipt")
     _require_exact_int(value["schema"], expected=1, name="capture receipt schema")
     artifact_id = _require_run_id(value["artifact_id"], name="artifact_id")
@@ -666,6 +671,30 @@ def _environment_value(environment: CaptureEnvironment) -> dict[str, object]:
     }
 
 
+def _require_nonsymlink_directory(path: Path, *, name: str) -> Path:
+    try:
+        mode = path.lstat().st_mode
+    except OSError as error:
+        raise OracleEvidenceError(f"{name} must be an existing directory") from error
+    if stat.S_ISLNK(mode):
+        raise OracleEvidenceError(f"{name} must not be a symbolic link")
+    if not stat.S_ISDIR(mode):
+        raise OracleEvidenceError(f"{name} must be an existing directory")
+    return path
+
+
+def _require_nonsymlink_file(path: Path, *, name: str) -> Path:
+    try:
+        mode = path.lstat().st_mode
+    except OSError as error:
+        raise OracleEvidenceError(f"{name} must be an existing regular file") from error
+    if stat.S_ISLNK(mode):
+        raise OracleEvidenceError(f"{name} must not be a symbolic link")
+    if not stat.S_ISREG(mode):
+        raise OracleEvidenceError(f"{name} must be an existing regular file")
+    return path
+
+
 def _load_json_object(path: Path, *, name: str) -> tuple[dict[str, object], bytes]:
     try:
         payload = path.read_bytes()
@@ -856,4 +885,5 @@ __all__ = [
     "validate_capture_bundle",
     "validate_capture_receipt",
     "validate_promoted_capture",
+    "validate_promoted_captures_root",
 ]
