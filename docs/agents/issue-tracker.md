@@ -7,7 +7,7 @@ the other. Use the `gh` CLI for all issue operations.
 
 ## Existing workflow (don't re-invent)
 
-These conventions are already in force (see CLAUDE.md → *Roadmap: GitHub for
+These conventions are already in force (see AGENTS.md → *Roadmap: GitHub for
 status, vault for rationale*):
 
 - **One issue per backlog item.** The issue body holds the full

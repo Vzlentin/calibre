@@ -10,5 +10,5 @@ the single source of truth — read the plan for any work item before implementi
 This directory is a **public-safe redirector**: it names *where* the plans live,
 never a plan body. New plans are written to the vault; if the vault is
 unreachable a skill may write a temporary local plan here, then relocate it to
-the vault on return (see CLAUDE.md → *Agent memory*). See
+the vault on return (see AGENTS.md → *Agent memory*). See
 `docs/agents/domain.md` for the full consumer rules.

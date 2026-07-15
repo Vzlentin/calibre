@@ -1,0 +1,13 @@
+# Project config for the user-level /go skill (~/.agents/skills/go).
+# See AGENTS.md -> "Agent skills" for how this is consumed.
+
+[go]
+quality_gates = [
+    "uv run ruff check .",
+    "uv run ty check calibre/",
+    "uv run pytest",
+]
+venv_gate = "uv run python -c 'import calibre'"
+
+[go.data]
+m5 = "data/m5"
