@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import stat
 from collections.abc import Mapping, Sequence
@@ -682,15 +683,47 @@ def _require_expected(actual: str, expected: object, *, name: str) -> None:
         raise VN2ResultError(f"VN2 result {name} does not match the requested value")
 
 
-def _require_trusted_digest(actual: str, path: Path, *, name: str) -> None:
+def _read_trusted_file(path: Path, *, name: str) -> bytes:
+    if path.is_symlink():
+        raise VN2ResultError(f"trusted {name} input must be a real non-symlink regular file")
+    if os.name == "posix":
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as error:
+            raise VN2ResultError(f"trusted {name} input must be a readable file") from error
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise VN2ResultError(
+                    f"trusted {name} input must be a real non-symlink regular file"
+                )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        except OSError as error:
+            raise VN2ResultError(f"trusted {name} input must be a readable file") from error
+        finally:
+            os.close(fd)
     try:
         file_stat = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(file_stat.st_mode):
+            raise VN2ResultError(f"trusted {name} input must be a real non-symlink regular file")
+        return path.read_bytes()
+    except VN2ResultError:
+        raise
     except OSError as error:
         raise VN2ResultError(f"trusted {name} input must be a readable file") from error
-    if path.is_symlink() or not stat.S_ISREG(file_stat.st_mode):
-        raise VN2ResultError(f"trusted {name} input must be a real non-symlink regular file")
-    if actual != _sha256_file(path, name=name):
+
+
+def _require_trusted_digest(actual: str, path: Path, *, name: str) -> bytes:
+    payload = _read_trusted_file(path, name=name)
+    if actual != _sha256(payload):
         raise VN2ResultError(f"VN2 result {name} does not match trusted input bytes")
+    return payload
 
 
 def _sha256_file(path: Path, *, name: str) -> str:

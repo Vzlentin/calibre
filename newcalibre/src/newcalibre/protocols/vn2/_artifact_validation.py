@@ -80,7 +80,7 @@ from newcalibre.protocols.vn2._artifact_contracts import (
     _TrustedInputs,
     _validate_run_url,
 )
-from newcalibre.protocols.vn2.config import VN2ProtocolConfig, load_vn2_config
+from newcalibre.protocols.vn2.config import VN2ProtocolConfig, _load_vn2_config_bytes
 
 
 def _validate_lost_sales_sequence(
@@ -163,7 +163,7 @@ def validate_vn2_result_bundle(
         input_inventory_digest=input_digest,
         lock_digest=lock_digest,
     )
-    _require_trusted_digest(
+    config_bytes = _require_trusted_digest(
         config_digest,
         Path(expected_config_path),
         name="config_digest",
@@ -174,7 +174,10 @@ def validate_vn2_result_bundle(
         name="input_inventory_digest",
     )
     _require_trusted_digest(lock_digest, Path(expected_lock_path), name="lock_digest")
-    config = load_vn2_config(Path(expected_config_path))
+    try:
+        config = _load_vn2_config_bytes(config_bytes, path=Path(expected_config_path))
+    except ValueError as error:
+        raise VN2ResultError("trusted VN2 configuration is invalid") from error
     if manifest["actuals_semantics"] != config.actuals_semantics.value:
         raise VN2ResultError("manifest actuals_semantics does not match VN2 configuration")
 

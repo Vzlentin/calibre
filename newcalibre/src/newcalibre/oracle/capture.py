@@ -175,10 +175,36 @@ def validate_capture_bundle(
     expected_candidate_sha: str,
     expected_workflow_sha: str,
     expected_run_id: str,
+    expected_config_path: Path,
+    expected_input_inventory_path: Path,
+) -> CaptureBundle:
+    """Validate a live capture bundle against all trusted input bytes."""
+    if not isinstance(expected_config_path, Path) or not isinstance(
+        expected_input_inventory_path, Path
+    ):
+        raise OracleEvidenceError(
+            "validate_capture_bundle requires trusted config and input-inventory paths"
+        )
+    return _validate_capture_bundle(
+        root,
+        expected_candidate_sha=expected_candidate_sha,
+        expected_workflow_sha=expected_workflow_sha,
+        expected_run_id=expected_run_id,
+        expected_config_path=expected_config_path,
+        expected_input_inventory_path=expected_input_inventory_path,
+    )
+
+
+def _validate_capture_bundle(
+    root: Path,
+    *,
+    expected_candidate_sha: str,
+    expected_workflow_sha: str,
+    expected_run_id: str,
     expected_config_path: Path | None,
     expected_input_inventory_path: Path | None,
 ) -> CaptureBundle:
-    """Validate identity, manifest completeness, payload shape, and every byte."""
+    """Validate structure with optional trusted paths for committed bytes."""
     bundle_root = _require_nonsymlink_directory(Path(root), name="capture bundle")
     manifest_path = bundle_root / "manifest.json"
     listing_path = bundle_root / "files.sha256"
@@ -489,14 +515,23 @@ def validate_promoted_capture(
 def validate_committed_promoted_capture(root: Path) -> tuple[CaptureBundle, CaptureReceipt]:
     """Validate the sole committed capture bundle and receipt without live metadata."""
     captures_root = validate_promoted_captures_root(root)
+    entries: list[Path] = []
     try:
-        entries = sorted(captures_root.iterdir(), key=lambda path: path.name.encode())
+        for index, entry in enumerate(captures_root.iterdir()):
+            if index >= 2:
+                raise OracleEvidenceError(
+                    "promoted captures root must contain exactly one SHA-named bundle and receipt"
+                )
+            entries.append(entry)
+    except OracleEvidenceError:
+        raise
     except OSError as error:
         raise OracleEvidenceError("promoted captures root must be readable") from error
     if len(entries) != 2:
         raise OracleEvidenceError(
             "promoted captures root must contain exactly one SHA-named bundle and receipt"
         )
+    entries.sort(key=lambda path: path.name.encode())
     bundle_candidates = [entry for entry in entries if entry.is_dir()]
     if len(bundle_candidates) != 1:
         raise OracleEvidenceError(
@@ -521,7 +556,7 @@ def validate_committed_promoted_capture(root: Path) -> tuple[CaptureBundle, Capt
         manifest_value.get("run_id"),
         name="committed capture run_id",
     )
-    bundle = validate_capture_bundle(
+    bundle = _validate_capture_bundle(
         bundle_root,
         expected_candidate_sha=candidate_sha,
         expected_workflow_sha=workflow_sha,

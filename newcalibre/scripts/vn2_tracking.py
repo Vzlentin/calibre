@@ -77,7 +77,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         expected = _build(args)
         if args.command == "propose":
-            args.proposal.parent.mkdir(parents=True, exist_ok=True)
             write_proposal_record(expected, args.proposal)
         else:
             actual = parse_tracking_record(args.proposal)

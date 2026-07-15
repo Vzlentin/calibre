@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 from pathlib import Path
 
 import pytest
 
 from newcalibre.domain._canonical_json import canonical_json_bytes
+from newcalibre.protocols.vn2 import VN2ResultError, build_tracking_record
 from newcalibre.protocols.vn2.tracking import (
     TRACKING_KIND,
     TRACKING_SCHEMA,
@@ -17,7 +20,7 @@ from newcalibre.protocols.vn2.tracking import (
     decide_append,
     parse_tracking_history,
     parse_tracking_record,
-    write_tracking_record,
+    write_proposal_record,
 )
 
 pytestmark = pytest.mark.tier1
@@ -37,7 +40,13 @@ def _environment() -> dict[str, object]:
         "os": {"id": "ubuntu", "pretty_name": "Ubuntu 24.04", "version_id": "24.04"},
         "python": "3.12.13",
         "runner_image": "ubuntu24/20260701.1",
-        "thread_policy": {"OMP_NUM_THREADS": "1"},
+        "thread_policy": {
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
+        },
     }
 
 
@@ -134,7 +143,12 @@ def _record(*, total_cost: float = 3.0, candidate: str = CANDIDATE) -> VN2Tracki
             "total_cost": total_cost,
         },
     }
+
     return VN2TrackingRecord(payload)
+
+
+def _json_payload(record: VN2TrackingRecord) -> dict[str, object]:
+    return json.loads(record.to_json())
 
 
 def test_canonical_record_round_trip_and_history_duplicate_refusal() -> None:
@@ -159,11 +173,14 @@ def test_append_idempotency_and_atomic_writer(tmp_path: Path) -> None:
     record = _record()
     assert decide_append(record, ()).action == "append"
     assert decide_append(record, (record,)).action == "noop"
-    path = tmp_path / "proposal.jsonl"
-    assert write_tracking_record(record, path)
-    assert not write_tracking_record(record, path)
+    root = tmp_path / "newcalibre"
+    (root / "artifacts").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("[project]\nname = 'newcalibre'\n")
+    path = root / "artifacts" / "proposal.jsonl"
+    assert write_proposal_record(record, path)
+    assert not write_proposal_record(record, path)
     with pytest.raises(TrackingError, match="conflicts"):
-        write_tracking_record(_record(total_cost=4.0), path)
+        write_proposal_record(_record(total_cost=4.0), path)
 
 
 def test_strict_codec_refuses_pretty_json_and_crlf() -> None:
@@ -174,3 +191,95 @@ def test_strict_codec_refuses_pretty_json_and_crlf() -> None:
         parse_tracking_record((record.to_json().rstrip("\n").replace(":", ": ") + "\n").encode())
     with pytest.raises(TrackingError, match="LF"):
         parse_tracking_record(body + b"\r\n")
+
+
+def test_tracking_record_owns_nested_values_and_exposes_no_aliases() -> None:
+    payload = _json_payload(_record())
+    record = VN2TrackingRecord(payload)
+    payload["subject"]["repository"] = "evil"  # type: ignore[index]
+    assert record.payload["subject"]["repository"] == "Vzlentin/calibre"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        record.payload["subject"]["repository"] = "evil"  # type: ignore[index]
+    import newcalibre.protocols.vn2.tracking as tracking
+
+    assert not hasattr(tracking, "TrackingRecord")
+    assert not hasattr(tracking, "append_decision")
+    assert not hasattr(tracking, "build_proposed_record")
+    assert not hasattr(tracking, "compare_records")
+    assert not hasattr(tracking, "write_tracking_record")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"{}\n\n",
+        b"\xef\xbb\xbf{}\n",
+        b"\xff{}\n",
+        b"{}",
+    ],
+)
+def test_tracking_codec_rejects_malformed_line_shapes(payload: bytes) -> None:
+    with pytest.raises(TrackingError):
+        parse_tracking_record(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.pop("subject"),
+        lambda value: value.__setitem__("unknown", None),
+        lambda value: value["environment"].__setitem__("facts", []),
+        lambda value: value["objective"].__setitem__("total_cost", math.nan),
+        lambda value: value["evidence"]["promoted_capture"].__setitem__(
+            "artifact_name", "oracle-capture-" + "c" * 40
+        ),
+        lambda value: value["workflow"].__setitem__(
+            "definition_ref", "evil.example/workflow.yml@main"
+        ),
+    ],
+)
+def test_tracking_constructor_refuses_schema_and_fact_corruption(mutation) -> None:
+    payload = _json_payload(_record())
+    mutation(payload)
+    with pytest.raises(TrackingError):
+        VN2TrackingRecord(payload)
+
+
+def test_tracking_history_and_publication_paths_are_successor_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "newcalibre"
+    (root / "artifacts").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("[project]\nname = 'newcalibre'\n")
+    monkeypatch.chdir(root)
+    record = _record()
+    relative = Path("artifacts") / "nested" / "proposal.jsonl"
+    assert write_proposal_record(record, relative)
+    with pytest.raises(TrackingError):
+        write_proposal_record(record, tmp_path / "outside" / "proposal.jsonl")
+    with pytest.raises(TrackingError, match="tracked history"):
+        write_proposal_record(record, root / "stage3" / "tracking" / "series.jsonl")
+
+
+def test_builder_translates_domain_validator_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import newcalibre.protocols.vn2._tracking_projection as projection
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise VN2ResultError("fixture validator failure")
+
+    monkeypatch.setattr(projection, "validate_vn2_result_bundle", fail)
+    with pytest.raises(TrackingError) as caught:
+        build_tracking_record(
+            Path("result"),
+            Path("captures"),
+            candidate_sha=CANDIDATE,
+            definition_ref="Vzlentin/calibre/.github/workflows/newcalibre.yml@main",
+            definition_sha=WORKFLOW,
+            run_id=RUN_ID,
+            run_url=f"https://github.com/Vzlentin/calibre/actions/runs/{RUN_ID}",
+            result_artifact_id="789012",
+            result_artifact_name=f"vn2-acceptance-{CANDIDATE}",
+            result_artifact_digest=DIGEST,
+        )
+    assert isinstance(caught.value.__cause__, VN2ResultError)

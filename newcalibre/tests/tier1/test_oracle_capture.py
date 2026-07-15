@@ -18,6 +18,7 @@ from newcalibre.oracle import (
     OracleEvidenceError,
     validate_capture_bundle,
     validate_capture_receipt,
+    validate_committed_promoted_capture,
     validate_promoted_capture,
     validate_promoted_captures_root,
 )
@@ -684,6 +685,64 @@ def test_promoted_capture_refuses_wrong_workflow_run(
             run_metadata=run_metadata,
             expected_config_path=_trusted_inputs(root)[0],
             expected_input_inventory_path=_trusted_inputs(root)[1],
+        )
+
+
+def test_committed_capture_helper_validates_one_bundle_and_receipt(tmp_path: Path) -> None:
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    bundle_root = captures / CANDIDATE_SHA
+    bundle = _validate(_valid_bundle(bundle_root))
+    receipt_path = captures / f"{CANDIDATE_SHA}-receipt.json"
+    (captures / "vn2-winning-loop.yaml").unlink()
+    (captures / "vn2-input-digests.json").unlink()
+    _write_json(receipt_path, _receipt_value(bundle))
+
+    validated_bundle, validated_receipt = validate_committed_promoted_capture(captures)
+
+    assert validated_bundle.manifest == bundle.manifest
+    assert validated_receipt.artifact_id == ARTIFACT_ID
+
+
+@pytest.mark.parametrize("entry_count", [0, 3])
+def test_committed_capture_helper_bounds_root_enumeration(tmp_path: Path, entry_count: int) -> None:
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    if entry_count == 3:
+        (captures / "a").mkdir()
+        (captures / "b").write_bytes(b"receipt")
+        (captures / "c").write_bytes(b"extra")
+
+    with pytest.raises(
+        OracleEvidenceError,
+        match="promoted captures root must contain exactly one SHA-named bundle and receipt",
+    ):
+        validate_committed_promoted_capture(captures)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="symlink trust checks are Linux-ratified")
+def test_committed_capture_helper_rejects_symlink_bundle(tmp_path: Path) -> None:
+    (tmp_path / "real").mkdir()
+    real_bundle = _valid_bundle(tmp_path / "real" / CANDIDATE_SHA)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    (captures / CANDIDATE_SHA).symlink_to(real_bundle, target_is_directory=True)
+    (captures / f"{CANDIDATE_SHA}-receipt.json").write_bytes(b"{}")
+
+    with pytest.raises(OracleEvidenceError, match="symbolic link"):
+        validate_committed_promoted_capture(captures)
+
+
+def test_public_capture_validator_requires_trusted_paths(tmp_path: Path) -> None:
+    root = _valid_bundle(tmp_path / "bundle")
+    with pytest.raises(OracleEvidenceError, match="requires trusted"):
+        validate_capture_bundle(
+            root,
+            expected_candidate_sha=CANDIDATE_SHA,
+            expected_workflow_sha=WORKFLOW_SHA,
+            expected_run_id=RUN_ID,
+            expected_config_path=None,  # type: ignore[arg-type]
+            expected_input_inventory_path=None,  # type: ignore[arg-type]
         )
 
 

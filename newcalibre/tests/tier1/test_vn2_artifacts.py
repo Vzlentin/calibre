@@ -426,6 +426,11 @@ def test_bundle_projects_exact_r1_r4_spines_semantics_and_math(tmp_path: Path) -
     assert r3["holding_total"] == objective.holding.value
     assert r3["shortage_total"] == objective.shortage.value
     assert r3["total_cost"] == r3["holding_total"] + r3["shortage_total"]
+    assert bundle.cost.holding.value == r3["holding_total"]
+    assert bundle.cost.shortage.value == r3["shortage_total"]
+    assert bundle.cost.total.value == r3["total_cost"]
+    assert bundle.cost.holding.actuals_semantics is ActualsSemantics.CENSORED_SALES_SURROGATE
+    assert validated.cost == bundle.cost
 
     partial_by_origin = {partial.origin: partial.cost.value for partial in objective.partials}
     decision_rows = r4["decision_rounds"]
@@ -848,6 +853,50 @@ def test_bundle_refuses_foreign_session_and_identity_mapping_before_writing(
                 lock_path=lock_path,
             )
         assert not root.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlink trust checks are POSIX-ratified")
+@pytest.mark.parametrize("trusted_name", ["config_path", "inventory_path", "lock_path"])
+def test_validator_refuses_symlink_and_non_regular_trusted_inputs(
+    tmp_path: Path, trusted_name: str
+) -> None:
+    result, config, config_path, inventory_path, lock_path = _run(tmp_path / "source")
+    bundle_root = tmp_path / "bundle"
+    _emit(
+        bundle_root,
+        result=result,
+        config=config,
+        config_path=config_path,
+        inventory_path=inventory_path,
+        lock_path=lock_path,
+    )
+    paths = {
+        "config_path": config_path,
+        "inventory_path": inventory_path,
+        "lock_path": lock_path,
+    }
+    trusted_path = paths[trusted_name]
+    original = trusted_path.read_bytes()
+    target = trusted_path.with_name(trusted_path.name + ".target")
+    target.write_bytes(original)
+    trusted_path.unlink()
+    trusted_path.symlink_to(target)
+    with pytest.raises(VN2ResultError, match="real non-symlink regular file"):
+        _validate(
+            bundle_root,
+            config_path=config_path,
+            inventory_path=inventory_path,
+            lock_path=lock_path,
+        )
+    trusted_path.unlink()
+    trusted_path.mkdir()
+    with pytest.raises(VN2ResultError, match="real non-symlink regular file"):
+        _validate(
+            bundle_root,
+            config_path=config_path,
+            inventory_path=inventory_path,
+            lock_path=lock_path,
+        )
 
 
 def test_validator_refuses_tamper_extra_symlink_duplicate_keys_and_wrong_identity(

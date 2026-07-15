@@ -573,7 +573,6 @@ jobs:
             --proposal artifacts/vn2-tracking/proposed-record.jsonl
       - name: Upload proposal record (manual vn2-mint only)
         if: env.VN2_MODE == 'mint'
-        id: tracking_upload
         uses: actions/upload-artifact@v4
         with:
           name: vn2-tracking-proposal-${{ env.VN2_CANDIDATE_SHA }}
