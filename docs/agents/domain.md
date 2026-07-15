@@ -8,7 +8,7 @@ redirectors.** Nothing durable — glossary, ADRs, plans — lives in the code r
 
 Resolve the vault root from the repo's `.env` first (`grep OBSIDIAN_VAULT_PATH
 .env`) — do **not** trust a bare `$OBSIDIAN_VAULT_PATH` in the shell, which
-reads empty on this machine (see CLAUDE.md → *Agent memory*). The project folder
+reads empty on this machine (see AGENTS.md → *Agent memory*). The project folder
 is `Projects/Calibre/`.
 
 - **Glossary** — `<vault>/Projects/Calibre/CONCEPTS.md`. The shared domain
@@ -19,7 +19,7 @@ is `Projects/Calibre/`.
   plus `reviews/`). Read the plan for any work item before implementing.
 - **Broader context** — the vault also holds `architecture.md`, `lessons.md`,
   `vision.md`, `ROADMAP.md`, `STRATEGY.md`, `solutions/` (per-problem learnings).
-  See CLAUDE.md → *Agent memory* for the full map and consumer rules; this file
+  See AGENTS.md → *Agent memory* for the full map and consumer rules; this file
   covers only the glossary + ADRs + plans the Matt Pocock skills look for.
 
 ## Repo paths are redirectors, not bodies
@@ -65,7 +65,7 @@ If `.env` carries no `OBSIDIAN_VAULT_PATH` line (truly unset — not merely abse
 from the live shell), the vault is unavailable: **proceed silently**. Don't flag
 the absence; don't suggest creating the vault. The glossary and ADRs won't be
 available. A skill may write a **temporary** local plan under `docs/plans/` to
-keep work moving, then relocate it to the vault on return (see CLAUDE.md →
+keep work moving, then relocate it to the vault on return (see AGENTS.md →
 *Agent memory*); never write durable memory (ADRs, glossary, solutions) to a
 guessed repo path.
 

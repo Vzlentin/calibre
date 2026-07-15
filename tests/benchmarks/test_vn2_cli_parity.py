@@ -70,7 +70,7 @@ _x86_64_gate = pytest.mark.skipif(
     reason=(
         f"VN2 parity baseline {BASELINE_TOTAL_COST} is the x86_64/Linux gate value; "
         f"on {platform.machine()} the same config deterministically yields a different "
-        "cost (cross-arch LightGBM float divergence, not a regression). See CLAUDE.md."
+        "cost (cross-arch LightGBM float divergence, not a regression). See AGENTS.md."
     ),
 )
 
@@ -327,14 +327,14 @@ def test_c5_calibre_run_reproduces_4992_via_settle_path(
 
     assert settle_capture.holding == pytest.approx(BASELINE_HOLDING_COST, abs=BASELINE_ABS_TOL), (
         f"settle holding_cost {settle_capture.holding:.4f} drifted from "
-        f"{BASELINE_HOLDING_COST}; do not loosen — see CLAUDE.md Gotchas."
+        f"{BASELINE_HOLDING_COST}; do not loosen — see AGENTS.md Gotchas."
     )
     assert settle_capture.shortage == pytest.approx(BASELINE_SHORTAGE_COST, abs=BASELINE_ABS_TOL), (
         f"settle shortage_cost {settle_capture.shortage:.4f} drifted from {BASELINE_SHORTAGE_COST}."
     )
     assert total == pytest.approx(BASELINE_TOTAL_COST, abs=BASELINE_ABS_TOL), (
         f"settle total_cost {total:.4f} drifted from the x86_64 baseline "
-        f"{BASELINE_TOTAL_COST}. Do not loosen this — see CLAUDE.md Gotchas."
+        f"{BASELINE_TOTAL_COST}. Do not loosen this — see AGENTS.md Gotchas."
     )
 
 

@@ -16,9 +16,8 @@ def load_script_module(path: Path) -> ModuleType:
     """Import a standalone script (outside any package) as a module.
 
     Used for repo automation scripts that tests exercise directly, e.g.
-    ``.github/scripts/`` and ``.agents/skills/go/scripts/``. The module is
-    registered in ``sys.modules`` under its stem so dataclasses and pickling
-    resolve it.
+    ``.github/scripts/``. The module is registered in ``sys.modules`` under
+    its stem so dataclasses and pickling resolve it.
     """
     name = path.stem
     spec = importlib.util.spec_from_file_location(name, path)

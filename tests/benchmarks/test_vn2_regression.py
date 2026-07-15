@@ -2,7 +2,7 @@
 
 Pins the documented baseline ``total_cost = 4992.20`` (EUR) — the cross-cutting
 invariant the C1–C5 architecture deepenings must preserve. The number lives in
-CLAUDE.md / README as prose; this module makes it *executable* so it is enforced
+AGENTS.md / README as prose; this module makes it *executable* so it is enforced
 on every merge rather than merely documented.
 
 Two independent production code paths reproduce the baseline; the gate pins both,
@@ -22,7 +22,7 @@ bare scalar would miss.
 **Platform.** 4992.20 is the **x86_64/Linux** value, which is where CI runs. On
 arm64/macOS the same config deterministically yields ~5011.20 — cross-arch
 LightGBM float divergence (SIMD/FMA/libm), **not** a regression — so the gate
-skips there instead of failing. See CLAUDE.md "Gotchas".
+skips there instead of failing. See AGENTS.md "Gotchas".
 
 **Cost.** Each path trains an 800-estimator global LightGBM over the full
 600-series VN2 panel across 6 decision rounds (~90s each), so the two heavy
@@ -59,7 +59,7 @@ _x86_64_gate = pytest.mark.skipif(
         f"VN2 baseline {BASELINE_TOTAL_COST} is the x86_64/Linux gate value; "
         f"on {platform.machine()} the same config deterministically yields a "
         "different cost (cross-arch LightGBM float divergence, not a "
-        "regression). See CLAUDE.md Gotchas."
+        "regression). See AGENTS.md Gotchas."
     ),
 )
 
@@ -71,7 +71,7 @@ def _assert_baseline(summary: pd.DataFrame, *, path: str) -> None:
     shortage = float(summary["shortage_cost"].sum())
     assert total == pytest.approx(BASELINE_TOTAL_COST, abs=BASELINE_ABS_TOL), (
         f"{path}: VN2 total_cost drifted to {total:.4f}; the x86_64 baseline is "
-        f"{BASELINE_TOTAL_COST}. Do not loosen this — see CLAUDE.md Gotchas."
+        f"{BASELINE_TOTAL_COST}. Do not loosen this — see AGENTS.md Gotchas."
     )
     assert holding == pytest.approx(BASELINE_HOLDING_COST, abs=BASELINE_ABS_TOL), (
         f"{path}: holding_cost drifted to {holding:.4f} (baseline {BASELINE_HOLDING_COST})."
