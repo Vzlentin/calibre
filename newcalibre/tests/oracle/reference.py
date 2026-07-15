@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 type DemandKey = tuple[str, str]
 
@@ -38,7 +39,7 @@ class ReferenceOrder:
 
 @dataclass(frozen=True, slots=True)
 class ReferenceRow:
-    """Expose every hand-recomputable transition and cost component."""
+    """Expose every hand-recomputable transition, position, and cost component."""
 
     series_key: str
     period: str
@@ -47,6 +48,7 @@ class ReferenceRow:
     demand: float
     fulfilled: float
     closing: float
+    on_order: float
     shortage: float
     holding_cost: float
     shortage_cost: float
@@ -73,6 +75,7 @@ def calculate_reference_trajectory(
     demand: Mapping[DemandKey, float],
     orders: Sequence[ReferenceOrder],
     lead_time: int,
+    initial_arrivals: Mapping[DemandKey, float] | None = None,
 ) -> ReferenceTrajectory:
     """Apply arrive, lost-sale, then linear-cost identities in period order."""
     frozen_periods = tuple(periods)
@@ -102,7 +105,30 @@ def calculate_reference_trajectory(
             f"reference demand keys mismatch: missing={missing!r}, extra={extra!r}"
         )
     normalized_demand = {key: _nonnegative(value, name="demand") for key, value in demand.items()}
+    period_indexes = {period: index for index, period in enumerate(frozen_periods)}
     arrivals: dict[tuple[str, int], list[float]] = {}
+    initial_open_orders: dict[str, list[float]] = {}
+    if initial_arrivals is not None:
+        if len(frozen_periods) < lead_time:
+            raise ReferenceInputError(
+                "reference trajectory omits an initial-arrival pipeline period"
+            )
+        expected_arrivals = {
+            (series_key, period)
+            for period in frozen_periods[:lead_time]
+            for series_key in series_by_key
+        }
+        if set(initial_arrivals) != expected_arrivals:
+            missing = sorted(expected_arrivals - set(initial_arrivals))
+            extra = sorted(set(initial_arrivals) - expected_arrivals)
+            raise ReferenceInputError(
+                f"reference initial arrival keys mismatch: missing={missing!r}, extra={extra!r}"
+            )
+        for (series_key, period), value in initial_arrivals.items():
+            quantity = _nonnegative(value, name="initial arrival")
+            arrivals.setdefault((series_key, period_indexes[period]), []).append(quantity)
+            initial_open_orders.setdefault(series_key, []).append(quantity)
+    orders_by_origin: dict[tuple[str, int], list[float]] = {}
     for order in orders:
         if not isinstance(order, ReferenceOrder):
             raise TypeError("reference orders must contain ReferenceOrder values")
@@ -113,12 +139,14 @@ def calculate_reference_trajectory(
         if order.origin_index < 0 or order.origin_index >= len(frozen_periods):
             raise ReferenceInputError("reference order origin index lies outside the trajectory")
         quantity = _nonnegative(order.quantity, name="order quantity")
+        orders_by_origin.setdefault((order.series_key, order.origin_index), []).append(quantity)
         arrival_index = order.origin_index + lead_time
         if arrival_index >= len(frozen_periods):
             raise ReferenceInputError("reference trajectory omits an order-arrival drain period")
         arrivals.setdefault((order.series_key, arrival_index), []).append(quantity)
 
     positions = {key: item.initial_on_hand for key, item in series_by_key.items()}
+    open_orders = {key: math.fsum(initial_open_orders.get(key, ())) for key in series_by_key}
     rows: list[ReferenceRow] = []
     costs: dict[str, float] = {}
     for period_index, period in enumerate(frozen_periods):
@@ -131,6 +159,11 @@ def calculate_reference_trajectory(
             available = opening + arrived
             fulfilled = min(available, realized)
             closing = available - fulfilled
+            current_orders = math.fsum(orders_by_origin.get((series_key, period_index), ()))
+            on_order = _nonnegative(
+                math.fsum((open_orders[series_key], -arrived, current_orders)),
+                name="open-order quantity",
+            )
             shortage = realized - fulfilled
             holding_cost = item.holding_rate * closing
             shortage_cost = item.shortage_rate * shortage
@@ -142,17 +175,19 @@ def calculate_reference_trajectory(
                 demand=realized,
                 fulfilled=fulfilled,
                 closing=closing,
+                on_order=on_order,
                 shortage=shortage,
                 holding_cost=holding_cost,
                 shortage_cost=shortage_cost,
             )
             rows.append(row)
             positions[series_key] = closing
+            open_orders[series_key] = on_order
             period_costs.append(row.total_cost)
         costs[period] = math.fsum(period_costs)
     return ReferenceTrajectory(
         rows=tuple(rows),
-        cost_by_period=dict(costs),
+        cost_by_period=MappingProxyType(dict(costs)),
         total_cost=math.fsum(costs[period] for period in frozen_periods),
     )
 
