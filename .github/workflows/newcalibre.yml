@@ -269,6 +269,13 @@ jobs:
     # absent captures skip visibly.
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.lane == 'oracle')
     runs-on: ubuntu-24.04
+    env:
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      ORACLE_CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
     steps:
       - name: Validate candidate SHA (manual runs)
         if: github.event_name == 'workflow_dispatch'
@@ -278,25 +285,94 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      - name: Verify checked-out HEAD
-        if: github.event_name == 'workflow_dispatch'
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
-      - name: Successor + captures presence
-        id: present
+      - name: Verify checked-out HEAD equals candidate
+        run: test "$(git rev-parse HEAD)" = "$ORACLE_CANDIDATE_SHA"
+      - name: Require successor + Tier 3 harness
         run: |
-          echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "captures=$([ -d stage3/evidence/captures ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          test -f newcalibre/pyproject.toml \
+            || { echo "missing successor project: newcalibre/pyproject.toml"; exit 1; }
+          test -f stage3/evidence/vn2-input-digests.json \
+            || { echo "missing VN2 digest inventory: stage3/evidence/vn2-input-digests.json"; exit 1; }
+          test -f newcalibre/benchmarks/vn2/vn2-input-digests.json \
+            || { echo "missing successor VN2 inventory"; exit 1; }
+          test -f newcalibre/scripts/vn2_data.py \
+            || { echo "missing successor VN2 verifier"; exit 1; }
+          test -d newcalibre/tests/tier3 \
+            || { echo "missing Tier 3 harness"; exit 1; }
+      - name: Promoted captures presence
+        id: captures
+        run: echo "present=$([ -d stage3/evidence/captures ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Tier 3 visibly skipped
-        if: steps.present.outputs.exists != 'true' || steps.present.outputs.captures != 'true'
-        run: echo "::notice::tier 3 skipped — successor or promoted captures absent"
+        if: github.event_name == 'schedule' && steps.captures.outputs.present != 'true'
+        run: echo "::notice::tier 3 skipped - promoted captures absent"
+      - name: Require promoted captures (manual runs)
+        if: github.event_name == 'workflow_dispatch' && steps.captures.outputs.present != 'true'
+        run: |
+          echo "promoted captures are required for a manual Tier 3 evidence run"
+          exit 1
       - uses: astral-sh/setup-uv@v4
-        if: steps.present.outputs.exists == 'true' && steps.present.outputs.captures == 'true'
-      - name: Tier 3 replay + divergence + witness enforcement
-        if: steps.present.outputs.exists == 'true' && steps.present.outputs.captures == 'true'
+        if: steps.captures.outputs.present == 'true'
+      - name: Preflight - evidence environment (ADR 0001)
+        if: steps.captures.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = "ubuntu" || { echo "non-Ubuntu runner refused"; exit 1; }
+          test "$VERSION_ID" = "24.04" || { echo "Ubuntu release $VERSION_ID refused"; exit 1; }
+          test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
+          test "${ImageOS:-}" = "ubuntu24" || { echo "runner image OS must be ubuntu24"; exit 1; }
+          test -n "${ImageVersion:-}" || { echo "ImageVersion is required"; exit 1; }
+          uv run --no-project --python 3.12 python - <<'PY'
+          import sys
+
+          assert sys.version_info[:2] == (3, 12), sys.version
+          print(f"bootstrap_python={sys.version}")
+          PY
+          sha256sum newcalibre/uv.lock
+          printf 'runner_image=%s/%s\n' "$ImageOS" "$ImageVersion"
+          printf 'os_release=%s arch=%s\n' "$PRETTY_NAME" "$(uname -m)"
+      - name: Restore VN2 data (exact digest-inventory key, no fallback)
+        if: steps.captures.outputs.present == 'true'
+        uses: actions/cache@v4
+        with:
+          path: newcalibre/data/vn2
+          key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
+      - name: Acquire VN2 inputs with bootstrap tooling
+        if: steps.captures.outputs.present == 'true'
+        env:
+          DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
+          GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
+        run: uv run --no-project python .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
+      - name: Verify VN2 inputs with successor tooling
+        if: steps.captures.outputs.present == 'true'
+        run: |
+          uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify --target newcalibre/data/vn2 \
+            --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json
+      - name: Record numerical provenance
+        if: steps.captures.outputs.present == 'true'
         working-directory: newcalibre
         run: |
-          uv sync --locked --group dev
-          uv run --locked pytest tests/tier3
+          uv run --locked --no-sync python - <<'PY'
+          import platform
+          import sys
+          from hashlib import sha256
+          from pathlib import Path
+
+          import numpy
+
+          print(f"python={sys.version}")
+          print(f"cpu={platform.processor()}")
+          print(f"numpy={numpy.__version__}")
+          lock_digest = sha256(Path("uv.lock").read_bytes()).hexdigest()
+          print(f"lock_sha256={lock_digest}")
+          numpy.show_config()
+          PY
+      - name: Tier 3 replay + divergence + witness enforcement
+        if: steps.captures.outputs.present == 'true'
+        working-directory: newcalibre
+        run: uv run --locked --no-sync pytest tests/tier3
 
   vn2-acceptance:
     # Tier 4 — schedule is verify-only against the default-branch SHA;

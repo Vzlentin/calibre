@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 type DemandKey = tuple[str, str]
 
@@ -73,6 +74,7 @@ def calculate_reference_trajectory(
     demand: Mapping[DemandKey, float],
     orders: Sequence[ReferenceOrder],
     lead_time: int,
+    initial_arrivals: Mapping[DemandKey, float] | None = None,
 ) -> ReferenceTrajectory:
     """Apply arrive, lost-sale, then linear-cost identities in period order."""
     frozen_periods = tuple(periods)
@@ -102,7 +104,27 @@ def calculate_reference_trajectory(
             f"reference demand keys mismatch: missing={missing!r}, extra={extra!r}"
         )
     normalized_demand = {key: _nonnegative(value, name="demand") for key, value in demand.items()}
+    period_indexes = {period: index for index, period in enumerate(frozen_periods)}
     arrivals: dict[tuple[str, int], list[float]] = {}
+    if initial_arrivals is not None:
+        if len(frozen_periods) < lead_time:
+            raise ReferenceInputError(
+                "reference trajectory omits an initial-arrival pipeline period"
+            )
+        expected_arrivals = {
+            (series_key, period)
+            for period in frozen_periods[:lead_time]
+            for series_key in series_by_key
+        }
+        if set(initial_arrivals) != expected_arrivals:
+            missing = sorted(expected_arrivals - set(initial_arrivals))
+            extra = sorted(set(initial_arrivals) - expected_arrivals)
+            raise ReferenceInputError(
+                f"reference initial arrival keys mismatch: missing={missing!r}, extra={extra!r}"
+            )
+        for (series_key, period), value in initial_arrivals.items():
+            quantity = _nonnegative(value, name="initial arrival")
+            arrivals.setdefault((series_key, period_indexes[period]), []).append(quantity)
     for order in orders:
         if not isinstance(order, ReferenceOrder):
             raise TypeError("reference orders must contain ReferenceOrder values")
@@ -152,7 +174,7 @@ def calculate_reference_trajectory(
         costs[period] = math.fsum(period_costs)
     return ReferenceTrajectory(
         rows=tuple(rows),
-        cost_by_period=dict(costs),
+        cost_by_period=MappingProxyType(dict(costs)),
         total_cost=math.fsum(costs[period] for period in frozen_periods),
     )
 
