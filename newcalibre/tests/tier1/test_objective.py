@@ -346,15 +346,19 @@ def test_obj2_tuning_default_returns_a_labeled_scalar_for_surrogate_actuals() ->
     assert objective == CostValue(2.0, ActualsSemantics.CENSORED_SALES_SURROGATE)
 
 
-def test_obj2_preserves_canonical_origin_totals_while_binding_final_components() -> None:
+def test_obj3_preserves_cumulative_trajectory_across_float_reassociation() -> None:
     semantics = ActualsSemantics.DEMAND
     components_by_decision = {
         ("a", PERIODS[0]): CostComponents(
-            holding=CostValue(1e16, semantics),
+            holding=CostValue(0.0, semantics),
             shortage=CostValue(1.0, semantics),
         ),
         ("b", PERIODS[0]): CostComponents(
-            holding=CostValue(1.0, semantics),
+            holding=CostValue(2.0, semantics),
+            shortage=CostValue(1e16, semantics),
+        ),
+        ("a", PERIODS[1]): CostComponents(
+            holding=CostValue(1e-16, semantics),
             shortage=CostValue(0.0, semantics),
         ),
     }
@@ -364,40 +368,20 @@ def test_obj2_preserves_canonical_origin_totals_while_binding_final_components()
         actuals_semantics=semantics,
         components_by_decision=components_by_decision,
     )
-    canonical_total = math.fsum(
-        components.total.value for components in components_by_decision.values()
-    )
-    reassociated_total = math.fsum(
-        component.value
-        for components in components_by_decision.values()
-        for component in (components.holding, components.shortage)
-    )
+    component_grouped_total = objective.holding.value + objective.shortage.value
 
-    assert canonical_total != reassociated_total
-    assert objective.by_origin[PERIODS[0]].value == canonical_total
-    assert objective.total.value == objective.holding.value + objective.shortage.value
-    assert objective.partials[-1].cost is objective.total
-
-
-def test_obj2_final_total_is_exactly_bound_to_exported_component_totals() -> None:
-    semantics = ActualsSemantics.DEMAND
-    objective = SettlementObjective(
-        session=_session(),
-        actuals_semantics=semantics,
-        components_by_decision={
-            ("a", PERIODS[0]): CostComponents(
-                holding=CostValue(1.3, semantics),
-                shortage=CostValue(1.0, semantics),
-            ),
-            ("a", PERIODS[1]): CostComponents(
-                holding=CostValue(1.1, semantics),
-                shortage=CostValue(0.4, semantics),
-            ),
-        },
-    )
-
-    assert objective.total.value == objective.holding.value + objective.shortage.value
-    assert objective.partials[-1].cost is objective.total
+    assert [cost.value for cost in objective.by_origin.values()] == [
+        1.0000000000000004e16,
+        1e-16,
+    ]
+    assert [partial.cost.value for partial in objective.partials] == [
+        1.0000000000000004e16,
+        1.0000000000000004e16,
+    ]
+    assert component_grouped_total == 1.0000000000000002e16
+    assert component_grouped_total < objective.partials[0].cost.value
+    assert objective.total is objective.partials[-1].cost
+    assert objective.total.value != component_grouped_total
 
 
 def test_obj2_one_booked_cost_quantum_changes_the_objective_once() -> None:

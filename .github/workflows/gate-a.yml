@@ -122,6 +122,7 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
       - name: Verify HEAD equals candidate
         run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+      - uses: astral-sh/setup-uv@v4
       - name: Preflight — evidence environment (ADR 0001)
         run: |
           set -euo pipefail
@@ -131,7 +132,7 @@ jobs:
           test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
           test "${ImageOS:-}" = "ubuntu24" || { echo "runner image OS must be ubuntu24"; exit 1; }
           test -n "${ImageVersion:-}" || { echo "ImageVersion is required"; exit 1; }
-          python3 - <<'PY'
+          uv run --no-project --python 3.12 python - <<'PY'
           import sys
 
           assert sys.version_info[:2] == (3, 12), sys.version
@@ -140,7 +141,6 @@ jobs:
           sha256sum newcalibre/uv.lock
           printf 'runner_image=%s/%s\n' "$ImageOS" "$ImageVersion"
           printf 'os_release=%s arch=%s\n' "$PRETTY_NAME" "$(uname -m)"
-      - uses: astral-sh/setup-uv@v4
       - name: Restore VN2 data (exact digest-inventory key, no fallback)
         uses: actions/cache@v4
         with:

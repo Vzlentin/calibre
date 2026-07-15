@@ -530,14 +530,16 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     job = workflow["jobs"]["vn2-acceptance"]
     steps = job["steps"]
     checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
+    setup = next(step for step in steps if step.get("uses") == "astral-sh/setup-uv@v4")
     checked_out_head = next(
         step for step in steps if step.get("name") == "Verify checked-out HEAD equals candidate"
     )
     preflight = next(
         step for step in steps if step.get("name") == "Preflight — evidence environment (ADR 0001)"
     )
-    presence = next(step for step in steps if step.get("name") == "Successor + harness presence")
-    skipped = next(step for step in steps if step.get("name") == "Tier 4 visibly skipped")
+    harness = next(
+        step for step in steps if step.get("name") == "Require successor + Tier 4 harness"
+    )
     acquire = next(
         step for step in steps if step.get("name") == "Acquire VN2 inputs with bootstrap tooling"
     )
@@ -564,6 +566,7 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     )
     assert "if" not in checked_out_head
     assert checked_out_head["run"] == ('test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"')
+    assert steps.index(setup) < steps.index(preflight)
     assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
     assert job["env"]["VN2_CANDIDATE_SHA"] == (
         "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
@@ -585,38 +588,27 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
         'test "$(uname -m)" = "x86_64"',
         'test "${ImageOS:-}" = "ubuntu24"',
         'test -n "${ImageVersion:-}"',
+        "uv run --no-project --python 3.12 python - <<'PY'",
         "sys.version_info[:2] == (3, 12)",
         "sha256sum newcalibre/uv.lock",
     ):
         assert required in preflight_script
-    assert presence["run"].strip() == (
-        "ready=false\n"
-        "[ -f newcalibre/pyproject.toml ] && "
-        "[ -f stage3/evidence/vn2-input-digests.json ] \\\n"
-        "  && [ -f newcalibre/tests/tier4/test_vn2_acceptance.py ] && ready=true\n"
-        'echo "ready=$ready" >> "$GITHUB_OUTPUT"'
+    assert "python3 - <<'PY'" not in preflight_script
+    assert harness["run"].strip() == (
+        "set -euo pipefail\n"
+        "test -f newcalibre/pyproject.toml \\\n"
+        '  || { echo "missing successor project: newcalibre/pyproject.toml"; exit 1; }\n'
+        "test -f stage3/evidence/vn2-input-digests.json \\\n"
+        '  || { echo "missing VN2 digest inventory: '
+        'stage3/evidence/vn2-input-digests.json"; exit 1; }\n'
+        "test -f newcalibre/tests/tier4/test_vn2_acceptance.py \\\n"
+        '  || { echo "missing Tier 4 acceptance test: '
+        'newcalibre/tests/tier4/test_vn2_acceptance.py"; exit 1; }'
     )
-    assert skipped["run"] == (
-        'echo "::notice::tier 4 skipped — acceptance contract or digest inventory absent"'
-    )
-    assert skipped["if"] == "steps.present.outputs.ready != 'true'"
-    guarded_tail = {
-        "astral-sh/setup-uv@v4": "steps.present.outputs.ready == 'true'",
-        "Restore VN2 data (exact digest-inventory key, no fallback)": (
-            "steps.present.outputs.ready == 'true'"
-        ),
-        "Acquire VN2 inputs with bootstrap tooling": "steps.present.outputs.ready == 'true'",
-        "Verify VN2 inputs with successor tooling": "steps.present.outputs.ready == 'true'",
-        "Record numerical provenance": "steps.present.outputs.ready == 'true'",
-        "Tier 4 run": "steps.present.outputs.ready == 'true'",
-        "Refuse tracked checkout mutation": "steps.present.outputs.ready == 'true'",
-        "Upload digest-bound bundle": (
-            "steps.present.outputs.ready == 'true' && github.event_name == 'workflow_dispatch'"
-        ),
-    }
-    for step in steps[steps.index(skipped) + 1 :]:
-        identity = step.get("name", step.get("uses"))
-        assert step["if"] == guarded_tail[identity]
+    assert all(step.get("name") != "Tier 4 visibly skipped" for step in steps)
+    for step in steps[steps.index(harness) + 1 : -1]:
+        assert "if" not in step
+    assert upload["if"] == "github.event_name == 'workflow_dispatch'"
 
     assert acquire["name"] == "Acquire VN2 inputs with bootstrap tooling"
     assert acquire["run"] == (
@@ -648,6 +640,7 @@ def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() ->
     job = workflow["jobs"]["vn2-verify"]
     steps = job["steps"]
     checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
+    setup = next(step for step in steps if step.get("uses") == "astral-sh/setup-uv@v4")
     preflight = next(
         step for step in steps if step.get("name") == "Preflight — evidence environment (ADR 0001)"
     )
@@ -663,6 +656,7 @@ def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() ->
     )
 
     assert checkout["with"]["ref"] == "${{ inputs.candidate_sha }}"
+    assert steps.index(setup) < steps.index(preflight)
     assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
     assert job["env"]["VN2_CANDIDATE_SHA"] == "${{ inputs.candidate_sha }}"
     assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
@@ -678,10 +672,12 @@ def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() ->
         'test "$(uname -m)" = "x86_64"',
         'test "${ImageOS:-}" = "ubuntu24"',
         'test -n "${ImageVersion:-}"',
+        "uv run --no-project --python 3.12 python - <<'PY'",
         "sys.version_info[:2] == (3, 12)",
         "sha256sum newcalibre/uv.lock",
     ):
         assert required in preflight["run"]
+    assert "python3 - <<'PY'" not in preflight["run"]
     assert "numpy.__version__" in provenance["run"]
     assert "numpy.show_config()" in provenance["run"]
     assert 'Path("uv.lock").read_bytes()' in provenance["run"]

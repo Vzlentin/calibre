@@ -326,6 +326,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       - name: Verify checked-out HEAD equals candidate
         run: test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"
+      - uses: astral-sh/setup-uv@v4
       - name: Preflight — evidence environment (ADR 0001)
         run: |
           set -euo pipefail
@@ -335,7 +336,7 @@ jobs:
           test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
           test "${ImageOS:-}" = "ubuntu24" || { echo "runner image OS must be ubuntu24"; exit 1; }
           test -n "${ImageVersion:-}" || { echo "ImageVersion is required"; exit 1; }
-          python3 - <<'PY'
+          uv run --no-project --python 3.12 python - <<'PY'
           import sys
 
           assert sys.version_info[:2] == (3, 12), sys.version
@@ -344,38 +345,31 @@ jobs:
           sha256sum newcalibre/uv.lock
           printf 'runner_image=%s/%s\n' "$ImageOS" "$ImageVersion"
           printf 'os_release=%s arch=%s\n' "$PRETTY_NAME" "$(uname -m)"
-      - name: Successor + harness presence
-        id: present
+      - name: Require successor + Tier 4 harness
         run: |
-          ready=false
-          [ -f newcalibre/pyproject.toml ] && [ -f stage3/evidence/vn2-input-digests.json ] \
-            && [ -f newcalibre/tests/tier4/test_vn2_acceptance.py ] && ready=true
-          echo "ready=$ready" >> "$GITHUB_OUTPUT"
-      - name: Tier 4 visibly skipped
-        if: steps.present.outputs.ready != 'true'
-        run: echo "::notice::tier 4 skipped — acceptance contract or digest inventory absent"
-      - uses: astral-sh/setup-uv@v4
-        if: steps.present.outputs.ready == 'true'
+          set -euo pipefail
+          test -f newcalibre/pyproject.toml \
+            || { echo "missing successor project: newcalibre/pyproject.toml"; exit 1; }
+          test -f stage3/evidence/vn2-input-digests.json \
+            || { echo "missing VN2 digest inventory: stage3/evidence/vn2-input-digests.json"; exit 1; }
+          test -f newcalibre/tests/tier4/test_vn2_acceptance.py \
+            || { echo "missing Tier 4 acceptance test: newcalibre/tests/tier4/test_vn2_acceptance.py"; exit 1; }
       - name: Restore VN2 data (exact digest-inventory key, no fallback)
-        if: steps.present.outputs.ready == 'true'
         uses: actions/cache@v4
         with:
           path: newcalibre/data/vn2
           key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
       - name: Acquire VN2 inputs with bootstrap tooling
-        if: steps.present.outputs.ready == 'true'
         env:
           DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
           GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
         run: uv run --no-project python .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
       - name: Verify VN2 inputs with successor tooling
-        if: steps.present.outputs.ready == 'true'
         run: |
           uv sync --project newcalibre --locked --group dev
           uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify --target newcalibre/data/vn2 \
             --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json
       - name: Record numerical provenance
-        if: steps.present.outputs.ready == 'true'
         working-directory: newcalibre
         run: |
           uv run --locked --no-sync python - <<'PY'
@@ -394,11 +388,9 @@ jobs:
           numpy.show_config()
           PY
       - name: Tier 4 run
-        if: steps.present.outputs.ready == 'true'
         working-directory: newcalibre
         run: uv run --locked --no-sync pytest tests/tier4
       - name: Refuse tracked checkout mutation
-        if: steps.present.outputs.ready == 'true'
         run: |
           set -euo pipefail
           test -z "$(git status --porcelain --untracked-files=no)" || {
@@ -407,7 +399,7 @@ jobs:
             exit 1
           }
       - name: Upload digest-bound bundle
-        if: steps.present.outputs.ready == 'true' && github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}
