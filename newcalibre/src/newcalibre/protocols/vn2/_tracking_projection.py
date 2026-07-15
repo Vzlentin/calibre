@@ -82,9 +82,7 @@ def _build_tracking_record(
     if manifest.run_url != run_url:
         raise TrackingError("workflow.run_url does not match the validated result bundle")
     result_files = {
-        entry.path: entry.sha256
-        for entry in manifest.files
-        if entry.path != "environment.json"
+        entry.path: entry.sha256 for entry in manifest.files if entry.path != "environment.json"
     }
     environment = _environment_value(manifest.environment)
     toolchain_digest = _toolchain_digest(environment)

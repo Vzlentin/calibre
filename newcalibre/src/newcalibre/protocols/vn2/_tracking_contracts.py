@@ -226,7 +226,6 @@ class VN2TrackingRecord:
             name="objective.total_cost",
         )
 
-
     def to_bytes(self) -> bytes:
         """Serialize the record as canonical JSONL bytes."""
         return _canonical_record_bytes(_thawed_payload(self.payload))

@@ -7,7 +7,6 @@ import os
 import stat
 from pathlib import Path
 
-
 from newcalibre.protocols.vn2._tracking_contracts import (
     TrackingError,
     VN2TrackingRecord,
@@ -97,11 +96,7 @@ def _descend(root: Path, relative_parent: tuple[str, ...]) -> tuple[int, list[in
 
 
 def _read_existing(parent_fd: int, name: str) -> bytes | None:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(name, flags, dir_fd=parent_fd)
     except FileNotFoundError:

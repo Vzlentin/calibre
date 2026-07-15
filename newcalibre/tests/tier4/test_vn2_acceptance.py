@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from newcalibre.domain import GuaranteeDescriptor
 from newcalibre.oracle import validate_committed_promoted_capture
 from newcalibre.protocols.vn2 import (
