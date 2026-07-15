@@ -197,6 +197,7 @@ def test_bundle_projects_exact_r1_r4_spines_semantics_and_math(tmp_path: Path) -
     r2 = _jsonl(root / "r2-cost-ledger.jsonl")
     r3 = _json(root / "r3-final-triple.json")
     r4 = _json(root / "r4-cost-trajectory.json")
+    manifest = _json(root / "manifest.json")
     series_keys = tuple(sorted(result.series_identities, key=str.encode))
 
     assert len(r1) == len(series_keys) * config.round_count
@@ -271,6 +272,29 @@ def test_bundle_projects_exact_r1_r4_spines_semantics_and_math(tmp_path: Path) -
     )
     assert drain["actuals_semantics"] == "censored_sales_surrogate"
     assert drain["provenance_digest"] == provenance
+    expected_provenance = {
+        "actuals_semantics": "censored_sales_surrogate",
+        "artifact_kind": "vn2-gate-a-results",
+        "artifact_name": f"vn2-acceptance-{CANDIDATE_SHA}",
+        "candidate_sha": CANDIDATE_SHA,
+        "config_digest": manifest["config_digest"],
+        "environment_digest": manifest["environment_digest"],
+        "input_inventory_digest": manifest["input_inventory_digest"],
+        "lock_digest": manifest["lock_digest"],
+        "realized_periods": [period.isoformat() for period in config.realized_periods],
+        "run_id": RUN_ID,
+        "run_url": RUN_URL,
+        "series_identity_digest": manifest["series_identity_digest"],
+        "session_id": result.session.value,
+        "workflow_sha": WORKFLOW_SHA,
+    }
+    expected_provenance_bytes = json.dumps(
+        expected_provenance,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    assert provenance == hashlib.sha256(expected_provenance_bytes).hexdigest()
 
 
 def test_bundle_is_byte_identical_for_shuffled_engine_facts(tmp_path: Path) -> None:

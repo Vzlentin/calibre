@@ -325,6 +325,21 @@ class _ValidatedFacts:
     series_identity_digest: str
 
 
+@dataclass(frozen=True, slots=True)
+class _RunIdentity:
+    candidate_sha: str
+    workflow_sha: str
+    run_id: str
+    run_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedInputs:
+    config_digest: str
+    input_inventory_digest: str
+    lock_digest: str
+
+
 def capture_vn2_evidence_environment() -> VN2EvidenceEnvironment:
     """Capture the ratified Ubuntu runner, Python, NumPy, BLAS, and thread facts."""
     release = _os_release()
@@ -377,23 +392,16 @@ def emit_vn2_result_bundle(
     facts = _validate_engine_facts(result, config=config)
     environment_value = _environment_value(environment)
     environment_digest = _digest_json(environment_value, name="VN2 environment")
-    artifact_name = f"vn2-acceptance-{identity['candidate_sha']}"
-    provenance_value = {
-        "actuals_semantics": config.actuals_semantics.value,
-        "artifact_kind": RESULT_KIND,
-        "artifact_name": artifact_name,
-        "candidate_sha": identity["candidate_sha"],
-        "config_digest": trusted["config_digest"],
-        "environment_digest": environment_digest,
-        "input_inventory_digest": trusted["input_inventory_digest"],
-        "lock_digest": trusted["lock_digest"],
-        "realized_periods": [period.isoformat() for period in config.realized_periods],
-        "run_id": identity["run_id"],
-        "run_url": identity["run_url"],
-        "series_identity_digest": facts.series_identity_digest,
-        "session_id": result.session.value,
-        "workflow_sha": identity["workflow_sha"],
-    }
+    artifact_name = f"vn2-acceptance-{identity.candidate_sha}"
+    provenance_value = _provenance_value(
+        config=config,
+        artifact_name=artifact_name,
+        identity=identity,
+        trusted=trusted,
+        environment_digest=environment_digest,
+        series_identity_digest=facts.series_identity_digest,
+        session_id=result.session.value,
+    )
     provenance_digest = _digest_json(provenance_value, name="VN2 provenance")
     payloads = _project_payloads(
         result,
@@ -413,27 +421,27 @@ def emit_vn2_result_bundle(
         "actuals_semantics": config.actuals_semantics.value,
         "artifact_kind": RESULT_KIND,
         "artifact_name": artifact_name,
-        "candidate_sha": identity["candidate_sha"],
-        "config_digest": trusted["config_digest"],
+        "candidate_sha": identity.candidate_sha,
+        "config_digest": trusted.config_digest,
         "config_path": CONFIG_PATH,
         "environment": environment_value,
         "environment_digest": environment_digest,
         "files": [_file_value(entry) for entry in files],
         "inner_bundle_digest": _sha256(listing),
-        "input_inventory_digest": trusted["input_inventory_digest"],
+        "input_inventory_digest": trusted.input_inventory_digest,
         "input_inventory_path": INPUT_INVENTORY_PATH,
-        "lock_digest": trusted["lock_digest"],
+        "lock_digest": trusted.lock_digest,
         "lock_path": LOCK_PATH,
         "provenance_digest": provenance_digest,
         "realized_period_count": len(config.realized_periods),
         "round_count": config.round_count,
-        "run_id": identity["run_id"],
-        "run_url": identity["run_url"],
+        "run_id": identity.run_id,
+        "run_url": identity.run_url,
         "schema": 1,
         "series_count": config.series_count,
         "series_identity_digest": facts.series_identity_digest,
         "session_id": result.session.value,
-        "workflow_sha": identity["workflow_sha"],
+        "workflow_sha": identity.workflow_sha,
     }
     manifest_bytes = _json_bytes(manifest_value, name="VN2 result manifest")
 
@@ -449,9 +457,9 @@ def emit_vn2_result_bundle(
         (temporary / "manifest.json").write_bytes(manifest_bytes)
         validate_vn2_result_bundle(
             temporary,
-            expected_candidate_sha=identity["candidate_sha"],
-            expected_workflow_sha=identity["workflow_sha"],
-            expected_run_id=identity["run_id"],
+            expected_candidate_sha=identity.candidate_sha,
+            expected_workflow_sha=identity.workflow_sha,
+            expected_run_id=identity.run_id,
             expected_config_path=Path(config_path),
             expected_input_inventory_path=Path(input_inventory_path),
             expected_lock_path=Path(lock_path),
@@ -462,9 +470,9 @@ def emit_vn2_result_bundle(
         raise
     return validate_vn2_result_bundle(
         bundle_root,
-        expected_candidate_sha=identity["candidate_sha"],
-        expected_workflow_sha=identity["workflow_sha"],
-        expected_run_id=identity["run_id"],
+        expected_candidate_sha=identity.candidate_sha,
+        expected_workflow_sha=identity.workflow_sha,
+        expected_run_id=identity.run_id,
         expected_config_path=Path(config_path),
         expected_input_inventory_path=Path(input_inventory_path),
         expected_lock_path=Path(lock_path),
@@ -502,6 +510,12 @@ def validate_vn2_result_bundle(
     _require_expected(workflow_sha, expected_workflow_sha, name="workflow_sha")
     _require_expected(run_id, expected_run_id, name="run_id")
     run_url = _validate_run_url(manifest["run_url"], run_id=run_id)
+    identity = _RunIdentity(
+        candidate_sha=candidate_sha,
+        workflow_sha=workflow_sha,
+        run_id=run_id,
+        run_url=run_url,
+    )
     artifact_name = _require_text(manifest["artifact_name"], name="artifact_name")
     if artifact_name != f"vn2-acceptance-{candidate_sha}":
         raise VN2ResultError("artifact_name must bind the candidate SHA")
@@ -520,6 +534,11 @@ def validate_vn2_result_bundle(
         name="input_inventory_digest",
     )
     lock_digest = _require_sha256(manifest["lock_digest"], name="lock_digest")
+    trusted = _TrustedInputs(
+        config_digest=config_digest,
+        input_inventory_digest=input_digest,
+        lock_digest=lock_digest,
+    )
     _require_trusted_digest(
         config_digest,
         Path(expected_config_path),
@@ -597,22 +616,15 @@ def validate_vn2_result_bundle(
         manifest["provenance_digest"],
         name="provenance_digest",
     )
-    provenance_value = {
-        "actuals_semantics": config.actuals_semantics.value,
-        "artifact_kind": RESULT_KIND,
-        "artifact_name": artifact_name,
-        "candidate_sha": candidate_sha,
-        "config_digest": config_digest,
-        "environment_digest": environment_digest,
-        "input_inventory_digest": input_digest,
-        "lock_digest": lock_digest,
-        "realized_periods": [period.isoformat() for period in config.realized_periods],
-        "run_id": run_id,
-        "run_url": run_url,
-        "series_identity_digest": series_identity_digest,
-        "session_id": session_id,
-        "workflow_sha": workflow_sha,
-    }
+    provenance_value = _provenance_value(
+        config=config,
+        artifact_name=artifact_name,
+        identity=identity,
+        trusted=trusted,
+        environment_digest=environment_digest,
+        series_identity_digest=series_identity_digest,
+        session_id=session_id,
+    )
     if provenance_digest != _digest_json(provenance_value, name="VN2 provenance"):
         raise VN2ResultError("provenance_digest does not match manifest provenance facts")
 
@@ -721,20 +733,55 @@ def _trusted_inputs(
     config_path: Path,
     input_inventory_path: Path,
     lock_path: Path,
-) -> dict[str, str]:
-    paths = {
-        "config_digest": Path(config_path),
-        "input_inventory_digest": Path(input_inventory_path),
-        "lock_digest": Path(lock_path),
-    }
-    digests = {name: _sha256_file(path, name=name) for name, path in paths.items()}
+) -> _TrustedInputs:
+    config_file = Path(config_path)
+    input_inventory_file = Path(input_inventory_path)
+    lock_file = Path(lock_path)
+    config_digest = _sha256_file(config_file, name="config_digest")
+    input_inventory_digest = _sha256_file(
+        input_inventory_file,
+        name="input_inventory_digest",
+    )
+    lock_digest = _sha256_file(lock_file, name="lock_digest")
     try:
-        trusted_config = load_vn2_config(Path(config_path))
+        trusted_config = load_vn2_config(config_file)
     except (OSError, ValueError) as error:
         raise VN2ResultError("trusted VN2 configuration is invalid") from error
     if trusted_config != config:
         raise VN2ResultError("VN2 configuration object does not match trusted config bytes")
-    return digests
+    return _TrustedInputs(
+        config_digest=config_digest,
+        input_inventory_digest=input_inventory_digest,
+        lock_digest=lock_digest,
+    )
+
+
+def _provenance_value(
+    *,
+    config: VN2ProtocolConfig,
+    artifact_name: str,
+    identity: _RunIdentity,
+    trusted: _TrustedInputs,
+    environment_digest: str,
+    series_identity_digest: str,
+    session_id: str,
+) -> dict[str, object]:
+    return {
+        "actuals_semantics": config.actuals_semantics.value,
+        "artifact_kind": RESULT_KIND,
+        "artifact_name": artifact_name,
+        "candidate_sha": identity.candidate_sha,
+        "config_digest": trusted.config_digest,
+        "environment_digest": environment_digest,
+        "input_inventory_digest": trusted.input_inventory_digest,
+        "lock_digest": trusted.lock_digest,
+        "realized_periods": [period.isoformat() for period in config.realized_periods],
+        "run_id": identity.run_id,
+        "run_url": identity.run_url,
+        "series_identity_digest": series_identity_digest,
+        "session_id": session_id,
+        "workflow_sha": identity.workflow_sha,
+    }
 
 
 def _validate_engine_facts(
@@ -747,10 +794,11 @@ def _validate_engine_facts(
         raise VN2ResultError("VN2 series identity mapping must match configured series_count")
     if len(set(identities.values())) != len(identities):
         raise VN2ResultError("VN2 series identity mapping values must be unique")
-    expected_session = _derive_session(config, identities)
+    canonical_series_keys = tuple(sorted(identities, key=str.encode))
+    expected_session = _derive_session(config, canonical_series_keys)
     if result.session != expected_session:
         raise VN2ResultError("VN2 result session does not match its series mapping and config")
-    series_keys = frozenset(identities)
+    series_keys = frozenset(canonical_series_keys)
     origins = frozenset(config.decision_origins)
     periods = frozenset(config.realized_periods)
 
@@ -776,8 +824,7 @@ def _validate_engine_facts(
         ):
             raise VN2ResultError("Gate-A VN2 order evidence must consume claim none")
         order_by_key[key] = order
-    expected_order_keys = {(series, origin) for series in series_keys for origin in origins}
-    if set(order_by_key) != expected_order_keys:
+    if len(order_by_key) != config.series_count * config.round_count:
         raise VN2ResultError("VN2 R1 order spine is incomplete")
 
     settlement_by_key: dict[tuple[str, pd.Timestamp], SettlementRecord] = {}
@@ -794,24 +841,26 @@ def _validate_engine_facts(
         if key in settlement_by_key:
             raise VN2ResultError("VN2 settlements must have one row per series and period")
         settlement_by_key[key] = record
-    expected_settlement_keys = {(series, period) for series in series_keys for period in periods}
-    if set(settlement_by_key) != expected_settlement_keys:
+    if len(settlement_by_key) != config.series_count * len(config.realized_periods):
         raise VN2ResultError("VN2 R2 settlement spine is incomplete")
     ordered_orders = tuple(
         order_by_key[(series, origin)]
         for origin in config.decision_origins
-        for series in sorted(series_keys, key=str.encode)
+        for series in canonical_series_keys
     )
     ordered_settlements = tuple(
         settlement_by_key[(series, period)]
         for period in config.realized_periods
-        for series in sorted(series_keys, key=str.encode)
+        for series in canonical_series_keys
     )
     return _ValidatedFacts(
         identities=MappingProxyType(identities),
         orders=ordered_orders,
         settlements=ordered_settlements,
-        series_identity_digest=_series_digest(identities),
+        series_identity_digest=_series_digest(
+            identities,
+            series_keys=canonical_series_keys,
+        ),
     )
 
 
@@ -999,16 +1048,17 @@ def _validate_r1_payload(
             if not isinstance(binding["bound"], bool):
                 raise VN2ResultError("R1 binding bound must be boolean")
         spine.append((round_number, series_key))
+    canonical_series_keys = tuple(sorted(identities, key=str.encode))
     expected_spine = [
         (round_number, series_key)
         for round_number in range(1, config.round_count + 1)
-        for series_key in sorted(identities, key=str.encode)
+        for series_key in canonical_series_keys
     ]
     if spine != expected_spine or len(identities) != config.series_count:
         raise VN2ResultError("R1 orders do not use the exact canonical Cartesian spine")
     if len(set(identities.values())) != len(identities):
         raise VN2ResultError("R1 series identities must be unique")
-    return identities, _derive_session(config, identities), order_arrivals
+    return identities, _derive_session(config, canonical_series_keys), order_arrivals
 
 
 def _validate_r2_payload(
@@ -1245,9 +1295,8 @@ def _require_exact_objective_total(objective: SettlementObjective) -> None:
 
 def _derive_session(
     config: VN2ProtocolConfig,
-    identities: Mapping[str, tuple[int, int]],
+    series_keys: tuple[str, ...],
 ) -> SessionIdentity:
-    series_keys = tuple(sorted(identities, key=str.encode))
     return SessionIdentity.derive(
         tenant=config.dataset,
         series_keys=series_keys,
@@ -1263,13 +1312,21 @@ def _derive_session(
     )
 
 
-def _series_digest(identities: Mapping[str, tuple[int, int]]) -> str:
+def _series_digest(
+    identities: Mapping[str, tuple[int, int]],
+    *,
+    series_keys: tuple[str, ...] | None = None,
+) -> str:
+    ordered_series_keys = (
+        tuple(sorted(identities, key=str.encode)) if series_keys is None else series_keys
+    )
     value = [
-        {"product": product, "series_key": series, "store": store}
-        for series, (store, product) in sorted(
-            identities.items(),
-            key=lambda item: item[0].encode(),
-        )
+        {
+            "product": identities[series][1],
+            "series_key": series,
+            "store": identities[series][0],
+        }
+        for series in ordered_series_keys
     ]
     return _digest_json(value, name="VN2 series identities")
 
@@ -1327,16 +1384,16 @@ def _validated_identity(
     workflow_sha: object,
     run_id: object,
     run_url: object,
-) -> dict[str, str]:
+) -> _RunIdentity:
     candidate = _require_commit_sha(candidate_sha, name="candidate_sha")
     workflow = _require_commit_sha(workflow_sha, name="workflow_sha")
     run = _require_run_id(run_id, name="run_id")
-    return {
-        "candidate_sha": candidate,
-        "workflow_sha": workflow,
-        "run_id": run,
-        "run_url": _validate_run_url(run_url, run_id=run),
-    }
+    return _RunIdentity(
+        candidate_sha=candidate,
+        workflow_sha=workflow,
+        run_id=run,
+        run_url=_validate_run_url(run_url, run_id=run),
+    )
 
 
 def _environment_value(environment: VN2EvidenceEnvironment) -> dict[str, object]:
@@ -1631,16 +1688,9 @@ def _require_semantics(
 
 def _os_release() -> dict[str, str]:
     try:
-        lines = Path("/etc/os-release").read_text(encoding="utf-8").splitlines()
+        return platform.freedesktop_os_release()
     except OSError as error:
         raise VN2ResultError("VN2 evidence requires readable /etc/os-release") from error
-    result: dict[str, str] = {}
-    for line in lines:
-        if "=" not in line:
-            continue
-        key, raw_value = line.split("=", 1)
-        result[key] = raw_value.strip().strip('"')
-    return result
 
 
 def _cpu_model() -> str:
