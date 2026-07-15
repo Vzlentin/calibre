@@ -521,6 +521,14 @@ def _aggregate_settlement_costs(
             key=lambda item: item[0].encode(),
         )
     }
+    holding = CostValue(
+        _finite_sum(holding_values, name="settlement holding total"),
+        actuals_semantics,
+    )
+    shortage = CostValue(
+        _finite_sum(shortage_values, name="settlement shortage total"),
+        actuals_semantics,
+    )
     partials: list[OriginPartial] = []
     cumulative = 0.0
     for origin, cost in by_origin.items():
@@ -534,20 +542,15 @@ def _aggregate_settlement_costs(
                 cost=CostValue(cumulative, actuals_semantics),
             )
         )
+    total = partials[-1].cost
 
     return _SettlementAggregates(
         by_origin=MappingProxyType(by_origin),
         by_series=MappingProxyType(by_series),
         partials=tuple(partials),
-        holding=CostValue(
-            _finite_sum(holding_values, name="settlement holding total"),
-            actuals_semantics,
-        ),
-        shortage=CostValue(
-            _finite_sum(shortage_values, name="settlement shortage total"),
-            actuals_semantics,
-        ),
-        total=partials[-1].cost,
+        holding=holding,
+        shortage=shortage,
+        total=total,
     )
 
 
