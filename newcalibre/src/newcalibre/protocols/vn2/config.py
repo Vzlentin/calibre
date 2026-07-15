@@ -223,12 +223,22 @@ def load_vn2_config(path: Path) -> VN2ProtocolConfig:
     if not isinstance(path, Path):
         raise VN2ConfigError("configuration path must be a pathlib.Path")
     try:
-        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
+        payload = path.read_bytes()
+    except OSError as error:
+        raise VN2ConfigError(f"VN2 configuration is unreadable: {path}") from error
+    return _load_vn2_config_bytes(payload, path=path)
+
+
+def _load_vn2_config_bytes(payload: bytes, *, path: Path) -> VN2ProtocolConfig:
+    """Parse one already-bound config byte sequence without reopening its path."""
+    try:
+        text = payload.decode("utf-8")
+        raw = yaml.load(text, Loader=_UniqueKeyLoader)
     except _DuplicateYAMLKey as error:
         raise VN2ConfigError(
             f"VN2 configuration contains duplicate YAML key {error.key!r}"
         ) from error
-    except (OSError, UnicodeError, yaml.YAMLError) as error:
+    except (UnicodeError, yaml.YAMLError) as error:
         raise VN2ConfigError(f"VN2 configuration is unreadable: {path}") from error
     top = _exact_mapping(raw, keys=_TOP_LEVEL_KEYS, surface="top-level configuration")
     if top["schema"] != 1:

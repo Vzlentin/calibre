@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import stat
 from collections.abc import Mapping, Sequence
@@ -178,7 +179,33 @@ def validate_capture_bundle(
     expected_config_path: Path,
     expected_input_inventory_path: Path,
 ) -> CaptureBundle:
-    """Validate identity, manifest completeness, payload shape, and every byte."""
+    """Validate a live capture bundle against all trusted input bytes."""
+    if not isinstance(expected_config_path, Path) or not isinstance(
+        expected_input_inventory_path, Path
+    ):
+        raise OracleEvidenceError(
+            "validate_capture_bundle requires trusted config and input-inventory paths"
+        )
+    return _validate_capture_bundle(
+        root,
+        expected_candidate_sha=expected_candidate_sha,
+        expected_workflow_sha=expected_workflow_sha,
+        expected_run_id=expected_run_id,
+        expected_config_path=expected_config_path,
+        expected_input_inventory_path=expected_input_inventory_path,
+    )
+
+
+def _validate_capture_bundle(
+    root: Path,
+    *,
+    expected_candidate_sha: str,
+    expected_workflow_sha: str,
+    expected_run_id: str,
+    expected_config_path: Path | None,
+    expected_input_inventory_path: Path | None,
+) -> CaptureBundle:
+    """Validate structure with optional trusted paths for committed bytes."""
     bundle_root = _require_nonsymlink_directory(Path(root), name="capture bundle")
     manifest_path = bundle_root / "manifest.json"
     listing_path = bundle_root / "files.sha256"
@@ -210,11 +237,12 @@ def validate_capture_bundle(
 
     run_url = _validate_run_url(manifest_value["run_url"], run_id=run_id)
     config_digest = _require_sha256(manifest_value["config_digest"], name="config_digest")
-    _require_trusted_digest(
-        config_digest,
-        expected_config_path,
-        name="config_digest",
-    )
+    if expected_config_path is not None:
+        _require_trusted_digest(
+            config_digest,
+            expected_config_path,
+            name="config_digest",
+        )
     input_inventory = _require_payload_path(
         manifest_value["input_inventory"],
         name="input_inventory",
@@ -227,11 +255,12 @@ def validate_capture_bundle(
         manifest_value["input_inventory_digest"],
         name="input_inventory_digest",
     )
-    _require_trusted_digest(
-        input_inventory_digest,
-        expected_input_inventory_path,
-        name="input_inventory_digest",
-    )
+    if expected_input_inventory_path is not None:
+        _require_trusted_digest(
+            input_inventory_digest,
+            expected_input_inventory_path,
+            name="input_inventory_digest",
+        )
     environment = _validate_environment(manifest_value["environment"])
     files = _validate_file_entries(manifest_value["files"])
     capture_digest = _require_sha256(
@@ -484,6 +513,95 @@ def validate_promoted_capture(
     return bundle, receipt
 
 
+def validate_committed_promoted_capture(root: Path) -> tuple[CaptureBundle, CaptureReceipt]:
+    """Validate the sole committed capture bundle and receipt without live metadata."""
+    captures_root = validate_promoted_captures_root(root)
+    entries: list[Path] = []
+    try:
+        for index, entry in enumerate(captures_root.iterdir()):
+            if index >= 2:
+                raise OracleEvidenceError(
+                    "promoted captures root must contain exactly one SHA-named bundle and receipt"
+                )
+            entries.append(entry)
+    except OracleEvidenceError:
+        raise
+    except OSError as error:
+        raise OracleEvidenceError("promoted captures root must be readable") from error
+    if len(entries) != 2:
+        raise OracleEvidenceError(
+            "promoted captures root must contain exactly one SHA-named bundle and receipt"
+        )
+    entries.sort(key=lambda path: path.name.encode())
+    bundle_candidates = [entry for entry in entries if entry.is_dir()]
+    if len(bundle_candidates) != 1:
+        raise OracleEvidenceError(
+            "promoted captures root must contain exactly one SHA-named bundle directory"
+        )
+    bundle_root = bundle_candidates[0]
+    candidate_sha = _require_commit_sha(bundle_root.name, name="committed capture directory")
+    receipt_path = captures_root / f"{candidate_sha}-receipt.json"
+    if entries != [bundle_root, receipt_path]:
+        raise OracleEvidenceError(
+            "promoted captures root must contain the matching SHA-named receipt"
+        )
+    _require_nonsymlink_file(bundle_root / "manifest.json", name="committed capture manifest")
+    manifest_value, _ = _load_canonical_json_object(
+        bundle_root / "manifest.json",
+        name="committed capture manifest",
+    )
+    workflow_sha = _require_commit_sha(
+        manifest_value.get("workflow_sha"),
+        name="committed capture workflow_sha",
+    )
+    run_id = _require_run_id(
+        manifest_value.get("run_id"),
+        name="committed capture run_id",
+    )
+    bundle = _validate_capture_bundle(
+        bundle_root,
+        expected_candidate_sha=candidate_sha,
+        expected_workflow_sha=workflow_sha,
+        expected_run_id=run_id,
+        expected_config_path=None,
+        expected_input_inventory_path=None,
+    )
+    _require_nonsymlink_file(receipt_path, name="committed capture receipt")
+    receipt_value, _ = _load_canonical_json_object(
+        receipt_path,
+        name="committed capture receipt",
+    )
+    receipt = validate_capture_receipt(
+        receipt_path,
+        bundle=bundle,
+        expected_artifact_id=_require_run_id(
+            receipt_value.get("artifact_id"),
+            name="committed capture artifact_id",
+        ),
+        expected_artifact_digest=_require_sha256(
+            receipt_value.get("artifact_digest"),
+            name="committed capture artifact_digest",
+        ),
+        expected_artifact_name=_require_text(
+            receipt_value.get("artifact_name"),
+            name="committed capture artifact_name",
+        ),
+        expected_producer_sha=_require_commit_sha(
+            receipt_value.get("producer_sha"),
+            name="committed capture producer_sha",
+        ),
+        expected_workflow_sha=_require_commit_sha(
+            receipt_value.get("workflow_sha"),
+            name="committed capture workflow_sha",
+        ),
+        expected_workflow_run_id=_require_run_id(
+            receipt_value.get("workflow_run_id"),
+            name="committed capture workflow_run_id",
+        ),
+    )
+    return bundle, receipt
+
+
 def _validate_environment(value: object) -> CaptureEnvironment:
     environment = _require_object(value, name="capture environment")
     _require_exact_keys(environment, _ENVIRONMENT_KEYS, name="capture environment")
@@ -707,6 +825,14 @@ def _load_json_object(path: Path, *, name: str) -> tuple[dict[str, object], byte
     return _require_object(value, name=name), payload
 
 
+def _load_canonical_json_object(path: Path, *, name: str) -> tuple[dict[str, object], bytes]:
+    value, payload = _load_json_object(path, name=name)
+    expected = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if payload != expected:
+        raise OracleEvidenceError(f"{name} must use canonical sorted indented JSON with a final LF")
+    return value, payload
+
+
 def _unique_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
     value: dict[str, object] = {}
     for key, item in pairs:
@@ -861,11 +987,20 @@ def _capture_digest(files: tuple[CaptureFile, ...]) -> str:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("trusted input is not a regular file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
             digest.update(chunk)
-    return digest.hexdigest()
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
 
 
 def _sha256_bytes(value: bytes) -> str:

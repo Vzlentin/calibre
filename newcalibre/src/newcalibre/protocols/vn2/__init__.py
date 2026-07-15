@@ -42,6 +42,20 @@ from newcalibre.protocols.vn2.loader import (
     VN2WeeklyActuals,
     load_vn2_dataset,
 )
+from newcalibre.protocols.vn2.tracking import (
+    TRACKING_KIND,
+    TRACKING_SCHEMA,
+    AppendDecision,
+    TrackingComparison,
+    TrackingError,
+    VN2TrackingRecord,
+    build_tracking_record,
+    compare_tracking_records,
+    decide_append,
+    parse_tracking_history,
+    parse_tracking_record,
+    write_proposal_record,
+)
 
 __all__ = [
     "EXPECTED_INPUT_COUNT",
@@ -62,6 +76,7 @@ __all__ = [
     "VN2ResultError",
     "VN2ResultFile",
     "VN2ResultManifest",
+    "VN2TrackingRecord",
     "VN2RunResult",
     "VN2RoundInput",
     "VN2SeasonalNaiveQuantileAdapter",
@@ -77,4 +92,15 @@ __all__ = [
     "run_vn2",
     "validate_vn2_result_bundle",
     "verify_vn2_inputs",
+    "AppendDecision",
+    "TRACKING_KIND",
+    "TRACKING_SCHEMA",
+    "TrackingComparison",
+    "TrackingError",
+    "build_tracking_record",
+    "compare_tracking_records",
+    "decide_append",
+    "parse_tracking_history",
+    "parse_tracking_record",
+    "write_proposal_record",
 ]

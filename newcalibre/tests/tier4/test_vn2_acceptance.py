@@ -11,13 +11,16 @@ from pathlib import Path
 import pytest
 
 from newcalibre.domain import GuaranteeDescriptor
+from newcalibre.oracle import validate_committed_promoted_capture
 from newcalibre.protocols.vn2 import (
     VN2ProtocolConfig,
     VN2RunResult,
+    build_tracking_record,
     capture_vn2_evidence_environment,
     emit_vn2_result_bundle,
     load_vn2_config,
     load_vn2_dataset,
+    parse_tracking_record,
     run_vn2,
     validate_vn2_result_bundle,
     verify_vn2_inputs,
@@ -38,10 +41,13 @@ INVENTORY_PATH = PROJECT_ROOT / "benchmarks" / "vn2" / "vn2-input-digests.json"
 LOCK_PATH = PROJECT_ROOT / "uv.lock"
 DATA_PATH = PROJECT_ROOT / "data" / "vn2"
 BUNDLE_PATH = PROJECT_ROOT / "artifacts" / "vn2"
+CAPTURES_ROOT = REPOSITORY_ROOT / "stage3" / "evidence" / "captures"
+PROPOSAL_PATH = PROJECT_ROOT / "artifacts" / "vn2-tracking" / "proposed-record.jsonl"
 TRACKING_PATH = REPOSITORY_ROOT / "stage3" / "evidence" / "tracking" / "series.jsonl"
 
 
 def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
+    """Run and bind a complete VN2 result and tracking proposal."""
     candidate_sha = _required_environment("VN2_CANDIDATE_SHA")
     workflow_sha = _required_environment("VN2_WORKFLOW_SHA")
     run_id = _required_environment("VN2_RUN_ID")
@@ -93,8 +99,148 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
         expected_input_inventory_path=INVENTORY_PATH,
         expected_lock_path=LOCK_PATH,
     )
-
     assert validated == emitted
+    manifest = validated.manifest
+    assert manifest.candidate_sha == candidate_sha
+    assert manifest.workflow_sha == workflow_sha
+    assert manifest.run_id == run_id
+    assert manifest.run_url == run_url
+    assert manifest.artifact_name == f"vn2-acceptance-{candidate_sha}"
+
+    capture, receipt = validate_committed_promoted_capture(CAPTURES_ROOT)
+    result_artifact_id = "999999"
+    result_artifact_digest = "a" * 64
+    proposal_before = _optional_digest(PROPOSAL_PATH)
+    proposal = build_tracking_record(
+        BUNDLE_PATH,
+        CAPTURES_ROOT,
+        candidate_sha=candidate_sha,
+        definition_ref="Vzlentin/calibre/.github/workflows/newcalibre.yml@main",
+        definition_sha=workflow_sha,
+        run_id=run_id,
+        run_url=run_url,
+        result_artifact_id=result_artifact_id,
+        result_artifact_name=f"vn2-acceptance-{candidate_sha}",
+        result_artifact_digest=result_artifact_digest,
+        config_path=CONFIG_PATH,
+        input_inventory_path=INVENTORY_PATH,
+        lockfile_path=LOCK_PATH,
+    )
+    proposal_bytes = proposal.to_bytes()
+    parsed = parse_tracking_record(proposal_bytes)
+    assert parsed.to_bytes() == proposal_bytes
+
+    environment = manifest.environment
+    expected_environment = {
+        "arch": environment.arch,
+        "cpu_model": environment.cpu_model,
+        "os": {
+            "id": environment.os_id,
+            "pretty_name": environment.os_pretty_name,
+            "version_id": environment.os_version_id,
+        },
+        "python": environment.python,
+        "numpy": environment.numpy,
+        "numpy_config": environment.numpy_config,
+        "runner_image": environment.runner_image,
+        "thread_policy": dict(environment.thread_policy),
+    }
+    expected_files = {
+        entry.path: entry.sha256 for entry in manifest.files if entry.path != "environment.json"
+    }
+    assert set(expected_files) == {
+        "r1-orders.jsonl",
+        "r2-cost-ledger.jsonl",
+        "r3-final-triple.json",
+        "r4-cost-trajectory.json",
+    }
+    promoted_capture = {
+        "artifact_digest": receipt.artifact_digest,
+        "artifact_id": receipt.artifact_id,
+        "artifact_name": receipt.artifact_name,
+        "capture_digest": capture.manifest.capture_digest,
+        "environment_digest": receipt.environment_digest,
+        "inner_bundle_digest": receipt.inner_bundle_digest,
+        "manifest_sha256": receipt.manifest_sha256,
+        "producer_sha": receipt.producer_sha,
+        "run_url": receipt.run_url,
+        "workflow_run_id": receipt.workflow_run_id,
+        "workflow_sha": receipt.workflow_sha,
+    }
+    payload = json.loads(proposal_bytes)
+    assert payload["subject"] == {
+        "candidate_sha": candidate_sha,
+        "repository": "Vzlentin/calibre",
+    }
+    assert payload["workflow"] == {
+        "definition_ref": "Vzlentin/calibre/.github/workflows/newcalibre.yml@main",
+        "definition_sha": workflow_sha,
+        "run_id": run_id,
+        "run_url": run_url,
+    }
+    assert payload["result_artifact"] == {
+        "digest": result_artifact_digest,
+        "id": result_artifact_id,
+        "name": f"vn2-acceptance-{candidate_sha}",
+    }
+    assert payload["result_bundle"] == {
+        "artifact_kind": "vn2-gate-a-results",
+        "files": expected_files,
+        "inner_bundle_digest": manifest.inner_bundle_digest,
+        "manifest_sha256": validated.manifest_sha256,
+        "provenance_digest": manifest.provenance_digest,
+    }
+    evidence = payload["evidence"]
+    assert evidence["actuals_semantics"] == manifest.actuals_semantics
+    assert evidence["config"] == {
+        "digest": manifest.config_digest,
+        "path": "benchmarks/vn2/protocol.yaml",
+    }
+    assert evidence["input_inventory"] == {
+        "digest": manifest.input_inventory_digest,
+        "path": "benchmarks/vn2/vn2-input-digests.json",
+    }
+    assert evidence["lockfile"] == {
+        "digest": manifest.lock_digest,
+        "path": "uv.lock",
+    }
+    assert evidence["session"] == {
+        "id": manifest.session_id,
+        "series_count": manifest.series_count,
+        "series_identity_digest": manifest.series_identity_digest,
+    }
+    assert evidence["promoted_capture"] == promoted_capture
+    assert payload["environment"] == {
+        "digest": manifest.environment_digest,
+        "facts": expected_environment,
+        "toolchain_digest": payload["environment"]["toolchain_digest"],
+    }
+    assert payload["objective"] == {
+        "holding_cost": validated.cost.holding.value,
+        "shortage_cost": validated.cost.shortage.value,
+        "total_cost": validated.cost.total.value,
+    }
+    assert payload["objective"]["total_cost"] == (
+        payload["objective"]["holding_cost"] + payload["objective"]["shortage_cost"]
+    )
+
+    rebuilt = build_tracking_record(
+        BUNDLE_PATH,
+        CAPTURES_ROOT,
+        candidate_sha=candidate_sha,
+        definition_ref="Vzlentin/calibre/.github/workflows/newcalibre.yml@main",
+        definition_sha=workflow_sha,
+        run_id=run_id,
+        run_url=run_url,
+        result_artifact_id=result_artifact_id,
+        result_artifact_name=f"vn2-acceptance-{candidate_sha}",
+        result_artifact_digest=result_artifact_digest,
+        config_path=CONFIG_PATH,
+        input_inventory_path=INVENTORY_PATH,
+        lockfile_path=LOCK_PATH,
+    )
+    assert rebuilt.to_bytes() == proposal_bytes
+    assert _optional_digest(PROPOSAL_PATH) == proposal_before
     trajectory = json.loads((BUNDLE_PATH / "r4-cost-trajectory.json").read_text(encoding="utf-8"))
     assert [row["round"] for row in trajectory["decision_rounds"]] == list(range(1, 7))
     assert len(trajectory["drain_remainder"]["periods"]) == 2

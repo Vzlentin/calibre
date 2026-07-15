@@ -29,7 +29,7 @@ from newcalibre.ledger import (
     StockoutTransition,
     validate_lost_sales_transition,
 )
-from newcalibre.ordering import SettlementObjective, settle_path_cost
+from newcalibre.ordering import CostComponents, SettlementObjective, settle_path_cost
 from newcalibre.protocols.vn2._artifact_contracts import (
     _ALL_PATHS,
     _BINDING_KEYS,
@@ -80,7 +80,7 @@ from newcalibre.protocols.vn2._artifact_contracts import (
     _TrustedInputs,
     _validate_run_url,
 )
-from newcalibre.protocols.vn2.config import VN2ProtocolConfig, load_vn2_config
+from newcalibre.protocols.vn2.config import VN2ProtocolConfig, _load_vn2_config_bytes
 
 
 def _validate_lost_sales_sequence(
@@ -163,7 +163,7 @@ def validate_vn2_result_bundle(
         input_inventory_digest=input_digest,
         lock_digest=lock_digest,
     )
-    _require_trusted_digest(
+    config_bytes = _require_trusted_digest(
         config_digest,
         Path(expected_config_path),
         name="config_digest",
@@ -174,7 +174,10 @@ def validate_vn2_result_bundle(
         name="input_inventory_digest",
     )
     _require_trusted_digest(lock_digest, Path(expected_lock_path), name="lock_digest")
-    config = load_vn2_config(Path(expected_config_path))
+    try:
+        config = _load_vn2_config_bytes(config_bytes, path=Path(expected_config_path))
+    except ValueError as error:
+        raise VN2ResultError("trusted VN2 configuration is invalid") from error
     if manifest["actuals_semantics"] != config.actuals_semantics.value:
         raise VN2ResultError("manifest actuals_semantics does not match VN2 configuration")
 
@@ -287,7 +290,7 @@ def validate_vn2_result_bundle(
             records,
             actuals_semantics=config.actuals_semantics,
         )
-        _validate_r3_payload(
+        cost = _validate_r3_payload(
             bundle_root / "r3-final-triple.json",
             objective=objective,
             semantics=config.actuals_semantics,
@@ -333,6 +336,7 @@ def validate_vn2_result_bundle(
         root=bundle_root.resolve(),
         manifest=manifest_object,
         manifest_sha256=_sha256(manifest_bytes),
+        cost=cost,
     )
 
 
@@ -578,7 +582,7 @@ def _validate_r3_payload(
     objective: SettlementObjective,
     semantics: ActualsSemantics,
     provenance_digest: str,
-) -> None:
+) -> CostComponents:
     value, _ = _load_json_object(path, name="R3 final triple")
     _require_exact_keys(value, _R3_KEYS, name="R3 final triple")
     expected = _r3_value(
@@ -588,6 +592,7 @@ def _validate_r3_payload(
     )
     if value != expected:
         raise VN2ResultError("R3 final triple does not match the generic settlement reducer")
+    return CostComponents(objective.holding, objective.shortage)
 
 
 def _validate_r4_payload(
