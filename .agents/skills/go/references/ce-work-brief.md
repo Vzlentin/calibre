@@ -1,7 +1,7 @@
 # Stage 1 — implementation subagent brief
 
 Spawn **one** foreground agent (model per the Stage 0a routing classification —
-routine work on the `sidekick` profile, judgment-heavy work inheriting the
+routine work on the `sidekick` agent, judgment-heavy work inheriting the
 frontier model) with the brief below, filling in `#N`, `<type>/<slug>`,
 `<WORKDIR>`, and the pasted plan text.
 
@@ -20,20 +20,21 @@ frontier model) with the brief below, filling in `#N`, `<type>/<slug>`,
 >   `<type>/<slug>` branch — do **not** create a branch, do **not** touch the
 >   main checkout.
 >
-> You may delegate internally per the Fusion policy: mechanical sub-steps (test
-> runs, scaffolding, applying already-specified fixes) go to `sidekick`, recon
-> to `fast_scan`; keep every judgment call — spec interpretation, design, and
-> acceptance of delegated output — to yourself. `sidekick` (luna) has no native
-> auto-delegation, so internal delegation is manual spawn-based. After
-> delegating, block on the agent's terminal completion (the wait primitive) —
-> never busy-poll or repeatedly inspect partial output. Delegates never
-> weaken tests, skip gates, or touch frozen surfaces beyond their brief.
+> You may delegate internally per the Fusion policy, via the `task` tool:
+> mechanical sub-steps (test runs, scaffolding, applying already-specified
+> fixes) go to `agent: sidekick`, recon to `explore`; keep every judgment
+> call — spec interpretation, design, and acceptance of delegated output — to
+> yourself. `sidekick` (luna) has no native auto-delegation, so internal
+> delegation is manual spawn-based. After delegating, block on `job`
+> completion — never busy-poll or repeatedly inspect partial output.
+> Delegates never weaken tests, skip gates, or touch frozen surfaces beyond
+> their brief.
 >
 > Run the `uv run` quality gates — `uv run pytest` (scoped), `uv run ruff check .`,
 > and `uv run ty check calibre/` — in the **FOREGROUND**, blocking on each gate's
 > exit before you report. Do **not** end your turn with any gate still running in
-> the background: there is no way to resume a backgrounded gate in this harness, so
-> a turn that ends mid-gate abandons it. Commit only after the gates pass green.
+> the background: a gate still running when the turn ends is abandoned, not
+> resumed — nothing picks it back up. Commit only after the gates pass green.
 >
 > Finish by pushing the branch and opening a PR whose body includes `closes #N`,
 > a <=70-char title, a 3-bullet summary, and a test-plan checklist.
