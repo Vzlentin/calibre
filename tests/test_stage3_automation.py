@@ -545,20 +545,18 @@ def test_consistency_workflows_require_nonempty_tier2_artifacts_before_diff(
 
 
 @pytest.mark.parametrize(
-    ("workflow_path", "candidate_ref", "candidate_env"),
+    ("workflow_path", "candidate"),
     [
         (
             SUCCESSOR_WORKFLOW,
             "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}",
-            "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}",
         ),
-        (GATE_WORKFLOW, "${{ inputs.candidate_sha }}", "${{ inputs.candidate_sha }}"),
+        (GATE_WORKFLOW, "${{ inputs.candidate_sha }}"),
     ],
 )
 def test_oracle_workflows_bind_exact_candidate_environment_and_vn2_inputs(
     workflow_path: Path,
-    candidate_ref: str,
-    candidate_env: str,
+    candidate: str,
 ) -> None:
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     job = workflow["jobs"]["oracle"]
@@ -585,8 +583,8 @@ def test_oracle_workflows_bind_exact_candidate_environment_and_vn2_inputs(
 
     assert job["runs-on"] == "ubuntu-24.04"
     assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
-    assert job["env"]["ORACLE_CANDIDATE_SHA"] == candidate_env
-    assert checkout["with"]["ref"] == candidate_ref
+    assert job["env"]["ORACLE_CANDIDATE_SHA"] == candidate
+    assert checkout["with"]["ref"] == candidate
     assert "if" not in checked_out_head
     assert checked_out_head["run"] == ('test "$(git rev-parse HEAD)" = "$ORACLE_CANDIDATE_SHA"')
 
@@ -777,18 +775,9 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     assert upload["if"] == "github.event_name == 'workflow_dispatch'"
 
     assert acquire["name"] == "Acquire VN2 inputs with bootstrap tooling"
-    assert acquire["run"] == (
-        "uv run --no-project python .github/scripts/stage3_vn2_data.py download "
-        "--target newcalibre/data/vn2 --if-missing"
-    )
+    assert acquire["run"] == VN2_ACQUIRE
     assert verify["name"] == "Verify VN2 inputs with successor tooling"
-    assert verify["run"].strip() == (
-        "uv sync --project newcalibre --locked --group dev\n"
-        "uv run --project newcalibre --locked --no-sync python "
-        "newcalibre/scripts/vn2_data.py verify "
-        "--target newcalibre/data/vn2 \\\n"
-        "  --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json"
-    )
+    assert verify["run"].strip() == VN2_VERIFY
     assert tier4["working-directory"] == "newcalibre"
     assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
     assert "numpy.__version__" in provenance["run"]

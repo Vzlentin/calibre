@@ -21,6 +21,7 @@ from newcalibre.oracle import CaptureBundle
 from newcalibre.protocols.vn2 import VN2Dataset
 from oracle.reference import (
     ReferenceOrder,
+    ReferenceRow,
     ReferenceSeries,
     ReferenceTrajectory,
     calculate_reference_trajectory,
@@ -48,8 +49,8 @@ class CapturedInitialState:
 
 
 @dataclass(frozen=True, slots=True)
-class CanonicalReplay:
-    """Own immutable shared inputs, the prior expectation, and successor facts."""
+class ReplayInputs:
+    """Own immutable shared inputs plus the independently frozen expectation."""
 
     dataset: VN2Dataset
     session: SessionIdentity
@@ -59,15 +60,19 @@ class CanonicalReplay:
     actuals: Mapping[tuple[str, pd.Timestamp], float]
     captured_decisions: tuple[CapturedDecision, ...]
     orders: tuple[OrderRow, ...]
-    reference_series: tuple[ReferenceSeries, ...]
     reference_periods: tuple[str, ...]
     reference_demand: Mapping[tuple[str, str], float]
-    reference_arrivals: Mapping[tuple[str, str], float]
     expectation: ReferenceTrajectory
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalReplay:
+    """Bind completed successor records to immutable inputs and fingerprints."""
+
+    inputs: ReplayInputs
     records: tuple[SettlementRecord, ...]
     shared_fingerprint: str
     expectation_fingerprint: str
-    settle_calls: int
 
 
 @pytest.fixture(scope="session")
@@ -83,7 +88,6 @@ def canonical_replay(
 def test_promoted_orders_match_independent_conditional_replay(
     canonical_replay: CanonicalReplay,
 ) -> None:
-    assert canonical_replay.settle_calls == 1
     _assert_conditional_replay(canonical_replay, canonical_replay.records)
 
 
@@ -91,11 +95,9 @@ def test_promoted_orders_match_independent_conditional_replay(
 def test_conditional_replay_rejects_one_successor_order_unit(
     canonical_replay: CanonicalReplay,
 ) -> None:
-    before = (
-        _shared_fingerprint(canonical_replay),
-        _expectation_fingerprint(canonical_replay.expectation),
-    )
-    orders = list(canonical_replay.orders)
+    _assert_fingerprint_integrity(canonical_replay)
+    inputs = canonical_replay.inputs
+    orders = list(inputs.orders)
     last_origin = max(order.origin for order in orders)
     target_index = min(
         (index for index, order in enumerate(orders) if order.origin == last_origin),
@@ -106,40 +108,40 @@ def test_conditional_replay_rejects_one_successor_order_unit(
         quantity=orders[target_index].quantity + 1.0,
     )
 
-    drifted = _settle_once(canonical_replay, tuple(orders))
+    drifted = _settle_orders(inputs, tuple(orders))
 
     with pytest.raises(AssertionError, match="conditional replay"):
-        _assert_conditional_replay(canonical_replay, drifted.records)
-    assert before == (
-        _shared_fingerprint(canonical_replay),
-        _expectation_fingerprint(canonical_replay.expectation),
-    )
+        _assert_settlement_records(inputs, drifted.records)
 
 
 def test_replay_fingerprints_reject_shared_or_expectation_replacement(
     canonical_replay: CanonicalReplay,
 ) -> None:
-    first = canonical_replay.captured_decisions[0]
+    inputs = canonical_replay.inputs
+    first = inputs.captured_decisions[0]
     changed_decisions = (
         replace(first, quantity=first.quantity + 1.0),
-        *canonical_replay.captured_decisions[1:],
+        *inputs.captured_decisions[1:],
     )
     replaced_shared = replace(
         canonical_replay,
-        captured_decisions=changed_decisions,
+        inputs=replace(inputs, captured_decisions=changed_decisions),
     )
     with pytest.raises(AssertionError, match="shared-input fingerprint"):
         _assert_conditional_replay(replaced_shared, canonical_replay.records)
 
     replaced_expectation = replace(
-        canonical_replay.expectation,
-        total_cost=canonical_replay.expectation.total_cost + 1.0,
+        inputs.expectation,
+        total_cost=inputs.expectation.total_cost + 1.0,
     )
-    replaced_replay = replace(canonical_replay, expectation=replaced_expectation)
+    replaced_replay = replace(
+        canonical_replay,
+        inputs=replace(inputs, expectation=replaced_expectation),
+    )
     with pytest.raises(AssertionError, match="expectation fingerprint"):
         _assert_conditional_replay(replaced_replay, canonical_replay.records)
 
-    demand = cast(dict[tuple[str, str], float], canonical_replay.reference_demand)
+    demand = cast(dict[tuple[str, str], float], inputs.reference_demand)
     with pytest.raises(TypeError):
         demand[next(iter(demand))] = 0.0
 
@@ -286,7 +288,7 @@ def _build_replay(bundle: CaptureBundle, dataset: VN2Dataset) -> CanonicalReplay
         for item in frozen_decisions
     )
 
-    replay_without_records = CanonicalReplay(
+    inputs = ReplayInputs(
         dataset=dataset,
         session=session,
         periods=periods,
@@ -295,39 +297,32 @@ def _build_replay(bundle: CaptureBundle, dataset: VN2Dataset) -> CanonicalReplay
         actuals=MappingProxyType(actuals),
         captured_decisions=frozen_decisions,
         orders=orders,
-        reference_series=tuple(reference_series),
         reference_periods=reference_periods,
         reference_demand=MappingProxyType(reference_demand),
-        reference_arrivals=MappingProxyType(reference_arrivals),
         expectation=expectation,
-        records=(),
-        shared_fingerprint="",
-        expectation_fingerprint=expectation_fingerprint,
-        settle_calls=0,
     )
-    shared_fingerprint = _shared_fingerprint(replay_without_records)
-    result = _settle_once(replay_without_records, orders)
-    return replace(
-        replay_without_records,
+    result = _settle_orders(inputs, inputs.orders)
+    return CanonicalReplay(
+        inputs=inputs,
         records=result.records,
-        shared_fingerprint=shared_fingerprint,
-        settle_calls=1,
+        shared_fingerprint=_shared_fingerprint(inputs),
+        expectation_fingerprint=expectation_fingerprint,
     )
 
 
-def _settle_once(replay: CanonicalReplay, orders: Sequence[OrderRow]) -> SettlementResult:
+def _settle_orders(inputs: ReplayInputs, orders: Sequence[OrderRow]) -> SettlementResult:
     sink = InMemoryLedgerSink(
-        session=replay.session,
-        calendar=replay.dataset.config.calendar,
-        initial_arrivals=replay.initial_arrivals,
+        session=inputs.session,
+        calendar=inputs.dataset.config.calendar,
+        initial_arrivals=inputs.initial_arrivals,
     )
     request = SettlementRequest(
-        session=replay.session,
-        snapshot=sink.settlement_snapshot(replay.periods),
-        actuals=replay.actuals,
-        inventory_positions=replay.initial_positions,
+        session=inputs.session,
+        snapshot=sink.settlement_snapshot(inputs.periods),
+        actuals=inputs.actuals,
+        inventory_positions=inputs.initial_positions,
         orders=orders,
-        actuals_semantics=replay.dataset.config.actuals_semantics,
+        actuals_semantics=inputs.dataset.config.actuals_semantics,
     )
     return settle(request)
 
@@ -336,25 +331,50 @@ def _assert_conditional_replay(
     replay: CanonicalReplay,
     records: Sequence[SettlementRecord],
 ) -> None:
-    assert _shared_fingerprint(replay) == replay.shared_fingerprint, (
+    _assert_fingerprint_integrity(replay)
+    _assert_settlement_records(replay.inputs, records)
+
+
+def _assert_fingerprint_integrity(replay: CanonicalReplay) -> None:
+    assert _shared_fingerprint(replay.inputs) == replay.shared_fingerprint, (
         "conditional replay shared-input fingerprint changed"
     )
-    assert _expectation_fingerprint(replay.expectation) == replay.expectation_fingerprint, (
+    assert _expectation_fingerprint(replay.inputs.expectation) == replay.expectation_fingerprint, (
         "conditional replay expectation fingerprint changed"
     )
-    expected = {(row.series_key, row.period): row for row in replay.expectation.rows}
-    actual = {(record.series_key, record.period.strftime("%Y-%m-%d")): record for record in records}
+
+
+def _assert_settlement_records(
+    inputs: ReplayInputs,
+    records: Sequence[SettlementRecord],
+) -> None:
+    expected: dict[tuple[str, str], ReferenceRow] = {}
+    expected_costs = {period: [] for period in inputs.reference_periods}
+    expected_terminal_costs: list[float] = []
+    for row in inputs.expectation.rows:
+        expected[(row.series_key, row.period)] = row
+        expected_costs[row.period].append(row.total_cost)
+        expected_terminal_costs.append(row.total_cost)
+
+    actual: dict[tuple[str, str], SettlementRecord] = {}
+    actual_costs = {period: [] for period in inputs.reference_periods}
+    actual_terminal_costs: list[float] = []
+    for record in records:
+        period = record.period.strftime("%Y-%m-%d")
+        actual[(record.series_key, period)] = record
+        actual_costs[period].append(record.realized_cost)
+        actual_terminal_costs.append(record.realized_cost)
     assert len(expected) == len(actual) == 599 * 8 == 4_792
     assert set(actual) == set(expected)
 
     for key in sorted(expected, key=lambda value: (value[1].encode(), value[0].encode())):
         row = expected[key]
         record = actual[key]
-        assert record.session == replay.session
-        assert record.actuals_semantics is replay.dataset.config.actuals_semantics
-        assert record.transition.rule is replay.dataset.config.stockout_rule
-        assert record.holding.rate == replay.dataset.config.holding_rate
-        assert record.shortage.rate == replay.dataset.config.shortage_rate
+        assert record.session == inputs.session
+        assert record.actuals_semantics is inputs.dataset.config.actuals_semantics
+        assert record.transition.rule is inputs.dataset.config.stockout_rule
+        assert record.holding.rate == inputs.dataset.config.holding_rate
+        assert record.shortage.rate == inputs.dataset.config.shortage_rate
         assert record.inventory_position.backorders == 0.0
         _assert_few_ulps(record.arrivals, row.arrivals, name=f"{key!r} arrivals")
         _assert_few_ulps(record.transition.demand, row.demand, name=f"{key!r} demand")
@@ -389,23 +409,17 @@ def _assert_conditional_replay(
             name=f"{key!r} shortage cost",
         )
 
-    for period in replay.reference_periods:
-        terms = tuple(row.total_cost for row in replay.expectation.rows if row.period == period)
-        actual_cost = math.fsum(
-            record.realized_cost
-            for record in records
-            if record.period.strftime("%Y-%m-%d") == period
-        )
+    for period in inputs.reference_periods:
         _assert_gamma_sum(
-            actual_cost,
-            replay.expectation.cost_by_period[period],
-            terms=terms,
+            math.fsum(actual_costs[period]),
+            inputs.expectation.cost_by_period[period],
+            terms=expected_costs[period],
             name=f"period {period} cost",
         )
     _assert_gamma_sum(
-        math.fsum(record.realized_cost for record in records),
-        replay.expectation.total_cost,
-        terms=tuple(row.total_cost for row in replay.expectation.rows),
+        math.fsum(actual_terminal_costs),
+        inputs.expectation.total_cost,
+        terms=expected_terminal_costs,
         name="terminal cost",
     )
 
@@ -438,23 +452,23 @@ def _assert_gamma_sum(
     )
 
 
-def _shared_fingerprint(replay: CanonicalReplay) -> str:
+def _shared_fingerprint(inputs: ReplayInputs) -> str:
     payload = {
         "actuals": [
             [series_key, period.isoformat(), _float_hex(value)]
             for (series_key, period), value in sorted(
-                replay.actuals.items(),
+                inputs.actuals.items(),
                 key=lambda item: (item[0][1], item[0][0].encode()),
             )
         ],
         "captured_decisions": [
             [item.series_key, item.origin_index, _float_hex(item.quantity)]
-            for item in replay.captured_decisions
+            for item in inputs.captured_decisions
         ],
         "initial_arrivals": [
             [series_key, period.isoformat(), _float_hex(value)]
             for (series_key, period), value in sorted(
-                replay.initial_arrivals.items(),
+                inputs.initial_arrivals.items(),
                 key=lambda item: (item[0][1], item[0][0].encode()),
             )
         ],
@@ -466,7 +480,7 @@ def _shared_fingerprint(replay: CanonicalReplay) -> str:
                 _float_hex(value.backorders),
             ]
             for key, value in sorted(
-                replay.initial_positions.items(),
+                inputs.initial_positions.items(),
                 key=lambda item: item[0].encode(),
             )
         ],
