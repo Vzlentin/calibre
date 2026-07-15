@@ -14,6 +14,7 @@ from newcalibre.domain import GuaranteeDescriptor
 from newcalibre.protocols.vn2 import (
     VN2ProtocolConfig,
     VN2RunResult,
+    build_tracking_record,
     capture_vn2_evidence_environment,
     emit_vn2_result_bundle,
     load_vn2_config,
@@ -38,6 +39,8 @@ INVENTORY_PATH = PROJECT_ROOT / "benchmarks" / "vn2" / "vn2-input-digests.json"
 LOCK_PATH = PROJECT_ROOT / "uv.lock"
 DATA_PATH = PROJECT_ROOT / "data" / "vn2"
 BUNDLE_PATH = PROJECT_ROOT / "artifacts" / "vn2"
+CAPTURES_ROOT = REPOSITORY_ROOT / "stage3" / "evidence" / "captures"
+PROPOSAL_PATH = PROJECT_ROOT / "artifacts" / "vn2-tracking" / "proposed-record.jsonl"
 TRACKING_PATH = REPOSITORY_ROOT / "stage3" / "evidence" / "tracking" / "series.jsonl"
 
 
@@ -93,8 +96,25 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
         expected_input_inventory_path=INVENTORY_PATH,
         expected_lock_path=LOCK_PATH,
     )
-
     assert validated == emitted
+    proposal_before = _optional_digest(PROPOSAL_PATH)
+    proposal = build_tracking_record(
+        BUNDLE_PATH,
+        CAPTURES_ROOT,
+        candidate_sha=candidate_sha,
+        definition_ref="Vzlentin/calibre/.github/workflows/newcalibre.yml@main",
+        definition_sha=workflow_sha,
+        run_id=run_id,
+        run_url=run_url,
+        result_artifact_id="999999",
+        result_artifact_name=f"vn2-acceptance-{candidate_sha}",
+        result_artifact_digest="a" * 64,
+        config_path=CONFIG_PATH,
+        input_inventory_path=INVENTORY_PATH,
+        lockfile_path=LOCK_PATH,
+    )
+    assert proposal.to_bytes().endswith(b"\n")
+    assert _optional_digest(PROPOSAL_PATH) == proposal_before
     trajectory = json.loads((BUNDLE_PATH / "r4-cost-trajectory.json").read_text(encoding="utf-8"))
     assert [row["round"] for row in trajectory["decision_rounds"]] == list(range(1, 7))
     assert len(trajectory["drain_remainder"]["periods"]) == 2

@@ -440,6 +440,7 @@ jobs:
       VN2_WORKFLOW_SHA: ${{ github.workflow_sha }}
       VN2_RUN_ID: ${{ github.run_id }}
       VN2_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      VN2_WORKFLOW_REF: ${{ github.workflow_ref }}
       VN2_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' && 'mint' || 'verify' }}
     steps:
       - name: Validate candidate SHA (manual runs)
@@ -526,8 +527,61 @@ jobs:
           }
       - name: Upload digest-bound bundle
         if: github.event_name == 'workflow_dispatch'
+        id: result_upload
         uses: actions/upload-artifact@v4
         with:
           name: vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}
           path: newcalibre/artifacts/vn2/
           if-no-files-found: error
+      - name: Build and validate proposal record (manual vn2-mint only)
+        if: env.VN2_MODE == 'mint'
+        working-directory: newcalibre
+        run: |
+          uv run --locked --no-sync python scripts/vn2_tracking.py propose \
+            --result-root artifacts/vn2 \
+            --capture-root ../stage3/evidence/captures \
+            --candidate-sha "$VN2_CANDIDATE_SHA" \
+            --workflow-ref "$VN2_WORKFLOW_REF" \
+            --workflow-sha "$VN2_WORKFLOW_SHA" \
+            --run-id "$VN2_RUN_ID" \
+            --run-url "$VN2_RUN_URL" \
+            --result-artifact-id "${{ steps.result_upload.outputs.artifact-id }}" \
+            --result-artifact-name "vn2-acceptance-$VN2_CANDIDATE_SHA" \
+            --result-artifact-digest "${{ steps.result_upload.outputs.artifact-digest }}" \
+            --config benchmarks/vn2/protocol.yaml \
+            --input-inventory benchmarks/vn2/vn2-input-digests.json \
+            --lockfile uv.lock \
+            --output artifacts/vn2-tracking/proposed-record.jsonl
+      - name: Revalidate proposal record (manual vn2-mint only)
+        if: env.VN2_MODE == 'mint'
+        working-directory: newcalibre
+        run: |
+          uv run --locked --no-sync python scripts/vn2_tracking.py validate \
+            --result-root artifacts/vn2 \
+            --capture-root ../stage3/evidence/captures \
+            --candidate-sha "$VN2_CANDIDATE_SHA" \
+            --workflow-ref "$VN2_WORKFLOW_REF" \
+            --workflow-sha "$VN2_WORKFLOW_SHA" \
+            --run-id "$VN2_RUN_ID" \
+            --run-url "$VN2_RUN_URL" \
+            --result-artifact-id "${{ steps.result_upload.outputs.artifact-id }}" \
+            --result-artifact-name "vn2-acceptance-$VN2_CANDIDATE_SHA" \
+            --result-artifact-digest "${{ steps.result_upload.outputs.artifact-digest }}" \
+            --config benchmarks/vn2/protocol.yaml \
+            --input-inventory benchmarks/vn2/vn2-input-digests.json \
+            --lockfile uv.lock \
+            --proposal artifacts/vn2-tracking/proposed-record.jsonl
+      - name: Upload proposal record (manual vn2-mint only)
+        if: env.VN2_MODE == 'mint'
+        id: tracking_upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: vn2-tracking-proposal-${{ env.VN2_CANDIDATE_SHA }}
+          path: newcalibre/artifacts/vn2-tracking/proposed-record.jsonl
+          if-no-files-found: error
+      - name: Final tracked history guard
+        if: always()
+        run: |
+          set -euo pipefail
+          test ! -e stage3/evidence/tracking/series.jsonl
+          test -z "$(git status --porcelain --untracked-files=no)"

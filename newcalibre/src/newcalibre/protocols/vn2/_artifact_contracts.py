@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -18,7 +19,7 @@ import pandas as pd
 from newcalibre.domain import ActualsSemantics, SessionIdentity
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.ledger import SettlementRecord
-from newcalibre.ordering import CostValue, SettlementObjective, settle_path_cost
+from newcalibre.ordering import CostComponents, CostValue, SettlementObjective, settle_path_cost
 from newcalibre.protocols.vn2.config import VN2ProtocolConfig
 
 RESULT_KIND = "vn2-gate-a-results"
@@ -293,11 +294,12 @@ class VN2ResultManifest:
 
 @dataclass(frozen=True, slots=True)
 class VN2ResultBundle:
-    """Return one content-verified bundle plus the manifest digest."""
+    """Return one content-verified bundle plus the manifest digest and R3 costs."""
 
     root: Path
     manifest: VN2ResultManifest
     manifest_sha256: str
+    cost: CostComponents
 
 
 @dataclass(frozen=True, slots=True)
@@ -681,6 +683,12 @@ def _require_expected(actual: str, expected: object, *, name: str) -> None:
 
 
 def _require_trusted_digest(actual: str, path: Path, *, name: str) -> None:
+    try:
+        file_stat = path.lstat()
+    except OSError as error:
+        raise VN2ResultError(f"trusted {name} input must be a readable file") from error
+    if path.is_symlink() or not stat.S_ISREG(file_stat.st_mode):
+        raise VN2ResultError(f"trusted {name} input must be a real non-symlink regular file")
     if actual != _sha256_file(path, name=name):
         raise VN2ResultError(f"VN2 result {name} does not match trusted input bytes")
 

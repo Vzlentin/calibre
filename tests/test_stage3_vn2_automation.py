@@ -337,7 +337,22 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
         step for step in steps if step.get("name") == "Refuse tracked checkout mutation"
     )
     upload = next(step for step in steps if step.get("name") == "Upload digest-bound bundle")
-
+    proposal = next(
+        step
+        for step in steps
+        if step.get("name") == "Build and validate proposal record (manual vn2-mint only)"
+    )
+    revalidate = next(
+        step
+        for step in steps
+        if step.get("name") == "Revalidate proposal record (manual vn2-mint only)"
+    )
+    proposal_upload = next(
+        step
+        for step in steps
+        if step.get("name") == "Upload proposal record (manual vn2-mint only)"
+    )
+    final_guard = next(step for step in steps if step.get("name") == "Final tracked history guard")
     assert job["if"] == (
         "github.event_name == 'schedule' || "
         "(github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))"
@@ -356,15 +371,7 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     assert job["env"]["VN2_CANDIDATE_SHA"] == (
         "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
     )
-    assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
-    assert job["env"]["VN2_RUN_ID"] == "${{ github.run_id }}"
-    assert job["env"]["VN2_RUN_URL"] == (
-        "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-    )
-    assert job["env"]["VN2_MODE"] == (
-        "${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' "
-        "&& 'mint' || 'verify' }}"
-    )
+    assert job["env"]["VN2_WORKFLOW_REF"] == "${{ github.workflow_ref }}"
     assert "github.workflow_sha" not in job["env"]["VN2_CANDIDATE_SHA"]
     preflight_script = preflight["run"]
     for required in (
@@ -391,24 +398,36 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
         'newcalibre/tests/tier4/test_vn2_acceptance.py"; exit 1; }'
     )
     assert all(step.get("name") != "Tier 4 visibly skipped" for step in steps)
-    for step in steps[steps.index(harness) + 1 : -1]:
-        assert "if" not in step
-    assert upload["if"] == "github.event_name == 'workflow_dispatch'"
-
-    assert acquire["name"] == "Acquire VN2 inputs with bootstrap tooling"
     assert acquire["run"] == VN2_ACQUIRE
-    assert verify["name"] == "Verify VN2 inputs with successor tooling"
     assert verify["run"].strip() == VN2_VERIFY
-    assert tier4["working-directory"] == "newcalibre"
-    assert tier4["run"] == "uv run --locked --no-sync pytest tests/tier4"
     assert "numpy.__version__" in provenance["run"]
     assert "numpy.show_config()" in provenance["run"]
     assert 'Path("uv.lock").read_bytes()' in provenance["run"]
     assert "sha256" in provenance["run"]
+    assert upload["if"] == "github.event_name == 'workflow_dispatch'"
+    assert upload["id"] == "result_upload"
+    assert proposal["if"] == "env.VN2_MODE == 'mint'"
+    assert revalidate["if"] == "env.VN2_MODE == 'mint'"
+    assert proposal_upload["if"] == "env.VN2_MODE == 'mint'"
+    assert final_guard["if"] == "always()"
     assert steps.index(tier4) < steps.index(mutation) < steps.index(upload)
-    assert "git status --porcelain --untracked-files=no" in mutation["run"]
-    assert upload["with"]["name"] == "vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}"
-    assert upload["with"]["if-no-files-found"] == "error"
+    assert (
+        steps.index(upload)
+        < steps.index(proposal)
+        < steps.index(revalidate)
+        < steps.index(proposal_upload)
+        < steps.index(final_guard)
+    )
+    assert "steps.result_upload.outputs.artifact-id" in proposal["run"]
+    assert "steps.result_upload.outputs.artifact-digest" in proposal["run"]
+    assert "artifacts/vn2-tracking/proposed-record.jsonl" in proposal["run"]
+    assert "artifacts/vn2-tracking/proposed-record.jsonl" in revalidate["run"]
+    assert proposal_upload["with"]["name"] == "vn2-tracking-proposal-${{ env.VN2_CANDIDATE_SHA }}"
+    assert (
+        proposal_upload["with"]["path"]
+        == "newcalibre/artifacts/vn2-tracking/proposed-record.jsonl"
+    )
+    assert "series.jsonl" in final_guard["run"]
 
 
 def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() -> None:

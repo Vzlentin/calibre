@@ -175,8 +175,8 @@ def validate_capture_bundle(
     expected_candidate_sha: str,
     expected_workflow_sha: str,
     expected_run_id: str,
-    expected_config_path: Path,
-    expected_input_inventory_path: Path,
+    expected_config_path: Path | None,
+    expected_input_inventory_path: Path | None,
 ) -> CaptureBundle:
     """Validate identity, manifest completeness, payload shape, and every byte."""
     bundle_root = _require_nonsymlink_directory(Path(root), name="capture bundle")
@@ -210,11 +210,12 @@ def validate_capture_bundle(
 
     run_url = _validate_run_url(manifest_value["run_url"], run_id=run_id)
     config_digest = _require_sha256(manifest_value["config_digest"], name="config_digest")
-    _require_trusted_digest(
-        config_digest,
-        expected_config_path,
-        name="config_digest",
-    )
+    if expected_config_path is not None:
+        _require_trusted_digest(
+            config_digest,
+            expected_config_path,
+            name="config_digest",
+        )
     input_inventory = _require_payload_path(
         manifest_value["input_inventory"],
         name="input_inventory",
@@ -227,11 +228,12 @@ def validate_capture_bundle(
         manifest_value["input_inventory_digest"],
         name="input_inventory_digest",
     )
-    _require_trusted_digest(
-        input_inventory_digest,
-        expected_input_inventory_path,
-        name="input_inventory_digest",
-    )
+    if expected_input_inventory_path is not None:
+        _require_trusted_digest(
+            input_inventory_digest,
+            expected_input_inventory_path,
+            name="input_inventory_digest",
+        )
     environment = _validate_environment(manifest_value["environment"])
     files = _validate_file_entries(manifest_value["files"])
     capture_digest = _require_sha256(
@@ -481,6 +483,81 @@ def validate_promoted_capture(
     )
     if bundle.manifest.run_url != run_url:
         raise OracleEvidenceError("promoted capture run_url does not match GitHub metadata")
+    return bundle, receipt
+
+
+def validate_committed_promoted_capture(root: Path) -> tuple[CaptureBundle, CaptureReceipt]:
+    """Validate the sole committed capture bundle and receipt without live metadata."""
+    captures_root = validate_promoted_captures_root(root)
+    try:
+        entries = sorted(captures_root.iterdir(), key=lambda path: path.name.encode())
+    except OSError as error:
+        raise OracleEvidenceError("promoted captures root must be readable") from error
+    if len(entries) != 2:
+        raise OracleEvidenceError(
+            "promoted captures root must contain exactly one SHA-named bundle and receipt"
+        )
+    bundle_candidates = [entry for entry in entries if entry.is_dir()]
+    if len(bundle_candidates) != 1:
+        raise OracleEvidenceError(
+            "promoted captures root must contain exactly one SHA-named bundle directory"
+        )
+    bundle_root = bundle_candidates[0]
+    candidate_sha = _require_commit_sha(bundle_root.name, name="committed capture directory")
+    receipt_path = captures_root / f"{candidate_sha}-receipt.json"
+    if entries != [bundle_root, receipt_path]:
+        raise OracleEvidenceError(
+            "promoted captures root must contain the matching SHA-named receipt"
+        )
+    manifest_value, _ = _load_json_object(
+        bundle_root / "manifest.json",
+        name="committed capture manifest",
+    )
+    workflow_sha = _require_commit_sha(
+        manifest_value.get("workflow_sha"),
+        name="committed capture workflow_sha",
+    )
+    run_id = _require_run_id(
+        manifest_value.get("run_id"),
+        name="committed capture run_id",
+    )
+    bundle = validate_capture_bundle(
+        bundle_root,
+        expected_candidate_sha=candidate_sha,
+        expected_workflow_sha=workflow_sha,
+        expected_run_id=run_id,
+        expected_config_path=None,
+        expected_input_inventory_path=None,
+    )
+    receipt_value, _ = _load_json_object(receipt_path, name="committed capture receipt")
+    receipt = validate_capture_receipt(
+        receipt_path,
+        bundle=bundle,
+        expected_artifact_id=_require_run_id(
+            receipt_value.get("artifact_id"),
+            name="committed capture artifact_id",
+        ),
+        expected_artifact_digest=_require_sha256(
+            receipt_value.get("artifact_digest"),
+            name="committed capture artifact_digest",
+        ),
+        expected_artifact_name=_require_text(
+            receipt_value.get("artifact_name"),
+            name="committed capture artifact_name",
+        ),
+        expected_producer_sha=_require_commit_sha(
+            receipt_value.get("producer_sha"),
+            name="committed capture producer_sha",
+        ),
+        expected_workflow_sha=_require_commit_sha(
+            receipt_value.get("workflow_sha"),
+            name="committed capture workflow_sha",
+        ),
+        expected_workflow_run_id=_require_run_id(
+            receipt_value.get("workflow_run_id"),
+            name="committed capture workflow_run_id",
+        ),
+    )
     return bundle, receipt
 
 
