@@ -334,25 +334,45 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     provenance = next(step for step in steps if step.get("name") == "Record numerical provenance")
     tier4 = next(step for step in steps if step.get("name") == "Tier 4 run")
     mutation = next(
-        step for step in steps if step.get("name") == "Refuse tracked checkout mutation"
+        step
+        for step in steps
+        if step.get("name") == "Refuse tracked checkout mutation before upload"
     )
-    upload = next(step for step in steps if step.get("name") == "Upload digest-bound bundle")
+    result_upload = next(step for step in steps if step.get("name") == "Upload digest-bound bundle")
+    result_download = next(
+        step
+        for step in steps
+        if step.get("name") == "Download immutable result bundle for proposal"
+    )
     proposal = next(
         step
         for step in steps
-        if step.get("name") == "Build and validate proposal record (manual vn2-mint only)"
+        if step.get("name") == "Build proposal record from immutable result (manual vn2-mint only)"
     )
     revalidate = next(
         step
         for step in steps
-        if step.get("name") == "Revalidate proposal record (manual vn2-mint only)"
+        if step.get("name")
+        == "Revalidate proposal record from immutable result (manual vn2-mint only)"
     )
     proposal_upload = next(
         step
         for step in steps
         if step.get("name") == "Upload proposal record (manual vn2-mint only)"
     )
+    proposal_download = next(
+        step
+        for step in steps
+        if step.get("name") == "Download immutable proposal record (manual vn2-mint only)"
+    )
+    uploaded_validation = next(
+        step
+        for step in steps
+        if step.get("name") == "Validate uploaded proposal record (manual vn2-mint only)"
+    )
     final_guard = next(step for step in steps if step.get("name") == "Final tracked history guard")
+
+    assert workflow["permissions"] == {"contents": "read"}
     assert job["if"] == (
         "github.event_name == 'schedule' || "
         "(github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))"
@@ -371,8 +391,18 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     assert job["env"]["VN2_CANDIDATE_SHA"] == (
         "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
     )
+    assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
+    assert job["env"]["VN2_RUN_ID"] == "${{ github.run_id }}"
+    assert job["env"]["VN2_RUN_URL"] == (
+        "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    )
     assert job["env"]["VN2_WORKFLOW_REF"] == "${{ github.workflow_ref }}"
+    assert job["env"]["VN2_MODE"] == (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' "
+        "&& 'mint' || 'verify' }}"
+    )
     assert "github.workflow_sha" not in job["env"]["VN2_CANDIDATE_SHA"]
+    assert "inputs.lane == 'vn2-mint'" in job["env"]["VN2_MODE"]
     preflight_script = preflight["run"]
     for required in (
         'test "$ID" = "ubuntu"',
@@ -404,30 +434,76 @@ def test_vn2_acceptance_has_an_exact_successor_owned_consumption_boundary() -> N
     assert "numpy.show_config()" in provenance["run"]
     assert 'Path("uv.lock").read_bytes()' in provenance["run"]
     assert "sha256" in provenance["run"]
-    assert upload["if"] == "github.event_name == 'workflow_dispatch'"
-    assert upload["id"] == "result_upload"
-    assert proposal["if"] == "env.VN2_MODE == 'mint'"
-    assert revalidate["if"] == "env.VN2_MODE == 'mint'"
-    assert proposal_upload["if"] == "env.VN2_MODE == 'mint'"
-    assert final_guard["if"] == "always()"
-    assert steps.index(tier4) < steps.index(mutation) < steps.index(upload)
+
+    assert result_upload["if"] == "github.event_name == 'workflow_dispatch'"
+    assert result_upload["id"] == "result_upload"
+    assert result_upload["uses"] == "actions/upload-artifact@v4"
+    assert result_upload["with"] == {
+        "name": "vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}",
+        "path": "newcalibre/artifacts/vn2/",
+        "if-no-files-found": "error",
+    }
+    assert result_download["if"] == "env.VN2_MODE == 'mint'"
+    assert result_download["uses"] == "actions/download-artifact@v4"
+    assert result_download["with"] == {
+        "artifact-ids": "${{ steps.result_upload.outputs.artifact-id }}",
+        "path": "${{ runner.temp }}/vn2-result-${{ env.VN2_CANDIDATE_SHA }}",
+        "merge-multiple": True,
+    }
+
+    proposal_steps = [proposal, revalidate, proposal_upload, proposal_download, uploaded_validation]
+    assert all(step["if"] == "env.VN2_MODE == 'mint'" for step in proposal_steps)
+    assert proposal_upload["id"] == "proposal_upload"
+    assert proposal_upload["uses"] == "actions/upload-artifact@v4"
+    assert proposal_upload["with"] == {
+        "name": "vn2-tracking-proposal-${{ env.VN2_CANDIDATE_SHA }}",
+        "path": "newcalibre/artifacts/vn2-tracking/proposed-record.jsonl",
+        "if-no-files-found": "error",
+    }
+    assert proposal_download["uses"] == "actions/download-artifact@v4"
+    assert proposal_download["with"] == {
+        "artifact-ids": "${{ steps.proposal_upload.outputs.artifact-id }}",
+        "path": "${{ runner.temp }}/vn2-proposal-${{ env.VN2_CANDIDATE_SHA }}",
+        "merge-multiple": True,
+    }
+    result_root = '--result-root "${RUNNER_TEMP}/vn2-result-${VN2_CANDIDATE_SHA}"'
+    for step in (proposal, revalidate, uploaded_validation):
+        assert result_root in step["run"]
+        assert (
+            '--result-artifact-id "${{ steps.result_upload.outputs.artifact-id }}"' in step["run"]
+        )
+        assert (
+            '--result-artifact-digest "${{ steps.result_upload.outputs.artifact-digest }}"'
+            in step["run"]
+        )
+        assert '--result-artifact-name "vn2-acceptance-$VN2_CANDIDATE_SHA"' in step["run"]
+    assert "--proposal artifacts/vn2-tracking/proposed-record.jsonl" in revalidate["run"]
     assert (
-        steps.index(upload)
+        '--proposal "${RUNNER_TEMP}/vn2-proposal-${VN2_CANDIDATE_SHA}/proposed-record.jsonl"'
+        in uploaded_validation["run"]
+    )
+
+    assert final_guard["if"] == "always()"
+    final_script = final_guard["run"]
+    assert "set -euo pipefail" in final_script
+    assert "test ! -L stage3/evidence/tracking/series.jsonl" in final_script
+    assert "test ! -e stage3/evidence/tracking/series.jsonl" in final_script
+    assert 'test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"' in final_script
+    assert "git status --porcelain --untracked-files=no" in final_script
+    status_command = "git status --porcelain --untracked-files=no"
+    assert sum(status_command in step.get("run", "") for step in (mutation, final_guard)) == 2
+    assert steps.index(tier4) < steps.index(mutation) < steps.index(result_upload)
+    assert (
+        steps.index(result_upload)
+        < steps.index(result_download)
         < steps.index(proposal)
         < steps.index(revalidate)
         < steps.index(proposal_upload)
+        < steps.index(proposal_download)
+        < steps.index(uploaded_validation)
         < steps.index(final_guard)
     )
-    assert "steps.result_upload.outputs.artifact-id" in proposal["run"]
-    assert "steps.result_upload.outputs.artifact-digest" in proposal["run"]
-    assert "artifacts/vn2-tracking/proposed-record.jsonl" in proposal["run"]
-    assert "artifacts/vn2-tracking/proposed-record.jsonl" in revalidate["run"]
-    assert proposal_upload["with"]["name"] == "vn2-tracking-proposal-${{ env.VN2_CANDIDATE_SHA }}"
-    assert (
-        proposal_upload["with"]["path"]
-        == "newcalibre/artifacts/vn2-tracking/proposed-record.jsonl"
-    )
-    assert "series.jsonl" in final_guard["run"]
+    assert all("git push" not in step.get("run", "") for step in steps)
 
 
 def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() -> None:

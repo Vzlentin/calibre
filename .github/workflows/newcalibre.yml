@@ -517,7 +517,7 @@ jobs:
       - name: Tier 4 run
         working-directory: newcalibre
         run: uv run --locked --no-sync pytest tests/tier4
-      - name: Refuse tracked checkout mutation
+      - name: Refuse tracked checkout mutation before upload
         run: |
           set -euo pipefail
           test -z "$(git status --porcelain --untracked-files=no)" || {
@@ -533,12 +533,19 @@ jobs:
           name: vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}
           path: newcalibre/artifacts/vn2/
           if-no-files-found: error
-      - name: Build and validate proposal record (manual vn2-mint only)
+      - name: Download immutable result bundle for proposal
+        if: env.VN2_MODE == 'mint'
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.result_upload.outputs.artifact-id }}
+          path: ${{ runner.temp }}/vn2-result-${{ env.VN2_CANDIDATE_SHA }}
+          merge-multiple: true
+      - name: Build proposal record from immutable result (manual vn2-mint only)
         if: env.VN2_MODE == 'mint'
         working-directory: newcalibre
         run: |
           uv run --locked --no-sync python scripts/vn2_tracking.py propose \
-            --result-root artifacts/vn2 \
+            --result-root "${RUNNER_TEMP}/vn2-result-${VN2_CANDIDATE_SHA}" \
             --capture-root ../stage3/evidence/captures \
             --candidate-sha "$VN2_CANDIDATE_SHA" \
             --workflow-ref "$VN2_WORKFLOW_REF" \
@@ -552,12 +559,12 @@ jobs:
             --input-inventory benchmarks/vn2/vn2-input-digests.json \
             --lockfile uv.lock \
             --output artifacts/vn2-tracking/proposed-record.jsonl
-      - name: Revalidate proposal record (manual vn2-mint only)
+      - name: Revalidate proposal record from immutable result (manual vn2-mint only)
         if: env.VN2_MODE == 'mint'
         working-directory: newcalibre
         run: |
           uv run --locked --no-sync python scripts/vn2_tracking.py validate \
-            --result-root artifacts/vn2 \
+            --result-root "${RUNNER_TEMP}/vn2-result-${VN2_CANDIDATE_SHA}" \
             --capture-root ../stage3/evidence/captures \
             --candidate-sha "$VN2_CANDIDATE_SHA" \
             --workflow-ref "$VN2_WORKFLOW_REF" \
@@ -573,14 +580,43 @@ jobs:
             --proposal artifacts/vn2-tracking/proposed-record.jsonl
       - name: Upload proposal record (manual vn2-mint only)
         if: env.VN2_MODE == 'mint'
+        id: proposal_upload
         uses: actions/upload-artifact@v4
         with:
           name: vn2-tracking-proposal-${{ env.VN2_CANDIDATE_SHA }}
           path: newcalibre/artifacts/vn2-tracking/proposed-record.jsonl
           if-no-files-found: error
+      - name: Download immutable proposal record (manual vn2-mint only)
+        if: env.VN2_MODE == 'mint'
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.proposal_upload.outputs.artifact-id }}
+          path: ${{ runner.temp }}/vn2-proposal-${{ env.VN2_CANDIDATE_SHA }}
+          merge-multiple: true
+      - name: Validate uploaded proposal record (manual vn2-mint only)
+        if: env.VN2_MODE == 'mint'
+        working-directory: newcalibre
+        run: |
+          uv run --locked --no-sync python scripts/vn2_tracking.py validate \
+            --result-root "${RUNNER_TEMP}/vn2-result-${VN2_CANDIDATE_SHA}" \
+            --capture-root ../stage3/evidence/captures \
+            --candidate-sha "$VN2_CANDIDATE_SHA" \
+            --workflow-ref "$VN2_WORKFLOW_REF" \
+            --workflow-sha "$VN2_WORKFLOW_SHA" \
+            --run-id "$VN2_RUN_ID" \
+            --run-url "$VN2_RUN_URL" \
+            --result-artifact-id "${{ steps.result_upload.outputs.artifact-id }}" \
+            --result-artifact-name "vn2-acceptance-$VN2_CANDIDATE_SHA" \
+            --result-artifact-digest "${{ steps.result_upload.outputs.artifact-digest }}" \
+            --config benchmarks/vn2/protocol.yaml \
+            --input-inventory benchmarks/vn2/vn2-input-digests.json \
+            --lockfile uv.lock \
+            --proposal "${RUNNER_TEMP}/vn2-proposal-${VN2_CANDIDATE_SHA}/proposed-record.jsonl"
       - name: Final tracked history guard
         if: always()
         run: |
           set -euo pipefail
+          test ! -L stage3/evidence/tracking/series.jsonl
           test ! -e stage3/evidence/tracking/series.jsonl
+          test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
