@@ -90,7 +90,7 @@ jobs:
       - name: Stage 3 automation contracts
         run: |
           uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py
+          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py
       - name: Provision export venv (network still on)
         if: steps.present.outputs.exists == 'true'
         working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
@@ -300,9 +300,24 @@ jobs:
             || { echo "missing successor VN2 verifier"; exit 1; }
           test -d newcalibre/tests/tier3 \
             || { echo "missing Tier 3 harness"; exit 1; }
+          test -f newcalibre/tests/tier3/oracle_inventory.json \
+            || { echo "missing required Tier 3 oracle inventory"; exit 1; }
+          test -f newcalibre/tests/tier3/test_conditional_replay.py \
+            || { echo "missing required Tier 3 conditional replay"; exit 1; }
       - name: Promoted captures presence
         id: captures
-        run: echo "present=$([ -d stage3/evidence/captures ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          test ! -L stage3/evidence/captures \
+            || { echo "symlinked promoted captures root refused"; exit 1; }
+          test ! -e stage3/evidence/captures \
+            || test -d stage3/evidence/captures \
+            || { echo "promoted captures root is not a directory"; exit 1; }
+          if test -d stage3/evidence/captures; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Tier 3 visibly skipped
         if: github.event_name == 'schedule' && steps.captures.outputs.present != 'true'
         run: echo "::notice::tier 3 skipped - promoted captures absent"
@@ -369,10 +384,45 @@ jobs:
           print(f"lock_sha256={lock_digest}")
           numpy.show_config()
           PY
+          uv run --locked --no-sync python scripts/capture_oracle_vn2.py environment \
+            --out "${RUNNER_TEMP}/oracle-environment.json"
+          cat "${RUNNER_TEMP}/oracle-environment.json"
+          uv --version
       - name: Tier 3 replay + divergence + witness enforcement
+        id: tier3
         if: steps.captures.outputs.present == 'true'
         working-directory: newcalibre
-        run: uv run --locked --no-sync pytest tests/tier3
+        run: >-
+          uv run --locked --no-sync pytest tests/tier3
+          --junitxml="${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml"
+      - name: Emit candidate-qualified oracle evidence
+        if: always()
+        env:
+          ORACLE_TEST_OUTCOME: ${{ steps.tier3.outcome }}
+        run: |
+          python3 .github/scripts/stage3_oracle_evidence.py emit \
+            --candidate-sha "$ORACLE_CANDIDATE_SHA" \
+            --environment "${RUNNER_TEMP}/oracle-environment.json" \
+            --junit "${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml" \
+            --out "${RUNNER_TEMP}/oracle-evidence-${ORACLE_CANDIDATE_SHA}.json" \
+            --test-outcome "$ORACLE_TEST_OUTCOME"
+      - name: Validate candidate-qualified oracle evidence
+        if: always()
+        run: |
+          python3 .github/scripts/stage3_oracle_evidence.py validate \
+            --evidence "${RUNNER_TEMP}/oracle-evidence-${ORACLE_CANDIDATE_SHA}.json" \
+            --junit "${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml" \
+            --allow-skipped \
+              "${{ github.event_name == 'schedule' && steps.captures.outputs.present != 'true' }}"
+      - name: Upload oracle evidence and pytest outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-evidence-${{ env.ORACLE_CANDIDATE_SHA }}
+          path: |
+            ${{ runner.temp }}/oracle-evidence-${{ env.ORACLE_CANDIDATE_SHA }}.json
+            ${{ runner.temp }}/oracle-pytest-${{ env.ORACLE_CANDIDATE_SHA }}.xml
+          if-no-files-found: error
 
   vn2-acceptance:
     # Tier 4 — schedule is verify-only against the default-branch SHA;

@@ -8,18 +8,37 @@ import sys
 from pathlib import Path
 from typing import cast
 
+import pandas as pd
 import pytest
 
+from newcalibre.domain import (
+    ActualsSemantics,
+    Calendar,
+    CostStructure,
+    DecisionTiming,
+    InventoryPosition,
+    SessionIdentity,
+    StockoutRule,
+)
+from newcalibre.engine import (
+    InMemoryLedgerSink,
+    SettlementRequest,
+    SettlementResult,
+    settle,
+)
+from newcalibre.ledger import BookedCost, SettlementRecord, StockoutTransition
 from oracle import reference as _reference
 from oracle.reference import (
     ReferenceInputError,
     ReferenceOrder,
+    ReferenceRow,
     ReferenceSeries,
     calculate_reference_trajectory,
 )
 from oracle.witnesses import (
     WitnessDeclaration,
     WitnessPairingError,
+    require_exact_inventory,
     require_exact_witnesses,
 )
 
@@ -62,6 +81,16 @@ def test_closed_form_reference_recomputes_arrival_conservation_and_cost_by_hand(
     assert rows[("b", "p1")].shortage == 1.0
     assert rows[("a", "p2")].closing == 1.0
     assert rows[("b", "p3")].closing == 1.0
+    assert tuple(row.on_order for row in trajectory.rows) == (
+        5.0,
+        0.0,
+        5.0,
+        2.0,
+        0.0,
+        2.0,
+        0.0,
+        0.0,
+    )
     assert trajectory.cost_by_period == {"p0": 3.0, "p1": 9.0, "p2": 6.0, "p3": 2.0}
     assert trajectory.total_cost == 20.0
     assert demand[("a", "p2")] == 4.0
@@ -89,6 +118,7 @@ def test_closed_form_reference_seeds_every_initial_pipeline_period() -> None:
     rows = {row.period: row for row in trajectory.rows}
     assert tuple(row.arrivals for row in trajectory.rows) == (2.0, 3.0, 5.0, 0.0)
     assert tuple(row.closing for row in trajectory.rows) == (1.0, 2.0, 3.0, 3.0)
+    assert tuple(row.on_order for row in trajectory.rows) == (8.0, 5.0, 0.0, 0.0)
     assert trajectory.cost_by_period == {"p0": 1.0, "p1": 2.0, "p2": 3.0, "p3": 3.0}
     assert rows["p2"].opening == 2.0
 
@@ -158,39 +188,192 @@ def test_vn2_protocol_defines_no_second_local_settlement_implementation() -> Non
     assert forbidden_definitions == []
 
 
-def test_demand_and_censored_sales_have_separately_derived_integer_trajectories() -> None:
-    demand_scored = calculate_reference_trajectory(
-        periods=("p0", "p1"),
-        series=(ReferenceSeries("stockout", 4, 0, 1),),
-        demand={("stockout", "p0"): 7, ("stockout", "p1"): 1},
-        orders=(),
-        lead_time=1,
+def test_successor_demand_and_reference_sales_have_separately_proven_results() -> None:
+    series_key = "stockout"
+    calendar = Calendar("W-MON", phase=pd.Timestamp("2026-01-05"))
+    periods = tuple(pd.date_range("2026-01-05", periods=2, freq="W-MON"))
+    timing = DecisionTiming(lead_time=1, review_period=1)
+    session = SessionIdentity.derive(
+        tenant="synthetic-censoring",
+        series_keys=(series_key,),
+        calendar=calendar,
+        horizon=timing.protection_period,
+        model_config={"backend": "seasonal-naive", "m": 1},
+        ordering_policy={"name": "newsvendor"},
+        decision_series_keys=(series_key,),
+        cost_structure=CostStructure(1.0, 1.0, 0.0, 1.0),
+        decision_timing=timing,
+        stockout_rule=StockoutRule.LOST_SALES,
     )
-    sales_scored = calculate_reference_trajectory(
-        periods=("p0", "p1"),
-        series=(ReferenceSeries("stockout", 4, 0, 1),),
-        demand={("stockout", "p0"): 4, ("stockout", "p1"): 0},
-        orders=(),
-        lead_time=1,
+    sink = InMemoryLedgerSink(session=session, calendar=calendar)
+    demand_scored = settle(
+        SettlementRequest(
+            session=session,
+            snapshot=sink.settlement_snapshot(periods),
+            actuals={(series_key, periods[0]): 7, (series_key, periods[1]): 1},
+            inventory_positions={series_key: InventoryPosition(4, 0, 0)},
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
+    )
+    literal_demand_expectation = SettlementResult(
+        records=(
+            SettlementRecord(
+                session=session,
+                series_key=series_key,
+                period=periods[0],
+                arrivals=0,
+                actuals_semantics=ActualsSemantics.DEMAND,
+                transition=StockoutTransition(
+                    rule=StockoutRule.LOST_SALES,
+                    demand=7,
+                    fulfilled_demand=4,
+                    unmet_demand=3,
+                    closing_on_hand=0,
+                    closing_backorders=0,
+                ),
+                inventory_position=InventoryPosition(0, 0, 0),
+                holding=BookedCost(rate=0, basis=0, amount=0),
+                shortage=BookedCost(rate=1, basis=3, amount=3),
+            ),
+            SettlementRecord(
+                session=session,
+                series_key=series_key,
+                period=periods[1],
+                arrivals=0,
+                actuals_semantics=ActualsSemantics.DEMAND,
+                transition=StockoutTransition(
+                    rule=StockoutRule.LOST_SALES,
+                    demand=1,
+                    fulfilled_demand=0,
+                    unmet_demand=1,
+                    closing_on_hand=0,
+                    closing_backorders=0,
+                ),
+                inventory_position=InventoryPosition(0, 0, 0),
+                holding=BookedCost(rate=0, basis=0, amount=0),
+                shortage=BookedCost(rate=1, basis=1, amount=1),
+            ),
+        ),
+        inventory_positions={series_key: InventoryPosition(0, 0, 0)},
     )
 
-    # Hand derivation: four units serve the first period. True demand leaves
-    # shortages (3, 1); censored sales report only the fulfilled units (4, 0).
-    assert tuple((row.fulfilled, row.shortage, row.closing) for row in demand_scored.rows) == (
-        (4.0, 3.0, 0.0),
-        (0.0, 1.0, 0.0),
+    assert demand_scored == literal_demand_expectation
+
+    sales_scored = calculate_reference_trajectory(
+        periods=("p0", "p1"),
+        series=(ReferenceSeries(series_key, 4, 0, 1),),
+        demand={(series_key, "p0"): 4, (series_key, "p1"): 0},
+        orders=(),
+        lead_time=1,
     )
-    assert tuple((row.fulfilled, row.shortage, row.closing) for row in sales_scored.rows) == (
-        (4.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0),
+    literal_sales_expectation = (
+        ReferenceRow(
+            series_key=series_key,
+            period="p0",
+            opening=4,
+            arrivals=0,
+            demand=4,
+            fulfilled=4,
+            closing=0,
+            on_order=0,
+            shortage=0,
+            holding_cost=0,
+            shortage_cost=0,
+        ),
+        ReferenceRow(
+            series_key=series_key,
+            period="p1",
+            opening=0,
+            arrivals=0,
+            demand=0,
+            fulfilled=0,
+            closing=0,
+            on_order=0,
+            shortage=0,
+            holding_cost=0,
+            shortage_cost=0,
+        ),
     )
-    assert demand_scored.cost_by_period == {"p0": 3.0, "p1": 1.0}
+
+    assert sales_scored.rows == literal_sales_expectation
     assert sales_scored.cost_by_period == {"p0": 0.0, "p1": 0.0}
-    assert demand_scored != sales_scored
+    assert sales_scored.total_cost == 0.0
+
+    demand_outcome = tuple(
+        (
+            record.transition.demand,
+            record.transition.fulfilled_demand,
+            record.transition.unmet_demand,
+            record.inventory_position.on_hand,
+            record.realized_cost,
+        )
+        for record in demand_scored.records
+    )
+    sales_outcome = tuple(
+        (row.demand, row.fulfilled, row.shortage, row.closing, row.total_cost)
+        for row in sales_scored.rows
+    )
+    assert demand_outcome != sales_outcome
 
 
 def test_deleting_numeric_gate_witness_fails_collection_contract() -> None:
     project_root = Path(__file__).parents[2]
+    tier3 = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/tier3",
+            "--collect-only",
+            "-q",
+        ),
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert tier3.returncode == 0, tier3.stdout + tier3.stderr
+
+    one_half = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            (
+                "tests/tier3/test_conditional_replay.py::"
+                "test_promoted_orders_match_independent_conditional_replay"
+            ),
+            "--collect-only",
+            "-q",
+        ),
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert one_half.returncode != 0
+    assert "vn2-conditional-replay" in one_half.stdout + one_half.stderr
+
+    whole_module = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/tier3",
+            "--ignore=tests/tier3/test_conditional_replay.py",
+            "--collect-only",
+            "-q",
+        ),
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert whole_module.returncode != 0
+    assert "required Tier 3 oracle inventory mismatch" in (
+        whole_module.stdout + whole_module.stderr
+    )
+
     paired = subprocess.run(
         (
             sys.executable,
@@ -259,3 +442,92 @@ def test_witness_contract_requires_exactly_one_same_tier_pair(
     witnesses = tuple(WitnessDeclaration("tier3", "a", node) for node in witness_nodes)
     with pytest.raises(WitnessPairingError, match=message):
         require_exact_witnesses(gates, witnesses)
+
+
+@pytest.mark.parametrize(
+    ("gates", "witnesses", "message"),
+    [
+        ((), (), "missing_gates"),
+        (
+            (
+                WitnessDeclaration(
+                    "tier3",
+                    "vn2-conditional-replay",
+                    (
+                        "tests.tier3.test_conditional_replay::"
+                        "test_promoted_orders_match_independent_conditional_replay"
+                    ),
+                ),
+            ),
+            (),
+            "missing_witnesses",
+        ),
+        (
+            (),
+            (
+                WitnessDeclaration(
+                    "tier3",
+                    "vn2-conditional-replay",
+                    (
+                        "tests.tier3.test_conditional_replay::"
+                        "test_conditional_replay_rejects_one_successor_order_unit"
+                    ),
+                ),
+            ),
+            "missing_gates",
+        ),
+        (
+            (
+                WitnessDeclaration(
+                    "tier3",
+                    "vn2-conditional-replay",
+                    "tests.tier3.renamed_replay::test_promoted_orders",
+                ),
+            ),
+            (
+                WitnessDeclaration(
+                    "tier3",
+                    "vn2-conditional-replay",
+                    (
+                        "tests.tier3.test_conditional_replay::"
+                        "test_conditional_replay_rejects_one_successor_order_unit"
+                    ),
+                ),
+            ),
+            "unexpected_gates",
+        ),
+    ],
+)
+def test_required_tier3_inventory_refuses_empty_half_or_renamed_declarations(
+    gates: tuple[WitnessDeclaration, ...],
+    witnesses: tuple[WitnessDeclaration, ...],
+    message: str,
+) -> None:
+    required_gates = (
+        WitnessDeclaration(
+            "tier3",
+            "vn2-conditional-replay",
+            (
+                "tests.tier3.test_conditional_replay::"
+                "test_promoted_orders_match_independent_conditional_replay"
+            ),
+        ),
+    )
+    required_witnesses = (
+        WitnessDeclaration(
+            "tier3",
+            "vn2-conditional-replay",
+            (
+                "tests.tier3.test_conditional_replay::"
+                "test_conditional_replay_rejects_one_successor_order_unit"
+            ),
+        ),
+    )
+
+    with pytest.raises(WitnessPairingError, match=message):
+        require_exact_inventory(
+            gates,
+            witnesses,
+            required_gates=required_gates,
+            required_witnesses=required_witnesses,
+        )

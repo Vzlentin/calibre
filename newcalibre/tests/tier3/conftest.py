@@ -9,8 +9,10 @@ import pytest
 
 from newcalibre.oracle import (
     CaptureBundle,
+    OracleEvidenceError,
     validate_capture_bundle,
     validate_capture_receipt,
+    validate_promoted_captures_root,
 )
 from newcalibre.protocols.vn2 import (
     EXPECTED_INPUT_COUNT,
@@ -34,9 +36,16 @@ SUCCESSOR_DATA = REPOSITORY_ROOT / "newcalibre" / "data" / "vn2"
 @pytest.fixture(scope="session")
 def promoted_captures_root() -> Path:
     """Expose promoted bytes or visibly skip only when they are absent."""
-    if not CAPTURES_ROOT.is_dir():
+    try:
+        CAPTURES_ROOT.lstat()
+    except FileNotFoundError:
         pytest.skip("tier 3 skipped: promoted oracle captures are absent")
-    return CAPTURES_ROOT
+    except OSError as error:
+        pytest.fail(f"tier 3 cannot inspect promoted captures root: {error}")
+    try:
+        return validate_promoted_captures_root(CAPTURES_ROOT)
+    except OracleEvidenceError as error:
+        pytest.fail(str(error))
 
 
 @pytest.fixture(scope="session")
@@ -48,8 +57,14 @@ def validated_promoted_capture(promoted_captures_root: Path) -> CaptureBundle:
     bundle_root = promoted_captures_root / CAPTURE_SHA
     receipt_path = promoted_captures_root / f"{CAPTURE_SHA}-receipt.json"
     expected_names = {CAPTURE_SHA, f"{CAPTURE_SHA}-receipt.json"}
+    if bundle_root.is_symlink():
+        pytest.fail("canonical capture bundle root must not be a symbolic link")
+    if receipt_path.is_symlink():
+        pytest.fail("canonical capture receipt must not be a symbolic link")
+    if not bundle_root.is_dir() or not receipt_path.is_file():
+        pytest.fail("tier 3 requires exactly one canonical 40-SHA capture bundle and receipt")
     actual_names = {path.name for path in promoted_captures_root.iterdir()}
-    if actual_names != expected_names or not bundle_root.is_dir() or not receipt_path.is_file():
+    if actual_names != expected_names:
         pytest.fail("tier 3 requires exactly one canonical 40-SHA capture bundle and receipt")
 
     bundle = validate_capture_bundle(

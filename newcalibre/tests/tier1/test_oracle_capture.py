@@ -19,6 +19,7 @@ from newcalibre.oracle import (
     validate_capture_bundle,
     validate_capture_receipt,
     validate_promoted_capture,
+    validate_promoted_captures_root,
 )
 
 pytestmark = pytest.mark.tier1
@@ -209,6 +210,49 @@ def test_capture_bundle_binds_complete_manifest_identity_and_payload_bytes(tmp_p
     assert bundle.manifest.environment.thread_policy["OMP_NUM_THREADS"] == "1"
     assert len(bundle.manifest.files) == 8
     assert bundle.manifest_sha256 == _sha256((root / "manifest.json").read_bytes())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="symlink trust checks are Linux-ratified")
+def test_promoted_captures_root_refuses_a_directory_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "real-captures"
+    target.mkdir()
+    linked_root = tmp_path / "linked-captures"
+    linked_root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(OracleEvidenceError, match="promoted captures root.*symbolic link"):
+        validate_promoted_captures_root(linked_root)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="symlink trust checks are Linux-ratified")
+def test_capture_bundle_refuses_a_root_directory_symlink(tmp_path: Path) -> None:
+    target = _valid_bundle(tmp_path / "real-bundle")
+    linked_root = tmp_path / "linked-bundle"
+    linked_root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(OracleEvidenceError, match="capture bundle.*symbolic link"):
+        _validate(linked_root)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="symlink trust checks are Linux-ratified")
+def test_capture_receipt_refuses_a_file_symlink(tmp_path: Path) -> None:
+    root = _valid_bundle(tmp_path / "bundle")
+    bundle = _validate(root)
+    target = tmp_path / "receipt.json"
+    _write_json(target, _receipt_value(bundle))
+    linked_receipt = tmp_path / "linked-receipt.json"
+    linked_receipt.symlink_to(target)
+
+    with pytest.raises(OracleEvidenceError, match="capture receipt.*symbolic link"):
+        validate_capture_receipt(
+            linked_receipt,
+            bundle=bundle,
+            expected_artifact_id=ARTIFACT_ID,
+            expected_artifact_digest=ARTIFACT_DIGEST,
+            expected_artifact_name=bundle.manifest.artifact_name,
+            expected_producer_sha=CANDIDATE_SHA,
+            expected_workflow_sha=WORKFLOW_SHA,
+            expected_workflow_run_id=RUN_ID,
+        )
 
 
 def test_candidate_runner_validates_the_requested_capture_identity(tmp_path: Path) -> None:

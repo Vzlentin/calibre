@@ -13,6 +13,7 @@ from newcalibre.oracle.capture import (
     validate_capture_bundle,
     validate_capture_receipt,
     validate_promoted_capture,
+    validate_promoted_captures_root,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "validate_capture_bundle",
     "validate_capture_receipt",
     "validate_promoted_capture",
+    "validate_promoted_captures_root",
 ]
