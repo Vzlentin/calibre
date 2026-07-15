@@ -17,7 +17,6 @@ from newcalibre.protocols.vn2._artifact_contracts import (
     INPUT_INVENTORY_PATH,
     LOCK_PATH,
     RESULT_KIND,
-    VN2EvidenceEnvironment,
     VN2ResultBundle,
     VN2ResultError,
     _environment_value,
@@ -82,8 +81,12 @@ def _build_tracking_record(
     manifest = result.manifest
     if manifest.run_url != run_url:
         raise TrackingError("workflow.run_url does not match the validated result bundle")
-    result_files = {entry.path: entry.sha256 for entry in manifest.files}
-    environment = _environment_payload(manifest.environment)
+    result_files = {
+        entry.path: entry.sha256
+        for entry in manifest.files
+        if entry.path != "environment.json"
+    }
+    environment = _environment_value(manifest.environment)
     toolchain_digest = _toolchain_digest(environment)
     promoted = _capture_payload(capture, receipt)
     evidence = {
@@ -147,15 +150,12 @@ def _build_tracking_record(
         canonical_json_bytes(identity_preimage, path="tracking identity")
     ).hexdigest()
     try:
-        return VN2TrackingRecord(payload)
+        return VN2TrackingRecord._from_evidence(payload)
     except (TrackingError, ValueError, TypeError) as error:
         if isinstance(error, TrackingError):
             raise
-        raise TrackingError("validated evidence did not form a tracking record") from error
 
-
-def _environment_payload(environment: VN2EvidenceEnvironment) -> dict[str, object]:
-    return dict(_environment_value(environment))
+        raise TrackingError(f"tracking evidence validation failed: {error}") from error
 
 
 def _capture_payload(bundle: CaptureBundle, receipt: CaptureReceipt) -> dict[str, object]:
@@ -220,4 +220,4 @@ def build_tracking_record(
         TypeError,
         ValueError,
     ) as error:
-        raise TrackingError("tracking evidence validation failed") from error
+        raise TrackingError(f"tracking evidence validation failed: {error}") from error

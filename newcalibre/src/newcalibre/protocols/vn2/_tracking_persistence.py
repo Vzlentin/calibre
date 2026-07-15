@@ -7,10 +7,13 @@ import os
 import stat
 from pathlib import Path
 
+
 from newcalibre.protocols.vn2._tracking_contracts import (
     TrackingError,
     VN2TrackingRecord,
 )
+
+_TRUSTED_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _reject_tracked_path(path: Path) -> None:
@@ -19,21 +22,10 @@ def _reject_tracked_path(path: Path) -> None:
 
 
 def _successor_root(destination: Path) -> tuple[Path, Path]:
-    absolute = destination if destination.is_absolute() else Path.cwd() / destination
+    root = _TRUSTED_PROJECT_ROOT
+    absolute = destination if destination.is_absolute() else root / destination
     absolute = absolute.absolute()
     _reject_tracked_path(absolute)
-    candidates: list[Path] = []
-    for ancestor in (absolute.parent, *absolute.parents):
-        if ancestor.name != "newcalibre":
-            continue
-        if any(parent.is_symlink() for parent in (ancestor, *ancestor.parents)):
-            raise TrackingError("proposal path contains a symbolic ancestor")
-        artifacts = ancestor / "artifacts"
-        if (ancestor / "pyproject.toml").is_file() and not artifacts.is_symlink():
-            candidates.append(ancestor)
-    if not candidates:
-        raise TrackingError("proposal path must be beneath the successor newcalibre/artifacts root")
-    root = max(candidates, key=lambda path: len(path.parts))
     try:
         relative = absolute.relative_to(root)
     except ValueError as error:
@@ -105,7 +97,11 @@ def _descend(root: Path, relative_parent: tuple[str, ...]) -> tuple[int, list[in
 
 
 def _read_existing(parent_fd: int, name: str) -> bytes | None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         fd = os.open(name, flags, dir_fd=parent_fd)
     except FileNotFoundError:
@@ -152,7 +148,15 @@ def _publish_unix(parent_fd: int, name: str, payload: bytes) -> bool:
                 continue
         if temporary_fd is None or temporary_name is None:
             raise TrackingError("tracking proposal temporary publication failed")
-        os.write(temporary_fd, payload)
+        view = memoryview(payload)
+        while view:
+            try:
+                written = os.write(temporary_fd, view)
+            except OSError as error:
+                raise TrackingError("tracking proposal publication failed") from error
+            if written <= 0:
+                raise TrackingError("tracking proposal publication made no progress")
+            view = view[written:]
         os.fsync(temporary_fd)
         os.close(temporary_fd)
         temporary_fd = None
@@ -187,25 +191,19 @@ def _publish_unix(parent_fd: int, name: str, payload: bytes) -> bool:
 
 
 def _write_tracking_record(record: VN2TrackingRecord, path: Path) -> bool:
+    if not record._publication_eligible:
+        raise TrackingError("proposal writer requires a record derived from validated evidence")
     root, relative = _successor_root(Path(path))
     if len(relative.parts) < 2:
         raise TrackingError("proposal path must be beneath newcalibre/artifacts")
+    if os.name != "posix":
+        raise TrackingError("proposal publication requires the POSIX no-clobber mechanism")
     parent_fd, fds = _descend(root, tuple(relative.parts[:-1]))
     try:
         name = relative.parts[-1]
         if name in {"", ".", ".."} or "/" in name or "\\" in name:
             raise TrackingError("proposal path must use canonical relative components")
-        payload = record.to_bytes()
-        if os.name == "posix":
-            return _publish_unix(parent_fd, name, payload)
-        destination = root / relative
-        if destination.exists() or destination.is_symlink():
-            existing = destination.read_bytes()
-            if existing == payload:
-                return False
-            raise TrackingError("tracking proposal destination conflicts with the proposed record")
-        destination.write_bytes(payload)
-        return True
+        return _publish_unix(parent_fd, name, record.to_bytes())
     finally:
         for fd in reversed(fds):
             with contextlib.suppress(OSError):

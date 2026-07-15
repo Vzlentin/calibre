@@ -687,7 +687,11 @@ def _read_trusted_file(path: Path, *, name: str) -> bytes:
     if path.is_symlink():
         raise VN2ResultError(f"trusted {name} input must be a real non-symlink regular file")
     if os.name == "posix":
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         try:
             fd = os.open(path, flags)
         except OSError as error:

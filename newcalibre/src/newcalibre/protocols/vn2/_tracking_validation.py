@@ -29,7 +29,7 @@ def parse_tracking_record(value: bytes | bytearray | str | Path) -> VN2TrackingR
     parsed = _parse_json(body, name="tracking record")
     if _canonical_record_bytes(parsed) != payload:
         raise TrackingError("tracking record bytes are not canonical")
-    return VN2TrackingRecord(parsed)
+    return VN2TrackingRecord._from_parsed(parsed)
 
 
 def parse_tracking_history(value: bytes | bytearray | str | Path) -> tuple[VN2TrackingRecord, ...]:

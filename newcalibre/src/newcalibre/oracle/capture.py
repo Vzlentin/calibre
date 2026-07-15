@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import stat
 from collections.abc import Mapping, Sequence
@@ -544,7 +545,8 @@ def validate_committed_promoted_capture(root: Path) -> tuple[CaptureBundle, Capt
         raise OracleEvidenceError(
             "promoted captures root must contain the matching SHA-named receipt"
         )
-    manifest_value, _ = _load_json_object(
+    _require_nonsymlink_file(bundle_root / "manifest.json", name="committed capture manifest")
+    manifest_value, _ = _load_canonical_json_object(
         bundle_root / "manifest.json",
         name="committed capture manifest",
     )
@@ -564,7 +566,11 @@ def validate_committed_promoted_capture(root: Path) -> tuple[CaptureBundle, Capt
         expected_config_path=None,
         expected_input_inventory_path=None,
     )
-    receipt_value, _ = _load_json_object(receipt_path, name="committed capture receipt")
+    _require_nonsymlink_file(receipt_path, name="committed capture receipt")
+    receipt_value, _ = _load_canonical_json_object(
+        receipt_path,
+        name="committed capture receipt",
+    )
     receipt = validate_capture_receipt(
         receipt_path,
         bundle=bundle,
@@ -819,6 +825,14 @@ def _load_json_object(path: Path, *, name: str) -> tuple[dict[str, object], byte
     return _require_object(value, name=name), payload
 
 
+def _load_canonical_json_object(path: Path, *, name: str) -> tuple[dict[str, object], bytes]:
+    value, payload = _load_json_object(path, name=name)
+    expected = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if payload != expected:
+        raise OracleEvidenceError(f"{name} must use canonical sorted indented JSON with a final LF")
+    return value, payload
+
+
 def _unique_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
     value: dict[str, object] = {}
     for key, item in pairs:
@@ -973,11 +987,20 @@ def _capture_digest(files: tuple[CaptureFile, ...]) -> str:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("trusted input is not a regular file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
             digest.update(chunk)
-    return digest.hexdigest()
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
 
 
 def _sha256_bytes(value: bytes) -> str:

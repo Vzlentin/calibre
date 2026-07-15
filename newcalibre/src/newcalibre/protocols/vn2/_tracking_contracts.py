@@ -7,21 +7,21 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal, cast
 from urllib.parse import urlparse
 
 from newcalibre.domain._canonical_json import canonical_json_bytes
+from newcalibre.domain.actuals import ActualsSemantics
 from newcalibre.protocols.vn2._artifact_contracts import (
     CONFIG_PATH,
     GITHUB_REPOSITORY,
     INPUT_INVENTORY_PATH,
     LOCK_PATH,
     RESULT_KIND,
-    VN2EvidenceEnvironment,
-    VN2ResultError,
+    THREAD_VARIABLES,
 )
 
 TRACKING_SCHEMA = 1
@@ -53,13 +53,13 @@ _BUNDLE_KEYS = frozenset(
 )
 _FILE_NAMES = frozenset(
     {
-        "environment.json",
         "r1-orders.jsonl",
         "r2-cost-ledger.jsonl",
         "r3-final-triple.json",
         "r4-cost-trajectory.json",
     }
 )
+_MAX_TRACKING_BYTES = 4 * 1024 * 1024
 _EVIDENCE_KEYS = frozenset(
     {"config", "input_inventory", "lockfile", "promoted_capture", "actuals_semantics", "session"}
 )
@@ -98,16 +98,52 @@ class TrackingError(ValueError):
     """Report malformed, untrusted, or conflicting tracking evidence."""
 
 
-def _owned_value(value: object, *, name: str) -> object:
+def _owned_value(
+    value: object,
+    *,
+    name: str,
+    _active: set[int] | None = None,
+    _depth: int = 0,
+) -> object:
+    if _depth > 64:
+        raise TrackingError(f"{name} exceeds the maximum JSON nesting depth")
+    active = set() if _active is None else _active
     if isinstance(value, Mapping):
-        owned: dict[object, object] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TrackingError(f"{name} object keys must be strings")
-            owned[key] = _owned_value(item, name=f"{name}.{key}")
-        return owned
+        identity = id(value)
+        if identity in active:
+            raise TrackingError(f"{name} contains a cyclic JSON value")
+        active.add(identity)
+        try:
+            owned: dict[object, object] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TrackingError(f"{name} object keys must be strings")
+                owned[key] = _owned_value(
+                    item,
+                    name=f"{name}.{key}",
+                    _active=active,
+                    _depth=_depth + 1,
+                )
+            return owned
+        finally:
+            active.remove(identity)
     if isinstance(value, (list, tuple)):
-        return [_owned_value(item, name=f"{name}[]") for item in value]
+        identity = id(value)
+        if identity in active:
+            raise TrackingError(f"{name} contains a cyclic JSON value")
+        active.add(identity)
+        try:
+            return [
+                _owned_value(
+                    item,
+                    name=f"{name}[]",
+                    _active=active,
+                    _depth=_depth + 1,
+                )
+                for item in value
+            ]
+        finally:
+            active.remove(identity)
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     raise TrackingError(f"{name} contains an unsupported JSON value")
@@ -137,38 +173,70 @@ def _thawed_payload(value: Mapping[str, object]) -> dict[str, object]:
     return cast(dict[str, object], _thaw_value(value))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class VN2TrackingRecord:
-    """One validated canonical v1 tracking record."""
+    """Represent one validated canonical v1 tracking record."""
 
     payload: Mapping[str, object]
+    _publication_eligible: bool = field(repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        owned = _owned_value(self.payload, name="tracking record")
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TrackingError(
+            "VN2TrackingRecord construction is private; use validated parsing or "
+            "evidence projection"
+        )
+
+    @classmethod
+    def _from_parsed(cls, payload: Mapping[str, object]) -> VN2TrackingRecord:
+        """Construct one structurally valid record parsed from canonical bytes."""
+        return cls._construct(payload, publication_eligible=False)
+
+    @classmethod
+    def _from_evidence(cls, payload: Mapping[str, object]) -> VN2TrackingRecord:
+        """Construct one publication-eligible record from validated evidence."""
+        return cls._construct(payload, publication_eligible=True)
+
+    @classmethod
+    def _construct(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        publication_eligible: bool,
+    ) -> VN2TrackingRecord:
+        self = object.__new__(cls)
+        owned = _owned_value(payload, name="tracking record")
         if not isinstance(owned, dict):
             raise TrackingError("tracking record must be a JSON object")
         value = _validate_payload(cast(dict[str, object], owned))
         _canonical_record_bytes(value)
         object.__setattr__(self, "payload", _frozen_payload(value))
+        object.__setattr__(self, "_publication_eligible", publication_eligible)
+        return self
 
     @property
     def identity(self) -> str:
+        """Return the immutable record identity."""
         return cast(str, self.payload["identity"])
 
     @property
     def total_cost(self) -> float:
+        """Return the validated total realized cost."""
         return _finite_cost(
             cast(Mapping[str, object], self.payload["objective"])["total_cost"],
             name="objective.total_cost",
         )
 
+
     def to_bytes(self) -> bytes:
+        """Serialize the record as canonical JSONL bytes."""
         return _canonical_record_bytes(_thawed_payload(self.payload))
 
     def to_json(self) -> str:
+        """Serialize the record as canonical JSONL text."""
         return self.to_bytes().decode("utf-8")
 
     def __getitem__(self, key: str) -> object:
+        """Return one immutable payload field."""
         return self.payload[key]
 
 
@@ -191,13 +259,15 @@ class AppendDecision:
 
     @property
     def should_append(self) -> bool:
+        """Return whether publication should append this record."""
         return self.action == "append"
 
 
 def _validate_payload(value: dict[str, object]) -> dict[str, object]:
     _exact_keys(value, _TOP_KEYS, "tracking record")
-    if value.get("schema") != TRACKING_SCHEMA:
-        raise TrackingError("tracking schema must equal 1")
+    schema = value.get("schema")
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema != TRACKING_SCHEMA:
+        raise TrackingError("tracking schema must be the integer 1")
     if value.get("record_kind") != TRACKING_KIND:
         raise TrackingError(f"record_kind must equal {TRACKING_KIND!r}")
     subject = _object(value["subject"], "subject")
@@ -207,12 +277,7 @@ def _validate_payload(value: dict[str, object]) -> dict[str, object]:
         raise TrackingError(f"subject.repository must equal {REPOSITORY!r}")
     workflow = _object(value["workflow"], "workflow")
     _exact_keys(workflow, _WORKFLOW_KEYS, "workflow")
-    definition_ref = _text(workflow["definition_ref"], name="workflow.definition_ref")
-    if (
-        not definition_ref.startswith(f"{REPOSITORY}/.github/workflows/")
-        or definition_ref.count("@") != 1
-    ):
-        raise TrackingError("workflow.definition_ref must identify the repository workflow ref")
+    _validate_definition_ref(workflow["definition_ref"])
     _commit_sha(workflow["definition_sha"], name="workflow.definition_sha")
     run_id = _run_id(workflow["run_id"], name="workflow.run_id")
     _run_url(workflow["run_url"], run_id=run_id)
@@ -232,9 +297,7 @@ def _validate_payload(value: dict[str, object]) -> dict[str, object]:
     _digest(bundle["provenance_digest"], name="result_bundle.provenance_digest")
     files = _object(bundle["files"], "result_bundle.files")
     if set(files) != _FILE_NAMES:
-        raise TrackingError(
-            "result_bundle.files must contain exactly the R1-R4 and environment files"
-        )
+        raise TrackingError("result_bundle.files must contain exactly the four R1-R4 paths")
     for path, digest in files.items():
         _payload_path(path, name=f"result_bundle.files[{path!r}]")
         _digest(digest, name=f"result_bundle.files[{path!r}]")
@@ -253,8 +316,8 @@ def _validate_payload(value: dict[str, object]) -> dict[str, object]:
             raise TrackingError(f"evidence.{name}.path must equal {expected_paths[name]!r}")
         _digest(item["digest"], name=f"evidence.{name}.digest")
     semantics = _text(evidence["actuals_semantics"], name="evidence.actuals_semantics")
-    if semantics != "censored_sales_surrogate":
-        raise TrackingError("actuals_semantics must equal censored_sales_surrogate")
+    if semantics not in {item.value for item in ActualsSemantics}:
+        raise TrackingError("actuals_semantics must be a supported ActualsSemantics value")
     session = _object(evidence["session"], "evidence.session")
     _exact_keys(session, _SESSION_KEYS, "evidence.session")
     _digest(session["id"], name="evidence.session.id")
@@ -267,17 +330,21 @@ def _validate_payload(value: dict[str, object]) -> dict[str, object]:
     _digest(session["series_identity_digest"], name="evidence.session.series_identity_digest")
     _validate_capture_payload(evidence["promoted_capture"])
     environment = _object(value["environment"], "environment")
+    _exact_keys(environment, _ENVIRONMENT_KEYS, "environment")
     facts = _object(environment["facts"], "environment.facts")
+    _validate_environment(facts)
     environment_digest = _digest(environment["digest"], name="environment.digest")
     toolchain_digest = _digest(environment["toolchain_digest"], name="environment.toolchain_digest")
-    expected_environment_digest = hashlib.sha256(
-        canonical_json_bytes(dict(facts), path="environment.facts")
-    ).hexdigest()
+    try:
+        expected_environment_digest = hashlib.sha256(
+            canonical_json_bytes(dict(facts), path="environment.facts")
+        ).hexdigest()
+    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as error:
+        raise TrackingError("environment.facts contains non-canonical JSON values") from error
     if environment_digest != expected_environment_digest:
         raise TrackingError("environment.digest does not match environment facts")
     if toolchain_digest != _toolchain_digest(facts):
         raise TrackingError("environment.toolchain_digest does not match environment facts")
-    _validate_environment(facts)
     objective = _object(value["objective"], "objective")
     _exact_keys(objective, _OBJECTIVE_KEYS, "objective")
     holding = _finite_cost(objective["holding_cost"], name="objective.holding_cost")
@@ -331,7 +398,7 @@ def _validate_capture_payload(value: object) -> None:
     _run_url(capture["run_url"], run_id=workflow_run_id)
 
 
-def _validate_environment(value: object) -> VN2EvidenceEnvironment:
+def _validate_environment(value: object) -> None:
     facts = _object(value, "environment.facts")
     expected = frozenset(
         {
@@ -346,24 +413,48 @@ def _validate_environment(value: object) -> VN2EvidenceEnvironment:
         }
     )
     _exact_keys(facts, expected, "environment.facts")
+    for name in ("arch", "cpu_model", "python", "numpy", "numpy_config", "runner_image"):
+        _text(facts[name], name=f"environment.facts.{name}")
     os_value = _object(facts["os"], "environment.facts.os")
     _exact_keys(os_value, frozenset({"id", "version_id", "pretty_name"}), "environment.facts.os")
-    try:
-        environment = VN2EvidenceEnvironment(
-            arch=cast(str, facts["arch"]),
-            cpu_model=cast(str, facts["cpu_model"]),
-            os_id=cast(str, os_value["id"]),
-            os_version_id=cast(str, os_value["version_id"]),
-            os_pretty_name=cast(str, os_value["pretty_name"]),
-            python=cast(str, facts["python"]),
-            numpy=cast(str, facts["numpy"]),
-            numpy_config=cast(str, facts["numpy_config"]),
-            runner_image=cast(str, facts["runner_image"]),
-            thread_policy=cast(Mapping[str, str], facts["thread_policy"]),
+    for name in ("id", "version_id", "pretty_name"):
+        _text(os_value[name], name=f"environment.facts.os.{name}")
+    thread_policy = _object(facts["thread_policy"], "environment.facts.thread_policy")
+    _exact_keys(
+        thread_policy,
+        frozenset(THREAD_VARIABLES),
+        "environment.facts.thread_policy",
+    )
+    for name in THREAD_VARIABLES:
+        _text(thread_policy[name], name=f"environment.facts.thread_policy.{name}")
+
+
+def _validate_definition_ref(value: object) -> str:
+    text = _text(value, name="workflow.definition_ref")
+    if text.count("@") != 1:
+        raise TrackingError("workflow.definition_ref must contain one @ separator")
+    repository_path, ref = text.split("@")
+    prefix = f"{REPOSITORY}/.github/workflows/"
+    if not repository_path.startswith(prefix) or not ref:
+        raise TrackingError("workflow.definition_ref must identify a workflow path and ref")
+    workflow_path = repository_path[len(prefix) :]
+    if (
+        not workflow_path
+        or workflow_path.startswith("/")
+        or workflow_path.endswith("/")
+        or "\\" in workflow_path
+        or any(part in {"", ".", ".."} for part in workflow_path.split("/"))
+        or PurePosixPath(workflow_path).as_posix() != workflow_path
+        or PurePosixPath(ref).as_posix() != ref
+        or ref.startswith("/")
+        or ref.endswith("/")
+        or "\\" in ref
+        or any(part in {"", ".", ".."} for part in ref.split("/"))
+    ):
+        raise TrackingError(
+            "workflow.definition_ref must use canonical repository workflow path and ref"
         )
-    except (VN2ResultError, TypeError, ValueError) as error:
-        raise TrackingError("environment.facts do not satisfy the VN2 evidence contract") from error
-    return environment
+    return text
 
 
 def _toolchain_digest(environment: Mapping[str, object]) -> str:
@@ -397,33 +488,53 @@ def _comparability_key(payload: Mapping[str, object]) -> dict[str, object]:
 def _canonical_record_bytes(value: Mapping[str, object]) -> bytes:
     try:
         return canonical_json_bytes(dict(value), path="tracking record") + b"\n"
-    except (TypeError, ValueError, UnicodeError) as error:
+    except (
+        RecursionError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        UnicodeError,
+    ) as error:
         raise TrackingError("tracking record contains non-canonical JSON values") from error
 
 
 def _read_bytes(value: bytes | bytearray | str | Path, *, name: str) -> bytes:
     if isinstance(value, Path):
         try:
-            return value.read_bytes()
+            payload = value.read_bytes()
         except OSError as error:
             raise TrackingError(f"{name} path is unreadable") from error
+        return _bounded_bytes(payload, name=name)
     if isinstance(value, bytearray):
-        return bytes(value)
+        return _bounded_bytes(bytes(value), name=name)
     if isinstance(value, bytes):
-        return value
+        return _bounded_bytes(value, name=name)
     if isinstance(value, str):
         try:
-            return value.encode("utf-8")
+            payload = value.encode("utf-8")
         except UnicodeError as error:
             raise TrackingError(f"{name} must be valid UTF-8") from error
+        return _bounded_bytes(payload, name=name)
     raise TrackingError(f"{name} must be bytes, text, or a path")
+
+
+def _bounded_bytes(value: bytes, *, name: str) -> bytes:
+    if len(value) > _MAX_TRACKING_BYTES:
+        raise TrackingError(f"{name} exceeds the maximum size")
+    return value
 
 
 def _parse_json(value: bytes, *, name: str) -> dict[str, object]:
     try:
         text = value.decode("utf-8")
         parsed = json.loads(text, object_pairs_hook=_unique_object)
-    except (UnicodeError, json.JSONDecodeError) as error:
+    except (
+        UnicodeError,
+        ValueError,
+        OverflowError,
+        RecursionError,
+        json.JSONDecodeError,
+    ) as error:
         raise TrackingError(f"{name} must be valid UTF-8 JSON") from error
     return _object(parsed, name)
 

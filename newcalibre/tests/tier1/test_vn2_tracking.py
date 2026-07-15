@@ -102,7 +102,6 @@ def _record(*, total_cost: float = 3.0, candidate: str = CANDIDATE) -> VN2Tracki
             "inner_bundle_digest": DIGEST,
             "provenance_digest": DIGEST,
             "files": {
-                "environment.json": DIGEST,
                 "r1-orders.jsonl": DIGEST,
                 "r2-cost-ledger.jsonl": DIGEST,
                 "r3-final-triple.json": DIGEST,
@@ -144,7 +143,7 @@ def _record(*, total_cost: float = 3.0, candidate: str = CANDIDATE) -> VN2Tracki
         },
     }
 
-    return VN2TrackingRecord(payload)
+    return VN2TrackingRecord._from_evidence(payload)
 
 
 def _json_payload(record: VN2TrackingRecord) -> dict[str, object]:
@@ -153,9 +152,12 @@ def _json_payload(record: VN2TrackingRecord) -> dict[str, object]:
 
 def test_canonical_record_round_trip_and_history_duplicate_refusal() -> None:
     record = _record()
-    assert parse_tracking_record(record.to_bytes()).to_bytes() == record.to_bytes()
+    parsed = parse_tracking_record(record.to_bytes())
+    assert parsed.to_bytes() == record.to_bytes()
     with pytest.raises(TrackingError, match="duplicate identity"):
         parse_tracking_history(record.to_bytes() + record.to_bytes())
+    with pytest.raises(TrackingError, match="derived from validated evidence"):
+        write_proposal_record(parsed, Path("artifacts") / "parsed.jsonl")
 
 
 def test_comparison_is_informational_and_exact_key_mismatches_have_no_delta() -> None:
@@ -167,13 +169,17 @@ def test_comparison_is_informational_and_exact_key_mismatches_have_no_delta() ->
     changed_comparison = compare_tracking_records(changed, prior)
     assert changed_comparison.comparable
     assert changed_comparison.total_cost_delta == 1.0
+def test_append_idempotency_and_atomic_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
 
-
-def test_append_idempotency_and_atomic_writer(tmp_path: Path) -> None:
     record = _record()
     assert decide_append(record, ()).action == "append"
     assert decide_append(record, (record,)).action == "noop"
     root = tmp_path / "newcalibre"
+    import newcalibre.protocols.vn2._tracking_persistence as persistence
+
+    monkeypatch.setattr(persistence, "_TRUSTED_PROJECT_ROOT", root)
     (root / "artifacts").mkdir(parents=True)
     (root / "pyproject.toml").write_text("[project]\nname = 'newcalibre'\n")
     path = root / "artifacts" / "proposal.jsonl"
@@ -195,7 +201,9 @@ def test_strict_codec_refuses_pretty_json_and_crlf() -> None:
 
 def test_tracking_record_owns_nested_values_and_exposes_no_aliases() -> None:
     payload = _json_payload(_record())
-    record = VN2TrackingRecord(payload)
+    with pytest.raises(TrackingError, match="construction is private"):
+        VN2TrackingRecord(payload)
+    record = VN2TrackingRecord._from_evidence(payload)
     payload["subject"]["repository"] = "evil"  # type: ignore[index]
     assert record.payload["subject"]["repository"] == "Vzlentin/calibre"  # type: ignore[index]
     with pytest.raises(TypeError):
@@ -250,6 +258,9 @@ def test_tracking_history_and_publication_paths_are_successor_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "newcalibre"
+    import newcalibre.protocols.vn2._tracking_persistence as persistence
+
+    monkeypatch.setattr(persistence, "_TRUSTED_PROJECT_ROOT", root)
     (root / "artifacts").mkdir(parents=True)
     (root / "pyproject.toml").write_text("[project]\nname = 'newcalibre'\n")
     monkeypatch.chdir(root)

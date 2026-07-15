@@ -22,34 +22,23 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("propose", "validate"):
         command = commands.add_parser(name)
-        command.add_argument(
-            "--result-root", "--result", dest="result_root", type=Path, required=True
-        )
-        command.add_argument(
-            "--capture-root", "--capture", dest="capture_root", type=Path, required=True
-        )
+        command.add_argument("--result-root", type=Path, required=True)
+        command.add_argument("--capture-root", type=Path, required=True)
         command.add_argument("--candidate-sha", required=True)
-        command.add_argument(
-            "--workflow-ref", "--definition-ref", dest="definition_ref", required=True
-        )
-        command.add_argument(
-            "--workflow-sha", "--definition-sha", dest="definition_sha", required=True
-        )
+        command.add_argument("--workflow-ref", dest="definition_ref", required=True)
+        command.add_argument("--workflow-sha", dest="definition_sha", required=True)
         command.add_argument("--run-id", required=True)
         command.add_argument("--run-url", required=True)
-        command.add_argument(
-            "--result-artifact-id", "--artifact-id", dest="artifact_id", required=True
-        )
-        command.add_argument(
-            "--result-artifact-name", "--artifact-name", dest="artifact_name", required=True
-        )
-        command.add_argument(
-            "--result-artifact-digest", "--artifact-digest", dest="artifact_digest", required=True
-        )
+        command.add_argument("--result-artifact-id", dest="artifact_id", required=True)
+        command.add_argument("--result-artifact-name", dest="artifact_name", required=True)
+        command.add_argument("--result-artifact-digest", dest="artifact_digest", required=True)
         command.add_argument("--config", type=Path, required=True)
         command.add_argument("--input-inventory", type=Path, required=True)
-        command.add_argument("--lockfile", "--lock", dest="lockfile", type=Path, required=True)
-        command.add_argument("--output", "--proposal", dest="proposal", type=Path, required=True)
+        command.add_argument("--lockfile", type=Path, required=True)
+        if name == "propose":
+            command.add_argument("--output", type=Path, required=True)
+        else:
+            command.add_argument("--proposal", type=Path, required=True)
     return parser
 
 
@@ -77,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         expected = _build(args)
         if args.command == "propose":
-            write_proposal_record(expected, args.proposal)
+            write_proposal_record(expected, args.output)
         else:
             actual = parse_tracking_record(args.proposal)
             if actual.to_bytes() != expected.to_bytes():
@@ -86,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
     except TrackingError as error:
         raise SystemExit(str(error)) from error
-    print(f"validated {args.command} tracking proposal: {args.proposal}")  # noqa: T201
+    proposal_path = args.output if args.command == "propose" else args.proposal
+    print(f"validated {args.command} tracking proposal: {proposal_path}")  # noqa: T201
     return 0
 
 
