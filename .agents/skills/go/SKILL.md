@@ -70,14 +70,16 @@ the fan-out:
 ## Model routing
 
 `/go` routes work between the frontier main model and the cheap `sidekick`
-profile (luna; with `deep_worker` — terra — as the escalation tier) per the
-Fusion sidekick pattern: the main agent delegates and monitors, reads only
-what it needs to decide, and keeps the plan, interpretation of ambiguity, and
-final review for itself.
+omp task agent (luna @ xhigh thinking, pinned in machine config —
+`~/.omp/agent/agents/sidekick.md`, not committed to the repo), with the
+`slow` model role as the escalation tier and the bundled read-only `explore`
+agent (on the `smol` role) for recon, per the Fusion sidekick pattern: the
+main agent delegates and monitors, reads only what it needs to decide, and
+keeps the plan, interpretation of ambiguity, and final review for itself.
 
-The harness runs the main model at the native `ultra` effort (automatic task
-delegation); this section is the steering policy for that delegator — the
-routing table below is the *what-goes-where*, ultra is the *how*.
+The main agent runs at its configured frontier effort; this section is the
+steering policy for that delegator — the routing table below is the
+*what-goes-where*.
 
 **Routing classifier.** At Stage 0a, classify the work item — and re-check
 per stage — on these signals:
@@ -96,20 +98,26 @@ regardless.
 **Persistent sidekick.** Spawn one `sidekick` thread at the start of the run
 and send it subsequent sequential tasks rather than spawning fresh agents —
 its warm context is the cost saving. Fresh spawns only for parallel fan-out
-or isolation. Verified mechanics (2026-07-14): interactive Codex sessions
-expose `spawn_agent`, `followup_task` (new task to an existing thread),
-`send_message`, `wait_agent`, `interrupt_agent`, `list_agents` — use
-`followup_task` for sequential reuse and `wait_agent` as the blocking wait.
-Collab tools are **not** exposed in `codex exec` non-interactive mode; there,
-fall back to per-task runs with minimal briefs.
+or one-off isolation. Verified mechanics (2026-07-15): spawn the persistent
+sidekick once via the `task` tool with a stable `name: sidekick` and
+`agent: sidekick`, never `isolated: true` — isolated agents are torn down at
+completion and are not revivable, so only throwaway one-off spawns may
+isolate. Reuse it sequentially with an `irc` DM to the named agent: a
+finished spawn goes `idle`, parks after `task.agentIdleTtlMs` (default
+7 min), and a DM revives it with context intact. Block on completion with
+the `job` tool, interrupt with `job cancel`, and list the roster with
+`irc`. When omp-internal collab is unavailable,
+cross-process orchestration falls back to herdr pane primitives
+(`herdr pane split/run/send-keys/read`,
+`herdr wait agent-status <pane> --status done`).
 
 **Escalation ladder.** The sidekick gets one self-retry per failure; on a
 second failure, an `ESCALATE:` return, or a repeated failure signature, move
-the task to `deep_worker` — or take it over inline when judgment is the
+the task to the `slow` role — or take it over inline when judgment is the
 blocker — then demote remaining mechanical work back to the sidekick.
 
 **Delegation discipline.** After delegating, block on the agent's terminal
-completion token (the wait primitive); never busy-poll or repeatedly inspect
+completion via the `job` tool; never busy-poll or repeatedly inspect
 partial output — polling burns frontier tokens and defeats the cost purpose
 of delegation.
 
@@ -304,13 +312,12 @@ later runtime failure. Non-M5 items impose no such requirement.
 ## Stage 1 — Implement + open the PR
 
 Spawn **one** implementation-capable agent (foreground, model per the Stage 0a
-routing classification — routine work on the `sidekick` profile, judgment-heavy
+routing classification — routine work on the `sidekick` agent, judgment-heavy
 work inheriting the frontier model) to implement the plan and open the PR — a
 subagent per the Invocation model, instructed to follow `ce-work`. The brief
 authorizes it to delegate internally per the same Fusion policy (mechanical
-sub-steps to `sidekick`/`fast_scan`, judgment kept to itself) — this nesting is
-why the harness runs `[agents] max_depth = 2`. Give it the
-brief in
+sub-steps to `sidekick`/`explore`, judgment kept to itself) — this nesting is
+what omp's `task.maxRecursionDepth` gate bounds. Give it the brief in
 `.agents/skills/go/references/ce-work-brief.md` (mode-specific setup clauses,
 `uv run` quality gates, the private-context guard, the `closes #N` PR finish),
 filling in `#N`, `<type>/<slug>`, `<WORKDIR>`, and the **pasted** plan path.
@@ -344,7 +351,7 @@ yourself. On pass, record it:
 ## Stage 2 — Simplify the diff (`ce-simplify-code`, inline)
 
 Invoke the `ce-simplify-code` skill from `WORKDIR` (inline — see Invocation
-model; it spawns its own subagents, which should use the `sidekick` profile).
+model; it spawns its own subagents, which should use the `sidekick` agent).
 Scope is the branch diff vs `main`. If it
 changes anything, **rerun the quality gates in the foreground and commit + push
 only on green** — do not chain the commit unconditionally after the gate, or a
@@ -529,8 +536,8 @@ Stage 6 always runs from the main checkout (`$MAIN`), never from `WORKDIR` — b
 the worktree may be removed by Stage 5 cleanup, and persistence is independent of
 execution mode. Mechanical vault/log writes run on the `sidekick`; the main agent
 owns the GATE check. Every landing receipt (execution log + tracker) carries a
-one-line **model mix** note — e.g. `model mix: impl sidekick, review sol, CI
-sidekick, 1 escalation` — so the cost claim is checkable run-over-run.
+one-line **model mix** note — e.g. `model mix: impl sidekick, review frontier,
+CI sidekick, 1 escalation` — so the cost claim is checkable run-over-run.
 **Delegate persistence to `/project-memory`** and persist exactly
 one outcome:
 
