@@ -189,17 +189,6 @@ per-project config layer: the skill discovers Calibre's quality gates
 (ruff / ty / pytest, all `uv run`-prefixed) from this file's *Commands*
 section directly.
 
-Campaign routing examples for this repo (the `route:mechanical` /
-`route:judgment` labels win when present):
-
-- **Mechanical:** promotion/evidence PRs, receipts and execution-log updates,
-  carve-out/config edits, data plumbing, applying an already-specified fix,
-  CI log retrieval.
-- **Judgment:** spec-conformance derivation, witness design, gate/clock
-  semantics, trust boundaries and validators, refusal matrices, anything
-  interpreting `docs/spec/` or touching frozen surfaces (e.g. the VN2
-  `4992.20` baseline — see Gotchas).
-
 ### Issue tracker
 
 GitHub issues in `Vzlentin/calibre` — hybrid with the vault `ROADMAP.md` for
