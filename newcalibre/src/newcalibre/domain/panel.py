@@ -244,11 +244,22 @@ def _canonicalize_panel_frame(
             effective_calendar = calendar.bind(pd.Timestamp(normalized[TIMESTAMP].min()))
         except CalendarError as error:
             raise PanelError(f"panel {error}") from error
-    for timestamp in normalized[TIMESTAMP]:
+    last_timestamp_by_series: dict[str, pd.Timestamp] = {}
+    timestamps_out_of_order = False
+    for series_key, raw_timestamp in zip(
+        normalized[SERIES_KEY], normalized[TIMESTAMP], strict=True
+    ):
+        timestamp = pd.Timestamp(raw_timestamp)
         try:
-            effective_calendar.require_member(pd.Timestamp(timestamp))
+            effective_calendar.require_member(timestamp)
         except CalendarError as error:
             raise PanelError(f"panel {error}") from error
+        previous_timestamp = last_timestamp_by_series.get(series_key)
+        if previous_timestamp is not None and timestamp <= previous_timestamp:
+            timestamps_out_of_order = True
+        last_timestamp_by_series[series_key] = timestamp
+    if timestamps_out_of_order:
+        raise PanelError("panel timestamps must be strictly increasing within each series")
 
     metadata_columns: list[str] = []
     has_censoring_facts = (
