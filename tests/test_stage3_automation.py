@@ -926,22 +926,7 @@ def test_clock_manual_triggers_execute_only_the_default_branch_workflow() -> Non
         "pull-requests": "read",
     }
     successor = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
-    # Bootstrap-only: the immediate cutover PR removes this legacy emitter.
-    legacy = successor["jobs"]["s3-activation-gate"]
-    assert set(legacy) == {"if", "runs-on", "permissions", "steps"}
-    assert legacy["permissions"] == {
-        "contents": "read",
-        "issues": "read",
-        "pull-requests": "read",
-    }
-    step_names = [step.get("name", step.get("uses")) for step in legacy["steps"]]
-    assert step_names == [
-        "actions/checkout@v4",
-        "Activation-record gate",
-        "Report lane result",
-    ]
-    assert "stage3_clock.py gate" in legacy["steps"][1]["run"]
-    assert legacy["steps"][2]["run"] == 'echo "s3-activation-gate complete"'
+    assert "s3-activation-gate" not in successor["jobs"]
     activation = yaml.safe_load(ACTIVATION_WORKFLOW.read_text(encoding="utf-8"))
     assert activation["permissions"] == {
         "actions": "read",

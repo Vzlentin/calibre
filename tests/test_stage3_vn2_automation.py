@@ -312,11 +312,9 @@ def test_tracking_activation_gate_is_base_controlled_before_mint() -> None:
     )
     assert "newcalibre/scripts/vn2_tracking.py promote" in validator["run"]
     assert '--default-branch-sha "$DEFAULT_SHA"' in validator["run"]
-    # The legacy emitter remains only for the bootstrap landing because the
-    # base-controlled pull_request_target workflow cannot judge its own PR.
     assert (
         "s3-activation-gate"
-        in yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        not in yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     )
 
 
