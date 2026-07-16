@@ -613,6 +613,7 @@ def test_digest_bound_evidence_and_configs_are_never_text_normalized() -> None:
     for rule, evidence_path in DIGEST_BOUND_ATTRIBUTE_EXAMPLES.items():
         evidence = REPO_ROOT / evidence_path
         if os.path.lexists(evidence):
+            assert not evidence.is_symlink()
             assert evidence.is_file()
         else:
             assert rule == "stage3/evidence/tracking/** -text"
