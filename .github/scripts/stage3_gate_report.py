@@ -306,21 +306,22 @@ def _tracking_evidence(
     if not rows or any(not row for row in rows):
         problems.append("tracking series must not contain blank records")
         return None, None, None
-    records: list[dict[str, object]] = []
+    identities: list[object] = []
+    latest: dict[str, object] | None = None
     try:
         for index, row in enumerate(rows):
-            records.append(_canonical_json_line(row, name=f"tracking series row {index + 1}"))
+            latest = _canonical_json_line(row, name=f"tracking series row {index + 1}")
+            identities.append(latest.get("identity"))
     except ValueError as error:
         problems.append(str(error))
         return None, None, None
-    identities = [record.get("identity") for record in records]
     if any(
         not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None
         for identity in identities
     ) or len(set(identities)) != len(identities):
         problems.append("tracking series identities must be unique lowercase SHA-256 values")
         return None, None, None
-    latest = records[-1]
+    assert latest is not None
     expected_record_keys = {
         "environment",
         "evidence",

@@ -195,34 +195,6 @@ def _ga1_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(canonical_json_bytes(key, path="GA1 comparability key")).hexdigest()
 
 
-def _record_with_ga1_digest() -> VN2TrackingRecord:
-    payload = _json_payload(_record())
-    environment = payload["environment"]
-    evidence = payload["evidence"]
-    subject = payload["subject"]
-    assert isinstance(environment, dict)
-    assert isinstance(evidence, dict)
-    assert isinstance(subject, dict)
-    environment["digest"] = _ga1_digest(payload)
-    config = evidence["config"]
-    input_inventory = evidence["input_inventory"]
-    assert isinstance(config, dict)
-    assert isinstance(input_inventory, dict)
-    payload["identity"] = hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "artifact_kind": "vn2-gate-a-results",
-                "candidate_sha": subject["candidate_sha"],
-                "config_digest": config["digest"],
-                "environment_digest": environment["digest"],
-                "input_inventory_digest": input_inventory["digest"],
-            },
-            path="tracking identity",
-        )
-    ).hexdigest()
-    return VN2TrackingRecord._from_evidence(payload)
-
-
 def _promotion_fixture(
     tmp_path: Path,
 ) -> tuple[
@@ -619,13 +591,13 @@ def test_tracking_path_reads_refuse_symlinks_and_nonregular_leaves(tmp_path: Pat
 
 
 def test_environment_digest_uses_only_the_eight_field_ga1_key() -> None:
-    record = _record_with_ga1_digest()
+    record = _record()
     payload = _json_payload(record)
     assert payload["environment"]["digest"] == _ga1_digest(payload)  # type: ignore[index]
 
 
 def test_ga1_digest_excludes_run_artifact_toolchain_and_diagnostic_provenance() -> None:
-    baseline = _json_payload(_record_with_ga1_digest())
+    baseline = _json_payload(_record())
     changed = copy.deepcopy(baseline)
     changed["workflow"]["run_id"] = "654321"  # type: ignore[index]
     changed["workflow"]["run_url"] = (  # type: ignore[index]
@@ -704,7 +676,7 @@ def test_comparison_is_informational_and_exact_key_mismatches_have_no_delta() ->
     assert changed_comparison.comparable
     assert changed_comparison.total_cost_delta == 1.0
 
-    mismatch_payload = _json_payload(_record_with_ga1_digest())
+    mismatch_payload = _json_payload(_record())
     mismatch_payload["evidence"]["config"]["digest"] = "7" * 64  # type: ignore[index]
     mismatch_payload["environment"]["digest"] = _ga1_digest(mismatch_payload)  # type: ignore[index]
     identity_preimage = {
@@ -720,7 +692,7 @@ def test_comparison_is_informational_and_exact_key_mismatches_have_no_delta() ->
         canonical_json_bytes(identity_preimage, path="tracking identity")
     ).hexdigest()
     mismatch = VN2TrackingRecord._from_evidence(mismatch_payload)
-    mismatch_comparison = compare_tracking_records(mismatch, _record_with_ga1_digest())
+    mismatch_comparison = compare_tracking_records(mismatch, _record())
     assert not mismatch_comparison.comparable
     assert mismatch_comparison.mismatched_fields == ("config_digest",)
     assert mismatch_comparison.total_cost_delta is None

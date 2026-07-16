@@ -142,7 +142,7 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
     proposal_bytes = proposal.to_bytes()
     parsed = parse_tracking_record(proposal_bytes)
     assert parsed.to_bytes() == proposal_bytes
-    if mode == "verify" and history:
+    if history_mode == "compare":
         require_exact_recomputation(proposal, history)
 
     environment = manifest.environment

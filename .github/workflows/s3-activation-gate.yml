@@ -209,6 +209,7 @@ jobs:
           import hashlib
           import json
           import os
+          import shutil
           import stat
           import zipfile
           from pathlib import Path
@@ -266,7 +267,11 @@ jobs:
               ):
                   raise SystemExit(f"{name} artifact metadata is not from the trusted C0 mint")
               archive = root / f"{name}.zip"
-              archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              archive_hasher = hashlib.sha256()
+              with archive.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                      archive_hasher.update(chunk)
+              archive_digest = archive_hasher.hexdigest()
               if metadata["digest"] != f"sha256:{archive_digest}":
                   raise SystemExit(
                       f"downloaded {name} archive digest does not match GitHub metadata"
@@ -306,8 +311,7 @@ jobs:
                       else:
                           target.parent.mkdir(parents=True, exist_ok=True)
                           with bundle.open(entry) as source, target.open("xb") as output:
-                              while chunk := source.read(1024 * 1024):
-                                  output.write(chunk)
+                              shutil.copyfileobj(source, output, length=1024 * 1024)
           PY
       - name: Install trusted base validator
         if: steps.promotion.outputs.present == 'true'

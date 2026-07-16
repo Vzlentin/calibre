@@ -250,8 +250,13 @@ def validate_tracking_promotion(
         raise TrackingError("tracking promotion conflicts with an existing identity")
 
     promoted_bytes = _read_bytes(promoted_history, name="promoted tracking history")
-    parse_tracking_history(promoted_bytes)
-    if promoted_bytes != prior_bytes + proposal_bytes:
+    is_exact_append = (
+        len(promoted_bytes) == len(prior_bytes) + len(proposal_bytes)
+        and promoted_bytes.startswith(prior_bytes)
+        and promoted_bytes.endswith(proposal_bytes)
+    )
+    if not is_exact_append:
+        parse_tracking_history(promoted_bytes)
         raise TrackingError("promoted history must equal the exact old prefix plus proposal bytes")
     return actual_receipt
 

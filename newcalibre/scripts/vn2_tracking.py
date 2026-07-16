@@ -199,18 +199,18 @@ def main(argv: list[str] | None = None) -> int:
         expected = _build(args)
         if args.command == "propose":
             write_proposal_record(expected, args.output)
-            validated_path = args.output
+            validated_subject = str(args.output)
         elif args.command == "validate":
             actual = parse_tracking_record(args.proposal)
             if actual.to_bytes() != expected.to_bytes():
                 raise TrackingError(
                     "proposal bytes do not match freshly derived validated evidence"
                 )
-            validated_path = args.proposal
+            validated_subject = str(args.proposal)
         elif args.command == "receipt":
             receipt = build_promotion_receipt(expected, args.proposal, **_live_inputs(args))
             write_promotion_receipt(receipt, args.output)
-            validated_path = args.output
+            validated_subject = str(args.output)
         else:
             prior, promoted, receipt_bytes = _promotion_git_blobs(
                 args.repository_root,
@@ -228,10 +228,10 @@ def main(argv: list[str] | None = None) -> int:
                 default_branch_sha=args.default_branch_sha,
                 **_live_inputs(args),
             )
-            validated_path = Path(args.head_sha)
+            validated_subject = args.head_sha
     except TrackingError as error:
         raise SystemExit(str(error)) from error
-    print(f"validated {args.command} tracking evidence: {validated_path}")  # noqa: T201
+    print(f"validated {args.command} tracking evidence: {validated_subject}")  # noqa: T201
     return 0
 
 
