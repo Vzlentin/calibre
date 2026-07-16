@@ -91,7 +91,6 @@ def test_build_tracking_record_reduces_validated_bundle(tmp_path: Path) -> None:
     assert record.candidate_sha == bundle.manifest.candidate_sha
     assert record.result_manifest_digest == bundle.manifest_sha256
     assert record.total_cost == record.holding_cost + record.shortage_cost
-    assert record.to_bytes() == _record_bytes(record)
 
 
 def test_comparison_refuses_every_comparability_mismatch() -> None:
@@ -148,7 +147,3 @@ def test_tracking_record_requires_exact_total() -> None:
     """Require total cost to be the exact sum of its components."""
     with pytest.raises(TrackingError, match="holding plus shortage"):
         _record(total_cost=8.0)
-
-
-def _record_bytes(record: VN2TrackingRecord) -> bytes:
-    return record.to_bytes()

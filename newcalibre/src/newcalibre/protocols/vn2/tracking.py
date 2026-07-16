@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.protocols.vn2.artifacts import PLATFORM, VN2ResultBundle
 
 TRACKING_SCHEMA = 2
@@ -214,17 +215,8 @@ def _record_value(record: VN2TrackingRecord) -> dict[str, object]:
 
 def _canonical_bytes(value: object) -> bytes:
     try:
-        return (
-            json.dumps(
-                value,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
-    except (TypeError, ValueError) as error:
+        return canonical_json_bytes(value, path="VN2 tracking record") + b"\n"
+    except CanonicalJsonError as error:
         raise TrackingError("tracking record is not canonical JSON") from error
 
 

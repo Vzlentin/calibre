@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
+from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.ledger import OrderRow, SettlementRecord
 from newcalibre.protocols.vn2.adapter import VN2RunResult
 from newcalibre.protocols.vn2.config import VN2ProtocolConfig, load_vn2_config
@@ -154,7 +155,7 @@ def emit_result_bundle(
         "lock_digest": _file_digest(Path(lock_path), name="lock"),
     }
     identities, orders, settlements = _validated_engine_rows(result, config=config)
-    r1 = _project_r1(result, config=config, identities=identities, orders=orders)
+    r1 = _project_r1(config=config, identities=identities, orders=orders)
     r2 = _project_r2(config=config, identities=identities, settlements=settlements)
     r3 = _reduce_r3(r2)
     r4 = _reduce_r4(r2, config=config)
@@ -366,7 +367,6 @@ def _validated_engine_rows(
 
 
 def _project_r1(
-    result: VN2RunResult,
     *,
     config: VN2ProtocolConfig,
     identities: Mapping[str, tuple[int, int]],
@@ -391,7 +391,6 @@ def _project_r1(
                 "store": store,
             }
         )
-    del result
     return rows
 
 
@@ -575,17 +574,8 @@ def _identity_digest(identities: Mapping[str, tuple[int, int]]) -> str:
 
 def _json_bytes(value: object) -> bytes:
     try:
-        return (
-            json.dumps(
-                value,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
-    except (TypeError, ValueError) as error:
+        return canonical_json_bytes(value, path="VN2 result") + b"\n"
+    except CanonicalJsonError as error:
         raise VN2ResultError("result values must be canonical JSON") from error
 
 
