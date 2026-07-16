@@ -2,17 +2,23 @@ name: gate-a
 # Single-candidate Gate A aggregation (KTD-A13). Accepts exactly one full
 # 40-hex candidate SHA (C1, after capture and record promotions merged),
 # checks out exactly that SHA in every job, runs or verifies every lane
-# there, and emits one machine-readable Gate report artifact. Individually
-# green links from different revisions are inadmissible; this aggregate is
-# the only accepted evidence surface for the Gate record. Tier 4 runs
-# verify-only here: it validates the promoted U9 record without minting
-# another.
+# there, and emits one machine-readable Gate report artifact. Manual runs
+# take an explicit C1; pushes that promote tracking evidence take the exact
+# post-merge SHA. Tier 4 is always verify-only and never mints evidence.
 on:
   workflow_dispatch:
     inputs:
       candidate_sha:
         description: "Full 40-hex candidate SHA (C1)"
         required: true
+  push:
+    branches: [main]
+    paths:
+      - stage3/evidence/tracking/series.jsonl
+      - stage3/evidence/tracking/*-receipt.json
+
+env:
+  GATE_CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.candidate_sha }}
 
 permissions:
   contents: read
@@ -23,13 +29,13 @@ jobs:
     steps:
       - name: Validate candidate SHA
         run: |
-          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+          echo "${{ env.GATE_CANDIDATE_SHA }}" | grep -Eq '^[0-9a-f]{40}$' \
             || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ env.GATE_CANDIDATE_SHA }}
       - name: Verify HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+        run: test "$(git rev-parse HEAD)" = "${{ env.GATE_CANDIDATE_SHA }}"
       - uses: astral-sh/setup-uv@v4
       - name: Tier 0 at C1
         working-directory: newcalibre
@@ -44,9 +50,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ env.GATE_CANDIDATE_SHA }}
       - name: Verify HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+        run: test "$(git rev-parse HEAD)" = "${{ env.GATE_CANDIDATE_SHA }}"
       - uses: astral-sh/setup-uv@v4
       - name: Successor-only export + isolation canaries + tier 1 offline
         run: |
@@ -65,9 +71,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ env.GATE_CANDIDATE_SHA }}
       - name: Verify HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+        run: test "$(git rev-parse HEAD)" = "${{ env.GATE_CANDIDATE_SHA }}"
       - uses: astral-sh/setup-uv@v4
       - name: Tier 2 double run at C1
         working-directory: newcalibre
@@ -94,15 +100,15 @@ jobs:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       VECLIB_MAXIMUM_THREADS: "1"
-      ORACLE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      ORACLE_CANDIDATE_SHA: ${{ env.GATE_CANDIDATE_SHA }}
     steps:
       - name: Validate candidate SHA
         run: |
-          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+          echo "${{ env.GATE_CANDIDATE_SHA }}" | grep -Eq '^[0-9a-f]{40}$' \
             || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ env.GATE_CANDIDATE_SHA }}
       - name: Verify checked-out HEAD equals candidate
         run: test "$(git rev-parse HEAD)" = "$ORACLE_CANDIDATE_SHA"
       - name: Gate precondition - promoted captures present
@@ -226,17 +232,18 @@ jobs:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       VECLIB_MAXIMUM_THREADS: "1"
-      VN2_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      VN2_CANDIDATE_SHA: ${{ env.GATE_CANDIDATE_SHA }}
       VN2_WORKFLOW_SHA: ${{ github.workflow_sha }}
       VN2_RUN_ID: ${{ github.run_id }}
       VN2_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
       VN2_MODE: verify
+      VN2_REQUIRE_HISTORY: "true"
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ env.GATE_CANDIDATE_SHA }}
       - name: Verify HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+        run: test "$(git rev-parse HEAD)" = "${{ env.GATE_CANDIDATE_SHA }}"
       - uses: astral-sh/setup-uv@v4
       - name: Preflight — evidence environment (ADR 0001)
         run: |
@@ -311,29 +318,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ env.GATE_CANDIDATE_SHA }}
           fetch-depth: 0
       - name: Verify HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_sha }}"
+        run: test "$(git rev-parse HEAD)" = "${{ env.GATE_CANDIDATE_SHA }}"
       - name: Download exact oracle evidence
         id: oracle-evidence-download
         if: always()
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: oracle-evidence-${{ inputs.candidate_sha }}
+          name: oracle-evidence-${{ env.GATE_CANDIDATE_SHA }}
           path: ${{ runner.temp }}/oracle-evidence
       - name: Emit the single-SHA technical Gate report
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_SHA: ${{ env.GATE_CANDIDATE_SHA }}
         run: |
           python3 .github/scripts/stage3_gate_report.py \
             --oracle-evidence \
-              "${RUNNER_TEMP}/oracle-evidence/oracle-evidence-${{ inputs.candidate_sha }}.json" \
+              "${RUNNER_TEMP}/oracle-evidence/oracle-evidence-${{ env.GATE_CANDIDATE_SHA }}.json" \
             --oracle-junit \
-              "${RUNNER_TEMP}/oracle-evidence/oracle-pytest-${{ inputs.candidate_sha }}.xml" \
+              "${RUNNER_TEMP}/oracle-evidence/oracle-pytest-${{ env.GATE_CANDIDATE_SHA }}.xml" \
             --lane "lint=${{ needs.lint.result }}" \
             --lane "unit-isolated=${{ needs['unit-isolated'].result }}" \
             --lane "consistency=${{ needs.consistency.result }}" \
@@ -345,7 +352,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gate-a-report-${{ inputs.candidate_sha }}
+          name: gate-a-report-${{ env.GATE_CANDIDATE_SHA }}
           path: ${{ runner.temp }}/gate-report.json
           if-no-files-found: error
       - name: Enforce Gate report outcome after upload

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -20,10 +19,16 @@ from newcalibre.protocols.vn2 import (
     emit_vn2_result_bundle,
     load_vn2_config,
     load_vn2_dataset,
+    parse_tracking_history,
     parse_tracking_record,
     run_vn2,
     validate_vn2_result_bundle,
     verify_vn2_inputs,
+)
+from newcalibre.protocols.vn2._tracking_contracts import _ga1_digest, _regular_file_sha256
+from newcalibre.protocols.vn2._tracking_validation import (
+    require_exact_recomputation,
+    resolve_tracking_history_mode,
 )
 
 pytestmark = [
@@ -53,10 +58,18 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
     run_id = _required_environment("VN2_RUN_ID")
     run_url = _required_environment("VN2_RUN_URL")
     mode = _required_environment("VN2_MODE")
-    assert mode in {"mint", "verify"}
+    require_history = _required_environment("VN2_REQUIRE_HISTORY")
+    tracking_before = _optional_digest(TRACKING_PATH)
+    history = parse_tracking_history(TRACKING_PATH) if tracking_before is not None else ()
+    history_mode = resolve_tracking_history_mode(
+        mode=mode,
+        require_history=require_history,
+        history=history,
+    )
+    if history_mode == "skip":
+        print("tracking comparison skipped: scheduled history is absent")  # noqa: T201
     assert not BUNDLE_PATH.exists(), "Tier 4 requires a clean ignored artifact directory"
 
-    tracking_before = _optional_digest(TRACKING_PATH)
     verify_vn2_inputs(DATA_PATH, INVENTORY_PATH)
     config = load_vn2_config(CONFIG_PATH)
     dataset = load_vn2_dataset(DATA_PATH, INVENTORY_PATH, config)
@@ -129,6 +142,8 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
     proposal_bytes = proposal.to_bytes()
     parsed = parse_tracking_record(proposal_bytes)
     assert parsed.to_bytes() == proposal_bytes
+    if mode == "verify" and history:
+        require_exact_recomputation(proposal, history)
 
     environment = manifest.environment
     expected_environment = {
@@ -211,7 +226,7 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
     }
     assert evidence["promoted_capture"] == promoted_capture
     assert payload["environment"] == {
-        "digest": manifest.environment_digest,
+        "digest": _ga1_digest(payload),
         "facts": expected_environment,
         "toolchain_digest": payload["environment"]["toolchain_digest"],
     }
@@ -255,7 +270,9 @@ def _required_environment(name: str) -> str:
 
 
 def _optional_digest(path: Path) -> str | None:
-    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    if not os.path.lexists(path):
+        return None
+    return _regular_file_sha256(path, name=f"Tier 4 evidence {path.as_posix()}")
 
 
 def _expected_r1_jsonl(

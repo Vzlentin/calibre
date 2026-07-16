@@ -28,6 +28,7 @@ from newcalibre.protocols.vn2._tracking_contracts import (
     TrackingError,
     VN2TrackingRecord,
     _commit_sha,
+    _ga1_digest,
     _normalized_digest,
     _run_id,
     _run_url,
@@ -84,8 +85,8 @@ def _build_tracking_record(
     result_files = {
         entry.path: entry.sha256 for entry in manifest.files if entry.path != "environment.json"
     }
-    environment = _environment_value(manifest.environment)
-    toolchain_digest = _toolchain_digest(environment)
+    environment_facts = _environment_value(manifest.environment)
+    toolchain_digest = _toolchain_digest(environment_facts)
     promoted = _capture_payload(capture, receipt)
     evidence = {
         "actuals_semantics": manifest.actuals_semantics,
@@ -102,12 +103,13 @@ def _build_tracking_record(
             "series_identity_digest": manifest.series_identity_digest,
         },
     }
+    environment_payload: dict[str, object] = {
+        "digest": "",
+        "facts": environment_facts,
+        "toolchain_digest": toolchain_digest,
+    }
     payload: dict[str, object] = {
-        "environment": {
-            "digest": manifest.environment_digest,
-            "facts": environment,
-            "toolchain_digest": toolchain_digest,
-        },
+        "environment": environment_payload,
         "evidence": evidence,
         "identity": "",
         "objective": {
@@ -137,11 +139,12 @@ def _build_tracking_record(
             "run_url": run_url,
         },
     }
+    environment_payload["digest"] = _ga1_digest(payload)
     identity_preimage = {
         "artifact_kind": RESULT_KIND,
         "candidate_sha": candidate_sha,
         "config_digest": manifest.config_digest,
-        "environment_digest": manifest.environment_digest,
+        "environment_digest": environment_payload["digest"],
         "input_inventory_digest": manifest.input_inventory_digest,
     }
     payload["identity"] = hashlib.sha256(

@@ -185,9 +185,7 @@ def _publish_unix(parent_fd: int, name: str, payload: bytes) -> bool:
                 os.unlink(temporary_name, dir_fd=parent_fd)
 
 
-def _write_tracking_record(record: VN2TrackingRecord, path: Path) -> bool:
-    if not record._publication_eligible:
-        raise TrackingError("proposal writer requires a record derived from validated evidence")
+def _write_artifact_bytes(payload: bytes, path: Path) -> bool:
     root, relative = _successor_root(Path(path))
     if len(relative.parts) < 2:
         raise TrackingError("proposal path must be beneath newcalibre/artifacts")
@@ -198,11 +196,17 @@ def _write_tracking_record(record: VN2TrackingRecord, path: Path) -> bool:
         name = relative.parts[-1]
         if name in {"", ".", ".."} or "/" in name or "\\" in name:
             raise TrackingError("proposal path must use canonical relative components")
-        return _publish_unix(parent_fd, name, record.to_bytes())
+        return _publish_unix(parent_fd, name, payload)
     finally:
         for fd in reversed(fds):
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+def _write_tracking_record(record: VN2TrackingRecord, path: Path) -> bool:
+    if not record._publication_eligible:
+        raise TrackingError("proposal writer requires a record derived from validated evidence")
+    return _write_artifact_bytes(record.to_bytes(), path)
 
 
 def write_proposal_record(record: VN2TrackingRecord, path: Path) -> bool:

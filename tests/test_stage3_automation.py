@@ -18,6 +18,7 @@ GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.ym
 CLOCK_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "stage3-clock.yml"
 ROOT_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
 SUCCESSOR_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "newcalibre.yml"
+ACTIVATION_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "s3-activation-gate.yml"
 TIER2_ARTIFACT_CHECK = (
     "set -euo pipefail\n"
     "for run in tier2-run1 tier2-run2; do\n"
@@ -679,7 +680,10 @@ def test_clock_manual_triggers_execute_only_the_default_branch_workflow() -> Non
         "pull-requests": "read",
     }
     successor = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
-    assert successor["jobs"]["s3-activation-gate"]["permissions"] == {
+    assert "s3-activation-gate" not in successor["jobs"]
+    activation = yaml.safe_load(ACTIVATION_WORKFLOW.read_text(encoding="utf-8"))
+    assert activation["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "issues": "read",
         "pull-requests": "read",
@@ -730,10 +734,26 @@ def test_negative_gate_report_is_written_before_main_returns_nonzero(
     assert report["problems"] == [
         "Gate report requires every required lane result",
         "gate precondition unmet: no promoted tracking record (U9b)",
+        "C0→candidate evidence-only diff could not be established",
         "no schema-complete activation record on the Gate issue",
         "aggregate checkout HEAD does not equal the Gate candidate",
         f"promoted capture root is missing: {(tmp_path / 'missing-captures').as_posix()}",
     ]
+
+
+def test_gate_report_reads_nested_tracking_candidate_sha() -> None:
+    candidate = "c" * 40
+    assert (
+        stage3_gate_report._tracking_candidate_sha(
+            {
+                "subject": {
+                    "candidate_sha": candidate,
+                    "repository": "Vzlentin/calibre",
+                }
+            }
+        )
+        == candidate
+    )
 
 
 def test_deadline_check_uses_one_gate_comment_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:

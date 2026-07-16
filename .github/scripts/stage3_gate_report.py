@@ -11,10 +11,12 @@ writes to the repository.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -112,6 +114,259 @@ def sha256_file(path: Path) -> str:
 def git(*args: str) -> str:
     """Run a git command and return stripped stdout."""
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _open_regular_file(path: Path, *, name: str) -> int:
+    absolute = Path(os.path.abspath(path))
+    parts = absolute.parts
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    leaf_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    opened: list[int] = []
+    try:
+        parent_fd = os.open(absolute.anchor, directory_flags)
+        opened.append(parent_fd)
+        for part in parts[1:-1]:
+            child_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            opened.append(child_fd)
+            parent_fd = child_fd
+        fd = os.open(parts[-1], leaf_flags, dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError(f"{name} must be a regular non-symlink file")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+    except ValueError:
+        raise
+    except OSError as error:
+        raise ValueError(f"{name} and every ancestor must be readable non-symlinks") from error
+    finally:
+        for directory_fd in reversed(opened):
+            with contextlib.suppress(OSError):
+                os.close(directory_fd)
+    return fd
+
+
+def _read_regular_bytes(path: Path, *, name: str, maximum: int = 4 * 1024 * 1024) -> bytes:
+    fd = _open_regular_file(path, name=name)
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        while True:
+            chunk = os.read(fd, min(1024 * 1024, maximum + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > maximum:
+                raise ValueError(f"{name} exceeds the maximum size")
+    except OSError as error:
+        raise ValueError(f"{name} is unreadable") from error
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def _canonical_json_line(line: bytes, *, name: str) -> dict[str, object]:
+    if not line or b"\n" in line or b"\r" in line:
+        raise ValueError(f"{name} must contain exactly one LF-free JSON object")
+    try:
+        value = json.loads(line.decode("utf-8"), object_pairs_hook=_unique_object)
+        canonical = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError) as error:
+        raise ValueError(f"{name} must be finite canonical UTF-8 JSON") from error
+    if not isinstance(value, dict) or canonical != line:
+        raise ValueError(f"{name} bytes are not one canonical JSON object")
+    return value
+
+
+def _tracking_candidate_sha(record: dict[str, object]) -> str:
+    subject = record.get("subject")
+    if not isinstance(subject, dict) or set(subject) != {"candidate_sha", "repository"}:
+        raise ValueError("tracking record subject has an invalid schema")
+    candidate = subject.get("candidate_sha")
+    if (
+        not isinstance(candidate, str)
+        or re.fullmatch(r"[0-9a-f]{40}", candidate) is None
+        or subject.get("repository") != "Vzlentin/calibre"
+    ):
+        raise ValueError("tracking record subject does not bind the canonical repository and C0")
+    return candidate
+
+
+def _receipt_binds_record(
+    receipt: dict[str, object],
+    record: dict[str, object],
+    *,
+    candidate: str,
+    record_digest: str,
+) -> bool:
+    expected_receipt_keys = {
+        "candidate_sha",
+        "proposal_artifact",
+        "receipt_kind",
+        "record_sha256",
+        "repository",
+        "result_artifact",
+        "schema",
+        "workflow",
+    }
+    if (
+        set(receipt) != expected_receipt_keys
+        or receipt.get("schema") != 1
+        or receipt.get("receipt_kind") != "vn2-tracking-promotion-receipt"
+        or receipt.get("repository") != "Vzlentin/calibre"
+        or receipt.get("candidate_sha") != candidate
+        or receipt.get("record_sha256") != record_digest
+    ):
+        return False
+    workflow = receipt.get("workflow")
+    result = receipt.get("result_artifact")
+    proposal = receipt.get("proposal_artifact")
+    if (
+        not isinstance(workflow, dict)
+        or set(workflow) != {"definition_ref", "definition_sha", "run_id", "run_url"}
+        or workflow != record.get("workflow")
+        or workflow.get("definition_ref")
+        != "Vzlentin/calibre/.github/workflows/newcalibre.yml@refs/heads/main"
+        or workflow.get("definition_sha") != candidate
+        or not isinstance(workflow.get("run_id"), str)
+        or re.fullmatch(r"[1-9][0-9]*", workflow["run_id"]) is None
+        or workflow.get("run_url")
+        != f"https://github.com/Vzlentin/calibre/actions/runs/{workflow['run_id']}"
+        or not _valid_receipt_artifact(
+            result,
+            expected_name=f"vn2-acceptance-{candidate}",
+        )
+        or not _valid_receipt_artifact(
+            proposal,
+            expected_name=f"vn2-tracking-proposal-{candidate}",
+        )
+        or result != record.get("result_artifact")
+    ):
+        return False
+    return result["id"] != proposal["id"]
+
+
+def _valid_receipt_artifact(value: object, *, expected_name: str) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"digest", "id", "name"}
+        and isinstance(value.get("id"), str)
+        and re.fullmatch(r"[1-9][0-9]*", value["id"]) is not None
+        and value.get("name") == expected_name
+        and isinstance(value.get("digest"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", value["digest"]) is not None
+    )
+
+
+def _tracking_evidence(
+    series_path: Path,
+    *,
+    problems: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    try:
+        payload = _read_regular_bytes(series_path, name="tracking series")
+    except ValueError as error:
+        if not os.path.lexists(series_path):
+            problems.append("gate precondition unmet: no promoted tracking record (U9b)")
+        else:
+            problems.append(str(error))
+        return None, None, None
+    if not payload or not payload.endswith(b"\n") or payload.endswith(b"\r\n"):
+        problems.append("tracking series must be non-empty canonical LF-terminated JSONL")
+        return None, None, None
+    rows = payload[:-1].split(b"\n")
+    if not rows or any(not row for row in rows):
+        problems.append("tracking series must not contain blank records")
+        return None, None, None
+    records: list[dict[str, object]] = []
+    try:
+        for index, row in enumerate(rows):
+            records.append(_canonical_json_line(row, name=f"tracking series row {index + 1}"))
+    except ValueError as error:
+        problems.append(str(error))
+        return None, None, None
+    identities = [record.get("identity") for record in records]
+    if any(
+        not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None
+        for identity in identities
+    ) or len(set(identities)) != len(identities):
+        problems.append("tracking series identities must be unique lowercase SHA-256 values")
+        return None, None, None
+    latest = records[-1]
+    expected_record_keys = {
+        "environment",
+        "evidence",
+        "identity",
+        "objective",
+        "record_kind",
+        "result_artifact",
+        "result_bundle",
+        "schema",
+        "subject",
+        "workflow",
+    }
+    if (
+        set(latest) != expected_record_keys
+        or latest.get("schema") != 1
+        or latest.get("record_kind") != "vn2-gate-a-tracking-record"
+    ):
+        problems.append("tracking series latest record has an invalid schema")
+        return None, None, None
+    try:
+        c0 = _tracking_candidate_sha(latest)
+    except ValueError as error:
+        problems.append(str(error))
+        return None, None, None
+    record_digest = hashlib.sha256(rows[-1] + b"\n").hexdigest()
+    receipt_path = series_path.parent / f"{c0}-receipt.json"
+    try:
+        receipt_bytes = _read_regular_bytes(receipt_path, name="tracking promotion receipt")
+        if not receipt_bytes.endswith(b"\n") or receipt_bytes.endswith(b"\r\n"):
+            raise ValueError("tracking promotion receipt must end with exactly one LF")
+        receipt = _canonical_json_line(
+            receipt_bytes[:-1],
+            name="tracking promotion receipt",
+        )
+    except ValueError as error:
+        problems.append(str(error))
+        return None, record_digest, None
+    if not _receipt_binds_record(
+        receipt,
+        latest,
+        candidate=c0,
+        record_digest=record_digest,
+    ):
+        problems.append("tracking promotion receipt does not bind the latest canonical record")
+        return None, record_digest, None
+    return c0, record_digest, hashlib.sha256(receipt_bytes).hexdigest()
 
 
 def _capture_manifest_digests(root: Path, *, problems: list[str]) -> dict[str, str]:
@@ -377,30 +632,27 @@ def main() -> int:
         )
         problems.extend(oracle_problems)
 
-    # Tracking record 1 (Gate precondition) and the C0→C1 merge discipline.
-    c0 = None
-    record_digest = None
-    if TRACKING_SERIES.exists():
-        lines = [ln for ln in TRACKING_SERIES.read_text(encoding="utf-8").splitlines() if ln]
-        if lines:
-            record_digest = hashlib.sha256((lines[-1] + "\n").encode("utf-8")).hexdigest()
-            try:
-                c0 = json.loads(lines[-1]).get("subject_sha")
-            except json.JSONDecodeError:
-                problems.append("tracking series last line is not valid JSON")
-    else:
-        problems.append("gate precondition unmet: no promoted tracking record (U9b)")
-
+    # Tracking record 1 (Gate precondition) and the C0→candidate merge discipline.
+    c0, record_digest, receipt_digest = _tracking_evidence(
+        TRACKING_SERIES,
+        problems=problems,
+    )
     diff_check = None
     if c0:
-        changed = git("diff", "--name-only", f"{c0}..HEAD").splitlines()
-        offending = [f for f in changed if not f.startswith(EVIDENCE_ALLOWLIST)]
-        diff_check = {"c0": c0, "changed": changed, "offending": offending}
-        if offending:
-            problems.append(
-                "C0→C1 diff leaves the evidence-path allowlist; "
-                "candidate void — re-mint at a new C0"
-            )
+        try:
+            changed = git("diff", "--name-only", f"{c0}..HEAD").splitlines()
+        except subprocess.CalledProcessError as error:
+            problems.append(f"C0→candidate diff inspection failed: {error}")
+        else:
+            offending = [path for path in changed if not path.startswith(EVIDENCE_ALLOWLIST)]
+            diff_check = {"c0": c0, "changed": changed, "offending": offending}
+            if offending:
+                problems.append(
+                    "C0→C1 diff leaves the evidence-path allowlist; "
+                    "candidate void — re-mint at a new C0"
+                )
+    if diff_check is None:
+        problems.append("C0→candidate evidence-only diff could not be established")
 
     # Budget check against the immutable activation record.
     now = datetime.now(UTC)
@@ -449,6 +701,7 @@ def main() -> int:
             "input_inventory": (sha256_file(INPUT_INVENTORY) if INPUT_INVENTORY.exists() else None),
             "capture_manifests": capture_manifest_digests,
             "tracking_record": record_digest,
+            "tracking_receipt": receipt_digest,
         },
         "oracle_evidence": oracle_evidence,
         "lanes": lanes,

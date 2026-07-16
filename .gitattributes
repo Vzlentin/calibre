@@ -1,6 +1,7 @@
 # Preserve digest-bound Stage 3 evidence bytes across platforms.
 stage3/evidence/captures/** -text
 stage3/evidence/vn2-input-digests.json -text
+stage3/evidence/tracking/** -text
 newcalibre/benchmarks/vn2/vn2-input-digests.json -text
 benchmarks/vn2/config/vn2-winning-loop.yaml -text
 newcalibre/benchmarks/vn2/protocol.yaml -text
