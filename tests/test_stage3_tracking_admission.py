@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import stat
 import subprocess
 import warnings
@@ -301,7 +302,17 @@ def test_safe_zip_rejects_oversized_total_expansion(tmp_path: Path) -> None:
     assert not (tmp_path / "accepted").exists()
 
 
-@pytest.mark.parametrize("payload", [b"not JSON", b"[]", b'{"id":1,"id":2}'])
+def test_metadata_loader_accepts_canonical_json_object(tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata.json"
+    metadata.write_bytes(b'{"id":1,"nested":{"ok":true}}')
+
+    assert stage3_tracking_admission.load_promotion_metadata(metadata, name="run metadata") == {
+        "id": 1,
+        "nested": {"ok": True},
+    }
+
+
+@pytest.mark.parametrize("payload", [b"not JSON", b"[]"])
 def test_metadata_loader_rejects_malformed_metadata(
     tmp_path: Path,
     payload: bytes,
@@ -309,8 +320,125 @@ def test_metadata_loader_rejects_malformed_metadata(
     metadata = tmp_path / "metadata.json"
     metadata.write_bytes(payload)
 
-    with pytest.raises(stage3_tracking_admission.AdmissionError, match="metadata"):
-        stage3_tracking_admission.read_json_object(metadata, label="run")
+    with pytest.raises(ValueError, match="metadata"):
+        stage3_tracking_admission.load_promotion_metadata(metadata, name="run metadata")
+
+
+def test_metadata_loader_rejects_duplicate_keys(tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata.json"
+    metadata.write_bytes(b'{"id":1,"id":2}')
+
+    with pytest.raises(ValueError, match="valid UTF-8 JSON"):
+        stage3_tracking_admission.load_promotion_metadata(metadata, name="run metadata")
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_metadata_loader_rejects_nonfinite_json(
+    tmp_path: Path,
+    constant: str,
+) -> None:
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(f'{{"value":{constant}}}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="valid UTF-8 JSON"):
+        stage3_tracking_admission.load_promotion_metadata(metadata, name="run metadata")
+
+
+def test_metadata_loader_rejects_oversized_json(tmp_path: Path) -> None:
+    metadata = tmp_path / "metadata.json"
+    metadata.write_bytes(b'{"value":"' + b"x" * (4 * 1024 * 1024) + b'"}')
+
+    with pytest.raises(ValueError, match="exceeds the maximum size"):
+        stage3_tracking_admission.load_promotion_metadata(metadata, name="run metadata")
+
+
+@pytest.mark.parametrize("link_kind", ["leaf", "ancestor"])
+def test_metadata_loader_rejects_symlink_leaf_and_ancestor(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    metadata = real_root / "metadata.json"
+    metadata.write_bytes(b'{"id":1}')
+    if link_kind == "leaf":
+        hostile_path = tmp_path / "metadata.json"
+        hostile_path.symlink_to(metadata)
+    else:
+        hostile_root = tmp_path / "metadata-root"
+        hostile_root.symlink_to(real_root, target_is_directory=True)
+        hostile_path = hostile_root / metadata.name
+
+    with pytest.raises(ValueError, match="every ancestor"):
+        stage3_tracking_admission.load_promotion_metadata(hostile_path, name="run metadata")
+
+
+@pytest.mark.parametrize("special", ["fifo", "directory", "socket"])
+def test_metadata_loader_rejects_special_files_without_blocking(
+    tmp_path: Path,
+    special: str,
+) -> None:
+    metadata = tmp_path / "metadata.json"
+    bound_socket: socket.socket | None = None
+    try:
+        if special == "fifo":
+            os.mkfifo(metadata)
+        elif special == "directory":
+            metadata.mkdir()
+        else:
+            bound_socket = socket.socket(socket.AF_UNIX)
+            bound_socket.bind(str(metadata))
+
+        with pytest.raises(ValueError, match="regular non-symlink file|every ancestor"):
+            stage3_tracking_admission.load_promotion_metadata(metadata, name="run metadata")
+    finally:
+        if bound_socket is not None:
+            bound_socket.close()
+
+
+@pytest.mark.parametrize("metadata_label", ["run", "result", "proposal"])
+def test_cli_applies_safe_loader_to_all_metadata_paths(
+    tmp_path: Path,
+    metadata_label: str,
+) -> None:
+    run_metadata = tmp_path / "run-metadata.json"
+    _write_json(run_metadata, _run_metadata())
+    result_archive = tmp_path / "result.zip"
+    proposal_archive = tmp_path / "proposal.zip"
+    _write_zip(
+        result_archive,
+        [("result.json", b"{}\n", stat.S_IFREG | 0o600)],
+    )
+    _write_zip(
+        proposal_archive,
+        [("proposed-record.jsonl", b'{"record":1}\n', stat.S_IFREG | 0o600)],
+    )
+    args = [
+        "admit",
+        "--candidate-sha",
+        CANDIDATE_SHA,
+        "--run-id",
+        str(RUN_ID),
+        "--run-url",
+        RUN_URL,
+        "--run-metadata",
+        str(run_metadata),
+        *_artifact_cli_args(tmp_path, label="result", artifact_id=1001, archive=result_archive),
+        *_artifact_cli_args(tmp_path, label="proposal", artifact_id=1002, archive=proposal_archive),
+    ]
+    metadata = (
+        run_metadata if metadata_label == "run" else tmp_path / f"{metadata_label}-metadata.json"
+    )
+    target = tmp_path / f"real-{metadata.name}"
+    metadata.replace(target)
+    metadata.symlink_to(target)
+
+    with pytest.raises(SystemExit) as error:
+        stage3_tracking_admission.main(args)
+
+    assert error.value.code == 1
+    assert not (tmp_path / "result").exists()
+    assert not (tmp_path / "proposal").exists()
 
 
 def test_run_metadata_mismatch_is_rejected() -> None:

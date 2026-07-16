@@ -32,10 +32,11 @@ TIER2_ARTIFACT_CHECK = (
     "done\n"
     'diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"'
 )
+TRACKING_ADMISSION_TEST = "tests/test_stage3_tracking_admission.py"
 STAGE3_AUTOMATION_CONTRACT = (
     "uv sync --project newcalibre --locked --group dev\n"
     "uv run --project newcalibre --locked --no-sync pytest "
-    "tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py"
+    "tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py " + TRACKING_ADMISSION_TEST
 )
 SUCCESSOR_EXPORT = (
     "set -euo pipefail\n"
@@ -770,6 +771,9 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
     assert "if" not in contract
     assert "continue-on-error" not in contract
     assert "shell" not in contract
+    assert TRACKING_ADMISSION_TEST in contract["run"].split(), (
+        "successor workflow must run the Stage 3 tracking admission suite"
+    )
     assert contract["run"].strip() == STAGE3_AUTOMATION_CONTRACT
     build_export = next(
         step for step in unit["steps"] if step.get("name") == "Build successor-only export"
@@ -823,6 +827,9 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
     assert "if" not in root_contract
     assert "continue-on-error" not in root_contract
     assert "shell" not in root_contract
+    assert TRACKING_ADMISSION_TEST in root_contract["run"].split(), (
+        "root workflow must run the Stage 3 tracking admission suite"
+    )
     assert root_contract["run"].strip() == STAGE3_AUTOMATION_CONTRACT
     root_setup = next(
         step for step in root_test["steps"] if step.get("uses") == "astral-sh/setup-uv@v4"
@@ -859,6 +866,7 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
         ".github/scripts/stage3_*.py",
         "tests/test_stage3_automation.py",
         "tests/test_stage3_vn2_automation.py",
+        TRACKING_ADMISSION_TEST,
     }
     scoped_job_names = {
         "lint-and-type-check",
@@ -882,6 +890,9 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
         assert scope["uses"] == "tj-actions/changed-files@v45"
         assert "continue-on-error" not in scope
         configured_patterns = set(scope["with"]["files"].splitlines())
+        assert TRACKING_ADMISSION_TEST in configured_patterns, (
+            f"{name} successor-only scope must include the tracking admission test"
+        )
         assert configured_patterns == expected_successor_only_patterns
 
 

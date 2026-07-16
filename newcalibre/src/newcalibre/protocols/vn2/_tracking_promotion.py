@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import cast
 
@@ -77,6 +77,130 @@ class PromotionReceipt:
     result_artifact: _ArtifactBinding
     proposal_artifact: _ArtifactBinding
     record_sha256: str
+    _publication_eligible: bool = field(repr=False, compare=False)
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TrackingError(
+            "PromotionReceipt construction is private; use validated parsing or "
+            "evidence construction"
+        )
+
+    @classmethod
+    def _from_parsed(
+        cls,
+        *,
+        candidate_sha: str,
+        definition_ref: str,
+        definition_sha: str,
+        run_id: str,
+        run_url: str,
+        result_artifact: _ArtifactBinding,
+        proposal_artifact: _ArtifactBinding,
+        record_sha256: str,
+    ) -> PromotionReceipt:
+        """Construct one structurally valid receipt parsed from canonical bytes."""
+        return cls._construct(
+            candidate_sha=candidate_sha,
+            definition_ref=definition_ref,
+            definition_sha=definition_sha,
+            run_id=run_id,
+            run_url=run_url,
+            result_artifact=result_artifact,
+            proposal_artifact=proposal_artifact,
+            record_sha256=record_sha256,
+            publication_eligible=False,
+        )
+
+    @classmethod
+    def _from_evidence(
+        cls,
+        *,
+        candidate_sha: str,
+        definition_ref: str,
+        definition_sha: str,
+        run_id: str,
+        run_url: str,
+        result_artifact: _ArtifactBinding,
+        proposal_artifact: _ArtifactBinding,
+        record_sha256: str,
+    ) -> PromotionReceipt:
+        """Construct one publication-eligible receipt from validated evidence."""
+        return cls._construct(
+            candidate_sha=candidate_sha,
+            definition_ref=definition_ref,
+            definition_sha=definition_sha,
+            run_id=run_id,
+            run_url=run_url,
+            result_artifact=result_artifact,
+            proposal_artifact=proposal_artifact,
+            record_sha256=record_sha256,
+            publication_eligible=True,
+        )
+
+    @classmethod
+    def _construct(
+        cls,
+        *,
+        candidate_sha: str,
+        definition_ref: str,
+        definition_sha: str,
+        run_id: str,
+        run_url: str,
+        result_artifact: _ArtifactBinding,
+        proposal_artifact: _ArtifactBinding,
+        record_sha256: str,
+        publication_eligible: bool,
+    ) -> PromotionReceipt:
+        candidate = _commit_sha(candidate_sha, name="receipt.candidate_sha")
+        validated_run_id = _run_id(run_id, name="receipt.workflow.run_id")
+        if not isinstance(result_artifact, _ArtifactBinding) or not isinstance(
+            proposal_artifact, _ArtifactBinding
+        ):
+            raise TrackingError("promotion receipt artifacts must be validated bindings")
+        result = _ArtifactBinding(
+            id=_run_id(result_artifact.id, name="receipt.result_artifact.id"),
+            name=_text(result_artifact.name, name="receipt.result_artifact.name"),
+            digest=_normalized_digest(
+                result_artifact.digest, name="receipt.result_artifact.digest"
+            ),
+        )
+        proposal = _ArtifactBinding(
+            id=_run_id(proposal_artifact.id, name="receipt.proposal_artifact.id"),
+            name=_text(proposal_artifact.name, name="receipt.proposal_artifact.name"),
+            digest=_normalized_digest(
+                proposal_artifact.digest, name="receipt.proposal_artifact.digest"
+            ),
+        )
+        if result.name != f"vn2-acceptance-{candidate}":
+            raise TrackingError("receipt result artifact name must bind the candidate SHA")
+        if proposal.name != f"vn2-tracking-proposal-{candidate}":
+            raise TrackingError("receipt proposal artifact name must bind the candidate SHA")
+        if not isinstance(publication_eligible, bool):
+            raise TrackingError("promotion receipt publication eligibility must be boolean")
+        self = object.__new__(cls)
+        object.__setattr__(self, "candidate_sha", candidate)
+        object.__setattr__(
+            self,
+            "definition_ref",
+            _validate_definition_ref(definition_ref),
+        )
+        object.__setattr__(
+            self,
+            "definition_sha",
+            _commit_sha(definition_sha, name="receipt.workflow.definition_sha"),
+        )
+        object.__setattr__(self, "run_id", validated_run_id)
+        object.__setattr__(self, "run_url", _run_url(run_url, run_id=validated_run_id))
+        object.__setattr__(self, "result_artifact", result)
+        object.__setattr__(self, "proposal_artifact", proposal)
+        object.__setattr__(
+            self,
+            "record_sha256",
+            _digest(record_sha256, name="receipt.record_sha256"),
+        )
+        object.__setattr__(self, "_publication_eligible", publication_eligible)
+        self.to_bytes()
+        return self
 
     def to_bytes(self) -> bytes:
         """Serialize the receipt as one canonical LF-terminated JSON object."""
@@ -182,7 +306,7 @@ def build_promotion_receipt(
         raise TrackingError("downloaded proposal archive digest does not match GitHub metadata")
     subject = cast(Mapping[str, object], record.payload["subject"])
     workflow = cast(Mapping[str, object], record.payload["workflow"])
-    return PromotionReceipt(
+    return PromotionReceipt._from_evidence(
         candidate_sha=cast(str, subject["candidate_sha"]),
         definition_ref=cast(str, workflow["definition_ref"]),
         definition_sha=cast(str, workflow["definition_sha"]),
@@ -198,6 +322,8 @@ def write_promotion_receipt(receipt: PromotionReceipt, path: Path) -> bool:
     """Publish a canonical receipt only beneath the successor artifacts root."""
     if not isinstance(receipt, PromotionReceipt):
         raise TrackingError("receipt writer requires a PromotionReceipt")
+    if getattr(receipt, "_publication_eligible", False) is not True:
+        raise TrackingError("receipt writer requires a receipt derived from validated evidence")
     return _write_artifact_bytes(receipt.to_bytes(), Path(path))
 
 
@@ -285,7 +411,7 @@ def _parse_receipt_value(value: dict[str, object]) -> PromotionReceipt:
         raise TrackingError("receipt result artifact name must bind the candidate SHA")
     if proposal.name != f"vn2-tracking-proposal-{candidate}":
         raise TrackingError("receipt proposal artifact name must bind the candidate SHA")
-    return PromotionReceipt(
+    return PromotionReceipt._from_parsed(
         candidate_sha=candidate,
         definition_ref=definition_ref,
         definition_sha=definition_sha,

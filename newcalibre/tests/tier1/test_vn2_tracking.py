@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -1094,6 +1095,23 @@ def test_promotion_receipt_wire_paths_and_publication_are_strict(
         result_archive=result_zip,
         proposal_archive=proposal_zip,
     )
+    receipt_bytes = receipt.to_bytes()
+    parsed_receipt = promotion.parse_promotion_receipt(receipt_bytes)
+    assert parsed_receipt == receipt
+    assert parsed_receipt.to_bytes() == receipt_bytes
+    with pytest.raises(TrackingError, match="construction is private"):
+        promotion.PromotionReceipt(
+            candidate_sha=receipt.candidate_sha,
+            definition_ref=receipt.definition_ref,
+            definition_sha=receipt.definition_sha,
+            run_id=receipt.run_id,
+            run_url=receipt.run_url,
+            result_artifact=receipt.result_artifact,
+            proposal_artifact=receipt.proposal_artifact,
+            record_sha256=receipt.record_sha256,
+        )
+    with pytest.raises(TrackingError, match="construction is private"):
+        replace(parsed_receipt, _publication_eligible=True)
     receipt_value = json.loads(receipt.to_bytes())
     pretty = (json.dumps(receipt_value, indent=2) + "\n").encode()
     with pytest.raises(TrackingError):
@@ -1123,6 +1141,10 @@ def test_promotion_receipt_wire_paths_and_publication_are_strict(
     monkeypatch.setattr(persistence, "_TRUSTED_PROJECT_ROOT", root)
     (root / "artifacts").mkdir(parents=True)
     output = root / "artifacts" / "receipt.json"
+    parsed_output = root / "artifacts" / "parsed-receipt.json"
+    with pytest.raises(TrackingError, match="validated evidence"):
+        promotion.write_promotion_receipt(parsed_receipt, parsed_output)
+    assert not parsed_output.exists()
     assert promotion.write_promotion_receipt(receipt, output)
     assert output.read_bytes() == receipt.to_bytes()
     with pytest.raises(TrackingError):

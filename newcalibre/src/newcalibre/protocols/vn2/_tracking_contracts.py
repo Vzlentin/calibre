@@ -635,10 +635,18 @@ def _bounded_bytes(value: bytes, *, name: str) -> bytes:
     return value
 
 
+def _reject_json_constant(value: str) -> None:
+    raise TrackingError(f"tracking JSON contains non-finite constant {value!r}")
+
+
 def _parse_json(value: bytes, *, name: str) -> dict[str, object]:
     try:
         text = value.decode("utf-8")
-        parsed = json.loads(text, object_pairs_hook=_unique_object)
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_json_constant,
+        )
     except (
         UnicodeError,
         ValueError,

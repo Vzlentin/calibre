@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -21,13 +20,13 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
 
 _SUCCESSOR_SRC = Path(__file__).resolve().parents[2] / "newcalibre" / "src"
 sys.path.insert(0, str(_SUCCESSOR_SRC))
 
 from newcalibre.protocols.vn2.tracking import (  # noqa: E402
     TRACKING_SERIES_PATH,
+    load_promotion_metadata,
     parse_promotion_receipt,
     promotion_receipt_path,
     validate_promotion_paths,
@@ -45,40 +44,12 @@ class AdmissionError(ValueError):
     """Report an artifact that cannot cross the tracking admission boundary."""
 
 
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    value: dict[str, Any] = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError(f"duplicate key: {key}")
-        value[key] = item
-    return value
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"invalid JSON constant: {value}")
-
-
-def read_json_object(path: Path, *, label: str) -> dict[str, Any]:
-    """Read a strict JSON object, rejecting invalid text and duplicate keys."""
-    try:
-        value = json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_json_constant,
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
-        raise AdmissionError(f"{label} metadata is malformed") from error
-    if not isinstance(value, dict):
-        raise AdmissionError(f"{label} metadata must be a JSON object")
-    return value
-
-
 def _is_integer(value: object) -> bool:
     return type(value) is int
 
 
 def validate_run_metadata(
-    metadata: dict[str, Any],
+    metadata: dict[str, object],
     *,
     run_id: int,
     candidate_sha: str,
@@ -108,7 +79,7 @@ def validate_run_metadata(
 
 
 def validate_artifact_metadata(
-    metadata: dict[str, Any],
+    metadata: dict[str, object],
     *,
     label: str,
     artifact_id: int,
@@ -523,7 +494,7 @@ def inspect_promotion(args: argparse.Namespace) -> None:
 
 def admit_artifacts(args: argparse.Namespace) -> None:
     """Validate both live artifacts, then stage and publish them as one operation."""
-    run = read_json_object(args.run_metadata, label="workflow-run")
+    run = load_promotion_metadata(args.run_metadata, name="workflow-run metadata")
     repository_id = validate_run_metadata(
         run,
         run_id=args.run_id,
@@ -541,7 +512,7 @@ def admit_artifacts(args: argparse.Namespace) -> None:
         metadata_path = getattr(args, f"{label}_artifact_metadata")
         archive = getattr(args, f"{label}_archive")
         destination = getattr(args, f"{label}_destination")
-        metadata = read_json_object(metadata_path, label=f"{label} artifact")
+        metadata = load_promotion_metadata(metadata_path, name=f"{label} artifact metadata")
         validate_artifact_metadata(
             metadata,
             label=label,

@@ -90,7 +90,7 @@ jobs:
       - name: Stage 3 automation contracts
         run: |
           uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py
+          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py tests/test_stage3_tracking_admission.py
       - name: Provision export venv (network still on)
         if: steps.present.outputs.exists == 'true'
         working-directory: ${{ env.EXPORT_ROOT }}/newcalibre

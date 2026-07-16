@@ -331,6 +331,18 @@ def _copy_evidence_scripts(root: Path) -> tuple[Path, Path]:
     return oracle_script, gate_script
 
 
+def _copied_gate_subprocess_env() -> dict[str, str]:
+    env = {**os.environ}
+    successor_src = str(REPO_ROOT / "newcalibre" / "src")
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        os.pathsep.join((successor_src, existing_pythonpath))
+        if existing_pythonpath
+        else successor_src
+    )
+    return env
+
+
 def _write_named_junit(path: Path, *, skipped: bool = False) -> None:
     suite = ET.Element(
         "testsuite",
@@ -1202,7 +1214,7 @@ def test_inventory_failures_write_negative_oracle_and_gate_artifacts_in_subproce
         raise SystemExit(module.main())
         """
     )
-    gate_env = {**os.environ, "CANDIDATE_SHA": candidate}
+    gate_env = {**_copied_gate_subprocess_env(), "CANDIDATE_SHA": candidate}
     gate_emitted = subprocess.run(
         [sys.executable, "-c", wrapper, str(gate_script), str(gate_path), candidate],
         cwd=REPO_ROOT,
@@ -1242,6 +1254,7 @@ def test_gate_report_check_mode_is_inventory_independent_in_a_subprocess(
     checked = subprocess.run(
         [sys.executable, str(gate_script), "--check-report", str(report_path)],
         cwd=REPO_ROOT,
+        env=_copied_gate_subprocess_env(),
         check=False,
         capture_output=True,
         text=True,
