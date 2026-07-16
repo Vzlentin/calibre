@@ -6,8 +6,15 @@ import hashlib
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
-from tests.vn2_fixtures import BASE_WEEKS, synthetic_config_payload, write_config, write_dataset
+from tests.vn2_fixtures import (
+    BASE_WEEKS,
+    refresh_inventory,
+    synthetic_config_payload,
+    write_config,
+    write_dataset,
+)
 
 from newcalibre.protocols.vn2 import (
     VN2ProtocolConfig,
@@ -25,10 +32,38 @@ CANDIDATE = "c" * 40
 CAPTURE_DIGEST = "d" * 64
 
 
-def _run(root: Path) -> tuple[VN2RunResult, VN2ProtocolConfig, Path, Path, Path]:
+def _run(
+    root: Path,
+    *,
+    round_count: int = 6,
+) -> tuple[VN2RunResult, VN2ProtocolConfig, Path, Path, Path]:
     data, inventory, config_path = write_dataset(root)
     payload = synthetic_config_payload()
     payload["model_config"]["m"] = len(BASE_WEEKS)  # type: ignore[index]
+    if round_count != 6:
+        decision = payload["decision"]
+        files = payload["files"]
+        decision["round_count"] = round_count
+        decision["origins"] = decision["origins"][:round_count]
+        files["sales_reveals"] = files["sales_reveals"][: round_count + 3]
+        configured_names = (
+            files["master"],
+            files["in_stock"],
+            files["initial_state"],
+            *files["sales_reveals"],
+        )
+        for path in data.glob("*.csv"):
+            if path.name not in configured_names:
+                path.unlink()
+        in_stock_path = data / files["in_stock"]
+        in_stock = pd.read_csv(in_stock_path)
+        visible_columns = 2 + len(BASE_WEEKS) + round_count + 2
+        in_stock.iloc[:, :visible_columns].to_csv(
+            in_stock_path,
+            index=False,
+            lineterminator="\n",
+        )
+        refresh_inventory(data, inventory, names=configured_names)
     write_config(config_path, payload)
     config = load_vn2_config(config_path)
     lock = root / "uv.lock"
@@ -82,6 +117,15 @@ def test_double_emission_is_byte_identical_and_loadable(tmp_path: Path) -> None:
     for name in (*first.manifest.files, "manifest.json"):
         assert (first.root / name).read_bytes() == (second.root / name).read_bytes()
     assert _load(first.root, facts) == first
+
+
+def test_non_six_round_bundle_is_loadable(tmp_path: Path) -> None:
+    """Derive the R1 spine from configuration rather than Gate A constants."""
+    facts = _run(tmp_path / "fixture", round_count=5)
+    bundle = _emit(tmp_path / "bundle", facts)
+
+    assert bundle.manifest.round_count == 5
+    assert _load(bundle.root, facts) == bundle
 
 
 def test_payload_corruption_is_rejected(tmp_path: Path) -> None:

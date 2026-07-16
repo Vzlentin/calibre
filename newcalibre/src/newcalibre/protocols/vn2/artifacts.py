@@ -509,7 +509,9 @@ def _validate_r1(
         _nonnegative(row["quantity"], name="R1 quantity")
         spine.append((round_number, series_key))
     series = tuple(sorted(identities, key=str.encode))
-    expected_spine = [(round_number, key) for round_number in range(1, 7) for key in series]
+    expected_spine = [
+        (round_number, key) for round_number in range(1, config.round_count + 1) for key in series
+    ]
     if spine != expected_spine or len(series) != config.series_count:
         raise VN2ResultError("R1 rows are not the canonical complete spine")
     return identities

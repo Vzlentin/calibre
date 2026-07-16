@@ -85,6 +85,28 @@ def test_load_capture_rejects_changed_order_byte(tmp_path: Path) -> None:
         load_capture(root, config_path=config, input_inventory_path=inventory)
 
 
+def test_load_capture_rejects_malformed_orders_with_matching_digest(tmp_path: Path) -> None:
+    """Exercise semantic validation after byte integrity succeeds."""
+    root, config, inventory = _write_capture(tmp_path)
+    order_path = root / "orders" / "round-1.json"
+    order_payload = json.loads(order_path.read_text(encoding="utf-8"))
+    order_payload["orders"].pop("0_1")
+    order_path.write_text(
+        json.dumps(order_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["orders"][0]["sha256"] = hashlib.sha256(order_path.read_bytes()).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(OracleEvidenceError, match="599 unique orders"):
+        load_capture(root, config_path=config, input_inventory_path=inventory)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [

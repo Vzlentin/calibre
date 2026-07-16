@@ -75,6 +75,10 @@ def test_append_check_executes_only_trusted_base_code() -> None:
     job = workflow["jobs"]["validate-append"]
     steps = job["steps"]
     checkout = steps[0]
+    bootstrap = next(step for step in steps if step.get("id") == "validator")
+    validation = next(
+        step for step in steps if step.get("name") == "Validate exact append with base code"
+    )
     runs = _runs(workflow)
 
     assert workflow["permissions"] == {"contents": "read"}
@@ -82,7 +86,10 @@ def test_append_check_executes_only_trusted_base_code() -> None:
     assert checkout["with"]["persist-credentials"] is False
     assert 'git fetch --no-tags origin "$HEAD_SHA"' in runs
     assert 'git show "$HEAD_SHA:$tracking"' in runs
-    assert "vn2_tracking.py validate-append" in runs
+    assert "vn2_tracking.py validate-append --help" in bootstrap["run"]
+    assert "available=false" in bootstrap["run"]
+    assert validation["if"] == "steps.validator.outputs.available == 'true'"
+    assert "vn2_tracking.py validate-append" in validation["run"]
     assert "pull_request" + "_target" not in text
     assert "actions/download-artifact" not in text
     assert "secrets." not in text

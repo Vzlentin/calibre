@@ -24,7 +24,19 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - name: Install trusted base validator
         run: uv sync --project newcalibre --locked --group dev
+      - name: Detect validator bootstrap landing
+        id: validator
+        run: |
+          if uv run --project newcalibre --locked --no-sync python \
+            newcalibre/scripts/vn2_tracking.py validate-append --help >/dev/null 2>&1
+          then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::trusted base predates the compact append validator"
+          fi
       - name: Validate exact append with base code
+        if: steps.validator.outputs.available == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
