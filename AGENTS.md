@@ -127,7 +127,7 @@ New worktrees auto-run `setup-worktree-unix` from `.cursor/worktrees.json`
 
 Long-lived project memory lives in an Obsidian vault and is governed by the
 **user-level** `project-memory` skill (`~/.agents/skills/project-memory/SKILL.md`,
-from the public `Vzlentin/.agents` repo). Read it at the start of any
+from the public `Vzlentin/dotfiles` repo). Read it at the start of any
 non-trivial task. Hermes agents: use the `obsidian` skill instead.
 
 The vault root is `$OBSIDIAN_VAULT_PATH` — but **on this machine that variable
@@ -183,12 +183,11 @@ Hybrid, one source of truth per fact-type — don't mirror one into the other:
 ### Shipping workflow (/go)
 
 The implementation-orchestration pipeline (`/go`) and `project-memory` are
-**user-level** skills from the public `Vzlentin/.agents` repo (`~/.agents/skills/`);
-they are no longer tracked in this repo. Calibre's project-specific inputs
-live in the committed [`.agents/config.toml`](.agents/config.toml): the
-quality-gate commands (ruff / ty / pytest, all `uv run`-prefixed), the venv
-gate (`import calibre`), and named data requirements (`m5 → data/m5`, gated
-per work item with `--require-data m5`).
+**user-level** skills from the public `Vzlentin/dotfiles` repo
+(`~/.agents/skills/`); they are no longer tracked in this repo. There is no
+per-project config layer: the skill discovers Calibre's quality gates
+(ruff / ty / pytest, all `uv run`-prefixed) from this file's *Commands*
+section directly.
 
 Campaign routing examples for this repo (the `route:mechanical` /
 `route:judgment` labels win when present):
