@@ -8,21 +8,44 @@ import json
 import math
 import os
 import socket
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
+from tests.vn2_fixtures import (
+    BASE_WEEKS,
+    synthetic_config_payload,
+    write_config,
+    write_dataset,
+)
 
 from newcalibre.domain._canonical_json import canonical_json_bytes
-from newcalibre.protocols.vn2 import VN2ResultError, build_tracking_record
+from newcalibre.oracle import ORACLE_COMMIT, ORACLE_LOCK_SHA256, ORACLE_TAG
+from newcalibre.protocols.vn2 import (
+    THREAD_VARIABLES,
+    VN2EvidenceEnvironment,
+    VN2ResultError,
+    emit_vn2_result_bundle,
+    load_vn2_config,
+    load_vn2_dataset,
+    run_vn2,
+)
 from newcalibre.protocols.vn2.tracking import (
     TRACKING_KIND,
     TRACKING_SCHEMA,
+    TRACKING_SERIES_PATH,
     TrackingError,
     VN2TrackingRecord,
+    build_promotion_receipt,
+    build_tracking_record,
     compare_tracking_records,
     decide_append,
     parse_tracking_history,
     parse_tracking_record,
+    promotion_receipt_path,
+    validate_tracking_promotion,
     write_proposal_record,
 )
 
@@ -263,8 +286,554 @@ def _promotion_fixture(
     )
 
 
+def _write_test_json(path: Path, value: object) -> bytes:
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return payload
+
+
+def _create_committed_capture(root: Path) -> None:
+    bundle_root = root / CANDIDATE
+    bundle_root.mkdir(parents=True)
+    environment = _environment()
+    _write_test_json(bundle_root / "environment.json", environment)
+    round_digests: dict[str, str] = {}
+    for round_number in range(1, 7):
+        round_payload = _write_test_json(
+            bundle_root / "orders" / f"round-{round_number}.json",
+            {
+                "origin": f"2026-0{round_number}-05",
+                "orders": {f"sku-{index:03d}": float(index % 3) for index in range(599)},
+                "round_num": round_number,
+            },
+        )
+        round_digests[f"round-{round_number}.json"] = hashlib.sha256(round_payload).hexdigest()
+    _write_test_json(
+        bundle_root / "orders" / "extraction-report.json",
+        {
+            "config": "benchmarks/vn2/config/vn2-winning-loop.yaml",
+            "files": round_digests,
+            "rounds": 6,
+            "series_per_round": 599,
+        },
+    )
+    payload_paths = sorted(
+        (path for path in bundle_root.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(bundle_root).as_posix().encode(),
+    )
+    files = [
+        {
+            "bytes": path.stat().st_size,
+            "path": path.relative_to(bundle_root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in payload_paths
+    ]
+    listing = "".join(f"{entry['sha256']}  {entry['path']}\n" for entry in files).encode()
+    (bundle_root / "files.sha256").write_bytes(listing)
+    capture_listing = "".join(
+        f"{entry['sha256']}  {entry['path']}\n"
+        for entry in files
+        if str(entry["path"]).startswith("orders/")
+    ).encode()
+    capture_digest = hashlib.sha256(capture_listing).hexdigest()
+    config_digest = "2" * 64
+    input_digest = "3" * 64
+    os_facts = environment["os"]
+    assert isinstance(os_facts, dict)
+    environment_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "actuals_semantics": "censored_sales_surrogate",
+                "architecture": environment["arch"],
+                "capture_digest": capture_digest,
+                "config_digest": config_digest,
+                "input_digest": input_digest,
+                "lockfile_sha256": ORACLE_LOCK_SHA256,
+                "os_release": {
+                    "id": os_facts["id"],
+                    "version_id": os_facts["version_id"],
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    manifest = {
+        "actuals_semantics": "censored_sales_surrogate",
+        "artifact_kind": "vn2-oracle-orders",
+        "artifact_name": f"oracle-capture-{CANDIDATE}",
+        "candidate_sha": CANDIDATE,
+        "capture_digest": capture_digest,
+        "config_digest": config_digest,
+        "environment": environment,
+        "environment_digest": environment_digest,
+        "files": files,
+        "inner_bundle_digest": hashlib.sha256(listing).hexdigest(),
+        "input_inventory": "stage3/evidence/vn2-input-digests.json",
+        "input_inventory_digest": input_digest,
+        "oracle_commit": ORACLE_COMMIT,
+        "oracle_lock_sha256": ORACLE_LOCK_SHA256,
+        "oracle_tag": ORACLE_TAG,
+        "run_id": RUN_ID,
+        "run_url": f"https://github.com/Vzlentin/calibre/actions/runs/{RUN_ID}",
+        "schema": 1,
+        "workflow_sha": WORKFLOW,
+    }
+    manifest_bytes = _write_test_json(bundle_root / "manifest.json", manifest)
+    _write_test_json(
+        root / f"{CANDIDATE}-receipt.json",
+        {
+            "artifact_digest": DIGEST,
+            "artifact_id": "789013",
+            "artifact_name": manifest["artifact_name"],
+            "environment_digest": environment_digest,
+            "inner_bundle_digest": manifest["inner_bundle_digest"],
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "producer_sha": CANDIDATE,
+            "run_url": manifest["run_url"],
+            "schema": 1,
+            "workflow_run_id": RUN_ID,
+            "workflow_sha": WORKFLOW,
+        },
+    )
+
+
+def _result_environment() -> VN2EvidenceEnvironment:
+    return VN2EvidenceEnvironment(
+        arch="x86_64",
+        cpu_model="Synthetic x86_64",
+        os_id="ubuntu",
+        os_version_id="24.04",
+        os_pretty_name="Ubuntu 24.04.2 LTS",
+        python="3.12.10",
+        numpy="2.3.1",
+        numpy_config="OpenBLAS synthetic provenance",
+        runner_image="ubuntu24/20250701.1",
+        thread_policy={name: "1" for name in THREAD_VARIABLES},
+    )
+
+
+def _create_result_bundle(
+    root: Path,
+    *,
+    candidate_sha: str,
+) -> tuple[Path, Path, Path, Path]:
+    data_root, inventory_path, config_path = write_dataset(root / "inputs")
+    config_payload = synthetic_config_payload()
+    model_config = config_payload["model_config"]
+    assert isinstance(model_config, dict)
+    model_config["m"] = len(BASE_WEEKS)
+    write_config(config_path, config_payload)
+    config = load_vn2_config(config_path)
+    dataset = load_vn2_dataset(data_root, inventory_path, config)
+    lock_path = root / "inputs" / "uv.lock"
+    lock_path.write_bytes(b"synthetic locked environment\n")
+    result_root = root / "result-bundle"
+    emit_vn2_result_bundle(
+        result_root,
+        result=run_vn2(dataset),
+        config=config,
+        candidate_sha=candidate_sha,
+        workflow_sha=candidate_sha,
+        run_id=RUN_ID,
+        run_url=f"https://github.com/Vzlentin/calibre/actions/runs/{RUN_ID}",
+        config_path=config_path,
+        input_inventory_path=inventory_path,
+        lock_path=lock_path,
+        environment=_result_environment(),
+    )
+    return result_root, config_path, inventory_path, lock_path
+
+
+def _archive_directory(source: Path, destination: Path) -> None:
+    with zipfile.ZipFile(destination, "w") as archive:
+        for path in sorted(source.rglob("*"), key=lambda item: item.as_posix().encode()):
+            if path.is_file():
+                archive.write(path, path.relative_to(source).as_posix())
+
+
+def _archive_file(source: Path, destination: Path) -> None:
+    with zipfile.ZipFile(destination, "w") as archive:
+        archive.write(source, source.name)
+
+
+def _initialize_promotion_repository(root: Path) -> str:
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    for key, value in (("user.name", "VN2 test"), ("user.email", "vn2@example.invalid")):
+        subprocess.run(["git", "-C", str(root), "config", key, value], check=True)
+    project = root / "newcalibre"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'newcalibre'\n")
+    subprocess.run(["git", "-C", str(root), "add", "newcalibre/pyproject.toml"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _commit_promotion(
+    root: Path,
+    *,
+    candidate_sha: str,
+    record: VN2TrackingRecord,
+    receipt: bytes,
+    symlink_series: bool = False,
+) -> str:
+    series_path = root / TRACKING_SERIES_PATH
+    series_path.parent.mkdir(parents=True)
+    if symlink_series:
+        series_path.symlink_to("untrusted-series.jsonl")
+    else:
+        series_path.write_bytes(record.to_bytes())
+    receipt_relative = promotion_receipt_path(candidate_sha)
+    receipt_path = root / receipt_relative
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_bytes(receipt)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "add",
+            "--",
+            TRACKING_SERIES_PATH,
+            receipt_relative,
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "promotion"], check=True)
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _commit_promotion_repository(
+    root: Path,
+    *,
+    record: VN2TrackingRecord,
+    receipt: bytes,
+    symlink_series: bool = False,
+) -> tuple[str, str]:
+    base_sha = _initialize_promotion_repository(root)
+    head_sha = _commit_promotion(
+        root,
+        candidate_sha=CANDIDATE,
+        record=record,
+        receipt=receipt,
+        symlink_series=symlink_series,
+    )
+    return base_sha, head_sha
+
+
+def test_promote_cli_validates_real_git_and_evidence_chain(tmp_path: Path) -> None:
+    from scripts import vn2_tracking
+
+    repository_root = tmp_path / "repository"
+    base_sha = _initialize_promotion_repository(repository_root)
+    capture_root = tmp_path / "captures"
+    _create_committed_capture(capture_root)
+    result_root, config_path, inventory_path, lock_path = _create_result_bundle(
+        tmp_path / "evidence",
+        candidate_sha=base_sha,
+    )
+    result_archive = tmp_path / "result.zip"
+    _archive_directory(result_root, result_archive)
+    result_digest = hashlib.sha256(result_archive.read_bytes()).hexdigest()
+    run_url = f"https://github.com/Vzlentin/calibre/actions/runs/{RUN_ID}"
+    result_artifact_name = f"vn2-acceptance-{base_sha}"
+    proposal_artifact_name = f"vn2-tracking-proposal-{base_sha}"
+    record = build_tracking_record(
+        result_root,
+        capture_root,
+        candidate_sha=base_sha,
+        definition_ref="Vzlentin/calibre/.github/workflows/newcalibre.yml@refs/heads/main",
+        definition_sha=base_sha,
+        run_id=RUN_ID,
+        run_url=run_url,
+        result_artifact_id="789012",
+        result_artifact_name=result_artifact_name,
+        result_artifact_digest=result_digest,
+        config_path=config_path,
+        input_inventory_path=inventory_path,
+        lockfile_path=lock_path,
+    )
+    proposal = tmp_path / "proposal.jsonl"
+    proposal.write_bytes(record.to_bytes())
+    proposal_archive = tmp_path / "proposal.zip"
+    _archive_file(proposal, proposal_archive)
+    proposal_digest = hashlib.sha256(proposal_archive.read_bytes()).hexdigest()
+    workflow_run = {
+        "head_branch": "main",
+        "head_repository_id": 42,
+        "head_sha": base_sha,
+        "id": int(RUN_ID),
+        "repository_id": 42,
+    }
+    result_metadata = {
+        "digest": f"sha256:{result_digest}",
+        "expired": False,
+        "id": 789012,
+        "name": result_artifact_name,
+        "workflow_run": workflow_run,
+    }
+    proposal_metadata = {
+        "digest": f"sha256:{proposal_digest}",
+        "expired": False,
+        "id": 789014,
+        "name": proposal_artifact_name,
+        "workflow_run": workflow_run,
+    }
+    run_metadata = {
+        "conclusion": "success",
+        "event": "workflow_dispatch",
+        "head_branch": "main",
+        "head_sha": base_sha,
+        "html_url": run_url,
+        "id": int(RUN_ID),
+        "path": ".github/workflows/newcalibre.yml",
+        "repository": {"full_name": "Vzlentin/calibre", "id": 42},
+        "run_attempt": 1,
+        "status": "completed",
+    }
+    result_metadata_path = tmp_path / "result-metadata.json"
+    proposal_metadata_path = tmp_path / "proposal-metadata.json"
+    run_metadata_path = tmp_path / "run-metadata.json"
+    _write_test_json(result_metadata_path, result_metadata)
+    _write_test_json(proposal_metadata_path, proposal_metadata)
+    _write_test_json(run_metadata_path, run_metadata)
+    receipt = build_promotion_receipt(
+        record,
+        proposal,
+        result_artifact_metadata=result_metadata,
+        proposal_artifact_metadata=proposal_metadata,
+        run_metadata=run_metadata,
+        result_archive=result_archive,
+        proposal_archive=proposal_archive,
+    )
+    head_sha = _commit_promotion(
+        repository_root,
+        candidate_sha=base_sha,
+        record=record,
+        receipt=receipt.to_bytes(),
+    )
+    arguments = [
+        "promote",
+        "--result-root",
+        str(result_root),
+        "--capture-root",
+        str(capture_root),
+        "--candidate-sha",
+        base_sha,
+        "--workflow-ref",
+        "Vzlentin/calibre/.github/workflows/newcalibre.yml@refs/heads/main",
+        "--workflow-sha",
+        base_sha,
+        "--run-id",
+        RUN_ID,
+        "--run-url",
+        run_url,
+        "--result-artifact-id",
+        "789012",
+        "--result-artifact-name",
+        result_artifact_name,
+        "--result-artifact-digest",
+        result_digest,
+        "--config",
+        str(config_path),
+        "--input-inventory",
+        str(inventory_path),
+        "--lockfile",
+        str(lock_path),
+        "--proposal",
+        str(proposal),
+        "--result-artifact-metadata",
+        str(result_metadata_path),
+        "--proposal-artifact-metadata",
+        str(proposal_metadata_path),
+        "--run-metadata",
+        str(run_metadata_path),
+        "--result-archive",
+        str(result_archive),
+        "--proposal-archive",
+        str(proposal_archive),
+        "--repository-root",
+        str(repository_root),
+        "--base-sha",
+        base_sha,
+        "--head-sha",
+        head_sha,
+        "--default-branch-sha",
+        base_sha,
+    ]
+    production_validator_called = False
+    validator_code = validate_tracking_promotion.__code__
+    previous_profiler = sys.getprofile()
+
+    def observe_validator(frame: object, event: str, argument: object) -> None:
+        del argument
+        nonlocal production_validator_called
+        if event == "call" and getattr(frame, "f_code", None) is validator_code:
+            production_validator_called = True
+
+    sys.setprofile(observe_validator)
+    try:
+        assert vn2_tracking.main(arguments) == 0
+    finally:
+        sys.setprofile(previous_profiler)
+    assert production_validator_called
+
+
+def test_promotion_git_diff_preserves_deleted_rename_source(tmp_path: Path) -> None:
+    from scripts import vn2_tracking
+
+    repository_root = tmp_path / "rename-repository"
+    _initialize_promotion_repository(repository_root)
+    old_candidate = "c" * 40
+    series_path = repository_root / TRACKING_SERIES_PATH
+    series_path.parent.mkdir(parents=True)
+    series_path.write_bytes(_record(candidate=old_candidate).to_bytes())
+    old_receipt_relative = promotion_receipt_path(old_candidate)
+    old_receipt_path = repository_root / old_receipt_relative
+    old_receipt_path.write_bytes(b'{"old":true}\n')
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "add",
+            "--",
+            TRACKING_SERIES_PATH,
+            old_receipt_relative,
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository_root), "commit", "-qm", "existing tracking evidence"],
+        check=True,
+    )
+    base_sha = subprocess.run(
+        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    new_receipt_relative = promotion_receipt_path(CANDIDATE)
+    old_receipt_path.rename(repository_root / new_receipt_relative)
+    series_path.write_bytes(series_path.read_bytes() + _record().to_bytes())
+    subprocess.run(["git", "-C", str(repository_root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository_root), "commit", "-qm", "rename receipt while appending"],
+        check=True,
+    )
+    head_sha = subprocess.run(
+        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    detected_with_renames = {
+        path
+        for path in subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository_root),
+                "diff",
+                "--name-only",
+                "-z",
+                base_sha,
+                head_sha,
+                "--",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode()
+        .split("\0")
+        if path
+    }
+    assert detected_with_renames == {TRACKING_SERIES_PATH, new_receipt_relative}
+    with pytest.raises(TrackingError, match="exactly"):
+        vn2_tracking._promotion_git_blobs(
+            repository_root,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            candidate_sha=CANDIDATE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "object_type"),
+    [
+        ("100755", "blob"),
+        ("120000", "blob"),
+        ("040000", "tree"),
+        ("160000", "commit"),
+    ],
+)
+def test_git_blob_rejects_noncanonical_tree_entry_modes_and_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    object_type: str,
+) -> None:
+    from scripts import vn2_tracking
+
+    path = "stage3/evidence/tracking/series.jsonl"
+    entry = f"{mode} {object_type} {'1' * 40}\t{path}\0".encode()
+
+    def inspect(root: Path, *args: str) -> bytes:
+        assert args[0] == "ls-tree"
+        return entry
+
+    monkeypatch.setattr(vn2_tracking, "_git", inspect)
+    with pytest.raises(TrackingError, match="mode 100644 and type blob"):
+        vn2_tracking._git_blob(tmp_path, CANDIDATE, path)
+
+
+def test_git_blob_distinguishes_missing_from_ambiguous_tree_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import vn2_tracking
+
+    path = "stage3/evidence/tracking/series.jsonl"
+    monkeypatch.setattr(vn2_tracking, "_git", lambda root, *args: b"")
+    assert (
+        vn2_tracking._git_blob(
+            tmp_path,
+            CANDIDATE,
+            path,
+            allow_missing=True,
+        )
+        is None
+    )
+    with pytest.raises(TrackingError, match="missing"):
+        vn2_tracking._git_blob(tmp_path, CANDIDATE, path)
+
+    entry = f"100644 blob {'1' * 40}\t{path}\0".encode()
+    monkeypatch.setattr(vn2_tracking, "_git", lambda root, *args: entry + entry)
+    with pytest.raises(TrackingError, match="ambiguous"):
+        vn2_tracking._git_blob(
+            tmp_path,
+            CANDIDATE,
+            path,
+            allow_missing=True,
+        )
+
+
 def test_promotion_receipt_proves_exact_first_and_later_append(tmp_path: Path) -> None:
-    import newcalibre.protocols.vn2._tracking_promotion as promotion
+    import newcalibre.protocols.vn2.tracking as promotion
 
     record, result_zip, proposal_zip, result_meta, proposal_meta, run_meta = _promotion_fixture(
         tmp_path
@@ -319,7 +888,7 @@ def test_promotion_receipt_proves_exact_first_and_later_append(tmp_path: Path) -
 
 
 def test_promotion_refuses_replay_conflict_and_old_prefix_mutation(tmp_path: Path) -> None:
-    import newcalibre.protocols.vn2._tracking_promotion as promotion
+    import newcalibre.protocols.vn2.tracking as promotion
 
     record, result_zip, proposal_zip, result_meta, proposal_meta, run_meta = _promotion_fixture(
         tmp_path
@@ -400,7 +969,7 @@ def test_promotion_refuses_live_run_and_artifact_mismatches(
     path: tuple[str, ...],
     value: object,
 ) -> None:
-    import newcalibre.protocols.vn2._tracking_promotion as promotion
+    import newcalibre.protocols.vn2.tracking as promotion
 
     record, result_zip, proposal_zip, result_meta, proposal_meta, run_meta = _promotion_fixture(
         tmp_path
@@ -432,7 +1001,7 @@ def test_promotion_refuses_live_run_and_artifact_mismatches(
 def test_promotion_refuses_proposal_archive_receipt_and_tip_mismatches(
     tmp_path: Path,
 ) -> None:
-    import newcalibre.protocols.vn2._tracking_promotion as promotion
+    import newcalibre.protocols.vn2.tracking as promotion
 
     record, result_zip, proposal_zip, result_meta, proposal_meta, run_meta = _promotion_fixture(
         tmp_path
@@ -511,7 +1080,7 @@ def test_promotion_receipt_wire_paths_and_publication_are_strict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import newcalibre.protocols.vn2._tracking_persistence as persistence
-    import newcalibre.protocols.vn2._tracking_promotion as promotion
+    import newcalibre.protocols.vn2.tracking as promotion
 
     record, result_zip, proposal_zip, result_meta, proposal_meta, run_meta = _promotion_fixture(
         tmp_path

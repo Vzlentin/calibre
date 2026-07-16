@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -14,21 +15,23 @@ from newcalibre.oracle import validate_committed_promoted_capture
 from newcalibre.protocols.vn2 import (
     VN2ProtocolConfig,
     VN2RunResult,
-    build_tracking_record,
     capture_vn2_evidence_environment,
     emit_vn2_result_bundle,
     load_vn2_config,
     load_vn2_dataset,
-    parse_tracking_history,
-    parse_tracking_record,
     run_vn2,
     validate_vn2_result_bundle,
     verify_vn2_inputs,
 )
-from newcalibre.protocols.vn2._tracking_contracts import _ga1_digest, _regular_file_sha256
-from newcalibre.protocols.vn2._tracking_validation import (
+from newcalibre.protocols.vn2.tracking import (
+    TrackingError,
+    build_tracking_record,
+    parse_tracking_history,
+    parse_tracking_record,
+    regular_file_sha256_if_exists,
     require_exact_recomputation,
     resolve_tracking_history_mode,
+    tracking_ga1_digest,
 )
 
 pytestmark = [
@@ -226,7 +229,7 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
     }
     assert evidence["promoted_capture"] == promoted_capture
     assert payload["environment"] == {
-        "digest": _ga1_digest(payload),
+        "digest": tracking_ga1_digest(payload),
         "facts": expected_environment,
         "toolchain_digest": payload["environment"]["toolchain_digest"],
     }
@@ -263,6 +266,24 @@ def test_full_vn2_run_emits_and_revalidates_exact_r1_r4_bundle() -> None:
     assert _optional_digest(TRACKING_PATH) == tracking_before
 
 
+def test_optional_history_digest_distinguishes_absence_from_symlink_ancestor(
+    tmp_path: Path,
+) -> None:
+    """Hash regular history and refuse absence hidden below a symlink."""
+    real_tracking_root = tmp_path / "real-tracking"
+    real_tracking_root.mkdir()
+    history = real_tracking_root / "series.jsonl"
+    assert _optional_digest(history) is None
+    history.write_bytes(b"canonical history\n")
+    assert _optional_digest(history) == hashlib.sha256(b"canonical history\n").hexdigest()
+    history.unlink()
+
+    linked_tracking_root = tmp_path / "tracking"
+    linked_tracking_root.symlink_to(real_tracking_root, target_is_directory=True)
+    with pytest.raises(TrackingError, match="ancestor"):
+        _optional_digest(linked_tracking_root / "series.jsonl")
+
+
 def _required_environment(name: str) -> str:
     value = os.environ.get(name)
     assert value, f"{name} must be set by the evidence workflow"
@@ -270,9 +291,10 @@ def _required_environment(name: str) -> str:
 
 
 def _optional_digest(path: Path) -> str | None:
-    if not os.path.lexists(path):
-        return None
-    return _regular_file_sha256(path, name=f"Tier 4 evidence {path.as_posix()}")
+    return regular_file_sha256_if_exists(
+        path,
+        name=f"Tier 4 evidence {path.as_posix()}",
+    )
 
 
 def _expected_r1_jsonl(

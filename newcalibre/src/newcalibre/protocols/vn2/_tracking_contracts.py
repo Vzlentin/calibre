@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import math
@@ -13,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Literal, cast
+from typing import Literal, cast, overload
 from urllib.parse import urlparse
 
 from newcalibre.domain._canonical_json import canonical_json_bytes
@@ -535,7 +536,30 @@ def _read_bytes(value: bytes | bytearray | str | Path, *, name: str) -> bytes:
     raise TrackingError(f"{name} must be bytes, text, or a path")
 
 
-def _open_regular_file(path: Path, *, name: str) -> int:
+@overload
+def _open_regular_file(
+    path: Path,
+    *,
+    name: str,
+    allow_missing: Literal[False] = False,
+) -> int: ...
+
+
+@overload
+def _open_regular_file(
+    path: Path,
+    *,
+    name: str,
+    allow_missing: Literal[True],
+) -> int | None: ...
+
+
+def _open_regular_file(
+    path: Path,
+    *,
+    name: str,
+    allow_missing: bool = False,
+) -> int | None:
     absolute = Path(os.path.abspath(path))
     parts = absolute.parts
     if not absolute.is_absolute() or len(parts) < 2:
@@ -571,6 +595,8 @@ def _open_regular_file(path: Path, *, name: str) -> int:
     except TrackingError:
         raise
     except OSError as error:
+        if allow_missing and error.errno == errno.ENOENT:
+            return None
         raise TrackingError(
             f"{name} path and every ancestor must be readable non-symlinks"
         ) from error
@@ -581,8 +607,10 @@ def _open_regular_file(path: Path, *, name: str) -> int:
     return fd
 
 
-def _regular_file_sha256(path: Path, *, name: str) -> str:
-    fd = _open_regular_file(path, name=name)
+def _regular_file_sha256_if_exists(path: Path, *, name: str) -> str | None:
+    fd = _open_regular_file(path, name=name, allow_missing=True)
+    if fd is None:
+        return None
     digest = hashlib.sha256()
     try:
         while chunk := os.read(fd, 1024 * 1024):
@@ -592,6 +620,13 @@ def _regular_file_sha256(path: Path, *, name: str) -> str:
     finally:
         os.close(fd)
     return digest.hexdigest()
+
+
+def _regular_file_sha256(path: Path, *, name: str) -> str:
+    digest = _regular_file_sha256_if_exists(path, name=name)
+    if digest is None:
+        raise TrackingError(f"{name} path does not exist")
+    return digest
 
 
 def _bounded_bytes(value: bytes, *, name: str) -> bytes:

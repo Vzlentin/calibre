@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
       - name: Verify trusted base checkout
         env:
@@ -36,163 +36,52 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin "refs/pull/$PR_NUMBER/head"
           test "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA"
-      - name: Detect and confine tracking promotion
+      - name: Detect tracking tree changes
+        id: tracking-change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git diff --quiet --no-renames "$BASE_SHA" "$HEAD_SHA" -- stage3/evidence/tracking
+          then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            test "$status" -eq 1
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install trusted base validator
+        if: steps.tracking-change.outputs.present == 'true'
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+      - name: Sync trusted base dependencies
+        if: steps.tracking-change.outputs.present == 'true'
+        run: uv sync --project newcalibre --locked --group dev
+      - name: Inspect and confine tracking promotion
         id: promotion
+        if: steps.tracking-change.outputs.present == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          python3 - <<'PY'
-          import os
-          import subprocess
-
-          base = os.environ["BASE_SHA"]
-          head = os.environ["HEAD_SHA"]
-          changed = subprocess.check_output(
-              ["git", "diff", "--name-only", "-z", base, head, "--"]
-          )
-          try:
-              paths = [item.decode("utf-8") for item in changed.split(b"\0") if item]
-          except UnicodeError as error:
-              raise SystemExit("PR changed paths must be valid UTF-8") from error
-          tracking = [path for path in paths if path.startswith("stage3/evidence/tracking/")]
-          if not tracking:
-              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-                  output.write("present=false\n")
-              raise SystemExit(0)
-          receipt = f"stage3/evidence/tracking/{base}-receipt.json"
-          expected = {"stage3/evidence/tracking/series.jsonl", receipt}
-          if len(paths) != 2 or set(paths) != expected:
-              raise SystemExit(
-                  "tracking promotion must change exactly series.jsonl and the matching C0 receipt"
-              )
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("present=true\n")
-              output.write(f"receipt={receipt}\n")
-          PY
-      - name: Read strict receipt fields from the PR Git object
-        id: receipt
-        if: steps.promotion.outputs.present == 'true'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RECEIPT_PATH: ${{ steps.promotion.outputs.receipt }}
-        run: |
-          git show "$HEAD_SHA:$RECEIPT_PATH" > "$RUNNER_TEMP/tracking-receipt.json"
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          payload = Path(os.environ["RUNNER_TEMP"]) / "tracking-receipt.json"
-          raw = payload.read_bytes()
-          if not raw.endswith(b"\n") or raw.endswith(b"\r\n") or b"\n" in raw[:-1]:
-              raise SystemExit("tracking receipt must be one LF-terminated JSON object")
-
-          def unique(pairs):
-              value = {}
-              for key, item in pairs:
-                  if key in value:
-                      raise ValueError(f"duplicate key: {key}")
-                  value[key] = item
-              return value
-
-          value = json.loads(raw[:-1].decode("utf-8"), object_pairs_hook=unique)
-          canonical = json.dumps(
-              value, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-          ).encode("utf-8") + b"\n"
-          if raw != canonical:
-              raise SystemExit("tracking receipt is not canonical JSON")
-          if set(value) != {
-              "candidate_sha",
-              "proposal_artifact",
-              "receipt_kind",
-              "record_sha256",
-              "repository",
-              "result_artifact",
-              "schema",
-              "workflow",
-          }:
-              raise SystemExit("tracking receipt has an invalid root schema")
-          if (
-              value.get("schema") != 1
-              or value.get("receipt_kind") != "vn2-tracking-promotion-receipt"
-              or value.get("repository") != "Vzlentin/calibre"
-              or re.fullmatch(r"[0-9a-f]{64}", str(value.get("record_sha256"))) is None
-          ):
-              raise SystemExit("tracking receipt has an invalid identity")
-          candidate = value.get("candidate_sha")
-          if candidate != os.environ["BASE_SHA"]:
-              raise SystemExit("tracking receipt candidate does not equal the PR base")
-          workflow = value.get("workflow")
-          result = value.get("result_artifact")
-          proposal = value.get("proposal_artifact")
-          if not isinstance(workflow, dict) or not isinstance(result, dict) or not isinstance(proposal, dict):
-              raise SystemExit("tracking receipt is missing workflow or artifact bindings")
-          if (
-              set(workflow) != {"definition_ref", "definition_sha", "run_id", "run_url"}
-              or set(result) != {"digest", "id", "name"}
-              or set(proposal) != {"digest", "id", "name"}
-          ):
-              raise SystemExit("tracking receipt workflow or artifact schema is invalid")
-          fields = {
-              "candidate": candidate,
-              "workflow_ref": workflow.get("definition_ref"),
-              "workflow_sha": workflow.get("definition_sha"),
-              "run_id": workflow.get("run_id"),
-              "run_url": workflow.get("run_url"),
-              "result_id": result.get("id"),
-              "result_name": result.get("name"),
-              "result_digest": result.get("digest"),
-              "proposal_id": proposal.get("id"),
-              "proposal_name": proposal.get("name"),
-              "proposal_digest": proposal.get("digest"),
-          }
-          for name, item in fields.items():
-              if not isinstance(item, str) or not item or "\n" in item or "\r" in item:
-                  raise SystemExit(f"tracking receipt field {name} is invalid")
-          if re.fullmatch(r"[1-9][0-9]*", fields["run_id"]) is None:
-              raise SystemExit("tracking receipt run ID is invalid")
-          for name in ("result_id", "proposal_id"):
-              if re.fullmatch(r"[1-9][0-9]*", fields[name]) is None:
-                  raise SystemExit(f"tracking receipt {name} is invalid")
-          if fields["result_id"] == fields["proposal_id"]:
-              raise SystemExit("tracking result and proposal artifacts must be distinct")
-          if fields["result_name"] != f"vn2-acceptance-{candidate}":
-              raise SystemExit("tracking receipt result artifact name is invalid")
-          if fields["proposal_name"] != f"vn2-tracking-proposal-{candidate}":
-              raise SystemExit("tracking receipt proposal artifact name is invalid")
-          for name in ("result_digest", "proposal_digest"):
-              if re.fullmatch(r"[0-9a-f]{64}", fields[name]) is None:
-                  raise SystemExit(f"tracking receipt {name} is invalid")
-          expected_ref = (
-              "Vzlentin/calibre/.github/workflows/newcalibre.yml@refs/heads/main"
-          )
-          if fields["workflow_ref"] != expected_ref or fields["workflow_sha"] != candidate:
-              raise SystemExit("tracking receipt workflow definition is not the trusted C0")
-          expected_url = (
-              f"https://github.com/Vzlentin/calibre/actions/runs/{fields['run_id']}"
-          )
-          if fields["run_url"] != expected_url:
-              raise SystemExit("tracking receipt workflow run URL is invalid")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              for name, item in fields.items():
-                  output.write(f"{name}={item}\n")
-          PY
+          uv run --project newcalibre --locked --no-sync python \
+            .github/scripts/stage3_tracking_admission.py inspect \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT" \
+            --repository-root .
       - name: Download live same-run artifact metadata and archives
         if: steps.promotion.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RESULT_ID: ${{ steps.receipt.outputs.result_id }}
-          PROPOSAL_ID: ${{ steps.receipt.outputs.proposal_id }}
-          RUN_ID: ${{ steps.receipt.outputs.run_id }}
+          RESULT_ID: ${{ steps.promotion.outputs.result_id }}
+          PROPOSAL_ID: ${{ steps.promotion.outputs.proposal_id }}
+          RUN_ID: ${{ steps.promotion.outputs.run_id }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          RESULT_NAME: ${{ steps.receipt.outputs.result_name }}
-          RESULT_DIGEST: ${{ steps.receipt.outputs.result_digest }}
-          PROPOSAL_NAME: ${{ steps.receipt.outputs.proposal_name }}
-          PROPOSAL_DIGEST: ${{ steps.receipt.outputs.proposal_digest }}
-          RUN_URL: ${{ steps.receipt.outputs.run_url }}
+          RESULT_NAME: ${{ steps.promotion.outputs.result_name }}
+          RESULT_DIGEST: ${{ steps.promotion.outputs.result_digest }}
+          PROPOSAL_NAME: ${{ steps.promotion.outputs.proposal_name }}
+          PROPOSAL_DIGEST: ${{ steps.promotion.outputs.proposal_digest }}
+          RUN_URL: ${{ steps.promotion.outputs.run_url }}
         run: |
           set -euo pipefail
           gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID" \
@@ -205,132 +94,36 @@ jobs:
             > "$RUNNER_TEMP/result.zip"
           gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$PROPOSAL_ID/zip" \
             > "$RUNNER_TEMP/proposal.zip"
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          import shutil
-          import stat
-          import zipfile
-          from pathlib import Path
-
-          root = Path(os.environ["RUNNER_TEMP"])
-          candidate = os.environ["BASE_SHA"]
-          run_id = os.environ["RUN_ID"]
-          run = json.loads((root / "run-metadata.json").read_text(encoding="utf-8"))
-          repository = run.get("repository")
-          if (
-              run.get("id") != int(run_id)
-              or run.get("event") != "workflow_dispatch"
-              or run.get("path") != ".github/workflows/newcalibre.yml"
-              or run.get("head_branch") != "main"
-              or run.get("head_sha") != candidate
-              or run.get("status") != "completed"
-              or run.get("conclusion") != "success"
-              or run.get("run_attempt") != 1
-              or run.get("html_url") != os.environ["RUN_URL"]
-              or not isinstance(repository, dict)
-              or repository.get("full_name") != "Vzlentin/calibre"
-              or not isinstance(repository.get("id"), int)
-          ):
-              raise SystemExit("workflow-run metadata is not the trusted successful C0 mint")
-          repository_id = repository["id"]
-
-          artifacts = {
-              "result": (
-                  os.environ["RESULT_ID"],
-                  os.environ["RESULT_NAME"],
-                  os.environ["RESULT_DIGEST"],
-              ),
-              "proposal": (
-                  os.environ["PROPOSAL_ID"],
-                  os.environ["PROPOSAL_NAME"],
-                  os.environ["PROPOSAL_DIGEST"],
-              ),
-          }
-          for name, (artifact_id, artifact_name, receipt_digest) in artifacts.items():
-              metadata = json.loads(
-                  (root / f"{name}-metadata.json").read_text(encoding="utf-8")
-              )
-              workflow_run = metadata.get("workflow_run")
-              if (
-                  metadata.get("id") != int(artifact_id)
-                  or metadata.get("name") != artifact_name
-                  or metadata.get("digest") != f"sha256:{receipt_digest}"
-                  or metadata.get("expired") is not False
-                  or not isinstance(workflow_run, dict)
-                  or workflow_run.get("id") != int(run_id)
-                  or workflow_run.get("head_branch") != "main"
-                  or workflow_run.get("head_sha") != candidate
-                  or workflow_run.get("repository_id") != repository_id
-                  or workflow_run.get("head_repository_id") != repository_id
-              ):
-                  raise SystemExit(f"{name} artifact metadata is not from the trusted C0 mint")
-              archive = root / f"{name}.zip"
-              archive_hasher = hashlib.sha256()
-              with archive.open("rb") as source:
-                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                      archive_hasher.update(chunk)
-              archive_digest = archive_hasher.hexdigest()
-              if metadata["digest"] != f"sha256:{archive_digest}":
-                  raise SystemExit(
-                      f"downloaded {name} archive digest does not match GitHub metadata"
-                  )
-              destination = root / name
-              destination.mkdir()
-              with zipfile.ZipFile(archive) as bundle:
-                  entries = bundle.infolist()
-                  if sum(entry.file_size for entry in entries) > 1024 * 1024 * 1024:
-                      raise SystemExit(f"{name} artifact archive expands beyond the limit")
-                  seen = set()
-                  for entry in entries:
-                      raw_path = entry.filename.rstrip("/")
-                      parts = raw_path.split("/")
-                      mode = entry.external_attr >> 16
-                      file_type = stat.S_IFMT(mode)
-                      if (
-                          not raw_path
-                          or "\\" in raw_path
-                          or raw_path.startswith("/")
-                          or any(part in {"", ".", ".."} for part in parts)
-                          or raw_path in seen
-                          or (
-                              entry.is_dir()
-                              and file_type not in {0, stat.S_IFDIR}
-                          )
-                          or (
-                              not entry.is_dir()
-                              and file_type not in {0, stat.S_IFREG}
-                          )
-                      ):
-                          raise SystemExit(f"{name} artifact archive has an unsafe entry")
-                      seen.add(raw_path)
-                      target = destination.joinpath(*parts)
-                      if entry.is_dir():
-                          target.mkdir(parents=True, exist_ok=True)
-                      else:
-                          target.parent.mkdir(parents=True, exist_ok=True)
-                          with bundle.open(entry) as source, target.open("xb") as output:
-                              shutil.copyfileobj(source, output, length=1024 * 1024)
-          PY
-      - name: Install trusted base validator
-        if: steps.promotion.outputs.present == 'true'
-        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
-      - name: Sync trusted base dependencies
-        if: steps.promotion.outputs.present == 'true'
-        run: uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync python \
+            .github/scripts/stage3_tracking_admission.py admit \
+            --candidate-sha "$BASE_SHA" \
+            --run-id "$RUN_ID" \
+            --run-url "$RUN_URL" \
+            --run-metadata "$RUNNER_TEMP/run-metadata.json" \
+            --result-artifact-id "$RESULT_ID" \
+            --result-artifact-name "$RESULT_NAME" \
+            --result-artifact-digest "$RESULT_DIGEST" \
+            --result-artifact-metadata "$RUNNER_TEMP/result-metadata.json" \
+            --result-archive "$RUNNER_TEMP/result.zip" \
+            --result-destination "$RUNNER_TEMP/result" \
+            --proposal-artifact-id "$PROPOSAL_ID" \
+            --proposal-artifact-name "$PROPOSAL_NAME" \
+            --proposal-artifact-digest "$PROPOSAL_DIGEST" \
+            --proposal-artifact-metadata "$RUNNER_TEMP/proposal-metadata.json" \
+            --proposal-archive "$RUNNER_TEMP/proposal.zip" \
+            --proposal-destination "$RUNNER_TEMP/proposal"
       - name: Validate live artifacts and exact append bytes
         if: steps.promotion.outputs.present == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          WORKFLOW_REF: ${{ steps.receipt.outputs.workflow_ref }}
-          WORKFLOW_SHA: ${{ steps.receipt.outputs.workflow_sha }}
-          RUN_ID: ${{ steps.receipt.outputs.run_id }}
-          RUN_URL: ${{ steps.receipt.outputs.run_url }}
-          RESULT_ID: ${{ steps.receipt.outputs.result_id }}
-          RESULT_NAME: ${{ steps.receipt.outputs.result_name }}
-          RESULT_DIGEST: ${{ steps.receipt.outputs.result_digest }}
+          WORKFLOW_REF: ${{ steps.promotion.outputs.workflow_ref }}
+          WORKFLOW_SHA: ${{ steps.promotion.outputs.workflow_sha }}
+          RUN_ID: ${{ steps.promotion.outputs.run_id }}
+          RUN_URL: ${{ steps.promotion.outputs.run_url }}
+          RESULT_ID: ${{ steps.promotion.outputs.result_id }}
+          RESULT_NAME: ${{ steps.promotion.outputs.result_name }}
+          RESULT_DIGEST: ${{ steps.promotion.outputs.result_digest }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail

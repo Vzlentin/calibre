@@ -11,20 +11,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from newcalibre.protocols.vn2 import (  # noqa: E402
-    TrackingError,
-    build_tracking_record,
-    parse_tracking_record,
-    write_proposal_record,
-)
-from newcalibre.protocols.vn2._tracking_promotion import (  # noqa: E402
+from newcalibre.protocols.vn2.tracking import (  # noqa: E402
     TRACKING_SERIES_PATH,
+    TrackingError,
     build_promotion_receipt,
+    build_tracking_record,
     load_promotion_metadata,
+    parse_tracking_record,
     promotion_receipt_path,
     validate_promotion_paths,
     validate_tracking_promotion,
     write_promotion_receipt,
+    write_proposal_record,
 )
 
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
@@ -139,20 +137,31 @@ def _git_blob(
     *,
     allow_missing: bool = False,
 ) -> bytes | None:
-    spec = f"{revision}:{path}"
-    classified = subprocess.run(
-        ["git", "-C", str(root), "cat-file", "-t", spec],
-        check=False,
-        capture_output=True,
-    )
-    if classified.returncode != 0:
+    entries = [
+        entry
+        for entry in _git(root, "ls-tree", "-z", "--full-tree", revision, "--", path).split(b"\0")
+        if entry
+    ]
+    if not entries:
         if allow_missing:
             return None
-        detail = classified.stderr.decode("utf-8", errors="replace").strip()
-        raise TrackingError(f"required Git blob is missing: {detail}")
-    if classified.stdout.strip() != b"blob":
-        raise TrackingError("tracking evidence Git object must be a regular blob")
-    return _git(root, "cat-file", "blob", spec)
+        raise TrackingError(f"required Git tree entry is missing: {path}")
+    if len(entries) != 1:
+        raise TrackingError(f"Git tree entry is ambiguous: {path}")
+    try:
+        metadata, actual_path = entries[0].split(b"\t", 1)
+        mode, object_type, object_id = metadata.split(b" ")
+        expected_path = path.encode("utf-8")
+        object_name = object_id.decode("ascii")
+    except (UnicodeError, ValueError) as error:
+        raise TrackingError(f"Git tree entry is malformed: {path}") from error
+    if actual_path != expected_path:
+        raise TrackingError(f"Git tree entry does not exactly match required path: {path}")
+    if mode != b"100644" or object_type != b"blob":
+        raise TrackingError(
+            f"tracking evidence Git entry must have mode 100644 and type blob: {path}"
+        )
+    return _git(root, "cat-file", "blob", object_name)
 
 
 def _promotion_git_blobs(
@@ -177,7 +186,16 @@ def _promotion_git_blobs(
     for name, revision in (("base", base), ("head", head)):
         if _git(root, "cat-file", "-t", revision).strip() != b"commit":
             raise TrackingError(f"promotion {name} SHA must identify a commit")
-    changed_raw = _git(root, "diff", "--name-only", "-z", base, head, "--")
+    changed_raw = _git(
+        root,
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        base,
+        head,
+        "--",
+    )
     try:
         changed = [item.decode("utf-8") for item in changed_raw.split(b"\0") if item]
     except UnicodeError as error:

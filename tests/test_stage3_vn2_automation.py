@@ -73,6 +73,16 @@ stage3_oracle_evidence = load_script_module(SCRIPTS_DIR / "stage3_oracle_evidenc
 
 def _write_report_tracking_evidence(root: Path, candidate: str) -> tuple[Path, Path]:
     root.mkdir(parents=True, exist_ok=True)
+
+    def canonical(value: object) -> bytes:
+        return json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+
     workflow = {
         "definition_ref": ("Vzlentin/calibre/.github/workflows/newcalibre.yml@refs/heads/main"),
         "definition_sha": candidate,
@@ -84,14 +94,114 @@ def _write_report_tracking_evidence(root: Path, candidate: str) -> tuple[Path, P
         "id": "789012",
         "name": f"vn2-acceptance-{candidate}",
     }
+    environment_facts = {
+        "arch": "x86_64",
+        "cpu_model": "fixture cpu",
+        "numpy": "2.3.1",
+        "numpy_config": "OpenBLAS fixture",
+        "os": {"id": "ubuntu", "pretty_name": "Ubuntu 24.04", "version_id": "24.04"},
+        "python": "3.12.13",
+        "runner_image": "ubuntu24/20260701.1",
+        "thread_policy": {
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
+        },
+    }
+    config_digest = "2" * 64
+    input_digest = "3" * 64
+    lock_digest = "4" * 64
+    capture_digest = "5" * 64
+    environment_digest = hashlib.sha256(
+        canonical(
+            {
+                "actuals_semantics": "censored_sales_surrogate",
+                "architecture": environment_facts["arch"],
+                "config_digest": config_digest,
+                "input_inventory_digest": input_digest,
+                "lockfile_digest": lock_digest,
+                "os_id": "ubuntu",
+                "os_version": "24.04",
+                "promoted_capture_digest": capture_digest,
+            }
+        )
+    ).hexdigest()
+    toolchain_digest = hashlib.sha256(
+        canonical(
+            {
+                "numpy": environment_facts["numpy"],
+                "numpy_config": environment_facts["numpy_config"],
+                "python": environment_facts["python"],
+                "schema": 1,
+            }
+        )
+    ).hexdigest()
+    identity = hashlib.sha256(
+        canonical(
+            {
+                "artifact_kind": "vn2-gate-a-results",
+                "candidate_sha": candidate,
+                "config_digest": config_digest,
+                "environment_digest": environment_digest,
+                "input_inventory_digest": input_digest,
+            }
+        )
+    ).hexdigest()
     record = {
-        "environment": {},
-        "evidence": {},
-        "identity": "e" * 64,
-        "objective": {},
+        "environment": {
+            "digest": environment_digest,
+            "facts": environment_facts,
+            "toolchain_digest": toolchain_digest,
+        },
+        "evidence": {
+            "actuals_semantics": "censored_sales_surrogate",
+            "config": {"digest": config_digest, "path": "benchmarks/vn2/protocol.yaml"},
+            "input_inventory": {
+                "digest": input_digest,
+                "path": "benchmarks/vn2/vn2-input-digests.json",
+            },
+            "lockfile": {"digest": lock_digest, "path": "uv.lock"},
+            "promoted_capture": {
+                "artifact_digest": "1" * 64,
+                "artifact_id": "789013",
+                "artifact_name": f"oracle-capture-{candidate}",
+                "capture_digest": capture_digest,
+                "environment_digest": "1" * 64,
+                "inner_bundle_digest": "1" * 64,
+                "manifest_sha256": "1" * 64,
+                "producer_sha": candidate,
+                "run_url": "https://github.com/Vzlentin/calibre/actions/runs/123456",
+                "workflow_run_id": "123456",
+                "workflow_sha": candidate,
+            },
+            "session": {
+                "id": "1" * 64,
+                "series_count": 1,
+                "series_identity_digest": "1" * 64,
+            },
+        },
+        "identity": identity,
+        "objective": {
+            "holding_cost": 1.0,
+            "shortage_cost": 2.0,
+            "total_cost": 3.0,
+        },
         "record_kind": "vn2-gate-a-tracking-record",
         "result_artifact": result_artifact,
-        "result_bundle": {},
+        "result_bundle": {
+            "artifact_kind": "vn2-gate-a-results",
+            "files": {
+                "r1-orders.jsonl": "1" * 64,
+                "r2-cost-ledger.jsonl": "1" * 64,
+                "r3-final-triple.json": "1" * 64,
+                "r4-cost-trajectory.json": "1" * 64,
+            },
+            "inner_bundle_digest": "1" * 64,
+            "manifest_sha256": "1" * 64,
+            "provenance_digest": "1" * 64,
+        },
         "schema": 1,
         "subject": {
             "candidate_sha": candidate,
@@ -163,7 +273,7 @@ def test_tracking_activation_gate_is_base_controlled_before_mint() -> None:
     assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkout["uses"])
     assert checkout["with"] == {
         "ref": "${{ github.event.pull_request.base.sha }}",
-        "fetch-depth": 0,
+        "fetch-depth": 1,
         "persist-credentials": False,
     }
     assert "github.event.pull_request.head.sha" not in json.dumps(checkout)
@@ -174,19 +284,26 @@ def test_tracking_activation_gate_is_base_controlled_before_mint() -> None:
     assert 'test "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA"' in fetch["run"]
     setup = next(step for step in job["steps"] if "setup-uv@" in step.get("uses", ""))
     assert re.fullmatch(r"astral-sh/setup-uv@[0-9a-f]{40}", setup["uses"])
-    promotion = next(
-        step for step in job["steps"] if step.get("name") == "Detect and confine tracking promotion"
+    tracking_change = next(
+        step for step in job["steps"] if step.get("name") == "Detect tracking tree changes"
     )
-    assert "len(paths) != 2 or set(paths) != expected" in promotion["run"]
+    assert 'git diff --quiet --no-renames "$BASE_SHA" "$HEAD_SHA"' in tracking_change["run"]
+    promotion = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Inspect and confine tracking promotion"
+    )
+    assert ".github/scripts/stage3_tracking_admission.py inspect" in promotion["run"]
+    assert promotion["if"] == "steps.tracking-change.outputs.present == 'true'"
+    assert "python3 - <<" not in workflow_text
     download = next(
         step
         for step in job["steps"]
         if step.get("name") == "Download live same-run artifact metadata and archives"
     )
-    assert 'run.get("event") != "workflow_dispatch"' in download["run"]
-    assert 'run.get("path") != ".github/workflows/newcalibre.yml"' in download["run"]
-    assert 'metadata.get("digest") != f"sha256:{receipt_digest}"' in download["run"]
-    assert "artifact archive has an unsafe entry" in download["run"]
+    assert ".github/scripts/stage3_tracking_admission.py admit" in download["run"]
+    assert '--result-destination "$RUNNER_TEMP/result"' in download["run"]
+    assert '--proposal-destination "$RUNNER_TEMP/proposal"' in download["run"]
     assert "unzip " not in download["run"]
     validator = next(
         step
@@ -195,9 +312,11 @@ def test_tracking_activation_gate_is_base_controlled_before_mint() -> None:
     )
     assert "newcalibre/scripts/vn2_tracking.py promote" in validator["run"]
     assert '--default-branch-sha "$DEFAULT_SHA"' in validator["run"]
+    # The legacy emitter remains only for the bootstrap landing because the
+    # base-controlled pull_request_target workflow cannot judge its own PR.
     assert (
         "s3-activation-gate"
-        not in yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        in yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     )
 
 
@@ -276,18 +395,26 @@ def _write_oracle_environment(path: Path) -> None:
 def test_tracking_verify_and_gate_candidate_modes_are_explicit() -> None:
     gate = yaml.safe_load(GATE_WORKFLOW.read_text(encoding="utf-8"))
     triggers = gate[True]
-    assert set(triggers) == {"push", "workflow_dispatch"}
-    assert triggers["push"] == {
+    assert set(triggers) == {"pull_request_target", "workflow_dispatch"}
+    assert triggers["pull_request_target"] == {
+        "types": ["closed"],
         "branches": ["main"],
         "paths": [
             "stage3/evidence/tracking/series.jsonl",
             "stage3/evidence/tracking/*-receipt.json",
         ],
     }
-    assert (
-        gate["env"]["GATE_CANDIDATE_SHA"]
-        == "${{ github.event_name == 'push' && github.sha || inputs.candidate_sha }}"
+    event_candidate = (
+        "${{ github.event_name == 'pull_request_target' && "
+        "github.event.pull_request.merge_commit_sha || inputs.candidate_sha }}"
     )
+    assert gate["env"]["GATE_CANDIDATE_SHA"] == event_candidate
+    merged_only = (
+        "github.event_name != 'pull_request_target' || github.event.pull_request.merged == true"
+    )
+    for name in ("lint", "unit-isolated", "consistency", "oracle", "vn2-verify"):
+        assert gate["jobs"][name]["if"] == merged_only
+    assert gate["jobs"]["aggregate"]["if"] == f"always() && ({merged_only})"
     assert gate["jobs"]["vn2-verify"]["env"]["VN2_REQUIRE_HISTORY"] == "true"
 
     successor = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
@@ -307,18 +434,25 @@ def test_tracking_verify_and_gate_candidate_modes_are_explicit() -> None:
 
 
 @pytest.mark.parametrize(
-    ("workflow_path", "candidate"),
+    ("workflow_path", "job_candidate", "checkout_candidate"),
     [
         (
             SUCCESSOR_WORKFLOW,
             "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}",
+            "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}",
         ),
-        (GATE_WORKFLOW, "${{ env.GATE_CANDIDATE_SHA }}"),
+        (
+            GATE_WORKFLOW,
+            "${{ github.event_name == 'pull_request_target' && "
+            "github.event.pull_request.merge_commit_sha || inputs.candidate_sha }}",
+            "${{ env.GATE_CANDIDATE_SHA }}",
+        ),
     ],
 )
 def test_oracle_workflows_bind_exact_candidate_environment_and_vn2_inputs(
     workflow_path: Path,
-    candidate: str,
+    job_candidate: str,
+    checkout_candidate: str,
 ) -> None:
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     job = workflow["jobs"]["oracle"]
@@ -346,8 +480,8 @@ def test_oracle_workflows_bind_exact_candidate_environment_and_vn2_inputs(
 
     assert job["runs-on"] == "ubuntu-24.04"
     assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
-    assert job["env"]["ORACLE_CANDIDATE_SHA"] == candidate
-    assert checkout["with"]["ref"] == candidate
+    assert job["env"]["ORACLE_CANDIDATE_SHA"] == job_candidate
+    assert checkout["with"]["ref"] == checkout_candidate
     assert "if" not in checked_out_head
     assert checked_out_head["run"] == ('test "$(git rev-parse HEAD)" = "$ORACLE_CANDIDATE_SHA"')
     assert "if" not in harness
@@ -447,7 +581,9 @@ def test_gate_a_oracle_fails_closed_and_remains_an_aggregate_dependency() -> Non
         if step.get("name") == "Gate precondition - promoted captures present"
     )
 
-    assert "if" not in oracle
+    assert oracle["if"] == (
+        "github.event_name != 'pull_request_target' || github.event.pull_request.merged == true"
+    )
     assert "if" not in precondition
     assert "test ! -L stage3/evidence/captures" in precondition["run"]
     assert precondition["run"].index("test ! -L") < precondition["run"].index("test -d")
@@ -699,7 +835,10 @@ def test_gate_a_vn2_verify_binds_one_candidate_and_the_evidence_environment() ->
     assert checkout["with"]["ref"] == "${{ env.GATE_CANDIDATE_SHA }}"
     assert steps.index(setup) < steps.index(preflight)
     assert {key: job["env"][key] for key in VN2_THREAD_ENV} == VN2_THREAD_ENV
-    assert job["env"]["VN2_CANDIDATE_SHA"] == "${{ env.GATE_CANDIDATE_SHA }}"
+    assert job["env"]["VN2_CANDIDATE_SHA"] == (
+        "${{ github.event_name == 'pull_request_target' && "
+        "github.event.pull_request.merge_commit_sha || inputs.candidate_sha }}"
+    )
     assert job["env"]["VN2_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
     assert job["env"]["VN2_RUN_ID"] == "${{ github.run_id }}"
     assert job["env"]["VN2_RUN_URL"] == (
@@ -777,7 +916,10 @@ def test_gate_aggregate_ingests_and_binds_the_exact_oracle_artifact() -> None:
     )
 
     assert "oracle" in aggregate["needs"]
-    assert aggregate["if"] == "always()"
+    assert aggregate["if"] == (
+        "always() && (github.event_name != 'pull_request_target' || "
+        "github.event.pull_request.merged == true)"
+    )
     assert download["if"] == "always()"
     assert download["continue-on-error"] is True
     assert download["uses"] == "actions/download-artifact@v4"
@@ -840,7 +982,7 @@ def test_gate_report_persists_failed_or_skipped_oracle_lane_before_enforcement(
     def fake_git(*args: str) -> str:
         if args == ("rev-parse", "HEAD"):
             return candidate
-        if args[:2] == ("diff", "--name-only"):
+        if args[:3] == ("diff", "--no-renames", "--name-only"):
             return ""
         raise AssertionError(f"unexpected git call: {args!r}")
 

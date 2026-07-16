@@ -16,14 +16,26 @@ import hashlib
 import json
 import os
 import platform
-import re
 import stat
 import subprocess
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from stage3_clock import find_activation_record, parse_utc_timestamp, record_is_schema_complete
+
+SUCCESSOR_SRC = Path(__file__).resolve().parents[2] / "newcalibre" / "src"
+sys.path.insert(0, str(SUCCESSOR_SRC))
+
+from newcalibre.protocols.vn2.tracking import (  # noqa: E402
+    PromotionReceipt,
+    TrackingError,
+    VN2TrackingRecord,
+    parse_promotion_receipt,
+    parse_tracking_history,
+)
 
 EVIDENCE_ALLOWLIST = ("stage3/evidence/",)
 TRACKING_SERIES = Path("stage3/evidence/tracking/series.jsonl")
@@ -178,111 +190,26 @@ def _read_regular_bytes(path: Path, *, name: str, maximum: int = 4 * 1024 * 1024
     return b"".join(chunks)
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    value: dict[str, object] = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        value[key] = item
-    return value
-
-
-def _canonical_json_line(line: bytes, *, name: str) -> dict[str, object]:
-    if not line or b"\n" in line or b"\r" in line:
-        raise ValueError(f"{name} must contain exactly one LF-free JSON object")
-    try:
-        value = json.loads(line.decode("utf-8"), object_pairs_hook=_unique_object)
-        canonical = json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError) as error:
-        raise ValueError(f"{name} must be finite canonical UTF-8 JSON") from error
-    if not isinstance(value, dict) or canonical != line:
-        raise ValueError(f"{name} bytes are not one canonical JSON object")
-    return value
-
-
-def _tracking_candidate_sha(record: dict[str, object]) -> str:
-    subject = record.get("subject")
-    if not isinstance(subject, dict) or set(subject) != {"candidate_sha", "repository"}:
-        raise ValueError("tracking record subject has an invalid schema")
-    candidate = subject.get("candidate_sha")
-    if (
-        not isinstance(candidate, str)
-        or re.fullmatch(r"[0-9a-f]{40}", candidate) is None
-        or subject.get("repository") != "Vzlentin/calibre"
-    ):
-        raise ValueError("tracking record subject does not bind the canonical repository and C0")
-    return candidate
-
-
 def _receipt_binds_record(
-    receipt: dict[str, object],
-    record: dict[str, object],
+    receipt: PromotionReceipt,
+    record: VN2TrackingRecord,
     *,
-    candidate: str,
     record_digest: str,
 ) -> bool:
-    expected_receipt_keys = {
-        "candidate_sha",
-        "proposal_artifact",
-        "receipt_kind",
-        "record_sha256",
-        "repository",
-        "result_artifact",
-        "schema",
-        "workflow",
-    }
-    if (
-        set(receipt) != expected_receipt_keys
-        or receipt.get("schema") != 1
-        or receipt.get("receipt_kind") != "vn2-tracking-promotion-receipt"
-        or receipt.get("repository") != "Vzlentin/calibre"
-        or receipt.get("candidate_sha") != candidate
-        or receipt.get("record_sha256") != record_digest
-    ):
-        return False
-    workflow = receipt.get("workflow")
-    result = receipt.get("result_artifact")
-    proposal = receipt.get("proposal_artifact")
-    if (
-        not isinstance(workflow, dict)
-        or set(workflow) != {"definition_ref", "definition_sha", "run_id", "run_url"}
-        or workflow != record.get("workflow")
-        or workflow.get("definition_ref")
-        != "Vzlentin/calibre/.github/workflows/newcalibre.yml@refs/heads/main"
-        or workflow.get("definition_sha") != candidate
-        or not isinstance(workflow.get("run_id"), str)
-        or re.fullmatch(r"[1-9][0-9]*", workflow["run_id"]) is None
-        or workflow.get("run_url")
-        != f"https://github.com/Vzlentin/calibre/actions/runs/{workflow['run_id']}"
-        or not _valid_receipt_artifact(
-            result,
-            expected_name=f"vn2-acceptance-{candidate}",
-        )
-        or not _valid_receipt_artifact(
-            proposal,
-            expected_name=f"vn2-tracking-proposal-{candidate}",
-        )
-        or result != record.get("result_artifact")
-    ):
-        return False
-    return result["id"] != proposal["id"]
-
-
-def _valid_receipt_artifact(value: object, *, expected_name: str) -> bool:
+    subject = cast(Mapping[str, object], record.payload["subject"])
+    workflow = cast(Mapping[str, object], record.payload["workflow"])
+    result = cast(Mapping[str, object], record.payload["result_artifact"])
     return (
-        isinstance(value, dict)
-        and set(value) == {"digest", "id", "name"}
-        and isinstance(value.get("id"), str)
-        and re.fullmatch(r"[1-9][0-9]*", value["id"]) is not None
-        and value.get("name") == expected_name
-        and isinstance(value.get("digest"), str)
-        and re.fullmatch(r"[0-9a-f]{64}", value["digest"]) is not None
+        receipt.candidate_sha == subject["candidate_sha"]
+        and receipt.definition_ref == workflow["definition_ref"]
+        and receipt.definition_sha == workflow["definition_sha"]
+        and receipt.run_id == workflow["run_id"]
+        and receipt.run_url == workflow["run_url"]
+        and receipt.result_artifact.id == result["id"]
+        and receipt.result_artifact.name == result["name"]
+        and receipt.result_artifact.digest == result["digest"]
+        and receipt.proposal_artifact.id != receipt.result_artifact.id
+        and receipt.record_sha256 == record_digest
     )
 
 
@@ -292,82 +219,41 @@ def _tracking_evidence(
     problems: list[str],
 ) -> tuple[str | None, str | None, str | None]:
     try:
-        payload = _read_regular_bytes(series_path, name="tracking series")
+        series_bytes = _read_regular_bytes(series_path, name="tracking series")
     except ValueError as error:
         if not os.path.lexists(series_path):
-            problems.append("gate precondition unmet: no promoted tracking record (U9b)")
+            problems.append("gate precondition unmet: no promoted tracking record")
         else:
             problems.append(str(error))
         return None, None, None
-    if not payload or not payload.endswith(b"\n") or payload.endswith(b"\r\n"):
-        problems.append("tracking series must be non-empty canonical LF-terminated JSONL")
-        return None, None, None
-    rows = payload[:-1].split(b"\n")
-    if not rows or any(not row for row in rows):
-        problems.append("tracking series must not contain blank records")
-        return None, None, None
-    identities: list[object] = []
-    latest: dict[str, object] | None = None
     try:
-        for index, row in enumerate(rows):
-            latest = _canonical_json_line(row, name=f"tracking series row {index + 1}")
-            identities.append(latest.get("identity"))
-    except ValueError as error:
+        records = parse_tracking_history(series_bytes)
+    except TrackingError as error:
         problems.append(str(error))
         return None, None, None
-    if any(
-        not isinstance(identity, str) or re.fullmatch(r"[0-9a-f]{64}", identity) is None
-        for identity in identities
-    ) or len(set(identities)) != len(identities):
-        problems.append("tracking series identities must be unique lowercase SHA-256 values")
-        return None, None, None
-    assert latest is not None
-    expected_record_keys = {
-        "environment",
-        "evidence",
-        "identity",
-        "objective",
-        "record_kind",
-        "result_artifact",
-        "result_bundle",
-        "schema",
-        "subject",
-        "workflow",
-    }
-    if (
-        set(latest) != expected_record_keys
-        or latest.get("schema") != 1
-        or latest.get("record_kind") != "vn2-gate-a-tracking-record"
-    ):
-        problems.append("tracking series latest record has an invalid schema")
-        return None, None, None
-    try:
-        c0 = _tracking_candidate_sha(latest)
-    except ValueError as error:
-        problems.append(str(error))
-        return None, None, None
-    record_digest = hashlib.sha256(rows[-1] + b"\n").hexdigest()
+
+    latest_record = records[-1]
+    subject = cast(Mapping[str, object], latest_record.payload["subject"])
+    c0 = cast(str, subject["candidate_sha"])
+    record_bytes = latest_record.to_bytes()
+    record_digest = hashlib.sha256(record_bytes).hexdigest()
+
     receipt_path = series_path.parent / f"{c0}-receipt.json"
     try:
         receipt_bytes = _read_regular_bytes(receipt_path, name="tracking promotion receipt")
-        if not receipt_bytes.endswith(b"\n") or receipt_bytes.endswith(b"\r\n"):
-            raise ValueError("tracking promotion receipt must end with exactly one LF")
-        receipt = _canonical_json_line(
-            receipt_bytes[:-1],
-            name="tracking promotion receipt",
-        )
-    except ValueError as error:
+        receipt = parse_promotion_receipt(receipt_bytes)
+    except (TrackingError, ValueError) as error:
         problems.append(str(error))
-        return None, record_digest, None
+        return None, None, None
     if not _receipt_binds_record(
         receipt,
-        latest,
-        candidate=c0,
+        latest_record,
         record_digest=record_digest,
     ):
         problems.append("tracking promotion receipt does not bind the latest canonical record")
-        return None, record_digest, None
-    return c0, record_digest, hashlib.sha256(receipt_bytes).hexdigest()
+        return None, None, None
+    canonical_receipt_bytes = receipt.to_bytes()
+    return c0, record_digest, hashlib.sha256(canonical_receipt_bytes).hexdigest()
 
 
 def _capture_manifest_digests(root: Path, *, problems: list[str]) -> dict[str, str]:
@@ -641,7 +527,7 @@ def main() -> int:
     diff_check = None
     if c0:
         try:
-            changed = git("diff", "--name-only", f"{c0}..HEAD").splitlines()
+            changed = git("diff", "--no-renames", "--name-only", f"{c0}..HEAD").splitlines()
         except subprocess.CalledProcessError as error:
             problems.append(f"C0→candidate diff inspection failed: {error}")
         else:

@@ -3,28 +3,30 @@ name: gate-a
 # 40-hex candidate SHA (C1, after capture and record promotions merged),
 # checks out exactly that SHA in every job, runs or verifies every lane
 # there, and emits one machine-readable Gate report artifact. Manual runs
-# take an explicit C1; pushes that promote tracking evidence take the exact
-# post-merge SHA. Tier 4 is always verify-only and never mints evidence.
+# take an explicit C1; merged tracking-evidence pull requests take their exact
+# merge commit SHA. Tier 4 is always verify-only and never mints evidence.
 on:
   workflow_dispatch:
     inputs:
       candidate_sha:
         description: "Full 40-hex candidate SHA (C1)"
         required: true
-  push:
+  pull_request_target:
+    types: [closed]
     branches: [main]
     paths:
       - stage3/evidence/tracking/series.jsonl
       - stage3/evidence/tracking/*-receipt.json
 
 env:
-  GATE_CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.candidate_sha }}
+  GATE_CANDIDATE_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merge_commit_sha || inputs.candidate_sha }}
 
 permissions:
   contents: read
 
 jobs:
   lint:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     steps:
       - name: Validate candidate SHA
@@ -46,6 +48,7 @@ jobs:
           uv run --locked ty check src/newcalibre/
 
   unit-isolated:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +70,7 @@ jobs:
           sudo unshare -n sudo -u "$USER" env "PATH=$PATH" "HOME=$HOME" "UV_CACHE_DIR=${UV_CACHE_DIR:-$HOME/.cache/uv}" uv run --no-sync pytest tests/tier1
 
   consistency:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -93,6 +97,7 @@ jobs:
           diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
 
   oracle:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     env:
       MKL_NUM_THREADS: "1"
@@ -100,7 +105,7 @@ jobs:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       VECLIB_MAXIMUM_THREADS: "1"
-      ORACLE_CANDIDATE_SHA: ${{ env.GATE_CANDIDATE_SHA }}
+      ORACLE_CANDIDATE_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merge_commit_sha || inputs.candidate_sha }}
     steps:
       - name: Validate candidate SHA
         run: |
@@ -225,6 +230,7 @@ jobs:
           if-no-files-found: error
 
   vn2-verify:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     env:
       MKL_NUM_THREADS: "1"
@@ -232,7 +238,7 @@ jobs:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
       VECLIB_MAXIMUM_THREADS: "1"
-      VN2_CANDIDATE_SHA: ${{ env.GATE_CANDIDATE_SHA }}
+      VN2_CANDIDATE_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merge_commit_sha || inputs.candidate_sha }}
       VN2_WORKFLOW_SHA: ${{ github.workflow_sha }}
       VN2_RUN_ID: ${{ github.run_id }}
       VN2_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -309,7 +315,7 @@ jobs:
 
   aggregate:
     needs: [lint, unit-isolated, consistency, oracle, vn2-verify]
-    if: always()
+    if: always() && (github.event_name != 'pull_request_target' || github.event.pull_request.merged == true)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -322,6 +328,9 @@ jobs:
           fetch-depth: 0
       - name: Verify HEAD equals candidate
         run: test "$(git rev-parse HEAD)" = "${{ env.GATE_CANDIDATE_SHA }}"
+      - uses: astral-sh/setup-uv@v4
+      - name: Install the canonical tracking parser
+        run: uv sync --project newcalibre --locked --group dev
       - name: Download exact oracle evidence
         id: oracle-evidence-download
         if: always()
@@ -336,7 +345,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ env.GATE_CANDIDATE_SHA }}
         run: |
-          python3 .github/scripts/stage3_gate_report.py \
+          uv run --project newcalibre --locked --no-sync python .github/scripts/stage3_gate_report.py \
             --oracle-evidence \
               "${RUNNER_TEMP}/oracle-evidence/oracle-evidence-${{ env.GATE_CANDIDATE_SHA }}.json" \
             --oracle-junit \
@@ -358,5 +367,5 @@ jobs:
       - name: Enforce Gate report outcome after upload
         if: always()
         run: >-
-          python3 .github/scripts/stage3_gate_report.py
+          uv run --project newcalibre --locked --no-sync python .github/scripts/stage3_gate_report.py
           --check-report "${RUNNER_TEMP}/gate-report.json"
