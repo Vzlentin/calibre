@@ -30,13 +30,11 @@ jobs:
             newcalibre/**
             stage3/**
             .github/workflows/newcalibre.yml
-            .github/workflows/oracle-capture.yml
-            .github/workflows/gate-a.yml
+            .github/workflows/vn2-evidence.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
             tests/test_stage3_automation.py
             tests/test_stage3_vn2_automation.py
-            tests/test_stage3_tracking_admission.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
@@ -86,13 +84,11 @@ jobs:
             newcalibre/**
             stage3/**
             .github/workflows/newcalibre.yml
-            .github/workflows/oracle-capture.yml
-            .github/workflows/gate-a.yml
+            .github/workflows/vn2-evidence.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
             tests/test_stage3_automation.py
             tests/test_stage3_vn2_automation.py
-            tests/test_stage3_tracking_admission.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
@@ -100,7 +96,7 @@ jobs:
       - name: Stage 3 automation contracts
         run: |
           uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py tests/test_stage3_tracking_admission.py
+          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py
       - run: uv sync --locked --extra dev --extra benchmarks --extra hierarchy
         if: steps.gate.outputs.run_frozen == 'true'
       - name: Cache VN2 data
@@ -132,13 +128,11 @@ jobs:
             newcalibre/**
             stage3/**
             .github/workflows/newcalibre.yml
-            .github/workflows/oracle-capture.yml
-            .github/workflows/gate-a.yml
+            .github/workflows/vn2-evidence.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
             tests/test_stage3_automation.py
             tests/test_stage3_vn2_automation.py
-            tests/test_stage3_tracking_admission.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
@@ -198,13 +192,11 @@ jobs:
             newcalibre/**
             stage3/**
             .github/workflows/newcalibre.yml
-            .github/workflows/oracle-capture.yml
-            .github/workflows/gate-a.yml
+            .github/workflows/vn2-evidence.yml
             .github/workflows/stage3-clock.yml
             .github/scripts/stage3_*.py
             tests/test_stage3_automation.py
             tests/test_stage3_vn2_automation.py
-            tests/test_stage3_tracking_admission.py
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"

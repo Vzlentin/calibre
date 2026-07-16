@@ -1,7 +1,7 @@
 """Exercise the successor-owned VN2 inventory and acquisition boundary.
 
-Inventory/schema/refusal assertions are exact tolerance-class-1 facts. File
-digests and the approved-copy receipt are byte-identity class-4 assertions.
+Inventory/schema/refusal assertions are exact tolerance-class-1 facts. The
+approved file digests are byte-identity class-4 assertions.
 """
 
 from __future__ import annotations

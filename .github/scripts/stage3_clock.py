@@ -82,8 +82,7 @@ SUCCESSOR_PATTERNS = (
     "newcalibre/",
     "stage3/",
     ".github/workflows/newcalibre.yml",
-    ".github/workflows/oracle-capture.yml",
-    ".github/workflows/gate-a.yml",
+    ".github/workflows/vn2-evidence.yml",
     ".github/workflows/stage3-clock.yml",
     ".github/scripts/stage3_",
 )

@@ -1,0 +1,39 @@
+name: vn2-evidence
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-append:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out trusted base code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch head as Git data only
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch --no-tags origin "$HEAD_SHA"
+      - uses: astral-sh/setup-uv@v4
+      - name: Install trusted base validator
+        run: uv sync --project newcalibre --locked --group dev
+      - name: Validate exact append with base code
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          tracking=stage3/evidence/tracking/series.jsonl
+          git show "$BASE_SHA:$tracking" > "${RUNNER_TEMP}/base-series.jsonl"
+          git show "$HEAD_SHA:$tracking" > "${RUNNER_TEMP}/head-series.jsonl"
+          uv run --project newcalibre --locked --no-sync python \
+            newcalibre/scripts/vn2_tracking.py validate-append \
+            --base "${RUNNER_TEMP}/base-series.jsonl" \
+            --head "${RUNNER_TEMP}/head-series.jsonl"

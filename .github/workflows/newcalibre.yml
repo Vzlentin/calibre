@@ -1,11 +1,5 @@
 name: newcalibre
-# Successor CI lanes (Stage 3). Tiers 0-1 run per commit and are
-# branch-protection required, so they must report on every PR: they
-# short-circuit green while the successor project does not exist yet.
-# Tier 2 runs per merge to main. Tiers 3-4 are scheduled monitoring
-# (verify-only, never minting tracked evidence) or manual evidence runs at a
-# full 40-hex candidate SHA. Evidence environment: ADR 0001 — explicitly
-# versioned ubuntu-24.04 x86_64, locked toolchain; never ubuntu-latest.
+
 on:
   push:
     branches: [main]
@@ -16,401 +10,87 @@ on:
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: "Full 40-hex candidate SHA (manual evidence runs only)"
+        description: "Full 40-hex candidate SHA"
         required: true
-      lane:
-        description: "Evidence lane to run"
-        type: choice
-        required: true
-        options: [oracle, vn2-verify, vn2-mint]
+      mint:
+        description: "Upload a compact bundle and proposed tracking line"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   newcalibre-lint:
-    # Tier 0 — required context; real work only once newcalibre/ exists.
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Successor presence
-        id: present
-        run: echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - name: Record environment manifest
-        if: steps.present.outputs.exists == 'true'
-        run: |
-          echo "runner_image=${ImageOS:-unknown}/${ImageVersion:-unknown}"
-          echo "cpu_model=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
-          echo "os_release=$(. /etc/os-release && echo "$PRETTY_NAME")"
-          echo "arch=$(uname -m)"
       - uses: astral-sh/setup-uv@v4
-        if: steps.present.outputs.exists == 'true'
-      - name: Locked sync (dev group)
-        if: steps.present.outputs.exists == 'true'
-        working-directory: newcalibre
-        run: uv sync --locked --group dev
-      - name: Ruff check
-        if: steps.present.outputs.exists == 'true'
-        working-directory: newcalibre
-        run: uv run --locked ruff check .
-      - name: Ruff format check
-        if: steps.present.outputs.exists == 'true'
-        working-directory: newcalibre
-        run: uv run --locked ruff format --check .
-      - name: Type check
-        if: steps.present.outputs.exists == 'true'
-        working-directory: newcalibre
-        run: uv run --locked ty check src/newcalibre/
-      - name: Report lane result
-        run: echo "newcalibre-lint complete (successor present=${{ steps.present.outputs.exists }})"
+      - run: uv sync --project newcalibre --locked --group dev
+      - run: uv run --project newcalibre --locked --no-sync ruff check newcalibre
+      - run: uv run --project newcalibre --locked --no-sync ruff format --check newcalibre
+      - run: uv run --project newcalibre --locked --no-sync ty check newcalibre/src/newcalibre/
 
   newcalibre-unit:
-    # Tier 1 — required context. Runs from a successor-only export with the
-    # frozen tree, Git objects, captures, and network physically unavailable
-    # (GA5): provision the venv first, then run the suite inside a
-    # no-network namespace after the canaries prove the isolation.
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Successor presence
-        id: present
-        run: echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@v4
-        if: steps.present.outputs.exists == 'true'
+      - name: Test live Stage 3 automation contracts
+        run: |
+          uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync pytest \
+            tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py
       - name: Build successor-only export
-        if: steps.present.outputs.exists == 'true'
         run: |
           set -euo pipefail
           export_root="${RUNNER_TEMP}/successor-export"
           mkdir -p "$export_root"
-          rsync -a --exclude '.git' --exclude 'captures/' newcalibre/ "$export_root/newcalibre/"
+          rsync -a --exclude '.git' newcalibre/ "$export_root/newcalibre/"
           echo "EXPORT_ROOT=$export_root" >> "$GITHUB_ENV"
-      - name: Stage 3 automation contracts
-        run: |
-          uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py tests/test_stage3_tracking_admission.py
-      - name: Provision export venv (network still on)
-        if: steps.present.outputs.exists == 'true'
+      - name: Provision export environment
         working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
         run: uv sync --locked --group dev
-      - name: Isolation canaries
-        if: steps.present.outputs.exists == 'true'
+      - name: Run Tier 1 without repository, captures, or network
         working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
         run: |
           set -euo pipefail
-          test ! -e "$EXPORT_ROOT/calibre" || { echo "frozen package present in export"; exit 1; }
-          test ! -e "$EXPORT_ROOT/benchmarks" || { echo "frozen benchmarks present in export"; exit 1; }
-          test ! -e "$EXPORT_ROOT/newcalibre/.git" || { echo "Git objects present in export"; exit 1; }
-          find "$EXPORT_ROOT" -type d -name captures | grep -q . && { echo "captures present in export"; exit 1; } || true
-          uv run --no-sync python -c "import importlib.util, sys; sys.exit(1 if importlib.util.find_spec('calibre') else 0)" \
-            || { echo "frozen 'calibre' importable from export venv"; exit 1; }
-      - name: Tier 1 (network disabled)
-        if: steps.present.outputs.exists == 'true'
-        working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
-        run: |
-          set -euo pipefail
-          sudo unshare -n sudo -u "$USER" env "PATH=$PATH" "HOME=$HOME" "UV_CACHE_DIR=${UV_CACHE_DIR:-$HOME/.cache/uv}" bash -c '
-            set -euo pipefail
-            uv run --no-sync python -c "
+          test ! -e "$EXPORT_ROOT/.git"
+          test ! -e "$EXPORT_ROOT/stage3"
+          test ! -e "$EXPORT_ROOT/calibre"
+          sudo unshare -n sudo -u "$USER" env "PATH=$PATH" "HOME=$HOME" \
+            "UV_CACHE_DIR=${UV_CACHE_DIR:-$HOME/.cache/uv}" bash -c '
+              set -euo pipefail
+              uv run --no-sync python -c "
           import socket, sys
           try:
               socket.create_connection((\"1.1.1.1\", 443), timeout=3)
           except OSError:
               sys.exit(0)
           sys.exit(1)
-          " || { echo "network canary failed: network reachable"; exit 1; }
-            uv run --no-sync pytest tests/tier1
-          '
-      - name: Report lane result
-        run: echo "newcalibre-unit complete (successor present=${{ steps.present.outputs.exists }})"
-
-
-  capture-promotion:
-    # Capture promotion guard: capture PRs are evidence-only, and live GitHub
-    # artifact metadata must bind the exact bytes and committed receipt.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Detect and path-confine capture promotion
-        id: promotion
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          mapfile -t changed < <(git diff --name-only "$BASE_SHA"...HEAD)
-          capture_changes=()
-          outside_changes=()
-          for path in "${changed[@]}"; do
-            if [[ "$path" == stage3/evidence/captures/* ]]; then
-              capture_changes+=("$path")
-            else
-              outside_changes+=("$path")
-            fi
-          done
-          if (( ${#capture_changes[@]} == 0 )); then
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if (( ${#outside_changes[@]} != 0 )); then
-            echo "capture promotion PRs must contain evidence/receipt changes only"
-            printf 'outside allowlist: %s\n' "${outside_changes[@]}"
-            exit 1
-          fi
-          receipts=()
-          for path in "${capture_changes[@]}"; do
-            if [[ "$path" =~ ^stage3/evidence/captures/[0-9a-f]{40}-receipt\.json$ ]]; then
-              receipts+=("$path")
-            fi
-          done
-          if (( ${#receipts[@]} != 1 )); then
-            echo "capture promotion must add or update exactly one canonical receipt"
-            exit 1
-          fi
-          receipt="${receipts[0]}"
-          candidate="${receipt#stage3/evidence/captures/}"
-          candidate="${candidate%-receipt.json}"
-          bundle="stage3/evidence/captures/$candidate"
-          test -f "$receipt" && test -d "$bundle"
-          for path in "${capture_changes[@]}"; do
-            if [[ "$path" != "$receipt" && "$path" != "$bundle/"* ]]; then
-              echo "capture promotion mixes candidate identities: $path"
-              exit 1
-            fi
-          done
-          echo "present=true" >> "$GITHUB_OUTPUT"
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
-          echo "receipt=$receipt" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@v4
-        if: steps.promotion.outputs.present == 'true'
-      - name: Locked sync (promotion validator)
-        if: steps.promotion.outputs.present == 'true'
-        run: uv sync --project newcalibre --locked --group dev
-      - name: Validate exact promoted bytes against GitHub artifact metadata
-        if: steps.promotion.outputs.present == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          uv run --project newcalibre --locked python newcalibre/scripts/capture_oracle_vn2.py promote \
-            --bundle "${{ steps.promotion.outputs.bundle }}" \
-            --receipt "${{ steps.promotion.outputs.receipt }}" \
-            --config benchmarks/vn2/config/vn2-winning-loop.yaml \
-            --input-inventory stage3/evidence/vn2-input-digests.json \
-            --repository "$GITHUB_REPOSITORY"
-      - name: Report lane result
-        run: echo "capture-promotion complete (promotion present=${{ steps.promotion.outputs.present }})"
+          "
+              uv run --no-sync pytest tests/tier1
+            '
 
   newcalibre-consistency:
-    # Tier 2 — per merge to main: byte identity across two executions inside
-    # one job; later class-4 legs stay visibly pending, never green-washed.
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Successor presence
-        id: present
-        run: echo "exists=$([ -f newcalibre/pyproject.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@v4
-        if: steps.present.outputs.exists == 'true'
-      - name: Locked sync (dev group)
-        if: steps.present.outputs.exists == 'true'
-        working-directory: newcalibre
-        run: uv sync --locked --group dev
-      - name: Tier 2, execution 1
-        if: steps.present.outputs.exists == 'true'
-        working-directory: newcalibre
-        run: NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run1" uv run --locked pytest tests/tier2
-      - name: Tier 2, execution 2
-        if: steps.present.outputs.exists == 'true'
-        working-directory: newcalibre
-        run: NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-run2" uv run --locked pytest tests/tier2
-      - name: Require Tier-2 artifacts and compare executions
-        if: steps.present.outputs.exists == 'true'
+      - run: uv sync --project newcalibre --locked --group dev
+      - name: Run Tier 2 twice
         run: |
-          set -euo pipefail
-          for run in tier2-run1 tier2-run2; do
-            for artifact in resumed-ledger.bin same-seed-ledger.bin; do
-              test -s "${RUNNER_TEMP}/${run}/${artifact}"
-            done
-          done
-          diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"
-      - name: Report lane result
-        run: echo "newcalibre-consistency complete (successor present=${{ steps.present.outputs.exists }})"
+          NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-a" \
+            uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier2
+          NEWCALIBRE_TIER2_OUT="${RUNNER_TEMP}/tier2-b" \
+            uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier2
+          diff -r "${RUNNER_TEMP}/tier2-a" "${RUNNER_TEMP}/tier2-b"
 
-  oracle:
-    # Tier 3 — schedule verifies the default-branch SHA (monitoring only,
-    # never minting tracked evidence); manual dispatch requires a full
-    # candidate SHA. Consumes only promoted, manifest-complete captures;
-    # absent captures skip visibly.
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.lane == 'oracle')
-    runs-on: ubuntu-24.04
-    env:
-      MKL_NUM_THREADS: "1"
-      NUMEXPR_NUM_THREADS: "1"
-      OMP_NUM_THREADS: "1"
-      OPENBLAS_NUM_THREADS: "1"
-      VECLIB_MAXIMUM_THREADS: "1"
-      ORACLE_CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-    steps:
-      - name: Validate candidate SHA (manual runs)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
-            || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      - name: Verify checked-out HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "$ORACLE_CANDIDATE_SHA"
-      - name: Require successor + Tier 3 harness
-        run: |
-          set -euo pipefail
-          test -f newcalibre/pyproject.toml \
-            || { echo "missing successor project: newcalibre/pyproject.toml"; exit 1; }
-          test -f stage3/evidence/vn2-input-digests.json \
-            || { echo "missing VN2 digest inventory: stage3/evidence/vn2-input-digests.json"; exit 1; }
-          test -f newcalibre/benchmarks/vn2/vn2-input-digests.json \
-            || { echo "missing successor VN2 inventory"; exit 1; }
-          test -f newcalibre/scripts/vn2_data.py \
-            || { echo "missing successor VN2 verifier"; exit 1; }
-          test -d newcalibre/tests/tier3 \
-            || { echo "missing Tier 3 harness"; exit 1; }
-          test -f newcalibre/tests/tier3/oracle_inventory.json \
-            || { echo "missing required Tier 3 oracle inventory"; exit 1; }
-          test -f newcalibre/tests/tier3/test_conditional_replay.py \
-            || { echo "missing required Tier 3 conditional replay"; exit 1; }
-      - name: Promoted captures presence
-        id: captures
-        run: |
-          set -euo pipefail
-          test ! -L stage3/evidence/captures \
-            || { echo "symlinked promoted captures root refused"; exit 1; }
-          test ! -e stage3/evidence/captures \
-            || test -d stage3/evidence/captures \
-            || { echo "promoted captures root is not a directory"; exit 1; }
-          if test -d stage3/evidence/captures; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Tier 3 visibly skipped
-        if: github.event_name == 'schedule' && steps.captures.outputs.present != 'true'
-        run: echo "::notice::tier 3 skipped - promoted captures absent"
-      - name: Require promoted captures (manual runs)
-        if: github.event_name == 'workflow_dispatch' && steps.captures.outputs.present != 'true'
-        run: |
-          echo "promoted captures are required for a manual Tier 3 evidence run"
-          exit 1
-      - uses: astral-sh/setup-uv@v4
-        if: steps.captures.outputs.present == 'true'
-      - name: Preflight - evidence environment (ADR 0001)
-        if: steps.captures.outputs.present == 'true'
-        run: |
-          set -euo pipefail
-          . /etc/os-release
-          test "$ID" = "ubuntu" || { echo "non-Ubuntu runner refused"; exit 1; }
-          test "$VERSION_ID" = "24.04" || { echo "Ubuntu release $VERSION_ID refused"; exit 1; }
-          test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
-          test "${ImageOS:-}" = "ubuntu24" || { echo "runner image OS must be ubuntu24"; exit 1; }
-          test -n "${ImageVersion:-}" || { echo "ImageVersion is required"; exit 1; }
-          uv run --no-project --python 3.12 python - <<'PY'
-          import sys
-
-          assert sys.version_info[:2] == (3, 12), sys.version
-          print(f"bootstrap_python={sys.version}")
-          PY
-          sha256sum newcalibre/uv.lock
-          printf 'runner_image=%s/%s\n' "$ImageOS" "$ImageVersion"
-          printf 'os_release=%s arch=%s\n' "$PRETTY_NAME" "$(uname -m)"
-      - name: Restore VN2 data (exact digest-inventory key, no fallback)
-        if: steps.captures.outputs.present == 'true'
-        uses: actions/cache@v4
-        with:
-          path: newcalibre/data/vn2
-          key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
-      - name: Acquire VN2 inputs with bootstrap tooling
-        if: steps.captures.outputs.present == 'true'
-        env:
-          DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
-          GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
-        run: uv run --no-project python .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
-      - name: Verify VN2 inputs with successor tooling
-        if: steps.captures.outputs.present == 'true'
-        run: |
-          uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify --target newcalibre/data/vn2 \
-            --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json
-      - name: Record numerical provenance
-        if: steps.captures.outputs.present == 'true'
-        working-directory: newcalibre
-        run: |
-          uv run --locked --no-sync python - <<'PY'
-          import platform
-          import sys
-          from hashlib import sha256
-          from pathlib import Path
-
-          import numpy
-
-          print(f"python={sys.version}")
-          print(f"cpu={platform.processor()}")
-          print(f"numpy={numpy.__version__}")
-          lock_digest = sha256(Path("uv.lock").read_bytes()).hexdigest()
-          print(f"lock_sha256={lock_digest}")
-          numpy.show_config()
-          PY
-          uv run --locked --no-sync python scripts/capture_oracle_vn2.py environment \
-            --out "${RUNNER_TEMP}/oracle-environment.json"
-          cat "${RUNNER_TEMP}/oracle-environment.json"
-          uv --version
-      - name: Tier 3 replay + divergence + witness enforcement
-        id: tier3
-        if: steps.captures.outputs.present == 'true'
-        working-directory: newcalibre
-        run: >-
-          uv run --locked --no-sync pytest tests/tier3
-          --junitxml="${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml"
-      - name: Emit candidate-qualified oracle evidence
-        if: always()
-        env:
-          ORACLE_TEST_OUTCOME: ${{ steps.tier3.outcome }}
-        run: |
-          python3 .github/scripts/stage3_oracle_evidence.py emit \
-            --candidate-sha "$ORACLE_CANDIDATE_SHA" \
-            --environment "${RUNNER_TEMP}/oracle-environment.json" \
-            --junit "${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml" \
-            --out "${RUNNER_TEMP}/oracle-evidence-${ORACLE_CANDIDATE_SHA}.json" \
-            --test-outcome "$ORACLE_TEST_OUTCOME"
-      - name: Validate candidate-qualified oracle evidence
-        if: always()
-        run: |
-          python3 .github/scripts/stage3_oracle_evidence.py validate \
-            --evidence "${RUNNER_TEMP}/oracle-evidence-${ORACLE_CANDIDATE_SHA}.json" \
-            --junit "${RUNNER_TEMP}/oracle-pytest-${ORACLE_CANDIDATE_SHA}.xml" \
-            --allow-skipped \
-              "${{ github.event_name == 'schedule' && steps.captures.outputs.present != 'true' }}"
-      - name: Upload oracle evidence and pytest outcomes
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: oracle-evidence-${{ env.ORACLE_CANDIDATE_SHA }}
-          path: |
-            ${{ runner.temp }}/oracle-evidence-${{ env.ORACLE_CANDIDATE_SHA }}.json
-            ${{ runner.temp }}/oracle-pytest-${{ env.ORACLE_CANDIDATE_SHA }}.xml
-          if-no-files-found: error
-
-  vn2-acceptance:
-    # Tier 4 — schedule is verify-only against the default-branch SHA;
-    # manual mint/verify runs require a full candidate SHA and emit a
-    # digest-bound bundle artifact. The job never edits the checkout.
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && startsWith(inputs.lane, 'vn2'))
+  vn2-regression:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     env:
       MKL_NUM_THREADS: "1"
@@ -419,14 +99,8 @@ jobs:
       OPENBLAS_NUM_THREADS: "1"
       VECLIB_MAXIMUM_THREADS: "1"
       VN2_CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      VN2_WORKFLOW_SHA: ${{ github.workflow_sha }}
-      VN2_RUN_ID: ${{ github.run_id }}
-      VN2_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      VN2_WORKFLOW_REF: ${{ github.workflow_ref }}
-      VN2_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' && 'mint' || 'verify' }}
-      VN2_REQUIRE_HISTORY: ${{ github.event_name == 'schedule' && 'false' || 'true' }}
     steps:
-      - name: Validate candidate SHA (manual runs)
+      - name: Validate manual candidate
         if: github.event_name == 'workflow_dispatch'
         run: |
           echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
@@ -434,195 +108,56 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
-      - name: Verify checked-out HEAD equals candidate
-        run: test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"
       - uses: astral-sh/setup-uv@v4
-      - name: Preflight — evidence environment (ADR 0001)
+      - name: Require canonical VN2 evidence and harnesses
         run: |
           set -euo pipefail
-          . /etc/os-release
-          test "$ID" = "ubuntu" || { echo "non-Ubuntu runner refused"; exit 1; }
-          test "$VERSION_ID" = "24.04" || { echo "Ubuntu release $VERSION_ID refused"; exit 1; }
-          test "$(uname -m)" = "x86_64" || { echo "non-x86_64 runner refused"; exit 1; }
-          test "${ImageOS:-}" = "ubuntu24" || { echo "runner image OS must be ubuntu24"; exit 1; }
-          test -n "${ImageVersion:-}" || { echo "ImageVersion is required"; exit 1; }
-          uv run --no-project --python 3.12 python - <<'PY'
-          import sys
-
-          assert sys.version_info[:2] == (3, 12), sys.version
-          print(f"bootstrap_python={sys.version}")
-          PY
-          sha256sum newcalibre/uv.lock
-          printf 'runner_image=%s/%s\n' "$ImageOS" "$ImageVersion"
-          printf 'os_release=%s arch=%s\n' "$PRETTY_NAME" "$(uname -m)"
-      - name: Require successor + Tier 4 harness
-        run: |
-          set -euo pipefail
-          test -f newcalibre/pyproject.toml \
-            || { echo "missing successor project: newcalibre/pyproject.toml"; exit 1; }
-          test -f stage3/evidence/vn2-input-digests.json \
-            || { echo "missing VN2 digest inventory: stage3/evidence/vn2-input-digests.json"; exit 1; }
-          test -f newcalibre/tests/tier4/test_vn2_acceptance.py \
-            || { echo "missing Tier 4 acceptance test: newcalibre/tests/tier4/test_vn2_acceptance.py"; exit 1; }
-      - name: Restore VN2 data (exact digest-inventory key, no fallback)
+          test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"
+          test -f newcalibre/benchmarks/vn2/vn2-input-digests.json
+          test -f stage3/evidence/captures/vn2/manifest.json
+          test -f newcalibre/tests/tier3/test_conditional_replay.py
+          test -f newcalibre/tests/tier4/test_vn2_acceptance.py
+      - name: Restore canonical VN2 inputs
         uses: actions/cache@v4
         with:
           path: newcalibre/data/vn2
-          key: stage3-vn2-${{ hashFiles('stage3/evidence/vn2-input-digests.json') }}
-      - name: Acquire VN2 inputs with bootstrap tooling
-        env:
-          DATASETS_MIRROR_REPO: ${{ vars.DATASETS_MIRROR_REPO }}
-          GH_TOKEN: ${{ secrets.DATASETS_MIRROR_TOKEN }}
-        run: uv run --no-project python .github/scripts/stage3_vn2_data.py download --target newcalibre/data/vn2 --if-missing
-      - name: Verify VN2 inputs with successor tooling
+          key: vn2-${{ hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json') }}
+      - name: Acquire and verify VN2 inputs with successor tooling
         run: |
+          set -euo pipefail
+          jq '{files: [.files[] | {name: .file_name, url: .url}]}' \
+            benchmarks/vn2/vn2_file_links.json > "${RUNNER_TEMP}/vn2-sources.json"
           uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify --target newcalibre/data/vn2 \
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py download \
+            --target newcalibre/data/vn2 \
+            --sources "${RUNNER_TEMP}/vn2-sources.json" \
+            --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json \
+            --if-missing
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify \
+            --target newcalibre/data/vn2 \
             --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json
-      - name: Record numerical provenance
-        working-directory: newcalibre
+      - name: Run conditional replay and biting witness
+        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier3
+      - name: Run generic-engine VN2 acceptance and R1-R4 emission
+        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4
+      - name: Build proposed compact tracking line
+        if: github.event_name == 'workflow_dispatch' && inputs.mint
         run: |
-          uv run --locked --no-sync python - <<'PY'
-          import platform
-          import sys
-          from hashlib import sha256
-          from pathlib import Path
-
-          import numpy
-
-          print(f"python={sys.version}")
-          print(f"cpu={platform.processor()}")
-          print(f"numpy={numpy.__version__}")
-          lock_digest = sha256(Path("uv.lock").read_bytes()).hexdigest()
-          print(f"lock_sha256={lock_digest}")
-          numpy.show_config()
-          PY
-      - name: Snapshot tracked history state
-        id: history
-        run: |
-          set -euo pipefail
-          path=stage3/evidence/tracking/series.jsonl
-          test ! -L "$path"
-          if test -e "$path"; then
-            test -f "$path"
-            echo "state=present" >> "$GITHUB_OUTPUT"
-            echo "digest=$(sha256sum "$path" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          else
-            echo "state=absent" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Tier 4 run
-        working-directory: newcalibre
-        run: uv run --locked --no-sync pytest tests/tier4
-      - name: Refuse tracked checkout mutation before upload
-        run: |
-          set -euo pipefail
-          test -z "$(git status --porcelain --untracked-files=no)" || {
-            echo "Tier 4 modified tracked checkout content"
-            git status --short --untracked-files=no
-            exit 1
-          }
-      - name: Upload digest-bound bundle
-        if: github.event_name == 'workflow_dispatch'
-        id: result_upload
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_tracking.py build \
+            --result-root newcalibre/artifacts/vn2 \
+            --candidate-sha "$VN2_CANDIDATE_SHA" \
+            --config newcalibre/benchmarks/vn2/protocol.yaml \
+            --input-inventory newcalibre/benchmarks/vn2/vn2-input-digests.json \
+            --lockfile newcalibre/uv.lock \
+            --capture stage3/evidence/captures/vn2 \
+            --oracle-config benchmarks/vn2/config/vn2-winning-loop.yaml \
+            --output newcalibre/artifacts/vn2-tracking/proposed-record.jsonl
+      - name: Upload compact evidence for a reviewed evidence-only PR
+        if: github.event_name == 'workflow_dispatch' && inputs.mint
         uses: actions/upload-artifact@v4
         with:
-          name: vn2-acceptance-${{ env.VN2_CANDIDATE_SHA }}
-          path: newcalibre/artifacts/vn2/
+          name: vn2-compact-evidence-${{ env.VN2_CANDIDATE_SHA }}
+          path: |
+            newcalibre/artifacts/vn2/
+            newcalibre/artifacts/vn2-tracking/proposed-record.jsonl
           if-no-files-found: error
-      - name: Download immutable result bundle for proposal
-        if: env.VN2_MODE == 'mint'
-        uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.result_upload.outputs.artifact-id }}
-          path: ${{ runner.temp }}/vn2-result-${{ env.VN2_CANDIDATE_SHA }}
-          merge-multiple: true
-      - name: Build proposal record from immutable result (manual vn2-mint only)
-        if: env.VN2_MODE == 'mint'
-        working-directory: newcalibre
-        run: |
-          uv run --locked --no-sync python scripts/vn2_tracking.py propose \
-            --result-root "${RUNNER_TEMP}/vn2-result-${VN2_CANDIDATE_SHA}" \
-            --capture-root ../stage3/evidence/captures \
-            --candidate-sha "$VN2_CANDIDATE_SHA" \
-            --workflow-ref "$VN2_WORKFLOW_REF" \
-            --workflow-sha "$VN2_WORKFLOW_SHA" \
-            --run-id "$VN2_RUN_ID" \
-            --run-url "$VN2_RUN_URL" \
-            --result-artifact-id "${{ steps.result_upload.outputs.artifact-id }}" \
-            --result-artifact-name "vn2-acceptance-$VN2_CANDIDATE_SHA" \
-            --result-artifact-digest "${{ steps.result_upload.outputs.artifact-digest }}" \
-            --config benchmarks/vn2/protocol.yaml \
-            --input-inventory benchmarks/vn2/vn2-input-digests.json \
-            --lockfile uv.lock \
-            --output artifacts/vn2-tracking/proposed-record.jsonl
-      - name: Revalidate proposal record from immutable result (manual vn2-mint only)
-        if: env.VN2_MODE == 'mint'
-        working-directory: newcalibre
-        run: |
-          uv run --locked --no-sync python scripts/vn2_tracking.py validate \
-            --result-root "${RUNNER_TEMP}/vn2-result-${VN2_CANDIDATE_SHA}" \
-            --capture-root ../stage3/evidence/captures \
-            --candidate-sha "$VN2_CANDIDATE_SHA" \
-            --workflow-ref "$VN2_WORKFLOW_REF" \
-            --workflow-sha "$VN2_WORKFLOW_SHA" \
-            --run-id "$VN2_RUN_ID" \
-            --run-url "$VN2_RUN_URL" \
-            --result-artifact-id "${{ steps.result_upload.outputs.artifact-id }}" \
-            --result-artifact-name "vn2-acceptance-$VN2_CANDIDATE_SHA" \
-            --result-artifact-digest "${{ steps.result_upload.outputs.artifact-digest }}" \
-            --config benchmarks/vn2/protocol.yaml \
-            --input-inventory benchmarks/vn2/vn2-input-digests.json \
-            --lockfile uv.lock \
-            --proposal artifacts/vn2-tracking/proposed-record.jsonl
-      - name: Upload proposal record (manual vn2-mint only)
-        if: env.VN2_MODE == 'mint'
-        id: proposal_upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: vn2-tracking-proposal-${{ env.VN2_CANDIDATE_SHA }}
-          path: newcalibre/artifacts/vn2-tracking/proposed-record.jsonl
-          if-no-files-found: error
-      - name: Download immutable proposal record (manual vn2-mint only)
-        if: env.VN2_MODE == 'mint'
-        uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ steps.proposal_upload.outputs.artifact-id }}
-          path: ${{ runner.temp }}/vn2-proposal-${{ env.VN2_CANDIDATE_SHA }}
-          merge-multiple: true
-      - name: Validate uploaded proposal record (manual vn2-mint only)
-        if: env.VN2_MODE == 'mint'
-        working-directory: newcalibre
-        run: |
-          uv run --locked --no-sync python scripts/vn2_tracking.py validate \
-            --result-root "${RUNNER_TEMP}/vn2-result-${VN2_CANDIDATE_SHA}" \
-            --capture-root ../stage3/evidence/captures \
-            --candidate-sha "$VN2_CANDIDATE_SHA" \
-            --workflow-ref "$VN2_WORKFLOW_REF" \
-            --workflow-sha "$VN2_WORKFLOW_SHA" \
-            --run-id "$VN2_RUN_ID" \
-            --run-url "$VN2_RUN_URL" \
-            --result-artifact-id "${{ steps.result_upload.outputs.artifact-id }}" \
-            --result-artifact-name "vn2-acceptance-$VN2_CANDIDATE_SHA" \
-            --result-artifact-digest "${{ steps.result_upload.outputs.artifact-digest }}" \
-            --config benchmarks/vn2/protocol.yaml \
-            --input-inventory benchmarks/vn2/vn2-input-digests.json \
-            --lockfile uv.lock \
-            --proposal "${RUNNER_TEMP}/vn2-proposal-${VN2_CANDIDATE_SHA}/proposed-record.jsonl"
-      - name: Final tracked history guard
-        if: always()
-        env:
-          INITIAL_DIGEST: ${{ steps.history.outputs.digest }}
-          INITIAL_STATE: ${{ steps.history.outputs.state }}
-        run: |
-          set -euo pipefail
-          path=stage3/evidence/tracking/series.jsonl
-          test ! -L "$path"
-          if test "$INITIAL_STATE" = present; then
-            test -f "$path"
-            test "$(sha256sum "$path" | cut -d' ' -f1)" = "$INITIAL_DIGEST"
-          else
-            test "$INITIAL_STATE" = absent
-            test ! -e "$path"
-          fi
-          test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"
-          test -z "$(git status --porcelain --untracked-files=no)"

@@ -1,256 +1,76 @@
-"""Build, receipt, and validate exact VN2 tracking promotions."""
+"""Build compact VN2 tracking proposals or validate an exact history append."""
 
 from __future__ import annotations
 
 import argparse
-import re
-import subprocess
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from newcalibre.protocols.vn2.tracking import (  # noqa: E402
-    TRACKING_SERIES_PATH,
-    TrackingError,
-    build_promotion_receipt,
+from newcalibre.oracle import OracleEvidenceError, load_capture  # noqa: E402
+from newcalibre.protocols.vn2 import (  # noqa: E402
+    VN2ResultError,
     build_tracking_record,
-    load_promotion_metadata,
-    parse_tracking_record,
-    promotion_receipt_path,
-    validate_promotion_paths,
-    validate_tracking_promotion,
-    write_promotion_receipt,
-    write_proposal_record,
+    load_result_bundle,
+)
+from newcalibre.protocols.vn2.tracking import (  # noqa: E402
+    TrackingError,
+    validate_tracking_append,
 )
 
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
-
-def _add_record_arguments(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--result-root", type=Path, required=True)
-    command.add_argument("--capture-root", type=Path, required=True)
-    command.add_argument("--candidate-sha", required=True)
-    command.add_argument("--workflow-ref", dest="definition_ref", required=True)
-    command.add_argument("--workflow-sha", dest="definition_sha", required=True)
-    command.add_argument("--run-id", required=True)
-    command.add_argument("--run-url", required=True)
-    command.add_argument("--result-artifact-id", dest="artifact_id", required=True)
-    command.add_argument("--result-artifact-name", dest="artifact_name", required=True)
-    command.add_argument("--result-artifact-digest", dest="artifact_digest", required=True)
-    command.add_argument("--config", type=Path, required=True)
-    command.add_argument("--input-inventory", type=Path, required=True)
-    command.add_argument("--lockfile", type=Path, required=True)
-
-
-def _add_live_promotion_arguments(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--proposal", type=Path, required=True)
-    command.add_argument("--result-artifact-metadata", type=Path, required=True)
-    command.add_argument("--proposal-artifact-metadata", type=Path, required=True)
-    command.add_argument("--run-metadata", type=Path, required=True)
-    command.add_argument("--result-archive", type=Path, required=True)
-    command.add_argument("--proposal-archive", type=Path, required=True)
-
-
-def _parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the compact tracking CLI."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("propose", "validate", "receipt", "promote"):
-        command = commands.add_parser(name)
-        _add_record_arguments(command)
-        if name == "propose":
-            command.add_argument("--output", type=Path, required=True)
-        elif name == "validate":
-            command.add_argument("--proposal", type=Path, required=True)
-        else:
-            _add_live_promotion_arguments(command)
-            if name == "receipt":
-                command.add_argument("--output", type=Path, required=True)
-            else:
-                command.add_argument("--repository-root", type=Path, required=True)
-                command.add_argument("--base-sha", required=True)
-                command.add_argument("--head-sha", required=True)
-                command.add_argument("--default-branch-sha", required=True)
+
+    build = commands.add_parser("build")
+    build.add_argument("--result-root", type=Path, required=True)
+    build.add_argument("--candidate-sha", required=True)
+    build.add_argument("--config", type=Path, required=True)
+    build.add_argument("--input-inventory", type=Path, required=True)
+    build.add_argument("--lockfile", type=Path, required=True)
+    build.add_argument("--capture", type=Path, required=True)
+    build.add_argument("--oracle-config", type=Path, required=True)
+    build.add_argument("--output", type=Path, required=True)
+
+    append = commands.add_parser("validate-append")
+    append.add_argument("--base", type=Path, required=True)
+    append.add_argument("--head", type=Path, required=True)
     return parser
 
 
-def _build(args: argparse.Namespace):
-    return build_tracking_record(
-        args.result_root,
-        args.capture_root,
-        candidate_sha=args.candidate_sha,
-        definition_ref=args.definition_ref,
-        definition_sha=args.definition_sha,
-        run_id=args.run_id,
-        run_url=args.run_url,
-        result_artifact_id=args.artifact_id,
-        result_artifact_name=args.artifact_name,
-        result_artifact_digest=args.artifact_digest,
-        config_path=args.config,
-        input_inventory_path=args.input_inventory,
-        lockfile_path=args.lockfile,
-    )
-
-
-def _live_inputs(args: argparse.Namespace) -> dict[str, object]:
-    return {
-        "result_artifact_metadata": load_promotion_metadata(
-            args.result_artifact_metadata,
-            name="result artifact metadata",
-        ),
-        "proposal_artifact_metadata": load_promotion_metadata(
-            args.proposal_artifact_metadata,
-            name="proposal artifact metadata",
-        ),
-        "run_metadata": load_promotion_metadata(
-            args.run_metadata,
-            name="workflow-run metadata",
-        ),
-        "result_archive": args.result_archive,
-        "proposal_archive": args.proposal_archive,
-    }
-
-
-def _require_commit(value: str, *, name: str) -> str:
-    if _COMMIT_SHA.fullmatch(value) is None:
-        raise TrackingError(f"{name} must be a full lowercase 40-hex commit SHA")
-    return value
-
-
-def _git(root: Path, *args: str) -> bytes:
-    completed = subprocess.run(
-        ["git", "-C", str(root), *args],
-        check=False,
-        capture_output=True,
-    )
-    if completed.returncode == 0:
-        return completed.stdout
-    detail = completed.stderr.decode("utf-8", errors="replace").strip()
-    raise TrackingError(f"Git object inspection failed: {detail}")
-
-
-def _git_blob(
-    root: Path,
-    revision: str,
-    path: str,
-    *,
-    allow_missing: bool = False,
-) -> bytes | None:
-    entries = [
-        entry
-        for entry in _git(root, "ls-tree", "-z", "--full-tree", revision, "--", path).split(b"\0")
-        if entry
-    ]
-    if not entries:
-        if allow_missing:
-            return None
-        raise TrackingError(f"required Git tree entry is missing: {path}")
-    if len(entries) != 1:
-        raise TrackingError(f"Git tree entry is ambiguous: {path}")
+def main() -> int:
+    """Dispatch proposal construction or trusted-base append validation."""
+    args = build_parser().parse_args()
     try:
-        metadata, actual_path = entries[0].split(b"\t", 1)
-        mode, object_type, object_id = metadata.split(b" ")
-        expected_path = path.encode("utf-8")
-        object_name = object_id.decode("ascii")
-    except (UnicodeError, ValueError) as error:
-        raise TrackingError(f"Git tree entry is malformed: {path}") from error
-    if actual_path != expected_path:
-        raise TrackingError(f"Git tree entry does not exactly match required path: {path}")
-    if mode != b"100644" or object_type != b"blob":
-        raise TrackingError(
-            f"tracking evidence Git entry must have mode 100644 and type blob: {path}"
+        if args.command == "validate-append":
+            appended = validate_tracking_append(args.base, args.head)
+            print(f"validated exact VN2 tracking append: {len(appended)} record(s)")  # noqa: T201
+            return 0
+
+        capture = load_capture(
+            args.capture,
+            config_path=args.oracle_config,
+            input_inventory_path=args.input_inventory,
         )
-    return _git(root, "cat-file", "blob", object_name)
-
-
-def _promotion_git_blobs(
-    repository_root: Path,
-    *,
-    base_sha: str,
-    head_sha: str,
-    candidate_sha: str,
-) -> tuple[bytes | None, bytes, bytes]:
-    root = Path(repository_root).absolute()
-    if (
-        root.is_symlink()
-        or (root / ".git").is_symlink()
-        or not (root / ".git").exists()
-        or not (root / "newcalibre" / "pyproject.toml").is_file()
-    ):
-        raise TrackingError("repository root must identify the checked-out Calibre worktree")
-    base = _require_commit(base_sha, name="promotion base SHA")
-    head = _require_commit(head_sha, name="promotion head SHA")
-    if base == head:
-        raise TrackingError("promotion head SHA must differ from its base")
-    for name, revision in (("base", base), ("head", head)):
-        if _git(root, "cat-file", "-t", revision).strip() != b"commit":
-            raise TrackingError(f"promotion {name} SHA must identify a commit")
-    changed_raw = _git(
-        root,
-        "diff",
-        "--no-renames",
-        "--name-only",
-        "-z",
-        base,
-        head,
-        "--",
-    )
-    try:
-        changed = [item.decode("utf-8") for item in changed_raw.split(b"\0") if item]
-    except UnicodeError as error:
-        raise TrackingError("promotion changed paths must be valid UTF-8") from error
-    validate_promotion_paths(changed, candidate_sha=candidate_sha)
-    receipt_path = promotion_receipt_path(candidate_sha)
-    promoted = _git_blob(root, head, TRACKING_SERIES_PATH)
-    receipt = _git_blob(root, head, receipt_path)
-    prior = _git_blob(root, base, TRACKING_SERIES_PATH, allow_missing=True)
-    assert promoted is not None
-    assert receipt is not None
-    return prior, promoted, receipt
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Dispatch proposal construction, receipt construction, or promotion validation."""
-    args = _parser().parse_args(argv)
-    try:
-        expected = _build(args)
-        if args.command == "propose":
-            write_proposal_record(expected, args.output)
-            validated_subject = str(args.output)
-        elif args.command == "validate":
-            actual = parse_tracking_record(args.proposal)
-            if actual.to_bytes() != expected.to_bytes():
-                raise TrackingError(
-                    "proposal bytes do not match freshly derived validated evidence"
-                )
-            validated_subject = str(args.proposal)
-        elif args.command == "receipt":
-            receipt = build_promotion_receipt(expected, args.proposal, **_live_inputs(args))
-            write_promotion_receipt(receipt, args.output)
-            validated_subject = str(args.output)
-        else:
-            prior, promoted, receipt_bytes = _promotion_git_blobs(
-                args.repository_root,
-                base_sha=args.base_sha,
-                head_sha=args.head_sha,
-                candidate_sha=args.candidate_sha,
-            )
-            validate_tracking_promotion(
-                expected,
-                args.proposal,
-                receipt_bytes,
-                promoted,
-                prior_history=prior,
-                base_sha=args.base_sha,
-                default_branch_sha=args.default_branch_sha,
-                **_live_inputs(args),
-            )
-            validated_subject = args.head_sha
-    except TrackingError as error:
+        bundle = load_result_bundle(
+            args.result_root,
+            expected_candidate_sha=args.candidate_sha,
+            config_path=args.config,
+            input_inventory_path=args.input_inventory,
+            lock_path=args.lockfile,
+            expected_capture_digest=capture.manifest_sha256,
+        )
+        record = build_tracking_record(bundle)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_bytes(record.to_bytes())
+        print(f"wrote compact VN2 tracking proposal: {args.output}")  # noqa: T201
+        return 0
+    except (OracleEvidenceError, TrackingError, VN2ResultError) as error:
         raise SystemExit(str(error)) from error
-    print(f"validated {args.command} tracking evidence: {validated_subject}")  # noqa: T201
-    return 0
 
 
 if __name__ == "__main__":
