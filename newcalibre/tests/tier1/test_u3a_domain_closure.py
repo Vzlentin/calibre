@@ -51,28 +51,28 @@ def _panel_frame(*, string_storage: str = "pyarrow") -> pd.DataFrame:
     return pd.DataFrame(
         {
             SERIES_KEY: pd.Series(
-                ["sku-b", "sku-a", "sku-b", "sku-a", "sku-b", "sku-a"],
+                ["sku-a", "sku-b", "sku-a", "sku-b", "sku-b", "sku-a"],
                 dtype=pd.StringDtype(storage=string_storage),
             ),
             TIMESTAMP: pd.Series(
                 pd.to_datetime(
                     [
+                        "2026-01-05",
+                        "2026-01-05",
+                        "2026-01-12",
+                        "2026-01-12",
                         "2026-01-19",
-                        "2026-01-05",
-                        "2026-01-05",
-                        "2026-01-12",
-                        "2026-01-12",
                         "2026-01-19",
                     ]
                 ).astype("datetime64[ms]")
             ),
-            OBSERVED_VALUE: pd.Series([3, 1, 1, 2, 2, 3], dtype="int16"),
+            OBSERVED_VALUE: pd.Series([1, 1, 2, 2, 3, 3], dtype="int16"),
             CENSOR_STATUS: pd.Series(
-                [None, "uncensored", "undeclared", "censored", None, "uncensored"],
+                ["uncensored", "undeclared", "censored", None, None, "uncensored"],
                 dtype=pd.StringDtype(storage=string_storage),
             ),
-            AVAILABILITY_BOUND: pd.Series([3, 1, 1, 2, 2, 3], dtype="uint16"),
-            "price": pd.Series([1, 1, 1.5, 1.5, 2, 2], dtype="float32"),
+            AVAILABILITY_BOUND: pd.Series([1, 1, 2, 2, 3, 3], dtype="uint16"),
+            "price": pd.Series([1, 1.5, 1.5, 2, 1, 2], dtype="float32"),
         }
     )
 
@@ -118,9 +118,9 @@ def test_multiplied_weekly_calendar_binds_panel_phase_and_round_trips_it() -> No
         {
             SERIES_KEY: pd.Series(["sku", "sku"], dtype="string"),
             TIMESTAMP: pd.Series(
-                pd.to_datetime(["2026-01-19", "2026-01-05"]).astype("datetime64[ms]")
+                pd.to_datetime(["2026-01-05", "2026-01-19"]).astype("datetime64[ms]")
             ),
-            OBSERVED_VALUE: pd.Series([2.0, 1.0], dtype="float64"),
+            OBSERVED_VALUE: pd.Series([1.0, 2.0], dtype="float64"),
         }
     )
     panel = Panel.from_frame(frame, calendar=Calendar("2W-MON"))
@@ -162,7 +162,7 @@ def test_multiplied_calendar_rejects_observation_and_origin_off_bound_phase(
     panel = Panel.from_frame(frame, calendar=Calendar(frequency))
     bad_observation = pd.concat(
         [
-            frame,
+            frame.iloc[::-1],
             pd.DataFrame(
                 {
                     SERIES_KEY: pd.Series(["sku"], dtype="string"),
@@ -516,7 +516,7 @@ def test_nullable_mask_payloads_canonicalize_to_identical_task_bytes() -> None:
 def test_nullable_uint64_round_trip_preserves_values_above_float_precision() -> None:
     frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     frame[OBSERVED_VALUE] = pd.Series(
-        [pd.NA, 2**64 - 1, 2**63 + 1, 2**63, 2, 3],
+        [2**64 - 1, 2**63 + 1, 2**63, 2, pd.NA, 3],
         dtype="UInt64",
     )
     task = _task(frame=frame)

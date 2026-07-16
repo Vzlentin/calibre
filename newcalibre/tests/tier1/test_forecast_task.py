@@ -37,11 +37,11 @@ def _panel_frame(*, resolution: str = "us") -> pd.DataFrame:
     timestamps = pd.Series(
         pd.to_datetime(
             [
+                "2026-01-05",
+                "2026-01-05",
+                "2026-01-12",
+                "2026-01-12",
                 "2026-01-19",
-                "2026-01-05",
-                "2026-01-12",
-                "2026-01-05",
-                "2026-01-12",
                 "2026-01-19",
             ]
         ).astype(f"datetime64[{resolution}]")
@@ -49,17 +49,17 @@ def _panel_frame(*, resolution: str = "us") -> pd.DataFrame:
     return pd.DataFrame(
         {
             SERIES_KEY: pd.Series(
-                ["sku-b", "sku-a", "sku-a", "sku-b", "sku-b", "sku-a"],
+                ["sku-a", "sku-b", "sku-a", "sku-b", "sku-b", "sku-a"],
                 dtype="string",
             ),
             TIMESTAMP: timestamps,
-            OBSERVED_VALUE: pd.Series([30, 10, np.nan, 20, 25, 15], dtype="float64"),
+            OBSERVED_VALUE: pd.Series([10, 20, np.nan, 25, 30, 15], dtype="float64"),
             CENSOR_STATUS: pd.Series(
-                [pd.NA, "uncensored", "censored", pd.NA, "uncensored", "censored"],
+                ["uncensored", pd.NA, "censored", "uncensored", pd.NA, "censored"],
                 dtype="string",
             ),
-            AVAILABILITY_BOUND: pd.Series([30, 10, 9, 20, 25, 14], dtype="int64"),
-            "planned_price": pd.Series([3, 1, 2, 1, 2, 3], dtype="int32"),
+            AVAILABILITY_BOUND: pd.Series([10, 20, 9, 25, 30, 14], dtype="int64"),
+            "planned_price": pd.Series([1, 1, 2, 2, 3, 3], dtype="int32"),
         }
     )
 
@@ -124,16 +124,55 @@ def test_panel_canonicalizes_rows_columns_and_numeric_values_without_fabricating
     assert panel.frame[CENSOR_STATUS].dtype.storage == "pyarrow"
 
 
-def test_panel_permutations_produce_the_same_canonical_snapshot() -> None:
+def test_valid_interleavings_produce_the_same_canonical_snapshot() -> None:
     frame = _panel_frame()
     first = Panel.from_frame(frame, calendar=Calendar("W-MON"))
     second = Panel.from_frame(
-        frame.sample(frac=1, random_state=7)[list(reversed(frame.columns))],
+        frame.iloc[[1, 0, 3, 2, 4, 5]][list(reversed(frame.columns))],
         calendar=Calendar("W-MON"),
     )
 
     pd.testing.assert_frame_equal(first.frame, second.frame)
     assert first.series_keys == second.series_keys
+
+
+def test_panel_rejects_unique_out_of_order_timestamps_within_a_series() -> None:
+    frame = pd.DataFrame(
+        {
+            SERIES_KEY: pd.Series(
+                ["sku-a", "sku-b", "sku-a", "sku-b", "sku-b", "sku-a"],
+                dtype="string",
+            ),
+            TIMESTAMP: pd.to_datetime(
+                [
+                    "2026-01-05",
+                    "2026-01-05",
+                    "2026-01-12",
+                    "2026-01-19",
+                    "2026-01-12",
+                    "2026-01-19",
+                ]
+            ),
+            OBSERVED_VALUE: pd.Series([1.0, 10.0, 2.0, 30.0, 20.0, 3.0]),
+        }
+    )
+
+    with pytest.raises(PanelError, match="strictly increasing"):
+        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+
+
+def test_panel_accepts_an_increasing_series_with_a_calendar_gap() -> None:
+    frame = pd.DataFrame(
+        {
+            SERIES_KEY: pd.Series(["sku", "sku"], dtype="string"),
+            TIMESTAMP: pd.to_datetime(["2026-01-05", "2026-01-19"]),
+            OBSERVED_VALUE: pd.Series([1.0, 3.0]),
+        }
+    )
+
+    panel = Panel.from_frame(frame, calendar=Calendar("W-MON"))
+
+    pd.testing.assert_frame_equal(panel.frame, frame)
 
 
 @pytest.mark.parametrize(
@@ -379,8 +418,8 @@ def test_task_round_trip_is_exact_and_preserves_datetime_resolution() -> None:
     assert restored.model_config == task.model_config
 
 
-def test_task_bytes_ignore_input_row_column_and_config_mapping_order() -> None:
-    frame = _panel_frame().sample(frac=1, random_state=3)
+def test_task_bytes_ignore_valid_interleaving_column_and_config_mapping_order() -> None:
+    frame = _panel_frame()
     first = Panel.from_frame(frame, calendar=Calendar("W-MON")).forecast_tasks(
         origin=pd.Timestamp("2026-01-19"),
         horizon=2,
@@ -388,7 +427,8 @@ def test_task_bytes_ignore_input_row_column_and_config_mapping_order() -> None:
         model_config={"backend": "seasonal-naive", "m": 2},
     )[0]
     second = Panel.from_frame(
-        frame[list(reversed(frame.columns))], calendar=Calendar("W-MON")
+        frame.iloc[[1, 0, 3, 2, 4, 5]][list(reversed(frame.columns))],
+        calendar=Calendar("W-MON"),
     ).forecast_tasks(
         origin=pd.Timestamp("2026-01-19"),
         horizon=2,
