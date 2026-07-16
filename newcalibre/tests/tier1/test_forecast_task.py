@@ -128,7 +128,7 @@ def test_valid_interleavings_produce_the_same_canonical_snapshot() -> None:
     frame = _panel_frame()
     first = Panel.from_frame(frame, calendar=Calendar("W-MON"))
     second = Panel.from_frame(
-        frame.iloc[[1, 0, 3, 2, 4, 5]][list(reversed(frame.columns))],
+        frame.iloc[[0, 2, 1, 3, 5, 4]][list(reversed(frame.columns))],
         calendar=Calendar("W-MON"),
     )
 
@@ -427,7 +427,7 @@ def test_task_bytes_ignore_valid_interleaving_column_and_config_mapping_order() 
         model_config={"backend": "seasonal-naive", "m": 2},
     )[0]
     second = Panel.from_frame(
-        frame.iloc[[1, 0, 3, 2, 4, 5]][list(reversed(frame.columns))],
+        frame.iloc[[0, 2, 1, 3, 5, 4]][list(reversed(frame.columns))],
         calendar=Calendar("W-MON"),
     ).forecast_tasks(
         origin=pd.Timestamp("2026-01-19"),
