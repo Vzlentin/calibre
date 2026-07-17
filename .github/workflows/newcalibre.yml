@@ -126,24 +126,6 @@ jobs:
       - name: Report lane result
         run: echo "newcalibre-unit complete (successor present=${{ steps.present.outputs.exists }})"
 
-  s3-activation-gate:
-    # Keep the required context live while its base-controlled replacement
-    # lands; pull_request_target cannot run a workflow absent from main.
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      issues: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Activation-record gate
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 .github/scripts/stage3_clock.py gate --pr "${{ github.event.pull_request.number }}"
-      - name: Report lane result
-        run: echo "s3-activation-gate complete"
 
   capture-promotion:
     # Capture promotion guard: capture PRs are evidence-only, and live GitHub
