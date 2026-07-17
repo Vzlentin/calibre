@@ -1,0 +1,41 @@
+{
+  "actuals_semantics": "censored_sales_surrogate",
+  "config_sha256": "16cf991ac8379a81075a7b5d901afdf59a4c1fcd86fd728f290abbe1ee395c9c",
+  "input_inventory_sha256": "54f8556a811eac81c9597c0fb0d2ef16dca5a6d84936188b7322fcdb8f15ed97",
+  "oracle_commit": "686a1b284a4f4879123b4095d306f07b88d2ddc3",
+  "oracle_lock_sha256": "5cc585d347195861d81760e16a675bd2a05b51777cf90c13d9af0ab05bb743f3",
+  "oracle_tag": "oracle-freeze-2026-07-06",
+  "orders": [
+    {
+      "path": "orders/round-1.json",
+      "round": 1,
+      "sha256": "95484ebab662b7409a88b4c4a0beb676ef29f5710db68c7e70d92de47344544e"
+    },
+    {
+      "path": "orders/round-2.json",
+      "round": 2,
+      "sha256": "c15c986c3bd248bcf29d5c36276949b8e3528ece936ec5ed43b106bdaabbb3bb"
+    },
+    {
+      "path": "orders/round-3.json",
+      "round": 3,
+      "sha256": "2a6b15bbed2a1320050b02d1f950800cae3ccb85f637e018facbee6351de682d"
+    },
+    {
+      "path": "orders/round-4.json",
+      "round": 4,
+      "sha256": "2583264e3f69fc7650de548970105ffaf34d566ec555b39819effb84b8f5cb46"
+    },
+    {
+      "path": "orders/round-5.json",
+      "round": 5,
+      "sha256": "7c46d3519cafb5a3c59f0a619d5cfb83c4307a3545b0ed8aa075904bce825c91"
+    },
+    {
+      "path": "orders/round-6.json",
+      "round": 6,
+      "sha256": "2b904b1f34d377808adffbff079880b32de06edd3d30178f628eaa993870020a"
+    }
+  ],
+  "schema": 1
+}
