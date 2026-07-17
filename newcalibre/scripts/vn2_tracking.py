@@ -62,7 +62,7 @@ def main() -> int:
             config_path=args.config,
             input_inventory_path=args.input_inventory,
             lock_path=args.lockfile,
-            expected_capture_digest=capture.manifest_sha256,
+            expected_capture_digest=capture.capture_digest,
         )
         record = build_tracking_record(bundle)
         args.output.parent.mkdir(parents=True, exist_ok=True)

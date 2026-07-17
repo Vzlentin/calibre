@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -15,6 +16,8 @@ from newcalibre.protocols.vn2.artifacts import PLATFORM, VN2ResultBundle
 TRACKING_SCHEMA = 2
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_LEGACY_RECORD_SHA256 = "5f094f8e1c10c2528671281e5435061544e2378fc44ba5ff6c5e82935dec179c"
+_COMPACT_CAPTURE_DIGEST = "16f86c7cbe2d39b51346b8cb2b02bf434c9f1ea5da0c73186629a68803f33904"
 _RECORD_KEYS = frozenset(
     {
         "actuals_semantics",
@@ -138,27 +141,33 @@ def load_tracking_history(
             raw = json.loads(line.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as error:
             raise TrackingError(f"tracking line {index} is not UTF-8 JSON") from error
-        if (
-            not isinstance(raw, dict)
-            or set(raw) != _RECORD_KEYS
-            or raw["schema"] != TRACKING_SCHEMA
-        ):
-            raise TrackingError(f"tracking line {index} does not use compact schema 2")
-        record = VN2TrackingRecord(
-            candidate_sha=raw["candidate_sha"],
-            config_digest=raw["config_digest"],
-            input_inventory_digest=raw["input_inventory_digest"],
-            capture_digest=raw["capture_digest"],
-            lock_digest=raw["lock_digest"],
-            platform=raw["platform"],
-            actuals_semantics=raw["actuals_semantics"],
-            result_manifest_digest=raw["result_manifest_digest"],
-            holding_cost=raw["holding_cost"],
-            shortage_cost=raw["shortage_cost"],
-            total_cost=raw["total_cost"],
-        )
-        if record.to_bytes() != line + b"\n":
-            raise TrackingError(f"tracking line {index} is not canonical JSON")
+        encoded_line = line + b"\n"
+        if hashlib.sha256(encoded_line).hexdigest() == _LEGACY_RECORD_SHA256:
+            if index != 1 or not isinstance(raw, dict):
+                raise TrackingError("the historical Gate A record must remain first")
+            record = _legacy_record(cast(dict[str, object], raw))
+        else:
+            if (
+                not isinstance(raw, dict)
+                or set(raw) != _RECORD_KEYS
+                or raw["schema"] != TRACKING_SCHEMA
+            ):
+                raise TrackingError(f"tracking line {index} does not use compact schema 2")
+            record = VN2TrackingRecord(
+                candidate_sha=raw["candidate_sha"],
+                config_digest=raw["config_digest"],
+                input_inventory_digest=raw["input_inventory_digest"],
+                capture_digest=raw["capture_digest"],
+                lock_digest=raw["lock_digest"],
+                platform=raw["platform"],
+                actuals_semantics=raw["actuals_semantics"],
+                result_manifest_digest=raw["result_manifest_digest"],
+                holding_cost=raw["holding_cost"],
+                shortage_cost=raw["shortage_cost"],
+                total_cost=raw["total_cost"],
+            )
+            if record.to_bytes() != encoded_line:
+                raise TrackingError(f"tracking line {index} is not canonical JSON")
         records.append(record)
     candidates = [record.candidate_sha for record in records]
     if len(set(candidates)) != len(candidates):
@@ -194,6 +203,39 @@ def validate_tracking_append(
     if not head_bytes.startswith(base_bytes) or head_records[: len(base_records)] != base_records:
         raise TrackingError("tracking history update is not an exact append")
     return head_records[len(base_records) :]
+
+
+def _legacy_record(raw: dict[str, object]) -> VN2TrackingRecord:
+    subject = _object(raw.get("subject"), name="legacy subject")
+    evidence = _object(raw.get("evidence"), name="legacy evidence")
+    environment = _object(raw.get("environment"), name="legacy environment")
+    facts = _object(environment.get("facts"), name="legacy environment facts")
+    os_facts = _object(facts.get("os"), name="legacy OS")
+    objective = _object(raw.get("objective"), name="legacy objective")
+    result_bundle = _object(raw.get("result_bundle"), name="legacy result bundle")
+    config = _object(evidence.get("config"), name="legacy config")
+    inventory = _object(evidence.get("input_inventory"), name="legacy input inventory")
+    lockfile = _object(evidence.get("lockfile"), name="legacy lockfile")
+    _object(evidence.get("promoted_capture"), name="legacy capture")
+    return VN2TrackingRecord(
+        candidate_sha=cast(str, subject.get("candidate_sha")),
+        config_digest=cast(str, config.get("digest")),
+        input_inventory_digest=cast(str, inventory.get("digest")),
+        capture_digest=_COMPACT_CAPTURE_DIGEST,
+        lock_digest=cast(str, lockfile.get("digest")),
+        platform=(f"{os_facts.get('id')}-{os_facts.get('version_id')}/{facts.get('arch')}"),
+        actuals_semantics=cast(str, evidence.get("actuals_semantics")),
+        result_manifest_digest=cast(str, result_bundle.get("manifest_sha256")),
+        holding_cost=cast(float, objective.get("holding_cost")),
+        shortage_cost=cast(float, objective.get("shortage_cost")),
+        total_cost=cast(float, objective.get("total_cost")),
+    )
+
+
+def _object(value: object, *, name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TrackingError(f"{name} must be an object")
+    return cast(dict[str, object], value)
 
 
 def _record_value(record: VN2TrackingRecord) -> dict[str, object]:

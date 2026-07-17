@@ -42,6 +42,13 @@ def test_regression_workflow_has_only_pr_main_and_regression_lanes() -> None:
     assert workflow["jobs"]["newcalibre-lint"]["if"] == "github.event_name == 'pull_request'"
     assert workflow["jobs"]["newcalibre-unit"]["if"] == "github.event_name == 'pull_request'"
     assert workflow["jobs"]["newcalibre-consistency"]["if"] == "github.event_name == 'push'"
+    type_step = next(
+        step
+        for step in workflow["jobs"]["newcalibre-lint"]["steps"]
+        if "ty check" in step.get("run", "")
+    )
+    assert type_step["working-directory"] == "newcalibre"
+    assert type_step["run"] == "uv run --locked --no-sync ty check src/newcalibre/"
 
 
 def test_regression_uses_one_inventory_and_successor_verifier() -> None:

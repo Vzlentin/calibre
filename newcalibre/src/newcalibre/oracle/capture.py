@@ -67,11 +67,19 @@ class CaptureManifest:
 
 @dataclass(frozen=True, slots=True)
 class CaptureBundle:
-    """Return a validated capture root and its exact manifest digest."""
+    """Return a validated capture root and its stable order-stream identity."""
 
     root: Path
     manifest: CaptureManifest
     manifest_sha256: str
+
+    @property
+    def capture_digest(self) -> str:
+        """Return the stable digest of the six canonical order payloads."""
+        listing = "".join(
+            f"{entry.sha256}  {entry.path}\n" for entry in self.manifest.orders
+        ).encode("utf-8")
+        return _sha256(listing)
 
 
 def load_capture(

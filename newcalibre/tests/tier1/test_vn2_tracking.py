@@ -23,6 +23,7 @@ from newcalibre.protocols.vn2.tracking import (
 )
 
 pytestmark = pytest.mark.tier1
+LEGACY_RECORD = Path(__file__).with_name("fixtures") / "legacy-vn2-record.jsonl"
 
 
 def _record(**changes: object) -> VN2TrackingRecord:
@@ -65,22 +66,17 @@ def _bundle(tmp_path: Path):
     return bundle
 
 
-def test_migrated_history_shape_is_readable_and_preserves_gate_a_result() -> None:
-    """Read record one after its clean migration to the compact schema."""
-    migrated = _record(
-        candidate_sha="860ccdbfcc2f6b0b30d4b31e5072e73bd88feeb2",
-        config_digest="979b6d39e0d0e1c52a91995c8d2fdf6de7430e0d202a442c354de2678033a370",
-        input_inventory_digest="54f8556a811eac81c9597c0fb0d2ef16dca5a6d84936188b7322fcdb8f15ed97",
-        capture_digest="9c69bef8922df65ef25e6e54212c6e7c813b5acf1c3abff90f3b0ee746c8f6d4",
-        lock_digest="78a0e2d123d110639bfeae5d8e13d0f054b68621627f1a00095ec2efab9a0719",
-        result_manifest_digest=("4996915e1c6b3632b018eb8ec4aaca448ed3f60e3635c31000b85c170df7762c"),
-        holding_cost=3643.6000000000004,
-        shortage_cost=2764.0,
-        total_cost=6407.6,
-    )
-    (record,) = load_tracking_history(migrated.to_bytes())
+def test_historical_record_is_readable_and_preserves_gate_a_result() -> None:
+    """Normalize the exact historical Gate A line without rewriting it."""
+    (record,) = load_tracking_history(LEGACY_RECORD)
 
-    assert record == migrated
+    assert record.candidate_sha == "860ccdbfcc2f6b0b30d4b31e5072e73bd88feeb2"
+    assert (
+        record.capture_digest == "16f86c7cbe2d39b51346b8cb2b02bf434c9f1ea5da0c73186629a68803f33904"
+    )
+    assert record.holding_cost == 3643.6000000000004
+    assert record.shortage_cost == 2764.0
+    assert record.total_cost == 6407.6
 
 
 def test_build_tracking_record_reduces_validated_bundle(tmp_path: Path) -> None:

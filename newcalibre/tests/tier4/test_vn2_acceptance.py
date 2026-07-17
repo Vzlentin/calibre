@@ -65,7 +65,7 @@ def test_generic_vn2_run_emits_deterministic_compact_r1_r4(tmp_path: Path) -> No
         config_path=CONFIG,
         input_inventory_path=INVENTORY,
         lock_path=LOCK,
-        capture_digest=capture.manifest_sha256,
+        capture_digest=capture.capture_digest,
     )
     second = emit_result_bundle(
         tmp_path / "second",
@@ -75,7 +75,7 @@ def test_generic_vn2_run_emits_deterministic_compact_r1_r4(tmp_path: Path) -> No
         config_path=CONFIG,
         input_inventory_path=INVENTORY,
         lock_path=LOCK,
-        capture_digest=capture.manifest_sha256,
+        capture_digest=capture.capture_digest,
     )
     for name in (*emitted.manifest.files, "manifest.json"):
         assert (emitted.root / name).read_bytes() == (second.root / name).read_bytes()
@@ -86,7 +86,7 @@ def test_generic_vn2_run_emits_deterministic_compact_r1_r4(tmp_path: Path) -> No
             config_path=CONFIG,
             input_inventory_path=INVENTORY,
             lock_path=LOCK,
-            expected_capture_digest=capture.manifest_sha256,
+            expected_capture_digest=capture.capture_digest,
         )
         == emitted
     )

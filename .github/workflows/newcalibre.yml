@@ -30,7 +30,8 @@ jobs:
       - run: uv sync --project newcalibre --locked --group dev
       - run: uv run --project newcalibre --locked --no-sync ruff check newcalibre
       - run: uv run --project newcalibre --locked --no-sync ruff format --check newcalibre
-      - run: uv run --project newcalibre --locked --no-sync ty check newcalibre/src/newcalibre/
+      - working-directory: newcalibre
+        run: uv run --locked --no-sync ty check src/newcalibre/
 
   newcalibre-unit:
     if: github.event_name == 'pull_request'

@@ -72,6 +72,7 @@ def test_load_capture_validates_compact_canonical_bundle(tmp_path: Path) -> None
     assert bundle.manifest.oracle_commit == ORACLE_COMMIT
     assert bundle.manifest.actuals_semantics == "censored_sales_surrogate"
     assert [entry.round for entry in bundle.manifest.orders] == list(range(1, 7))
+    assert bundle.capture_digest
     assert bundle.manifest_sha256
 
 
