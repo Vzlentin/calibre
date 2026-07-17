@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 from newcalibre.protocols.vn2._tracking_contracts import (
     _GA1_FIELDS,
@@ -77,3 +78,41 @@ def compare_tracking_records(
         return TrackingComparison(False, mismatches, None, None)
     delta = current.total_cost - prior.total_cost
     return TrackingComparison(True, (), delta, delta > 0.0)
+
+
+def resolve_tracking_history_mode(
+    *,
+    mode: str,
+    require_history: str,
+    history: Sequence[VN2TrackingRecord],
+) -> Literal["mint", "compare", "skip"]:
+    """Resolve whether one Tier 4 run must compare canonical history."""
+    if mode not in {"mint", "verify"}:
+        raise TrackingError("tracking mode must be 'mint' or 'verify'")
+    if require_history not in {"true", "false"}:
+        raise TrackingError("tracking history requirement must be 'true' or 'false'")
+    if mode == "mint":
+        return "mint"
+    if history:
+        return "compare"
+    if require_history == "true":
+        raise TrackingError("verify mode requires non-empty canonical tracking history")
+    return "skip"
+
+
+def require_exact_recomputation(
+    current: VN2TrackingRecord,
+    history: Sequence[VN2TrackingRecord],
+) -> TrackingComparison:
+    """Require the latest historical record to compare at exact zero delta."""
+    if not history:
+        raise TrackingError("tracking verification requires non-empty canonical history")
+    comparison = compare_tracking_records(current, history[-1])
+    if not comparison.comparable:
+        mismatches = ", ".join(comparison.mismatched_fields)
+        raise TrackingError(f"latest tracking record is not GA1-comparable: {mismatches}")
+    if comparison.total_cost_delta != 0.0:
+        raise TrackingError(
+            "recomputed objective does not exactly match the latest tracking record"
+        )
+    return comparison

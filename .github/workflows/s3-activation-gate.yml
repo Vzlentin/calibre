@@ -1,0 +1,156 @@
+name: s3-activation-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  s3-activation-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the immutable PR base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify trusted base checkout
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: test "$(git rev-parse HEAD)" = "$BASE_SHA"
+      - name: Activation-record gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/stage3_clock.py gate --pr "${{ github.event.pull_request.number }}"
+      - name: Fetch PR head as untrusted Git data
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags --depth=1 origin "refs/pull/$PR_NUMBER/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA"
+      - name: Detect tracking tree changes
+        id: tracking-change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git diff --quiet --no-renames "$BASE_SHA" "$HEAD_SHA" -- stage3/evidence/tracking
+          then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            test "$status" -eq 1
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install trusted base validator
+        if: steps.tracking-change.outputs.present == 'true'
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+      - name: Sync trusted base dependencies
+        if: steps.tracking-change.outputs.present == 'true'
+        run: uv sync --project newcalibre --locked --group dev
+      - name: Inspect and confine tracking promotion
+        id: promotion
+        if: steps.tracking-change.outputs.present == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          uv run --project newcalibre --locked --no-sync python \
+            .github/scripts/stage3_tracking_admission.py inspect \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT" \
+            --repository-root .
+      - name: Download live same-run artifact metadata and archives
+        if: steps.promotion.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT_ID: ${{ steps.promotion.outputs.result_id }}
+          PROPOSAL_ID: ${{ steps.promotion.outputs.proposal_id }}
+          RUN_ID: ${{ steps.promotion.outputs.run_id }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RESULT_NAME: ${{ steps.promotion.outputs.result_name }}
+          RESULT_DIGEST: ${{ steps.promotion.outputs.result_digest }}
+          PROPOSAL_NAME: ${{ steps.promotion.outputs.proposal_name }}
+          PROPOSAL_DIGEST: ${{ steps.promotion.outputs.proposal_digest }}
+          RUN_URL: ${{ steps.promotion.outputs.run_url }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID" \
+            > "$RUNNER_TEMP/result-metadata.json"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$PROPOSAL_ID" \
+            > "$RUNNER_TEMP/proposal-metadata.json"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
+            > "$RUNNER_TEMP/run-metadata.json"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID/zip" \
+            > "$RUNNER_TEMP/result.zip"
+          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$PROPOSAL_ID/zip" \
+            > "$RUNNER_TEMP/proposal.zip"
+          uv run --project newcalibre --locked --no-sync python \
+            .github/scripts/stage3_tracking_admission.py admit \
+            --candidate-sha "$BASE_SHA" \
+            --run-id "$RUN_ID" \
+            --run-url "$RUN_URL" \
+            --run-metadata "$RUNNER_TEMP/run-metadata.json" \
+            --result-artifact-id "$RESULT_ID" \
+            --result-artifact-name "$RESULT_NAME" \
+            --result-artifact-digest "$RESULT_DIGEST" \
+            --result-artifact-metadata "$RUNNER_TEMP/result-metadata.json" \
+            --result-archive "$RUNNER_TEMP/result.zip" \
+            --result-destination "$RUNNER_TEMP/result" \
+            --proposal-artifact-id "$PROPOSAL_ID" \
+            --proposal-artifact-name "$PROPOSAL_NAME" \
+            --proposal-artifact-digest "$PROPOSAL_DIGEST" \
+            --proposal-artifact-metadata "$RUNNER_TEMP/proposal-metadata.json" \
+            --proposal-archive "$RUNNER_TEMP/proposal.zip" \
+            --proposal-destination "$RUNNER_TEMP/proposal"
+      - name: Validate live artifacts and exact append bytes
+        if: steps.promotion.outputs.present == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          WORKFLOW_REF: ${{ steps.promotion.outputs.workflow_ref }}
+          WORKFLOW_SHA: ${{ steps.promotion.outputs.workflow_sha }}
+          RUN_ID: ${{ steps.promotion.outputs.run_id }}
+          RUN_URL: ${{ steps.promotion.outputs.run_url }}
+          RESULT_ID: ${{ steps.promotion.outputs.result_id }}
+          RESULT_NAME: ${{ steps.promotion.outputs.result_name }}
+          RESULT_DIGEST: ${{ steps.promotion.outputs.result_digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DEFAULT_SHA=$(gh api "/repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_tracking.py promote \
+            --result-root "$RUNNER_TEMP/result" \
+            --capture-root stage3/evidence/captures \
+            --candidate-sha "$BASE_SHA" \
+            --workflow-ref "$WORKFLOW_REF" \
+            --workflow-sha "$WORKFLOW_SHA" \
+            --run-id "$RUN_ID" \
+            --run-url "$RUN_URL" \
+            --result-artifact-id "$RESULT_ID" \
+            --result-artifact-name "$RESULT_NAME" \
+            --result-artifact-digest "$RESULT_DIGEST" \
+            --config newcalibre/benchmarks/vn2/protocol.yaml \
+            --input-inventory newcalibre/benchmarks/vn2/vn2-input-digests.json \
+            --lockfile newcalibre/uv.lock \
+            --proposal "$RUNNER_TEMP/proposal/proposed-record.jsonl" \
+            --result-artifact-metadata "$RUNNER_TEMP/result-metadata.json" \
+            --proposal-artifact-metadata "$RUNNER_TEMP/proposal-metadata.json" \
+            --run-metadata "$RUNNER_TEMP/run-metadata.json" \
+            --result-archive "$RUNNER_TEMP/result.zip" \
+            --proposal-archive "$RUNNER_TEMP/proposal.zip" \
+            --repository-root . \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --default-branch-sha "$DEFAULT_SHA"
+      - name: Report lane result
+        run: echo "s3-activation-gate complete"

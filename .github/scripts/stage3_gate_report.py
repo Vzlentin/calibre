@@ -11,6 +11,7 @@ writes to the repository.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -18,10 +19,23 @@ import platform
 import stat
 import subprocess
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from stage3_clock import find_activation_record, parse_utc_timestamp, record_is_schema_complete
+
+SUCCESSOR_SRC = Path(__file__).resolve().parents[2] / "newcalibre" / "src"
+sys.path.insert(0, str(SUCCESSOR_SRC))
+
+from newcalibre.protocols.vn2.tracking import (  # noqa: E402
+    PromotionReceipt,
+    TrackingError,
+    VN2TrackingRecord,
+    parse_promotion_receipt,
+    parse_tracking_history,
+)
 
 EVIDENCE_ALLOWLIST = ("stage3/evidence/",)
 TRACKING_SERIES = Path("stage3/evidence/tracking/series.jsonl")
@@ -112,6 +126,134 @@ def sha256_file(path: Path) -> str:
 def git(*args: str) -> str:
     """Run a git command and return stripped stdout."""
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _open_regular_file(path: Path, *, name: str) -> int:
+    absolute = Path(os.path.abspath(path))
+    parts = absolute.parts
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    leaf_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    opened: list[int] = []
+    try:
+        parent_fd = os.open(absolute.anchor, directory_flags)
+        opened.append(parent_fd)
+        for part in parts[1:-1]:
+            child_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            opened.append(child_fd)
+            parent_fd = child_fd
+        fd = os.open(parts[-1], leaf_flags, dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError(f"{name} must be a regular non-symlink file")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+    except ValueError:
+        raise
+    except OSError as error:
+        raise ValueError(f"{name} and every ancestor must be readable non-symlinks") from error
+    finally:
+        for directory_fd in reversed(opened):
+            with contextlib.suppress(OSError):
+                os.close(directory_fd)
+    return fd
+
+
+def _read_regular_bytes(path: Path, *, name: str, maximum: int = 4 * 1024 * 1024) -> bytes:
+    fd = _open_regular_file(path, name=name)
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        while True:
+            chunk = os.read(fd, min(1024 * 1024, maximum + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > maximum:
+                raise ValueError(f"{name} exceeds the maximum size")
+    except OSError as error:
+        raise ValueError(f"{name} is unreadable") from error
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _receipt_binds_record(
+    receipt: PromotionReceipt,
+    record: VN2TrackingRecord,
+    *,
+    record_digest: str,
+) -> bool:
+    subject = cast(Mapping[str, object], record.payload["subject"])
+    workflow = cast(Mapping[str, object], record.payload["workflow"])
+    result = cast(Mapping[str, object], record.payload["result_artifact"])
+    return (
+        receipt.candidate_sha == subject["candidate_sha"]
+        and receipt.definition_ref == workflow["definition_ref"]
+        and receipt.definition_sha == workflow["definition_sha"]
+        and receipt.run_id == workflow["run_id"]
+        and receipt.run_url == workflow["run_url"]
+        and receipt.result_artifact.id == result["id"]
+        and receipt.result_artifact.name == result["name"]
+        and receipt.result_artifact.digest == result["digest"]
+        and receipt.proposal_artifact.id != receipt.result_artifact.id
+        and receipt.record_sha256 == record_digest
+    )
+
+
+def _tracking_evidence(
+    series_path: Path,
+    *,
+    problems: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    try:
+        series_bytes = _read_regular_bytes(series_path, name="tracking series")
+    except ValueError as error:
+        if not os.path.lexists(series_path):
+            problems.append("gate precondition unmet: no promoted tracking record")
+        else:
+            problems.append(str(error))
+        return None, None, None
+    try:
+        records = parse_tracking_history(series_bytes)
+    except TrackingError as error:
+        problems.append(str(error))
+        return None, None, None
+
+    latest_record = records[-1]
+    subject = cast(Mapping[str, object], latest_record.payload["subject"])
+    c0 = cast(str, subject["candidate_sha"])
+    record_bytes = latest_record.to_bytes()
+    record_digest = hashlib.sha256(record_bytes).hexdigest()
+
+    receipt_path = series_path.parent / f"{c0}-receipt.json"
+    try:
+        receipt_bytes = _read_regular_bytes(receipt_path, name="tracking promotion receipt")
+        receipt = parse_promotion_receipt(receipt_bytes)
+    except (TrackingError, ValueError) as error:
+        problems.append(str(error))
+        return None, None, None
+    if not _receipt_binds_record(
+        receipt,
+        latest_record,
+        record_digest=record_digest,
+    ):
+        problems.append("tracking promotion receipt does not bind the latest canonical record")
+        return None, None, None
+    canonical_receipt_bytes = receipt.to_bytes()
+    return c0, record_digest, hashlib.sha256(canonical_receipt_bytes).hexdigest()
 
 
 def _capture_manifest_digests(root: Path, *, problems: list[str]) -> dict[str, str]:
@@ -377,30 +519,27 @@ def main() -> int:
         )
         problems.extend(oracle_problems)
 
-    # Tracking record 1 (Gate precondition) and the C0→C1 merge discipline.
-    c0 = None
-    record_digest = None
-    if TRACKING_SERIES.exists():
-        lines = [ln for ln in TRACKING_SERIES.read_text(encoding="utf-8").splitlines() if ln]
-        if lines:
-            record_digest = hashlib.sha256((lines[-1] + "\n").encode("utf-8")).hexdigest()
-            try:
-                c0 = json.loads(lines[-1]).get("subject_sha")
-            except json.JSONDecodeError:
-                problems.append("tracking series last line is not valid JSON")
-    else:
-        problems.append("gate precondition unmet: no promoted tracking record (U9b)")
-
+    # Tracking record 1 (Gate precondition) and the C0→candidate merge discipline.
+    c0, record_digest, receipt_digest = _tracking_evidence(
+        TRACKING_SERIES,
+        problems=problems,
+    )
     diff_check = None
     if c0:
-        changed = git("diff", "--name-only", f"{c0}..HEAD").splitlines()
-        offending = [f for f in changed if not f.startswith(EVIDENCE_ALLOWLIST)]
-        diff_check = {"c0": c0, "changed": changed, "offending": offending}
-        if offending:
-            problems.append(
-                "C0→C1 diff leaves the evidence-path allowlist; "
-                "candidate void — re-mint at a new C0"
-            )
+        try:
+            changed = git("diff", "--no-renames", "--name-only", f"{c0}..HEAD").splitlines()
+        except subprocess.CalledProcessError as error:
+            problems.append(f"C0→candidate diff inspection failed: {error}")
+        else:
+            offending = [path for path in changed if not path.startswith(EVIDENCE_ALLOWLIST)]
+            diff_check = {"c0": c0, "changed": changed, "offending": offending}
+            if offending:
+                problems.append(
+                    "C0→C1 diff leaves the evidence-path allowlist; "
+                    "candidate void — re-mint at a new C0"
+                )
+    if diff_check is None:
+        problems.append("C0→candidate evidence-only diff could not be established")
 
     # Budget check against the immutable activation record.
     now = datetime.now(UTC)
@@ -449,6 +588,7 @@ def main() -> int:
             "input_inventory": (sha256_file(INPUT_INVENTORY) if INPUT_INVENTORY.exists() else None),
             "capture_manifests": capture_manifest_digests,
             "tracking_record": record_digest,
+            "tracking_receipt": receipt_digest,
         },
         "oracle_evidence": oracle_evidence,
         "lanes": lanes,

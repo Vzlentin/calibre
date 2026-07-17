@@ -90,7 +90,7 @@ jobs:
       - name: Stage 3 automation contracts
         run: |
           uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py
+          uv run --project newcalibre --locked --no-sync pytest tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py tests/test_stage3_tracking_admission.py
       - name: Provision export venv (network still on)
         if: steps.present.outputs.exists == 'true'
         working-directory: ${{ env.EXPORT_ROOT }}/newcalibre
@@ -127,8 +127,8 @@ jobs:
         run: echo "newcalibre-unit complete (successor present=${{ steps.present.outputs.exists }})"
 
   s3-activation-gate:
-    # Required context: mechanically blocks Stage 3 PRs while the Gate issue
-    # lacks a schema-complete clock activation record.
+    # Keep the required context live while its base-controlled replacement
+    # lands; pull_request_target cannot run a workflow absent from main.
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
@@ -442,6 +442,7 @@ jobs:
       VN2_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
       VN2_WORKFLOW_REF: ${{ github.workflow_ref }}
       VN2_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'vn2-mint' && 'mint' || 'verify' }}
+      VN2_REQUIRE_HISTORY: ${{ github.event_name == 'schedule' && 'false' || 'true' }}
     steps:
       - name: Validate candidate SHA (manual runs)
         if: github.event_name == 'workflow_dispatch'
@@ -514,6 +515,19 @@ jobs:
           print(f"lock_sha256={lock_digest}")
           numpy.show_config()
           PY
+      - name: Snapshot tracked history state
+        id: history
+        run: |
+          set -euo pipefail
+          path=stage3/evidence/tracking/series.jsonl
+          test ! -L "$path"
+          if test -e "$path"; then
+            test -f "$path"
+            echo "state=present" >> "$GITHUB_OUTPUT"
+            echo "digest=$(sha256sum "$path" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+          fi
       - name: Tier 4 run
         working-directory: newcalibre
         run: uv run --locked --no-sync pytest tests/tier4
@@ -614,9 +628,19 @@ jobs:
             --proposal "${RUNNER_TEMP}/vn2-proposal-${VN2_CANDIDATE_SHA}/proposed-record.jsonl"
       - name: Final tracked history guard
         if: always()
+        env:
+          INITIAL_DIGEST: ${{ steps.history.outputs.digest }}
+          INITIAL_STATE: ${{ steps.history.outputs.state }}
         run: |
           set -euo pipefail
-          test ! -L stage3/evidence/tracking/series.jsonl
-          test ! -e stage3/evidence/tracking/series.jsonl
+          path=stage3/evidence/tracking/series.jsonl
+          test ! -L "$path"
+          if test "$INITIAL_STATE" = present; then
+            test -f "$path"
+            test "$(sha256sum "$path" | cut -d' ' -f1)" = "$INITIAL_DIGEST"
+          else
+            test "$INITIAL_STATE" = absent
+            test ! -e "$path"
+          fi
           test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"

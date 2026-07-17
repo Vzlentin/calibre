@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Literal, cast
+from typing import Literal, cast, overload
 from urllib.parse import urlparse
 
 from newcalibre.domain._canonical_json import canonical_json_bytes
@@ -334,14 +338,8 @@ def _validate_payload(value: dict[str, object]) -> dict[str, object]:
     _validate_environment(facts)
     environment_digest = _digest(environment["digest"], name="environment.digest")
     toolchain_digest = _digest(environment["toolchain_digest"], name="environment.toolchain_digest")
-    try:
-        expected_environment_digest = hashlib.sha256(
-            canonical_json_bytes(dict(facts), path="environment.facts")
-        ).hexdigest()
-    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as error:
-        raise TrackingError("environment.facts contains non-canonical JSON values") from error
-    if environment_digest != expected_environment_digest:
-        raise TrackingError("environment.digest does not match environment facts")
+    if environment_digest != _ga1_digest(value):
+        raise TrackingError("environment.digest does not match the GA1 comparability key")
     if toolchain_digest != _toolchain_digest(facts):
         raise TrackingError("environment.toolchain_digest does not match environment facts")
     objective = _object(value["objective"], "objective")
@@ -484,6 +482,15 @@ def _comparability_key(payload: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _ga1_digest(payload: Mapping[str, object]) -> str:
+    try:
+        key = _comparability_key(payload)
+        canonical = canonical_json_bytes(key, path="GA1 comparability key")
+    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as error:
+        raise TrackingError("GA1 comparability key contains non-canonical JSON values") from error
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _canonical_record_bytes(value: Mapping[str, object]) -> bytes:
     try:
         return canonical_json_bytes(dict(value), path="tracking record") + b"\n"
@@ -499,11 +506,23 @@ def _canonical_record_bytes(value: Mapping[str, object]) -> bytes:
 
 def _read_bytes(value: bytes | bytearray | str | Path, *, name: str) -> bytes:
     if isinstance(value, Path):
+        fd = _open_regular_file(value, name=name)
+        chunks: list[bytes] = []
+        size = 0
         try:
-            payload = value.read_bytes()
+            while True:
+                chunk = os.read(fd, min(1024 * 1024, _MAX_TRACKING_BYTES + 1 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > _MAX_TRACKING_BYTES:
+                    raise TrackingError(f"{name} exceeds the maximum size")
         except OSError as error:
             raise TrackingError(f"{name} path is unreadable") from error
-        return _bounded_bytes(payload, name=name)
+        finally:
+            os.close(fd)
+        return b"".join(chunks)
     if isinstance(value, bytearray):
         return _bounded_bytes(bytes(value), name=name)
     if isinstance(value, bytes):
@@ -517,16 +536,117 @@ def _read_bytes(value: bytes | bytearray | str | Path, *, name: str) -> bytes:
     raise TrackingError(f"{name} must be bytes, text, or a path")
 
 
+@overload
+def _open_regular_file(
+    path: Path,
+    *,
+    name: str,
+    allow_missing: Literal[False] = False,
+) -> int: ...
+
+
+@overload
+def _open_regular_file(
+    path: Path,
+    *,
+    name: str,
+    allow_missing: Literal[True],
+) -> int | None: ...
+
+
+def _open_regular_file(
+    path: Path,
+    *,
+    name: str,
+    allow_missing: bool = False,
+) -> int | None:
+    absolute = Path(os.path.abspath(path))
+    parts = absolute.parts
+    if not absolute.is_absolute() or len(parts) < 2:
+        raise TrackingError(f"{name} path must identify a regular file")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    leaf_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    opened: list[int] = []
+    try:
+        parent_fd = os.open(absolute.anchor, directory_flags)
+        opened.append(parent_fd)
+        for part in parts[1:-1]:
+            child_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            opened.append(child_fd)
+            parent_fd = child_fd
+        fd = os.open(parts[-1], leaf_flags, dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise TrackingError(f"{name} path must be a regular non-symlink file")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+    except TrackingError:
+        raise
+    except OSError as error:
+        if allow_missing and error.errno == errno.ENOENT:
+            return None
+        raise TrackingError(
+            f"{name} path and every ancestor must be readable non-symlinks"
+        ) from error
+    finally:
+        for directory_fd in reversed(opened):
+            with contextlib.suppress(OSError):
+                os.close(directory_fd)
+    return fd
+
+
+def _regular_file_sha256_if_exists(path: Path, *, name: str) -> str | None:
+    fd = _open_regular_file(path, name=name, allow_missing=True)
+    if fd is None:
+        return None
+    digest = hashlib.sha256()
+    try:
+        while chunk := os.read(fd, 1024 * 1024):
+            digest.update(chunk)
+    except OSError as error:
+        raise TrackingError(f"{name} path is unreadable") from error
+    finally:
+        os.close(fd)
+    return digest.hexdigest()
+
+
+def _regular_file_sha256(path: Path, *, name: str) -> str:
+    digest = _regular_file_sha256_if_exists(path, name=name)
+    if digest is None:
+        raise TrackingError(f"{name} path does not exist")
+    return digest
+
+
 def _bounded_bytes(value: bytes, *, name: str) -> bytes:
     if len(value) > _MAX_TRACKING_BYTES:
         raise TrackingError(f"{name} exceeds the maximum size")
     return value
 
 
+def _reject_json_constant(value: str) -> None:
+    raise TrackingError(f"tracking JSON contains non-finite constant {value!r}")
+
+
 def _parse_json(value: bytes, *, name: str) -> dict[str, object]:
     try:
         text = value.decode("utf-8")
-        parsed = json.loads(text, object_pairs_hook=_unique_object)
+        parsed = json.loads(
+            text,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_json_constant,
+        )
     except (
         UnicodeError,
         ValueError,

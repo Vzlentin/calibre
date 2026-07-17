@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
+import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +22,7 @@ GATE_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "gate-a.ym
 CLOCK_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "stage3-clock.yml"
 ROOT_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
 SUCCESSOR_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "newcalibre.yml"
+ACTIVATION_WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "s3-activation-gate.yml"
 TIER2_ARTIFACT_CHECK = (
     "set -euo pipefail\n"
     "for run in tier2-run1 tier2-run2; do\n"
@@ -27,10 +32,11 @@ TIER2_ARTIFACT_CHECK = (
     "done\n"
     'diff -r "${RUNNER_TEMP}/tier2-run1" "${RUNNER_TEMP}/tier2-run2"'
 )
+TRACKING_ADMISSION_TEST = "tests/test_stage3_tracking_admission.py"
 STAGE3_AUTOMATION_CONTRACT = (
     "uv sync --project newcalibre --locked --group dev\n"
     "uv run --project newcalibre --locked --no-sync pytest "
-    "tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py"
+    "tests/test_stage3_automation.py tests/test_stage3_vn2_automation.py " + TRACKING_ADMISSION_TEST
 )
 SUCCESSOR_EXPORT = (
     "set -euo pipefail\n"
@@ -179,6 +185,237 @@ def _expiry_body() -> str:
 
 stage3_clock = load_script_module(SCRIPTS_DIR / "stage3_clock.py")
 stage3_gate_report = load_script_module(SCRIPTS_DIR / "stage3_gate_report.py")
+
+TRACKING_C0 = "c" * 40
+
+
+def _canonical_line(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+@pytest.fixture
+def strict_tracking_evidence(tmp_path: Path) -> tuple[Path, bytes, bytes]:
+    environment = {
+        "arch": "x86_64",
+        "cpu_model": "fixture cpu",
+        "numpy": "2.3.1",
+        "numpy_config": "OpenBLAS fixture",
+        "os": {"id": "ubuntu", "pretty_name": "Ubuntu 24.04", "version_id": "24.04"},
+        "python": "3.12.13",
+        "runner_image": "ubuntu24/20260701.1",
+        "thread_policy": {
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
+        },
+    }
+    config_digest = "2" * 64
+    input_digest = "3" * 64
+    lock_digest = "4" * 64
+    capture_digest = "5" * 64
+    artifact_digest = "6" * 64
+    workflow = {
+        "definition_ref": ("Vzlentin/calibre/.github/workflows/newcalibre.yml@refs/heads/main"),
+        "definition_sha": TRACKING_C0,
+        "run_id": "123456",
+        "run_url": "https://github.com/Vzlentin/calibre/actions/runs/123456",
+    }
+    result_artifact = {
+        "digest": artifact_digest,
+        "id": "789012",
+        "name": f"vn2-acceptance-{TRACKING_C0}",
+    }
+    environment_digest = hashlib.sha256(
+        _canonical_line(
+            {
+                "actuals_semantics": "censored_sales_surrogate",
+                "architecture": environment["arch"],
+                "config_digest": config_digest,
+                "input_inventory_digest": input_digest,
+                "lockfile_digest": lock_digest,
+                "os_id": environment["os"]["id"],
+                "os_version": environment["os"]["version_id"],
+                "promoted_capture_digest": capture_digest,
+            }
+        )[:-1]
+    ).hexdigest()
+    toolchain_digest = hashlib.sha256(
+        _canonical_line(
+            {
+                "numpy": environment["numpy"],
+                "numpy_config": environment["numpy_config"],
+                "python": environment["python"],
+                "schema": 1,
+            }
+        )[:-1]
+    ).hexdigest()
+    identity = hashlib.sha256(
+        _canonical_line(
+            {
+                "artifact_kind": "vn2-gate-a-results",
+                "candidate_sha": TRACKING_C0,
+                "config_digest": config_digest,
+                "environment_digest": environment_digest,
+                "input_inventory_digest": input_digest,
+            }
+        )[:-1]
+    ).hexdigest()
+    record_line = _canonical_line(
+        {
+            "environment": {
+                "digest": environment_digest,
+                "facts": environment,
+                "toolchain_digest": toolchain_digest,
+            },
+            "evidence": {
+                "actuals_semantics": "censored_sales_surrogate",
+                "config": {
+                    "digest": config_digest,
+                    "path": "benchmarks/vn2/protocol.yaml",
+                },
+                "input_inventory": {
+                    "digest": input_digest,
+                    "path": "benchmarks/vn2/vn2-input-digests.json",
+                },
+                "lockfile": {"digest": lock_digest, "path": "uv.lock"},
+                "promoted_capture": {
+                    "artifact_digest": artifact_digest,
+                    "artifact_id": "789013",
+                    "artifact_name": f"oracle-capture-{TRACKING_C0}",
+                    "capture_digest": capture_digest,
+                    "environment_digest": artifact_digest,
+                    "inner_bundle_digest": artifact_digest,
+                    "manifest_sha256": artifact_digest,
+                    "producer_sha": TRACKING_C0,
+                    "run_url": workflow["run_url"],
+                    "workflow_run_id": workflow["run_id"],
+                    "workflow_sha": TRACKING_C0,
+                },
+                "session": {
+                    "id": artifact_digest,
+                    "series_count": 1,
+                    "series_identity_digest": artifact_digest,
+                },
+            },
+            "identity": identity,
+            "objective": {
+                "holding_cost": 1.0,
+                "shortage_cost": 2.0,
+                "total_cost": 3.0,
+            },
+            "record_kind": "vn2-gate-a-tracking-record",
+            "result_artifact": result_artifact,
+            "result_bundle": {
+                "artifact_kind": "vn2-gate-a-results",
+                "files": {
+                    "r1-orders.jsonl": artifact_digest,
+                    "r2-cost-ledger.jsonl": artifact_digest,
+                    "r3-final-triple.json": artifact_digest,
+                    "r4-cost-trajectory.json": artifact_digest,
+                },
+                "inner_bundle_digest": artifact_digest,
+                "manifest_sha256": artifact_digest,
+                "provenance_digest": artifact_digest,
+            },
+            "schema": 1,
+            "subject": {
+                "candidate_sha": TRACKING_C0,
+                "repository": "Vzlentin/calibre",
+            },
+            "workflow": workflow,
+        }
+    )
+    receipt_line = _canonical_line(
+        {
+            "candidate_sha": TRACKING_C0,
+            "proposal_artifact": {
+                "digest": "7" * 64,
+                "id": "789014",
+                "name": f"vn2-tracking-proposal-{TRACKING_C0}",
+            },
+            "receipt_kind": "vn2-tracking-promotion-receipt",
+            "record_sha256": hashlib.sha256(record_line).hexdigest(),
+            "repository": "Vzlentin/calibre",
+            "result_artifact": result_artifact,
+            "schema": 1,
+            "workflow": workflow,
+        }
+    )
+    series_path = tmp_path / "tracking" / "series.jsonl"
+    series_path.parent.mkdir()
+    series_path.write_bytes(record_line)
+    (series_path.parent / f"{TRACKING_C0}-receipt.json").write_bytes(receipt_line)
+    return series_path, record_line, receipt_line
+
+
+def _emit_gate_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tracking_evidence: tuple[Path, bytes, bytes],
+    *,
+    changed: list[str] | None = None,
+    diff_error: bool = False,
+) -> tuple[int, dict[str, object]]:
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> FixedDateTime:
+            return cls(2026, 7, 30, 6, 30, tzinfo=UTC)
+
+    candidate = "d" * 40
+    output = tmp_path / "gate-report.json"
+    series_path, _, _ = tracking_evidence
+
+    def fake_git(*args: str) -> str:
+        if args[0] == "diff":
+            assert args == ("diff", "--no-renames", "--name-only", f"{TRACKING_C0}..HEAD")
+            if diff_error:
+                raise subprocess.CalledProcessError(128, ("git", *args))
+            return "\n".join(changed or [])
+        assert args == ("rev-parse", "HEAD")
+        return candidate
+
+    monkeypatch.setattr(stage3_gate_report, "TRACKING_SERIES", series_path)
+    monkeypatch.setattr(stage3_gate_report, "INPUT_INVENTORY", tmp_path / "missing-inputs.json")
+    monkeypatch.setattr(stage3_gate_report, "CAPTURES_DIR", tmp_path / "captures")
+    monkeypatch.setattr(stage3_gate_report, "datetime", FixedDateTime)
+    monkeypatch.setattr(stage3_gate_report, "find_activation_record", lambda: ACTIVATION_RECORD)
+    monkeypatch.setattr(stage3_gate_report, "git", fake_git)
+    monkeypatch.setattr(
+        stage3_gate_report,
+        "_load_required_oracle_outcomes",
+        lambda path, *, problems: {},
+    )
+    monkeypatch.setattr(
+        stage3_gate_report,
+        "_lane_provenance",
+        lambda specs, *, candidate, problems: {},
+    )
+    monkeypatch.setattr(
+        stage3_gate_report,
+        "_capture_manifest_digests",
+        lambda root, *, problems: {},
+    )
+    monkeypatch.setattr(
+        stage3_gate_report.platform,
+        "freedesktop_os_release",
+        lambda: {"PRETTY_NAME": "test runner"},
+    )
+    monkeypatch.setenv("CANDIDATE_SHA", candidate)
+    monkeypatch.setattr(sys, "argv", ["stage3_gate_report.py", "--out", str(output)])
+
+    result = stage3_gate_report.main()
+    return result, json.loads(output.read_text(encoding="utf-8"))
 
 
 def test_gate_report_reads_the_real_multiline_activation_record(
@@ -534,6 +771,9 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
     assert "if" not in contract
     assert "continue-on-error" not in contract
     assert "shell" not in contract
+    assert TRACKING_ADMISSION_TEST in contract["run"].split(), (
+        "successor workflow must run the Stage 3 tracking admission suite"
+    )
     assert contract["run"].strip() == STAGE3_AUTOMATION_CONTRACT
     build_export = next(
         step for step in unit["steps"] if step.get("name") == "Build successor-only export"
@@ -587,6 +827,9 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
     assert "if" not in root_contract
     assert "continue-on-error" not in root_contract
     assert "shell" not in root_contract
+    assert TRACKING_ADMISSION_TEST in root_contract["run"].split(), (
+        "root workflow must run the Stage 3 tracking admission suite"
+    )
     assert root_contract["run"].strip() == STAGE3_AUTOMATION_CONTRACT
     root_setup = next(
         step for step in root_test["steps"] if step.get("uses") == "astral-sh/setup-uv@v4"
@@ -623,6 +866,7 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
         ".github/scripts/stage3_*.py",
         "tests/test_stage3_automation.py",
         "tests/test_stage3_vn2_automation.py",
+        TRACKING_ADMISSION_TEST,
     }
     scoped_job_names = {
         "lint-and-type-check",
@@ -646,6 +890,9 @@ def test_required_successor_unit_covers_every_stage3_contract_pull_request() -> 
         assert scope["uses"] == "tj-actions/changed-files@v45"
         assert "continue-on-error" not in scope
         configured_patterns = set(scope["with"]["files"].splitlines())
+        assert TRACKING_ADMISSION_TEST in configured_patterns, (
+            f"{name} successor-only scope must include the tracking admission test"
+        )
         assert configured_patterns == expected_successor_only_patterns
 
 
@@ -679,7 +926,25 @@ def test_clock_manual_triggers_execute_only_the_default_branch_workflow() -> Non
         "pull-requests": "read",
     }
     successor = yaml.safe_load(SUCCESSOR_WORKFLOW.read_text(encoding="utf-8"))
-    assert successor["jobs"]["s3-activation-gate"]["permissions"] == {
+    # Bootstrap-only: the immediate cutover PR removes this legacy emitter.
+    legacy = successor["jobs"]["s3-activation-gate"]
+    assert set(legacy) == {"if", "runs-on", "permissions", "steps"}
+    assert legacy["permissions"] == {
+        "contents": "read",
+        "issues": "read",
+        "pull-requests": "read",
+    }
+    step_names = [step.get("name", step.get("uses")) for step in legacy["steps"]]
+    assert step_names == [
+        "actions/checkout@v4",
+        "Activation-record gate",
+        "Report lane result",
+    ]
+    assert "stage3_clock.py gate" in legacy["steps"][1]["run"]
+    assert legacy["steps"][2]["run"] == 'echo "s3-activation-gate complete"'
+    activation = yaml.safe_load(ACTIVATION_WORKFLOW.read_text(encoding="utf-8"))
+    assert activation["permissions"] == {
+        "actions": "read",
         "contents": "read",
         "issues": "read",
         "pull-requests": "read",
@@ -729,11 +994,268 @@ def test_negative_gate_report_is_written_before_main_returns_nonzero(
     assert report["candidate_sha"] == "b" * 40
     assert report["problems"] == [
         "Gate report requires every required lane result",
-        "gate precondition unmet: no promoted tracking record (U9b)",
+        "gate precondition unmet: no promoted tracking record",
+        "C0→candidate evidence-only diff could not be established",
         "no schema-complete activation record on the Gate issue",
         "aggregate checkout HEAD does not equal the Gate candidate",
         f"promoted capture root is missing: {(tmp_path / 'missing-captures').as_posix()}",
     ]
+
+
+def test_gate_report_admits_one_strict_canonical_record_and_receipt(
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    series_path, record_line, receipt_line = strict_tracking_evidence
+    problems: list[str] = []
+
+    assert stage3_gate_report._tracking_evidence(series_path, problems=problems) == (
+        TRACKING_C0,
+        hashlib.sha256(record_line).hexdigest(),
+        hashlib.sha256(receipt_line).hexdigest(),
+    )
+    assert problems == []
+
+
+def _assert_tracking_evidence_rejected(series_path: Path) -> list[str]:
+    problems: list[str] = []
+    assert stage3_gate_report._tracking_evidence(series_path, problems=problems) == (
+        None,
+        None,
+        None,
+    )
+    assert problems
+    return problems
+
+
+@pytest.mark.parametrize(
+    ("mutate", "problem"),
+    [
+        (
+            lambda payload: payload.replace(
+                b'{"candidate_sha":',
+                f'{{"candidate_sha":"{TRACKING_C0}","candidate_sha":'.encode(),
+                1,
+            ),
+            "valid UTF-8 JSON",
+        ),
+        (
+            lambda payload: (
+                json.dumps(
+                    json.loads(payload),
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            ),
+            "canonical",
+        ),
+        (lambda payload: payload[:-1] + b"\r\n", "exactly one LF"),
+    ],
+)
+def test_gate_report_rejects_hostile_receipt_bytes(
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+    mutate: Callable[[bytes], bytes],
+    problem: str,
+) -> None:
+    series_path, _, receipt_line = strict_tracking_evidence
+    receipt_path = series_path.parent / f"{TRACKING_C0}-receipt.json"
+    receipt_path.write_bytes(mutate(receipt_line))
+
+    problems = _assert_tracking_evidence_rejected(series_path)
+
+    assert problem in problems[0]
+
+
+@pytest.mark.parametrize("leaf", ["series", "receipt"])
+def test_gate_report_rejects_symlink_tracking_leaves(
+    tmp_path: Path,
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+    leaf: str,
+) -> None:
+    series_path, record_line, receipt_line = strict_tracking_evidence
+    receipt_path = series_path.parent / f"{TRACKING_C0}-receipt.json"
+    hostile_path, payload = (
+        (series_path, record_line) if leaf == "series" else (receipt_path, receipt_line)
+    )
+    target = tmp_path / f"real-{leaf}"
+    target.write_bytes(payload)
+    hostile_path.unlink()
+    hostile_path.symlink_to(target)
+
+    problems = _assert_tracking_evidence_rejected(series_path)
+
+    assert "non-symlinks" in problems[0]
+
+
+def test_gate_report_rejects_symlink_tracking_ancestor(
+    tmp_path: Path,
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    series_path, _, _ = strict_tracking_evidence
+    tracking_root = series_path.parent
+    real_root = tmp_path / "real-tracking"
+    tracking_root.rename(real_root)
+    tracking_root.symlink_to(real_root, target_is_directory=True)
+
+    problems = _assert_tracking_evidence_rejected(series_path)
+
+    assert "every ancestor" in problems[0]
+
+
+@pytest.mark.parametrize("leaf", ["series", "receipt"])
+@pytest.mark.parametrize("special", ["fifo", "directory"])
+def test_gate_report_rejects_special_tracking_leaves_without_blocking(
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+    leaf: str,
+    special: str,
+) -> None:
+    series_path, _, _ = strict_tracking_evidence
+    receipt_path = series_path.parent / f"{TRACKING_C0}-receipt.json"
+    hostile_path = series_path if leaf == "series" else receipt_path
+    hostile_path.unlink()
+    if special == "fifo":
+        os.mkfifo(hostile_path)
+    else:
+        hostile_path.mkdir()
+
+    problems = _assert_tracking_evidence_rejected(series_path)
+
+    assert "regular non-symlink file" in problems[0]
+
+
+def test_gate_report_rejects_receipt_binding_mismatch(
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    series_path, _, receipt_line = strict_tracking_evidence
+    receipt = json.loads(receipt_line)
+    receipt["record_sha256"] = "0" * 64
+    (series_path.parent / f"{TRACKING_C0}-receipt.json").write_bytes(_canonical_line(receipt))
+
+    problems = _assert_tracking_evidence_rejected(series_path)
+
+    assert problems == ["tracking promotion receipt does not bind the latest canonical record"]
+
+
+def test_gate_report_derives_nothing_from_a_noncanonical_tracking_record(
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    series_path, record_line, _ = strict_tracking_evidence
+    malformed = json.loads(record_line)
+    malformed["objective"]["total_cost"] = 4.0
+    series_path.write_bytes(_canonical_line(malformed))
+    problems: list[str] = []
+
+    assert stage3_gate_report._tracking_evidence(series_path, problems=problems) == (
+        None,
+        None,
+        None,
+    )
+    assert problems == ["objective.total_cost must equal holding_cost + shortage_cost"]
+
+
+def test_gate_report_persists_nonempty_allowlisted_c0_c1_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    changed = [
+        "stage3/evidence/tracking/series.jsonl",
+        f"stage3/evidence/tracking/{TRACKING_C0}-receipt.json",
+    ]
+
+    verdict, report = _emit_gate_report(
+        monkeypatch,
+        tmp_path,
+        strict_tracking_evidence,
+        changed=changed,
+    )
+
+    assert verdict == 0
+    assert report["c0_c1_discipline"] == {
+        "c0": TRACKING_C0,
+        "changed": changed,
+        "offending": [],
+    }
+    assert report["problems"] == []
+
+
+def test_gate_report_rejects_and_persists_offending_c0_c1_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    changed = [
+        "stage3/evidence/tracking/series.jsonl",
+        "newcalibre/src/newcalibre/protocols/vn2/tracking.py",
+    ]
+
+    verdict, report = _emit_gate_report(
+        monkeypatch,
+        tmp_path,
+        strict_tracking_evidence,
+        changed=changed,
+    )
+
+    assert verdict == 1
+    assert report["c0_c1_discipline"] == {
+        "c0": TRACKING_C0,
+        "changed": changed,
+        "offending": ["newcalibre/src/newcalibre/protocols/vn2/tracking.py"],
+    }
+    assert report["problems"] == [
+        "C0→C1 diff leaves the evidence-path allowlist; candidate void — re-mint at a new C0"
+    ]
+
+
+def test_gate_report_exposes_rename_source_deletion_as_an_offending_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    renamed_source = "newcalibre/retired-tracking-receipt.json"
+    changed = [
+        renamed_source,
+        f"stage3/evidence/tracking/{TRACKING_C0}-receipt.json",
+    ]
+
+    verdict, report = _emit_gate_report(
+        monkeypatch,
+        tmp_path,
+        strict_tracking_evidence,
+        changed=changed,
+    )
+
+    assert verdict == 1
+    assert report["c0_c1_discipline"] == {
+        "c0": TRACKING_C0,
+        "changed": changed,
+        "offending": [renamed_source],
+    }
+    assert report["problems"] == [
+        "C0→C1 diff leaves the evidence-path allowlist; candidate void — re-mint at a new C0"
+    ]
+
+
+def test_gate_report_persists_failed_c0_c1_diff_inspection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strict_tracking_evidence: tuple[Path, bytes, bytes],
+) -> None:
+    verdict, report = _emit_gate_report(
+        monkeypatch,
+        tmp_path,
+        strict_tracking_evidence,
+        diff_error=True,
+    )
+
+    assert verdict == 1
+    assert report["c0_c1_discipline"] is None
+    problems = report["problems"]
+    assert isinstance(problems, list)
+    assert len(problems) == 2
+    assert problems[0].startswith("C0→candidate diff inspection failed: ")
+    assert problems[1] == "C0→candidate evidence-only diff could not be established"
 
 
 def test_deadline_check_uses_one_gate_comment_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
