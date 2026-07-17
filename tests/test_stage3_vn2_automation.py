@@ -611,10 +611,12 @@ def test_digest_bound_evidence_and_configs_are_never_text_normalized() -> None:
     assert rules == set(DIGEST_BOUND_ATTRIBUTE_EXAMPLES)
 
     for rule, evidence_path in DIGEST_BOUND_ATTRIBUTE_EXAMPLES.items():
-        if rule == "stage3/evidence/tracking/** -text":
-            assert not os.path.lexists(REPO_ROOT / evidence_path)
+        evidence = REPO_ROOT / evidence_path
+        if os.path.lexists(evidence):
+            assert not evidence.is_symlink()
+            assert evidence.is_file()
         else:
-            assert (REPO_ROOT / evidence_path).is_file()
+            assert rule == "stage3/evidence/tracking/** -text"
         checked = subprocess.run(
             ["git", "check-attr", "text", "--", evidence_path],
             cwd=REPO_ROOT,
