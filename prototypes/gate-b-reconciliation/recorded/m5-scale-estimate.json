@@ -1,0 +1,92 @@
+{
+  "cross_checks": {
+    "dense_summing_bytes_matches_prf21": true,
+    "dense_summing_gib": 7.624446377158165,
+    "nnz": 213430
+  },
+  "estimates": {
+    "mint_cov": {
+      "ceiling_bytes": 1073741824,
+      "decision": "rejected",
+      "dense_components": {
+        "covariance_dense": 9011799752,
+        "factor_temporary": 7437120800,
+        "normal_equations": 7437120800,
+        "residual_wide": 1042332528,
+        "summing_matrix_dense": 8186686960
+      },
+      "dense_workspace_bytes": 33115060840,
+      "formulation": "mint_cov",
+      "reason": "rejected by name: raw full sample covariance is rank-deficient for T < n_nodes and ill-conditioned on retail-sized lattices; use wls_var or wls_struct",
+      "sparse_components": null,
+      "sparse_workspace_bytes": null
+    },
+    "mint_shrink": {
+      "ceiling_bytes": 1073741824,
+      "decision": "rejected",
+      "dense_components": {
+        "covariance_dense": 9011799752,
+        "factor_temporary": 7437120800,
+        "normal_equations": 7437120800,
+        "residual_wide": 1042332528,
+        "summing_matrix_dense": 8186686960
+      },
+      "dense_workspace_bytes": 33115060840,
+      "formulation": "mint_shrink",
+      "reason": "dense-only formulation needs 33115060840 B, exceeding ceiling 1073741824 B, and has no sparse path; use wls_var or wls_struct",
+      "sparse_components": null,
+      "sparse_workspace_bytes": null
+    },
+    "wls_struct": {
+      "ceiling_bytes": 1073741824,
+      "decision": "sparse-required",
+      "dense_components": {
+        "factor_temporary": 7437120800,
+        "normal_equations": 7437120800,
+        "summing_matrix_dense": 8186686960,
+        "weights_diagonal": 268504
+      },
+      "dense_workspace_bytes": 23061197064,
+      "formulation": "wls_struct",
+      "reason": "dense workspace 23061197064 B exceeds ceiling 1073741824 B; the sparse operator path never materializes it",
+      "sparse_components": {
+        "iterative_vectors": 1512688,
+        "summing_matrix_csr": 2695416,
+        "weights_diagonal": 268504
+      },
+      "sparse_workspace_bytes": 4476608
+    },
+    "wls_var": {
+      "ceiling_bytes": 1073741824,
+      "decision": "sparse-required",
+      "dense_components": {
+        "factor_temporary": 7437120800,
+        "normal_equations": 7437120800,
+        "residual_wide": 1042332528,
+        "summing_matrix_dense": 8186686960,
+        "weights_diagonal": 268504
+      },
+      "dense_workspace_bytes": 24103529592,
+      "formulation": "wls_var",
+      "reason": "dense workspace 24103529592 B exceeds ceiling 1073741824 B; the sparse operator path never materializes it",
+      "sparse_components": {
+        "iterative_vectors": 1512688,
+        "residual_wide": 1042332528,
+        "summing_matrix_csr": 2695416,
+        "weights_diagonal": 268504
+      },
+      "sparse_workspace_bytes": 1046809136
+    }
+  },
+  "metadata": {
+    "n_attributes": 5,
+    "n_bottom": 30490,
+    "n_nodes": 33563,
+    "residual_periods": 1941,
+    "sources": [
+      "docs/spec/21-protocol-m5.md [M5-H2] (30,490 bottom; 33,563 nodes)",
+      "docs/spec/21-protocol-m5.md [M5-H1]/[M5-D1] (five attribute columns)",
+      "docs/spec/21-protocol-m5.md [M5-D3] (evaluation phase: 1,941 days)"
+    ]
+  }
+}

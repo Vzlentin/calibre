@@ -1,0 +1,230 @@
+{
+  "base_forecast": [
+    10.0,
+    20.0,
+    30.0,
+    40.0,
+    50.0,
+    60.0,
+    48.0,
+    75.0,
+    95.0,
+    55.0,
+    160.0,
+    200.0
+  ],
+  "coherence_max_abs_residual": {
+    "mint_shrink_dense": 0.0,
+    "wls_struct_dense": 0.0,
+    "wls_var_dense": 0.0
+  },
+  "condition_numbers": {
+    "mint_shrink": 8.239048062347667,
+    "wls_struct": 4.000000000000002,
+    "wls_var": 3.77357599029997
+  },
+  "dense_vs_sparse_max_abs_diff": {
+    "wls_struct": 5.684341886080802e-14,
+    "wls_var": 2.842170943040401e-14
+  },
+  "derived_tolerances": {
+    "wls_struct_sparse": 9.600023980817335e-07,
+    "wls_var_sparse": 9.056605150907745e-07
+  },
+  "lattice": {
+    "n_attributes": 2,
+    "n_bottom": 6,
+    "n_nodes": 12,
+    "nnz": 24,
+    "node_labels": [
+      "s1",
+      "s2",
+      "s3",
+      "s4",
+      "s5",
+      "s6",
+      "channel=a",
+      "channel=b",
+      "channel=c",
+      "region=east",
+      "region=west",
+      "__total__"
+    ]
+  },
+  "preflight_fixture": {
+    "mint_cov": {
+      "ceiling_bytes": 1073741824,
+      "decision": "rejected",
+      "dense_components": {
+        "covariance_dense": 1152,
+        "factor_temporary": 288,
+        "normal_equations": 288,
+        "residual_wide": 1536,
+        "summing_matrix_dense": 576
+      },
+      "dense_workspace_bytes": 3840,
+      "formulation": "mint_cov",
+      "reason": "rejected by name: raw full sample covariance is rank-deficient for T < n_nodes and ill-conditioned on retail-sized lattices; use wls_var or wls_struct",
+      "sparse_components": null,
+      "sparse_workspace_bytes": null
+    },
+    "mint_shrink": {
+      "ceiling_bytes": 1073741824,
+      "decision": "dense-permitted",
+      "dense_components": {
+        "covariance_dense": 1152,
+        "factor_temporary": 288,
+        "normal_equations": 288,
+        "residual_wide": 1536,
+        "summing_matrix_dense": 576
+      },
+      "dense_workspace_bytes": 3840,
+      "formulation": "mint_shrink",
+      "reason": "dense workspace 3840 B within ceiling 1073741824 B",
+      "sparse_components": null,
+      "sparse_workspace_bytes": null
+    },
+    "wls_struct": {
+      "ceiling_bytes": 1073741824,
+      "decision": "dense-permitted",
+      "dense_components": {
+        "factor_temporary": 288,
+        "normal_equations": 288,
+        "summing_matrix_dense": 576,
+        "weights_diagonal": 96
+      },
+      "dense_workspace_bytes": 1248,
+      "formulation": "wls_struct",
+      "reason": "dense workspace 1248 B within ceiling 1073741824 B",
+      "sparse_components": {
+        "iterative_vectors": 384,
+        "summing_matrix_csr": 340,
+        "weights_diagonal": 96
+      },
+      "sparse_workspace_bytes": 820
+    },
+    "wls_var": {
+      "ceiling_bytes": 1073741824,
+      "decision": "dense-permitted",
+      "dense_components": {
+        "factor_temporary": 288,
+        "normal_equations": 288,
+        "residual_wide": 1536,
+        "summing_matrix_dense": 576,
+        "weights_diagonal": 96
+      },
+      "dense_workspace_bytes": 2784,
+      "formulation": "wls_var",
+      "reason": "dense workspace 2784 B within ceiling 1073741824 B",
+      "sparse_components": {
+        "iterative_vectors": 384,
+        "residual_wide": 1536,
+        "summing_matrix_csr": 340,
+        "weights_diagonal": 96
+      },
+      "sparse_workspace_bytes": 2356
+    }
+  },
+  "reconciled": {
+    "mint_shrink_dense": [
+      9.604612645584476,
+      20.360514963258655,
+      29.552836209572426,
+      41.12026950891833,
+      51.005077138734485,
+      61.82533888950677,
+      50.7248821545028,
+      71.36559210199314,
+      91.37817509907919,
+      59.51796381841555,
+      153.9506855371596,
+      213.4686493555751
+    ],
+    "wls_struct_dense": [
+      7.708333333333328,
+      19.458333333333318,
+      29.458333333333357,
+      40.20833333333334,
+      51.95833333333336,
+      61.958333333333314,
+      47.91666666666667,
+      71.41666666666667,
+      91.41666666666667,
+      56.625,
+      154.125,
+      210.75
+    ],
+    "wls_struct_sparse": [
+      7.708333333333336,
+      19.458333333333325,
+      29.45833333333333,
+      40.20833333333335,
+      51.95833333333336,
+      61.95833333333335,
+      47.916666666666686,
+      71.41666666666669,
+      91.41666666666669,
+      56.624999999999986,
+      154.12500000000006,
+      210.75000000000003
+    ],
+    "wls_var_dense": [
+      8.72930156106704,
+      19.360886821750533,
+      29.805408110979904,
+      39.84573029556287,
+      51.6081705728404,
+      60.7382865684701,
+      48.57503185662991,
+      70.96905739459093,
+      90.54369467945,
+      57.89559649379748,
+      152.19218743687338,
+      210.08778393067087
+    ],
+    "wls_var_sparse": [
+      8.72930156106704,
+      19.360886821750544,
+      29.80540811097991,
+      39.84573029556287,
+      51.6081705728404,
+      60.73828656847011,
+      48.57503185662991,
+      70.96905739459095,
+      90.54369467945003,
+      57.8955964937975,
+      152.19218743687338,
+      210.08778393067087
+    ]
+  },
+  "shrinkage_intensity": 0.3003372428099977,
+  "structural_weights": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    2.0,
+    2.0,
+    2.0,
+    3.0,
+    3.0,
+    6.0
+  ],
+  "variance_floor": 1.4007842504984833e-13,
+  "variance_weights": [
+    5.714285714285714,
+    8.928571428571429,
+    4.357142857142857,
+    6.0,
+    12.857142857142858,
+    4.857142857142857,
+    19.714285714285715,
+    33.142857142857146,
+    30.0,
+    44.357142857142854,
+    59.42857142857143,
+    78.85714285714286
+  ]
+}
