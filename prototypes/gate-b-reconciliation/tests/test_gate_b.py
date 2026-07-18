@@ -37,7 +37,8 @@ from gate_b_proto.preflight import (
     DENSE_WORKSPACE_CEILING_BYTES,
     FORMULATIONS,
     M5_METADATA,
-    REJECTED,
+    REJECTED_AT_SCALE,
+    REJECTED_BY_NAME,
     SPARSE_REQUIRED,
     LatticeMetadata,
     estimate_formulation,
@@ -223,13 +224,13 @@ def test_mint_shrink_stays_positive_definite_where_mint_cov_fails() -> None:
 
 
 def test_preflight_fixture_permits_dense_and_rejects_mint_cov() -> None:
-    """At fixture scale everything dense fits; mint_cov is rejected by name."""
+    """At fixture scale everything dense fits; only mint_cov is rejected by name."""
     meta = LatticeMetadata(n_bottom=6, n_nodes=12, n_attributes=2, residual_periods=8)
     for name in ("wls_struct", "wls_var", "mint_shrink"):
         estimate = estimate_formulation(name, meta)
         assert estimate.decision == DENSE_PERMITTED
         assert estimate.dense_workspace_bytes <= DENSE_WORKSPACE_CEILING_BYTES
-    assert estimate_formulation("mint_cov", meta).decision == REJECTED
+    assert estimate_formulation("mint_cov", meta).decision == REJECTED_BY_NAME
 
 
 def test_preflight_m5_decisions_from_metadata() -> None:
@@ -243,9 +244,9 @@ def test_preflight_m5_decisions_from_metadata() -> None:
     assert var_estimate.decision == SPARSE_REQUIRED
     assert dict(var_estimate.sparse_components or ())["residual_wide"] == 2 * 33_563 * 1_941 * 8
     shrink_estimate = estimate_formulation("mint_shrink", M5_METADATA)
-    assert shrink_estimate.decision == REJECTED
+    assert shrink_estimate.decision == REJECTED_AT_SCALE
     assert "wls_var or wls_struct" in shrink_estimate.reason
-    assert estimate_formulation("mint_cov", M5_METADATA).decision == REJECTED
+    assert estimate_formulation("mint_cov", M5_METADATA).decision == REJECTED_BY_NAME
 
 
 def test_witness_preflight_ceiling_boundary() -> None:
@@ -261,7 +262,33 @@ def test_witness_preflight_ceiling_boundary() -> None:
     dense_only_below = estimate_formulation(
         "mint_shrink", meta, ceiling_bytes=exact.dense_workspace_bytes - 8
     )
-    assert dense_only_below.decision == REJECTED
+    assert dense_only_below.decision == REJECTED_AT_SCALE
+
+
+def test_mint_shrink_permitted_below_ceiling_rejected_above_without_allocation() -> None:
+    """Biting test for the owner decision: one strategy, gated by the ceiling only.
+
+    `mint_shrink` is dense-only and ships in the roster: permitted when its
+    itemized dense workspace fits the ceiling (fixture scale), rejected for
+    the run — never by name — when it does not (full-M5 metadata), with the
+    rejection computed from metadata and allocating nothing.
+    """
+    fixture_meta = LatticeMetadata(n_bottom=6, n_nodes=12, n_attributes=2, residual_periods=8)
+    below = estimate_formulation("mint_shrink", fixture_meta)
+    assert below.decision == DENSE_PERMITTED
+    assert below.dense_workspace_bytes <= below.ceiling_bytes
+
+    tracemalloc.start()
+    try:
+        above = estimate_formulation("mint_shrink", M5_METADATA)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert above.decision == REJECTED_AT_SCALE
+    assert above.decision != REJECTED_BY_NAME  # per-run ceiling rejection, not global
+    assert above.dense_workspace_bytes > above.ceiling_bytes
+    assert "wls_var or wls_struct" in above.reason
+    assert peak < 1_000_000  # bytes; the ~31 GiB workspace is never allocated
 
 
 def test_preflight_allocates_no_forbidden_structure() -> None:

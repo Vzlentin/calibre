@@ -54,7 +54,7 @@
   "preflight_fixture": {
     "mint_cov": {
       "ceiling_bytes": 1073741824,
-      "decision": "rejected",
+      "decision": "rejected-by-name",
       "dense_components": {
         "covariance_dense": 1152,
         "factor_temporary": 288,
@@ -64,7 +64,7 @@
       },
       "dense_workspace_bytes": 3840,
       "formulation": "mint_cov",
-      "reason": "rejected by name: raw full sample covariance is rank-deficient for T < n_nodes and ill-conditioned on retail-sized lattices; use wls_var or wls_struct",
+      "reason": "rejected by name at resolution: raw full sample covariance is rank-deficient for T < n_nodes and ill-conditioned on retail-sized lattices; use wls_var or wls_struct",
       "sparse_components": null,
       "sparse_workspace_bytes": null
     },

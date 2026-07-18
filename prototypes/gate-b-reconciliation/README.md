@@ -14,21 +14,24 @@ here ships; `newcalibre/` is untouched. Design authority is
 
 ## Verdict
 
-Ship **wls_struct** (structural-weights projection) and **wls_var** (MinT with
-the diagonal residual-covariance model) as the two projection strategies;
-reject **mint_shrink** and **mint_cov** by name at resolution time per
-`[REC-10]`. Gate the dense representation behind a **deterministic 1 GiB
-(2^30 B) dense-workspace ceiling**, evaluated from metadata before any
-allocation. The MinT-family choice is forced by scale feasibility — stated
-plainly in §7 rather than dressed up as an open menu; the one genuine choice
-left to the owner is the mint_shrink disposition (§7).
+**Owner decision (recorded in §7).** The recommended registry ships five
+strategies: `none` (no-op), `bottom_up` (synthesis), **wls_struct**
+(structural-weights projection), **wls_var** (MinT with the diagonal
+residual-covariance model), and **mint_shrink** (MinT with the
+Schäfer–Strimmer shrunk covariance — dense-only, gated by the ceiling). Only
+**mint_cov** is rejected by name at resolution time per `[REC-10]`. The dense
+representation is bounded by a **deterministic 1 GiB (2^30 B) dense-workspace
+ceiling**, evaluated from metadata before any allocation: `mint_shrink` runs
+where its itemized dense workspace fits (small real-world hierarchies — the
+owner's stated reason for keeping it) and the run is rejected above the
+ceiling, naming `wls_var` and `wls_struct` as the scalable alternatives.
 
 ## 1. Recommended formulations, stated exactly
 
-Both candidates are the same weighted projection with different weight
-matrices. Per cross-section (one model name, origin, horizon step — `[REC-2]`)
-with base vector `y_hat` over the `n` lattice nodes and summing matrix `S`
-(`n × n_bottom`, 0/1, identity block first — `[REC-11]`):
+Every projection candidate is the same weighted projection with a different
+weight matrix. Per cross-section (one model name, origin, horizon step —
+`[REC-2]`) with base vector `y_hat` over the `n` lattice nodes and summing
+matrix `S` (`n × n_bottom`, 0/1, identity block first — `[REC-11]`):
 
 ```
 beta       = argmin_b (y_hat - S b)' W^-1 (y_hat - S b)
@@ -78,11 +81,11 @@ reconciled = S @ beta                     # coherent by construction
   part of the formulation. With the floor, `W` stays strictly positive and
   `S' W^-1 S` positive definite.
 
-## 2. The rejected MinT alternative — `mint_shrink` (and `mint_cov`)
+## 2. The full-covariance MinT members — `mint_shrink` (ships, dense-only) and `mint_cov` (rejected by name)
 
 - **Formulation.** `W = D ((1 - lam) R + lam I) D`, where `R` is the sample
   correlation of the residuals, `D = diag(sd)`, and `lam` is the
-  Schafer-Strimmer shrinkage intensity toward the identity target:
+  Schäfer–Strimmer shrinkage intensity toward the identity target:
 
   ```
   lam = sum_{i != j} (T / (T-1)^3) * sum_t (w_ijt - w_bar_ij)^2  /  sum_{i != j} r_ij^2
@@ -90,18 +93,22 @@ reconciled = S @ beta                     # coherent by construction
   ```
 
   `lam = 1` degenerates to `wls_var`; `lam = 0` is `mint_cov`.
-- **Why it loses.** Every intermediate is `n²` dense: `W` itself, the
-  `W`-solves inside the projection, and the `(n_bottom, n_bottom)` normal
-  matrix with its factorization. At full-M5 metadata the recorded estimate is
-  **33,115,060,840 B ≈ 30.8 GiB** of dense workspace (§5) — ~96% of the
-  `[PRF-20]` 32 GiB process budget before the rest of the pipeline allocates
-  anything, and ~31× the recommended ceiling. Worse, `W` must be re-estimated
-  and re-factored per origin per model (the fitted window grows), an
-  `O(n_bottom^3)` solve per origin against `[PRF-1]`'s 15-minute budget. No
-  sparse variant exists upstream for a reason: nothing in this estimator is
-  sparse. Recommendation: rejected **by name** at resolution time per
-  `[REC-10]`, with the message naming `wls_var` and `wls_struct` — not kept
-  registered below the ceiling (see §7).
+- **Why it is dense-only, and what that costs at scale.** Every intermediate
+  is `n²` dense: `W` itself, the `W`-solves inside the projection, and the
+  `(n_bottom, n_bottom)` normal matrix with its factorization. At full-M5
+  metadata the recorded estimate is **33,115,060,840 B ≈ 30.8 GiB** of dense
+  workspace (§5) — ~96% of the `[PRF-20]` 32 GiB process budget before the
+  rest of the pipeline allocates anything, and ~31× the recommended ceiling.
+  Worse at scale, `W` must be re-estimated and re-factored per origin per
+  model (the fitted window grows), an `O(n_bottom^3)` solve per origin
+  against `[PRF-1]`'s 15-minute budget. No sparse variant exists upstream for
+  a reason: nothing in this estimator is sparse. Per the owner decision (§7),
+  `mint_shrink` therefore ships **gated by the dense-workspace ceiling**, not
+  rejected by name: the registry is not sized purely for full M5, and the
+  shrunk-covariance member is the benchmarking reference on smaller
+  real-world hierarchies whose itemized dense workspace fits under 1 GiB.
+  Above the ceiling the *run* is rejected before allocation, with the message
+  naming `wls_var` and `wls_struct` as the scalable alternatives.
 - **`mint_cov`** (`lam = 0`, raw sample covariance) is rank-deficient whenever
   `T < n_nodes` — the common case for most of a backtest — and
   ill-conditioned on retail-sized lattices even when `T >= n_nodes`. This is
@@ -121,8 +128,8 @@ merits. Feasibility is therefore per formulation, not per matrix:
 |---|---|---:|---|---|
 | `wls_struct` | diagonal (structure) | 23,061,197,064 B ≈ 21.5 GiB | matrix-free operator: `v -> S'((S v) / w)`, `O(nnz(S))` per action | sparse at any scale |
 | `wls_var` | diagonal (residual variances) | 24,103,529,592 B ≈ 22.4 GiB | identical operator; plus the `(n,T)` sidecar (~0.97 GiB), representation-independent | sparse at any scale |
-| `mint_shrink` | full `n × n` (shrunk) | 33,115,060,840 B ≈ 30.8 GiB | none — `W` and its factorization are the wall, not `S` | rejected `[REC-10]` |
-| `mint_cov` | full `n × n` (raw) | (same shape) + singular for `T < n` | none | rejected `[REC-10]` |
+| `mint_shrink` | full `n × n` (shrunk) | 33,115,060,840 B ≈ 30.8 GiB | none — `W` and its factorization are the wall, not `S` | dense-only; permitted below the 1 GiB ceiling, run rejected above it |
+| `mint_cov` | full `n × n` (raw) | (same shape) + singular for `T < n` | none | rejected by name `[REC-10]` |
 
 Note the first row's shape: even the *diagonal-weight* dense path at M5 is
 ~21.5 GiB once the normal equations and one factorization temporary are
@@ -159,8 +166,11 @@ residual_wide  = 2 * n_nodes * T * 8                      # residual formulation
 2. `>` ceiling and the formulation declares a sparse operator path →
    sparse-required; the dense producer is never invoked on its behalf
    (`[REC-15]`).
-3. `>` ceiling and no sparse path (or a name on the `[REC-10]` list) →
-   rejected with the itemized estimate, naming usable alternatives.
+3. `>` ceiling and no sparse path → the *run* is rejected before allocation
+   with the itemized estimate, naming the scalable alternatives (`wls_var`,
+   `wls_struct`); the strategy itself stays registered for smaller
+   hierarchies. Independently of scale, a name on the `[REC-10]` list
+   (`mint_cov`) is rejected at resolution, whatever the metadata.
 
 Derivation of the constant: 1 GiB = 1/32 of Stage 3's 32 GiB process budget
 (`[PRF-20]`), so a dense-permitted run's reconciliation allocations are
@@ -206,22 +216,29 @@ downloaded:
   `S_csr` = 2,695,416 B ≈ **2.6 MiB** — a ~3,000× pivot.
 - Decisions: `wls_struct` → sparse-required (dense 21.5 GiB vs sparse
   4.3 MB); `wls_var` → sparse-required (sparse total 1,046,809,136 B ≈ 0.97
-  GiB, dominated by the 1,042,332,528 B sidecar — at M5 the MinT entry's cost
-  driver is the fitted-values sidecar, not the solve); `mint_shrink` →
-  rejected (30.8 GiB); `mint_cov` → rejected by name.
+  GiB, dominated by the 1,042,332,528 B sidecar — at M5 the diagonal MinT
+  entry's cost driver is the fitted-values sidecar, not the solve);
+  `mint_shrink` → rejected-at-scale (30.8 GiB over the 1 GiB ceiling — a
+  per-run rejection, not a by-name one); `mint_cov` → rejected-by-name.
 
 ## 6. Normative product behavior vs prototype machinery
 
 **Normative** (what S3-U12 should bake into `newcalibre`'s reconcile module,
-each traceable to spec):
+each traceable to spec, reflecting the owner decision of §7):
 
-- The two formulations and their exact `W` estimators, including the
-  `max(v) * T * eps` variance floor and the `T >= 2` loud failure.
-- `mint_shrink` / `mint_cov` rejected by name at resolution with alternatives
-  in the message (`[REC-10]`).
-- The 1 GiB deterministic dense-workspace ceiling and the three-way
-  dense/sparse/reject rule, evaluated from metadata before allocation,
-  itemizing the summing-matrix term (`[REC-16]`, `[PRF-21]`).
+- The five-strategy registry — `none`, `bottom_up`, `wls_struct`, `wls_var`,
+  `mint_shrink` — with the exact `W` estimators of §1–§2, including the
+  `max(v) * T * eps` variance floor, the `T >= 2` loud failure, and the
+  Schäfer–Strimmer intensity.
+- `mint_shrink` registered as **dense-only** (`[REC-8]`c declaration):
+  permitted when its itemized dense workspace estimate is within the ceiling,
+  the run rejected above it before allocation with `wls_var` and `wls_struct`
+  named as scalable alternatives. `mint_cov` alone is rejected by name at
+  resolution (`[REC-10]`).
+- The 1 GiB deterministic dense-workspace ceiling and the four-way
+  dense-permitted / sparse-required / rejected-at-scale / rejected-by-name
+  rule, evaluated from metadata before allocation, itemizing the
+  summing-matrix term (`[REC-16]`, `[PRF-21]`).
 - One shared derived tolerance function consumed by the runtime coherence
   check and the tests (`[REC-12]`); iterative-solver convergence surfaced as
   a first-class error carrying the cross-section identity (`[REC-21]`).
@@ -244,33 +261,35 @@ each traceable to spec):
 
 Seam note, in design terms: the preflight is one deep module behind a
 four-integer interface (metadata in, itemized decision out); the dense closed
-form remains as the class-3 reference adapter behind the test seam — which is
-why a dense path must keep existing below the ceiling even with a
-zero-dense-only strategy roster. No new glossary terms are required:
+form doubles as the class-3 reference adapter behind the test seam and as
+`mint_shrink`'s production path below the ceiling — the same dense
+representation serves both adapters, which is why the ceiling gates the
+producer rather than the strategy list. No new glossary terms are required:
 "structural weights" and the least-squares/trace-minimization families are
 already `[REC-9]` vocabulary; "dense-workspace ceiling" is proposed here as
 the configuration name for `[PRF-21]`'s threshold and is reported, not
 glossed.
 
-## 7. The single smallest owner choice
+## 7. Owner decision (recorded)
 
-The evidence makes the formulations dominant — the campaign contract fixes
-the structural-weights projection, and full-M5 feasibility forces the
-MinT-family entry to `wls_var` (it is the only MinT member with a sparse
-path; `[REC-23]`'s coverage lever needs M5-feasible knobs). What genuinely
-remains is one ratification:
+The HITL question this asset posed was the MinT-family disposition. The owner
+decided: **ship both `wls_var` and `mint_shrink`.** Rationale: the registry
+must not be sized purely for full M5 — dense-only `mint_shrink` is the
+useful benchmarking reference on smaller real-world hierarchies — and it is
+kept bounded by the metadata-only dense preflight rather than excluded.
+Consequences, now reflected throughout this asset:
 
-> **Ratify the roster exactly as recommended — `mint_shrink` rejected by name
-> per `[REC-10]`, leaving zero dense-only strategies — rather than keeping
-> `mint_shrink` registered below the 1 GiB ceiling for small hierarchies?**
-
-Recommended answer: **ratify the rejection.** The campaign contract commits
-to exactly one MinT-family strategy; a below-ceiling `mint_shrink` would
-register a second one whose marginal value over `wls_var` at small scale is
-unproven, and a zero-dense-only roster makes `[REC-15]`/`[PRF-21]`
-enforcement a property of the representation producer alone. (The 1 GiB
-constant itself is a configuration default, revisitable later without any
-interface change — not the load-bearing choice.)
+- Roster: `none`, `bottom_up`, `wls_struct`, `wls_var`, `mint_shrink`.
+- `mint_shrink` is dense-only and ceiling-gated, never rejected by name:
+  permitted where its itemized dense workspace estimate is `<= 1 GiB`;
+  above the ceiling the run is rejected before allocation, naming `wls_var`
+  and `wls_struct` as scalable alternatives.
+- `mint_cov` remains the only by-name rejection (`[REC-10]`): its raw
+  covariance is rank-deficient for `T < n_nodes` and ill-conditioned on
+  retail-sized lattices — the common regime.
+- The full-M5 result stands: at M5 metadata `mint_shrink`'s ~30.8 GiB
+  estimate trips the per-run ceiling; `wls_struct`/`wls_var` remain the
+  M5-feasible knobs for the `[REC-23]` coverage lever.
 
 ## 8. Commands and results
 
@@ -280,7 +299,7 @@ Worktree from current `origin/main` (`dc6434e`), branch
 ```
 cd prototypes/gate-b-reconciliation
 uv run python -m gate_b_proto.record          # wrote recorded/*.json
-uv run pytest tests/ -q                       # 15 passed in 0.21s
+uv run pytest tests/ -q                       # 16 passed
 cd <repo root>
 uv run ruff check .                           # All checks passed!
 uv run ruff format --check prototypes/        # 8 files already formatted
@@ -289,10 +308,12 @@ uv run ruff format --check prototypes/        # 8 files already formatted
 Suite contents: structure/exact-membership and `nnz` identity; dense/sparse
 equivalence within the derived κ·eps bound (class 3); coherence per
 `[REC-12]`; idempotence per `[REC-22]`; three witnesses (membership
-corruption, starved solver, ceiling boundary); variance-floor and
-degenerate-sidecar behavior; `mint_cov` rank deficiency vs `mint_shrink`
-positive-definiteness; O(metadata) preflight under `tracemalloc`; recorded
-JSONs pinned against recomputation.
+corruption, starved solver, ceiling boundary); the owner-decision biting test
+(`mint_shrink` permitted below the ceiling, rejected-at-scale above it, no
+allocation either way); variance-floor and degenerate-sidecar behavior;
+`mint_cov` rank deficiency vs `mint_shrink` positive-definiteness;
+O(metadata) preflight under `tracemalloc`; recorded JSONs pinned against
+recomputation.
 
 ## Sources
 

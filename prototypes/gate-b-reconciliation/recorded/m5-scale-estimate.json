@@ -7,7 +7,7 @@
   "estimates": {
     "mint_cov": {
       "ceiling_bytes": 1073741824,
-      "decision": "rejected",
+      "decision": "rejected-by-name",
       "dense_components": {
         "covariance_dense": 9011799752,
         "factor_temporary": 7437120800,
@@ -17,13 +17,13 @@
       },
       "dense_workspace_bytes": 33115060840,
       "formulation": "mint_cov",
-      "reason": "rejected by name: raw full sample covariance is rank-deficient for T < n_nodes and ill-conditioned on retail-sized lattices; use wls_var or wls_struct",
+      "reason": "rejected by name at resolution: raw full sample covariance is rank-deficient for T < n_nodes and ill-conditioned on retail-sized lattices; use wls_var or wls_struct",
       "sparse_components": null,
       "sparse_workspace_bytes": null
     },
     "mint_shrink": {
       "ceiling_bytes": 1073741824,
-      "decision": "rejected",
+      "decision": "rejected-at-scale",
       "dense_components": {
         "covariance_dense": 9011799752,
         "factor_temporary": 7437120800,
@@ -33,7 +33,7 @@
       },
       "dense_workspace_bytes": 33115060840,
       "formulation": "mint_shrink",
-      "reason": "dense-only formulation needs 33115060840 B, exceeding ceiling 1073741824 B, and has no sparse path; use wls_var or wls_struct",
+      "reason": "dense-only formulation needs 33115060840 B, exceeding ceiling 1073741824 B, and has no sparse path; this run is rejected before allocation (the strategy itself stays registered); use wls_var or wls_struct, which scale sparsely",
       "sparse_components": null,
       "sparse_workspace_bytes": null
     },

@@ -12,7 +12,8 @@ Every candidate is the same projection with a different weight matrix `W`::
   i.e. shrinkage to the diagonal target at full intensity.
 - ``mint_shrink``: `W = D ((1-lam) R + lam I) D` with `R` the sample
   correlation of the residuals, `D = diag(sd)`, `lam` the Schafer-Strimmer
-  shrinkage intensity — dense-only; the rejected loser.
+  shrinkage intensity — dense-only; ships gated by the dense-workspace
+  ceiling (permitted below it, the run rejected above it before allocation).
 - ``mint_cov``: `lam = 0` (raw sample covariance) — rank-deficient whenever
   `T < n_nodes` and ill-conditioned on retail-sized lattices; rejected by
   name per `[REC-10]`. Implemented nowhere; a test pins why.

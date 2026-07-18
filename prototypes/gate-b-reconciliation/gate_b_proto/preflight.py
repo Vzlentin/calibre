@@ -2,10 +2,13 @@
 
 Computes dimensions/nnz/workspace estimates from run-constant metadata —
 ``(n_bottom, n_nodes, n_attributes, residual_periods)`` — and decides
-dense-permitted / sparse-required / rejected *before any array is allocated*
-(`[REC-16]`, `[PRF-2]` O(metadata), `[PRF-21]`). The estimate names every
-array and its dtype rather than reporting only ``S.nbytes``, and rejects a
-forbidden dense structure instead of materializing it.
+dense-permitted / sparse-required / rejected-at-scale / rejected-by-name
+*before any array is allocated* (`[REC-16]`, `[PRF-2]` O(metadata),
+`[PRF-21]`). The estimate names every array and its dtype rather than
+reporting only ``S.nbytes``, and rejects a forbidden dense structure instead
+of materializing it. `mint_shrink` ships as the roster's dense-only member:
+permitted below the ceiling, rejected per run above it — never rejected by
+name; only `mint_cov` carries the global by-name rejection.
 
 Recommended normative default: ``DENSE_WORKSPACE_CEILING_BYTES = 2**30``
 (1 GiB = 1/32 of Stage 3's 32 GiB process budget, `[PRF-20]`), a configured
@@ -23,7 +26,8 @@ DENSE_WORKSPACE_CEILING_BYTES = 1 << 30
 
 DENSE_PERMITTED = "dense-permitted"
 SPARSE_REQUIRED = "sparse-required"
-REJECTED = "rejected"
+REJECTED_BY_NAME = "rejected-by-name"
+REJECTED_AT_SCALE = "rejected-at-scale"
 
 # Factorization of the dense normal matrix is assumed to need one extra
 # n_bottom^2 temporary beyond the normal matrix itself.
@@ -95,7 +99,16 @@ FORMULATIONS: dict[str, FormulationSpec] = {
 
 @dataclass(frozen=True, slots=True)
 class Estimate:
-    """Report one formulation's itemized byte estimates and the preflight decision."""
+    """Report one formulation's itemized byte estimates and the preflight decision.
+
+    Decisions: ``DENSE_PERMITTED`` (dense workspace within the ceiling),
+    ``SPARSE_REQUIRED`` (dense over the ceiling but a sparse operator path
+    exists), ``REJECTED_AT_SCALE`` (dense-only and over the ceiling — a
+    per-run rejection before allocation, naming scalable alternatives; the
+    strategy stays registered for smaller hierarchies), and
+    ``REJECTED_BY_NAME`` (a formulation ruled unusable at the engine's target
+    scale per `[REC-10]`, rejected at resolution whatever the metadata).
+    """
 
     formulation: str
     decision: str
@@ -190,7 +203,8 @@ def estimate_formulation(
         sparse_workspace = sum(bytes for _, bytes in sparse_components)
 
     if spec.rejected_by_name is not None:
-        decision, reason = REJECTED, f"rejected by name: {spec.rejected_by_name}"
+        decision = REJECTED_BY_NAME
+        reason = f"rejected by name at resolution: {spec.rejected_by_name}"
     elif dense_workspace <= ceiling_bytes:
         decision = DENSE_PERMITTED
         reason = f"dense workspace {dense_workspace} B within ceiling {ceiling_bytes} B"
@@ -201,10 +215,12 @@ def estimate_formulation(
             "the sparse operator path never materializes it"
         )
     else:
-        decision = REJECTED
+        decision = REJECTED_AT_SCALE
         reason = (
             f"dense-only formulation needs {dense_workspace} B, exceeding ceiling "
-            f"{ceiling_bytes} B, and has no sparse path; use wls_var or wls_struct"
+            f"{ceiling_bytes} B, and has no sparse path; this run is rejected before "
+            "allocation (the strategy itself stays registered); use wls_var or "
+            "wls_struct, which scale sparsely"
         )
 
     return Estimate(
