@@ -221,6 +221,39 @@ downloaded:
   `mint_shrink` → rejected-at-scale (30.8 GiB over the 1 GiB ceiling — a
   per-run rejection, not a by-name one); `mint_cov` → rejected-by-name.
 
+## Production substrate
+
+S3-U12 does **not** reimplement the nontrivial projection mathematics in this
+prototype. It wraps the point-reconciliation methods from a pinned
+`hierarchicalforecast` release behind Calibre's reconciler interface:
+
+- `wls_struct` and `wls_var` delegate to
+  `hierarchicalforecast.methods.MinTraceSparse` when the sparse representation
+  is required, and may use `MinTrace` when the dense representation is
+  permitted.
+- `mint_shrink` delegates to
+  `hierarchicalforecast.methods.MinTrace(method="mint_shrink")` when its
+  metadata-only preflight permits the dense representation.
+- `none` and the all-members-present `bottom_up` synthesis remain native: they
+  express Calibre's identity and completeness contracts and contain no
+  nontrivial projection solver to duplicate.
+
+Calibre owns the deep interface around that substrate: strategy declarations
+and registry, hierarchy index and deterministic summing-matrix construction,
+Nixtla layout conversion, input/cross-section/fitted-value validation,
+representation selection, memory preflight, derived coherence and idempotence
+checks, and errors carrying cross-section identity. S3-U12 must verify the
+exact upstream interface against the version it pins. If that release still
+discards the sparse iterative solver's convergence status, a checked adapter
+must surface it per `[REC-21]`; if upstream has fixed the behavior, Calibre
+must not retain a redundant custom solver implementation. Nixtla's conformal
+interval reconciliation remains outside this points-only stage.
+
+The local NumPy/SciPy implementation is intentionally independent class-3
+reference evidence: it prevents testing Nixtla against itself, makes the
+formula and tolerance derivation inspectable, and provides biting witnesses.
+It is not production code.
+
 ## 6. Normative product behavior vs prototype machinery
 
 **Normative** (what S3-U12 should bake into `newcalibre`'s reconcile module,
@@ -249,11 +282,10 @@ each traceable to spec, reflecting the owner decision of §7):
 
 **Prototype/test machinery** (evidence, not product):
 
-- The pure NumPy/SciPy implementations under `gate_b_proto/`; U12
-  re-implements inside `newcalibre/src/newcalibre/reconcile/` against the
-  landed `HierarchyIndex` / `FittedValues` adapters.
+- The pure NumPy/SciPy implementations under `gate_b_proto/`, retained only
+  as an independent class-3 reference for the Nixtla adapters.
 - The 12-node fixture, the recorded JSONs, and the CG solver choice (the
-  guard *shape* is normative; the solver is U12's).
+  convergence-guard *contract* is normative; the prototype solver is not).
 - Exact condition numbers (fixture-affordable; production substitutes an
   estimate in the same derived tolerance).
 - The fixture's exactly-zero coherence residual — a fixture property, not a
@@ -261,14 +293,14 @@ each traceable to spec, reflecting the owner decision of §7):
 
 Seam note, in design terms: the preflight is one deep module behind a
 four-integer interface (metadata in, itemized decision out); the dense closed
-form doubles as the class-3 reference adapter behind the test seam and as
-`mint_shrink`'s production path below the ceiling — the same dense
-representation serves both adapters, which is why the ceiling gates the
-producer rather than the strategy list. No new glossary terms are required:
-"structural weights" and the least-squares/trace-minimization families are
-already `[REC-9]` vocabulary; "dense-workspace ceiling" is proposed here as
-the configuration name for `[PRF-21]`'s threshold and is reported, not
-glossed.
+form stays behind the test seam as the class-3 reference adapter, while the
+production projection adapters delegate to `hierarchicalforecast`. The same
+representation ceiling gates both the dense Nixtla producer and the reference
+producer rather than shrinking the strategy list. No new glossary terms are
+required: "structural weights" and the least-squares/trace-minimization
+families are already `[REC-9]` vocabulary; "dense-workspace ceiling" is
+proposed here as the configuration name for `[PRF-21]`'s threshold and is
+reported, not glossed.
 
 ## 7. Owner decision (recorded)
 
