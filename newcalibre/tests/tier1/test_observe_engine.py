@@ -15,6 +15,7 @@ from newcalibre.conformal import (
     derive_partition_label,
     resolve_method,
 )
+from newcalibre.conformal.state import JsonStateCodec
 from newcalibre.domain import (
     ACTUAL_VALUE,
     HORIZON_STEP,
@@ -281,6 +282,42 @@ def test_real_split_runtime_escapes_cold_start_at_declared_boundary() -> None:
     }
 
 
+def test_real_weighted_runtime_escapes_cold_start_at_declared_boundary() -> None:
+    configuration = {
+        "method": "weighted-per-step",
+        "coverage": 0.5,
+        "calibration_window": 20,
+    }
+    panel = _panel()
+    first, second, _engine_value, states, sink, session = _run_two_origins(
+        forecast_panel=panel,
+        actuals_panel=panel,
+        configuration=configuration,
+    )
+    _lower, upper = interval_columns(0.5)
+    partition = derive_partition_label(
+        "observe-fixture",
+        "global",
+        EmissionScope.PER_STEP,
+    )
+    snapshot = states.snapshot(session)
+    payload = JsonStateCodec("weighted-per-step", 1).decode(
+        snapshot[partition],
+        expected_label=partition,
+    )
+
+    assert math.isnan(float(first.forecasts.frame[upper].iloc[0]))
+    assert float(second.forecasts.frame[upper].iloc[0]) == 4.0
+    assert first.forecasts.observation_issuances
+    assert second.forecasts.observation_issuances
+    assert len(sink.observe_annotations) == 2
+    assert all(value.advanced_delivered_score for value in sink.observe_annotations)
+    assert isinstance(payload, dict)
+    assert payload["delivered_score_count"] == 2
+    assert set(snapshot) == {METHOD_SCOPE_LABEL, partition}
+    assert all(isinstance(value, bytes) for value in snapshot.values())
+
+
 def test_observe_before_issue_changes_only_the_perturbed_next_bound() -> None:
     configuration = {
         "method": "split-per-step",
@@ -393,6 +430,22 @@ def test_removed_callback_and_partition_surfaces_are_structurally_absent() -> No
         str(path.relative_to(source_root)): value
         for path in source_root.rglob("*.py")
         for value in forbidden
+        if value in path.read_text()
+    }
+    assert violations == {}
+
+
+def test_weighted_method_addition_has_no_engine_or_observe_branch() -> None:
+    identifiers = ("weighted-per-step", "WeightedPerStep", "WeightedConformal")
+    witness = "weighted-per-step WeightedPerStep WeightedConformal"
+    assert all(value in witness for value in identifiers)
+
+    source_root = Path(__file__).parents[2] / "src" / "newcalibre"
+    violations = {
+        str(path.relative_to(source_root)): value
+        for package in ("engine", "observe")
+        for path in (source_root / package).rglob("*.py")
+        for value in identifiers
         if value in path.read_text()
     }
     assert violations == {}

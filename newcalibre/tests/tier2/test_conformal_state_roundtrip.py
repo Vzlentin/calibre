@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 import pandas as pd
@@ -25,6 +26,8 @@ from newcalibre.domain import (
     SERIES_KEY,
     TARGET_TIMESTAMP,
     CensoringAssertion,
+    ScoredSeries,
+    interval_columns,
 )
 
 pytestmark = pytest.mark.tier2
@@ -129,6 +132,60 @@ def test_per_step_restart_preserves_censoring_label_clamp_and_later_replay() -> 
         next(iter(continued_apply.issuances.values())).effective_descriptor.scored_series.value
         == "recorded-sales"
     )
+
+    later_delivery = _delivery(
+        continued_apply,
+        (9.0,),
+        (CensoringAssertion.UNCENSORED,),
+    )
+    continued_observe = runtime.observe(later_delivery, states)
+    restored_observe = restored.observe(later_delivery, states)
+    assert continued_observe == restored_observe
+
+
+@pytest.mark.parametrize(
+    ("weight_decay", "expected_null_reason"),
+    [(0.99, None), (0.1, "held-out-weight-mass")],
+)
+def test_weighted_restart_matches_finite_and_heldout_mass_continuations(
+    weight_decay: float,
+    expected_null_reason: str | None,
+) -> None:
+    configuration = {
+        "method": "weighted-per-step",
+        "coverage": 0.9,
+        "calibration_window": 12,
+        "weight_decay": weight_decay,
+    }
+    runtime = resolve_method(configuration)
+    label = derive_partition_label(_MODEL, "global", runtime.manifest.emission_scope)
+    seed = runtime.calibrate({label: list(range(1, 11))})
+    issued = runtime.apply(
+        _frame((2.0, 3.0), origin=pd.Timestamp("2026-04-06")),
+        seed,
+    )
+    observed = runtime.observe(
+        _delivery(
+            issued,
+            (99.0, 7.0),
+            (CensoringAssertion.CENSORED, None),
+        ),
+        seed,
+    )
+    states = _combined_states(seed, issued, observed.state_updates)
+    restored = resolve_method(configuration, states=states)
+
+    assert all(isinstance(state, bytes) for state in states.values())
+    later_frame = _frame((6.0,), origin=pd.Timestamp("2026-04-13"))
+    continued_apply = runtime.apply(later_frame, states)
+    restored_apply = restored.apply(later_frame, states)
+    _assert_apply_equal(continued_apply, restored_apply)
+    facts = next(iter(continued_apply.issuances.values()))
+    upper = interval_columns(0.9)[1]
+    assert facts.effective_descriptor.scored_series is ScoredSeries.RECORDED_SALES
+    assert facts.calibration_ready
+    assert facts.bounds_null_reason == expected_null_reason
+    assert math.isnan(continued_apply.forecasts.loc[0, upper]) == (expected_null_reason is not None)
 
     later_delivery = _delivery(
         continued_apply,

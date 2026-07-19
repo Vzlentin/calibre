@@ -1,4 +1,4 @@
-"""Run one shared protocol suite over every built-in split registration."""
+"""Run one shared protocol suite over every built-in conformal registration."""
 
 from __future__ import annotations
 
@@ -73,13 +73,22 @@ def _observation(result: CalibrationResult) -> ResolvedObservation:
 
 
 def test_builtin_method_enumeration_is_nonvacuous_and_exact() -> None:
-    assert _METHODS == ("split-per-step", "split-window-sum")
+    assert _METHODS == ("split-per-step", "split-window-sum", "weighted-per-step")
 
 
 @pytest.mark.parametrize("method", _METHODS)
-def test_builtin_split_registration_has_schema_parity_and_all_three_verbs(method: str) -> None:
+def test_builtin_registration_has_schema_parity_and_all_three_verbs(method: str) -> None:
     schema = method_config_schema(method)
     runtime = resolve_method({"method": method})
+    method_fields = (
+        {"weight_decay"}
+        if method == "weighted-per-step"
+        else {
+            "upper_floor",
+            "upper_cap",
+            *({"protection_period"} if method == "split-window-sum" else set()),
+        }
+    )
 
     assert isinstance(runtime, ConformalRuntime)
     assert type(runtime.config) is schema
@@ -87,9 +96,7 @@ def test_builtin_split_registration_has_schema_parity_and_all_three_verbs(method
         "coverage",
         "calibration_window",
         "partition_by",
-        "upper_floor",
-        "upper_cap",
-        *({"protection_period"} if method == "split-window-sum" else set()),
+        *method_fields,
     }
     for verb in ("calibrate", "apply", "observe"):
         assert callable(getattr(runtime, verb))
@@ -98,7 +105,7 @@ def test_builtin_split_registration_has_schema_parity_and_all_three_verbs(method
 
 
 @pytest.mark.parametrize("method", _METHODS)
-def test_builtin_split_protocol_covers_below_and_at_readiness_with_complete_descriptor(
+def test_builtin_protocol_covers_below_and_at_readiness_with_complete_descriptor(
     method: str,
 ) -> None:
     runtime = resolve_method({"method": method})
@@ -133,7 +140,7 @@ def test_builtin_split_protocol_covers_below_and_at_readiness_with_complete_desc
 
 
 @pytest.mark.parametrize("method", _METHODS)
-def test_builtin_split_observe_replay_and_factory_restoration_are_exact(method: str) -> None:
+def test_builtin_observe_replay_and_factory_restoration_are_exact(method: str) -> None:
     original = resolve_method({"method": method})
     label = derive_partition_label(
         "protocol-model",
