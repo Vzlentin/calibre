@@ -1214,7 +1214,7 @@ def _validate_observation_issuance(
         facts.upper_bound,
     ):
         raise LedgerError("observation issuance bounds must equal the forecast payload")
-    return IssuedBoundFacts.snapshot(facts)
+    return facts
 
 
 def _same_optional_bound(value: object, expected: float) -> bool:

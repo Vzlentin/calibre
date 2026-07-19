@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import ChainMap
 from collections.abc import Iterable, Mapping
 from numbers import Integral
 from types import MappingProxyType
@@ -125,13 +126,13 @@ class ObserveLoop:
 
         staged: list[ObservedActual] = []
         idempotent: list[ActualKey] = []
-        known = {**self._committed_history, **self._staged_history}
         for record in submission.records:
             value = ObservedActual.from_record(record)
-            previous = known.get(value.key)
+            previous = self._staged_history.get(value.key)
+            if previous is None:
+                previous = self._committed_history.get(value.key)
             if previous is None:
                 staged.append(value)
-                known[value.key] = value
                 continue
             if previous.recorded_fact != value.recorded_fact:
                 raise ObserveError(
@@ -146,7 +147,7 @@ class ObserveLoop:
     def cycle(self, origin: pd.Timestamp) -> ObserveCycle:
         """Resolve due rows and return one deterministic unpersisted cycle delta."""
         _require_timestamp(origin, name="observe-cycle origin")
-        history = {**self._committed_history, **self._staged_history}
+        history = ChainMap(self._staged_history, self._committed_history)
         candidates = tuple(
             self._resolve_pending(row, history=history, origin=origin) for row in self._pending
         )
@@ -384,13 +385,15 @@ def _history_snapshot(
                 raise ObserveError("observed-history mappings must use each record's exact key")
     else:
         raw_history = _snapshot_iterable(values, name="observed history")
-    if any(not isinstance(value, ObservedActual) for value in raw_history):
-        raise ObserveError("observed history must contain ObservedActual values")
-    history = tuple(value for value in raw_history if isinstance(value, ObservedActual))
+    history: list[ObservedActual] = []
+    for value in raw_history:
+        if not isinstance(value, ObservedActual):
+            raise ObserveError("observed history must contain ObservedActual values")
+        history.append(value)
     keys = tuple(value.key for value in history)
     if len(set(keys)) != len(keys):
         raise ObserveError("observed history contains duplicate keys")
-    return history
+    return tuple(history)
 
 
 def _pending_snapshot(
