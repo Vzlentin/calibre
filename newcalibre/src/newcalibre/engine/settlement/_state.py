@@ -96,6 +96,7 @@ class SettlementIndex:
         self._initial_due_arrivals = dict(self._initial_arrival_seed)
         self._active_orders: set[OrderKey] = set()
         self._due_orders: dict[ActualKey, dict[OrderKey, float]] = {}
+        self._origin_orders: dict[ActualKey, dict[OrderKey, float]] = {}
         self._due_heap: list[tuple[pd.Timestamp, str]] = [
             (period, series_key) for series_key, period in self._initial_due_arrivals
         ]
@@ -151,13 +152,7 @@ class SettlementIndex:
         """Project only due buckets and constant-per-series frontier state."""
         frozen_periods = self._validated_periods(periods)
         due_arrivals: dict[ActualKey, float] = {}
-        origin_quantities: dict[ActualKey, list[float]] = {}
-        period_set = set(frozen_periods)
-        for bucket in self._due_orders.values():
-            for order_key, quantity in bucket.items():
-                _session, series_key, origin, _model_name = order_key
-                if origin in period_set:
-                    origin_quantities.setdefault((series_key, origin), []).append(quantity)
+        origin_order_quantities: dict[ActualKey, float] = {}
         for period in frozen_periods:
             for series_key in self._series_keys:
                 key = (series_key, period)
@@ -170,6 +165,12 @@ class SettlementIndex:
                             *(bucket.values() if bucket is not None else ()),
                         ),
                         name="settlement snapshot due arrivals",
+                    )
+                origin_bucket = self._origin_orders.get(key)
+                if origin_bucket is not None:
+                    origin_order_quantities[key] = _finite_quantity_sum(
+                        origin_bucket.values(),
+                        name="settlement snapshot origin-order quantities",
                     )
         current_positions = {
             series_key: InventoryPosition(
@@ -188,13 +189,7 @@ class SettlementIndex:
             open_order_quantities=self._open_quantities,
             due_arrivals=due_arrivals,
             actuals_semantics=self._actuals_semantics,
-            origin_order_quantities={
-                key: _finite_quantity_sum(
-                    quantities,
-                    name="settlement snapshot origin-order quantities",
-                )
-                for key, quantities in origin_quantities.items()
-            },
+            origin_order_quantities=origin_order_quantities,
             current_positions=current_positions,
             window_opening_positions=self._inventory_positions,
         )
@@ -263,27 +258,15 @@ class SettlementIndex:
                 raise LedgerError("open order is overdue before the settlement window")
 
         by_origin: dict[ActualKey, list[float]] = {}
-        durable_by_origin: dict[ActualKey, list[float]] = {}
-        for bucket in self._due_orders.values():
-            for order_key, quantity in bucket.items():
-                _session, series_key, origin, _model_name = order_key
-                durable_by_origin.setdefault((series_key, origin), []).append(quantity)
         by_arrival: dict[ActualKey, list[OrderRow]] = {}
         for order in staged_orders:
             by_origin.setdefault((order.series_key, order.origin), []).append(order.quantity)
             by_arrival.setdefault((order.series_key, order.arrival_period), []).append(order)
 
         open_quantities = dict(self._open_quantities)
-        if periods:
-            first_period = periods[0]
-            for order in staged_orders:
-                if order.origin < first_period:
-                    open_quantities[order.series_key] = _finite_quantity_sum(
-                        (open_quantities[order.series_key], order.quantity),
-                        name="settlement on_order",
-                    )
-        elif staged_orders:
-            for order in staged_orders:
+        first_period = periods[0] if periods else None
+        for order in staged_orders:
+            if first_period is None or order.origin < first_period:
                 open_quantities[order.series_key] = _finite_quantity_sum(
                     (open_quantities[order.series_key], order.quantity),
                     name="settlement on_order",
@@ -343,11 +326,9 @@ class SettlementIndex:
                     by_origin.get(due_key, ()),
                     name="staged settlement current-order quantity",
                 )
+                durable_origin_orders = self._origin_orders.get(due_key, {})
                 current_quantity = _finite_quantity_sum(
-                    (
-                        *durable_by_origin.get(due_key, ()),
-                        staged_quantity,
-                    ),
+                    (*durable_origin_orders.values(), staged_quantity),
                     name="settlement current-order quantity",
                 )
                 indexed_next_on_order = _finite_quantity_sum(
@@ -404,6 +385,12 @@ class SettlementIndex:
             bucket = self._due_orders.pop(due_key, {})
             for order_key in bucket:
                 self._active_orders.discard(order_key)
+                _session, series_key, origin, _model_name = order_key
+                origin_key = (series_key, origin)
+                origin_bucket = self._origin_orders[origin_key]
+                del origin_bucket[order_key]
+                if not origin_bucket:
+                    del self._origin_orders[origin_key]
         for order in delta.added_orders:
             self._active_orders.add(order.key)
             due_key = (order.series_key, order.arrival_period)
@@ -413,6 +400,9 @@ class SettlementIndex:
                 self._due_orders[due_key] = bucket
                 heapq.heappush(self._due_heap, (order.arrival_period, order.series_key))
             bucket[order.key] = order.quantity
+            self._origin_orders.setdefault((order.series_key, order.origin), {})[order.key] = (
+                order.quantity
+            )
         self._open_quantities = delta.open_quantities
         self._inventory_positions = delta.inventory_positions
         self._frontier = delta.frontier

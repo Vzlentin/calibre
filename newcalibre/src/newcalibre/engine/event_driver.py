@@ -35,7 +35,7 @@ from newcalibre.engine.settlement import (
 )
 from newcalibre.engine.spine import Engine, OriginRequest, SettlementWindow, Spine
 from newcalibre.ledger import OrderRow
-from newcalibre.observe import ActualRecord, ActualsSubmission, ObservedActual
+from newcalibre.observe import ActualsSubmission, ObservedActual
 
 
 class EventDriverError(EngineError):
@@ -69,11 +69,7 @@ class OriginEvent:
             raise TypeError("origin event scope must be a Scope")
         if future_exogenous is not None and not isinstance(future_exogenous, pd.DataFrame):
             raise TypeError("origin event future exogenous input must be a pandas DataFrame")
-        owned_future = (
-            None
-            if future_exogenous is None
-            else pd.DataFrame(future_exogenous, copy=True).copy(deep=True)
-        )
+        owned_future = None if future_exogenous is None else future_exogenous.copy(deep=True)
         positions = _inventory_positions(initial_inventory_positions or {})
         fingerprint = _origin_fingerprint(
             session=session,
@@ -126,19 +122,9 @@ class ActualsEvent:
             raise TypeError("actuals event submission must be an ActualsSubmission")
         if not submission.records:
             raise ValueError("actuals event submission must not be empty")
-        records = tuple(
-            ActualRecord(
-                record.series_key,
-                record.timestamp,
-                record.recorded_value,
-                record.censoring_assertion,
-                record.availability_bound,
-            )
-            for record in submission.records
-        )
         canonical = ActualsSubmission(
             sorted(
-                records,
+                submission.records,
                 key=lambda record: (record.series_key.encode(), record.timestamp),
             )
         )
