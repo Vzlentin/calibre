@@ -7,8 +7,15 @@ import inspect
 import pandas as pd
 import pytest
 
-from newcalibre.conformal import ForecastKey as ConformalForecastKey
-from newcalibre.conformal import ObserveAnnotation
+from newcalibre.conformal import (
+    Delivery,
+    ObserveAnnotation,
+    ResolvedObservation,
+    resolve_method,
+)
+from newcalibre.conformal import (
+    ForecastKey as ConformalForecastKey,
+)
 from newcalibre.domain import (
     ACTUAL_VALUE,
     AVAILABILITY_BOUND,
@@ -260,6 +267,35 @@ def test_commit_digest_is_sensitive_to_every_observe_materialization_family() ->
     resolution = ObservationResolution(key, ORIGIN_DATE, 2.0, None, None)
     pending = PendingObservation(key, ORIGIN_DATE, 1.0, resolution=resolution)
     annotation = ObserveAnnotation(key, 1.0, None, True)
+    runtime = resolve_method(
+        {"method": "split-per-step", "coverage": 0.5, "partition_by": "global"}
+    )
+    issued = runtime.apply(_forecast_frame(), {}).issuances[key]
+    delivery = Delivery(
+        issued.partition_label,
+        (
+            ResolvedObservation(
+                key,
+                ORIGIN_DATE,
+                2.0,
+                1.0,
+                None,
+                None,
+                issued,
+            ),
+        ),
+    )
+    without_delivery = ObserveCycle(
+        resolutions=(resolution,),
+        pending_removals=(key,),
+        annotations=(annotation,),
+    )
+    with_delivery = ObserveCycle(
+        resolutions=(resolution,),
+        pending_removals=(key,),
+        deliveries=(delivery,),
+        annotations=(annotation,),
+    )
     variants = (
         ObserveCycle(history_appends=(ObservedActual("a", ORIGIN_DATE, 2),)),
         ObserveCycle(history_appends=(ObservedActual("a", ORIGIN_DATE, 2.0),)),
@@ -267,6 +303,8 @@ def test_commit_digest_is_sensitive_to_every_observe_materialization_family() ->
         ObserveCycle(pending_removals=(key,)),
         ObserveCycle(pending_retentions=(pending,)),
         ObserveCycle(annotations=(annotation,)),
+        without_delivery,
+        with_delivery,
         ObserveCycle(state_updates={"state": b"value"}),
     )
 
@@ -275,6 +313,18 @@ def test_commit_digest_is_sensitive_to_every_observe_materialization_family() ->
         for cycle in variants
     }
 
+    assert (
+        OriginCommit(
+            session=session,
+            origin=origin,
+            observe_cycle=with_delivery,
+        ).digest
+        != OriginCommit(
+            session=session,
+            origin=origin,
+            observe_cycle=without_delivery,
+        ).digest
+    )
     assert len(digests) == len(variants)
 
     committed = OriginCommit(

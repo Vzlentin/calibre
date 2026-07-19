@@ -9,8 +9,11 @@ import pandas as pd
 import pytest
 
 from newcalibre.conformal import (
+    Delivery,
     EmissionForm,
     IssuedBoundFacts,
+    ObserveAnnotation,
+    ResolvedObservation,
     derive_partition_label,
 )
 from newcalibre.conformal import (
@@ -147,6 +150,28 @@ def _ledger() -> Ledger:
     ledger.append_forecasts(
         _frame(),
         issuances={_key(step): {QUANTILE: _issuance()} for step in (2, 1, 3, 4)},
+    )
+    return ledger
+
+
+def _conformal_ledger() -> Ledger:
+    frame = _frame(steps=(1,))
+    lower, upper = "lower_0.5", "upper_0.5"
+    frame[lower] = pd.Series([0.0], dtype="float64")
+    frame[upper] = pd.Series([12.0], dtype="float64")
+    facts = _observation_facts(1)
+    upper_claim = ForecastIssuance(
+        descriptor=facts.effective_descriptor,
+        guaranteed_side=GuaranteedSide.UPPER,
+        calibration_ready=True,
+        bounds_finite=True,
+        bounds_null_reason=None,
+    )
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    ledger.append_forecasts(
+        frame,
+        issuances={_key(1): {(lower,): _issuance(), (upper,): upper_claim}},
+        observation_issuances={_key(1): facts},
     )
     return ledger
 
@@ -457,6 +482,61 @@ def test_resolved_incomplete_window_remains_pending_until_delivery() -> None:
         origin=pd.Timestamp("2026-01-04"),
     )
     assert [row.actual_value for row in ledger.forecasts] == [22.0, 11.0, None, None]
+
+
+def test_conformal_issued_removal_requires_a_matching_delivery_without_effect() -> None:
+    ledger = _conformal_ledger()
+    pending = ledger.pending_observations[0]
+    resolution = _resolution(pending, 11.0)
+    cycle = ObserveCycle(
+        resolutions=(resolution,),
+        pending_removals=(pending.forecast_key,),
+    )
+
+    with pytest.raises(LedgerError, match="conformal-issued pending removals"):
+        ledger.apply_observe_cycle(cycle, origin=pd.Timestamp("2026-01-03"))
+
+    assert ledger.forecasts[0].actual_value is None
+    assert ledger.observation_resolutions == ()
+    assert ledger.observe_annotations == ()
+    assert ledger.pending_observations == (pending,)
+
+
+def test_delivery_facts_must_match_the_staged_resolution_without_effect() -> None:
+    ledger = _conformal_ledger()
+    pending = ledger.pending_observations[0]
+    issued = pending.issued
+    if issued is None:
+        raise AssertionError("conformal fixture must carry issued facts")
+    resolution = _resolution(pending, 11.0)
+    delivery = Delivery(
+        issued.partition_label,
+        (
+            ResolvedObservation(
+                pending.forecast_key,
+                pending.target_timestamp,
+                12.0,
+                pending.point_forecast,
+                resolution.censoring_assertion,
+                resolution.availability_bound,
+                issued,
+            ),
+        ),
+    )
+    cycle = ObserveCycle(
+        resolutions=(resolution,),
+        pending_removals=(pending.forecast_key,),
+        deliveries=(delivery,),
+        annotations=(ObserveAnnotation(pending.forecast_key, 2.0, None, True),),
+    )
+
+    with pytest.raises(LedgerError, match="delivery facts do not match staged resolution"):
+        ledger.apply_observe_cycle(cycle, origin=pd.Timestamp("2026-01-03"))
+
+    assert ledger.forecasts[0].actual_value is None
+    assert ledger.observation_resolutions == ()
+    assert ledger.observe_annotations == ()
+    assert ledger.pending_observations == (pending,)
 
 
 def test_observe_cycle_rejects_unknown_pending_keys_without_effect() -> None:

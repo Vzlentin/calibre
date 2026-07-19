@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from newcalibre.conformal import ForecastKey as ConformalForecastKey
-from newcalibre.conformal import IssuedBoundFacts, ObserveAnnotation
+from newcalibre.conformal import IssuedBoundFacts, ObserveAnnotation, ResolvedObservation
 from newcalibre.domain import (
     ACTUAL_VALUE,
     FRAME_KEY_COLUMNS,
@@ -1096,8 +1096,22 @@ class Ledger:
         delivered_keys = set(delivered_sequence)
         if len(delivered_keys) != len(delivered_sequence):
             raise LedgerError("observe deliveries contain a duplicate forecast key")
-        if delivered_keys and delivered_keys != removal_keys:
-            raise LedgerError("observe deliveries must exactly match pending removals")
+        conformal_removal_keys = {key for key in removal_keys if current[key].issued is not None}
+        if delivered_keys != conformal_removal_keys:
+            raise LedgerError(
+                "observe deliveries must exactly match conformal-issued pending removals"
+            )
+        for delivery in cycle.deliveries:
+            for observation in delivery.observations:
+                key = _ledger_forecast_key(observation.forecast_key)
+                if not _delivery_matches_staged_resolution(
+                    observation,
+                    pending=current[key],
+                    resolution=resolution_by_key[key],
+                ):
+                    raise LedgerError(
+                        f"observe delivery facts do not match staged resolution: {key!r}"
+                    )
         annotation_by_key = {
             _ledger_forecast_key(value.forecast_key): value for value in cycle.annotations
         }
@@ -1154,6 +1168,48 @@ class Ledger:
             self._calendar.require_member(origin, name="ledger origin")
         except CalendarError as error:
             raise LedgerError(f"ledger origin must lie on the owned calendar: {error}") from error
+
+
+def _delivery_matches_staged_resolution(
+    observation: ResolvedObservation,
+    *,
+    pending: PendingObservation,
+    resolution: ObservationResolution,
+) -> bool:
+    """Return whether a delivery repeats its pending and resolution facts exactly."""
+    issued = pending.issued
+    return (
+        issued is not None
+        and observation.forecast_key == pending.forecast_key
+        and observation.target_timestamp == resolution.target_timestamp
+        and observation.actual == resolution.actual
+        and observation.point_forecast == pending.point_forecast
+        and observation.censoring_assertion is resolution.censoring_assertion
+        and observation.availability_bound == resolution.availability_bound
+        and _issued_facts_match(observation.issued, issued)
+    )
+
+
+def _issued_facts_match(left: IssuedBoundFacts, right: IssuedBoundFacts) -> bool:
+    """Compare issued facts while treating paired cold-start NaNs as equal."""
+    return (
+        left.method_name == right.method_name
+        and left.emission_form is right.emission_form
+        and left.emission_scope is right.emission_scope
+        and left.partition_label == right.partition_label
+        and left.working_level == right.working_level
+        and left.state_reference == right.state_reference
+        and _nan_equal(left.lower_bound, right.lower_bound)
+        and _nan_equal(left.upper_bound, right.upper_bound)
+        and left.calibration_ready is right.calibration_ready
+        and left.bounds_null_reason == right.bounds_null_reason
+        and left.effective_descriptor == right.effective_descriptor
+        and left.bindings == right.bindings
+    )
+
+
+def _nan_equal(left: float, right: float) -> bool:
+    return left == right or (math.isnan(left) and math.isnan(right))
 
 
 def _score_bound(
