@@ -99,6 +99,7 @@ from newcalibre.ledger import (
 )
 from newcalibre.observe import ObserveCycle, ObserveLoop
 from newcalibre.ordering import OrderingInputError
+from newcalibre.reconcile import ReconciliationContext, resolve_strategy
 
 ENGINE_VERBS = (
     "fit",
@@ -476,7 +477,6 @@ class CommitResult:
 
 
 type AdapterResolver = Callable[[Mapping[str, object]], ForecastAdapter]
-type Reconciler = Callable[[ForecastBatch], ForecastBatch]
 type CustomOrderer = Callable[[OrderRequest], Iterable[OrderProposal]]
 type Orderer = CustomOrderer | ConfiguredPolicyOrderer
 type PhaseReporter = Callable[[PhaseEvent], None]
@@ -494,9 +494,9 @@ class Engine:
         calibration_state_store: CalibrationStateStore,
         ledger_sink: LedgerSink,
         dispatch_backend: DispatchBackend,
-        hierarchy: HierarchyIndex,
+        hierarchy: HierarchyIndex | None,
         adapter_resolver: AdapterResolver = resolve_adapter,
-        reconciler: Reconciler | None = None,
+        reconciliation_strategy: str = "none",
         orderer: Orderer | None = None,
     ) -> None:
         ports = (
@@ -510,21 +510,17 @@ class Engine:
         for adapter, port, name in ports:
             if not isinstance(adapter, port):
                 raise TypeError(f"engine {name} does not satisfy its port")
-        if not isinstance(hierarchy, HierarchyIndex):
-            raise TypeError("engine hierarchy must be a HierarchyIndex")
-        callables = (
-            (adapter_resolver, "adapter resolver"),
-            (reconciler, "reconciler"),
-        )
-        for hook, name in callables:
-            if hook is not None and not callable(hook):
-                raise TypeError(f"engine {name} must be callable")
+        if hierarchy is not None and not isinstance(hierarchy, HierarchyIndex):
+            raise TypeError("engine hierarchy must be a HierarchyIndex or None")
+        if not callable(adapter_resolver):
+            raise TypeError("engine adapter resolver must be callable")
         if orderer is not None and not (
             callable(orderer) or isinstance(orderer, ConfiguredPolicyOrderer)
         ):
             raise TypeError("engine orderer must be callable or a ConfiguredPolicyOrderer")
         # Resolve configuration before the panel port can perform any data load.
         adapter_resolver(_session_model_config(ledger_sink.session))
+        reconciler = resolve_strategy(reconciliation_strategy)
         ordering_configuration = _session_ordering_configuration(ledger_sink.session)
         state_snapshot = calibration_state_store.snapshot(ledger_sink.session)
         conformal_configuration = _session_conformal_config(ledger_sink.session)
@@ -535,8 +531,9 @@ class Engine:
         )
         self._ordering_configuration = ordering_configuration
         self._runtime: ConformalRuntime | None = runtime
-        self._hierarchy = hierarchy
+        self._reconciliation_hierarchy = hierarchy
         self._panel = panel_source.load()
+        self._hierarchy = hierarchy or HierarchyIndex.flat(self._panel.series_keys)
         self._actuals_source = actuals_source
         self._artifact_store = artifact_store
         self._calibration_state_store = calibration_state_store
@@ -590,21 +587,44 @@ class Engine:
         )
 
     def reconcile(self, forecasts: ForecastBatch) -> ForecastBatch:
-        """Apply the configured reconciler, or return the input identity."""
+        """Apply the configured registered point-reconciliation strategy."""
         if not isinstance(forecasts, ForecastBatch):
             raise TypeError("reconcile requires a ForecastBatch")
         self._require_forecast_batch(forecasts)
-        if self._reconciler is None:
-            return forecasts
-        callback_result = self._reconciler(forecasts)
-        if not isinstance(callback_result, ForecastBatch):
-            raise _EngineError("reconciler must return a ForecastBatch")
-        reconciled = _snapshot_forecast_batch(callback_result)
-        if reconciled.calendar != forecasts.calendar:
-            raise _EngineError("reconciler changed the forecast calendar")
-        removed = set(forecasts.issuances) - set(reconciled.issuances)
+        result = self._reconciler(
+            forecasts.frame,
+            self._reconciliation_hierarchy,
+            ReconciliationContext(),
+        )
+        if not isinstance(result, pd.DataFrame):
+            raise _EngineError("reconciliation strategy must return a pandas DataFrame")
+        normalized = validate_forecast_frame(
+            pd.DataFrame(result, copy=True),
+            calendar=forecasts.calendar,
+        )
+        result_keys = _forecast_keys(normalized)
+        original_keys = set(forecasts.issuances)
+        removed = original_keys - set(result_keys)
         if removed:
-            raise _EngineError("reconciler removed or changed forecast row keys")
+            raise _EngineError("reconciliation removed or changed forecast row keys")
+        origin = _forecast_batch_origin(forecasts)
+        if any(key[1] != origin for key in result_keys):
+            raise _EngineError("reconciliation changed the forecast origin")
+        issuances = {
+            key: dict(forecasts.issuances[key]) if key in original_keys else {}
+            for key in result_keys
+        }
+        observation_issuances = {
+            key: value
+            for key, value in forecasts.observation_issuances.items()
+            if key in original_keys
+        }
+        reconciled = ForecastBatch(
+            normalized,
+            calendar=forecasts.calendar,
+            issuances=issuances,
+            observation_issuances=observation_issuances,
+        )
         assert forecasts.session is not None
         return _bind_forecast_batch(
             reconciled,
@@ -1105,25 +1125,6 @@ def _bind_forecast_batch(
     object.__setattr__(bound, "_session", session)
     object.__setattr__(bound, "_engine_token", engine_token)
     return bound
-
-
-def _snapshot_forecast_batch(forecasts: ForecastBatch) -> ForecastBatch:
-    """Collapse callback subclasses into one stable, exact forecast value."""
-    frame = forecasts.frame
-    calendar = forecasts.calendar
-    issuances = {key: dict(bounds) for key, bounds in forecasts.issuances.items()}
-    observation_issuances = dict(forecasts.observation_issuances)
-    session = forecasts.session
-    engine_token = forecasts._engine_token
-    snapshot = ForecastBatch(
-        frame,
-        calendar=calendar,
-        issuances=issuances,
-        observation_issuances=observation_issuances,
-    )
-    object.__setattr__(snapshot, "_session", session)
-    object.__setattr__(snapshot, "_engine_token", engine_token)
-    return snapshot
 
 
 def _snapshot_commit_receipt(receipt: object) -> CommitReceipt:

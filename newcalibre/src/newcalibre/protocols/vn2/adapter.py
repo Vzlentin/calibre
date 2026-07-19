@@ -17,7 +17,6 @@ from newcalibre.domain import (
     TIMESTAMP,
     UNDECLARED_CENSORING,
     CensoringAssertion,
-    HierarchyIndex,
     InventoryPosition,
     Panel,
     Scope,
@@ -125,7 +124,7 @@ def run_vn2(dataset: VN2Dataset) -> VN2RunResult:
         calibration_state_store=InMemoryCalibrationStateStore(),
         ledger_sink=sink,
         dispatch_backend=InProcessDispatch(),
-        hierarchy=HierarchyIndex.flat(panel.series_keys),
+        hierarchy=None,
         adapter_resolver=resolve_vn2_adapter,
         orderer=ConfiguredPolicyOrderer(),
     )

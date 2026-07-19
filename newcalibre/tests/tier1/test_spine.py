@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import inspect
 import pickle
 import socket
 import sqlite3
@@ -13,6 +14,7 @@ from typing import Any, cast
 import pandas as pd
 import pytest
 
+from newcalibre.conformal import SPLIT_PER_STEP, derive_partition_label, resolve_method
 from newcalibre.domain import (
     ACTUAL_VALUE,
     HORIZON_STEP,
@@ -75,6 +77,7 @@ from newcalibre.engine import (
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
 from newcalibre.ledger import ForecastIssuance, OrderRow
 from newcalibre.ordering import OrderingConfigError
+from newcalibre.reconcile import ReconciliationRegistryError
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
@@ -213,6 +216,15 @@ class MalformedHorizonFixtureAdapter(PersistentFixtureAdapter):
             invalid_step,
             calendar=task.calendar,
         )
+        return frame
+
+
+class ForeignSeriesFixtureAdapter(PersistentFixtureAdapter):
+    """Emit a series outside the canonical hierarchy to fail Reconcile."""
+
+    def predict(self, task: ForecastTask) -> pd.DataFrame:
+        frame = super().predict(task)
+        frame[SERIES_KEY] = frame[SERIES_KEY].mask(frame[SERIES_KEY] == "a", "foreign")
         return frame
 
 
@@ -415,10 +427,11 @@ def _engine(
     states: InMemoryCalibrationStateStore,
     sink: InMemoryLedgerSink,
     dispatch: RecordingDispatch,
-    reconciler=None,
+    reconciliation_strategy: str = "none",
     orderer=None,
     panel_source=None,
     adapter_resolver=None,
+    hierarchy: HierarchyIndex | None = None,
 ) -> Engine:
     return Engine(
         panel_source=panel_source or InMemoryPanelSource(panel),
@@ -430,13 +443,13 @@ def _engine(
         calibration_state_store=states,
         ledger_sink=sink,
         dispatch_backend=dispatch,
-        hierarchy=HierarchyIndex.flat(panel.series_keys),
+        hierarchy=hierarchy or HierarchyIndex.flat(panel.series_keys),
         adapter_resolver=(
             (lambda _config: PersistentFixtureAdapter(events))
             if adapter_resolver is None
             else adapter_resolver
         ),
-        reconciler=reconciler,
+        reconciliation_strategy=reconciliation_strategy,
         orderer=orderer,
     )
 
@@ -452,10 +465,6 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     dispatch = RecordingDispatch()
     events: list[str] = []
     panel_source = RecordingPanelSource(panel)
-
-    def reconcile(forecasts: ForecastBatch) -> ForecastBatch:
-        events.append("reconcile")
-        return forecasts
 
     def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
         events.append("order")
@@ -479,7 +488,6 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         states=states,
         sink=sink,
         dispatch=dispatch,
-        reconciler=reconcile,
         orderer=order,
         panel_source=panel_source,
     )
@@ -519,12 +527,10 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         "fit",
         "load",
         "predict",
-        "reconcile",
         "order",
         "fit",
         "load",
         "predict",
-        "reconcile",
         "order",
     ]
     assert states.snapshots == 3
@@ -796,15 +802,18 @@ def test_unconfigured_stages_are_exact_identities() -> None:
         origin=pd.Timestamp("2026-01-05"),
         forecasts=forecasts,
     )
-    assert engine.reconcile(forecasts) is forecasts
+    reconciled = engine.reconcile(forecasts)
+    assert reconciled is not forecasts
+    pd.testing.assert_frame_equal(reconciled.frame, forecasts.frame)
+    assert reconciled.issuances == forecasts.issuances
     observation = engine.observe(pd.Timestamp("2026-01-05"), session=session)
     assert (
         engine.calibrate(
-            forecasts,
+            reconciled,
             session=session,
             observation=observation,
         ).forecasts
-        is forecasts
+        is reconciled
     )
     assert engine.order(order_request) is None
 
@@ -836,61 +845,31 @@ def test_order_request_rejects_forecasts_from_any_other_origin() -> None:
             )
 
 
-def test_reconcile_rejects_forecasts_from_another_calendar_instance() -> None:
+def test_unknown_reconciliation_strategy_refuses_before_panel_load() -> None:
     panel = _panel()
-    session = _session(with_decision=True)
+    panel_source = RecordingPanelSource(panel)
+    session = _session()
 
-    def change_calendar(forecasts: ForecastBatch) -> ForecastBatch:
-        return ForecastBatch(
-            forecasts.frame,
-            calendar=Calendar("D", phase=pd.Timestamp("2026-02-01")),
-            issuances=forecasts.issuances,
+    with pytest.raises(ReconciliationRegistryError, match="unknown strategy.*bottom_up, none"):
+        _engine(
+            panel=panel,
+            events=[],
+            artifacts=InMemoryArtifactStore(),
+            states=InMemoryCalibrationStateStore(),
+            sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+            dispatch=RecordingDispatch(),
+            panel_source=panel_source,
+            reconciliation_strategy="projection",
         )
 
-    engine = _engine(
-        panel=panel,
-        events=[],
-        artifacts=InMemoryArtifactStore(),
-        states=InMemoryCalibrationStateStore(),
-        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
-        dispatch=RecordingDispatch(),
-        reconciler=change_calendar,
-        orderer=lambda _request: (),
-    )
-    origin = pd.Timestamp("2026-01-05")
-    forecasts = engine.predict(
-        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
-    )
-    with pytest.raises(EngineError, match="changed the forecast calendar"):
-        engine.reconcile(forecasts)
+    assert panel_source.loads == 0
 
 
-def test_reconcile_cannot_remove_or_change_predicted_row_keys() -> None:
-    panel = _panel(series_keys=("a", "b"))
-    session = _session(series_keys=("a", "b"))
+def test_engine_constructor_has_no_provisional_reconciler_callback() -> None:
+    parameters = inspect.signature(Engine).parameters
 
-    def remove_series(forecasts: ForecastBatch) -> ForecastBatch:
-        return ForecastBatch(
-            forecasts.frame.loc[forecasts.frame[SERIES_KEY] == "a"].reset_index(drop=True),
-            calendar=forecasts.calendar,
-        )
-
-    engine = _engine(
-        panel=panel,
-        events=[],
-        artifacts=InMemoryArtifactStore(),
-        states=InMemoryCalibrationStateStore(),
-        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
-        dispatch=RecordingDispatch(),
-        reconciler=remove_series,
-    )
-    origin = pd.Timestamp("2026-01-05")
-    forecasts = engine.predict(
-        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
-    )
-
-    with pytest.raises(EngineError, match="removed or changed forecast row keys"):
-        engine.reconcile(forecasts)
+    assert "reconciler" not in parameters
+    assert parameters["reconciliation_strategy"].default == "none"
 
 
 def test_forecast_batch_provenance_can_only_be_bound_by_an_engine() -> None:
@@ -1158,18 +1137,10 @@ def test_commit_materializes_missing_decision_groups_as_zero_rows() -> None:
     assert result.orders == sink.orders
 
 
-def test_ordering_excludes_reconciled_aggregate_nodes_before_policy_and_commit() -> None:
+def test_bottom_up_preserves_bottom_issuances_and_excludes_aggregates_from_ordering() -> None:
     panel = _panel()
     session = _session(with_decision=True)
     seen_series: list[tuple[str, ...]] = []
-
-    def add_aggregate(forecasts: ForecastBatch) -> ForecastBatch:
-        frame = forecasts.frame
-        aggregate = frame.copy(deep=True)
-        aggregate[SERIES_KEY] = "aggregate"
-        combined = pd.concat([frame, aggregate], ignore_index=True)
-        combined[SERIES_KEY] = combined[SERIES_KEY].astype("string")
-        return ForecastBatch(combined, calendar=CALENDAR)
 
     def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
         seen_series.append(tuple(request.forecasts.frame[SERIES_KEY].unique()))
@@ -1182,8 +1153,80 @@ def test_ordering_excludes_reconciled_aggregate_nodes_before_policy_and_commit()
         states=InMemoryCalibrationStateStore(),
         sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
         dispatch=RecordingDispatch(),
-        reconciler=add_aggregate,
+        reconciliation_strategy="bottom_up",
         orderer=order,
+    )
+    origin = pd.Timestamp("2026-01-05")
+    predicted = engine.predict(
+        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
+    )
+    reconciled = engine.reconcile(predicted)
+    bottom_key = ("a", origin, 1, "fixture")
+    total_key = ("__total__", origin, 1, "fixture")
+
+    assert reconciled.issuances[bottom_key] == predicted.issuances[bottom_key]
+    assert dict(reconciled.issuances[total_key]) == {}
+    assert reconciled.frame[SERIES_KEY].tolist() == [
+        "a",
+        "a",
+        "__total__",
+        "__total__",
+    ]
+
+    result = Spine(engine).run_origin(
+        OriginRequest(
+            session=session,
+            origin=origin,
+            scope=Scope.LOCAL,
+            inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
+        )
+    )
+
+    assert seen_series == [("a",)]
+    assert set(result.forecasts.frame[SERIES_KEY]) == {"a", "__total__"}
+    assert tuple((row.series_key, row.quantity) for row in result.orders) == (("a", 0.0),)
+
+
+def test_real_conformal_apply_consumes_bottom_up_reconciled_points() -> None:
+    series_keys = ("a", "b")
+    panel = _panel(series_keys=series_keys)
+    conformal_config = {
+        "method": SPLIT_PER_STEP,
+        "coverage": 0.5,
+        "calibration_window": 10,
+    }
+    session = _session(
+        series_keys=series_keys,
+        conformal_config=conformal_config,
+    )
+    hierarchy = HierarchyIndex.from_facts(
+        pd.DataFrame(
+            {
+                SERIES_KEY: ["b", "a"],
+                "department": ["all", "all"],
+            }
+        ),
+        bottom_series=series_keys,
+    )
+    state_store = InMemoryCalibrationStateStore()
+    partition = derive_partition_label("fixture", "global", EmissionScope.PER_STEP)
+    seeded = resolve_method(conformal_config).calibrate({partition: [2.0, 2.0, 2.0]})
+    for label, value in seeded.items():
+        state_store.save(
+            session,
+            label,
+            value,
+            origin=pd.Timestamp("2026-01-04"),
+        )
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=state_store,
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+        reconciliation_strategy="bottom_up",
+        hierarchy=hierarchy,
     )
 
     result = Spine(engine).run_origin(
@@ -1191,12 +1234,15 @@ def test_ordering_excludes_reconciled_aggregate_nodes_before_policy_and_commit()
             session=session,
             origin=pd.Timestamp("2026-01-05"),
             scope=Scope.LOCAL,
-            inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
         )
     )
 
-    assert seen_series == [("a",)]
-    assert tuple((row.series_key, row.quantity) for row in result.orders) == (("a", 0.0),)
+    calibrated = result.forecasts.frame
+    lower, upper = interval_columns(0.5)
+    aggregate = calibrated.loc[~calibrated[SERIES_KEY].isin(series_keys)]
+    assert aggregate[POINT_FORECAST].tolist() == [8.0, 8.0]
+    assert aggregate[lower].tolist() == [0.0, 0.0]
+    assert aggregate[upper].tolist() == [10.0, 10.0]
 
 
 def test_session_owned_decision_scope_excludes_a_panel_aggregate_only_from_ordering() -> None:
@@ -1636,9 +1682,6 @@ def test_phase_failure_is_observable_and_commits_no_origin() -> None:
     sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
     phase_events: list[PhaseEvent] = []
 
-    def explode(_forecasts: ForecastBatch) -> ForecastBatch:
-        raise RuntimeError("fixture failure")
-
     engine = _engine(
         panel=panel,
         events=[],
@@ -1646,7 +1689,7 @@ def test_phase_failure_is_observable_and_commits_no_origin() -> None:
         states=states,
         sink=sink,
         dispatch=RecordingDispatch(),
-        reconciler=explode,
+        adapter_resolver=lambda _config: ForeignSeriesFixtureAdapter([]),
     )
     spine = Spine(engine, reporter=phase_events.append)
     request = OriginRequest(
@@ -1655,7 +1698,7 @@ def test_phase_failure_is_observable_and_commits_no_origin() -> None:
         scope=Scope.LOCAL,
     )
 
-    with pytest.raises(PhaseError, match="Reconcile.*2026-01-05.*fixture failure") as failure:
+    with pytest.raises(PhaseError, match="Reconcile.*2026-01-05.*not covered") as failure:
         spine.run_origin(request)
 
     assert failure.value.phase is Phase.RECONCILE
@@ -1664,7 +1707,8 @@ def test_phase_failure_is_observable_and_commits_no_origin() -> None:
         Phase.PREDICT,
         Phase.RECONCILE,
     ]
-    assert phase_events[-1].error == "fixture failure"
+    assert phase_events[-1].error is not None
+    assert "not covered" in phase_events[-1].error
     assert len(artifacts.artifacts) == 1
     assert states.states == {}
     assert sink.forecasts == ()
@@ -1935,9 +1979,6 @@ def test_reporter_failures_never_change_or_mask_phase_outcomes() -> None:
         committed_spine.run_origin(request)
     assert len(committed_sink.forecasts) == 1
 
-    def explode(_forecasts: ForecastBatch) -> ForecastBatch:
-        raise RuntimeError("original failure")
-
     failing_spine = Spine(
         _engine(
             panel=panel,
@@ -1946,13 +1987,13 @@ def test_reporter_failures_never_change_or_mask_phase_outcomes() -> None:
             states=InMemoryCalibrationStateStore(),
             sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
             dispatch=RecordingDispatch(),
-            reconciler=explode,
+            adapter_resolver=lambda _config: ForeignSeriesFixtureAdapter([]),
         ),
         reporter=broken_reporter,
     )
     with (
         pytest.warns(RuntimeWarning, match="phase reporter failed"),
-        pytest.raises(PhaseError, match="Reconcile.*original failure"),
+        pytest.raises(PhaseError, match="Reconcile.*not covered"),
     ):
         failing_spine.run_origin(request)
 
