@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from newcalibre.conformal import (
+    CalibrationResult,
     Delivery,
     ForecastKey,
     ResolvedObservation,
@@ -32,6 +33,7 @@ from newcalibre.domain import (
     CensoringAssertion,
     EmissionScope,
 )
+from newcalibre.domain._canonical_json import canonical_json_bytes
 
 pytestmark = pytest.mark.tier4
 
@@ -124,16 +126,6 @@ def _canonical_document(value: object) -> bytes:
     ).encode()
 
 
-def _canonical_payload(value: object) -> bytes:
-    return json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-
-
 def _load_reference_trace(path: Path = _TRACE_PATH) -> dict[str, object]:
     raw = path.read_bytes()
     try:
@@ -172,7 +164,9 @@ def _validate_trace(value: object) -> None:
     assert isinstance(digest, str) and len(digest) == 64, (
         "ACI reference trace payload digest is malformed"
     )
-    actual = hashlib.sha256(_canonical_payload(payload)).hexdigest()
+    actual = hashlib.sha256(
+        canonical_json_bytes(payload, path="ACI reference trace payload")
+    ).hexdigest()
     assert digest == actual, "ACI reference trace payload digest mismatch"
 
 
@@ -333,6 +327,11 @@ def _reference_case(document: Mapping[str, object], case_id: str) -> dict[str, o
     return next(case for case in cases if case["id"] == case_id)
 
 
+def _case_scores(case: Mapping[str, object]) -> tuple[float, ...]:
+    inputs = cast(dict[str, object], case["inputs"])
+    return tuple(_finite_hex(value, name="score") for value in cast(list[object], inputs["scores"]))
+
+
 def _frame(step: int) -> pd.DataFrame:
     origin = _ORIGIN + pd.Timedelta(days=step)
     return pd.DataFrame(
@@ -348,10 +347,8 @@ def _frame(step: int) -> pd.DataFrame:
     )
 
 
-def _observation(result: object, *, score: float) -> ResolvedObservation:
-    calibration = cast(object, result)
-    forecasts = calibration.forecasts  # type: ignore[attr-defined]
-    row = forecasts.iloc[0]
+def _observation(result: CalibrationResult, *, score: float) -> ResolvedObservation:
+    row = result.forecasts.iloc[0]
     key = ForecastKey(
         series_key=cast(str, row[SERIES_KEY]),
         origin=pd.Timestamp(row[ORIGIN]),
@@ -365,7 +362,7 @@ def _observation(result: object, *, score: float) -> ResolvedObservation:
         point_forecast=cast(float, row[POINT_FORECAST]),
         censoring_assertion=CensoringAssertion.UNCENSORED,
         availability_bound=None,
-        issued=calibration.issuances[key],  # type: ignore[attr-defined]
+        issued=result.issuances[key],
     )
 
 
@@ -411,9 +408,7 @@ def _assert_case_matches(
     scores_override: tuple[float, ...] | None = None,
 ) -> None:
     inputs = cast(dict[str, object], case["inputs"])
-    reference_scores = tuple(
-        _finite_hex(value, name="score") for value in cast(list[object], inputs["scores"])
-    )
+    reference_scores = _case_scores(case)
     scores = reference_scores if scores_override is None else scores_override
     assert len(scores) == len(reference_scores), "ACI replay score override has the wrong length"
     target_alpha = _finite_hex(inputs["target_alpha"], name="target alpha")

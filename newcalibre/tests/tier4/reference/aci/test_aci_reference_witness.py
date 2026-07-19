@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import math
-from typing import cast
 
 import pytest
 
 from tier4.reference.aci.test_aci_reference import (
     _assert_case_matches,
-    _finite_hex,
+    _case_scores,
     _load_reference_trace,
     _reference_case,
 )
@@ -22,10 +21,7 @@ def test_aci_reference_rejects_one_ulp_equality_threshold_crossing() -> None:
     document = _load_reference_trace()
     case = _reference_case(document, "shared-adaptive-eta-0.125")
     _assert_case_matches(case)
-    inputs = cast(dict[str, object], case["inputs"])
-    scores = tuple(
-        _finite_hex(value, name="score") for value in cast(list[object], inputs["scores"])
-    )
+    scores = _case_scores(case)
     drifted = list(scores)
     drifted[8] = math.nextafter(drifted[8], math.inf)
 
