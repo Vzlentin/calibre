@@ -36,6 +36,7 @@ from newcalibre.conformal.types import (
     IssuedBoundFacts,
     ObserveAnnotation,
     ObserveEffect,
+    ResolvedObservation,
     RuntimeContractError,
     _decode_label,
     derive_partition_label,
@@ -609,8 +610,23 @@ class SplitConformalRuntime:
         partition: _PartitionState,
     ) -> tuple[_PartitionState, tuple[ObserveAnnotation, ...]]:
         observations = delivery.observations
-        if len(observations) != self._protection_period:
-            raise RuntimeContractError("window-sum observe requires one complete protection window")
+        if len(observations) % self._protection_period:
+            raise RuntimeContractError(
+                "window-sum observe requires one or more complete protection windows"
+            )
+        current = partition
+        annotations: list[ObserveAnnotation] = []
+        for offset in range(0, len(observations), self._protection_period):
+            window = observations[offset : offset + self._protection_period]
+            current, window_annotations = self._observe_one_window(window, current)
+            annotations.extend(window_annotations)
+        return current, tuple(annotations)
+
+    def _observe_one_window(
+        self,
+        observations: tuple[ResolvedObservation, ...],
+        partition: _PartitionState,
+    ) -> tuple[_PartitionState, tuple[ObserveAnnotation, ...]]:
         first = observations[0].forecast_key
         if any(
             observation.forecast_key.series_key != first.series_key

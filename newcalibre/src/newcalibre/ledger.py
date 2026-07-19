@@ -14,6 +14,8 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
+from newcalibre.conformal import ForecastKey as ConformalForecastKey
+from newcalibre.conformal import IssuedBoundFacts
 from newcalibre.domain import (
     ACTUAL_VALUE,
     FRAME_KEY_COLUMNS,
@@ -40,6 +42,7 @@ from newcalibre.domain import (
     quantile_column,
     validate_forecast_frame,
 )
+from newcalibre.observe.state import PendingObservation
 
 type ForecastKey = tuple[str, pd.Timestamp, int, str]
 type BoundKey = tuple[str, ...]
@@ -470,6 +473,7 @@ class ForecastRow:
     origin: pd.Timestamp
     model_name: str
     issuances: Mapping[BoundKey, ForecastIssuance]
+    observation_issuance: IssuedBoundFacts | None
     _values: tuple[tuple[str, object], ...]
 
     def __init__(self) -> None:
@@ -481,6 +485,7 @@ class ForecastRow:
         values: Mapping[str, object],
         *,
         issuances: Mapping[BoundKey, ForecastIssuance],
+        observation_issuance: IssuedBoundFacts | None = None,
     ) -> ForecastRow:
         snapshot = tuple((name, _snapshot_scalar(value)) for name, value in values.items())
         by_name = dict(snapshot)
@@ -493,6 +498,13 @@ class ForecastRow:
         object.__setattr__(instance, "origin", by_name[ORIGIN])
         object.__setattr__(instance, "model_name", by_name[MODEL_NAME])
         object.__setattr__(instance, "issuances", MappingProxyType(dict(issuances)))
+        object.__setattr__(
+            instance,
+            "observation_issuance",
+            None
+            if observation_issuance is None
+            else IssuedBoundFacts.snapshot(observation_issuance),
+        )
         object.__setattr__(instance, "_values", snapshot)
         return instance
 
@@ -509,7 +521,11 @@ class ForecastRow:
     def _with_actual_value(self, actual_value: float) -> ForecastRow:
         values = dict(self._values)
         values[ACTUAL_VALUE] = actual_value
-        return self._from_validated_values(values, issuances=self.issuances)
+        return self._from_validated_values(
+            values,
+            issuances=self.issuances,
+            observation_issuance=self.observation_issuance,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -785,6 +801,24 @@ class Ledger:
         return tuple(self._forecasts.values())
 
     @property
+    def pending_observations(self) -> tuple[PendingObservation, ...]:
+        """Return a fresh typed snapshot of pending rows in append order."""
+        return tuple(
+            PendingObservation(
+                forecast_key=ConformalForecastKey(
+                    row.series_key,
+                    row.origin,
+                    row.horizon_step,
+                    row.model_name,
+                ),
+                target_timestamp=row.target_timestamp,
+                point_forecast=row.point_forecast,
+                issued=row.observation_issuance,
+            )
+            for row in self._pending_forecasts.values()
+        )
+
+    @property
     def orders(self) -> tuple[OrderRow, ...]:
         """Return order rows in stable append order."""
         return tuple(self._orders.values())
@@ -799,6 +833,7 @@ class Ledger:
         frame: pd.DataFrame,
         *,
         issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]],
+        observation_issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
     ) -> None:
         """Validate and atomically append one pending forecast-frame chunk."""
         try:
@@ -826,6 +861,10 @@ class Ledger:
         duplicate = next((key for key in staged if key in self._forecasts), None)
         if duplicate is not None:
             raise LedgerError(f"duplicate forecast key: {duplicate!r}")
+        observation_facts = _observation_issuance_snapshot(
+            observation_issuances,
+            staged_keys=staged_keys,
+        )
 
         bound_groups = forecast_bound_groups(columns)
         staged_rows: dict[ForecastKey, ForecastRow] = {}
@@ -837,9 +876,16 @@ class Ledger:
                 bound_groups=bound_groups,
                 issuances=issuances[key],
             )
+            observation_issuance = observation_facts.get(key)
+            if observation_issuance is not None:
+                observation_issuance = _validate_observation_issuance(
+                    values,
+                    observation_issuance,
+                )
             staged_rows[key] = ForecastRow._from_validated_values(
                 values,
                 issuances=row_issuances,
+                observation_issuance=observation_issuance,
             )
 
         for quantile_group in (group for group in bound_groups if len(group) == 1):
@@ -1127,6 +1173,60 @@ def _stage_rows[T](
 
 def _forecast_key(values: Mapping[str, object]) -> ForecastKey:
     return cast(ForecastKey, tuple(values[column] for column in FRAME_KEY_COLUMNS))
+
+
+def _observation_issuance_snapshot(
+    values: Mapping[ForecastKey, IssuedBoundFacts] | None,
+    *,
+    staged_keys: set[ForecastKey],
+) -> dict[ForecastKey, IssuedBoundFacts]:
+    if values is None:
+        return {}
+    if not isinstance(values, Mapping):
+        raise LedgerError("observation issuances must be keyed by forecast row key")
+    try:
+        snapshot = dict(values)
+    except (TypeError, ValueError) as error:
+        raise LedgerError("observation issuance keys must be hashable forecast keys") from error
+    unknown = next((key for key in snapshot if key not in staged_keys), None)
+    if unknown is not None:
+        raise LedgerError(f"observation issuance names an unknown forecast key: {unknown!r}")
+    frozen: dict[ForecastKey, IssuedBoundFacts] = {}
+    for key, facts in snapshot.items():
+        try:
+            frozen[key] = IssuedBoundFacts.snapshot(facts)
+        except ValueError as error:
+            raise LedgerError(str(error)) from error
+    return frozen
+
+
+def _validate_observation_issuance(
+    values: Mapping[str, object],
+    facts: IssuedBoundFacts,
+) -> IssuedBoundFacts:
+    lower_column, upper_column = interval_columns(facts.working_level)
+    if lower_column not in values or upper_column not in values:
+        raise LedgerError("observation issuance working level must identify forecast bound columns")
+    lower = values[lower_column]
+    upper = values[upper_column]
+    if not _same_optional_bound(lower, facts.lower_bound) or not _same_optional_bound(
+        upper,
+        facts.upper_bound,
+    ):
+        raise LedgerError("observation issuance bounds must equal the forecast payload")
+    return IssuedBoundFacts.snapshot(facts)
+
+
+def _same_optional_bound(value: object, expected: float) -> bool:
+    if _is_missing_scalar(value):
+        return math.isnan(expected)
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(normalized) and normalized == expected
 
 
 def _validate_row_issuances(
