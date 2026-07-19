@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -260,6 +261,33 @@ def test_observation_issuance_projection_rejects_mismatched_or_foreign_facts_ato
             frame,
             issuances={_key(1): {QUANTILE: _issuance()}},
             observation_issuances={_key(2): _observation_facts(2)},
+        )
+
+    assert ledger.forecasts == ()
+    assert ledger.pending_observations == ()
+
+
+def test_observation_issuance_rejects_payload_bound_mismatch_atomically() -> None:
+    frame = _frame(steps=(1,))
+    lower, upper = "lower_0.5", "upper_0.5"
+    frame[lower] = pd.Series([0.0], dtype="float64")
+    frame[upper] = pd.Series([12.0], dtype="float64")
+    matching = _observation_facts(1)
+    mismatched = replace(matching, upper_bound=13.0)
+    upper_claim = ForecastIssuance(
+        descriptor=matching.effective_descriptor,
+        guaranteed_side=GuaranteedSide.UPPER,
+        calibration_ready=True,
+        bounds_finite=True,
+        bounds_null_reason=None,
+    )
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+
+    with pytest.raises(LedgerError, match="bounds must equal the forecast payload"):
+        ledger.append_forecasts(
+            frame,
+            issuances={_key(1): {(lower,): _issuance(), (upper,): upper_claim}},
+            observation_issuances={_key(1): mismatched},
         )
 
     assert ledger.forecasts == ()

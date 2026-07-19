@@ -614,13 +614,31 @@ class SplitConformalRuntime:
             raise RuntimeContractError(
                 "window-sum observe requires one or more complete protection windows"
             )
+        windows: dict[
+            tuple[str, str, pd.Timestamp],
+            list[ResolvedObservation],
+        ] = {}
+        for observation in observations:
+            key = observation.forecast_key
+            windows.setdefault((key.series_key, key.model_name, key.origin), []).append(observation)
+
         current = partition
-        annotations: list[ObserveAnnotation] = []
-        for offset in range(0, len(observations), self._protection_period):
-            window = observations[offset : offset + self._protection_period]
+        annotations: dict[ForecastKey, ObserveAnnotation] = {}
+        ordered_keys = sorted(
+            windows,
+            key=lambda key: (key[2], key[0].encode(), key[1].encode()),
+        )
+        for key in ordered_keys:
+            window = tuple(windows[key])
+            if len(window) != self._protection_period:
+                raise RuntimeContractError(
+                    "window-sum observe requires one or more complete protection windows"
+                )
             current, window_annotations = self._observe_one_window(window, current)
-            annotations.extend(window_annotations)
-        return current, tuple(annotations)
+            annotations.update(
+                (annotation.forecast_key, annotation) for annotation in window_annotations
+            )
+        return current, tuple(annotations[observation.forecast_key] for observation in observations)
 
     def _observe_one_window(
         self,

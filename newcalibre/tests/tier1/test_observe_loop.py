@@ -309,6 +309,60 @@ def test_partial_window_retains_resolved_members_then_delivers_exactly_once() ->
     assert drained.resolutions == ()
 
 
+def test_global_window_delivery_groups_interleaved_canonical_rows_by_window() -> None:
+    hierarchy = _hierarchy()
+    delegate = resolve_method(
+        {
+            "method": "split-window-sum",
+            "coverage": 0.5,
+            "partition_by": "global",
+            "protection_period": 2,
+        }
+    )
+    runtime = _CountingRuntime(delegate)
+    label = _label("global", EmissionScope.WINDOW_SUM)
+    states = runtime.calibrate({label: [1.0, 2.0]})
+    second_target = pd.Timestamp("2026-01-03")
+    rows = (
+        ("sku-b", _ISSUE_ORIGIN, 2, second_target, 20.0, _MODEL),
+        ("sku-a", _ISSUE_ORIGIN, 1, _TARGET, 2.0, _MODEL),
+        ("sku-b", _ISSUE_ORIGIN, 1, _TARGET, 10.0, _MODEL),
+        ("sku-a", _ISSUE_ORIGIN, 2, second_target, 3.0, _MODEL),
+    )
+    loop = ObserveLoop(
+        hierarchy=hierarchy,
+        pending_observations=_issued_pending(runtime, rows, states),
+        conformal_states=states,
+        runtime=runtime,
+    )
+    loop.accept(
+        ActualsSubmission(
+            (
+                _actual("sku-b", 24, timestamp=second_target),
+                _actual("sku-a", 4),
+                _actual("sku-b", 13),
+                _actual("sku-a", 7, timestamp=second_target),
+            )
+        )
+    )
+
+    cycle = loop.cycle(pd.Timestamp("2026-01-04"))
+
+    assert runtime.calls == [label]
+    delivery = cycle.deliveries[0]
+    assert [
+        (value.forecast_key.series_key, value.forecast_key.horizon_step)
+        for value in delivery.observations
+    ] == [("sku-a", 1), ("sku-b", 1), ("sku-a", 2), ("sku-b", 2)]
+    assert [annotation.score for annotation in cycle.annotations] == [None, None, 6.0, 7.0]
+    assert [annotation.advanced_delivered_score for annotation in cycle.annotations] == [
+        False,
+        False,
+        True,
+        True,
+    ]
+
+
 def test_one_partition_call_can_carry_multiple_complete_windows() -> None:
     hierarchy = _hierarchy()
     delegate = resolve_method(

@@ -505,7 +505,10 @@ def test_window_observe_refuses_partial_foreign_out_of_range_and_noncanonical_me
         observations[1],
         forecast_key=replace(observations[1].forecast_key, series_key="foreign"),
     )
-    with pytest.raises(RuntimeContractError, match="declared partition|share series"):
+    with pytest.raises(
+        RuntimeContractError,
+        match="declared partition|share series|complete protection window",
+    ):
         runtime.observe(Delivery(label, (observations[0], foreign, observations[2])), states)
 
     out_of_range = replace(
