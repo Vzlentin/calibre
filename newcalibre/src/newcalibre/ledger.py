@@ -1008,10 +1008,6 @@ class Ledger:
         self._resolutions.update(resolutions)
         self._annotations.update(annotations)
 
-    def validate_observe_cycle(self, cycle: ObserveCycle, *, origin: pd.Timestamp) -> None:
-        """Validate one observe cycle without changing any ledger-owned fact."""
-        self._validated_observe_cycle(cycle, origin=origin)
-
     def _validated_observe_cycle(
         self,
         cycle: ObserveCycle,

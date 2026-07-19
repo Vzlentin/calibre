@@ -104,29 +104,13 @@ class HierarchyIndex:
     def flat(cls, bottom_series: Iterable[str]) -> HierarchyIndex:
         """Compile the canonical bottom-plus-total lattice for a flat panel."""
         bottom = _canonical_bottom_series(bottom_series)
-        nodes = tuple(
-            HierarchyNode(
-                label=series_key,
-                kind=HierarchyNodeKind.BOTTOM,
-                members=(series_key,),
-            )
-            for series_key in bottom
-        ) + (
-            HierarchyNode(
-                label=TOTAL_NODE_LABEL,
-                kind=HierarchyNodeKind.TOTAL,
-                members=bottom,
-            ),
+        return _build_hierarchy_index(
+            cls,
+            bottom=bottom,
+            attributes=(),
+            bottom_nodes=_bottom_nodes(bottom),
+            aggregate_nodes=(),
         )
-        if TOTAL_NODE_LABEL in bottom:
-            raise HierarchyError(
-                f"hierarchy node labels collide with bottom series keys: {[TOTAL_NODE_LABEL]!r}"
-            )
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "_bottom_series", bottom)
-        object.__setattr__(instance, "_attribute_names", ())
-        object.__setattr__(instance, "_nodes", nodes)
-        return instance
 
     @classmethod
     def from_facts(
@@ -138,15 +122,9 @@ class HierarchyIndex:
         """Compile per-bottom hierarchy facts into a deterministic lattice."""
         bottom = _canonical_bottom_series(bottom_series)
         normalized, attributes = _normalize_facts(facts, bottom=bottom)
+        bottom_nodes = _bottom_nodes(bottom)
 
-        nodes: list[HierarchyNode] = [
-            HierarchyNode(
-                label=series_key,
-                kind=HierarchyNodeKind.BOTTOM,
-                members=(series_key,),
-            )
-            for series_key in bottom
-        ]
+        aggregate_nodes: list[HierarchyNode] = []
         generated_labels: set[str] = set()
         for attribute in attributes:
             groups: dict[_AttributeValue, list[str]] = {}
@@ -161,7 +139,7 @@ class HierarchyIndex:
                 if label in generated_labels:
                     raise HierarchyError(f"generated hierarchy label collision: {label!r}")
                 generated_labels.add(label)
-                nodes.append(
+                aggregate_nodes.append(
                     HierarchyNode(
                         label=label,
                         kind=HierarchyNodeKind.AGGREGATE,
@@ -169,25 +147,13 @@ class HierarchyIndex:
                     )
                 )
 
-        generated_labels.add(TOTAL_NODE_LABEL)
-        bottom_collisions = sorted(set(bottom) & generated_labels, key=str.encode)
-        if bottom_collisions:
-            raise HierarchyError(
-                f"hierarchy node labels collide with bottom series keys: {bottom_collisions}"
-            )
-        nodes.append(
-            HierarchyNode(
-                label=TOTAL_NODE_LABEL,
-                kind=HierarchyNodeKind.TOTAL,
-                members=bottom,
-            )
+        return _build_hierarchy_index(
+            cls,
+            bottom=bottom,
+            attributes=attributes,
+            bottom_nodes=bottom_nodes,
+            aggregate_nodes=tuple(aggregate_nodes),
         )
-
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "_bottom_series", bottom)
-        object.__setattr__(instance, "_attribute_names", attributes)
-        object.__setattr__(instance, "_nodes", tuple(nodes))
-        return instance
 
     @property
     def bottom_series(self) -> tuple[str, ...]:
@@ -229,6 +195,47 @@ class HierarchyIndex:
         )
         selected_nodes = _select_nodes(self._nodes, node_labels=node_labels)
         return {node.label: _coherent_sum(observations, node=node) for node in selected_nodes}
+
+
+def _build_hierarchy_index(
+    cls: type[HierarchyIndex],
+    *,
+    bottom: tuple[str, ...],
+    attributes: tuple[str, ...],
+    bottom_nodes: tuple[HierarchyNode, ...],
+    aggregate_nodes: tuple[HierarchyNode, ...],
+) -> HierarchyIndex:
+    generated_labels = {node.label for node in aggregate_nodes} | {TOTAL_NODE_LABEL}
+    bottom_collisions = sorted(set(bottom) & generated_labels, key=str.encode)
+    if bottom_collisions:
+        raise HierarchyError(
+            f"hierarchy node labels collide with bottom series keys: {bottom_collisions}"
+        )
+    nodes = (
+        *bottom_nodes,
+        *aggregate_nodes,
+        HierarchyNode(
+            label=TOTAL_NODE_LABEL,
+            kind=HierarchyNodeKind.TOTAL,
+            members=bottom,
+        ),
+    )
+    instance = object.__new__(cls)
+    object.__setattr__(instance, "_bottom_series", bottom)
+    object.__setattr__(instance, "_attribute_names", attributes)
+    object.__setattr__(instance, "_nodes", nodes)
+    return instance
+
+
+def _bottom_nodes(bottom: tuple[str, ...]) -> tuple[HierarchyNode, ...]:
+    return tuple(
+        HierarchyNode(
+            label=series_key,
+            kind=HierarchyNodeKind.BOTTOM,
+            members=(series_key,),
+        )
+        for series_key in bottom
+    )
 
 
 def _canonical_bottom_series(bottom_series: Iterable[str]) -> tuple[str, ...]:

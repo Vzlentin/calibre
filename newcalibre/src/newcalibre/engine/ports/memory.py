@@ -311,7 +311,6 @@ class InMemoryLedgerSink:
 
         staged = _stage_new_rows(write, calendar=self._ledger.calendar)
         _require_origin_rows(write, staged=staged)
-        self._ledger.validate_observe_cycle(write.observe_cycle, origin=write.origin)
         for label, value in write.observe_cycle.state_updates.items():
             if write.state_updates.get(label) != value:
                 raise LedgerError(
@@ -326,9 +325,9 @@ class InMemoryLedgerSink:
         )
         settlement_delta = self._validated_settlement_delta(write)
 
-        # Every family was validated against scratch/indexed state. Publishing
-        # below uses only infallible owned-container updates before the receipt
-        # becomes externally observable.
+        # The observe cycle validates and publishes first. Every later family
+        # was prevalidated against scratch/indexed state, so only infallible
+        # owned-container updates remain before the receipt becomes observable.
         self._ledger.apply_observe_cycle(write.observe_cycle, origin=write.origin)
         for forecast in write.forecasts:
             self._ledger.append_forecasts(
