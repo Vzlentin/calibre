@@ -240,8 +240,6 @@ class IssuedBoundFacts:
         if scope != "partition":
             raise RuntimeContractError("issued partition label must be a data-derived label")
         level = _finite_real(self.working_level, name="working level")
-        if not 0.0 <= level <= 1.0:
-            raise RuntimeContractError("working level must lie between zero and one")
         _require_text(self.state_reference, name="state reference")
         lower = _finite_or_nan_real(self.lower_bound, name="lower bound")
         upper = _finite_or_nan_real(self.upper_bound, name="upper bound")
@@ -261,8 +259,6 @@ class IssuedBoundFacts:
         else:
             _require_text(self.bounds_null_reason, name="bounds null reason")
         descriptor = _snapshot_descriptor(self.effective_descriptor)
-        if descriptor.level != level:
-            raise RuntimeContractError("effective descriptor level must equal the working level")
         if descriptor.window is not self.emission_scope:
             raise RuntimeContractError(
                 "effective descriptor window must equal the issued emission scope"
@@ -498,9 +494,9 @@ def _snapshot_issuances(
     frozen: dict[ForecastKey, IssuedBoundFacts] = {}
     for position, key in enumerate(expected_keys):
         facts = IssuedBoundFacts.snapshot(snapshot[key])
-        if interval_columns(facts.working_level) != (lower_column, upper_column):
+        if interval_columns(facts.effective_descriptor.level) != (lower_column, upper_column):
             raise RuntimeContractError(
-                "issuance working level must identify the calibrated interval columns"
+                "issuance descriptor level must identify the calibrated interval columns"
             )
         lower = float(forecasts.iloc[position][lower_column])
         upper = float(forecasts.iloc[position][upper_column])

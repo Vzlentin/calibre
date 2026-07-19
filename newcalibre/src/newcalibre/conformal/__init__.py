@@ -20,17 +20,22 @@ from newcalibre.conformal.manifest import (
     PostWarmupNonFinite,
 )
 from newcalibre.conformal.methods import (
+    SEQUENTIAL_ADAPTIVE_PER_STEP,
+    SEQUENTIAL_ADAPTIVE_PER_STEP_MANIFEST,
     SPLIT_PER_STEP,
     SPLIT_PER_STEP_MANIFEST,
     SPLIT_WINDOW_SUM,
     SPLIT_WINDOW_SUM_MANIFEST,
     WEIGHTED_PER_STEP,
     WEIGHTED_PER_STEP_MANIFEST,
+    SequentialAdaptiveConformalRuntime,
+    SequentialAdaptivePerStepConfig,
     SplitConformalRuntime,
     SplitPerStepConfig,
     SplitWindowSumConfig,
     WeightedConformalRuntime,
     WeightedPerStepConfig,
+    build_sequential_adaptive_per_step,
     build_split_per_step,
     build_split_window_sum,
     build_weighted_per_step,
@@ -52,6 +57,12 @@ from newcalibre.conformal.types import (
 )
 
 _BUILTIN_METHODS = ConformalRegistry()
+_BUILTIN_METHODS.register(
+    SEQUENTIAL_ADAPTIVE_PER_STEP,
+    SEQUENTIAL_ADAPTIVE_PER_STEP_MANIFEST,
+    SequentialAdaptivePerStepConfig,
+    build_sequential_adaptive_per_step,
+)
 _BUILTIN_METHODS.register(
     SPLIT_PER_STEP,
     SPLIT_PER_STEP_MANIFEST,
@@ -93,6 +104,8 @@ def resolve_method(
 
 __all__ = [
     "METHOD_SCOPE_LABEL",
+    "SEQUENTIAL_ADAPTIVE_PER_STEP",
+    "SEQUENTIAL_ADAPTIVE_PER_STEP_MANIFEST",
     "SPLIT_PER_STEP",
     "SPLIT_PER_STEP_MANIFEST",
     "SPLIT_WINDOW_SUM",
@@ -122,6 +135,8 @@ __all__ = [
     "PostWarmupNonFinite",
     "ResolvedObservation",
     "RuntimeContractError",
+    "SequentialAdaptiveConformalRuntime",
+    "SequentialAdaptivePerStepConfig",
     "SplitConformalRuntime",
     "SplitPerStepConfig",
     "SplitWindowSumConfig",

@@ -250,6 +250,8 @@ def test_default_weighting_is_warm_then_finite_at_exact_count_readiness() -> Non
     assert ready.forecasts.loc[0, upper] == 14.0
     assert ready_facts.calibration_ready
     assert ready_facts.bounds_null_reason is None
+    assert ready_facts.working_level == pytest.approx(0.1)
+    assert ready_facts.effective_descriptor.level == 0.9
     assert ready_facts.bindings == ()
 
 
@@ -413,7 +415,7 @@ def test_observe_rejects_overflowed_finite_residual_before_state_encoding() -> N
         ("method", "wrong weighted method"),
         ("form", "wrong emission form"),
         ("scope", "wrong emission scope"),
-        ("working-level", "wrong working level"),
+        ("working-level", "wrong working alpha"),
     ],
 )
 def test_observe_rejects_tampered_issuance_before_state_advancement(
@@ -445,11 +447,7 @@ def test_observe_rejects_tampered_issuance_before_state_advancement(
             ),
         )
     else:
-        tampered = replace(
-            issued,
-            working_level=0.6,
-            effective_descriptor=replace(issued.effective_descriptor, level=0.6),
-        )
+        tampered = replace(issued, working_level=0.6)
     before = dict(states)
 
     with pytest.raises(RuntimeContractError, match=message):

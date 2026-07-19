@@ -1239,7 +1239,7 @@ def _ledger_bound_issuances(
 ) -> dict[ForecastKey, dict[BoundKey, ForecastIssuance]]:
     issuances: dict[ForecastKey, dict[BoundKey, ForecastIssuance]] = {}
     for key, facts in values.items():
-        lower, upper = interval_columns(facts.working_level)
+        lower, upper = interval_columns(facts.effective_descriptor.level)
         if facts.emission_form is EmissionForm.TWO_SIDED:
             bound_key: BoundKey = (lower, upper)
             selected = (facts.lower_bound, facts.upper_bound)
