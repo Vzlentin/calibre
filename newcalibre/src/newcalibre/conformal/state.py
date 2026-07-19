@@ -92,10 +92,7 @@ class JsonStateCodec:
     def address(self, state: bytes) -> StateAddress:
         """Validate a state row and return only its persistence address."""
         envelope = _decode_envelope(state)
-        scope = self._validate_envelope(envelope, expected_label=None)
-        label = envelope["label"]
-        if not isinstance(label, str):  # pragma: no cover - validated above.
-            raise StateCodecError("state envelope label must be a string")
+        scope, label = self._validate_envelope(envelope, expected_label=None)
         return StateAddress(
             method_name=self.method_name,
             schema_version=self.schema_version,
@@ -108,7 +105,7 @@ class JsonStateCodec:
         envelope: dict[str, object],
         *,
         expected_label: str | None,
-    ) -> StateScope:
+    ) -> tuple[StateScope, str]:
         if envelope["schema"] != _STATE_SCHEMA:
             raise StateCodecError("state envelope has an unsupported schema")
         if envelope["method"] != self.method_name:
@@ -139,7 +136,7 @@ class JsonStateCodec:
             raise StateCodecError(
                 f"state envelope label {label!r} does not match expected label {expected_label!r}"
             )
-        return declared_scope
+        return declared_scope, label
 
 
 def validate_state_blob(
