@@ -507,7 +507,29 @@ def test_partial_residual_widening_ignores_extra_nodes_but_requires_applicable_o
         build_wls_var()(frame, hierarchy, _context(hierarchy, frame=missing))
 
 
-def test_fitted_value_order_is_irrelevant_and_history_is_reused_across_horizons() -> None:
+def test_fitted_value_order_is_irrelevant_and_history_is_reused_across_horizons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newcalibre.reconcile.nixtla as nixtla
+
+    aligned_calls = 0
+    matrix_calls = 0
+    align = nixtla._aligned_fitted_matrices
+    build_matrix = nixtla.build_sparse_summing_matrix
+
+    def count_alignment(*args, **kwargs):
+        nonlocal aligned_calls
+        aligned_calls += 1
+        return align(*args, **kwargs)
+
+    def count_matrix(hierarchy: HierarchyIndex):
+        nonlocal matrix_calls
+        matrix_calls += 1
+        return build_matrix(hierarchy)
+
+    monkeypatch.setattr(nixtla, "_aligned_fitted_matrices", count_alignment)
+    monkeypatch.setattr(nixtla, "build_sparse_summing_matrix", count_matrix)
+
     hierarchy = _hierarchy()
     fitted = _fitted_frame(hierarchy)
     shuffled = fitted.sample(frac=1.0, random_state=7).reset_index(drop=True)
@@ -522,6 +544,8 @@ def test_fitted_value_order_is_irrelevant_and_history_is_reused_across_horizons(
     pd.testing.assert_frame_equal(ordered_result, shuffled_result)
     by_horizon = ordered_result.groupby(HORIZON_STEP, sort=True)[POINT_FORECAST].apply(list)
     assert np.allclose(by_horizon.loc[1], by_horizon.loc[2])
+    assert aligned_calls == 2
+    assert matrix_calls == 2
 
 
 def test_variance_floor_is_exact_and_keeps_one_zero_variance_node_positive() -> None:

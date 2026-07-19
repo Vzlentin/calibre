@@ -226,6 +226,12 @@ class ProjectionReconciler:
         """Reconcile every complete node cross-section in place by row key."""
         fitted_snapshot: pd.DataFrame | None = None
         model_frames: dict[str, pd.DataFrame] = {}
+        full_matrices: dict[bool, DenseSummingMatrix | SparseSummingMatrix] = {}
+        section_matrices: dict[
+            tuple[bool, tuple[str, ...]], DenseSummingMatrix | SparseSummingMatrix
+        ] = {}
+        aligned_fitted: dict[tuple[str, tuple[str, ...]], tuple[np.ndarray, np.ndarray]] = {}
+        variance_weights: dict[tuple[str, tuple[str, ...]], VarianceWeights] = {}
 
         def kernel(
             section: _ProjectionSection,
@@ -258,6 +264,10 @@ class ProjectionReconciler:
                     hierarchy,
                     base_forecast,
                     model_frame=model_frame,
+                    full_matrices=full_matrices,
+                    section_matrices=section_matrices,
+                    aligned_fitted=aligned_fitted,
+                    variance_weights=variance_weights,
                 )
             except ReconciliationError:
                 raise
@@ -281,6 +291,12 @@ class ProjectionReconciler:
         base_forecast: np.ndarray,
         *,
         model_frame: pd.DataFrame | None,
+        full_matrices: dict[bool, DenseSummingMatrix | SparseSummingMatrix],
+        section_matrices: dict[
+            tuple[bool, tuple[str, ...]], DenseSummingMatrix | SparseSummingMatrix
+        ],
+        aligned_fitted: dict[tuple[str, tuple[str, ...]], tuple[np.ndarray, np.ndarray]],
+        variance_weights: dict[tuple[str, tuple[str, ...]], VarianceWeights],
     ) -> np.ndarray:
         residual_periods = 0
         if model_frame is not None:
@@ -298,20 +314,20 @@ class ProjectionReconciler:
             raise ReconciliationError(
                 f"strategy {self.declaration.name!r} {section.description}: {preflight.reason}"
             )
-        if (
-            preflight.decision == SPARSE_REQUIRED
-            and self.declaration.matrix_capability is not MatrixCapability.SPARSE_CAPABLE
-        ):
-            raise ReconciliationError(
-                f"strategy {self.declaration.name!r} cannot consume the required sparse matrix"
-            )
-
         use_sparse = self.declaration.name == WLS_VAR or preflight.decision == SPARSE_REQUIRED
-        matrix: DenseSummingMatrix | SparseSummingMatrix
-        if use_sparse:
-            matrix = build_sparse_summing_matrix(hierarchy).subset(section.bottom_ids)
-        else:
-            matrix = build_dense_summing_matrix(hierarchy).subset(section.bottom_ids)
+        matrix_key = (use_sparse, section.bottom_ids)
+        matrix = section_matrices.get(matrix_key)
+        if matrix is None:
+            full_matrix = full_matrices.get(use_sparse)
+            if full_matrix is None:
+                full_matrix = (
+                    build_sparse_summing_matrix(hierarchy)
+                    if use_sparse
+                    else build_dense_summing_matrix(hierarchy)
+                )
+                full_matrices[use_sparse] = full_matrix
+            matrix = full_matrix.subset(section.bottom_ids)
+            section_matrices[matrix_key] = matrix
         if matrix.node_labels != section.node_labels:
             raise ReconciliationError(
                 f"{section.description} projection nodes drifted from the summing matrix"
@@ -323,15 +339,27 @@ class ProjectionReconciler:
         fitted: np.ndarray | None = None
         variance: VarianceWeights | None = None
         if model_frame is not None:
-            project_actuals, project_fitted = _aligned_fitted_matrices(
-                model_frame,
-                node_labels=section.node_labels,
-                section=section,
-            )
+            residual_key = (section.identity[0], section.node_labels)
+            aligned = aligned_fitted.get(residual_key)
+            if aligned is None:
+                aligned = _aligned_fitted_matrices(
+                    model_frame,
+                    node_labels=section.node_labels,
+                    section=section,
+                )
+                aligned_fitted[residual_key] = aligned
+            project_actuals, project_fitted = aligned
             actuals = project_actuals[list(layout.permutation)]
             fitted = project_fitted[list(layout.permutation)]
             if self.declaration.name == WLS_VAR:
-                variance = derive_variance_weights(actuals - fitted)
+                project_variance = variance_weights.get(residual_key)
+                if project_variance is None:
+                    project_variance = derive_variance_weights(project_actuals - project_fitted)
+                    variance_weights[residual_key] = project_variance
+                variance = VarianceWeights(
+                    values=project_variance.values[list(layout.permutation)],
+                    floor=project_variance.floor,
+                )
 
         if use_sparse:
             if not isinstance(matrix, SparseSummingMatrix):
