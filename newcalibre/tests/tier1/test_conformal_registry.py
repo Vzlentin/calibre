@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar
@@ -23,6 +24,7 @@ from newcalibre.conformal import (
     ConformalRuntime,
     Delivery,
     EmissionForm,
+    FixedCountRequirement,
     ForecastKey,
     GuaranteeDeclaration,
     IssuedBoundFacts,
@@ -38,10 +40,22 @@ from newcalibre.conformal import (
 )
 from newcalibre.conformal.state import JsonStateCodec
 from newcalibre.domain import (
+    ACTUAL_VALUE,
+    HORIZON_STEP,
+    MODEL_NAME,
+    ORIGIN,
+    POINT_FORECAST,
+    SERIES_KEY,
+    TARGET_TIMESTAMP,
     CensoringAssertion,
+    DecisionScope,
+    DecisionScopeKind,
     EmissionScope,
     GuaranteeClaim,
     GuaranteeCurrency,
+    GuaranteeDescriptor,
+    GuaranteeType,
+    ScoredSeries,
 )
 
 pytestmark = pytest.mark.tier1
@@ -71,7 +85,7 @@ FIXTURE_MANIFEST = MethodManifest(
         ),
     ),
     assumption_class=AssumptionClass.EXCHANGEABLE,
-    minimum_calibration_scores=1,
+    calibration_requirement=FixedCountRequirement(1),
     order_sensitive=True,
     censoring_policy=CensoringPolicy.REQUIRES_UNCENSORED,
     imputation_policy=None,
@@ -153,7 +167,6 @@ class _FixtureRuntime:
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
-        del states
         require_calibration_context(
             self.manifest,
             context,
@@ -162,7 +175,32 @@ class _FixtureRuntime:
         calibrated = forecasts.copy(deep=True)
         calibrated["lower_0.9"] = 0.0
         calibrated["upper_0.9"] = calibrated["point_forecast"] + self._config.offset
-        return CalibrationResult(calibrated, {})
+        partition = next(
+            (label for label in states if label != METHOD_SCOPE_LABEL),
+            derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP),
+        )
+        issuances = {
+            ForecastKey(
+                series_key=row[SERIES_KEY],
+                origin=pd.Timestamp(row[ORIGIN]),
+                horizon_step=row[HORIZON_STEP],
+                model_name=row[MODEL_NAME],
+            ): IssuedBoundFacts(
+                method_name="fixture",
+                emission_form=EmissionForm.ONE_SIDED_UPPER,
+                emission_scope=EmissionScope.PER_STEP,
+                partition_label=partition,
+                working_level=0.9,
+                state_reference="fixture:0",
+                lower_bound=0.0,
+                upper_bound=float(row[POINT_FORECAST]) + self._config.offset,
+                calibration_ready=True,
+                bounds_null_reason=None,
+                effective_descriptor=_descriptor(),
+            )
+            for row in calibrated.to_dict("records")
+        }
+        return CalibrationResult(calibrated, {}, issuances)
 
     def observe(
         self,
@@ -228,7 +266,11 @@ class _InvalidStateOutputRuntime(_FixtureRuntime):
     ) -> CalibrationResult:
         result = super().apply(forecasts, states, context=context)
         label = next(iter(states))
-        return CalibrationResult(result.forecasts, {label: self._invalid_state})
+        return CalibrationResult(
+            result.forecasts,
+            {label: self._invalid_state},
+            result.issuances,
+        )
 
     def observe(
         self,
@@ -242,6 +284,34 @@ class _InvalidStateOutputRuntime(_FixtureRuntime):
             {delivery.partition_label: self._invalid_state},
             effect.annotations,
         )
+
+
+def _descriptor() -> GuaranteeDescriptor:
+    return GuaranteeDescriptor(
+        type=GuaranteeType(
+            claim=GuaranteeClaim.ONE_SIDED_COVERAGE,
+            currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            declared_slack=None,
+        ),
+        level=0.9,
+        scored_series=ScoredSeries.DEMAND_HONEST,
+        window=EmissionScope.PER_STEP,
+        scope=DecisionScope(DecisionScopeKind.PER_DECISION_NODE, None),
+    )
+
+
+def _frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            SERIES_KEY: pd.Series(["sku"], dtype="string"),
+            TARGET_TIMESTAMP: pd.to_datetime(["2025-01-06"]),
+            ACTUAL_VALUE: pd.Series([float("nan")], dtype="float64"),
+            POINT_FORECAST: pd.Series([4.0], dtype="float64"),
+            HORIZON_STEP: pd.Series([1], dtype="int64"),
+            ORIGIN: pd.to_datetime(["2025-01-06"]),
+            MODEL_NAME: pd.Series(["fixture-model"], dtype="string"),
+        }
+    )
 
 
 def _observation(
@@ -265,6 +335,8 @@ def _observation(
         availability_bound=None,
         issued=IssuedBoundFacts(
             method_name="fixture",
+            emission_form=EmissionForm.ONE_SIDED_UPPER,
+            emission_scope=EmissionScope.PER_STEP,
             partition_label=partition_label,
             working_level=0.9,
             state_reference="fixture:0",
@@ -272,6 +344,7 @@ def _observation(
             upper_bound=5.0,
             calibration_ready=True,
             bounds_null_reason=None,
+            effective_descriptor=_descriptor(),
         ),
     )
 
@@ -312,7 +385,7 @@ def test_fixture_executes_calibrate_apply_observe_and_factory_restoration() -> N
     calibrated_states = original.calibrate({partition: [1.0, 2.0]})
     restored = registry.resolve({"method": "fixture"}, states=calibrated_states)
     restored_implementation = _FixtureRuntime.constructed[-1]
-    frame = pd.DataFrame({"series_key": ["sku"], "point_forecast": [4.0]})
+    frame = _frame()
     applied = restored.apply(frame, calibrated_states)
     observed = restored.observe(
         Delivery(partition, (_observation("sku", partition_label=partition, actual=7.0),)),
@@ -351,6 +424,18 @@ def test_registration_rejects_runtime_and_exposed_schema_mismatch_atomically() -
             _FixtureConfig,
             mismatch_factory,
         )
+    assert registry.available_methods == ()
+
+
+def test_registration_rejects_default_requirement_beyond_the_state_bound() -> None:
+    registry = ConformalRegistry()
+    impossible = replace(
+        FIXTURE_MANIFEST,
+        calibration_requirement=FixedCountRequirement(FIXTURE_MANIFEST.state_bound + 1),
+    )
+
+    with pytest.raises(ConformalRegistryError, match="requirement exceeds"):
+        registry.register("fixture", impossible, _FixtureConfig, _factory)
     assert registry.available_methods == ()
 
 
@@ -509,7 +594,7 @@ def test_registry_rejects_invalid_state_emitted_by_every_runtime_verb(
         invalid_output_factory,
     )
     runtime = registry.resolve({"method": "fixture"})
-    frame = pd.DataFrame({"series_key": ["sku"], "point_forecast": [4.0]})
+    frame = _frame()
     delivery = Delivery(
         partition,
         (_observation("sku", partition_label=partition, actual=7.0),),
@@ -577,6 +662,42 @@ def test_registry_requires_observe_annotations_for_exactly_the_delivered_rows(
 
     with pytest.raises(RuntimeContractError, match="exactly cover"):
         runtime.observe(delivery, {})
+
+
+def test_registry_rejects_undeclared_post_readiness_nonfinite_bounds() -> None:
+    class NonFiniteRuntime(_FixtureRuntime):
+        def apply(
+            self,
+            forecasts: pd.DataFrame,
+            states: Mapping[str, bytes | None],
+            *,
+            context: CalibrationContext | None = None,
+        ) -> CalibrationResult:
+            result = super().apply(forecasts, states, context=context)
+            calibrated = result.forecasts
+            calibrated.loc[:, ["lower_0.9", "upper_0.9"]] = float("nan")
+            issuances = {
+                key: replace(
+                    facts,
+                    lower_bound=float("nan"),
+                    upper_bound=float("nan"),
+                    bounds_null_reason="unattributed fallback",
+                )
+                for key, facts in result.issuances.items()
+            }
+            return CalibrationResult(calibrated, {}, issuances)
+
+    def factory(config: BaseModel, states: Mapping[str, bytes]) -> ConformalRuntime:
+        assert isinstance(config, _FixtureConfig)
+        return NonFiniteRuntime(config, states)
+
+    registry = ConformalRegistry()
+    registry.register("fixture", FIXTURE_MANIFEST, _FixtureConfig, factory)
+    runtime = registry.resolve({"method": "fixture"})
+    partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
+
+    with pytest.raises(RuntimeContractError, match="post-readiness non-finite"):
+        runtime.apply(_frame(), {partition: None})
 
 
 def test_fixture_extension_is_test_owned_and_runs_without_engine_changes() -> None:

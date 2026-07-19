@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
-from numbers import Integral
+from numbers import Integral, Real
+from typing import Protocol, runtime_checkable
+
+from pydantic import BaseModel
 
 from newcalibre.domain import EmissionScope, GuaranteeClaim, GuaranteeCurrency, GuaranteeType
 from newcalibre.domain.descriptor import GuaranteeDescriptorError
@@ -57,6 +61,65 @@ class JointClaim(StrEnum):
 
     NONE = "none"
     CLASS_CONDITIONAL = "class-conditional"
+
+
+@runtime_checkable
+class CalibrationRequirement(Protocol):
+    """Compute the score count required by one validated runtime configuration."""
+
+    def minimum_scores(self, config: BaseModel) -> int:
+        """Return the smallest admissible calibration-score count."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class FixedCountRequirement:
+    """Require one fixed nonnegative calibration-score count."""
+
+    count: int
+
+    def __post_init__(self) -> None:
+        _require_nonnegative_integer(self.count, name="fixed calibration count")
+        object.__setattr__(self, "count", int(self.count))
+
+    def minimum_scores(self, config: BaseModel) -> int:
+        """Return the configured-independent fixed count."""
+        if not isinstance(config, BaseModel):
+            raise MethodManifestError("calibration configuration must be a Pydantic model")
+        return self.count
+
+
+@dataclass(frozen=True, slots=True)
+class ConservativeRankRequirement:
+    """Require the smallest sample supporting a conservative conformal rank."""
+
+    coverage_field: str = "coverage"
+
+    def __post_init__(self) -> None:
+        _require_text(self.coverage_field, name="coverage field", trimmed=True)
+
+    def minimum_scores(self, config: BaseModel) -> int:
+        """Return the smallest ``n`` satisfying ``alpha > 1 / (n + 1)``."""
+        if not isinstance(config, BaseModel):
+            raise MethodManifestError("calibration configuration must be a Pydantic model")
+        coverage = getattr(config, self.coverage_field, None)
+        if isinstance(coverage, bool) or not isinstance(coverage, Real):
+            raise MethodManifestError(
+                f"configuration field {self.coverage_field!r} must be a real coverage"
+            )
+        normalized = float(coverage)
+        if not math.isfinite(normalized) or not 0.0 < normalized < 1.0:
+            raise MethodManifestError(
+                f"configuration field {self.coverage_field!r} must lie strictly "
+                "between zero and one"
+            )
+        alpha = 1.0 - normalized
+        minimum = max(0, math.floor(1.0 / alpha))
+        while not alpha > 1.0 / (minimum + 1):
+            minimum += 1
+        while minimum > 0 and alpha > 1.0 / minimum:
+            minimum -= 1
+        return minimum
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +176,7 @@ class MethodManifest:
     emission_scope: EmissionScope
     guarantees: tuple[GuaranteeDeclaration, ...]
     assumption_class: AssumptionClass
-    minimum_calibration_scores: int
+    calibration_requirement: CalibrationRequirement
     order_sensitive: bool
     censoring_policy: CensoringPolicy
     imputation_policy: str | None
@@ -132,10 +195,10 @@ class MethodManifest:
         _require_enum(self.emission_scope, EmissionScope, name="emission scope")
         _validate_guarantees(self.guarantees)
         _require_enum(self.assumption_class, AssumptionClass, name="assumption class")
-        _require_nonnegative_integer(
-            self.minimum_calibration_scores,
-            name="minimum calibration scores",
-        )
+        if not isinstance(self.calibration_requirement, CalibrationRequirement):
+            raise MethodManifestError(
+                "calibration requirement must implement CalibrationRequirement"
+            )
         _require_bool(self.order_sensitive, name="order sensitivity")
         _require_enum(self.censoring_policy, CensoringPolicy, name="censoring policy")
         _validate_imputation_policy(self.censoring_policy, self.imputation_policy)
@@ -155,6 +218,19 @@ class MethodManifest:
         _validate_clamps(self.clamps)
         _require_enum(self.joint_claim, JointClaim, name="joint claim")
         _validate_joint_claim(self)
+
+    def minimum_calibration_scores(self, config: BaseModel) -> int:
+        """Evaluate and validate this method's configuration-dependent requirement."""
+        try:
+            minimum = self.calibration_requirement.minimum_scores(config)
+        except MethodManifestError:
+            raise
+        except Exception as error:
+            raise MethodManifestError(
+                f"calibration requirement failed for method {self.name!r}: {error}"
+            ) from error
+        _require_nonnegative_integer(minimum, name="minimum calibration scores")
+        return int(minimum)
 
 
 def _validate_guarantees(guarantees: object) -> None:

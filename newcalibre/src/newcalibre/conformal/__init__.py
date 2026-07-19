@@ -1,16 +1,34 @@
-"""Expose the stable conformal runtime and registration contracts."""
+"""Expose the stable conformal runtime and built-in method contracts."""
+
+from collections.abc import Mapping
+
+from pydantic import BaseModel
 
 from newcalibre.conformal.manifest import (
     AssumptionClass,
+    CalibrationRequirement,
     CensoringPolicy,
     ClampDeclaration,
     ClampGuaranteeImpact,
+    ConservativeRankRequirement,
     EmissionForm,
+    FixedCountRequirement,
     GuaranteeDeclaration,
     JointClaim,
     MethodManifest,
     MethodManifestError,
     PostWarmupNonFinite,
+)
+from newcalibre.conformal.methods import (
+    SPLIT_PER_STEP,
+    SPLIT_PER_STEP_MANIFEST,
+    SPLIT_WINDOW_SUM,
+    SPLIT_WINDOW_SUM_MANIFEST,
+    SplitConformalRuntime,
+    SplitPerStepConfig,
+    SplitWindowSumConfig,
+    build_split_per_step,
+    build_split_window_sum,
 )
 from newcalibre.conformal.registry import ConformalRegistry, ConformalRegistryError
 from newcalibre.conformal.runtime import ConformalRuntime, require_calibration_context
@@ -28,10 +46,49 @@ from newcalibre.conformal.types import (
     derive_partition_label,
 )
 
+_BUILTIN_METHODS = ConformalRegistry()
+_BUILTIN_METHODS.register(
+    SPLIT_PER_STEP,
+    SPLIT_PER_STEP_MANIFEST,
+    SplitPerStepConfig,
+    build_split_per_step,
+)
+_BUILTIN_METHODS.register(
+    SPLIT_WINDOW_SUM,
+    SPLIT_WINDOW_SUM_MANIFEST,
+    SplitWindowSumConfig,
+    build_split_window_sum,
+)
+
+
+def available_methods() -> tuple[str, ...]:
+    """Return the immutable built-in conformal method view."""
+    return _BUILTIN_METHODS.available_methods
+
+
+def method_config_schema(method_name: str) -> type[BaseModel]:
+    """Return one built-in method's frozen configuration schema."""
+    return _BUILTIN_METHODS.config_schema(method_name)
+
+
+def resolve_method(
+    configuration: Mapping[str, object],
+    *,
+    states: Mapping[str, bytes] | None = None,
+) -> ConformalRuntime:
+    """Resolve one explicitly selected built-in conformal runtime."""
+    return _BUILTIN_METHODS.resolve(configuration, states=states)
+
+
 __all__ = [
     "METHOD_SCOPE_LABEL",
+    "SPLIT_PER_STEP",
+    "SPLIT_PER_STEP_MANIFEST",
+    "SPLIT_WINDOW_SUM",
+    "SPLIT_WINDOW_SUM_MANIFEST",
     "AssumptionClass",
     "CalibrationContext",
+    "CalibrationRequirement",
     "CalibrationResult",
     "CensoringPolicy",
     "ClampDeclaration",
@@ -39,8 +96,10 @@ __all__ = [
     "ConformalRegistry",
     "ConformalRegistryError",
     "ConformalRuntime",
+    "ConservativeRankRequirement",
     "Delivery",
     "EmissionForm",
+    "FixedCountRequirement",
     "ForecastKey",
     "GuaranteeDeclaration",
     "IssuedBoundFacts",
@@ -52,6 +111,12 @@ __all__ = [
     "PostWarmupNonFinite",
     "ResolvedObservation",
     "RuntimeContractError",
+    "SplitConformalRuntime",
+    "SplitPerStepConfig",
+    "SplitWindowSumConfig",
+    "available_methods",
     "derive_partition_label",
+    "method_config_schema",
     "require_calibration_context",
+    "resolve_method",
 ]

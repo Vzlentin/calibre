@@ -21,6 +21,7 @@ from newcalibre.conformal import (
     ConformalRuntime,
     Delivery,
     EmissionForm,
+    FixedCountRequirement,
     ForecastKey,
     GuaranteeDeclaration,
     IssuedBoundFacts,
@@ -35,7 +36,17 @@ from newcalibre.conformal import (
     require_calibration_context,
 )
 from newcalibre.conformal.state import JsonStateCodec, StateCodecError, StateScope
-from newcalibre.domain import CensoringAssertion, EmissionScope, GuaranteeClaim, GuaranteeCurrency
+from newcalibre.domain import (
+    CensoringAssertion,
+    DecisionScope,
+    DecisionScopeKind,
+    EmissionScope,
+    GuaranteeClaim,
+    GuaranteeCurrency,
+    GuaranteeDescriptor,
+    GuaranteeType,
+    ScoredSeries,
+)
 
 pytestmark = pytest.mark.tier1
 
@@ -58,7 +69,7 @@ def _manifest(*, consumes_context: bool = False) -> MethodManifest:
             ),
         ),
         assumption_class=AssumptionClass.EXCHANGEABLE,
-        minimum_calibration_scores=1,
+        calibration_requirement=FixedCountRequirement(1),
         order_sensitive=True,
         censoring_policy=CensoringPolicy.REQUIRES_UNCENSORED,
         imputation_policy=None,
@@ -90,9 +101,25 @@ def _key(series_key: str, *, horizon_step: int = 1) -> ForecastKey:
     )
 
 
+def _descriptor() -> GuaranteeDescriptor:
+    return GuaranteeDescriptor(
+        type=GuaranteeType(
+            claim=GuaranteeClaim.ONE_SIDED_COVERAGE,
+            currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+            declared_slack=None,
+        ),
+        level=0.9,
+        scored_series=ScoredSeries.DEMAND_HONEST,
+        window=EmissionScope.PER_STEP,
+        scope=DecisionScope(DecisionScopeKind.PER_DECISION_NODE, None),
+    )
+
+
 def _issued(partition_label: str, *, ready: bool = True) -> IssuedBoundFacts:
     return IssuedBoundFacts(
         method_name="fixture",
+        emission_form=EmissionForm.ONE_SIDED_UPPER,
+        emission_scope=EmissionScope.PER_STEP,
         partition_label=partition_label,
         working_level=0.9,
         state_reference="fixture:7",
@@ -100,6 +127,7 @@ def _issued(partition_label: str, *, ready: bool = True) -> IssuedBoundFacts:
         upper_bound=8.0 if ready else math.nan,
         calibration_ready=ready,
         bounds_null_reason=None if ready else "warm-up",
+        effective_descriptor=_descriptor(),
     )
 
 
@@ -320,6 +348,8 @@ def test_delivery_validates_complete_keys_values_censoring_and_issued_facts() ->
     with pytest.raises(RuntimeContractError, match="bounds null reason"):
         _issued(label, ready=True).__class__(
             method_name="fixture",
+            emission_form=EmissionForm.ONE_SIDED_UPPER,
+            emission_scope=EmissionScope.PER_STEP,
             partition_label=label,
             working_level=0.9,
             state_reference="fixture:7",
@@ -327,6 +357,7 @@ def test_delivery_validates_complete_keys_values_censoring_and_issued_facts() ->
             upper_bound=8.0,
             calibration_ready=True,
             bounds_null_reason="warm-up",
+            effective_descriptor=_descriptor(),
         )
 
 
@@ -334,10 +365,13 @@ def test_issued_bound_facts_reject_impossible_finite_bound_states() -> None:
     label = _partition()
     common = {
         "method_name": "fixture",
+        "emission_form": EmissionForm.ONE_SIDED_UPPER,
+        "emission_scope": EmissionScope.PER_STEP,
         "partition_label": label,
         "working_level": 0.9,
         "state_reference": "fixture:7",
         "bounds_null_reason": None,
+        "effective_descriptor": _descriptor(),
     }
 
     with pytest.raises(RuntimeContractError, match="lower bound cannot exceed"):
@@ -466,6 +500,48 @@ def test_effect_and_calibration_result_snapshot_values_and_require_bytes() -> No
     returned = result.forecasts
     returned.loc[0, "point_forecast"] = 88.0
     assert result.forecasts.loc[0, "point_forecast"] == 1.0
+
+
+def test_calibration_result_requires_exact_row_keyed_issuance_for_owned_bounds() -> None:
+    label = _partition()
+    frame = pd.DataFrame(
+        {
+            "series_key": pd.Series(["series"], dtype="string"),
+            "origin": pd.to_datetime(["2025-01-06"]),
+            "horizon_step": pd.Series([1], dtype="int64"),
+            "model_name": pd.Series(["fixture-model"], dtype="string"),
+            "lower_0.9": pd.Series([0.0], dtype="float64"),
+            "upper_0.9": pd.Series([8.0], dtype="float64"),
+        }
+    )
+    key = _key("series")
+
+    result = CalibrationResult(frame, {}, {key: _issued(label)})
+    assert result.issuances[key].upper_bound == 8.0
+    with pytest.raises(RuntimeContractError, match="exactly cover"):
+        CalibrationResult(frame, {})
+    with pytest.raises(RuntimeContractError, match="exactly cover"):
+        CalibrationResult(frame, {}, {})
+    with pytest.raises(RuntimeContractError, match="bounds must equal"):
+        CalibrationResult(
+            frame,
+            {},
+            {
+                key: _issued(label).__class__(
+                    method_name="fixture",
+                    emission_form=EmissionForm.ONE_SIDED_UPPER,
+                    emission_scope=EmissionScope.PER_STEP,
+                    partition_label=label,
+                    working_level=0.9,
+                    state_reference="fixture:7",
+                    lower_bound=0.0,
+                    upper_bound=9.0,
+                    calibration_ready=True,
+                    bounds_null_reason=None,
+                    effective_descriptor=_descriptor(),
+                )
+            },
+        )
 
 
 def test_context_presence_must_match_manifest_and_row_alignment() -> None:

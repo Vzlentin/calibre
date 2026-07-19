@@ -13,8 +13,19 @@ from typing import Final, cast
 
 import pandas as pd
 
-from newcalibre.domain import CensoringAssertion, EmissionScope
+from newcalibre.conformal.manifest import EmissionForm
+from newcalibre.domain import (
+    FRAME_KEY_COLUMNS,
+    AppliedBinding,
+    CensoringAssertion,
+    DecisionScope,
+    EmissionScope,
+    GuaranteeDescriptor,
+    GuaranteeType,
+    interval_columns,
+)
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
+from newcalibre.domain.forecast_frame import ForecastFrameError, forecast_bound_groups
 
 _PARTITION_PREFIX: Final = "p1."
 _METHOD_PREFIX: Final = "m1."
@@ -187,6 +198,8 @@ class IssuedBoundFacts:
     """Carry the immutable calibration facts recorded when one row was issued."""
 
     method_name: str
+    emission_form: EmissionForm
+    emission_scope: EmissionScope
     partition_label: str
     working_level: float
     state_reference: str
@@ -194,9 +207,35 @@ class IssuedBoundFacts:
     upper_bound: float
     calibration_ready: bool
     bounds_null_reason: str | None
+    effective_descriptor: GuaranteeDescriptor
+    bindings: tuple[AppliedBinding, ...] = ()
+
+    @classmethod
+    def snapshot(cls, facts: IssuedBoundFacts) -> IssuedBoundFacts:
+        """Return an exact immutable snapshot of issued bound facts."""
+        if not isinstance(facts, cls):
+            raise RuntimeContractError("issuance metadata must contain IssuedBoundFacts")
+        return cls(
+            method_name=facts.method_name,
+            emission_form=facts.emission_form,
+            emission_scope=facts.emission_scope,
+            partition_label=facts.partition_label,
+            working_level=facts.working_level,
+            state_reference=facts.state_reference,
+            lower_bound=facts.lower_bound,
+            upper_bound=facts.upper_bound,
+            calibration_ready=facts.calibration_ready,
+            bounds_null_reason=facts.bounds_null_reason,
+            effective_descriptor=facts.effective_descriptor,
+            bindings=facts.bindings,
+        )
 
     def __post_init__(self) -> None:
         _require_text(self.method_name, name="issued method name", trimmed=True)
+        if not isinstance(self.emission_form, EmissionForm):
+            raise RuntimeContractError("issued emission form must be an EmissionForm")
+        if not isinstance(self.emission_scope, EmissionScope):
+            raise RuntimeContractError("issued emission scope must be an EmissionScope")
         scope, _ = _decode_label(self.partition_label)
         if scope != "partition":
             raise RuntimeContractError("issued partition label must be a data-derived label")
@@ -221,9 +260,21 @@ class IssuedBoundFacts:
                 raise RuntimeContractError("finite bounds cannot carry a bounds null reason")
         else:
             _require_text(self.bounds_null_reason, name="bounds null reason")
+        descriptor = _snapshot_descriptor(self.effective_descriptor)
+        if descriptor.level != level:
+            raise RuntimeContractError("effective descriptor level must equal the working level")
+        if descriptor.window is not self.emission_scope:
+            raise RuntimeContractError(
+                "effective descriptor window must equal the issued emission scope"
+            )
+        bindings = _snapshot_bindings(self.bindings)
+        if len({binding.name for binding in bindings}) != len(bindings):
+            raise RuntimeContractError("issued binding names must be unique")
         object.__setattr__(self, "working_level", level)
         object.__setattr__(self, "lower_bound", lower)
         object.__setattr__(self, "upper_bound", upper)
+        object.__setattr__(self, "effective_descriptor", descriptor)
+        object.__setattr__(self, "bindings", bindings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,15 +424,17 @@ class ObserveEffect:
 
 @dataclass(frozen=True, slots=True, init=False)
 class CalibrationResult:
-    """Return a defensive calibrated-frame snapshot and opaque state updates."""
+    """Return calibrated forecasts, row-keyed issuance, and opaque state updates."""
 
     _forecasts: pd.DataFrame = field(repr=False)
     state_updates: Mapping[str, bytes]
+    issuances: Mapping[ForecastKey, IssuedBoundFacts]
 
     def __init__(
         self,
         forecasts: pd.DataFrame,
         state_updates: Mapping[str, bytes],
+        issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
     ) -> None:
         if not isinstance(forecasts, pd.DataFrame):
             raise RuntimeContractError("calibrated forecasts must be a pandas DataFrame")
@@ -390,13 +443,108 @@ class CalibrationResult:
         snapshot = forecasts.copy(deep=True)
         snapshot.attrs = {}
         updates = _snapshot_state_updates(state_updates)
+        frozen_issuances = _snapshot_issuances(snapshot, issuances)
         object.__setattr__(self, "_forecasts", snapshot)
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        object.__setattr__(self, "issuances", MappingProxyType(frozen_issuances))
 
     @property
     def forecasts(self) -> pd.DataFrame:
         """Return an isolated copy of the calibrated forecasts."""
         return self._forecasts.copy(deep=True)
+
+
+def _snapshot_issuances(
+    forecasts: pd.DataFrame,
+    issuances: Mapping[ForecastKey, IssuedBoundFacts] | None,
+) -> dict[ForecastKey, IssuedBoundFacts]:
+    try:
+        interval_groups = tuple(
+            group for group in forecast_bound_groups(forecasts.columns) if len(group) == 2
+        )
+    except ForecastFrameError as error:
+        raise RuntimeContractError(str(error)) from error
+    supplied = {} if issuances is None else issuances
+    if not isinstance(supplied, Mapping):
+        raise RuntimeContractError("calibration issuances must be a mapping")
+    if not interval_groups:
+        if supplied:
+            raise RuntimeContractError("issuance metadata requires calibrated interval bounds")
+        return {}
+    if len(interval_groups) != 1:
+        raise RuntimeContractError("calibration results must own exactly one interval pair")
+    missing_columns = [column for column in FRAME_KEY_COLUMNS if column not in forecasts]
+    if missing_columns:
+        raise RuntimeContractError(
+            "calibrated interval bounds require complete forecast key columns"
+        )
+    expected_keys = tuple(
+        ForecastKey(
+            series_key=row["series_key"],
+            origin=pd.Timestamp(row["origin"]),
+            horizon_step=row["horizon_step"],
+            model_name=row["model_name"],
+        )
+        for row in forecasts.loc[:, list(FRAME_KEY_COLUMNS)].to_dict("records")
+    )
+    if len(set(expected_keys)) != len(expected_keys):
+        raise RuntimeContractError("calibrated forecasts contain duplicate forecast keys")
+    snapshot = dict(supplied)
+    if set(snapshot) != set(expected_keys):
+        raise RuntimeContractError(
+            "calibration issuances must exactly cover calibrated forecast keys"
+        )
+    lower_column, upper_column = interval_groups[0]
+    frozen: dict[ForecastKey, IssuedBoundFacts] = {}
+    for position, key in enumerate(expected_keys):
+        facts = IssuedBoundFacts.snapshot(snapshot[key])
+        if interval_columns(facts.working_level) != (lower_column, upper_column):
+            raise RuntimeContractError(
+                "issuance working level must identify the calibrated interval columns"
+            )
+        lower = float(forecasts.iloc[position][lower_column])
+        upper = float(forecasts.iloc[position][upper_column])
+        if not _same_bound(lower, facts.lower_bound) or not _same_bound(
+            upper,
+            facts.upper_bound,
+        ):
+            raise RuntimeContractError("issuance bounds must equal the calibrated frame row")
+        frozen[key] = facts
+    return frozen
+
+
+def _same_bound(left: float, right: float) -> bool:
+    return left == right or (math.isnan(left) and math.isnan(right))
+
+
+def _snapshot_descriptor(value: object) -> GuaranteeDescriptor:
+    if not isinstance(value, GuaranteeDescriptor):
+        raise RuntimeContractError("effective descriptor must be a GuaranteeDescriptor")
+    descriptor_type = GuaranteeType(
+        claim=value.type.claim,
+        currency=value.type.currency,
+        declared_slack=value.type.declared_slack,
+    )
+    scope = DecisionScope(
+        kind=value.scope.kind,
+        class_system_name=value.scope.class_system_name,
+    )
+    return GuaranteeDescriptor(
+        type=descriptor_type,
+        level=value.level,
+        scored_series=value.scored_series,
+        window=value.window,
+        scope=scope,
+    )
+
+
+def _snapshot_bindings(values: object) -> tuple[AppliedBinding, ...]:
+    bindings = _snapshot_iterable(values, name="issued bindings")
+    if any(not isinstance(value, AppliedBinding) for value in bindings):
+        raise RuntimeContractError("issued bindings must contain AppliedBinding values")
+    return tuple(
+        AppliedBinding(name=value.name, value=value.value, bound=value.bound) for value in bindings
+    )
 
 
 def _snapshot_state_updates(values: object) -> dict[str, bytes]:

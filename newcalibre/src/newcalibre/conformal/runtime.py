@@ -46,7 +46,7 @@ class ConformalRuntime(Protocol):
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
-        """Issue calibrated forecasts without consuming actual values."""
+        """Issue calibrated forecasts with exact row-keyed issuance metadata."""
         ...
 
     def observe(
