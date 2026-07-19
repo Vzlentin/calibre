@@ -148,9 +148,12 @@ resolve into the ledger `[LED-2]` and update calibration state only under the
 admissible-update rule `[CAL-3]`; late and out-of-order actuals buffer as
 pending observations `[LED-3]`; the contract is restart-safe and applies to
 any conformal plugin satisfying chapter 05.
-**Acceptance.** Feeding the same actuals in-order and out-of-order, with
-restarts interleaved, yields identical calibration state and identical
-resolved ledgers.
+**Acceptance.** Replaying the same actuals with the same per-origin
+availability and canonical delivery sequence, with restarts interleaved,
+yields identical calibration state and identical resolved ledgers. Late or
+out-of-order submissions never retroactively change committed issuance;
+replaying the same arrival schedule resolves and delivers each eligible row
+exactly once.
 **Owner.** Chapter 06.
 
 ### `[VIS-11]` Reconcile hierarchies as a pipeline stage
