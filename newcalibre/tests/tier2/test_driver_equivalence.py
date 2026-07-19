@@ -111,6 +111,51 @@ class _ReorderedSnapshots:
         return tuple(reversed(self._sink.observe_annotations))
 
 
+class _ChangedSnapshotFamily:
+    """Replace one public durable row family with changed real rows."""
+
+    def __init__(
+        self,
+        sink: InMemoryLedgerSink,
+        *,
+        family: str,
+        values: tuple[object, ...],
+    ) -> None:
+        self._sink = sink
+        self._family = family
+        self._values = values
+
+    def __getattr__(self, name: str):
+        if name == self._family:
+            return self._values
+        return getattr(self._sink, name)
+
+
+class _ChangedSettlementSnapshot:
+    """Change one derived settlement-state input before projection."""
+
+    def __init__(self, sink: InMemoryLedgerSink, *, field_name: str) -> None:
+        self._sink = sink
+        self._field_name = field_name
+
+    def __getattr__(self, name: str):
+        return getattr(self._sink, name)
+
+    def settlement_snapshot(self, periods):
+        """Return the real snapshot with one selected durable fact changed."""
+        snapshot = self._sink.settlement_snapshot(periods)
+        if self._field_name == "inventory_positions":
+            positions = dict(snapshot.current_positions)
+            series_key = min(positions, key=str.encode)
+            position = positions[series_key]
+            positions[series_key] = replace(position, on_hand=position.on_hand + 1.0)
+            return replace(snapshot, current_positions=positions)
+        open_orders = dict(snapshot.open_order_quantities)
+        series_key = min(open_orders, key=str.encode)
+        open_orders[series_key] += 1.0
+        return replace(snapshot, open_order_quantities=open_orders)
+
+
 def _state(world: DriverWorld) -> DurableState:
     return project_durable_state(world.sink, world.states, world.artifacts)
 
@@ -145,10 +190,49 @@ def _assert_complete(
     assert costs[2][0] == "total"
 
 
-def _mutate_family(state: DurableState, field_name: str) -> DurableState:
-    value = getattr(state, field_name)
-    assert isinstance(value, tuple)
-    return replace(state, **{field_name: (*value, ("mutated", field_name))})
+def _projection_after_input_change(
+    world: DriverWorld,
+    field_name: str,
+) -> DurableState:
+    sink = world.sink
+    direct_families = {
+        "forecasts",
+        "orders",
+        "settlements",
+        "observed_history",
+        "pending_observations",
+        "observation_resolutions",
+        "observe_annotations",
+    }
+    if field_name in direct_families:
+        rows = getattr(sink, field_name)
+        assert rows
+        sink = _ChangedSnapshotFamily(
+            sink,
+            family=field_name,
+            values=tuple(rows[1:]),
+        )
+    elif field_name == "conformal_states":
+        world.states.save(
+            world.session,
+            "sensitivity-witness",
+            b"changed-state",
+            sequence=10_000,
+        )
+    elif field_name == "artifacts":
+        world.artifacts.save("sensitivity-witness", b"changed-artifact")
+    elif field_name in {"inventory_positions", "open_orders"}:
+        sink = _ChangedSettlementSnapshot(sink, field_name=field_name)
+    elif field_name == "booked_costs":
+        costly = next(row for row in sink.settlements if row.realized_cost != 0.0)
+        sink = _ChangedSnapshotFamily(
+            sink,
+            family="settlements",
+            values=tuple(row for row in sink.settlements if row.key != costly.key),
+        )
+    else:
+        raise AssertionError(f"no durable input mutation for {field_name}")
+    return project_durable_state(sink, world.states, world.artifacts)
 
 
 def test_durable_state_ignores_physical_order_and_transaction_grouping() -> None:
@@ -174,8 +258,11 @@ def test_durable_state_ignores_physical_order_and_transaction_grouping() -> None
     [field.name for field in fields(DurableState) if field.name not in {"session"}],
 )
 def test_durable_state_changes_when_an_included_fact_changes(field_name: str) -> None:
-    state = _state(run_event_world("split-per-step"))
-    assert _mutate_family(state, field_name) != state
+    world = run_event_world("split-per-step")
+    state = _state(world)
+    changed = _projection_after_input_change(world, field_name)
+
+    assert getattr(changed, field_name) != getattr(state, field_name)
 
 
 def test_runtime_configuration_registry_is_complete() -> None:
@@ -403,6 +490,44 @@ def test_event_to_time_loop_continuation_matches_uninterrupted_event_driver(
 
     build_time_loop(world).run()
     assert _state(world) == _state(expected)
+
+
+@pytest.mark.parametrize("runtime_name", RUNTIME_CASES)
+def test_time_loop_resumes_from_one_receipt_covering_multiple_settlement_periods(
+    runtime_name: str | None,
+) -> None:
+    expected = _run_grouped_receipt_schedule(runtime_name, resume_with_time_loop=False)
+    resumed = _run_grouped_receipt_schedule(runtime_name, resume_with_time_loop=True)
+
+    assert _state(resumed) == _state(expected)
+
+
+def _run_grouped_receipt_schedule(
+    runtime_name: str | None,
+    *,
+    resume_with_time_loop: bool,
+) -> DriverWorld:
+    world = make_world(runtime_name)
+    driver = build_event_driver(world)
+    seed_event_history(world, driver)
+    driver.handle(origin_event(world, ORIGINS[0], seed=True))
+    driver.handle(origin_event(world, ORIGINS[1]))
+
+    grouped = driver.handle(
+        actuals_event(
+            world,
+            actual_records(world, timestamps=ORIGINS[:2]),
+        )
+    )
+    assert grouped.receipt.settlement_periods == ORIGINS[:2]
+    assert world.sink.settlement_receipt(ORIGINS[0]) == grouped.receipt
+    assert world.sink.settlement_receipt(ORIGINS[1]) == grouped.receipt
+
+    if resume_with_time_loop:
+        build_time_loop(world).run()
+    else:
+        drive_origins(world, driver, origins=ORIGINS[2:])
+    return world
 
 
 def _run_rechunk_schedule(

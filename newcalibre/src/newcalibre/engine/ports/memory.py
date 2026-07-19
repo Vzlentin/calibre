@@ -400,6 +400,11 @@ class InMemoryLedgerSink:
             write,
             initial_positions=initial_positions,
         )
+        if (
+            write.expected_forecast_origin_count is not None
+            and write.expected_forecast_origin_count != self._forecast_origin_count
+        ):
+            raise LedgerError("forecast origin count changed during admission")
 
         # The observe cycle validates and publishes first. Every later family
         # was prevalidated against scratch/indexed state, so only infallible

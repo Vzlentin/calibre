@@ -224,6 +224,7 @@ class EventDriver:
         latest = self._ledger_sink.latest_origin
         if latest is not None and event.origin <= latest:
             raise EventDriverError("origin events must advance strictly monotonically")
+        forecast_origin_count = self._ledger_sink.forecast_origin_count
         positions, settlement = self._origin_context(event)
         request = OriginRequest(
             session=event.session,
@@ -234,10 +235,14 @@ class EventDriver:
         )
         result = self._spine.run_origin(
             request,
-            decision_origin=self._is_decision_origin(event.session),
+            decision_origin=self._is_decision_origin(
+                event.session,
+                forecast_origin_count=forecast_origin_count,
+            ),
             settlement=settlement,
             submission=ActualsSubmission(()),
             input_fingerprint=event.fingerprint,
+            expected_forecast_origin_count=forecast_origin_count,
         )
         return OriginOutcome(result.receipt, result.orders)
 
@@ -391,11 +396,16 @@ class EventDriver:
             )
         )
 
-    def _is_decision_origin(self, session: SessionIdentity) -> bool:
+    @staticmethod
+    def _is_decision_origin(
+        session: SessionIdentity,
+        *,
+        forecast_origin_count: int,
+    ) -> bool:
         decision = session_decision_inputs(session)
         if decision is None:
             return True
-        return self._ledger_sink.forecast_origin_count % decision.timing.review_period == 0
+        return forecast_origin_count % decision.timing.review_period == 0
 
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:

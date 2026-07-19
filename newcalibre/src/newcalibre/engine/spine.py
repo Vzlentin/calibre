@@ -428,6 +428,7 @@ class CommitRequest:
     decisions: DecisionBatch | None = None
     settlement: SettlementWindow | None = None
     input_fingerprint: str | None = None
+    expected_forecast_origin_count: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
@@ -462,6 +463,13 @@ class CommitRequest:
             or any(character not in "0123456789abcdef" for character in self.input_fingerprint)
         ):
             raise ValueError("commit request input fingerprint must be a SHA-256 hex string")
+        expected_count = self.expected_forecast_origin_count
+        if expected_count is not None and (
+            not isinstance(expected_count, int)
+            or isinstance(expected_count, bool)
+            or expected_count < 0
+        ):
+            raise ValueError("expected forecast origin count must be a non-negative integer")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
 
@@ -926,6 +934,7 @@ class Engine:
                 settlements=() if settlement_result is None else settlement_result.records,
                 state_updates=request.calibration.state_updates,
                 input_fingerprint=request.input_fingerprint,
+                expected_forecast_origin_count=request.expected_forecast_origin_count,
                 inventory_positions=request.inventory_positions,
             )
         )
@@ -1005,6 +1014,7 @@ class Spine:
         settlement: SettlementWindow | None = None,
         submission: ActualsSubmission | None = None,
         input_fingerprint: str | None = None,
+        expected_forecast_origin_count: int | None = None,
     ) -> OriginResult:
         """Run Resolve through Commit once for a declared origin."""
         if not isinstance(request, OriginRequest):
@@ -1017,6 +1027,12 @@ class Spine:
             raise ValueError("spine settlement window must contain exactly its origin")
         if submission is not None and not isinstance(submission, ActualsSubmission):
             raise TypeError("spine submission must be an ActualsSubmission or None")
+        if expected_forecast_origin_count is not None and (
+            not isinstance(expected_forecast_origin_count, int)
+            or isinstance(expected_forecast_origin_count, bool)
+            or expected_forecast_origin_count < 0
+        ):
+            raise ValueError("expected forecast origin count must be a non-negative integer")
         observation = self._phase(
             Phase.RESOLVE,
             request.origin,
@@ -1070,6 +1086,7 @@ class Spine:
                     decisions=decisions,
                     settlement=settlement,
                     input_fingerprint=input_fingerprint,
+                    expected_forecast_origin_count=expected_forecast_origin_count,
                 )
             )
 

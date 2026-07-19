@@ -158,37 +158,28 @@ class _Adapter:
         raise AdapterCapabilityError("event fixture has no incremental update")
 
 
-def _decision_session(calendar: Calendar) -> SessionIdentity:
+def _decision_session(
+    calendar: Calendar,
+    *,
+    review_period: int = 1,
+) -> SessionIdentity:
     return SessionIdentity.derive(
         tenant="event-driver",
         series_keys=("a",),
         calendar=calendar,
-        horizon=2,
+        horizon=review_period + 1,
         model_config={"backend": "fixture"},
         ordering_policy={"name": "newsvendor"},
         decision_series_keys=("a",),
         cost_structure=CostStructure(1.0, 1.0, 0.5, 2.0),
-        decision_timing=DecisionTiming(lead_time=1, review_period=1),
+        decision_timing=DecisionTiming(lead_time=1, review_period=review_period),
         stockout_rule=StockoutRule.LOST_SALES,
     )
 
 
-def _runtime(
-    *,
-    sink_factory: Callable[
-        [SessionIdentity, Calendar],
-        InMemoryLedgerSink,
-    ] = lambda session, calendar: InMemoryLedgerSink(session=session, calendar=calendar),
-) -> tuple[
-    EventDriver,
-    SessionIdentity,
-    InMemoryLedgerSink,
-    list[str],
-    list[pd.Timestamp],
-]:
-    calendar = Calendar("D", phase=pd.Timestamp("2026-01-01"))
+def _panel(calendar: Calendar) -> Panel:
     timestamps = pd.date_range("2026-01-01", periods=8, freq="D")
-    panel = Panel.from_frame(
+    return Panel.from_frame(
         pd.DataFrame(
             {
                 SERIES_KEY: pd.Series(["a"] * len(timestamps), dtype="string"),
@@ -198,11 +189,16 @@ def _runtime(
         ),
         calendar=calendar,
     )
-    session = _decision_session(panel.calendar)
-    sink = sink_factory(session, panel.calendar)
-    effects: list[str] = []
-    order_origins: list[pd.Timestamp] = []
 
+
+def _driver(
+    *,
+    panel: Panel,
+    session: SessionIdentity,
+    sink: InMemoryLedgerSink,
+    effects: list[str],
+    order_origins: list[pd.Timestamp],
+) -> EventDriver:
     def order(request) -> tuple[OrderProposal, ...]:
         order_origins.append(request.origin)
         return (OrderProposal("a", "fixture", 1.0),)
@@ -219,17 +215,41 @@ def _runtime(
         adapter_resolver=lambda _configuration: _Adapter(effects),
         orderer=order,
     )
-    return (
-        EventDriver(
-            engine=engine,
-            ledger_sink=sink,
-            actuals_semantics=ActualsSemantics.DEMAND,
-        ),
-        session,
-        sink,
-        effects,
-        order_origins,
+    return EventDriver(
+        engine=engine,
+        ledger_sink=sink,
+        actuals_semantics=ActualsSemantics.DEMAND,
     )
+
+
+def _runtime(
+    *,
+    sink_factory: Callable[
+        [SessionIdentity, Calendar],
+        InMemoryLedgerSink,
+    ] = lambda session, calendar: InMemoryLedgerSink(session=session, calendar=calendar),
+    review_period: int = 1,
+) -> tuple[
+    EventDriver,
+    SessionIdentity,
+    InMemoryLedgerSink,
+    list[str],
+    list[pd.Timestamp],
+]:
+    calendar = Calendar("D", phase=pd.Timestamp("2026-01-01"))
+    panel = _panel(calendar)
+    session = _decision_session(panel.calendar, review_period=review_period)
+    sink = sink_factory(session, panel.calendar)
+    effects: list[str] = []
+    order_origins: list[pd.Timestamp] = []
+    driver = _driver(
+        panel=panel,
+        session=session,
+        sink=sink,
+        effects=effects,
+        order_origins=order_origins,
+    )
+    return driver, session, sink, effects, order_origins
 
 
 def _origin(
@@ -268,9 +288,10 @@ class _InterleavingLedgerSink(InMemoryLedgerSink):
         self._first_origin = first_origin
         self._origin_writes_ready = Barrier(2)
         self._first_origin_published = Barrier(2)
+        self._race_complete = False
 
     def commit(self, write):
-        if not write.forecasts:
+        if not write.forecasts or self._race_complete:
             return super().commit(write)
         self._origin_writes_ready.wait(timeout=5)
         if write.origin == self._first_origin:
@@ -279,7 +300,10 @@ class _InterleavingLedgerSink(InMemoryLedgerSink):
             finally:
                 self._first_origin_published.wait(timeout=5)
         self._first_origin_published.wait(timeout=5)
-        return super().commit(write)
+        try:
+            return super().commit(write)
+        finally:
+            self._race_complete = True
 
 
 @pytest.mark.parametrize(
@@ -329,6 +353,49 @@ def test_concurrent_origin_admission_and_inventory_validation_are_atomic(
     expected_on_hand = 10.0 if first_origin.day == 4 else 20.0
     snapshot = sink.settlement_snapshot((pd.Timestamp("2026-01-06"),))
     assert snapshot.current_positions["a"].on_hand == expected_on_hand
+
+
+def test_concurrent_drivers_admit_decision_cadence_at_the_journal_boundary() -> None:
+    first_origin = pd.Timestamp("2026-01-04")
+    first_driver, session, sink, effects, order_origins = _runtime(
+        sink_factory=lambda session, calendar: _InterleavingLedgerSink(
+            session=session,
+            calendar=calendar,
+            first_origin=first_origin,
+        ),
+        review_period=2,
+    )
+    second_driver = _driver(
+        panel=_panel(sink.calendar),
+        session=session,
+        sink=sink,
+        effects=effects,
+        order_origins=order_origins,
+    )
+    initial = {"a": InventoryPosition(10.0, 0.0, 0.0)}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            first_driver.handle,
+            _origin(session, "2026-01-04", positions=initial),
+        )
+        second = executor.submit(
+            second_driver.handle,
+            _origin(session, "2026-01-05", positions=initial),
+        )
+        first.result(timeout=10)
+        with pytest.raises(PhaseError, match="origin count changed during admission"):
+            second.result(timeout=10)
+
+    assert {row.origin for row in sink.orders} == {first_origin}
+    retry = second_driver.handle(_origin(session, "2026-01-05"))
+    assert retry.orders == ()
+    assert sink.latest_origin == pd.Timestamp("2026-01-05")
+    assert {row.origin for row in sink.forecasts} == {
+        first_origin,
+        pd.Timestamp("2026-01-05"),
+    }
+    assert {row.origin for row in sink.orders} == {first_origin}
 
 
 def test_driver_retries_conflicts_and_settles_only_contiguous_eligible_periods() -> None:

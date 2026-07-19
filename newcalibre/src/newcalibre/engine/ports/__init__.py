@@ -113,6 +113,7 @@ class OriginCommit:
     state_updates: Mapping[str, bytes] = field(default_factory=dict)
     actual_keys: tuple[ActualKey, ...] = ()
     input_fingerprint: str | None = None
+    expected_forecast_origin_count: int | None = None
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     _digest: str = field(init=False, repr=False)
 
@@ -137,6 +138,15 @@ class OriginCommit:
             updates[partition] = value
         actual_keys = _canonical_actual_keys(self.actual_keys)
         fingerprint = _optional_sha256(self.input_fingerprint, name="input fingerprint")
+        expected_count = self.expected_forecast_origin_count
+        if expected_count is not None and (
+            not isinstance(expected_count, Integral)
+            or isinstance(expected_count, bool)
+            or expected_count < 0
+        ):
+            raise ValueError("expected forecast origin count must be a non-negative integer")
+        if expected_count is not None and not self.forecasts:
+            raise ValueError("expected forecast origin count requires forecast rows")
         positions = _frozen_inventory_positions(
             self.inventory_positions,
             name="origin commit inventory positions",
@@ -144,6 +154,11 @@ class OriginCommit:
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
         object.__setattr__(self, "actual_keys", actual_keys)
         object.__setattr__(self, "input_fingerprint", fingerprint)
+        object.__setattr__(
+            self,
+            "expected_forecast_origin_count",
+            None if expected_count is None else int(expected_count),
+        )
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         object.__setattr__(self, "_digest", _origin_commit_digest(self))
 
@@ -519,7 +534,7 @@ def _forecast_write_digest(write: ForecastWrite) -> str:
 
 def _origin_commit_digest(commit: OriginCommit) -> str:
     digest = hashlib.sha256()
-    _update_digest(digest, b"schema", b"newcalibre.origin-commit/v2")
+    _update_digest(digest, b"schema", b"newcalibre.origin-commit/v3")
     _update_digest(digest, b"session", commit.session.value.encode())
     _update_digest(
         digest,
@@ -558,6 +573,11 @@ def _origin_commit_digest(commit: OriginCommit) -> str:
         digest,
         b"input-fingerprint",
         _canonical_value_bytes(commit.input_fingerprint),
+    )
+    _update_digest(
+        digest,
+        b"expected-forecast-origin-count",
+        _canonical_value_bytes(commit.expected_forecast_origin_count),
     )
     _update_digest(
         digest,
