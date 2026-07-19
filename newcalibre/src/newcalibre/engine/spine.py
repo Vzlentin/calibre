@@ -97,7 +97,7 @@ from newcalibre.ledger import (
     GuaranteedSide,
     OrderRow,
 )
-from newcalibre.observe import ObserveCycle, ObserveLoop
+from newcalibre.observe import ActualsSubmission, ObserveCycle, ObserveLoop
 from newcalibre.ordering import OrderingInputError
 from newcalibre.reconcile import ReconciliationContext, resolve_strategy
 
@@ -391,10 +391,11 @@ class OriginRequest:
 
 @dataclass(frozen=True, slots=True)
 class OriginResult:
-    """Return the committed forecast and order facts for one origin."""
+    """Return the committed forecast, order, and journal facts for one origin."""
 
     forecasts: ForecastBatch
     orders: tuple[OrderRow, ...]
+    receipt: CommitReceipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +427,7 @@ class CommitRequest:
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     decisions: DecisionBatch | None = None
     settlement: SettlementWindow | None = None
+    input_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
@@ -453,6 +455,13 @@ class CommitRequest:
                 raise _EngineError("commit request settlement must match its session")
             if self.settlement.snapshot.periods != (self.origin,):
                 raise _EngineError("commit request settlement must contain exactly its origin")
+        if self.input_fingerprint is not None and (
+            not isinstance(self.input_fingerprint, str)
+            or len(self.input_fingerprint) != 64
+            or self.input_fingerprint != self.input_fingerprint.lower()
+            or any(character not in "0123456789abcdef" for character in self.input_fingerprint)
+        ):
+            raise ValueError("commit request input fingerprint must be a SHA-256 hex string")
         positions = _validated_inventory_positions(self.inventory_positions)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
 
@@ -771,9 +780,12 @@ class Engine:
         origin: pd.Timestamp,
         *,
         session: SessionIdentity,
+        submission: ActualsSubmission | None = None,
     ) -> ObservationResult:
         """Stage one complete durable-snapshot observe cycle without persistence."""
         self._require_session(session)
+        if submission is not None and not isinstance(submission, ActualsSubmission):
+            raise TypeError("observe submission must be an ActualsSubmission or None")
         prior_states = dict(self._calibration_state_store.snapshot(session))
         loop = ObserveLoop(
             hierarchy=self._hierarchy,
@@ -782,8 +794,8 @@ class Engine:
             conformal_states=prior_states,
             runtime=self._runtime,
         )
-        submission = self._actuals_source.reveal(before=origin)
-        loop.accept(submission)
+        accepted = self._actuals_source.reveal(before=origin) if submission is None else submission
+        loop.accept(accepted)
         cycle = loop.cycle(origin)
         return _bind_observation_result(
             cycle,
@@ -822,12 +834,12 @@ class Engine:
             raise TypeError("commit requires a CommitRequest, OriginCommit, or CommitReceipt")
         self._require_session(request.session)
         if isinstance(request, OriginCommit):
-            expected = CommitReceipt.from_commit(request)
             receipt = _snapshot_commit_receipt(self._ledger_sink.commit(request))
+            expected = CommitReceipt.from_commit(request, sequence=receipt.sequence)
             if receipt != expected:
                 raise _EngineError("ledger sink returned a mismatched commit receipt")
         else:
-            callback_receipt = self._ledger_sink.receipt(request.origin)
+            callback_receipt = self._ledger_sink.receipt(request.commit_key)
             if callback_receipt is None:
                 raise _EngineError("commit receipt is not journaled by the ledger sink")
             receipt = _snapshot_commit_receipt(callback_receipt)
@@ -838,7 +850,7 @@ class Engine:
                 receipt.session,
                 partition,
                 value,
-                origin=receipt.origin,
+                sequence=receipt.sequence,
             )
         return receipt
 
@@ -913,6 +925,8 @@ class Engine:
                 orders=orders,
                 settlements=() if settlement_result is None else settlement_result.records,
                 state_updates=request.calibration.state_updates,
+                input_fingerprint=request.input_fingerprint,
+                inventory_positions=request.inventory_positions,
             )
         )
         return CommitResult(receipt=receipt, orders=orders, settlement=settlement_result)
@@ -927,6 +941,11 @@ class Engine:
         self._require_session(forecasts.session)
         if forecasts.calendar != self._ledger_sink.calendar:
             raise _EngineError("forecast batch calendar does not match the engine ledger")
+
+    def _require_event_driver_port(self, *, ledger_sink: LedgerSink) -> None:
+        """Reject a driver wired to a different ledger than this engine."""
+        if ledger_sink is not self._ledger_sink:
+            raise _EngineError("event driver ledger sink does not belong to the engine")
 
     def _require_time_loop_ports(
         self,
@@ -984,6 +1003,8 @@ class Spine:
         *,
         decision_origin: bool = True,
         settlement: SettlementWindow | None = None,
+        submission: ActualsSubmission | None = None,
+        input_fingerprint: str | None = None,
     ) -> OriginResult:
         """Run Resolve through Commit once for a declared origin."""
         if not isinstance(request, OriginRequest):
@@ -994,12 +1015,15 @@ class Spine:
             raise TypeError("settlement must be a SettlementWindow or None")
         if settlement is not None and settlement.snapshot.periods != (request.origin,):
             raise ValueError("spine settlement window must contain exactly its origin")
+        if submission is not None and not isinstance(submission, ActualsSubmission):
+            raise TypeError("spine submission must be an ActualsSubmission or None")
         observation = self._phase(
             Phase.RESOLVE,
             request.origin,
             lambda: self._engine.observe(
                 request.origin,
                 session=request.session,
+                submission=submission,
             ),
         )
 
@@ -1035,8 +1059,8 @@ class Spine:
             unwrapped=(OrderingInputError,),
         )
 
-        def commit_phase() -> tuple[OrderRow, ...]:
-            committed = self._engine.commit(
+        def commit_phase() -> CommitResult:
+            return self._engine.commit(
                 CommitRequest(
                     session=request.session,
                     origin=request.origin,
@@ -1045,16 +1069,20 @@ class Spine:
                     inventory_positions=request.inventory_positions,
                     decisions=decisions,
                     settlement=settlement,
+                    input_fingerprint=input_fingerprint,
                 )
             )
-            return committed.orders
 
-        orders = self._phase(
+        committed = self._phase(
             Phase.COMMIT,
             request.origin,
             commit_phase,
         )
-        return OriginResult(forecasts=calibrated.forecasts, orders=orders)
+        return OriginResult(
+            forecasts=calibrated.forecasts,
+            orders=committed.orders,
+            receipt=committed.receipt,
+        )
 
     def _phase(
         self,
@@ -1138,6 +1166,11 @@ def _snapshot_commit_receipt(receipt: object) -> CommitReceipt:
         state_updates=dict(receipt.state_updates),
         observe_cycle=receipt.observe_cycle,
         settlement_periods=tuple(receipt.settlement_periods),
+        sequence=receipt.sequence,
+        actual_keys=tuple(receipt.actual_keys),
+        input_fingerprint=receipt.input_fingerprint,
+        orders=tuple(receipt.orders),
+        inventory_positions=dict(receipt.inventory_positions),
     )
 
 

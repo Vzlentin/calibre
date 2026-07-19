@@ -1017,6 +1017,7 @@ def test_receipt_hole_before_a_later_origin_is_rejected_before_callbacks() -> No
             origin=period,
             digest=str(index) * 64,
             state_updates={},
+            sequence=index,
             settlement_periods=(period,),
         )
     loop = TimeLoop(

@@ -384,12 +384,12 @@ class FailOnceStateStore(InMemoryCalibrationStateStore):
         partition: str,
         value: bytes,
         *,
-        origin: pd.Timestamp,
+        sequence: int,
     ) -> None:
         if self._fail:
             self._fail = False
             raise RuntimeError("calibration state store unavailable")
-        super().save(session, partition, value, origin=origin)
+        super().save(session, partition, value, sequence=sequence)
 
 
 class RecordingStateStore(InMemoryCalibrationStateStore):
@@ -1219,7 +1219,7 @@ def test_real_conformal_apply_consumes_bottom_up_reconciled_points() -> None:
             session,
             label,
             value,
-            origin=pd.Timestamp("2026-01-04"),
+            sequence=0,
         )
     engine = _engine(
         panel=panel,
@@ -1816,6 +1816,7 @@ def test_commit_repair_requires_the_ledger_journal_and_never_rolls_state_back() 
         origin=first_origin,
         digest="0" * 64,
         state_updates={"global": b"forged"},
+        sequence=0,
     )
 
     with pytest.raises(EngineError, match="not journaled"):
@@ -1841,6 +1842,7 @@ def test_commit_repair_requires_the_ledger_journal_and_never_rolls_state_back() 
         origin=second.origin,
         digest="f" * 64,
         state_updates={"global": b"wrong"},
+        sequence=second.sequence,
     )
     with pytest.raises(EngineError, match="does not match"):
         engine.commit(mismatched)
@@ -1868,6 +1870,7 @@ def test_commit_snapshots_ledger_receipts_before_comparison_and_state_repair() -
                 origin=receipt.origin,
                 digest=receipt.digest,
                 state_updates=receipt.state_updates,
+                sequence=receipt.sequence,
                 settlement_periods=receipt.settlement_periods,
             )
 

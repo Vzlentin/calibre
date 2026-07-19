@@ -411,7 +411,7 @@ def test_one_origin_uses_one_snapshot_and_preserves_untouched_partition_state() 
         session,
         foreign_label,
         foreign_state,
-        origin=pd.Timestamp("2026-01-01"),
+        sequence=0,
     )
     engine, _states, _sink = _engine(
         forecast_panel=panel,
