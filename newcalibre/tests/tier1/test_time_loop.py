@@ -24,6 +24,7 @@ from newcalibre.domain import (
     CostStructure,
     DecisionTiming,
     ForecastTask,
+    HierarchyIndex,
     InventoryPosition,
     Panel,
     Scope,
@@ -32,10 +33,8 @@ from newcalibre.domain import (
     target_timestamp,
 )
 from newcalibre.engine import (
-    CalibrationResult,
     CommitReceipt,
     Engine,
-    ForecastBatch,
     InMemoryActualsSource,
     InMemoryArtifactStore,
     InMemoryCalibrationStateStore,
@@ -51,7 +50,7 @@ from newcalibre.engine import (
 from newcalibre.engine.ports import ActualKey
 from newcalibre.engine.time_loop import TimeLoop, TimeLoopError, TimeLoopRequest
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
-from newcalibre.ledger import ForecastKey
+from newcalibre.observe import ActualRecord, ActualsSubmission
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
@@ -67,7 +66,6 @@ SETTLEMENT_END = pd.Timestamp("2026-01-11")
 INITIAL_POSITION = InventoryPosition(on_hand=100.0, on_order=0.0, backorders=0.0)
 
 type FitHistory = tuple[pd.Timestamp, tuple[pd.Timestamp, ...], tuple[float, ...]]
-type ResolutionSnapshot = Mapping[ForecastKey, float]
 
 
 def _panel(
@@ -206,25 +204,19 @@ class RecordingActualsSource(InMemoryActualsSource):
         self._omitted = frozenset(omitted)
         self._overrides = {} if overrides is None else dict(overrides)
 
-    def for_keys(
-        self,
-        keys: Sequence[ActualKey],
-        *,
-        before: pd.Timestamp,
-    ) -> Mapping[ActualKey, float]:
-        frozen_keys = tuple(keys)
-        self.calls.append((frozen_keys, before))
-        supplied = {
-            key: value
-            for key, value in super().for_keys(frozen_keys, before=before).items()
-            if key not in self._omitted
+    def reveal(self, *, before: pd.Timestamp) -> ActualsSubmission:
+        supplied = super().reveal(before=before)
+        by_key = {
+            record.key: record for record in supplied.records if record.key not in self._omitted
         }
-        supplied.update(
-            (key, value)
-            for key, value in self._overrides.items()
-            if key in frozen_keys and key[1] < before
+        for key, value in self._overrides.items():
+            if key[1] < before:
+                by_key[key] = ActualRecord(key[0], key[1], value)
+        records = tuple(
+            by_key[key] for key in sorted(by_key, key=lambda item: (item[0].encode(), item[1]))
         )
-        return supplied
+        self.calls.append((tuple(record.key for record in records), before))
+        return ActualsSubmission(records)
 
 
 class LoseFirstCommitResponseSink(InMemoryLedgerSink):
@@ -260,8 +252,6 @@ class Runtime:
     sink: InMemoryLedgerSink
     fit_histories: list[FitHistory]
     predicted_origins: list[pd.Timestamp]
-    resolutions: list[ResolutionSnapshot]
-    calibration_inputs: list[bytes | None]
     order_origins: list[pd.Timestamp]
     order_positions: dict[pd.Timestamp, InventoryPosition]
 
@@ -282,30 +272,8 @@ def _runtime(
     sink = sink or InMemoryLedgerSink(session=session, calendar=CALENDAR)
     fit_histories: list[FitHistory] = []
     predicted_origins: list[pd.Timestamp] = []
-    resolutions: list[ResolutionSnapshot] = []
-    calibration_inputs: list[bytes | None] = []
     order_origins: list[pd.Timestamp] = []
     order_positions: dict[pd.Timestamp, InventoryPosition] = {}
-
-    def observe(
-        _due: pd.DataFrame,
-        resolved: Mapping[ForecastKey, float],
-        _prior: Mapping[str, bytes | None],
-    ) -> Mapping[str, bytes]:
-        resolutions.append(dict(resolved))
-        if not resolved:
-            return {}
-        value = next(iter(resolved.values()))
-        return {"global": f"observed:{value}".encode()}
-
-    def calibrate(
-        forecasts: ForecastBatch,
-        prior: Mapping[str, bytes | None],
-    ) -> CalibrationResult:
-        value = prior["global"]
-        calibration_inputs.append(value)
-        next_value = b"warmup" if value is None else value
-        return CalibrationResult(forecasts, {"global": next_value + b"|calibrated"})
 
     def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
         order_origins.append(request.origin)
@@ -325,12 +293,11 @@ def _runtime(
         calibration_state_store=states,
         ledger_sink=sink,
         dispatch_backend=InProcessDispatch(),
+        hierarchy=HierarchyIndex.flat(forecast_panel.series_keys),
         adapter_resolver=lambda _config: DeterministicFixtureAdapter(
             fit_histories,
             predicted_origins,
         ),
-        observer=observe,
-        calibrator=calibrate,
         orderer=order,
     )
     return Runtime(
@@ -341,8 +308,6 @@ def _runtime(
         sink=sink,
         fit_histories=fit_histories,
         predicted_origins=predicted_origins,
-        resolutions=resolutions,
-        calibration_inputs=calibration_inputs,
         order_origins=order_origins,
         order_positions=order_positions,
     )
@@ -361,7 +326,6 @@ def _request(
         origins=origins,
         settlement_end=settlement_end,
         scope=Scope.LOCAL,
-        calibration_partitions=("global",),
         initial_inventory_positions={"a": INITIAL_POSITION} if positions is None else positions,
         actuals_semantics=actuals_semantics,
     )
@@ -370,8 +334,6 @@ def _request(
 def _assert_no_effects(runtime: Runtime) -> None:
     assert runtime.fit_histories == []
     assert runtime.predicted_origins == []
-    assert runtime.resolutions == []
-    assert runtime.calibration_inputs == []
     assert runtime.order_origins == []
     assert runtime.artifacts.artifacts == {}
     assert runtime.states.states == {}
@@ -390,7 +352,6 @@ def test_request_requires_explicit_actuals_semantics_before_effects() -> None:
             origins=ORIGINS,
             settlement_end=SETTLEMENT_END,
             scope=Scope.LOCAL,
-            calibration_partitions=("global",),
             initial_inventory_positions={"a": INITIAL_POSITION},
         )  # type: ignore[call-arg]
 
@@ -605,7 +566,6 @@ def test_request_rejects_invalid_settlement_end_values(
             origins=ORIGINS,
             settlement_end=settlement_end,  # type: ignore[arg-type]
             scope=Scope.LOCAL,
-            calibration_partitions=("global",),
             initial_inventory_positions={"a": INITIAL_POSITION},
             actuals_semantics=ActualsSemantics.DEMAND,
         )
@@ -706,14 +666,26 @@ def test_gapped_origins_use_sequence_cadence_and_settle_the_calendar_through_dra
         (ORIGINS[1], 1): 6.0,
         (ORIGINS[1], 2): 7.0,
         (ORIGINS[1], 3): 8.0,
-        (ORIGINS[1], 4): None,
-        (ORIGINS[2], 1): None,
-        (ORIGINS[2], 2): None,
-        (ORIGINS[2], 3): None,
+        (ORIGINS[1], 4): 9.0,
+        (ORIGINS[2], 1): 9.0,
+        (ORIGINS[2], 2): 10.0,
+        (ORIGINS[2], 3): 11.0,
         (ORIGINS[2], 4): None,
     }
-    assert runtime.calibration_inputs == [None, b"observed:4.0", b"observed:6.0"]
-    assert runtime.states.states[(session, "global")] == b"observed:6.0|calibrated"
+    assert [resolution.actual for resolution in runtime.sink.observation_resolutions] == [
+        4.0,
+        5.0,
+        6.0,
+        6.0,
+        7.0,
+        7.0,
+        8.0,
+        9.0,
+        9.0,
+        10.0,
+        11.0,
+    ]
+    assert runtime.states.states == {}
     assert len(result.receipts) == len(expected_periods)
     assert all(runtime.sink.receipt(period) is not None for period in expected_periods)
 
@@ -891,10 +863,8 @@ def test_time_loop_requests_actuals_and_settles_only_the_session_decision_series
     ).run()
 
     expected_periods = tuple(pd.date_range("2026-01-04", "2026-01-06", freq="D"))
-    assert actuals.calls[0] == (
-        tuple(("bottom", period) for period in expected_periods),
-        pd.Timestamp("2026-01-07"),
-    )
+    assert actuals.calls[0][1] == pd.Timestamp("2026-01-07")
+    assert {key[0] for key in actuals.calls[0][0]} == {"aggregate", "bottom"}
     assert result.settlement_periods == expected_periods
     assert {row.series_key for row in runtime.sink.forecasts} == {"aggregate", "bottom"}
     assert {row.series_key for row in runtime.sink.orders} == {"bottom"}
@@ -950,13 +920,8 @@ def test_missing_non_drain_actual_fails_at_construction_without_engine_effects()
             request=_request(session),
         )
 
-    expected_periods = tuple(pd.date_range("2026-01-04", "2026-01-11", freq="D"))
-    assert runtime.actuals.calls == [
-        (
-            tuple(("a", period) for period in expected_periods),
-            pd.Timestamp("2026-01-12"),
-        )
-    ]
+    assert runtime.actuals.calls[0][1] == pd.Timestamp("2026-01-12")
+    assert missing not in runtime.actuals.calls[0][0]
     _assert_no_effects(runtime)
 
 
@@ -978,13 +943,8 @@ def test_missing_drain_actual_fails_at_construction_without_engine_effects() -> 
             request=_request(session),
         )
 
-    expected_periods = tuple(pd.date_range("2026-01-04", "2026-01-11", freq="D"))
-    assert runtime.actuals.calls == [
-        (
-            tuple(("a", period) for period in expected_periods),
-            pd.Timestamp("2026-01-12"),
-        )
-    ]
+    assert runtime.actuals.calls[0][1] == pd.Timestamp("2026-01-12")
+    assert missing not in runtime.actuals.calls[0][0]
     _assert_no_effects(runtime)
 
 
@@ -1001,7 +961,7 @@ def test_invalid_drain_actual_fails_at_construction_without_engine_effects() -> 
         actuals=actuals,
     )
 
-    with pytest.raises(TimeLoopError, match="settlement actuals.*2026-01-11.*finite"):
+    with pytest.raises(TimeLoopError, match="settlement actuals source.*finite"):
         TimeLoop(
             engine=runtime.engine,
             actuals_source=runtime.actuals,
@@ -1126,13 +1086,8 @@ def test_reconstructed_loop_repairs_lost_commit_without_callbacks_or_rebooking()
         request=_request(session),
         reporter=phase_events.append,
     )
-    expected_uncommitted = tuple(pd.date_range("2026-01-05", "2026-01-11", freq="D"))
-    assert resumed_actuals.calls == [
-        (
-            tuple(("a", period) for period in expected_uncommitted),
-            pd.Timestamp("2026-01-12"),
-        )
-    ]
+    assert resumed_actuals.calls[0][1] == pd.Timestamp("2026-01-12")
+    assert ("a", ORIGINS[0]) not in resumed_actuals.calls[0][0]
     result = loop.run()
 
     assert all(event.origin != ORIGINS[0] for event in phase_events)
@@ -1147,7 +1102,7 @@ def test_reconstructed_loop_repairs_lost_commit_without_callbacks_or_rebooking()
     assert tuple(record.period for record in sink.settlements) == result.settlement_periods
     assert len({record.key for record in sink.settlements}) == len(sink.settlements)
     assert sink.receipt(ORIGINS[0]) == first_receipt
-    assert states.states[(session, "global")] == b"observed:6.0|calibrated"
+    assert states.states == {}
 
 
 def test_reconstructed_loop_skips_a_durable_filler_after_its_response_is_lost() -> None:

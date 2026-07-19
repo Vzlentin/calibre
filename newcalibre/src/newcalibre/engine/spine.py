@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -11,10 +12,21 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from itertools import islice
 from types import MappingProxyType
-from typing import cast, overload
+from typing import overload
 
 import pandas as pd
 
+from newcalibre.conformal import (
+    CalibrationContext,
+    ConformalRuntime,
+    EmissionForm,
+    IssuedBoundFacts,
+    resolve_method,
+)
+from newcalibre.conformal import CalibrationResult as RuntimeCalibrationResult
+from newcalibre.conformal import (
+    ForecastKey as ConformalForecastKey,
+)
 from newcalibre.domain import (
     HORIZON_STEP,
     MODEL_NAME,
@@ -24,11 +36,14 @@ from newcalibre.domain import (
     Calendar,
     DecisionTiming,
     ForecastTask,
+    GuaranteeClaim,
+    HierarchyIndex,
     InventoryPosition,
     Scope,
     SessionIdentity,
     StockoutRule,
     forecast_bound_groups,
+    interval_columns,
     validate_forecast_frame,
 )
 from newcalibre.engine._ordering_runtime import (
@@ -41,15 +56,14 @@ from newcalibre.engine._ordering_runtime import (
 from newcalibre.engine._ordering_runtime import (
     materialize_decisions as _materialize_decisions,
 )
-from newcalibre.engine._session import (
-    SessionCosts,
-)
+from newcalibre.engine._session import SessionCosts
 from newcalibre.engine._session import (
     require_panel_session_binding as _require_panel_session_binding,
 )
 from newcalibre.engine._session import (
     require_task_session_binding as _require_task_session_binding,
 )
+from newcalibre.engine._session import session_conformal_config as _session_conformal_config
 from newcalibre.engine._session import session_decision_inputs as _session_decision_inputs
 from newcalibre.engine._session import session_model_config as _session_model_config
 from newcalibre.engine._session import (
@@ -80,8 +94,10 @@ from newcalibre.ledger import (
     BoundKey,
     ForecastIssuance,
     ForecastKey,
+    GuaranteedSide,
     OrderRow,
 )
+from newcalibre.observe import ObserveCycle, ObserveLoop
 from newcalibre.ordering import OrderingInputError
 
 ENGINE_VERBS = (
@@ -136,6 +152,7 @@ class ForecastBatch:
     _session: SessionIdentity | None = field(repr=False)
     _engine_token: object | None = field(repr=False, compare=False)
     issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]]
+    observation_issuances: Mapping[ForecastKey, IssuedBoundFacts]
 
     def __init__(
         self,
@@ -143,6 +160,7 @@ class ForecastBatch:
         *,
         calendar: Calendar,
         issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]] | None = None,
+        observation_issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
     ) -> None:
         owned_frame = pd.DataFrame(frame, copy=True)
         validated = validate_forecast_frame(owned_frame, calendar=calendar)
@@ -159,11 +177,16 @@ class ForecastBatch:
             supplied = issuances
         if set(supplied) != set(keys):
             raise _EngineError("forecast issuance keys must exactly match the frame keys")
+        observed = {} if observation_issuances is None else dict(observation_issuances)
+        unknown_observed = set(observed) - set(keys)
+        if unknown_observed:
+            raise _EngineError("observation issuance names an unknown forecast row key")
+        frozen_observed = {key: IssuedBoundFacts.snapshot(value) for key, value in observed.items()}
         frozen: dict[ForecastKey, Mapping[BoundKey, ForecastIssuance]] = {}
         for key in keys:
             row_issuances = dict(supplied[key])
             intervals_issued = all(
-                group in row_issuances or all((column,) in row_issuances for column in group)
+                group in row_issuances or any((column,) in row_issuances for column in group)
                 for group in interval_groups
             )
             if not intervals_issued:
@@ -180,6 +203,11 @@ class ForecastBatch:
         object.__setattr__(self, "_session", None)
         object.__setattr__(self, "_engine_token", None)
         object.__setattr__(self, "issuances", MappingProxyType(frozen))
+        object.__setattr__(
+            self,
+            "observation_issuances",
+            MappingProxyType(frozen_observed),
+        )
 
     @property
     def frame(self) -> pd.DataFrame:
@@ -214,21 +242,17 @@ class FittedTask:
 
 @dataclass(frozen=True, slots=True)
 class ObservationResult:
-    """Stage due-row resolutions and their resulting calibration state."""
+    """Authenticate one immutable staged observe cycle and its prior state."""
 
-    resolutions: Mapping[ForecastKey, float]
-    state_updates: Mapping[str, bytes] = field(default_factory=dict)
-    prior_states: Mapping[str, bytes | None] = field(default_factory=dict)
+    cycle: ObserveCycle
+    prior_states: Mapping[str, bytes] = field(default_factory=dict)
     session: SessionIdentity | None = None
     origin: pd.Timestamp | None = None
     _engine_token: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.resolutions, Mapping):
-            raise TypeError("observation resolutions must be a mapping")
-        object.__setattr__(self, "resolutions", MappingProxyType(dict(self.resolutions)))
-        updates = _validated_state_updates(self.state_updates)
-        object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        if not isinstance(self.cycle, ObserveCycle):
+            raise TypeError("observation result cycle must be an ObserveCycle")
         prior_states = _validated_state_snapshot(self.prior_states)
         object.__setattr__(self, "prior_states", MappingProxyType(prior_states))
         _validate_optional_provenance(
@@ -311,7 +335,6 @@ class OriginRequest:
     origin: pd.Timestamp
     horizon: int
     scope: Scope
-    calibration_partitions: tuple[str, ...]
     _model_config: bytes = field(repr=False)
     _future_exogenous: pd.DataFrame | None = field(repr=False)
     _inventory_positions: Mapping[str, InventoryPosition] = field(repr=False)
@@ -322,7 +345,6 @@ class OriginRequest:
         session: SessionIdentity,
         origin: pd.Timestamp,
         scope: Scope,
-        calibration_partitions: Sequence[str] = (),
         future_exogenous: pd.DataFrame | None = None,
         inventory_positions: Mapping[str, InventoryPosition] | None = None,
     ) -> None:
@@ -333,7 +355,6 @@ class OriginRequest:
         if not isinstance(scope, Scope):
             raise TypeError("origin request scope must be a Scope")
         horizon, encoded_config = _session_origin_inputs(session)
-        partitions = _validated_partitions(calibration_partitions)
         if future_exogenous is not None and not isinstance(future_exogenous, pd.DataFrame):
             raise TypeError("future exogenous input must be a pandas DataFrame")
         positions = _validated_inventory_positions(inventory_positions or {})
@@ -341,7 +362,6 @@ class OriginRequest:
         object.__setattr__(self, "origin", origin)
         object.__setattr__(self, "horizon", horizon)
         object.__setattr__(self, "scope", scope)
-        object.__setattr__(self, "calibration_partitions", partitions)
         object.__setattr__(self, "_model_config", encoded_config)
         object.__setattr__(
             self,
@@ -457,14 +477,6 @@ class CommitResult:
 
 type AdapterResolver = Callable[[Mapping[str, object]], ForecastAdapter]
 type Reconciler = Callable[[ForecastBatch], ForecastBatch]
-type Calibrator = Callable[
-    [ForecastBatch, Mapping[str, bytes | None]],
-    CalibrationResult,
-]
-type Observer = Callable[
-    [pd.DataFrame, Mapping[ForecastKey, float], Mapping[str, bytes | None]],
-    Mapping[str, bytes],
-]
 type CustomOrderer = Callable[[OrderRequest], Iterable[OrderProposal]]
 type Orderer = CustomOrderer | ConfiguredPolicyOrderer
 type PhaseReporter = Callable[[PhaseEvent], None]
@@ -482,10 +494,9 @@ class Engine:
         calibration_state_store: CalibrationStateStore,
         ledger_sink: LedgerSink,
         dispatch_backend: DispatchBackend,
+        hierarchy: HierarchyIndex,
         adapter_resolver: AdapterResolver = resolve_adapter,
-        observer: Observer | None = None,
         reconciler: Reconciler | None = None,
-        calibrator: Calibrator | None = None,
         orderer: Orderer | None = None,
     ) -> None:
         ports = (
@@ -499,11 +510,11 @@ class Engine:
         for adapter, port, name in ports:
             if not isinstance(adapter, port):
                 raise TypeError(f"engine {name} does not satisfy its port")
+        if not isinstance(hierarchy, HierarchyIndex):
+            raise TypeError("engine hierarchy must be a HierarchyIndex")
         callables = (
             (adapter_resolver, "adapter resolver"),
-            (observer, "observer"),
             (reconciler, "reconciler"),
-            (calibrator, "calibrator"),
         )
         for hook, name in callables:
             if hook is not None and not callable(hook):
@@ -515,7 +526,16 @@ class Engine:
         # Resolve configuration before the panel port can perform any data load.
         adapter_resolver(_session_model_config(ledger_sink.session))
         ordering_configuration = _session_ordering_configuration(ledger_sink.session)
+        state_snapshot = calibration_state_store.snapshot(ledger_sink.session)
+        conformal_configuration = _session_conformal_config(ledger_sink.session)
+        runtime = (
+            None
+            if conformal_configuration is None
+            else resolve_method(conformal_configuration, states=state_snapshot)
+        )
         self._ordering_configuration = ordering_configuration
+        self._runtime: ConformalRuntime | None = runtime
+        self._hierarchy = hierarchy
         self._panel = panel_source.load()
         self._actuals_source = actuals_source
         self._artifact_store = artifact_store
@@ -523,9 +543,7 @@ class Engine:
         self._ledger_sink = ledger_sink
         self._dispatch_backend = dispatch_backend
         self._adapter_resolver = adapter_resolver
-        self._observer = observer
         self._reconciler = reconciler
-        self._calibrator = calibrator
         self._orderer = orderer
         self._phase_token = object()
         _require_panel_session_binding(
@@ -533,6 +551,8 @@ class Engine:
             session=self._ledger_sink.session,
             ledger_calendar=self._ledger_sink.calendar,
         )
+        if self._hierarchy.bottom_series != self._panel.series_keys:
+            raise _EngineError("hierarchy bottom series do not match the engine session panel")
 
     def fit(self, request: OriginRequest) -> tuple[FittedTask, ...]:
         """Build deterministic tasks and fit or restore their adapters."""
@@ -597,27 +617,27 @@ class Engine:
         forecasts: ForecastBatch,
         *,
         session: SessionIdentity,
-        partitions: Sequence[str] = (),
-        observation: ObservationResult | None = None,
+        observation: ObservationResult,
     ) -> CalibrationResult:
-        """Apply calibration from declared state, or return the input identity."""
+        """Apply once from the observe-updated origin state snapshot."""
         if not isinstance(forecasts, ForecastBatch):
             raise TypeError("calibrate requires a ForecastBatch")
+        if not isinstance(observation, ObservationResult):
+            raise TypeError("calibrate requires an ObservationResult")
         self._require_session(session)
         self._require_forecast_batch(forecasts)
         if forecasts.session != session:
             raise _EngineError("calibration forecasts do not match its session")
         origin = _forecast_batch_origin(forecasts)
-        if observation is not None and (
-            observation.session != session or observation.origin != origin
-        ):
+        if observation.session != session or observation.origin != origin:
             raise _EngineError("calibration observation does not match its session and origin")
-        if observation is not None and observation._engine_token is not self._phase_token:
+        if observation._engine_token is not self._phase_token:
             raise _EngineError("calibration observation was not produced by this engine")
-        requested = _validated_partitions(partitions)
-        observed_updates = {} if observation is None else dict(observation.state_updates)
-        _reject_undeclared_state_updates(observed_updates, requested, producer="observer")
-        if self._calibrator is None:
+
+        observed_updates = dict(observation.cycle.state_updates)
+        states = dict(observation.prior_states)
+        states.update(observed_updates)
+        if self._runtime is None:
             return _bind_calibration_result(
                 forecasts,
                 observed_updates,
@@ -625,43 +645,56 @@ class Engine:
                 origin=origin,
                 engine_token=self._phase_token,
             )
-        if observation is not None and set(observation.prior_states) == set(requested):
-            states = dict(observation.prior_states)
-        else:
-            states = {
-                partition: self._calibration_state_store.load(session, partition)
-                for partition in requested
-            }
-        states.update(observed_updates)
-        callback_result = self._calibrator(forecasts, states)
-        if not isinstance(callback_result, CalibrationResult):
-            raise _EngineError("calibrator must return a CalibrationResult")
-        result = CalibrationResult(
-            _snapshot_forecast_batch(callback_result.forecasts),
-            dict(callback_result.state_updates),
-            session=callback_result.session,
-            origin=callback_result.origin,
+
+        context = _calibration_context(
+            self._runtime,
+            forecasts._frame,
+            hierarchy=self._hierarchy,
         )
-        if result.session is not None and (result.session != session or result.origin != origin):
-            raise _EngineError("calibrator result does not match its session and origin")
-        if result.forecasts.calendar != forecasts.calendar:
-            raise _EngineError("calibrator changed the forecast calendar")
-        if set(result.forecasts.issuances) != set(forecasts.issuances):
-            raise _EngineError("calibrator changed forecast row keys")
+        try:
+            runtime_result = self._runtime.apply(
+                forecasts.frame,
+                MappingProxyType(states),
+                context=context,
+            )
+        except ValueError as error:
+            raise _EngineError(f"conformal apply failed: {error}") from error
+        if not isinstance(runtime_result, RuntimeCalibrationResult):
+            raise _EngineError("conformal apply must return a CalibrationResult")
+        observation_issuances = _ledger_observation_issuances(runtime_result.issuances)
+        calibrated_issuances = _ledger_bound_issuances(observation_issuances)
+        ledger_issuances = {
+            key: dict(forecasts.issuances[key]) | calibrated_issuances.get(key, {})
+            for key in forecasts.issuances
+        }
+        calibrated_value = ForecastBatch(
+            runtime_result.forecasts,
+            calendar=forecasts.calendar,
+            issuances=ledger_issuances,
+            observation_issuances=observation_issuances,
+        )
+        if set(calibrated_value.issuances) != set(forecasts.issuances):
+            raise _EngineError("conformal apply changed forecast row keys")
         calibrated = _bind_forecast_batch(
-            result.forecasts,
+            calibrated_value,
             session=session,
             engine_token=self._phase_token,
         )
         if _forecast_batch_origin(calibrated) != origin:
-            raise _EngineError("calibrator changed the forecast origin")
-        _reject_undeclared_state_updates(
-            result.state_updates,
-            requested,
-            producer="calibrator",
-        )
-        merged_updates = observed_updates
-        merged_updates.update(result.state_updates)
+            raise _EngineError("conformal apply changed the forecast origin")
+
+        apply_updates = _validated_state_updates(runtime_result.state_updates)
+        conflicts = {
+            label
+            for label in observed_updates.keys() & apply_updates.keys()
+            if observed_updates[label] != apply_updates[label]
+        }
+        if conflicts:
+            raise _EngineError(
+                f"observe and apply emitted conflicting states: {sorted(conflicts)!r}"
+            )
+        merged_updates = dict(observed_updates)
+        merged_updates.update(apply_updates)
         return _bind_calibration_result(
             calibrated,
             merged_updates,
@@ -718,59 +751,27 @@ class Engine:
         origin: pd.Timestamp,
         *,
         session: SessionIdentity,
-        partitions: Sequence[str] = (),
     ) -> ObservationResult:
-        """Match due ledger rows to actuals admissible at this origin."""
+        """Stage one complete durable-snapshot observe cycle without persistence."""
         self._require_session(session)
-        requested = _validated_partitions(partitions)
-        due = self._ledger_sink.due_frame(origin)
-        due_rows = tuple(due.itertuples(index=False))
-        actual_keys = tuple(
-            (cast(str, row.series_key), cast(pd.Timestamp, row.target_timestamp))
-            for row in due_rows
+        prior_states = dict(self._calibration_state_store.snapshot(session))
+        loop = ObserveLoop(
+            hierarchy=self._hierarchy,
+            observed_history=self._ledger_sink.observed_history,
+            pending_observations=self._ledger_sink.pending_observations,
+            conformal_states=prior_states,
+            runtime=self._runtime,
         )
-        actuals = self._actuals_source.for_keys(actual_keys, before=origin)
-        resolutions: dict[ForecastKey, float] = {}
-        for row in due_rows:
-            series_key = cast(str, row.series_key)
-            target_timestamp = cast(pd.Timestamp, row.target_timestamp)
-            actual = actuals.get((series_key, target_timestamp))
-            if actual is not None:
-                key: ForecastKey = (
-                    series_key,
-                    cast(pd.Timestamp, row.origin),
-                    cast(int, row.horizon_step),
-                    cast(str, row.model_name),
-                )
-                resolutions[key] = actual
-        if self._observer is None:
-            return _bind_observation_result(
-                resolutions,
-                session=session,
-                origin=origin,
-                engine_token=self._phase_token,
-            )
-        states = MappingProxyType(
-            {
-                partition: self._calibration_state_store.load(session, partition)
-                for partition in requested
-            }
-        )
-        updates = self._observer(due, MappingProxyType(resolutions), states)
-        result = _bind_observation_result(
-            resolutions,
-            updates,
-            states,
+        submission = self._actuals_source.reveal(before=origin)
+        loop.accept(submission)
+        cycle = loop.cycle(origin)
+        return _bind_observation_result(
+            cycle,
+            prior_states,
             session=session,
             origin=origin,
             engine_token=self._phase_token,
         )
-        _reject_undeclared_state_updates(
-            result.state_updates,
-            requested,
-            producer="observer",
-        )
-        return result
 
     def settle(self, request: _SettlementRequest) -> _SettlementResult:
         """Apply the engine's single pure settlement implementation."""
@@ -881,11 +882,12 @@ class Engine:
             OriginCommit(
                 session=request.session,
                 origin=request.origin,
-                resolutions=request.observation.resolutions,
+                observe_cycle=request.observation.cycle,
                 forecasts=(
                     ForecastWrite(
                         request.calibration.forecasts.frame,
                         request.calibration.forecasts.issuances,
+                        request.calibration.forecasts.observation_issuances,
                     ),
                 ),
                 orders=orders,
@@ -978,7 +980,6 @@ class Spine:
             lambda: self._engine.observe(
                 request.origin,
                 session=request.session,
-                partitions=request.calibration_partitions,
             ),
         )
 
@@ -998,7 +999,6 @@ class Spine:
             lambda: self._engine.calibrate(
                 reconciled,
                 session=request.session,
-                partitions=request.calibration_partitions,
                 observation=observation,
             ),
         )
@@ -1100,6 +1100,7 @@ def _bind_forecast_batch(
         forecasts.frame,
         calendar=forecasts.calendar,
         issuances=forecasts.issuances,
+        observation_issuances=forecasts.observation_issuances,
     )
     object.__setattr__(bound, "_session", session)
     object.__setattr__(bound, "_engine_token", engine_token)
@@ -1111,9 +1112,15 @@ def _snapshot_forecast_batch(forecasts: ForecastBatch) -> ForecastBatch:
     frame = forecasts.frame
     calendar = forecasts.calendar
     issuances = {key: dict(bounds) for key, bounds in forecasts.issuances.items()}
+    observation_issuances = dict(forecasts.observation_issuances)
     session = forecasts.session
     engine_token = forecasts._engine_token
-    snapshot = ForecastBatch(frame, calendar=calendar, issuances=issuances)
+    snapshot = ForecastBatch(
+        frame,
+        calendar=calendar,
+        issuances=issuances,
+        observation_issuances=observation_issuances,
+    )
     object.__setattr__(snapshot, "_session", session)
     object.__setattr__(snapshot, "_engine_token", engine_token)
     return snapshot
@@ -1128,23 +1135,22 @@ def _snapshot_commit_receipt(receipt: object) -> CommitReceipt:
         origin=receipt.origin,
         digest=receipt.digest,
         state_updates=dict(receipt.state_updates),
+        observe_cycle=receipt.observe_cycle,
         settlement_periods=tuple(receipt.settlement_periods),
     )
 
 
 def _bind_observation_result(
-    resolutions: Mapping[ForecastKey, float],
-    state_updates: Mapping[str, bytes] | None = None,
-    prior_states: Mapping[str, bytes | None] | None = None,
+    cycle: ObserveCycle,
+    prior_states: Mapping[str, bytes],
     *,
     session: SessionIdentity,
     origin: pd.Timestamp,
     engine_token: object,
 ) -> ObservationResult:
     result = ObservationResult(
-        resolutions,
-        {} if state_updates is None else state_updates,
-        {} if prior_states is None else prior_states,
+        cycle,
+        prior_states,
         session=session,
         origin=origin,
     )
@@ -1215,6 +1221,78 @@ def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:
     )
 
 
+def _ledger_observation_issuances(
+    values: Mapping[ConformalForecastKey, IssuedBoundFacts],
+) -> dict[ForecastKey, IssuedBoundFacts]:
+    issuances: dict[ForecastKey, IssuedBoundFacts] = {}
+    for key, facts in values.items():
+        ledger_key = (key.series_key, key.origin, key.horizon_step, key.model_name)
+        if ledger_key in issuances:
+            raise _EngineError(f"duplicate conformal issuance key: {ledger_key!r}")
+        issuances[ledger_key] = IssuedBoundFacts.snapshot(facts)
+    return issuances
+
+
+def _ledger_bound_issuances(
+    values: Mapping[ForecastKey, IssuedBoundFacts],
+) -> dict[ForecastKey, dict[BoundKey, ForecastIssuance]]:
+    issuances: dict[ForecastKey, dict[BoundKey, ForecastIssuance]] = {}
+    for key, facts in values.items():
+        lower, upper = interval_columns(facts.working_level)
+        if facts.emission_form is EmissionForm.TWO_SIDED:
+            bound_key: BoundKey = (lower, upper)
+            selected = (facts.lower_bound, facts.upper_bound)
+            side = None
+        elif facts.emission_form is EmissionForm.ONE_SIDED_LOWER:
+            bound_key = (lower,)
+            selected = (facts.lower_bound,)
+            side = GuaranteedSide.LOWER
+        elif facts.emission_form is EmissionForm.ONE_SIDED_UPPER:
+            bound_key = (upper,)
+            selected = (facts.upper_bound,)
+            side = GuaranteedSide.UPPER
+        else:
+            raise _EngineError(f"unsupported conformal emission form: {facts.emission_form!r}")
+        guaranteed_side = (
+            side
+            if facts.effective_descriptor.type.claim is GuaranteeClaim.ONE_SIDED_COVERAGE
+            else None
+        )
+        finite = all(math.isfinite(value) for value in selected)
+        issuances[key] = {
+            bound_key: ForecastIssuance(
+                descriptor=facts.effective_descriptor,
+                guaranteed_side=guaranteed_side,
+                calibration_ready=facts.calibration_ready,
+                bounds_finite=finite,
+                bounds_null_reason=None if finite else facts.bounds_null_reason,
+            )
+        }
+    return issuances
+
+
+def _calibration_context(
+    runtime: ConformalRuntime,
+    forecasts: pd.DataFrame,
+    *,
+    hierarchy: HierarchyIndex,
+) -> CalibrationContext | None:
+    if not runtime.manifest.consumes_calibration_context:
+        return None
+    nodes = {node.label: node for node in hierarchy.nodes}
+    try:
+        aligned = tuple(nodes[str(series_key)] for series_key in forecasts[SERIES_KEY])
+    except KeyError as error:
+        raise _EngineError(
+            f"forecast row names an unknown hierarchy node: {error.args[0]!r}"
+        ) from error
+    return CalibrationContext(
+        series_keys=tuple(node.label for node in aligned),
+        lattice_levels=tuple(node.kind.value for node in aligned),
+        aggregate_memberships=tuple(node.members for node in aligned),
+    )
+
+
 def _bottom_node_order_request(
     request: OrderRequest,
     *,
@@ -1235,11 +1313,17 @@ def _bottom_node_order_request(
     issuances = {
         key: value for key, value in request.forecasts.issuances.items() if key[0] in allowed
     }
+    observation_issuances = {
+        key: value
+        for key, value in request.forecasts.observation_issuances.items()
+        if key[0] in allowed
+    }
     filtered_forecasts = _bind_forecast_batch(
         ForecastBatch(
             filtered,
             calendar=request.forecasts.calendar,
             issuances=issuances,
+            observation_issuances=observation_issuances,
         ),
         session=request.session,
         engine_token=engine_token,
@@ -1320,15 +1404,6 @@ def _require_timestamp(value: object, *, name: str) -> None:
         raise _EngineError(f"{name} must be timezone-naive")
 
 
-def _validated_partitions(partitions: Sequence[str]) -> tuple[str, ...]:
-    requested = tuple(partitions)
-    if len(set(requested)) != len(requested):
-        raise _EngineError("calibration partitions must be unique")
-    for partition in requested:
-        _require_trimmed_identifier(partition, name="calibration partition")
-    return requested
-
-
 def _validated_state_updates(value: Mapping[str, bytes]) -> dict[str, bytes]:
     if not isinstance(value, Mapping):
         raise TypeError("calibration state updates must be a mapping")
@@ -1341,29 +1416,16 @@ def _validated_state_updates(value: Mapping[str, bytes]) -> dict[str, bytes]:
     return updates
 
 
-def _validated_state_snapshot(
-    value: Mapping[str, bytes | None],
-) -> dict[str, bytes | None]:
+def _validated_state_snapshot(value: Mapping[str, bytes]) -> dict[str, bytes]:
     if not isinstance(value, Mapping):
         raise TypeError("calibration state snapshot must be a mapping")
-    states: dict[str, bytes | None] = {}
-    for partition, state in value.items():
-        _require_trimmed_identifier(partition, name="calibration partition")
-        if state is not None and not isinstance(state, bytes):
-            raise TypeError("calibration state snapshot must contain bytes or None")
-        states[partition] = state
+    states: dict[str, bytes] = {}
+    for label, state in value.items():
+        _require_trimmed_identifier(label, name="calibration state label")
+        if not isinstance(state, bytes):
+            raise TypeError("calibration state snapshot must contain bytes")
+        states[label] = state
     return states
-
-
-def _reject_undeclared_state_updates(
-    updates: Mapping[str, bytes],
-    partitions: Sequence[str],
-    *,
-    producer: str,
-) -> None:
-    unknown = set(updates) - set(partitions)
-    if unknown:
-        raise _EngineError(f"{producer} updated undeclared partitions: {sorted(unknown)!r}")
 
 
 def _validated_inventory_positions(

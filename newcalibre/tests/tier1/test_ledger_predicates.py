@@ -11,6 +11,7 @@ from typing import Any, cast
 import pandas as pd
 import pytest
 
+from newcalibre.conformal import ForecastKey as ConformalForecastKey
 from newcalibre.domain import (
     ACTUAL_VALUE,
     HORIZON_STEP,
@@ -47,6 +48,7 @@ from newcalibre.ledger import (
     PredicateResult,
     ScoreOutcome,
 )
+from newcalibre.observe import ObservationResolution, ObserveCycle
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ISSUE_ORIGIN = pd.Timestamp("2026-01-01")
@@ -135,6 +137,43 @@ def _append(
     key: ForecastKey = ("sku-a", ISSUE_ORIGIN, 1, model)
     ledger.append_forecasts(frame, issuances={key: issuances})
     return key
+
+
+def _apply_resolutions(
+    ledger: Ledger,
+    resolutions: Mapping[ForecastKey, float],
+    *,
+    origin: pd.Timestamp,
+) -> None:
+    selected = set(resolutions)
+    pending = {
+        (
+            row.forecast_key.series_key,
+            row.forecast_key.origin,
+            row.forecast_key.horizon_step,
+            row.forecast_key.model_name,
+        ): row
+        for row in ledger.pending_observations
+    }
+    ledger.apply_observe_cycle(
+        ObserveCycle(
+            resolutions=(
+                ObservationResolution(
+                    pending[key].forecast_key,
+                    pending[key].target_timestamp,
+                    actual,
+                    None,
+                    None,
+                )
+                for key, actual in resolutions.items()
+            ),
+            pending_removals=(
+                ConformalForecastKey(key[0], key[1], key[2], key[3]) for key in resolutions
+            ),
+            pending_retentions=(row for key, row in pending.items() if key not in selected),
+        ),
+        origin=origin,
+    )
 
 
 def _append_one_sided(
@@ -238,7 +277,7 @@ def test_supported_custom_predicate_receives_exact_inputs_and_propagates_result(
         lower=0.0,
         upper=12.0,
     )
-    ledger.apply_resolutions({key: 10.0}, origin=SCORE_ORIGIN)
+    _apply_resolutions(ledger, {key: 10.0}, origin=SCORE_ORIGIN)
     issuance = ledger.forecasts[0].issuances[bound_key]
     observed: list[tuple[float, tuple[float, ...], ForecastIssuance]] = []
 
@@ -281,7 +320,7 @@ def test_custom_predicate_must_return_a_predicate_result() -> None:
         lower=0.0,
         upper=12.0,
     )
-    ledger.apply_resolutions({key: 10.0}, origin=SCORE_ORIGIN)
+    _apply_resolutions(ledger, {key: 10.0}, origin=SCORE_ORIGIN)
 
     def invalid_predicate(
         actual_value: float,
@@ -424,7 +463,8 @@ def test_gate_a_registry_recognizes_all_thirteen_closed_descriptor_pairs() -> No
             )
         intended[(claim, currency)] = (key, bound_key)
 
-    ledger.apply_resolutions(
+    _apply_resolutions(
+        ledger,
         {key: 10.0 for key, _ in intended.values()},
         origin=SCORE_ORIGIN,
     )
@@ -505,7 +545,8 @@ def test_mixed_target_uses_only_scored_outcomes_as_its_denominator() -> None:
         )
         for model, bound in (("covered-a", 10.0), ("uncovered", 9.0), ("covered-b", 11.0))
     )
-    ledger.apply_resolutions(
+    _apply_resolutions(
+        ledger,
         {key: 10.0 for key, _ in references[1:]},
         origin=SCORE_ORIGIN,
     )
@@ -598,7 +639,8 @@ def test_distinct_targets_keep_independent_denominators_and_reasons() -> None:
             target_b,
         ),
     ]
-    ledger.apply_resolutions(
+    _apply_resolutions(
+        ledger,
         {key: 10.0 for key, _ in (*target_a_rows, *target_b_rows)},
         origin=SCORE_ORIGIN,
     )
@@ -641,7 +683,8 @@ def test_an_all_unscored_target_has_no_coverage_ratio() -> None:
         )
         for index in range(2)
     ]
-    ledger.apply_resolutions(
+    _apply_resolutions(
+        ledger,
         {key: 10.0 for key, _ in references},
         origin=SCORE_ORIGIN,
     )
@@ -740,7 +783,8 @@ def test_unscored_precedence_is_total_and_preserves_the_issuance_reason() -> Non
             )
         },
     )
-    ledger.apply_resolutions(
+    _apply_resolutions(
+        ledger,
         {
             warm_up_key: 10.0,
             ready_nonfinite_key: 10.0,
@@ -822,7 +866,7 @@ def test_one_sided_predicate_uses_only_its_declared_side(
         lower=lower,
         upper=upper,
     )
-    ledger.apply_resolutions({key: actual}, origin=SCORE_ORIGIN)
+    _apply_resolutions(ledger, {key: actual}, origin=SCORE_ORIGIN)
 
     outcome = _outcome(ledger.coverage_report(PredicateRegistry.gate_a()), key, bound_key)
 
@@ -852,7 +896,7 @@ def test_two_sided_predicate_is_inclusive(actual: float, expected: bool) -> None
             )
         },
     )
-    ledger.apply_resolutions({key: actual}, origin=SCORE_ORIGIN)
+    _apply_resolutions(ledger, {key: actual}, origin=SCORE_ORIGIN)
 
     outcome = _outcome(ledger.coverage_report(PredicateRegistry.gate_a()), key, interval)
 
@@ -878,7 +922,7 @@ def test_risk_level_remains_independent_from_the_forecast_column_suffix() -> Non
             )
         },
     )
-    ledger.apply_resolutions({key: 10.0}, origin=SCORE_ORIGIN)
+    _apply_resolutions(ledger, {key: 10.0}, origin=SCORE_ORIGIN)
 
     outcome = _outcome(ledger.coverage_report(PredicateRegistry.gate_a()), key, quantile)
 
@@ -896,7 +940,7 @@ def test_coverage_report_outcomes_summaries_and_reason_maps_are_immutable() -> N
         bound_values={quantile[0]: 10.0},
         issuances={quantile: _issuance(_descriptor(GuaranteeClaim.NONE, None, level=0.5))},
     )
-    ledger.apply_resolutions({key: 10.0}, origin=SCORE_ORIGIN)
+    _apply_resolutions(ledger, {key: 10.0}, origin=SCORE_ORIGIN)
     report = ledger.coverage_report(PredicateRegistry.gate_a())
     outcome = _outcome(report, key, quantile)
     summary = report.summaries[outcome.target]
@@ -927,7 +971,7 @@ def test_coverage_summary_and_report_reject_internally_inconsistent_counts() -> 
         bound_values={quantile[0]: 10.0},
         issuances={quantile: _issuance(_descriptor(GuaranteeClaim.NONE, None, level=0.5))},
     )
-    ledger.apply_resolutions({key: 10.0}, origin=SCORE_ORIGIN)
+    _apply_resolutions(ledger, {key: 10.0}, origin=SCORE_ORIGIN)
     report = ledger.coverage_report(PredicateRegistry.gate_a())
     summary = next(iter(report.summaries.values()))
 

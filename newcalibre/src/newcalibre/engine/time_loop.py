@@ -45,6 +45,7 @@ from newcalibre.engine.spine import (
     SettlementWindow,
     Spine,
 )
+from newcalibre.observe import ObserveError
 
 
 class TimeLoopError(EngineError):
@@ -59,7 +60,6 @@ class TimeLoopRequest:
     origins: tuple[pd.Timestamp, ...]
     settlement_end: pd.Timestamp
     scope: Scope
-    calibration_partitions: tuple[str, ...]
     initial_inventory_positions: Mapping[str, InventoryPosition]
     actuals_semantics: ActualsSemantics
 
@@ -72,7 +72,6 @@ class TimeLoopRequest:
         scope: Scope,
         initial_inventory_positions: Mapping[str, InventoryPosition],
         actuals_semantics: ActualsSemantics,
-        calibration_partitions: Sequence[str] = (),
     ) -> None:
         if not isinstance(session, SessionIdentity):
             raise TypeError("time-loop session must be a SessionIdentity")
@@ -96,11 +95,6 @@ class TimeLoopRequest:
             raise TimeLoopError("time-loop settlement end must be at or after the last origin")
         if not isinstance(scope, Scope):
             raise TypeError("time-loop scope must be a Scope")
-        partitions = tuple(calibration_partitions)
-        if len(set(partitions)) != len(partitions):
-            raise TimeLoopError("time-loop calibration partitions must be unique")
-        for partition in partitions:
-            _require_text(partition, name="calibration partition", trimmed=True)
         if not isinstance(initial_inventory_positions, Mapping):
             raise TypeError("initial inventory positions must be a mapping")
         positions: dict[str, InventoryPosition] = {}
@@ -118,7 +112,6 @@ class TimeLoopRequest:
         object.__setattr__(self, "origins", frozen_origins)
         object.__setattr__(self, "settlement_end", settlement_end)
         object.__setattr__(self, "scope", scope)
-        object.__setattr__(self, "calibration_partitions", partitions)
         object.__setattr__(
             self,
             "initial_inventory_positions",
@@ -328,7 +321,6 @@ class TimeLoop:
                         session=self._request.session,
                         origin=period,
                         scope=self._request.scope,
-                        calibration_partitions=self._request.calibration_partitions,
                         inventory_positions=positions,
                     ),
                     decision_origin=period in self._decision_origin_set,
@@ -342,6 +334,10 @@ class TimeLoop:
                 if receipt is None:
                     raise TimeLoopError(f"time loop did not commit settlement period {period}")
             else:
+                observation = self._engine.observe(
+                    period,
+                    session=self._request.session,
+                )
                 settled = self._engine.settle(
                     SettlementRequest(
                         session=self._request.session,
@@ -356,7 +352,9 @@ class TimeLoop:
                     OriginCommit(
                         session=self._request.session,
                         origin=period,
+                        observe_cycle=observation.cycle,
                         settlements=settled.records,
+                        state_updates=observation.cycle.state_updates,
                     )
                 )
             if receipt.settlement_periods != (period,):
@@ -366,6 +364,22 @@ class TimeLoop:
             receipts[period] = receipt
 
         next_period = self._calendar.advance(self._settlement_periods[-1], 1)
+        final_observe_receipt = self._ledger_sink.receipt(next_period)
+        if final_observe_receipt is None:
+            observation = self._engine.observe(
+                next_period,
+                session=self._request.session,
+            )
+            final_observe_receipt = self._engine.commit(
+                OriginCommit(
+                    session=self._request.session,
+                    origin=next_period,
+                    observe_cycle=observation.cycle,
+                    state_updates=observation.cycle.state_updates,
+                )
+            )
+        else:
+            self._engine.commit(final_observe_receipt)
         final_snapshot = self._ledger_sink.settlement_snapshot((next_period,))
         if any(quantity != 0.0 for quantity in final_snapshot.open_order_quantities.values()):
             raise TimeLoopError("time-loop drain ended with open orders")
@@ -384,7 +398,16 @@ class TimeLoop:
             return {}
         keys = tuple((series_key, period) for period in periods for series_key in self._series_keys)
         before = self._calendar.advance(periods[-1], 1)
-        supplied = self._actuals_source.for_keys(keys, before=before)
+        try:
+            submission = self._actuals_source.reveal(before=before)
+        except ObserveError as error:
+            raise TimeLoopError(f"settlement actuals source is invalid: {error}") from error
+        requested = set(keys)
+        supplied = {
+            record.key: float(record.recorded_value)
+            for record in submission.records
+            if record.key in requested
+        }
         try:
             return validate_actuals_window(
                 supplied,

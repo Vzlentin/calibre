@@ -100,6 +100,16 @@ def session_model_config(session: SessionIdentity) -> dict[str, object]:
     return dict(cast(Mapping[str, object], model_config))
 
 
+def session_conformal_config(session: SessionIdentity) -> dict[str, object] | None:
+    """Return the optional canonical conformal configuration owned by a session."""
+    configuration = session_definition(session).get("conformal_config")
+    if configuration is None:
+        return None
+    if not isinstance(configuration, Mapping):
+        raise EngineError("session identity has an invalid conformal configuration")
+    return dict(cast(Mapping[str, object], configuration))
+
+
 def session_ordering_configuration(
     session: SessionIdentity,
 ) -> OrderingConfiguration | None:
@@ -331,6 +341,7 @@ __all__ = [
     "decision_from_definition",
     "require_panel_session_binding",
     "require_task_session_binding",
+    "session_conformal_config",
     "session_decision_inputs",
     "session_definition",
     "session_decision_series",

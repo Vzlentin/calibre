@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
-from numbers import Real
 from types import MappingProxyType
 from typing import TypeVar
 
 import pandas as pd
 
 from newcalibre.domain import (
+    AVAILABILITY_BOUND,
+    CENSOR_STATUS,
     OBSERVED_VALUE,
     SERIES_KEY,
     TIMESTAMP,
+    UNDECLARED_CENSORING,
     ActualsSemantics,
     Calendar,
-    CalendarError,
+    CensoringAssertion,
     Panel,
     SessionIdentity,
     StockoutRule,
@@ -40,6 +41,7 @@ from newcalibre.ledger import (
     OrderRow,
     SettlementRecord,
 )
+from newcalibre.observe import ActualRecord, ActualsSubmission, ObservedActual, PendingObservation
 
 _Input = TypeVar("_Input")
 _Output = TypeVar("_Output")
@@ -75,31 +77,36 @@ class InMemoryActualsSource:
             raise ValueError("a panel with censoring facts cannot supply demand-honest actuals")
         self._calendar = panel.calendar
         self._actuals_semantics = actuals_semantics
-        observed = panel.frame[[SERIES_KEY, TIMESTAMP, OBSERVED_VALUE]].dropna(
-            subset=[OBSERVED_VALUE]
-        )
-        self._actuals = {
-            (str(series_key), pd.Timestamp(timestamp)): float(value)
-            for series_key, timestamp, value in observed.itertuples(index=False, name=None)
-        }
+        frame = panel.frame
+        records: list[ActualRecord] = []
+        for values in frame.to_dict("records"):
+            recorded = values[OBSERVED_VALUE]
+            if pd.isna(recorded):
+                continue
+            status = values.get(CENSOR_STATUS, UNDECLARED_CENSORING)
+            assertion = None if status == UNDECLARED_CENSORING else CensoringAssertion(status)
+            raw_bound = values.get(AVAILABILITY_BOUND)
+            bound = None if raw_bound is None or pd.isna(raw_bound) else float(raw_bound)
+            records.append(
+                ActualRecord(
+                    series_key=str(values[SERIES_KEY]),
+                    timestamp=pd.Timestamp(values[TIMESTAMP]),
+                    recorded_value=recorded,
+                    censoring_assertion=assertion,
+                    availability_bound=bound,
+                )
+            )
+        self._records = tuple(records)
 
     @property
     def actuals_semantics(self) -> ActualsSemantics:
         """Return the explicitly bound meaning of the observed values."""
         return self._actuals_semantics
 
-    def for_keys(
-        self,
-        keys: Sequence[ActualKey],
-        *,
-        before: pd.Timestamp,
-    ) -> Mapping[ActualKey, float]:
-        """Look up only requested observations admissible before an origin."""
+    def reveal(self, *, before: pd.Timestamp) -> ActualsSubmission:
+        """Reveal every recorded observation admissible strictly before an origin."""
         self._calendar.require_member(before, name="actuals origin")
-        actuals = {
-            key: self._actuals[key] for key in keys if key[1] < before and key in self._actuals
-        }
-        return MappingProxyType(actuals)
+        return ActualsSubmission(record for record in self._records if record.timestamp < before)
 
 
 class InMemoryArtifactStore:
@@ -130,16 +137,22 @@ class InMemoryArtifactStore:
 
 
 class InMemoryCalibrationStateStore:
-    """Keep calibration-state bytes by typed session and partition."""
+    """Keep calibration-state bytes by typed session and state label."""
 
     def __init__(self) -> None:
         self._states: dict[tuple[SessionIdentity, str], tuple[pd.Timestamp, bytes]] = {}
 
-    def load(self, session: SessionIdentity, partition: str) -> bytes | None:
-        """Return one immutable state value, or ``None``."""
-        _require_session_partition(session, partition)
-        stored = self._states.get((session, partition))
-        return None if stored is None else stored[1]
+    def snapshot(self, session: SessionIdentity) -> Mapping[str, bytes]:
+        """Return a defensive immutable snapshot of one session's state rows."""
+        if not isinstance(session, SessionIdentity):
+            raise TypeError("calibration state session must be a SessionIdentity")
+        return MappingProxyType(
+            {
+                label: value
+                for (stored_session, label), (_origin, value) in self._states.items()
+                if stored_session == session
+            }
+        )
 
     def save(
         self,
@@ -223,6 +236,26 @@ class InMemoryLedgerSink:
         """Return the ledger's bound calendar."""
         return self._ledger.calendar
 
+    @property
+    def observed_history(self) -> tuple[ObservedActual, ...]:
+        """Return the ledger's defensive observed-history snapshot."""
+        return self._ledger.observed_history
+
+    @property
+    def pending_observations(self) -> tuple[PendingObservation, ...]:
+        """Return the ledger's defensive pending-observation snapshot."""
+        return self._ledger.pending_observations
+
+    @property
+    def observation_resolutions(self):
+        """Return durable censoring-aware row resolutions."""
+        return self._ledger.observation_resolutions
+
+    @property
+    def observe_annotations(self):
+        """Return durable observe annotations."""
+        return self._ledger.observe_annotations
+
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
         """Return the ledger's defensive due-row snapshot."""
         return self._ledger.due_frame(origin)
@@ -276,9 +309,13 @@ class InMemoryLedgerSink:
                 return previous
             raise LedgerError(f"origin {write.origin} already has a different committed write")
 
-        self._validate_resolutions(write)
         staged = _stage_new_rows(write, calendar=self._ledger.calendar)
         _require_origin_rows(write, staged=staged)
+        for label, value in write.observe_cycle.state_updates.items():
+            if write.state_updates.get(label) != value:
+                raise LedgerError(
+                    f"origin state updates do not preserve observe update for {label!r}"
+                )
         _reject_collision(self._forecast_rows, (row.key for row in staged.forecasts), "forecast")
         _reject_collision(self._order_keys, (row.key for row in staged.orders), "order")
         _reject_collision(
@@ -288,13 +325,16 @@ class InMemoryLedgerSink:
         )
         settlement_delta = self._validated_settlement_delta(write)
 
-        # Resolution validates atomically inside Ledger and runs first. Every
-        # append below was already validated against a scratch ledger and the
-        # owned key indexes, so no later family can partially fail the write.
-        if write.resolutions:
-            self._ledger.apply_resolutions(write.resolutions, origin=write.origin)
+        # The observe cycle validates and publishes first. Every later family
+        # was prevalidated against scratch/indexed state, so only infallible
+        # owned-container updates remain before the receipt becomes observable.
+        self._ledger.apply_observe_cycle(write.observe_cycle, origin=write.origin)
         for forecast in write.forecasts:
-            self._ledger.append_forecasts(forecast.frame, issuances=forecast.issuances)
+            self._ledger.append_forecasts(
+                forecast.frame,
+                issuances=forecast.issuances,
+                observation_issuances=forecast.observation_issuances,
+            )
         self._ledger.append_orders(write.orders)
         self._ledger.append_settlements(write.settlements)
         self._forecast_rows.update((row.key, row) for row in staged.forecasts)
@@ -306,28 +346,6 @@ class InMemoryLedgerSink:
         receipt = CommitReceipt.from_commit(write)
         self._commits[write.origin] = receipt
         return receipt
-
-    def _validate_resolutions(self, write: OriginCommit) -> None:
-        try:
-            self._ledger.calendar.require_member(write.origin, name="ledger origin")
-        except CalendarError as error:
-            raise LedgerError(f"ledger origin must lie on the owned calendar: {error}") from error
-        for key, value in write.resolutions.items():
-            row = self._forecast_rows.get(key)
-            if row is None:
-                raise LedgerError(f"unknown forecast key: {key!r}")
-            if row.actual_value is not None:
-                raise LedgerError(f"forecast row is already resolved: {key!r}")
-            if row.target_timestamp >= write.origin:
-                raise LedgerError(f"forecast row is not yet due: {key!r}")
-            if isinstance(value, bool) or not isinstance(value, Real):
-                raise LedgerError("resolved actual value must be a real number")
-            try:
-                normalized = float(value)
-            except (OverflowError, TypeError, ValueError) as error:
-                raise LedgerError("resolved actual value must be finite") from error
-            if not math.isfinite(normalized):
-                raise LedgerError("resolved actual value must be finite")
 
     def _validated_settlement_delta(self, write: OriginCommit):
         """Validate only newly appended settlement facts against the compact index."""
@@ -380,7 +398,11 @@ class InProcessDispatch:
 def _stage_new_rows(write: OriginCommit, *, calendar: Calendar) -> Ledger:
     staged = Ledger(session=write.session, calendar=calendar)
     for forecast in write.forecasts:
-        staged.append_forecasts(forecast.frame, issuances=forecast.issuances)
+        staged.append_forecasts(
+            forecast.frame,
+            issuances=forecast.issuances,
+            observation_issuances=forecast.observation_issuances,
+        )
     staged.append_orders(write.orders)
     staged.append_settlements(write.settlements)
     return staged

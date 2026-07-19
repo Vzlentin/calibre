@@ -260,7 +260,7 @@ def test_forecast_append_refuses_unissued_intervals() -> None:
     frame[upper] = pd.Series([11.0, 21.0], dtype="float64")
     ledger = Ledger(session=_session(), calendar=CALENDAR)
 
-    with pytest.raises(LedgerError, match="exactly account"):
+    with pytest.raises(LedgerError, match="account for every interval group"):
         ledger.append_forecasts(
             frame,
             issuances={key: {} for key in _issuances()},
@@ -400,7 +400,7 @@ def test_forecast_bound_issuances_account_for_multiple_groups_and_sides() -> Non
     incomplete = {key: dict(row_issuances) for key in _issuances()}
     del incomplete[_forecast_key("sku-b", 2)][quantile_09]
     empty_ledger = Ledger(session=_session(), calendar=CALENDAR)
-    with pytest.raises(LedgerError, match="exactly account"):
+    with pytest.raises(LedgerError, match="every supplied quantile group"):
         empty_ledger.append_forecasts(frame, issuances=incomplete)
     assert empty_ledger.forecasts == ()
 
