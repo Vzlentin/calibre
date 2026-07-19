@@ -437,9 +437,6 @@ def test_removed_callback_and_partition_surfaces_are_structurally_absent() -> No
 
 def test_weighted_method_addition_has_no_engine_or_observe_branch() -> None:
     identifiers = ("weighted-per-step", "WeightedPerStep", "WeightedConformal")
-    witness = "weighted-per-step WeightedPerStep WeightedConformal"
-    assert all(value in witness for value in identifiers)
-
     source_root = Path(__file__).parents[2] / "src" / "newcalibre"
     violations = {
         str(path.relative_to(source_root)): value

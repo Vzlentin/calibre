@@ -281,10 +281,13 @@ class WeightedConformalRuntime:
         minimum = self.manifest.minimum_calibration_scores(self._config)
         quantiles: dict[str, float | None] = {}
         state_references: dict[str, str] = {}
+        descriptors: dict[ScoredSeries, GuaranteeDescriptor] = {}
 
         for row in rows:
             label = self._partition_label(row.key.model_name, row.key.series_key)
-            partition = decoded.get(label, _empty_partition())
+            partition = decoded.get(label)
+            if partition is None:
+                partition = _empty_partition()
             ready = len(partition.scores) >= minimum
             if not ready:
                 lower = math.nan
@@ -319,6 +322,8 @@ class WeightedConformalRuntime:
                     self.manifest.name,
                     self._codec.encode_partition(label, partition),
                 )
+            if partition.scored_series not in descriptors:
+                descriptors[partition.scored_series] = self._descriptor(partition.scored_series)
             facts = IssuedBoundFacts(
                 method_name=self.manifest.name,
                 emission_form=self.manifest.emission_form,
@@ -330,7 +335,7 @@ class WeightedConformalRuntime:
                 upper_bound=upper,
                 calibration_ready=ready,
                 bounds_null_reason=null_reason,
-                effective_descriptor=self._descriptor(partition.scored_series),
+                effective_descriptor=descriptors[partition.scored_series],
                 bindings=(),
             )
             lower_values.append(lower)
@@ -367,7 +372,9 @@ class WeightedConformalRuntime:
         )
         self._validate_delivery_issuance(delivery)
         decoded = self._validate_states(states, allow_missing=True)
-        partition = decoded.get(delivery.partition_label, _empty_partition())
+        partition = decoded.get(delivery.partition_label)
+        if partition is None:
+            partition = _empty_partition()
         scores = list(partition.scores)
         count = partition.delivered_score_count
         scored_series = partition.scored_series
