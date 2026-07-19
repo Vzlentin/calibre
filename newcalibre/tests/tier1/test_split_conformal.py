@@ -9,12 +9,14 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
+import newcalibre.conformal.methods.split as split_method
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     SPLIT_PER_STEP_MANIFEST,
     CalibrationResult,
     ConformalRegistryError,
     Delivery,
+    EmissionForm,
     ForecastKey,
     ResolvedObservation,
     RuntimeContractError,
@@ -245,6 +247,27 @@ def test_window_sum_emits_only_on_the_terminal_complete_leading_window() -> None
         runtime.apply(_frame((2.0, 3.0)).iloc[[1]].assign(horizon_step=3), states)
 
 
+def test_window_apply_rejects_a_large_incomplete_period_before_range_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protection_period = 10**12
+    runtime = resolve_method(
+        {
+            "method": "split-window-sum",
+            "protection_period": protection_period,
+        }
+    )
+    terminal_only = _frame().assign(horizon_step=protection_period)
+
+    def fail_on_range(*_args: object) -> None:
+        raise AssertionError("incomplete window allocated over the protection period")
+
+    monkeypatch.setattr(split_method, "range", fail_on_range, raising=False)
+
+    with pytest.raises(RuntimeContractError, match="leading protection-window"):
+        runtime.apply(terminal_only, {})
+
+
 def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series() -> None:
     runtime, label, states = _states(
         "split-per-step",
@@ -279,6 +302,61 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
     assert later_facts.effective_descriptor.scored_series is ScoredSeries.RECORDED_SALES
     before_reference = next(iter(issued.issuances.values())).state_reference
     assert later_facts.state_reference != before_reference
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "message"),
+    [
+        ("method", "wrong split method"),
+        ("form", "wrong emission form"),
+        ("scope", "wrong emission scope"),
+        ("working-level", "wrong working level"),
+    ],
+)
+def test_observe_rejects_tampered_issuance_identity_before_state_advancement(
+    mismatch: str,
+    message: str,
+) -> None:
+    runtime, label, states = _states(
+        "split-per-step",
+        [1.0, 2.0],
+        configuration={"coverage": 0.5},
+    )
+    result = runtime.apply(_frame(), states)
+    observation = _observations(
+        result,
+        (7.0,),
+        (CensoringAssertion.UNCENSORED,),
+    )[0]
+    issued = observation.issued
+    if mismatch == "method":
+        tampered = replace(issued, method_name="stale-method")
+    elif mismatch == "form":
+        tampered = replace(issued, emission_form=EmissionForm.ONE_SIDED_LOWER)
+    elif mismatch == "scope":
+        tampered = replace(
+            issued,
+            emission_scope=EmissionScope.WINDOW_SUM,
+            effective_descriptor=replace(
+                issued.effective_descriptor,
+                window=EmissionScope.WINDOW_SUM,
+            ),
+        )
+    else:
+        tampered = replace(
+            issued,
+            working_level=0.6,
+            effective_descriptor=replace(issued.effective_descriptor, level=0.6),
+        )
+    before = dict(states)
+
+    with pytest.raises(RuntimeContractError, match=message):
+        runtime.observe(
+            Delivery(label, (replace(observation, issued=tampered),)),
+            states,
+        )
+
+    assert states == before
 
 
 def test_declared_censoring_without_an_undeclared_score_stays_demand_honest() -> None:
@@ -471,6 +549,7 @@ def test_warmup_never_falls_through_a_configured_clamp() -> None:
         {"coverage": 0.9999, "calibration_window": 10},
         {"upper_floor": math.inf},
         {"upper_cap": math.nan},
+        {"upper_cap": -1.0},
         {"upper_floor": 2.0, "upper_cap": 1.0},
     ],
 )

@@ -95,6 +95,8 @@ class _SplitConfig(BaseModel):
         minimum = ConservativeRankRequirement().minimum_scores(self)
         if minimum > self.calibration_window:
             raise ValueError("calibration_window cannot satisfy the configured conservative rank")
+        if self.upper_cap is not None and self.upper_cap < 0.0:
+            raise ValueError("upper_cap cannot be below the zero support bound")
         if (
             self.upper_floor is not None
             and self.upper_cap is not None
@@ -509,12 +511,12 @@ class SplitConformalRuntime:
         for row in rows:
             members.setdefault(_window_key(row.key), {})[row.key.horizon_step] = row.point_forecast
         centers: dict[tuple[str, pd.Timestamp, str], float] = {}
-        expected = set(range(1, self._protection_period + 1))
         for row in rows:
             if row.key.horizon_step != self._protection_period:
                 continue
             group = members[_window_key(row.key)]
-            if not expected.issubset(group):
+            leading_member_count = sum(step <= self._protection_period for step in group)
+            if leading_member_count != self._protection_period:
                 raise RuntimeContractError(
                     "window-sum apply requires every leading protection-window member"
                 )

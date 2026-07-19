@@ -47,6 +47,7 @@ from newcalibre.domain import (
     POINT_FORECAST,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    AppliedBinding,
     CensoringAssertion,
     DecisionScope,
     DecisionScopeKind,
@@ -298,6 +299,48 @@ def _descriptor() -> GuaranteeDescriptor:
         window=EmissionScope.PER_STEP,
         scope=DecisionScope(DecisionScopeKind.PER_DECISION_NODE, None),
     )
+
+
+def _invalid_issuance(facts: IssuedBoundFacts, invalid_kind: str) -> IssuedBoundFacts:
+    if invalid_kind == "method":
+        return replace(facts, method_name="other")
+    if invalid_kind == "form":
+        return replace(facts, emission_form=EmissionForm.ONE_SIDED_LOWER)
+    if invalid_kind == "scope":
+        return replace(
+            facts,
+            emission_scope=EmissionScope.WINDOW_SUM,
+            effective_descriptor=replace(
+                facts.effective_descriptor,
+                window=EmissionScope.WINDOW_SUM,
+            ),
+        )
+    if invalid_kind == "claim":
+        return replace(
+            facts,
+            effective_descriptor=replace(
+                facts.effective_descriptor,
+                type=GuaranteeType(
+                    GuaranteeClaim.TWO_SIDED_COVERAGE,
+                    GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+                    None,
+                ),
+            ),
+        )
+    if invalid_kind == "clamp":
+        return replace(
+            facts,
+            bindings=(AppliedBinding("undeclared-cap", 5.0, False),),
+        )
+    if invalid_kind == "claim-binding":
+        return replace(
+            facts,
+            effective_descriptor=replace(
+                facts.effective_descriptor,
+                type=GuaranteeType(GuaranteeClaim.NONE, None, None),
+            ),
+        )
+    raise AssertionError(f"unknown invalid issuance kind: {invalid_kind}")
 
 
 def _frame() -> pd.DataFrame:
@@ -662,6 +705,49 @@ def test_registry_requires_observe_annotations_for_exactly_the_delivered_rows(
 
     with pytest.raises(RuntimeContractError, match="exactly cover"):
         runtime.observe(delivery, {})
+
+
+@pytest.mark.parametrize(
+    ("invalid_kind", "message"),
+    [
+        ("method", "method must equal"),
+        ("form", "form must equal"),
+        ("scope", "scope must equal"),
+        ("claim", "descriptor is not declared"),
+        ("clamp", "binding is not declared"),
+        ("claim-binding", "claim must be voided exactly"),
+    ],
+)
+def test_registry_rejects_issuance_shapes_that_disagree_with_the_manifest(
+    invalid_kind: str,
+    message: str,
+) -> None:
+    class InvalidIssuanceRuntime(_FixtureRuntime):
+        def apply(
+            self,
+            forecasts: pd.DataFrame,
+            states: Mapping[str, bytes | None],
+            *,
+            context: CalibrationContext | None = None,
+        ) -> CalibrationResult:
+            result = super().apply(forecasts, states, context=context)
+            issuances = {
+                key: _invalid_issuance(facts, invalid_kind)
+                for key, facts in result.issuances.items()
+            }
+            return CalibrationResult(result.forecasts, {}, issuances)
+
+    def factory(config: BaseModel, states: Mapping[str, bytes]) -> ConformalRuntime:
+        assert isinstance(config, _FixtureConfig)
+        return InvalidIssuanceRuntime(config, states)
+
+    registry = ConformalRegistry()
+    registry.register("fixture", FIXTURE_MANIFEST, _FixtureConfig, factory)
+    runtime = registry.resolve({"method": "fixture"})
+    partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
+
+    with pytest.raises(RuntimeContractError, match=message):
+        runtime.apply(_frame(), {partition: None})
 
 
 def test_registry_rejects_undeclared_post_readiness_nonfinite_bounds() -> None:
