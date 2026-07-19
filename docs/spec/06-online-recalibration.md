@@ -42,7 +42,13 @@ Both drivers of chapter 03 run the *same* observe-loop code path:
 `[OBS-1]` Driver equivalence: given identical resolution schedules (the same
 actuals becoming available in the same order relative to the same origins),
 the two drivers produce identical calibration state. There is no
-backtest-only or API-only observe logic.
+backtest-only or API-only observe logic. Changing whether an actual is
+available before an origin changes the resolution schedule and is not an
+equivalence case. A different cross-cycle delivery order is likewise not
+required to be equivalent for a method that declares order sensitivity
+`[CNF-3]`. Out-of-order tolerance means durable acceptance, no retroactive
+change to committed issuance, and exactly-once eventual delivery under
+`[OBS-17]`; it does not mean permutation invariance.
 
 Two durable state surfaces participate, both session-owned:
 
