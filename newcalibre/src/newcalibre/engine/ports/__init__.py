@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
 from itertools import pairwise
 from numbers import Real
 from types import MappingProxyType
@@ -13,6 +14,7 @@ from typing import Protocol, TypeVar, runtime_checkable
 
 import pandas as pd
 
+from newcalibre.conformal import IssuedBoundFacts
 from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
@@ -27,6 +29,7 @@ from newcalibre.ledger import (
     OrderRow,
     SettlementRecord,
 )
+from newcalibre.observe import ActualsSubmission, ObserveCycle, ObservedActual, PendingObservation
 
 type ActualKey = tuple[str, pd.Timestamp]
 
@@ -41,21 +44,33 @@ class ForecastWrite:
     _frame: pd.DataFrame = field(repr=False)
     _digest: str = field(repr=False)
     issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]]
+    observation_issuances: Mapping[ForecastKey, IssuedBoundFacts]
 
     def __init__(
         self,
         frame: pd.DataFrame,
         issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]],
+        observation_issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
     ) -> None:
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("forecast write frame must be a pandas DataFrame")
         if not isinstance(issuances, Mapping):
             raise TypeError("forecast write issuances must be a mapping")
+        if observation_issuances is not None and not isinstance(
+            observation_issuances,
+            Mapping,
+        ):
+            raise TypeError("forecast write observation issuances must be a mapping")
         frozen_issuances = {
             key: MappingProxyType(dict(by_bound)) for key, by_bound in issuances.items()
         }
+        supplied_observations = {} if observation_issuances is None else observation_issuances
+        observed = {
+            key: IssuedBoundFacts.snapshot(value) for key, value in supplied_observations.items()
+        }
         object.__setattr__(self, "_frame", frame.copy(deep=True))
         object.__setattr__(self, "issuances", MappingProxyType(frozen_issuances))
+        object.__setattr__(self, "observation_issuances", MappingProxyType(observed))
         object.__setattr__(self, "_digest", _forecast_write_digest(self))
 
     @property
@@ -75,7 +90,7 @@ class OriginCommit:
 
     session: SessionIdentity
     origin: pd.Timestamp
-    resolutions: Mapping[ForecastKey, float] = field(default_factory=dict)
+    observe_cycle: ObserveCycle = field(default_factory=ObserveCycle)
     forecasts: tuple[ForecastWrite, ...] = ()
     orders: tuple[OrderRow, ...] = ()
     settlements: tuple[SettlementRecord, ...] = ()
@@ -87,9 +102,8 @@ class OriginCommit:
             raise TypeError("origin commit session must be a SessionIdentity")
         if not isinstance(self.origin, pd.Timestamp):
             raise TypeError("origin commit origin must be a pandas Timestamp")
-        if not isinstance(self.resolutions, Mapping):
-            raise TypeError("origin commit resolutions must be a mapping")
-        object.__setattr__(self, "resolutions", MappingProxyType(dict(self.resolutions)))
+        if not isinstance(self.observe_cycle, ObserveCycle):
+            raise TypeError("origin commit observe cycle must be an ObserveCycle")
         object.__setattr__(self, "forecasts", tuple(self.forecasts))
         object.__setattr__(self, "orders", tuple(self.orders))
         object.__setattr__(self, "settlements", tuple(self.settlements))
@@ -119,6 +133,7 @@ class CommitReceipt:
     origin: pd.Timestamp
     digest: str
     state_updates: Mapping[str, bytes]
+    observe_cycle: ObserveCycle = field(default_factory=ObserveCycle)
     settlement_periods: tuple[pd.Timestamp, ...] = ()
 
     @classmethod
@@ -129,6 +144,7 @@ class CommitReceipt:
             origin=commit.origin,
             digest=commit.digest,
             state_updates=commit.state_updates,
+            observe_cycle=commit.observe_cycle,
             settlement_periods=tuple(sorted({record.period for record in commit.settlements})),
         )
 
@@ -146,6 +162,8 @@ class CommitReceipt:
             raise ValueError("commit receipt digest must be a SHA-256 hex string")
         if not isinstance(self.state_updates, Mapping):
             raise TypeError("commit receipt state updates must be a mapping")
+        if not isinstance(self.observe_cycle, ObserveCycle):
+            raise TypeError("commit receipt observe cycle must be an ObserveCycle")
         updates: dict[str, bytes] = {}
         for partition, value in self.state_updates.items():
             if not isinstance(partition, str) or not partition or partition != partition.strip():
@@ -255,13 +273,8 @@ class ActualsSource(Protocol):
         """Return the meaning of every observation exposed by this source."""
         ...
 
-    def for_keys(
-        self,
-        keys: Sequence[ActualKey],
-        *,
-        before: pd.Timestamp,
-    ) -> Mapping[ActualKey, float]:
-        """Return the requested observations admissible before ``before``."""
+    def reveal(self, *, before: pd.Timestamp) -> ActualsSubmission:
+        """Return the complete immutable submission admissible before ``before``."""
         ...
 
 
@@ -280,10 +293,10 @@ class ArtifactStore(Protocol):
 
 @runtime_checkable
 class CalibrationStateStore(Protocol):
-    """Persist calibration state by session and partition."""
+    """Persist calibration state by session and independently addressed label."""
 
-    def load(self, session: SessionIdentity, partition: str) -> bytes | None:
-        """Return a state snapshot, or ``None`` when absent."""
+    def snapshot(self, session: SessionIdentity) -> Mapping[str, bytes]:
+        """Return one defensive snapshot of every state row for a session."""
         ...
 
     def save(
@@ -310,6 +323,16 @@ class LedgerSink(Protocol):
     @property
     def calendar(self) -> Calendar:
         """Return the calendar owned by the ledger."""
+        ...
+
+    @property
+    def observed_history(self) -> tuple[ObservedActual, ...]:
+        """Return a defensive observed-actual history snapshot."""
+        ...
+
+    @property
+    def pending_observations(self) -> tuple[PendingObservation, ...]:
+        """Return a defensive pending-observation snapshot."""
         ...
 
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
@@ -356,18 +379,12 @@ def _forecast_write_digest(write: ForecastWrite) -> str:
         .to_numpy(dtype="uint64")
         .tobytes(),
     )
-    issuance_facts = tuple(
-        sorted(
-            (
-                repr(forecast_key),
-                repr(bound_key),
-                repr(issuance),
-            )
-            for forecast_key, by_bound in write.issuances.items()
-            for bound_key, issuance in by_bound.items()
-        )
+    _update_digest(digest, b"issuances", _canonical_value_bytes(write.issuances))
+    _update_digest(
+        digest,
+        b"observation-issuances",
+        _canonical_value_bytes(write.observation_issuances),
     )
-    _update_digest(digest, b"issuances", repr(issuance_facts).encode())
     return digest.hexdigest()
 
 
@@ -380,17 +397,33 @@ def _origin_commit_digest(commit: OriginCommit) -> str:
         b"origin",
         f"{commit.origin.isoformat()}:{commit.origin.unit}".encode(),
     )
-    resolution_facts = tuple(
-        sorted((repr(key), float(value).hex()) for key, value in commit.resolutions.items())
+    cycle = commit.observe_cycle
+    _update_digest(digest, b"observe-history", _canonical_value_bytes(cycle.history_appends))
+    _update_digest(digest, b"observe-resolutions", _canonical_value_bytes(cycle.resolutions))
+    _update_digest(
+        digest,
+        b"observe-pending-removals",
+        _canonical_value_bytes(cycle.pending_removals),
     )
-    _update_digest(digest, b"resolutions", repr(resolution_facts).encode())
+    _update_digest(
+        digest,
+        b"observe-pending-retentions",
+        _canonical_value_bytes(cycle.pending_retentions),
+    )
+    _update_digest(digest, b"observe-deliveries", _canonical_value_bytes(cycle.deliveries))
+    _update_digest(digest, b"observe-annotations", _canonical_value_bytes(cycle.annotations))
+    _update_digest(
+        digest,
+        b"observe-state-updates",
+        _canonical_value_bytes(cycle.state_updates),
+    )
     _update_digest(
         digest,
         b"forecasts",
-        repr(tuple(write.digest for write in commit.forecasts)).encode(),
+        _canonical_value_bytes(tuple(write.digest for write in commit.forecasts)),
     )
-    _update_digest(digest, b"orders", repr(commit.orders).encode())
-    _update_digest(digest, b"settlements", repr(commit.settlements).encode())
+    _update_digest(digest, b"orders", _canonical_value_bytes(commit.orders))
+    _update_digest(digest, b"settlements", _canonical_value_bytes(commit.settlements))
     _update_digest(digest, b"state-count", len(commit.state_updates).to_bytes(8, "big"))
     for partition, state in sorted(commit.state_updates.items()):
         _update_digest(digest, b"state-partition", partition.encode())
@@ -404,6 +437,58 @@ def _update_digest(digest, label: bytes, payload: bytes) -> None:
     digest.update(label)
     digest.update(len(payload).to_bytes(8, "big"))
     digest.update(payload)
+
+
+def _canonical_value_bytes(value: object) -> bytes:
+    """Encode immutable domain values without repr-dependent aliases."""
+    if value is None:
+        return _tagged(b"none", b"")
+    if isinstance(value, pd.Timestamp):
+        payload = f"{value.isoformat()}:{value.unit}".encode()
+        return _tagged(b"timestamp", payload)
+    if isinstance(value, Enum):
+        payload = _tagged(b"type", _type_name(value).encode()) + _canonical_value_bytes(value.value)
+        return _tagged(b"enum", payload)
+    if isinstance(value, bool):
+        return _tagged(b"bool", b"1" if value else b"0")
+    if isinstance(value, int):
+        return _tagged(b"int", str(value).encode())
+    if isinstance(value, float):
+        return _tagged(b"float", value.hex().encode())
+    if isinstance(value, str):
+        return _tagged(b"str", value.encode())
+    if isinstance(value, bytes):
+        return _tagged(b"bytes", value)
+    if is_dataclass(value) and not isinstance(value, type):
+        payload = bytearray(_tagged(b"type", _type_name(value).encode()))
+        for item in fields(value):
+            payload.extend(_tagged(b"field", item.name.encode()))
+            payload.extend(_canonical_value_bytes(getattr(value, item.name)))
+        return _tagged(b"dataclass", bytes(payload))
+    if isinstance(value, Mapping):
+        entries = sorted(
+            (
+                _canonical_value_bytes(key),
+                _canonical_value_bytes(item),
+            )
+            for key, item in value.items()
+        )
+        payload = b"".join(_tagged(b"key", key) + _tagged(b"value", item) for key, item in entries)
+        return _tagged(b"mapping", payload)
+    if isinstance(value, (tuple, list)):
+        payload = b"".join(_tagged(b"item", _canonical_value_bytes(item)) for item in value)
+        kind = b"tuple" if isinstance(value, tuple) else b"list"
+        return _tagged(kind, payload)
+    raise TypeError(f"unsupported digest value type: {_type_name(value)}")
+
+
+def _tagged(label: bytes, payload: bytes) -> bytes:
+    return len(label).to_bytes(4, "big") + label + len(payload).to_bytes(8, "big") + payload
+
+
+def _type_name(value: object) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
 
 
 def _frozen_nonnegative_quantities[Key](

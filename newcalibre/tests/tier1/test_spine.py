@@ -7,7 +7,7 @@ import pickle
 import socket
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError
 from typing import Any, cast
 
 import pandas as pd
@@ -33,9 +33,9 @@ from newcalibre.domain import (
     ForecastFrameError,
     ForecastTask,
     GuaranteeClaim,
-    GuaranteeCurrency,
     GuaranteeDescriptor,
     GuaranteeType,
+    HierarchyIndex,
     InventoryPosition,
     Panel,
     Scope,
@@ -52,7 +52,6 @@ from newcalibre.engine import (
     CommitReceipt,
     CommitRequest,
     CommitResult,
-    ConfiguredPolicyOrderer,
     DecisionBatch,
     Engine,
     EngineError,
@@ -66,7 +65,6 @@ from newcalibre.engine import (
     OrderRequest,
     OriginCommit,
     OriginRequest,
-    OriginResult,
     Phase,
     PhaseError,
     PhaseEvent,
@@ -75,7 +73,7 @@ from newcalibre.engine import (
     Spine,
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
-from newcalibre.ledger import ForecastIssuance, GuaranteedSide, OrderRow
+from newcalibre.ledger import ForecastIssuance, OrderRow
 from newcalibre.ordering import OrderingConfigError
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
@@ -273,6 +271,7 @@ def _engine_with_default_resolver(
         calibration_state_store=InMemoryCalibrationStateStore(),
         ledger_sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
         dispatch_backend=RecordingDispatch(),
+        hierarchy=HierarchyIndex.flat(panel.series_keys),
     )
 
 
@@ -382,15 +381,15 @@ class FailOnceStateStore(InMemoryCalibrationStateStore):
 
 
 class RecordingStateStore(InMemoryCalibrationStateStore):
-    """Count state reads across Resolve and Calibrate."""
+    """Count complete state snapshots across engine construction and Resolve."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.loads = 0
+        self.snapshots = 0
 
-    def load(self, session: SessionIdentity, partition: str) -> bytes | None:
-        self.loads += 1
-        return super().load(session, partition)
+    def snapshot(self, session: SessionIdentity) -> Mapping[str, bytes]:
+        self.snapshots += 1
+        return super().snapshot(session)
 
 
 class FailAfterCommitLedgerSink(InMemoryLedgerSink):
@@ -416,9 +415,7 @@ def _engine(
     states: InMemoryCalibrationStateStore,
     sink: InMemoryLedgerSink,
     dispatch: RecordingDispatch,
-    observer=None,
     reconciler=None,
-    calibrator=None,
     orderer=None,
     panel_source=None,
     adapter_resolver=None,
@@ -433,14 +430,13 @@ def _engine(
         calibration_state_store=states,
         ledger_sink=sink,
         dispatch_backend=dispatch,
+        hierarchy=HierarchyIndex.flat(panel.series_keys),
         adapter_resolver=(
             (lambda _config: PersistentFixtureAdapter(events))
             if adapter_resolver is None
             else adapter_resolver
         ),
-        observer=observer,
         reconciler=reconciler,
-        calibrator=calibrator,
         orderer=orderer,
     )
 
@@ -455,33 +451,11 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
     dispatch = RecordingDispatch()
     events: list[str] = []
-    calibration_inputs: list[bytes | None] = []
     panel_source = RecordingPanelSource(panel)
-
-    def observe(
-        _due: pd.DataFrame,
-        resolutions: Mapping[tuple[str, pd.Timestamp, int, str], float],
-        _prior: Mapping[str, bytes | None],
-    ) -> Mapping[str, bytes]:
-        events.append("observe")
-        if not resolutions:
-            return {}
-        actual = next(iter(resolutions.values()))
-        return {"global": f"observed:{actual}".encode()}
 
     def reconcile(forecasts: ForecastBatch) -> ForecastBatch:
         events.append("reconcile")
         return forecasts
-
-    def calibrate(
-        forecasts: ForecastBatch,
-        prior: Mapping[str, bytes | None],
-    ) -> CalibrationResult:
-        events.append("calibrate")
-        calibration_inputs.append(prior["global"])
-        state = b"next-state" if prior["global"] is None else prior["global"]
-        assert state is not None
-        return CalibrationResult(forecasts, {"global": state})
 
     def order(request: OrderRequest) -> tuple[OrderProposal, ...]:
         events.append("order")
@@ -505,9 +479,7 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
         states=states,
         sink=sink,
         dispatch=dispatch,
-        observer=observe,
         reconciler=reconcile,
-        calibrator=calibrate,
         orderer=order,
         panel_source=panel_source,
     )
@@ -527,7 +499,6 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
                 session=session,
                 origin=origin,
                 scope=Scope.LOCAL,
-                calibration_partitions=("global",),
                 inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
             )
         )
@@ -545,24 +516,19 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     assert dispatch.batch_sizes == [1, 1, 1, 1]
     assert panel_source.loads == 1
     assert events == [
-        "observe",
         "fit",
         "load",
         "predict",
         "reconcile",
-        "calibrate",
         "order",
-        "observe",
         "fit",
         "load",
         "predict",
         "reconcile",
-        "calibrate",
         "order",
     ]
-    assert calibration_inputs == [None, b"observed:5.0"]
-    assert states.loads == 2
-    assert states.states[(session, "global")] == b"observed:5.0"
+    assert states.snapshots == 3
+    assert states.states == {}
     assert len(artifacts.artifacts) == 2
     assert len(sink.forecasts) == 4
     assert sink.forecasts[0].actual_value == 5.0
@@ -681,14 +647,16 @@ def test_forecast_batch_refuses_partially_issued_native_quantiles() -> None:
     frame[quantile] = frame[POINT_FORECAST]
     keys = tuple(predicted.issuances)
     issuances = {key: {} for key in keys}
-    descriptor = replace(
-        _policy_descriptor(),
+    descriptor = GuaranteeDescriptor(
         type=GuaranteeType(
             claim=GuaranteeClaim.NONE,
             currency=None,
             declared_slack=None,
         ),
         level=0.5,
+        scored_series=ScoredSeries.DEMAND_HONEST,
+        window=EmissionScope.PER_STEP,
+        scope=DecisionScope(DecisionScopeKind.PER_DECISION_NODE, None),
     )
     issuances[keys[0]] = {
         (quantile,): ForecastIssuance(
@@ -829,7 +797,15 @@ def test_unconfigured_stages_are_exact_identities() -> None:
         forecasts=forecasts,
     )
     assert engine.reconcile(forecasts) is forecasts
-    assert engine.calibrate(forecasts, session=session).forecasts is forecasts
+    observation = engine.observe(pd.Timestamp("2026-01-05"), session=session)
+    assert (
+        engine.calibrate(
+            forecasts,
+            session=session,
+            observation=observation,
+        ).forecasts
+        is forecasts
+    )
     assert engine.order(order_request) is None
 
 
@@ -917,43 +893,6 @@ def test_reconcile_cannot_remove_or_change_predicted_row_keys() -> None:
         engine.reconcile(forecasts)
 
 
-def test_calibrate_cannot_change_forecast_row_keys_before_commit() -> None:
-    panel = _panel()
-    session = _session(with_decision=True)
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
-
-    def change_horizon(
-        forecasts: ForecastBatch,
-        _prior: Mapping[str, bytes | None],
-    ) -> CalibrationResult:
-        frame = forecasts.frame
-        frame.loc[frame.index[-1], HORIZON_STEP] = 3
-        frame.loc[frame.index[-1], TARGET_TIMESTAMP] = CALENDAR.advance(
-            pd.Timestamp(frame.loc[frame.index[-1], ORIGIN]),
-            2,
-        )
-        return CalibrationResult(ForecastBatch(frame, calendar=forecasts.calendar))
-
-    engine = _engine(
-        panel=panel,
-        events=[],
-        artifacts=InMemoryArtifactStore(),
-        states=InMemoryCalibrationStateStore(),
-        sink=sink,
-        dispatch=RecordingDispatch(),
-        calibrator=change_horizon,
-    )
-    origin = pd.Timestamp("2026-01-05")
-    forecasts = engine.predict(
-        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
-    )
-
-    with pytest.raises(EngineError, match="calibrator changed forecast row keys"):
-        engine.calibrate(forecasts, session=session)
-
-    assert sink.forecasts == sink.orders == ()
-
-
 def test_forecast_batch_provenance_can_only_be_bound_by_an_engine() -> None:
     panel = _panel()
     session = _session()
@@ -1028,379 +967,6 @@ def test_commit_materializes_fractional_negative_and_empty_proposals(
     )
 
 
-def _policy_descriptor() -> GuaranteeDescriptor:
-    return GuaranteeDescriptor(
-        type=GuaranteeType(
-            claim=GuaranteeClaim.ONE_SIDED_COVERAGE,
-            currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
-            declared_slack=None,
-        ),
-        level=0.8,
-        scored_series=ScoredSeries.DEMAND_HONEST,
-        window=EmissionScope.PER_STEP,
-        scope=DecisionScope(
-            kind=DecisionScopeKind.PER_DECISION_NODE,
-            class_system_name=None,
-        ),
-    )
-
-
-def _policy_calibrator(
-    forecasts: ForecastBatch,
-    _prior: Mapping[str, bytes | None],
-) -> CalibrationResult:
-    frame = forecasts.frame
-    lower, upper = interval_columns(0.8)
-    frame[lower] = pd.Series([0.0, 0.0], dtype="float64")
-    frame[upper] = frame[HORIZON_STEP].map({1: 1.2, 2: 2.0}).astype("float64")
-    descriptor = _policy_descriptor()
-    issuance = ForecastIssuance(
-        descriptor=descriptor,
-        guaranteed_side=GuaranteedSide.UPPER,
-        calibration_ready=True,
-        bounds_finite=True,
-        bounds_null_reason=None,
-    )
-    support_issuance = ForecastIssuance(
-        descriptor=replace(
-            descriptor,
-            type=GuaranteeType(
-                claim=GuaranteeClaim.NONE,
-                currency=None,
-                declared_slack=None,
-            ),
-        ),
-        guaranteed_side=None,
-        calibration_ready=False,
-        bounds_finite=True,
-        bounds_null_reason=None,
-    )
-    issuances = {
-        (
-            str(row.series_key),
-            pd.Timestamp(row.origin),
-            int(row.horizon_step),
-            str(row.model_name),
-        ): {(lower,): support_issuance, (upper,): issuance}
-        for row in frame.itertuples(index=False)
-    }
-    return CalibrationResult(
-        ForecastBatch(frame, calendar=CALENDAR, issuances=issuances),
-    )
-
-
-def test_decision_layer_is_additive_to_forecasts_and_calibration_state() -> None:
-    panel = _panel()
-    enabled_session = _session(
-        with_decision=True,
-        ordering_policy={"name": "rs", "coverage": 0.8},
-        conformal_config={"coverage": 0.8, "protection_period": 2},
-    )
-    disabled_session = _session(horizon=TIMING.protection_period)
-    origin = pd.Timestamp("2026-01-05")
-    positions = {"a": InventoryPosition(0.0, 0.0, 0.0)}
-
-    def calibrator(
-        *,
-        emit_decision_bound: bool,
-    ) -> Callable[[ForecastBatch, Mapping[str, bytes | None]], CalibrationResult]:
-        def calibrate(
-            forecasts: ForecastBatch,
-            prior: Mapping[str, bytes | None],
-        ) -> CalibrationResult:
-            assert prior == {"global": None}
-            point_bytes = (
-                forecasts.frame[POINT_FORECAST].to_numpy(dtype="float64", copy=True).tobytes()
-            )
-            bounded = (
-                _policy_calibrator(forecasts, prior).forecasts if emit_decision_bound else forecasts
-            )
-            return CalibrationResult(bounded, {"global": point_bytes})
-
-        return calibrate
-
-    def exercise(
-        session: SessionIdentity,
-        *,
-        emit_decision_bound: bool,
-        orderer: ConfiguredPolicyOrderer | None,
-    ) -> tuple[OriginResult, bytes | None, Engine, InMemoryLedgerSink]:
-        states = InMemoryCalibrationStateStore()
-        sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
-        engine = _engine(
-            panel=panel,
-            events=[],
-            artifacts=InMemoryArtifactStore(),
-            states=states,
-            sink=sink,
-            dispatch=RecordingDispatch(),
-            calibrator=calibrator(emit_decision_bound=emit_decision_bound),
-            orderer=orderer,
-        )
-        result = Spine(engine).run_origin(
-            OriginRequest(
-                session=session,
-                origin=origin,
-                scope=Scope.LOCAL,
-                calibration_partitions=("global",),
-                inventory_positions=positions,
-            )
-        )
-        return result, states.load(session, "global"), engine, sink
-
-    enabled = exercise(
-        enabled_session,
-        emit_decision_bound=True,
-        orderer=ConfiguredPolicyOrderer(),
-    )
-    disabled = exercise(
-        disabled_session,
-        emit_decision_bound=False,
-        orderer=None,
-    )
-    enabled_result, enabled_state, enabled_engine, _enabled_sink = enabled
-    disabled_result, disabled_state, disabled_engine, disabled_sink = disabled
-    enabled_points = enabled_result.forecasts.frame[POINT_FORECAST].to_numpy(
-        dtype="float64",
-        copy=True,
-    )
-    disabled_points = disabled_result.forecasts.frame[POINT_FORECAST].to_numpy(
-        dtype="float64",
-        copy=True,
-    )
-
-    assert enabled_points.tobytes() == disabled_points.tobytes()
-    assert enabled_state == disabled_state == enabled_points.tobytes()
-    enabled_decisions = enabled_engine.order(
-        OrderRequest(
-            session=enabled_session,
-            origin=origin,
-            forecasts=enabled_result.forecasts,
-            inventory_positions=positions,
-        )
-    )
-    disabled_decisions = disabled_engine.order(
-        OrderRequest(
-            session=disabled_session,
-            origin=origin,
-            forecasts=disabled_result.forecasts,
-            inventory_positions=positions,
-        )
-    )
-    assert enabled_decisions is not None
-    assert enabled_decisions.proposals[0].evidence is not None
-    assert enabled_result.orders
-    assert disabled_decisions is None
-    assert all(not bounds for bounds in disabled_result.forecasts.issuances.values())
-    assert all(column not in disabled_result.forecasts.frame for column in interval_columns(0.8))
-    assert disabled_result.orders == ()
-    assert disabled_sink.orders == ()
-
-
-@pytest.mark.parametrize(
-    ("target_cap", "expected_target", "expected_quantity", "bound", "expected_claim"),
-    [
-        (3.0, 3.0, 3.0, True, GuaranteeClaim.NONE),
-        (4.0, 3.2, 4.0, False, GuaranteeClaim.ONE_SIDED_COVERAGE),
-    ],
-)
-def test_configured_policy_orderer_persists_policy_evidence_through_commit(
-    target_cap: float,
-    expected_target: float,
-    expected_quantity: float,
-    bound: bool,
-    expected_claim: GuaranteeClaim,
-) -> None:
-    panel = _panel()
-    session = _session(
-        with_decision=True,
-        ordering_policy={"name": "rs", "coverage": 0.8, "target_cap": target_cap},
-        conformal_config={"coverage": 0.8, "protection_period": 2},
-    )
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
-    engine = _engine(
-        panel=panel,
-        events=[],
-        artifacts=InMemoryArtifactStore(),
-        states=InMemoryCalibrationStateStore(),
-        sink=sink,
-        dispatch=RecordingDispatch(),
-        calibrator=_policy_calibrator,
-        orderer=ConfiguredPolicyOrderer(),
-    )
-    origin = pd.Timestamp("2026-01-05")
-    origin_request = OriginRequest(
-        session=session,
-        origin=origin,
-        scope=Scope.LOCAL,
-        inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
-    )
-    observation = engine.observe(origin, session=session)
-    predicted = engine.predict(engine.fit(origin_request))
-    calibrated = engine.calibrate(
-        engine.reconcile(predicted),
-        session=session,
-        observation=observation,
-    )
-    decisions = engine.order(
-        OrderRequest(
-            session=session,
-            origin=origin,
-            forecasts=calibrated.forecasts,
-            inventory_positions=origin_request.inventory_positions,
-        )
-    )
-
-    assert decisions is not None
-    assert decisions.proposals[0].quantity == pytest.approx(expected_target)
-    evidence = decisions.proposals[0].evidence
-    assert evidence is not None
-    assert evidence.raw_target == pytest.approx(3.2)
-    assert evidence.target == pytest.approx(expected_target)
-    assert evidence.source_descriptor == _policy_descriptor()
-    assert evidence.effective_descriptor.type.claim is expected_claim
-    assert [(binding.name, binding.value, binding.bound) for binding in evidence.bindings] == [
-        ("target_cap", target_cap, bound)
-    ]
-
-    committed = engine.commit(
-        CommitRequest(
-            session=session,
-            origin=origin,
-            observation=observation,
-            calibration=calibrated,
-            inventory_positions=origin_request.inventory_positions,
-            decisions=decisions,
-        )
-    )
-
-    assert isinstance(committed, CommitResult)
-    assert committed.orders[0].quantity == expected_quantity
-    assert committed.orders[0].evidence is evidence
-    assert sink.orders[0].quantity == expected_quantity
-    assert sink.orders[0].evidence is evidence
-
-
-def test_configured_newsvendor_consumes_split_interval_through_commit() -> None:
-    panel = _panel()
-    session = _session(
-        with_decision=True,
-        ordering_policy={"name": "newsvendor", "coverage": 0.8},
-        conformal_config={"coverage": 0.8, "protection_period": 2},
-    )
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
-    engine = _engine(
-        panel=panel,
-        events=[],
-        artifacts=InMemoryArtifactStore(),
-        states=InMemoryCalibrationStateStore(),
-        sink=sink,
-        dispatch=RecordingDispatch(),
-        calibrator=_policy_calibrator,
-        orderer=ConfiguredPolicyOrderer(),
-    )
-
-    result = Spine(engine).run_origin(
-        OriginRequest(
-            session=session,
-            origin=pd.Timestamp("2026-01-05"),
-            scope=Scope.LOCAL,
-            inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
-        )
-    )
-
-    assert result.orders == sink.orders
-    assert result.orders[0].quantity == 1.0
-    evidence = result.orders[0].evidence
-    assert evidence is not None
-    assert evidence.raw_target == pytest.approx(0.6)
-    assert evidence.source_columns == interval_columns(0.8)
-    assert evidence.source_descriptor == _policy_descriptor()
-
-
-def test_incomplete_interval_provenance_refuses_before_partial_origin() -> None:
-    series_keys = ("a", "b")
-    panel = _panel(series_keys=series_keys)
-    session = _session(
-        with_decision=True,
-        series_keys=series_keys,
-        ordering_policy={"name": "rs", "coverage": 0.8},
-        conformal_config={"coverage": 0.8, "protection_period": 2},
-    )
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
-
-    def missing_provenance(
-        forecasts: ForecastBatch,
-        _prior: Mapping[str, bytes | None],
-    ) -> CalibrationResult:
-        frame = forecasts.frame
-        lower, upper = interval_columns(0.8)
-        frame[lower] = pd.Series(0.0, index=frame.index, dtype="float64")
-        frame[upper] = frame[HORIZON_STEP].map({1: 1.2, 2: 2.0}).astype("float64")
-        descriptor = _policy_descriptor()
-        issuance = ForecastIssuance(
-            descriptor=descriptor,
-            guaranteed_side=GuaranteedSide.UPPER,
-            calibration_ready=True,
-            bounds_finite=True,
-            bounds_null_reason=None,
-        )
-        support_issuance = ForecastIssuance(
-            descriptor=replace(
-                descriptor,
-                type=GuaranteeType(
-                    claim=GuaranteeClaim.NONE,
-                    currency=None,
-                    declared_slack=None,
-                ),
-            ),
-            guaranteed_side=None,
-            calibration_ready=False,
-            bounds_finite=True,
-            bounds_null_reason=None,
-        )
-        issuances = {
-            key: ({(lower,): support_issuance, (upper,): issuance} if key[0] == "a" else {})
-            for key in forecasts.issuances
-        }
-        return CalibrationResult(
-            ForecastBatch(frame, calendar=CALENDAR, issuances=issuances),
-        )
-
-    spine = Spine(
-        _engine(
-            panel=panel,
-            events=[],
-            artifacts=InMemoryArtifactStore(),
-            states=InMemoryCalibrationStateStore(),
-            sink=sink,
-            dispatch=RecordingDispatch(),
-            calibrator=missing_provenance,
-            orderer=ConfiguredPolicyOrderer(),
-        )
-    )
-
-    with pytest.raises(
-        PhaseError,
-        match="Calibrate.*interval columns require explicit issuance metadata",
-    ) as failure:
-        spine.run_origin(
-            OriginRequest(
-                session=session,
-                origin=pd.Timestamp("2026-01-05"),
-                scope=Scope.LOCAL,
-                inventory_positions={
-                    series_key: InventoryPosition(0.0, 0.0, 0.0) for series_key in series_keys
-                },
-            )
-        )
-
-    assert type(failure.value.__cause__) is EngineError
-    assert sink.forecasts == ()
-    assert sink.orders == ()
-    assert sink.receipt(pd.Timestamp("2026-01-05")) is None
-
-
 def test_public_verb_results_reach_commit_without_private_order_math() -> None:
     panel = _panel()
     session = _session(with_decision=True)
@@ -1451,9 +1017,11 @@ def test_public_verb_results_reach_commit_without_private_order_math() -> None:
     foreign_forecasts = foreign_engine.predict(
         foreign_engine.fit(OriginRequest(session=foreign_session, origin=origin, scope=Scope.LOCAL))
     )
+    foreign_observation = foreign_engine.observe(origin, session=foreign_session)
     foreign_calibration = foreign_engine.calibrate(
         foreign_forecasts,
         session=foreign_session,
+        observation=foreign_observation,
     )
     with pytest.raises(EngineError, match="calibration must match"):
         CommitRequest(
@@ -1756,58 +1324,6 @@ def test_ordering_refuses_a_missing_configured_decision_series_before_policy() -
 
     assert calls == []
     assert sink.forecasts == sink.orders == ()
-
-
-def test_calibrate_snapshots_callback_subclasses_before_validating_keys() -> None:
-    panel = _panel()
-    session = _session(with_decision=True)
-
-    def flip_forecasts_after_validation(
-        forecasts: ForecastBatch,
-        _prior: Mapping[str, bytes | None],
-    ) -> CalibrationResult:
-        malformed_frame = forecasts.frame
-        malformed_frame.loc[malformed_frame.index[-1], HORIZON_STEP] = 3
-        malformed_frame.loc[malformed_frame.index[-1], TARGET_TIMESTAMP] = CALENDAR.advance(
-            pd.Timestamp(malformed_frame.loc[malformed_frame.index[-1], ORIGIN]),
-            2,
-        )
-        malformed = ForecastBatch(malformed_frame, calendar=forecasts.calendar)
-
-        class FlippingCalibrationResult(CalibrationResult):
-            armed = False
-            reads = 0
-
-            def __getattribute__(self, name: str) -> Any:
-                if name == "forecasts" and type(self).armed:
-                    type(self).reads += 1
-                    if type(self).reads > 2:
-                        return malformed
-                return super().__getattribute__(name)
-
-        result = FlippingCalibrationResult(forecasts)
-        FlippingCalibrationResult.armed = True
-        return result
-
-    engine = _engine(
-        panel=panel,
-        events=[],
-        artifacts=InMemoryArtifactStore(),
-        states=InMemoryCalibrationStateStore(),
-        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
-        dispatch=RecordingDispatch(),
-        calibrator=flip_forecasts_after_validation,
-    )
-    origin = pd.Timestamp("2026-01-05")
-    forecasts = engine.predict(
-        engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL))
-    )
-
-    result = engine.calibrate(forecasts, session=session)
-
-    assert type(result) is CalibrationResult
-    assert type(result.forecasts) is ForecastBatch
-    assert result.forecasts.frame[HORIZON_STEP].tolist() == [1, 2]
 
 
 def test_ordering_refuses_an_incomplete_engine_issued_horizon_before_policy() -> None:
@@ -2190,7 +1706,13 @@ def test_fit_artifact_failure_is_retryable_before_any_origin_commit() -> None:
 @pytest.mark.parametrize("failing_port", ["state", "ledger"])
 def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> None:
     panel = _panel()
-    session = _session()
+    session = _session(
+        conformal_config={
+            "method": "split-per-step",
+            "coverage": 0.5,
+            "calibration_window": 10,
+        }
+    )
     artifacts = InMemoryArtifactStore()
     states = FailOnceStateStore() if failing_port == "state" else InMemoryCalibrationStateStore()
     sink = (
@@ -2198,13 +1720,6 @@ def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> Non
         if failing_port == "ledger"
         else InMemoryLedgerSink(session=session, calendar=CALENDAR)
     )
-
-    def calibrate(
-        forecasts: ForecastBatch,
-        _prior: Mapping[str, bytes | None],
-    ) -> CalibrationResult:
-        return CalibrationResult(forecasts, {"global": b"state"})
-
     engine = _engine(
         panel=panel,
         events=[],
@@ -2212,14 +1727,12 @@ def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> Non
         states=states,
         sink=sink,
         dispatch=RecordingDispatch(),
-        calibrator=calibrate,
     )
     spine = Spine(engine)
     request = OriginRequest(
         session=session,
         origin=pd.Timestamp("2026-01-05"),
         scope=Scope.LOCAL,
-        calibration_partitions=("global",),
     )
 
     with pytest.raises(PhaseError, match="Commit.*(store unavailable|response lost)"):
@@ -2233,7 +1746,7 @@ def test_commit_failure_retries_without_a_split_origin(failing_port: str) -> Non
     engine.commit(receipt)
     assert len(sink.forecasts) == 1
     assert len(artifacts.artifacts) == 1
-    assert states.load(session, "global") == b"state"
+    assert len(states.snapshot(session)) == 1
 
 
 def test_commit_repair_requires_the_ledger_journal_and_never_rolls_state_back() -> None:
@@ -2286,7 +1799,7 @@ def test_commit_repair_requires_the_ledger_journal_and_never_rolls_state_back() 
         engine.commit(mismatched)
 
     engine.commit(first)
-    assert states.load(session, "global") == b"v2"
+    assert states.snapshot(session) == {"global": b"v2"}
     assert engine.commit(second) == second
 
 

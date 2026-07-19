@@ -16,6 +16,7 @@ from newcalibre.domain import (
     Calendar,
     CostStructure,
     DecisionTiming,
+    HierarchyIndex,
     InventoryPosition,
     Panel,
     SessionIdentity,
@@ -240,6 +241,7 @@ def _engine(
             calibration_state_store=InMemoryCalibrationStateStore(),
             ledger_sink=sink,
             dispatch_backend=InProcessDispatch(),
+            hierarchy=HierarchyIndex.flat(panel.series_keys),
         ),
         sink,
     )

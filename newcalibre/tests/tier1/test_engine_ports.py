@@ -7,8 +7,11 @@ import inspect
 import pandas as pd
 import pytest
 
+from newcalibre.conformal import ForecastKey as ConformalForecastKey
+from newcalibre.conformal import ObserveAnnotation
 from newcalibre.domain import (
     ACTUAL_VALUE,
+    AVAILABILITY_BOUND,
     CENSOR_STATUS,
     HORIZON_STEP,
     MODEL_NAME,
@@ -38,6 +41,12 @@ from newcalibre.engine.ports.memory import (
     InProcessDispatch,
 )
 from newcalibre.ledger import LedgerError, OrderRow
+from newcalibre.observe import (
+    ObservationResolution,
+    ObserveCycle,
+    ObservedActual,
+    PendingObservation,
+)
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ORIGIN_DATE = pd.Timestamp("2026-01-05")
@@ -96,18 +105,11 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
     actuals = InMemoryActualsSource(
         panel,
         actuals_semantics=ActualsSemantics.DEMAND,
-    ).for_keys(
-        (
-            ("a", pd.Timestamp("2026-01-01")),
-            ("b", pd.Timestamp("2026-01-01")),
-            ("a", pd.Timestamp("2026-01-02")),
-        ),
-        before=pd.Timestamp("2026-01-02"),
+    ).reveal(before=pd.Timestamp("2026-01-02"))
+    assert tuple((record.key, record.recorded_value) for record in actuals.records) == (
+        (("a", pd.Timestamp("2026-01-01")), 1.0),
+        (("b", pd.Timestamp("2026-01-01")), 3.0),
     )
-    assert actuals == {
-        ("a", pd.Timestamp("2026-01-01")): 1.0,
-        ("b", pd.Timestamp("2026-01-01")): 3.0,
-    }
 
     artifacts = InMemoryArtifactStore()
     artifacts.save("model:a", b"one")
@@ -119,14 +121,14 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
     states = InMemoryCalibrationStateStore()
     session = _session()
     states.save(session, "series:a", b"state", origin=ORIGIN_DATE)
-    assert states.load(session, "series:a") == b"state"
+    assert states.snapshot(session) == {"series:a": b"state"}
     states.save(
         session,
         "series:a",
         b"stale",
         origin=pd.Timestamp("2026-01-04"),
     )
-    assert states.load(session, "series:a") == b"state"
+    assert states.snapshot(session) == {"series:a": b"state"}
     with pytest.raises(ValueError, match="already holds different bytes"):
         states.save(session, "series:a", b"conflict", origin=ORIGIN_DATE)
 
@@ -141,8 +143,12 @@ def test_actuals_source_requires_and_enforces_observation_semantics() -> None:
 
     censored_frame = panel.frame
     censored_frame[CENSOR_STATUS] = pd.Series(
-        ["censored", "uncensored", "uncensored"],
+        ["censored", "uncensored", "undeclared"],
         dtype="string",
+    )
+    censored_frame[AVAILABILITY_BOUND] = pd.Series(
+        [1.5, None, 3.5],
+        dtype="float64",
     )
     censored_panel = Panel.from_frame(censored_frame, calendar=CALENDAR)
 
@@ -157,6 +163,12 @@ def test_actuals_source_requires_and_enforces_observation_semantics() -> None:
         actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
     )
     assert surrogate.actuals_semantics is ActualsSemantics.CENSORED_SALES_SURROGATE
+    revealed = surrogate.reveal(before=pd.Timestamp("2026-01-03"))
+    assert [
+        record.censoring_assertion.value if record.censoring_assertion is not None else None
+        for record in revealed.records
+    ] == ["censored", "uncensored", None]
+    assert [record.availability_bound for record in revealed.records] == [1.5, None, 3.5]
 
 
 def test_engine_declares_exactly_the_six_chapter_03_ports() -> None:
@@ -239,6 +251,80 @@ def test_ledger_sink_rejects_a_misattributed_origin_without_a_partial_commit() -
 
     assert len(sink.forecasts) == 1
     assert sink.orders == ()
+
+
+def test_commit_digest_is_sensitive_to_every_observe_materialization_family() -> None:
+    session = _session()
+    origin = pd.Timestamp("2026-01-06")
+    key = ConformalForecastKey("a", ORIGIN_DATE, 1, "fixture")
+    resolution = ObservationResolution(key, ORIGIN_DATE, 2.0, None, None)
+    pending = PendingObservation(key, ORIGIN_DATE, 1.0, resolution=resolution)
+    annotation = ObserveAnnotation(key, 1.0, None, True)
+    variants = (
+        ObserveCycle(history_appends=(ObservedActual("a", ORIGIN_DATE, 2),)),
+        ObserveCycle(history_appends=(ObservedActual("a", ORIGIN_DATE, 2.0),)),
+        ObserveCycle(resolutions=(resolution,)),
+        ObserveCycle(pending_removals=(key,)),
+        ObserveCycle(pending_retentions=(pending,)),
+        ObserveCycle(annotations=(annotation,)),
+        ObserveCycle(state_updates={"state": b"value"}),
+    )
+
+    digests = {
+        OriginCommit(session=session, origin=origin, observe_cycle=cycle).digest
+        for cycle in variants
+    }
+
+    assert len(digests) == len(variants)
+
+    committed = OriginCommit(
+        session=session,
+        origin=origin,
+        observe_cycle=variants[-1],
+        state_updates={"state": b"value"},
+    )
+    receipt = CommitReceipt.from_commit(committed)
+    assert receipt.observe_cycle == committed.observe_cycle
+    assert receipt.state_updates == committed.state_updates
+    assert receipt.digest == committed.digest
+
+
+def test_full_observe_fact_retry_is_idempotent_and_conflict_preserves_history() -> None:
+    session = _session()
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    observed = ObservedActual(
+        "a",
+        pd.Timestamp("2026-01-01"),
+        1.0,
+        availability_bound=2.0,
+    )
+    commit = OriginCommit(
+        session=session,
+        origin=ORIGIN_DATE,
+        observe_cycle=ObserveCycle(history_appends=(observed,)),
+    )
+
+    first = sink.commit(commit)
+    assert sink.commit(commit) == first
+    assert sink.observed_history == (observed,)
+
+    conflict = OriginCommit(
+        session=session,
+        origin=ORIGIN_DATE,
+        observe_cycle=ObserveCycle(
+            history_appends=(
+                ObservedActual(
+                    "a",
+                    pd.Timestamp("2026-01-01"),
+                    1.0,
+                    availability_bound=3.0,
+                ),
+            )
+        ),
+    )
+    with pytest.raises(LedgerError, match="different committed write"):
+        sink.commit(conflict)
+    assert sink.observed_history == (observed,)
 
 
 def test_commit_digest_frames_state_key_and_value_boundaries() -> None:

@@ -25,6 +25,7 @@ from newcalibre.domain import (
     DecisionTiming,
     FittedValues,
     ForecastTask,
+    HierarchyIndex,
     InventoryPosition,
     Panel,
     Scope,
@@ -33,10 +34,8 @@ from newcalibre.domain import (
     target_timestamp,
 )
 from newcalibre.engine import (
-    CalibrationResult,
     CommitReceipt,
     Engine,
-    ForecastBatch,
     InMemoryActualsSource,
     InMemoryArtifactStore,
     InMemoryCalibrationStateStore,
@@ -60,7 +59,6 @@ _ORIGINS = (
 )
 _FAIL_ORIGIN = _ORIGINS[1]
 _MODEL_NAME = "tier2-seeded"
-_PARTITION = "global"
 _SERIES = ("alpha", "zeta")
 _TIMING = DecisionTiming(lead_time=2, review_period=2)
 
@@ -182,22 +180,17 @@ def _session(seed: int) -> SessionIdentity:
         calendar=_CALENDAR,
         horizon=_TIMING.protection_period,
         model_config={"backend": _MODEL_NAME, "seed": seed},
-        conformal_config={"name": "tier2-counter"},
+        conformal_config={
+            "method": "split-per-step",
+            "coverage": 0.5,
+            "calibration_window": 20,
+        },
         ordering_policy={"name": "newsvendor"},
         decision_series_keys=_SERIES,
         cost_structure=CostStructure(underage=3.0, overage=1.0, holding=0.5, shortage=4.0),
         decision_timing=_TIMING,
         stockout_rule=StockoutRule.LOST_SALES,
     )
-
-
-def _calibrate(
-    forecasts: ForecastBatch,
-    prior: Mapping[str, bytes | None],
-) -> CalibrationResult:
-    previous = prior.get(_PARTITION)
-    count = 0 if previous is None else int(previous.decode("ascii"))
-    return CalibrationResult(forecasts, {_PARTITION: str(count + 1).encode("ascii")})
 
 
 def _order(request: OrderRequest) -> tuple[OrderProposal, ...]:
@@ -232,8 +225,8 @@ def _engine(
         calibration_state_store=states,
         ledger_sink=sink,
         dispatch_backend=InProcessDispatch(),
+        hierarchy=HierarchyIndex.flat(panel.series_keys),
         adapter_resolver=SeededFixtureAdapter,
-        calibrator=_calibrate,
         orderer=_order,
     )
 
@@ -244,7 +237,6 @@ def _request(*, session: SessionIdentity) -> TimeLoopRequest:
         origins=_ORIGINS,
         settlement_end=_CALENDAR.advance(_ORIGINS[-1], _TIMING.lead_time),
         scope=Scope.GLOBAL,
-        calibration_partitions=(_PARTITION,),
         initial_inventory_positions={
             series_key: InventoryPosition(on_hand=8.0, on_order=0.0, backorders=0.0)
             for series_key in _SERIES
@@ -253,7 +245,9 @@ def _request(*, session: SessionIdentity) -> TimeLoopRequest:
     )
 
 
-def _run_uninterrupted(seed: int) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
+def _run_uninterrupted(
+    seed: int,
+) -> tuple[InMemoryLedgerSink, TimeLoopResult, InMemoryCalibrationStateStore]:
     panel = _panel()
     session = _session(seed)
     actuals = InMemoryActualsSource(
@@ -268,15 +262,15 @@ def _run_uninterrupted(seed: int) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
         ledger_sink=sink,
         request=_request(session=session),
     ).run()
-    assert states.load(session, _PARTITION) == b"3"
-    return sink, result
+    assert len(states.snapshot(session)) == 2
+    return sink, result, states
 
 
 def _run_resumed(
     seed: int,
     *,
     commit_before_failure: bool,
-) -> tuple[InMemoryLedgerSink, TimeLoopResult]:
+) -> tuple[InMemoryLedgerSink, TimeLoopResult, InMemoryCalibrationStateStore]:
     panel = _panel()
     session = _session(seed)
     actuals = InMemoryActualsSource(
@@ -313,22 +307,21 @@ def _run_resumed(
     else:
         raise AssertionError("tier-2 interruption fixture did not interrupt")
     assert (sink.receipt(_FAIL_ORIGIN) is not None) is commit_before_failure
-    assert interrupted_states.load(session, _PARTITION) == b"1"
+    assert len(interrupted_states.snapshot(session)) == 2
 
-    resumed_states = InMemoryCalibrationStateStore()
     result = TimeLoop(
         engine=_engine(
             panel=panel,
             actuals=actuals,
             sink=sink,
-            states=resumed_states,
+            states=interrupted_states,
         ),
         actuals_source=actuals,
         ledger_sink=sink,
         request=_request(session=session),
     ).run()
-    assert resumed_states.load(session, _PARTITION) == b"3"
-    return sink, result
+    assert len(interrupted_states.snapshot(session)) == 2
+    return sink, result, interrupted_states
 
 
 def _float(value: float | None) -> str | None:
@@ -394,10 +387,38 @@ def _settlement_payload(row: SettlementRecord) -> dict[str, object]:
     }
 
 
-def _ledger_bytes(sink: InMemoryLedgerSink, result: TimeLoopResult) -> bytes:
+def _ledger_bytes(
+    sink: InMemoryLedgerSink,
+    result: TimeLoopResult,
+    states: InMemoryCalibrationStateStore,
+) -> bytes:
     payload = {
+        "annotations": [
+            {
+                "advanced": value.advanced_delivered_score,
+                "cause": value.exclusion_cause,
+                "key": repr(value.forecast_key),
+                "score": _float(value.score),
+            }
+            for value in sink.observe_annotations
+        ],
+        "conformal_states": [
+            (label, value.hex()) for label, value in sorted(states.snapshot(sink.session).items())
+        ],
         "decision_origins": [_timestamp(origin) for origin in result.decision_origins],
         "forecasts": [_forecast_payload(row) for row in sink.forecasts],
+        "observed_history": [
+            {
+                "availability_bound": _float(value.availability_bound),
+                "censoring": (
+                    None if value.censoring_assertion is None else value.censoring_assertion.value
+                ),
+                "recorded_value": _float(float(value.recorded_value)),
+                "series_key": value.series_key,
+                "timestamp": _timestamp(value.timestamp),
+            }
+            for value in sink.observed_history
+        ],
         "orders": [_order_payload(row) for row in sink.orders],
         "receipts": [
             {
@@ -411,7 +432,17 @@ def _ledger_bytes(sink: InMemoryLedgerSink, result: TimeLoopResult) -> bytes:
             }
             for receipt in result.receipts
         ],
-        "schema": "newcalibre.tier2-rolling-ledger/v1",
+        "pending_observations": [
+            {
+                "actual": (
+                    None if value.resolution is None else _float(float(value.resolution.actual))
+                ),
+                "forecast_key": repr(value.forecast_key),
+                "target_timestamp": _timestamp(value.target_timestamp),
+            }
+            for value in sink.pending_observations
+        ],
+        "schema": "newcalibre.tier2-rolling-ledger/v2",
         "session": sink.session.value,
         "settlement_periods": [_timestamp(period) for period in result.settlement_periods],
         "settlements": [_settlement_payload(row) for row in sink.settlements],
@@ -444,14 +475,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Run the selected fixture and write its canonical ledger bytes."""
     args = _parse_args(argv)
     if args.mode == "uninterrupted":
-        sink, result = _run_uninterrupted(args.seed)
+        sink, result, states = _run_uninterrupted(args.seed)
     else:
-        sink, result = _run_resumed(
+        sink, result, states = _run_resumed(
             args.seed,
             commit_before_failure=args.mode == "resumed-after-commit",
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(_ledger_bytes(sink, result))
+    args.output.write_bytes(_ledger_bytes(sink, result, states))
 
 
 if __name__ == "__main__":

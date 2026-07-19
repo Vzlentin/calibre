@@ -101,6 +101,34 @@ class HierarchyIndex:
     _nodes: tuple[HierarchyNode, ...]
 
     @classmethod
+    def flat(cls, bottom_series: Iterable[str]) -> HierarchyIndex:
+        """Compile the canonical bottom-plus-total lattice for a flat panel."""
+        bottom = _canonical_bottom_series(bottom_series)
+        nodes = tuple(
+            HierarchyNode(
+                label=series_key,
+                kind=HierarchyNodeKind.BOTTOM,
+                members=(series_key,),
+            )
+            for series_key in bottom
+        ) + (
+            HierarchyNode(
+                label=TOTAL_NODE_LABEL,
+                kind=HierarchyNodeKind.TOTAL,
+                members=bottom,
+            ),
+        )
+        if TOTAL_NODE_LABEL in bottom:
+            raise HierarchyError(
+                f"hierarchy node labels collide with bottom series keys: {[TOTAL_NODE_LABEL]!r}"
+            )
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_bottom_series", bottom)
+        object.__setattr__(instance, "_attribute_names", ())
+        object.__setattr__(instance, "_nodes", nodes)
+        return instance
+
+    @classmethod
     def from_facts(
         cls,
         facts: pd.DataFrame,

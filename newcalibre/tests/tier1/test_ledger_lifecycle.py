@@ -46,7 +46,7 @@ from newcalibre.ledger import (
     Ledger,
     LedgerError,
 )
-from newcalibre.observe import PendingObservation
+from newcalibre.observe import ObservationResolution, ObserveCycle, PendingObservation
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ISSUE_ORIGIN = pd.Timestamp("2026-01-01")
@@ -370,98 +370,114 @@ def test_due_frame_does_not_materialize_future_row_extension_schemas() -> None:
     assert due[HORIZON_STEP].tolist() == [2, 1]
 
 
-def test_due_frame_and_resolution_require_an_origin_on_the_owned_calendar() -> None:
+def _resolution(row: PendingObservation, actual: float) -> ObservationResolution:
+    return ObservationResolution(
+        row.forecast_key,
+        row.target_timestamp,
+        actual,
+        None,
+        None,
+    )
+
+
+def _delivery_cycle(
+    ledger: Ledger,
+    values: dict[int, float],
+    *,
+    retain: bool = False,
+) -> ObserveCycle:
+    selected = {
+        row.forecast_key.horizon_step: row
+        for row in ledger.pending_observations
+        if row.forecast_key.horizon_step in values
+    }
+    resolutions = {step: _resolution(selected[step], actual) for step, actual in values.items()}
+    retained = []
+    for row in ledger.pending_observations:
+        resolution = resolutions.get(row.forecast_key.horizon_step)
+        if resolution is None:
+            retained.append(row)
+        elif retain:
+            retained.append(replace(row, resolution=resolution))
+    return ObserveCycle(
+        resolutions=() if retain else resolutions.values(),
+        pending_removals=() if retain else (row.forecast_key for row in selected.values()),
+        pending_retentions=retained,
+    )
+
+
+def test_due_frame_and_observe_cycle_require_an_owned_calendar_origin() -> None:
     ledger = _ledger()
     off_grid = pd.Timestamp("2026-01-03 12:00")
 
     with pytest.raises(LedgerError, match="calendar"):
         ledger.due_frame(off_grid)
     with pytest.raises(LedgerError, match="calendar"):
-        ledger.apply_resolutions({_key(1): 11.0}, origin=off_grid)
+        ledger.apply_observe_cycle(
+            _delivery_cycle(ledger, {1: 11.0}),
+            origin=off_grid,
+        )
 
     assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
 
 
-def test_keyed_subset_resolution_replaces_rows_without_reordering_or_degrading() -> None:
+def test_complete_delivery_materializes_censoring_aware_resolutions_once() -> None:
     ledger = _ledger()
     before = ledger.forecasts
-    before_values = [dict(row.values) for row in before]
 
-    # Resolve in the reverse of ledger order and intentionally omit another late row.
-    ledger.apply_resolutions(
-        {_key(1): 11.0, _key(2): 22.0},
+    ledger.apply_observe_cycle(
+        _delivery_cycle(ledger, {1: 11.0, 2: 22.0}),
         origin=pd.Timestamp("2026-01-04"),
     )
-    after = ledger.forecasts
 
-    assert [row.key for row in after] == [_key(2), _key(1), _key(3), _key(4)]
-    assert [row.actual_value for row in after] == [22.0, 11.0, None, None]
+    assert [row.key for row in ledger.forecasts] == [_key(2), _key(1), _key(3), _key(4)]
+    assert [row.actual_value for row in ledger.forecasts] == [22.0, 11.0, None, None]
     assert [row.actual_value for row in before] == [None, None, None, None]
-    assert after[0] is not before[0]
-    assert after[1] is not before[1]
-    assert after[2] is before[2]
-    assert after[3] is before[3]
-
-    for index, expected_actual in ((0, 22.0), (1, 11.0)):
-        expected = before_values[index] | {ACTUAL_VALUE: expected_actual}
-        assert dict(after[index].values) == expected
-        assert after[index].point_forecast == before[index].point_forecast
-        assert after[index].issuances == before[index].issuances
-
-    late = ledger.due_frame(pd.Timestamp("2026-01-04"))
-    assert late[HORIZON_STEP].tolist() == [3]
-    assert late[ACTUAL_VALUE].isna().all()
+    assert [value.actual for value in ledger.observation_resolutions] == [11.0, 22.0]
+    assert [value.forecast_key.horizon_step for value in ledger.pending_observations] == [3, 4]
 
 
-def test_resolution_rejects_unknown_keys_atomically() -> None:
+def test_resolved_incomplete_window_remains_pending_until_delivery() -> None:
     ledger = _ledger()
-    unknown: ForecastKey = ("missing", ISSUE_ORIGIN, 1, "seasonal")
+    ledger.apply_observe_cycle(
+        _delivery_cycle(ledger, {1: 11.0}, retain=True),
+        origin=pd.Timestamp("2026-01-03"),
+    )
 
-    with pytest.raises(LedgerError, match="unknown"):
-        ledger.apply_resolutions(
-            {_key(1): 11.0, unknown: 99.0},
-            origin=pd.Timestamp("2026-01-03"),
-        )
+    retained = next(
+        row for row in ledger.pending_observations if row.forecast_key.horizon_step == 1
+    )
+    assert retained.resolution is not None
+    assert retained.resolution.actual == 11.0
+    assert all(row.actual_value is None for row in ledger.forecasts)
+    assert ledger.observation_resolutions == ()
+
+    ledger.apply_observe_cycle(
+        _delivery_cycle(ledger, {1: 11.0, 2: 22.0}),
+        origin=pd.Timestamp("2026-01-04"),
+    )
+    assert [row.actual_value for row in ledger.forecasts] == [22.0, 11.0, None, None]
+
+
+def test_observe_cycle_rejects_unknown_pending_keys_without_effect() -> None:
+    ledger = _ledger()
+    unknown = ConformalForecastKey("missing", ISSUE_ORIGIN, 1, "seasonal")
+    cycle = ObserveCycle(
+        resolutions=(
+            ObservationResolution(
+                unknown,
+                ISSUE_ORIGIN,
+                99.0,
+                None,
+                None,
+            ),
+        ),
+        pending_removals=(unknown,),
+        pending_retentions=ledger.pending_observations,
+    )
+
+    with pytest.raises(LedgerError, match="unknown pending"):
+        ledger.apply_observe_cycle(cycle, origin=pd.Timestamp("2026-01-03"))
 
     assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
-    assert ledger.due_frame(pd.Timestamp("2026-01-05"))[HORIZON_STEP].tolist() == [2, 1, 3, 4]
-
-
-def test_resolution_rejects_already_resolved_rows_atomically() -> None:
-    ledger = _ledger()
-    ledger.apply_resolutions({_key(1): 11.0}, origin=pd.Timestamp("2026-01-03"))
-    before = ledger.forecasts
-
-    with pytest.raises(LedgerError, match="resolved"):
-        ledger.apply_resolutions(
-            {_key(2): 22.0, _key(1): 11.0},
-            origin=pd.Timestamp("2026-01-03"),
-        )
-
-    assert ledger.forecasts == before
-    assert [row.actual_value for row in ledger.forecasts] == [None, 11.0, None, None]
-
-
-def test_resolution_rejects_not_yet_due_rows_atomically() -> None:
-    ledger = _ledger()
-
-    with pytest.raises(LedgerError, match="due"):
-        ledger.apply_resolutions(
-            {_key(1): 11.0, _key(3): 33.0},
-            origin=pd.Timestamp("2026-01-03"),
-        )
-
-    assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
-
-
-@pytest.mark.parametrize("invalid", [math.nan, math.inf, -math.inf, True])
-def test_resolution_rejects_nonfinite_values_atomically(invalid: float) -> None:
-    ledger = _ledger()
-
-    with pytest.raises(LedgerError, match="finite"):
-        ledger.apply_resolutions(
-            {_key(1): 11.0, _key(2): invalid},
-            origin=pd.Timestamp("2026-01-03"),
-        )
-
-    assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
+    assert len(ledger.pending_observations) == 4

@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from newcalibre.conformal import ForecastKey as ConformalForecastKey
-from newcalibre.conformal import IssuedBoundFacts
+from newcalibre.conformal import IssuedBoundFacts, ObserveAnnotation
 from newcalibre.domain import (
     ACTUAL_VALUE,
     FRAME_KEY_COLUMNS,
@@ -42,7 +42,12 @@ from newcalibre.domain import (
     quantile_column,
     validate_forecast_frame,
 )
-from newcalibre.observe.state import PendingObservation
+from newcalibre.observe.state import (
+    ObservationResolution,
+    ObserveCycle,
+    ObservedActual,
+    PendingObservation,
+)
 
 type ForecastKey = tuple[str, pd.Timestamp, int, str]
 type BoundKey = tuple[str, ...]
@@ -767,10 +772,13 @@ class Ledger:
     """Append and expose three immutable row families for one session."""
 
     __slots__ = (
+        "_annotations",
         "_calendar",
         "_forecasts",
+        "_observed_history",
         "_orders",
         "_pending_forecasts",
+        "_resolutions",
         "_session",
         "_settlements",
     )
@@ -781,7 +789,10 @@ class Ledger:
         self._session = session
         self._calendar = calendar
         self._forecasts: dict[ForecastKey, ForecastRow] = {}
-        self._pending_forecasts: dict[ForecastKey, ForecastRow] = {}
+        self._pending_forecasts: dict[ForecastKey, PendingObservation] = {}
+        self._observed_history: dict[tuple[str, pd.Timestamp], ObservedActual] = {}
+        self._resolutions: dict[ForecastKey, ObservationResolution] = {}
+        self._annotations: dict[ForecastKey, ObserveAnnotation] = {}
         self._orders: dict[OrderKey, OrderRow] = {}
         self._settlements: dict[SettlementKey, SettlementRecord] = {}
 
@@ -801,22 +812,42 @@ class Ledger:
         return tuple(self._forecasts.values())
 
     @property
+    def observed_history(self) -> tuple[ObservedActual, ...]:
+        """Return a fresh observed-actual snapshot in durable append order."""
+        return tuple(
+            ObservedActual(
+                value.series_key,
+                value.timestamp,
+                value.recorded_value,
+                value.censoring_assertion,
+                value.availability_bound,
+            )
+            for value in self._observed_history.values()
+        )
+
+    @property
     def pending_observations(self) -> tuple[PendingObservation, ...]:
         """Return a fresh typed snapshot of pending rows in append order."""
         return tuple(
             PendingObservation(
-                forecast_key=ConformalForecastKey(
-                    row.series_key,
-                    row.origin,
-                    row.horizon_step,
-                    row.model_name,
-                ),
-                target_timestamp=row.target_timestamp,
-                point_forecast=row.point_forecast,
-                issued=row.observation_issuance,
+                forecast_key=value.forecast_key,
+                target_timestamp=value.target_timestamp,
+                point_forecast=value.point_forecast,
+                issued=value.issued,
+                resolution=value.resolution,
             )
-            for row in self._pending_forecasts.values()
+            for value in self._pending_forecasts.values()
         )
+
+    @property
+    def observation_resolutions(self) -> tuple[ObservationResolution, ...]:
+        """Return delivered censoring-aware row resolutions in commit order."""
+        return tuple(self._resolutions.values())
+
+    @property
+    def observe_annotations(self) -> tuple[ObserveAnnotation, ...]:
+        """Return durable observe annotations in commit order."""
+        return tuple(self._annotations.values())
 
     @property
     def orders(self) -> tuple[OrderRow, ...]:
@@ -897,7 +928,23 @@ class Ledger:
                 )
 
         self._forecasts.update(staged_rows)
-        self._pending_forecasts.update(staged_rows)
+        self._pending_forecasts.update(
+            (
+                key,
+                PendingObservation(
+                    forecast_key=ConformalForecastKey(
+                        row.series_key,
+                        row.origin,
+                        row.horizon_step,
+                        row.model_name,
+                    ),
+                    target_timestamp=row.target_timestamp,
+                    point_forecast=row.point_forecast,
+                    issued=row.observation_issuance,
+                ),
+            )
+            for key, row in staged_rows.items()
+        )
 
     def append_orders(self, rows: Iterable[OrderRow]) -> None:
         """Validate one input chunk once, then append it atomically."""
@@ -938,9 +985,10 @@ class Ledger:
         """Return a fresh append-ordered snapshot of pending rows due before origin."""
         self._require_calendar_origin(origin)
         due_values: list[dict[str, object]] = []
-        for row in self._pending_forecasts.values():
-            if row.target_timestamp < origin:
-                due_values.append(dict(row._values))
+        for pending in self._pending_forecasts.values():
+            if pending.target_timestamp < origin:
+                key = _ledger_forecast_key(pending.forecast_key)
+                due_values.append(dict(self._forecasts[key]._values))
         if not due_values:
             return _empty_forecast_frame()
 
@@ -950,33 +998,129 @@ class Ledger:
         due_frame[ACTUAL_VALUE] = due_frame[ACTUAL_VALUE].astype("float64")
         return due_frame
 
-    def apply_resolutions(
+    def apply_observe_cycle(self, cycle: ObserveCycle, *, origin: pd.Timestamp) -> None:
+        """Validate then atomically materialize one complete observe-cycle delta."""
+        staged = self._validated_observe_cycle(cycle, origin=origin)
+        history, pending, resolved_rows, resolutions, annotations = staged
+        self._observed_history.update(history)
+        self._pending_forecasts = pending
+        self._forecasts.update(resolved_rows)
+        self._resolutions.update(resolutions)
+        self._annotations.update(annotations)
+
+    def validate_observe_cycle(self, cycle: ObserveCycle, *, origin: pd.Timestamp) -> None:
+        """Validate one observe cycle without changing any ledger-owned fact."""
+        self._validated_observe_cycle(cycle, origin=origin)
+
+    def _validated_observe_cycle(
         self,
-        resolutions: Mapping[ForecastKey, object],
+        cycle: ObserveCycle,
         *,
         origin: pd.Timestamp,
-    ) -> None:
-        """Atomically resolve a due subset once without changing append order."""
+    ) -> tuple[
+        dict[tuple[str, pd.Timestamp], ObservedActual],
+        dict[ForecastKey, PendingObservation],
+        dict[ForecastKey, ForecastRow],
+        dict[ForecastKey, ObservationResolution],
+        dict[ForecastKey, ObserveAnnotation],
+    ]:
         self._require_calendar_origin(origin)
-        if not isinstance(resolutions, Mapping):
-            raise LedgerError("forecast resolutions must be keyed by forecast row key")
+        if not isinstance(cycle, ObserveCycle):
+            raise LedgerError("ledger observation requires an ObserveCycle")
 
-        staged: dict[ForecastKey, ForecastRow] = {}
-        for key, actual_value in resolutions.items():
-            try:
-                row = self._forecasts[key]
-            except (KeyError, TypeError) as error:
-                raise LedgerError(f"unknown forecast key: {key!r}") from error
-            if row.actual_value is not None:
-                raise LedgerError(f"forecast row is already resolved: {key!r}")
-            if row.target_timestamp >= origin:
+        history = dict(self._observed_history)
+        for value in cycle.history_appends:
+            if value.timestamp >= origin:
+                raise LedgerError(f"observed actual is not admissible at origin: {value.key!r}")
+            previous = history.get(value.key)
+            if previous is not None:
+                if previous.recorded_fact != value.recorded_fact:
+                    raise LedgerError(f"conflicting observed actual: {value.key!r}")
+                raise LedgerError(f"observed actual is already recorded: {value.key!r}")
+            history[value.key] = value
+
+        current = dict(self._pending_forecasts)
+        removal_keys = {_ledger_forecast_key(key) for key in cycle.pending_removals}
+        unknown_removal = next((key for key in removal_keys if key not in current), None)
+        if unknown_removal is not None:
+            raise LedgerError(f"unknown pending forecast key: {unknown_removal!r}")
+        retention_by_key = {
+            _ledger_forecast_key(value.forecast_key): value for value in cycle.pending_retentions
+        }
+        expected_retentions = set(current) - removal_keys
+        if set(retention_by_key) != expected_retentions:
+            missing = sorted(expected_retentions - set(retention_by_key), key=repr)
+            extra = sorted(set(retention_by_key) - expected_retentions, key=repr)
+            raise LedgerError(
+                "observe pending retentions must exactly cover non-removed rows; "
+                f"missing={missing!r}, extra={extra!r}"
+            )
+        pending: dict[ForecastKey, PendingObservation] = {}
+        for key, retained in retention_by_key.items():
+            prior = current[key]
+            if (
+                retained.forecast_key != prior.forecast_key
+                or retained.target_timestamp != prior.target_timestamp
+                or retained.point_forecast != prior.point_forecast
+                or retained.issued != prior.issued
+            ):
+                raise LedgerError(f"pending retention changed issued row facts: {key!r}")
+            if prior.resolution is not None and retained.resolution != prior.resolution:
+                raise LedgerError(f"pending retention changed a resolved row: {key!r}")
+            if retained.resolution is not None and retained.target_timestamp >= origin:
+                raise LedgerError(f"pending retention resolved a row that is not due: {key!r}")
+            pending[key] = retained
+
+        resolution_by_key = {
+            _ledger_forecast_key(value.forecast_key): value for value in cycle.resolutions
+        }
+        if set(resolution_by_key) != removal_keys:
+            raise LedgerError("observe resolutions must exactly match pending removals")
+        resolved_rows: dict[ForecastKey, ForecastRow] = {}
+        for key, resolution in resolution_by_key.items():
+            prior = current[key]
+            if prior.target_timestamp >= origin:
                 raise LedgerError(f"forecast row is not yet due: {key!r}")
-            normalized_actual = _finite_real(actual_value, name="resolved actual value")
-            staged[key] = row._with_actual_value(normalized_actual)
+            if resolution.target_timestamp != prior.target_timestamp:
+                raise LedgerError(f"resolution target does not match pending row: {key!r}")
+            if prior.resolution is not None and prior.resolution != resolution:
+                raise LedgerError(f"resolution conflicts with retained pending state: {key!r}")
+            row = self._forecasts[key]
+            if row.actual_value is not None or key in self._resolutions:
+                raise LedgerError(f"forecast row is already resolved: {key!r}")
+            resolved_rows[key] = row._with_actual_value(
+                _finite_real(resolution.actual, name="resolved actual value")
+            )
 
-        self._forecasts.update(staged)
-        for key in staged:
-            del self._pending_forecasts[key]
+        delivered_sequence = tuple(
+            _ledger_forecast_key(observation.forecast_key)
+            for delivery in cycle.deliveries
+            for observation in delivery.observations
+        )
+        delivered_keys = set(delivered_sequence)
+        if len(delivered_keys) != len(delivered_sequence):
+            raise LedgerError("observe deliveries contain a duplicate forecast key")
+        if delivered_keys and delivered_keys != removal_keys:
+            raise LedgerError("observe deliveries must exactly match pending removals")
+        annotation_by_key = {
+            _ledger_forecast_key(value.forecast_key): value for value in cycle.annotations
+        }
+        if set(annotation_by_key) != delivered_keys:
+            raise LedgerError("observe annotations must exactly match delivered rows")
+        duplicate_annotation = next(
+            (key for key in annotation_by_key if key in self._annotations),
+            None,
+        )
+        if duplicate_annotation is not None:
+            raise LedgerError(f"duplicate observe annotation key: {duplicate_annotation!r}")
+
+        return (
+            history,
+            pending,
+            resolved_rows,
+            resolution_by_key,
+            annotation_by_key,
+        )
 
     def coverage_report(self, registry: PredicateRegistry) -> CoverageReport:
         """Score each forecast-bound fact once under its registered descriptor pair."""
@@ -1175,6 +1319,15 @@ def _forecast_key(values: Mapping[str, object]) -> ForecastKey:
     return cast(ForecastKey, tuple(values[column] for column in FRAME_KEY_COLUMNS))
 
 
+def _ledger_forecast_key(value: ConformalForecastKey) -> ForecastKey:
+    return (
+        value.series_key,
+        value.origin,
+        value.horizon_step,
+        value.model_name,
+    )
+
+
 def _observation_issuance_snapshot(
     values: Mapping[ForecastKey, IssuedBoundFacts] | None,
     *,
@@ -1243,7 +1396,7 @@ def _validate_row_issuances(
         raise LedgerError("forecast bound issuance keys must be hashable") from error
 
     group_by_column = {column: group for group in bound_groups for column in group}
-    required_columns = {column for group in bound_groups if len(group) == 2 for column in group}
+    interval_groups = tuple(group for group in bound_groups if len(group) == 2)
     accounted_columns: set[str] = set()
     for bound_key, issuance in snapshot.items():
         _validate_bound_key(bound_key, group_by_column=group_by_column)
@@ -1265,10 +1418,8 @@ def _validate_row_issuances(
                 "issued bounds finiteness/nullability does not match the forecast payload"
             )
 
-    if not required_columns.issubset(accounted_columns):
-        raise LedgerError(
-            "forecast bound issuance keys must exactly account for every interval column"
-        )
+    if any(not accounted_columns.intersection(group) for group in interval_groups):
+        raise LedgerError("forecast bound issuance keys must account for every interval group")
     return snapshot
 
 
