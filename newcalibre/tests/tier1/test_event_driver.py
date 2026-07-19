@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pandas as pd
 import pytest
@@ -44,6 +46,7 @@ from newcalibre.engine import (
     InProcessDispatch,
     OrderProposal,
     OriginEvent,
+    PhaseError,
 )
 from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
 from newcalibre.observe import ActualRecord, ActualsSubmission
@@ -170,7 +173,13 @@ def _decision_session(calendar: Calendar) -> SessionIdentity:
     )
 
 
-def _runtime() -> tuple[
+def _runtime(
+    *,
+    sink_factory: Callable[
+        [SessionIdentity, Calendar],
+        InMemoryLedgerSink,
+    ] = lambda session, calendar: InMemoryLedgerSink(session=session, calendar=calendar),
+) -> tuple[
     EventDriver,
     SessionIdentity,
     InMemoryLedgerSink,
@@ -190,7 +199,7 @@ def _runtime() -> tuple[
         calendar=calendar,
     )
     session = _decision_session(panel.calendar)
-    sink = InMemoryLedgerSink(session=session, calendar=panel.calendar)
+    sink = sink_factory(session, panel.calendar)
     effects: list[str] = []
     order_origins: list[pd.Timestamp] = []
 
@@ -243,6 +252,83 @@ def _actuals(session: SessionIdentity, value: str, demand: float) -> ActualsEven
         session,
         ActualsSubmission((ActualRecord("a", pd.Timestamp(value), demand),)),
     )
+
+
+class _InterleavingLedgerSink(InMemoryLedgerSink):
+    """Hold both origin writes at commit and publish one selected origin first."""
+
+    def __init__(
+        self,
+        *,
+        session: SessionIdentity,
+        calendar: Calendar,
+        first_origin: pd.Timestamp,
+    ) -> None:
+        super().__init__(session=session, calendar=calendar)
+        self._first_origin = first_origin
+        self._origin_writes_ready = Barrier(2)
+        self._first_origin_published = Barrier(2)
+
+    def commit(self, write):
+        if not write.forecasts:
+            return super().commit(write)
+        self._origin_writes_ready.wait(timeout=5)
+        if write.origin == self._first_origin:
+            try:
+                return super().commit(write)
+            finally:
+                self._first_origin_published.wait(timeout=5)
+        self._first_origin_published.wait(timeout=5)
+        return super().commit(write)
+
+
+@pytest.mark.parametrize(
+    ("first_origin", "failure"),
+    [
+        (pd.Timestamp("2026-01-05"), "strictly monotonically"),
+        (pd.Timestamp("2026-01-04"), "durable inventory state"),
+    ],
+)
+def test_concurrent_origin_admission_and_inventory_validation_are_atomic(
+    first_origin: pd.Timestamp,
+    failure: str,
+) -> None:
+    driver, session, sink, _effects, _order_origins = _runtime(
+        sink_factory=lambda session, calendar: _InterleavingLedgerSink(
+            session=session,
+            calendar=calendar,
+            first_origin=first_origin,
+        )
+    )
+    origins = {
+        pd.Timestamp("2026-01-04"): _origin(
+            session,
+            "2026-01-04",
+            positions={"a": InventoryPosition(10.0, 0.0, 0.0)},
+        ),
+        pd.Timestamp("2026-01-05"): _origin(
+            session,
+            "2026-01-05",
+            positions={"a": InventoryPosition(20.0, 0.0, 0.0)},
+        ),
+    }
+    losing_origin = next(origin for origin in origins if origin != first_origin)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            origin: executor.submit(driver.handle, event) for origin, event in origins.items()
+        }
+        winner = futures[first_origin].result(timeout=10)
+        with pytest.raises(PhaseError, match=failure):
+            futures[losing_origin].result(timeout=10)
+
+    assert winner.receipt == sink.receipt(first_origin)
+    assert sink.latest_origin == first_origin
+    assert {row.origin for row in sink.forecasts} == {first_origin}
+    assert {row.origin for row in sink.orders} == {first_origin}
+    expected_on_hand = 10.0 if first_origin.day == 4 else 20.0
+    snapshot = sink.settlement_snapshot((pd.Timestamp("2026-01-06"),))
+    assert snapshot.current_positions["a"].on_hand == expected_on_hand
 
 
 def test_driver_retries_conflicts_and_settles_only_contiguous_eligible_periods() -> None:
@@ -306,6 +392,46 @@ def test_driver_retries_conflicts_and_settles_only_contiguous_eligible_periods()
     )
     assert len({record.key for record in sink.settlements}) == 3
     assert sum(record.realized_cost for record in sink.settlements) == pytest.approx(8.5)
+
+
+def test_multi_record_actual_retry_is_order_independent_and_conflicts_atomically() -> None:
+    driver, session, sink, _effects, _order_origins = _runtime()
+    driver.handle(
+        _origin(
+            session,
+            "2026-01-04",
+            positions={"a": InventoryPosition(10.0, 0.0, 0.0)},
+        )
+    )
+    first_record = ActualRecord("a", pd.Timestamp("2026-01-04"), 2.0)
+    second_record = ActualRecord("a", pd.Timestamp("2026-01-05"), 3.0)
+    event = ActualsEvent(session, ActualsSubmission((first_record, second_record)))
+
+    first = driver.handle(event)
+    durable = (sink.observed_history, sink.settlements, sink.pending_observations)
+    retry = driver.handle(ActualsEvent(session, ActualsSubmission((second_record, first_record))))
+
+    assert retry.receipt == first.receipt
+    assert retry == first
+    assert (sink.observed_history, sink.settlements, sink.pending_observations) == durable
+    assert tuple(value.key for value in sink.observed_history) == (
+        first_record.key,
+        second_record.key,
+    )
+    assert first.settlement_periods == (first_record.timestamp,)
+
+    conflict = ActualsEvent(
+        session,
+        ActualsSubmission(
+            (
+                first_record,
+                ActualRecord("a", second_record.timestamp, 99.0),
+            )
+        ),
+    )
+    with pytest.raises(EventDriverError, match="different input facts"):
+        driver.handle(conflict)
+    assert (sink.observed_history, sink.settlements, sink.pending_observations) == durable
 
 
 def test_driver_rejects_wrong_session_and_off_calendar_actual_before_effects() -> None:

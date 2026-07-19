@@ -408,6 +408,7 @@ def _origin_fingerprint(
     future_exogenous: pd.DataFrame | None,
     inventory_positions: Mapping[str, InventoryPosition],
 ) -> str:
+    """Derive the canonical origin-event input fingerprint."""
     digest = hashlib.sha256()
     _digest_field(digest, b"schema", b"newcalibre.origin-event/v1")
     _digest_field(digest, b"session", session.value.encode())
@@ -432,6 +433,7 @@ def _actuals_fingerprint(
     session: SessionIdentity,
     submission: ActualsSubmission,
 ) -> str:
+    """Derive the canonical actuals-event input fingerprint."""
     digest = hashlib.sha256()
     _digest_field(digest, b"schema", b"newcalibre.actuals-event/v1")
     _digest_field(digest, b"session", session.value.encode())
@@ -457,6 +459,7 @@ def _actuals_fingerprint(
 
 
 def _frame_bytes(frame: pd.DataFrame) -> bytes:
+    """Encode frame schema and rows independently of their physical order."""
     if frame.columns.has_duplicates:
         raise EventDriverError("future exogenous input has duplicate column labels")
     columns = tuple(frame.columns)
@@ -476,6 +479,7 @@ def _frame_bytes(frame: pd.DataFrame) -> bytes:
 
 
 def _scalar_bytes(value: object) -> bytes:
+    """Encode one supported scalar with an unambiguous domain tag."""
     if value is None or value is pd.NA or (isinstance(value, float) and pd.isna(value)):
         return _tagged(b"none", b"")
     if isinstance(value, np.generic):
@@ -526,10 +530,12 @@ def _require_timestamp(value: object, *, name: str) -> pd.Timestamp:
 
 
 def _digest_field(digest, label: bytes, value: bytes) -> None:
+    """Append one domain-tagged field to an event fingerprint."""
     digest.update(_tagged(label, value))
 
 
 def _tagged(label: bytes, value: bytes) -> bytes:
+    """Frame one label and value without concatenation ambiguity."""
     return len(label).to_bytes(4, "big") + label + len(value).to_bytes(8, "big") + value
 
 

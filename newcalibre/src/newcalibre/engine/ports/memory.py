@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from threading import RLock
 from types import MappingProxyType
 from typing import TypeVar
 
@@ -197,6 +198,7 @@ class InMemoryLedgerSink:
         calendar: Calendar,
         initial_arrivals: Mapping[ActualKey, float] | None = None,
     ) -> None:
+        self._lock = RLock()
         self._ledger = Ledger(session=session, calendar=calendar)
         self._forecast_rows: dict[object, ForecastRow] = {}
         self._order_keys: set[object] = set()
@@ -323,10 +325,15 @@ class InMemoryLedgerSink:
                 )
         else:
             raise TypeError("commit receipt key must be an origin or actuals key")
-        return self._commits.get(key)
+        with self._lock:
+            return self._commits.get(key)
 
     def commit(self, write: OriginCommit) -> CommitReceipt:
         """Journal and publish a write atomically; return its repair receipt."""
+        with self._lock:
+            return self._commit(write)
+
+    def _commit(self, write: OriginCommit) -> CommitReceipt:
         if not isinstance(write, OriginCommit):
             raise TypeError("ledger sink commit requires an OriginCommit")
         if write.session != self._ledger.session:
@@ -337,6 +344,12 @@ class InMemoryLedgerSink:
             if previous.digest == write.digest:
                 return previous
             raise LedgerError(f"journal key {key!r} already has a different committed write")
+        if (
+            write.forecasts
+            and self._latest_origin is not None
+            and write.origin <= self._latest_origin
+        ):
+            raise LedgerError("forecast origins must advance strictly monotonically")
 
         staged = _stage_new_rows(write, calendar=self._ledger.calendar)
         _require_origin_rows(write, staged=staged)
@@ -353,14 +366,20 @@ class InMemoryLedgerSink:
             "settlement",
         )
         initial_positions = None
-        if (
-            self._settlement_index is not None
-            and write.inventory_positions
-            and not self._settlement_index.has_initial_positions
-        ):
-            initial_positions = self._settlement_index.validate_initial_positions(
-                write.inventory_positions
-            )
+        if self._settlement_index is not None and write.inventory_positions:
+            if self._settlement_index.has_initial_positions:
+                supplied_positions = dict(write.inventory_positions)
+                durable_positions = dict(
+                    self._settlement_index.snapshot((write.origin,)).current_positions
+                )
+                if supplied_positions not in (dict(self._initial_positions), durable_positions):
+                    raise LedgerError(
+                        "origin inventory positions do not match durable inventory state"
+                    )
+            else:
+                initial_positions = self._settlement_index.validate_initial_positions(
+                    write.inventory_positions
+                )
         settlement_delta = self._validated_settlement_delta(
             write,
             initial_positions=initial_positions,
