@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, cast
 
 import numpy as np
 import pandas as pd
@@ -80,6 +81,7 @@ class FittedValues:
     """Own a canonical defensive snapshot distinct from forecast rows."""
 
     _frame: pd.DataFrame = field(repr=False)
+    _series_residual_periods: tuple[tuple[str, str, int], ...] = field(repr=False)
 
     @classmethod
     def from_frame(cls, frame: pd.DataFrame) -> FittedValues:
@@ -155,14 +157,75 @@ class FittedValues:
         normalized.attrs = {}
         normalized.index.name = None
         normalized.columns.name = None
+        residual_period_counts = normalized.groupby(
+            [MODEL_NAME, SERIES_KEY],
+            sort=True,
+            observed=True,
+            dropna=False,
+        ).size()
+        series_residual_periods = tuple(
+            (
+                str(cast(tuple[str, str], key)[0]),
+                str(cast(tuple[str, str], key)[1]),
+                int(periods),
+            )
+            for key, periods in residual_period_counts.items()
+        )
         instance = object.__new__(cls)
         object.__setattr__(instance, "_frame", normalized)
+        object.__setattr__(instance, "_series_residual_periods", series_residual_periods)
         return instance
 
     @property
     def frame(self) -> pd.DataFrame:
         """Return a defensive copy in canonical key order."""
         return self._frame.copy(deep=True)
+
+    def residual_periods_for(
+        self,
+        model_name: str,
+        series_keys: Iterable[str],
+    ) -> int | None:
+        """Return an applicable model subset's period count without copying row data."""
+        if not isinstance(model_name, str) or not model_name:
+            raise ValueError("fitted-values model name must be a non-empty string")
+        selected_keys = _validated_series_keys(series_keys)
+        model_counts = {
+            series_key: periods
+            for candidate, series_key, periods in self._series_residual_periods
+            if candidate == model_name
+        }
+        if not model_counts:
+            return None
+        return max((model_counts[key] for key in selected_keys if key in model_counts), default=0)
+
+    def select_model_series(
+        self,
+        model_name: str,
+        series_keys: Iterable[str],
+    ) -> pd.DataFrame:
+        """Return a defensive copy filtered to one model and series subset."""
+        if not isinstance(model_name, str) or not model_name:
+            raise ValueError("fitted-values model name must be a non-empty string")
+        selected_keys = _validated_series_keys(series_keys)
+        selected = self._frame.loc[
+            (self._frame[MODEL_NAME] == model_name) & self._frame[SERIES_KEY].isin(selected_keys)
+        ]
+        return selected.copy(deep=True).reset_index(drop=True)
+
+
+def _validated_series_keys(series_keys: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(series_keys, (str, bytes)):
+        raise TypeError("fitted-values series keys must be an iterable of labels")
+    try:
+        selected_keys = tuple(series_keys)
+    except TypeError as error:
+        raise TypeError("fitted-values series keys must be iterable") from error
+    if any(not isinstance(key, str) or not key for key in selected_keys):
+        raise ValueError("fitted-values series keys must be non-empty strings")
+    if len(set(selected_keys)) != len(selected_keys):
+        raise ValueError("fitted-values series keys must be unique")
+    return selected_keys
 
 
 def _normalize_real_to_float64(series: pd.Series, *, column: str) -> pd.Series:

@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Protocol, Self, runtime_checkable
 
 import numpy as np
+from scipy import sparse
 
-from newcalibre.domain import HierarchyIndex
+from newcalibre.domain import HierarchyIndex, HierarchyNode
 
 
 class SummingMatrixError(ValueError):
@@ -252,6 +253,17 @@ class SparseSummingMatrix(_SummingMatrixOps):
             result[row] = np.sum(vector[list(self.indices[start:stop])], dtype=np.float64)
         return result
 
+    def to_csr(self) -> sparse.csr_array:
+        """Materialize isolated SciPy CSR buffers without a dense intermediate."""
+        return sparse.csr_array(
+            (
+                np.asarray(self.data, dtype=np.float64),
+                np.asarray(self.indices, dtype=np.int32),
+                np.asarray(self.indptr, dtype=np.int32),
+            ),
+            shape=self.shape,
+        )
+
     def to_dense(self) -> np.ndarray:
         """Materialize an isolated dense float64 matrix."""
         matrix = np.zeros(self.shape, dtype=np.float64)
@@ -261,32 +273,76 @@ class SparseSummingMatrix(_SummingMatrixOps):
         return matrix
 
 
-def build_dense_summing_matrix(hierarchy: HierarchyIndex) -> DenseSummingMatrix:
-    """Build the exact identity-first dense matrix from one canonical hierarchy."""
-    _require_hierarchy(hierarchy)
+def build_dense_summing_matrix(
+    hierarchy: HierarchyIndex,
+    *,
+    bottom_ids: Iterable[str] | None = None,
+) -> DenseSummingMatrix:
+    """Build an exact identity-first dense matrix, optionally for one bottom subset."""
+    selected_bottoms, selected_nodes = _selected_hierarchy(hierarchy, bottom_ids=bottom_ids)
     rows = tuple(
-        tuple(1.0 if bottom in node.members else 0.0 for bottom in hierarchy.bottom_series)
-        for node in hierarchy.nodes
+        tuple(1.0 if bottom in node.members else 0.0 for bottom in selected_bottoms)
+        for node in selected_nodes
     )
-    return DenseSummingMatrix(rows, hierarchy.bottom_series, hierarchy.node_labels)
+    return DenseSummingMatrix(
+        rows,
+        selected_bottoms,
+        tuple(node.label for node in selected_nodes),
+    )
 
 
-def build_sparse_summing_matrix(hierarchy: HierarchyIndex) -> SparseSummingMatrix:
-    """Build immutable CSR buffers directly from canonical node memberships."""
-    _require_hierarchy(hierarchy)
-    bottom_positions = {label: index for index, label in enumerate(hierarchy.bottom_series)}
+def build_sparse_summing_matrix(
+    hierarchy: HierarchyIndex,
+    *,
+    bottom_ids: Iterable[str] | None = None,
+) -> SparseSummingMatrix:
+    """Build immutable CSR buffers directly, optionally for one bottom subset."""
+    selected_bottoms, selected_nodes = _selected_hierarchy(hierarchy, bottom_ids=bottom_ids)
+    bottom_positions = {label: index for index, label in enumerate(selected_bottoms)}
     indices: list[int] = []
     indptr = [0]
-    for node in hierarchy.nodes:
-        indices.extend(bottom_positions[member] for member in node.members)
+    for node in selected_nodes:
+        indices.extend(
+            bottom_positions[member] for member in node.members if member in bottom_positions
+        )
         indptr.append(len(indices))
     return SparseSummingMatrix(
         data=(1.0,) * len(indices),
         indices=tuple(indices),
         indptr=tuple(indptr),
-        bottom_ids=hierarchy.bottom_series,
-        node_labels=hierarchy.node_labels,
+        bottom_ids=selected_bottoms,
+        node_labels=tuple(node.label for node in selected_nodes),
     )
+
+
+def _selected_hierarchy(
+    hierarchy: HierarchyIndex,
+    *,
+    bottom_ids: Iterable[str] | None,
+) -> tuple[tuple[str, ...], tuple[HierarchyNode, ...]]:
+    _require_hierarchy(hierarchy)
+    if bottom_ids is None:
+        return hierarchy.bottom_series, hierarchy.nodes
+    if isinstance(bottom_ids, (str, bytes)):
+        raise SummingMatrixError("present bottom ids must be an iterable of labels")
+    try:
+        supplied = tuple(bottom_ids)
+    except TypeError as error:
+        raise SummingMatrixError("present bottom ids must be iterable") from error
+    if any(not isinstance(label, str) or not label for label in supplied):
+        raise SummingMatrixError("present bottom ids must be non-empty strings")
+    if len(set(supplied)) != len(supplied):
+        raise SummingMatrixError("present bottom ids must be unique")
+    known = set(hierarchy.bottom_series)
+    unknown = sorted(set(supplied) - known, key=str.encode)
+    if unknown:
+        raise SummingMatrixError(f"unknown bottom ids: {unknown}")
+    supplied_set = set(supplied)
+    selected_bottoms = tuple(label for label in hierarchy.bottom_series if label in supplied_set)
+    selected_nodes = tuple(
+        node for node in hierarchy.nodes if any(member in supplied_set for member in node.members)
+    )
+    return selected_bottoms, selected_nodes
 
 
 def _require_hierarchy(hierarchy: object) -> None:

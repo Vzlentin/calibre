@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -43,6 +44,29 @@ class _CrossSection:
     def description(self) -> str:
         model, origin, step = self.identity
         return f"cross-section (model={model!r}, origin={origin}, horizon_step={step})"
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionSection:
+    identity: tuple[str, pd.Timestamp, int]
+    positions: tuple[int, ...]
+    bottom_ids: tuple[str, ...]
+    node_labels: tuple[str, ...]
+
+    @property
+    def description(self) -> str:
+        model, origin, step = self.identity
+        return f"cross-section (model={model!r}, origin={origin}, horizon_step={step})"
+
+
+class _ProjectionKernel(Protocol):
+    def __call__(
+        self,
+        section: _ProjectionSection,
+        hierarchy: HierarchyIndex,
+        context: ReconciliationContext,
+        base_forecast: np.ndarray,
+    ) -> np.ndarray: ...
 
 
 def apply_none(
@@ -127,6 +151,104 @@ def apply_bottom_up(
     if not aggregate_rows:
         return bottom_rows
     return pd.concat([bottom_rows, *aggregate_rows], ignore_index=True)
+
+
+def apply_projection(
+    frame: pd.DataFrame,
+    hierarchy: HierarchyIndex | None,
+    context: ReconciliationContext,
+    *,
+    declaration: ReconcilerDeclaration,
+    kernel: _ProjectionKernel,
+) -> pd.DataFrame:
+    """Validate complete node sections and replace only point forecasts."""
+    active = _active_inputs(frame, hierarchy, context, declaration=declaration)
+    if active is None:
+        return frame
+    sections = _validated_sections(frame, active, allow_aggregate_rows=True)
+    projection_sections = tuple(_projection_section(frame, active, section) for section in sections)
+    result = frame.copy(deep=True)
+    result_points = result[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
+
+    for section in projection_sections:
+        source = frame.iloc[list(section.positions)]
+        points = _finite_points(source, section=section)
+        by_label = dict(zip(source[SERIES_KEY], points, strict=True))
+        base_forecast = np.asarray(
+            [by_label[label] for label in section.node_labels],
+            dtype=np.float64,
+        )
+        reconciled = np.asarray(
+            kernel(section, active, context, base_forecast),
+            dtype=np.float64,
+        )
+        if reconciled.shape != base_forecast.shape:
+            raise ReconciliationError(
+                f"{section.description} projection returned shape {reconciled.shape}; "
+                f"expected {base_forecast.shape}"
+            )
+        if not np.all(np.isfinite(reconciled)):
+            raise ReconciliationError(
+                f"{section.description} projection returned non-finite point forecasts"
+            )
+        reconciled_by_label = dict(zip(section.node_labels, reconciled, strict=True))
+        restored = np.asarray(
+            [reconciled_by_label[label] for label in source[SERIES_KEY]],
+            dtype=np.float64,
+        )
+        result_points[list(section.positions)] = restored
+    result[POINT_FORECAST] = result_points
+    return result
+
+
+def _projection_section(
+    frame: pd.DataFrame,
+    hierarchy: HierarchyIndex,
+    section: _CrossSection,
+) -> _ProjectionSection:
+    source = frame.iloc[list(section.positions)]
+    supplied = set(source[SERIES_KEY])
+    bottom_ids = tuple(label for label in hierarchy.bottom_series if label in supplied)
+    if not bottom_ids:
+        raise ReconciliationError(
+            f"{section.description} projection requires at least one bottom-node row"
+        )
+    present = set(bottom_ids)
+    node_labels = tuple(
+        node.label for node in hierarchy.nodes if any(member in present for member in node.members)
+    )
+    expected = set(node_labels)
+    missing = sorted(expected - supplied, key=str.encode)
+    outside = sorted(supplied - expected, key=str.encode)
+    if missing:
+        raise ReconciliationError(
+            f"{section.description} is missing node rows required by the present "
+            f"bottom subset: {missing}"
+        )
+    if outside:
+        raise ReconciliationError(
+            f"{section.description} contains node rows outside the present bottom subset: {outside}"
+        )
+    return _ProjectionSection(
+        identity=section.identity,
+        positions=section.positions,
+        bottom_ids=bottom_ids,
+        node_labels=node_labels,
+    )
+
+
+def _finite_points(source: pd.DataFrame, *, section: _ProjectionSection) -> np.ndarray:
+    try:
+        points = source[POINT_FORECAST].to_numpy(dtype=np.float64, na_value=np.nan)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ReconciliationError(
+            f"{section.description} point forecasts must be real numeric values"
+        ) from error
+    if not np.all(np.isfinite(points)):
+        raise ReconciliationError(
+            f"{section.description} point forecasts must be finite real values"
+        )
+    return points
 
 
 def _active_inputs(

@@ -850,7 +850,10 @@ def test_unknown_reconciliation_strategy_refuses_before_panel_load() -> None:
     panel_source = RecordingPanelSource(panel)
     session = _session()
 
-    with pytest.raises(ReconciliationRegistryError, match="unknown strategy.*bottom_up, none"):
+    with pytest.raises(
+        ReconciliationRegistryError,
+        match="unknown strategy.*bottom_up, mint_shrink, none, wls_struct, wls_var",
+    ):
         _engine(
             panel=panel,
             events=[],
