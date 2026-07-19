@@ -333,6 +333,19 @@ def test_apply_ignores_poisoned_actuals_and_advances_only_method_issue_state() -
     ) == {"issue_counter": 1}
 
 
+def test_repeated_apply_advances_issuance_reference_without_observation() -> None:
+    runtime, _label, states = _states(list(range(1, 11)))
+
+    first = runtime.apply(_frame(), states)
+    second = runtime.apply(_frame(), {**states, **first.state_updates})
+    first_reference = next(iter(first.issuances.values())).state_reference
+    second_reference = next(iter(second.issuances.values())).state_reference
+
+    assert first_reference != second_reference
+    assert first_reference.startswith("weighted-per-step:0:sha256:")
+    assert second_reference.startswith("weighted-per-step:1:sha256:")
+
+
 def test_observe_preserves_canonical_append_order_censoring_and_sticky_series_label() -> None:
     runtime, label, states = _states(
         [8.0, 9.0],
@@ -370,6 +383,28 @@ def test_observe_preserves_canonical_append_order_censoring_and_sticky_series_la
     issued_facts = next(iter(issued.issuances.values()))
     assert later_facts.effective_descriptor.scored_series is ScoredSeries.RECORDED_SALES
     assert later_facts.state_reference != issued_facts.state_reference
+
+
+def test_observe_rejects_overflowed_finite_residual_before_state_encoding() -> None:
+    runtime, label, states = _states(
+        [1.0, 2.0],
+        configuration={"coverage": 0.5},
+    )
+    issued = runtime.apply(_frame((1e308,)), states)
+    delivery = Delivery(
+        label,
+        _observations(
+            issued,
+            (-1e308,),
+            (CensoringAssertion.UNCENSORED,),
+        ),
+    )
+    before = dict(states)
+
+    with pytest.raises(RuntimeContractError, match="weighted residual scores must be finite"):
+        runtime.observe(delivery, states)
+
+    assert states == before
 
 
 @pytest.mark.parametrize(

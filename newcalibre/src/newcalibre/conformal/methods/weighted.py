@@ -282,6 +282,7 @@ class WeightedConformalRuntime:
         quantiles: dict[str, float | None] = {}
         state_references: dict[str, str] = {}
         descriptors: dict[ScoredSeries, GuaranteeDescriptor] = {}
+        method_state = self._method_state(states)
 
         for row in rows:
             label = self._partition_label(row.key.model_name, row.key.series_key)
@@ -320,6 +321,8 @@ class WeightedConformalRuntime:
             if label not in state_references:
                 state_references[label] = _state_reference(
                     self.manifest.name,
+                    method_state.issue_counter,
+                    label,
                     self._codec.encode_partition(label, partition),
                 )
             if partition.scored_series not in descriptors:
@@ -345,7 +348,6 @@ class WeightedConformalRuntime:
         calibrated = forecasts.copy(deep=True)
         calibrated[lower_column] = pd.Series(lower_values, index=calibrated.index, dtype="float64")
         calibrated[upper_column] = pd.Series(upper_values, index=calibrated.index, dtype="float64")
-        method_state = self._method_state(states)
         updates = {
             METHOD_SCOPE_LABEL: self._codec.encode_method(
                 _MethodState(method_state.issue_counter + len(rows))
@@ -386,6 +388,8 @@ class WeightedConformalRuntime:
                 )
                 continue
             score = abs(observation.actual - observation.point_forecast)
+            if not math.isfinite(score):
+                raise RuntimeContractError("weighted residual scores must be finite")
             scores.append(score)
             count += 1
             if observation.censoring_assertion is None:
@@ -575,5 +579,12 @@ def _horizon(value: object) -> int:
     return int(value)
 
 
-def _state_reference(method_name: str, state: bytes) -> str:
-    return f"{method_name}:sha256:{hashlib.sha256(state).hexdigest()}"
+def _state_reference(
+    method_name: str,
+    issue_counter: int,
+    partition_label: str,
+    state: bytes,
+) -> str:
+    partition_identity = partition_label.encode("utf-8") + b"\x00" + state
+    digest = hashlib.sha256(partition_identity).hexdigest()
+    return f"{method_name}:{issue_counter}:sha256:{digest}"
