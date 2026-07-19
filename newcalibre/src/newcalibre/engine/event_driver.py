@@ -224,6 +224,7 @@ class EventDriver:
         latest = self._ledger_sink.latest_origin
         if latest is not None and event.origin <= latest:
             raise EventDriverError("origin events must advance strictly monotonically")
+        forecast_origin_count = self._ledger_sink.forecast_origin_count
         positions, settlement = self._origin_context(event)
         request = OriginRequest(
             session=event.session,
@@ -234,9 +235,14 @@ class EventDriver:
         )
         result = self._spine.run_origin(
             request,
+            decision_origin=self._is_decision_origin(
+                event.session,
+                forecast_origin_count=forecast_origin_count,
+            ),
             settlement=settlement,
             submission=ActualsSubmission(()),
             input_fingerprint=event.fingerprint,
+            expected_forecast_origin_count=forecast_origin_count,
         )
         return OriginOutcome(result.receipt, result.orders)
 
@@ -257,7 +263,7 @@ class EventDriver:
         if latest is not None:
             admission_frontier = max(admission_frontier, latest)
         admission_before = calendar.advance(admission_frontier, 1)
-        resolution_origin = admission_before if latest is None else latest
+        resolution_origin = admission_before if latest is None else calendar.advance(latest, 1)
         observation = self._engine.observe(
             resolution_origin,
             session=event.session,
@@ -389,6 +395,17 @@ class EventDriver:
                 actuals_semantics=self._actuals_semantics,
             )
         )
+
+    @staticmethod
+    def _is_decision_origin(
+        session: SessionIdentity,
+        *,
+        forecast_origin_count: int,
+    ) -> bool:
+        decision = session_decision_inputs(session)
+        if decision is None:
+            return True
+        return forecast_origin_count % decision.timing.review_period == 0
 
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:
