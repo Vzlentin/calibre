@@ -423,6 +423,7 @@ def test_exact_active_window_trigger_attributes_nonfinite_and_trivial_cover_retu
         {
             "method": _METHOD,
             "coverage": 0.5,
+            "calibration_window": 2,
             "learning_rate": 0.2,
         }
     )
@@ -430,6 +431,7 @@ def test_exact_active_window_trigger_attributes_nonfinite_and_trivial_cover_retu
     state = _partition_state(
         label,
         scores=[1.0, 3.0],
+        delivered_score_count=5,
         raw_alpha=1.0 / 3.0,
         feedback_count=1,
     )
@@ -459,6 +461,8 @@ def test_exact_active_window_trigger_attributes_nonfinite_and_trivial_cover_retu
     assert math.isnan(facts.lower_bound)
     assert math.isnan(facts.upper_bound)
     assert observed.annotations[0].score == 96.0
+    assert payload["scores"] == [3.0, 96.0]
+    assert payload["delivered_score_count"] == 6
     assert payload["feedback_count"] == 2
     assert payload["raw_alpha"] == pytest.approx(1.0 / 3.0 + 0.1)
     assert next(iter(later.issuances.values())).bounds_null_reason is None
