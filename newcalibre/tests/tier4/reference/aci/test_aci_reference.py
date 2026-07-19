@@ -158,7 +158,9 @@ def _validate_trace(value: object) -> None:
     for case in cases:
         _validate_case(case)
         case_value = cast(dict[str, object], case)
-        identities[cast(str, case_value["id"])] = cast(str, case_value["classification"])
+        case_id = cast(str, case_value["id"])
+        assert case_id not in identities, f"ACI reference trace has duplicate case ID {case_id!r}"
+        identities[case_id] = cast(str, case_value["classification"])
     assert identities == _EXPECTED_CASES, "ACI reference trace case inventory is not exact"
     digest = value["payload_sha256"]
     assert isinstance(digest, str) and len(digest) == 64, (
@@ -366,6 +368,45 @@ def _observation(result: CalibrationResult, *, score: float) -> ResolvedObservat
     )
 
 
+def _replay_successor_branches_through(
+    case: Mapping[str, object],
+    *,
+    stop: int,
+) -> tuple[str, ...]:
+    inputs = cast(dict[str, object], case["inputs"])
+    scores = _case_scores(case)
+    runtime = resolve_method(
+        {
+            "method": _METHOD,
+            "coverage": 1.0 - _finite_hex(inputs["target_alpha"], name="target alpha"),
+            "calibration_window": inputs["window_length"],
+            "learning_rate": _finite_hex(inputs["learning_rate"], name="learning rate"),
+        }
+    )
+    label = derive_partition_label(_MODEL, "global", EmissionScope.PER_STEP)
+    states: dict[str, bytes] = dict(runtime.calibrate({label: ()}))
+    branches: list[str] = []
+
+    for step in range(stop + 1):
+        result = runtime.apply(_frame(step), states)
+        states.update(result.state_updates)
+        facts = next(iter(result.issuances.values()))
+        if facts.bounds_null_reason is None:
+            branches.append("adaptive-higher")
+        elif facts.bounds_null_reason == "unresolvable-working-level":
+            branches.append("adaptive-unresolvable-active-window")
+        else:
+            branches.append("warm-up")
+        if step < stop:
+            effect = runtime.observe(
+                Delivery(label, (_observation(result, score=scores[step]),)),
+                states,
+            )
+            states.update(effect.state_updates)
+
+    return tuple(branches)
+
+
 def _assert_reference_value(
     *,
     step: int,
@@ -562,6 +603,15 @@ def test_trace_schema_canonical_bytes_and_payload_digest_are_strict() -> None:
     with pytest.raises(AssertionError, match="invalid root schema"):
         _validate_trace(extra)
 
+    duplicate = copy.deepcopy(document)
+    duplicate_cases = cast(
+        list[dict[str, object]],
+        cast(dict[str, object], duplicate["payload"])["cases"],
+    )
+    duplicate_cases.append(copy.deepcopy(duplicate_cases[0]))
+    with pytest.raises(AssertionError, match="duplicate case ID"):
+        _validate_trace(duplicate)
+
     bad_digest = copy.deepcopy(document)
     bad_digest["payload_sha256"] = "0" * 64
     with pytest.raises(AssertionError, match="payload digest mismatch"):
@@ -573,17 +623,22 @@ def test_reference_burn_in_is_trace_only_and_enters_prefix_interpolation() -> No
     case = _reference_case(document, "reference-burn-in-prefix-linear")
     rows = cast(list[dict[str, object]], case["rows"])
     trace_only = [row for row in rows if row["comparison"] == "reference-only-burn-in"]
+    divergence = cast(dict[str, object], case["expected_first_successor_divergence"])
 
     assert case["classification"] == "trace-only-reference-burn-in"
     assert [row["source_index"] for row in trace_only] == [5, 6]
     assert {row["reference_branch"] for row in trace_only} == {"burn-in-prefix-linear"}
     assert all(row["selected_higher_rank"] is None for row in trace_only)
-    assert case["expected_first_successor_divergence"] == {
+    assert divergence == {
         "quantity": "burn-in-branch",
         "reference": "burn-in-prefix-linear",
         "step": 5,
         "successor": "adaptive-higher",
     }
+    step = cast(int, divergence["step"])
+    successor_branches = _replay_successor_branches_through(case, stop=step)
+    assert rows[step]["reference_branch"] == divergence["reference"]
+    assert successor_branches[step] == divergence["successor"]
 
 
 def test_prefix_count_departure_first_occurs_at_declared_step_six_predicate() -> None:
