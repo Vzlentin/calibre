@@ -98,6 +98,12 @@ class ReconcilerRegistry:
             raise ReconciliationRegistryError(
                 f"{error}; available strategies: {available}"
             ) from error
+        if normalized == "mint_cov":
+            raise ReconciliationRegistryError(
+                "strategy 'mint_cov' is not supported because raw sample covariance is "
+                "rank-deficient or ill-conditioned at target scales; use wls_var or "
+                f"wls_struct; available strategies: {available}"
+            )
         try:
             return self._registrations[normalized]
         except KeyError as error:

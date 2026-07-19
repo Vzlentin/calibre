@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol, Self, runtime_checkable
 
 import numpy as np
+from scipy import sparse
 
 from newcalibre.domain import HierarchyIndex
 
@@ -251,6 +252,17 @@ class SparseSummingMatrix(_SummingMatrixOps):
             start, stop = self.indptr[row : row + 2]
             result[row] = np.sum(vector[list(self.indices[start:stop])], dtype=np.float64)
         return result
+
+    def to_csr(self) -> sparse.csr_array:
+        """Materialize isolated SciPy CSR buffers without a dense intermediate."""
+        return sparse.csr_array(
+            (
+                np.asarray(self.data, dtype=np.float64),
+                np.asarray(self.indices, dtype=np.int32),
+                np.asarray(self.indptr, dtype=np.int32),
+            ),
+            shape=self.shape,
+        )
 
     def to_dense(self) -> np.ndarray:
         """Materialize an isolated dense float64 matrix."""

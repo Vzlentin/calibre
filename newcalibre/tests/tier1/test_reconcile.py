@@ -13,12 +13,15 @@ import pytest
 
 from newcalibre.domain import (
     ACTUAL_VALUE,
+    FITTED_VALUE,
     HORIZON_STEP,
     MODEL_NAME,
     ORIGIN,
     POINT_FORECAST,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    TIMESTAMP,
+    FittedValues,
     HierarchyIndex,
     HierarchyNodeKind,
     interval_columns,
@@ -27,8 +30,15 @@ from newcalibre.domain import (
 from newcalibre.reconcile import (
     BOTTOM_UP,
     BOTTOM_UP_DECLARATION,
+    MINT_SHRINK,
+    MINT_SHRINK_DECLARATION,
     NONE,
     NONE_DECLARATION,
+    SPARSE_SOLVER_TOLERANCE,
+    WLS_STRUCT,
+    WLS_STRUCT_DECLARATION,
+    WLS_VAR,
+    WLS_VAR_DECLARATION,
     MatrixCapability,
     Reconciler,
     ReconcilerRegistry,
@@ -95,6 +105,37 @@ def _node_for_members(hierarchy: HierarchyIndex, members: tuple[str, ...]) -> st
     )
 
 
+def _fitted_context(hierarchy: HierarchyIndex) -> ReconciliationContext:
+    timestamps = pd.date_range("2025-01-01", periods=8, freq="D")
+    rows: list[dict[str, object]] = []
+    for node_index, label in enumerate(hierarchy.node_labels, start=1):
+        for period, timestamp in enumerate(timestamps, start=1):
+            fitted = float(10 + node_index + period)
+            rows.append(
+                {
+                    SERIES_KEY: label,
+                    TIMESTAMP: timestamp,
+                    ACTUAL_VALUE: fitted + node_index * period,
+                    FITTED_VALUE: fitted,
+                    MODEL_NAME: "model-a",
+                }
+            )
+    frame = pd.DataFrame.from_records(rows)
+    frame[SERIES_KEY] = frame[SERIES_KEY].astype("string")
+    frame[MODEL_NAME] = frame[MODEL_NAME].astype("string")
+    frame[ACTUAL_VALUE] = frame[ACTUAL_VALUE].astype("float64")
+    frame[FITTED_VALUE] = frame[FITTED_VALUE].astype("float64")
+    return ReconciliationContext(fitted_values=FittedValues.from_frame(frame))
+
+
+def _context_for(strategy_name: str, hierarchy: HierarchyIndex) -> ReconciliationContext:
+    return (
+        _fitted_context(hierarchy)
+        if strategy_declaration(strategy_name).requires_fitted_values
+        else ReconciliationContext()
+    )
+
+
 def test_native_declarations_are_immutable_and_inspectable() -> None:
     assert NONE_DECLARATION.name == NONE
     assert BOTTOM_UP_DECLARATION.name == BOTTOM_UP
@@ -108,24 +149,63 @@ def test_native_declarations_are_immutable_and_inspectable() -> None:
         cast(Any, BOTTOM_UP_DECLARATION).requires_fitted_values = True
 
 
-def test_registry_lists_normalizes_and_builds_fresh_native_strategies() -> None:
-    assert available_strategies() == (BOTTOM_UP, NONE)
-    assert strategy_declaration(" Bottom_UP ") is BOTTOM_UP_DECLARATION
-    first = resolve_strategy(" Bottom_UP ")
-    second = resolve_strategy("bOtToM_uP")
+def test_registry_lists_normalizes_and_builds_fresh_strategies() -> None:
+    expected = (BOTTOM_UP, MINT_SHRINK, NONE, WLS_STRUCT, WLS_VAR)
+    assert available_strategies() == expected
+    declarations = {
+        BOTTOM_UP: BOTTOM_UP_DECLARATION,
+        MINT_SHRINK: MINT_SHRINK_DECLARATION,
+        NONE: NONE_DECLARATION,
+        WLS_STRUCT: WLS_STRUCT_DECLARATION,
+        WLS_VAR: WLS_VAR_DECLARATION,
+    }
+    for name in expected:
+        assert strategy_declaration(f" {name.upper()} ") is declarations[name]
+        first = resolve_strategy(f" {name.upper()} ")
+        second = resolve_strategy(name.swapcase())
+        assert first is not second
+        assert isinstance(first, Reconciler)
+        assert isinstance(second, Reconciler)
 
-    assert first is not second
-    assert isinstance(first, Reconciler)
-    assert isinstance(second, Reconciler)
-    assert isinstance(resolve_strategy(" NONE "), Reconciler)
+    assert WLS_STRUCT_DECLARATION.input_family is ReconciliationInputFamily.PROJECTION
+    assert WLS_VAR_DECLARATION.input_family is ReconciliationInputFamily.PROJECTION
+    assert MINT_SHRINK_DECLARATION.input_family is ReconciliationInputFamily.PROJECTION
+    assert not WLS_STRUCT_DECLARATION.requires_fitted_values
+    assert WLS_VAR_DECLARATION.requires_fitted_values
+    assert MINT_SHRINK_DECLARATION.requires_fitted_values
+    assert WLS_STRUCT_DECLARATION.matrix_capability is MatrixCapability.SPARSE_CAPABLE
+    assert WLS_VAR_DECLARATION.matrix_capability is MatrixCapability.SPARSE_CAPABLE
+    assert MINT_SHRINK_DECLARATION.matrix_capability is MatrixCapability.DENSE_ONLY
 
 
 def test_registry_unknown_name_lists_available_strategies() -> None:
     with pytest.raises(
         ReconciliationRegistryError,
-        match=r"unknown strategy 'projection'.*bottom_up, none",
+        match=(
+            r"unknown strategy 'projection'.*bottom_up, mint_shrink, none, "
+            r"wls_struct, wls_var"
+        ),
     ):
         resolve_strategy("projection")
+
+
+def test_registry_rejects_mint_cov_before_method_or_matrix_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import newcalibre.reconcile.nixtla as nixtla
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("mint_cov resolution reached projection construction")
+
+    monkeypatch.setattr(nixtla, "MinTrace", forbidden)
+    monkeypatch.setattr(nixtla, "build_dense_summing_matrix", forbidden)
+    monkeypatch.setattr(nixtla, "build_sparse_summing_matrix", forbidden)
+
+    with pytest.raises(
+        ReconciliationRegistryError,
+        match=r"mint_cov.*wls_var.*wls_struct.*bottom_up, mint_shrink, none, wls_struct, wls_var",
+    ):
+        resolve_strategy("  MiNt_CoV ")
 
 
 def test_registry_rejects_a_reused_live_reconciler_without_retaining_discarded_ones() -> None:
@@ -177,14 +257,16 @@ def test_every_native_strategy_rejects_distributional_columns(
     else:
         frame[quantile_column(0.5)] = frame[POINT_FORECAST]
 
+    hierarchy = _hierarchy()
     with pytest.raises(ReconciliationError, match="point forecasts only"):
-        resolve_strategy(strategy_name)(frame, _hierarchy(), ReconciliationContext())
+        resolve_strategy(strategy_name)(frame, hierarchy, _context_for(strategy_name, hierarchy))
 
 
 @pytest.mark.parametrize("strategy_name", available_strategies())
 def test_native_strategies_reject_uncovered_and_duplicate_rows(strategy_name: str) -> None:
     hierarchy = _hierarchy()
     strategy = resolve_strategy(strategy_name)
+    context = _context_for(strategy_name, hierarchy)
     uncovered = _frame({"foreign": 1.0})
     duplicate = pd.concat(
         [_frame({"a": 1.0}), _frame({"a": 2.0})],
@@ -192,9 +274,9 @@ def test_native_strategies_reject_uncovered_and_duplicate_rows(strategy_name: st
     )
 
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*not covered"):
-        strategy(uncovered, hierarchy, ReconciliationContext())
+        strategy(uncovered, hierarchy, context)
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*duplicate"):
-        strategy(duplicate, hierarchy, ReconciliationContext())
+        strategy(duplicate, hierarchy, context)
 
 
 def test_none_rejects_aggregate_rows() -> None:
@@ -290,16 +372,26 @@ def test_bottom_up_isolated_cross_sections_and_appends_in_canonical_order() -> N
 
 
 @pytest.mark.parametrize("strategy_name", available_strategies())
-def test_registered_native_strategy_is_a_deterministic_fixed_point(strategy_name: str) -> None:
+def test_registered_strategy_is_coherent_and_idempotent_on_applicable_input(
+    strategy_name: str,
+) -> None:
     hierarchy = _hierarchy()
-    frame = _frame({"a": 1.0, "b": 2.0, "c": 3.0})
+    bottom = _frame({"a": 1.0, "b": 2.0, "c": 3.0})
+    if strategy_declaration(strategy_name).input_family is ReconciliationInputFamily.PROJECTION:
+        frame = resolve_strategy(BOTTOM_UP)(bottom, hierarchy, ReconciliationContext())
+    else:
+        frame = bottom
     strategy = resolve_strategy(strategy_name)
+    context = _context_for(strategy_name, hierarchy)
 
-    first = strategy(frame, hierarchy, ReconciliationContext())
-    second = strategy(first, hierarchy, ReconciliationContext())
+    first = strategy(frame, hierarchy, context)
+    second = strategy(first, hierarchy, context)
+    magnitude = float(first[POINT_FORECAST].abs().max())
     bound = coherence_tolerance(
         reduction_width=len(hierarchy.bottom_series),
-        vector_magnitude=float(first[POINT_FORECAST].abs().max()),
+        vector_magnitude=magnitude,
+        solver_tolerance=SPARSE_SOLVER_TOLERANCE,
+        condition_number=10.0,
     )
 
     pd.testing.assert_frame_equal(first, second, check_exact=False, atol=bound, rtol=0.0)
