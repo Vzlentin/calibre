@@ -100,15 +100,18 @@ def apply_bottom_up(
         )
         if not eligible:
             continue
-        template = source.iloc[[0]].copy(deep=True)
+        rows = source.iloc[[0] * len(eligible)].copy(deep=True).reset_index(drop=True)
+        point_values: list[float] = []
         for node in eligible:
-            row = template.copy(deep=True)
-            row_index = row.index[0]
-            row.at[row_index, SERIES_KEY] = node.label
-            row.at[row_index, ACTUAL_VALUE] = np.nan
             value = aggregated[node.label]
-            row.at[row_index, POINT_FORECAST] = np.nan if value is None else float(value)
-            aggregate_rows.append(row)
+            point_values.append(np.nan if value is None else float(value))
+        rows[SERIES_KEY] = pd.array(
+            [node.label for node in eligible],
+            dtype=pd.StringDtype(storage="pyarrow"),
+        )
+        rows[ACTUAL_VALUE] = np.nan
+        rows[POINT_FORECAST] = point_values
+        aggregate_rows.append(rows)
 
     bottom_rows = frame.copy(deep=True)
     if not aggregate_rows:
