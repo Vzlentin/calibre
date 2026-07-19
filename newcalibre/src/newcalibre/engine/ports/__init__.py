@@ -455,6 +455,11 @@ class LedgerSink(Protocol):
         """Return the latest committed forecast origin, when one exists."""
         ...
 
+    @property
+    def forecast_origins(self) -> tuple[pd.Timestamp, ...]:
+        """Return committed forecast origins in canonical sequence order."""
+        ...
+
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
         """Return pending rows due strictly before ``origin``."""
         ...
@@ -468,6 +473,10 @@ class LedgerSink(Protocol):
 
     def receipt(self, key: CommitKey) -> CommitReceipt | None:
         """Return the immutable commit receipt for a natural journal key, when present."""
+        ...
+
+    def settlement_receipt(self, period: pd.Timestamp) -> CommitReceipt | None:
+        """Return the receipt containing one durable settlement period, when present."""
         ...
 
     def commit(self, write: OriginCommit) -> CommitReceipt:

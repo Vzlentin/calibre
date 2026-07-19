@@ -266,6 +266,11 @@ class InMemoryLedgerSink:
         return self._latest_origin
 
     @property
+    def forecast_origins(self) -> tuple[pd.Timestamp, ...]:
+        """Return committed forecast origins in canonical sequence order."""
+        return tuple(sorted({row.origin for row in self._ledger.forecasts}))
+
+    @property
     def observation_resolutions(self):
         """Return durable censoring-aware row resolutions."""
         return self._ledger.observation_resolutions
@@ -327,6 +332,19 @@ class InMemoryLedgerSink:
             raise TypeError("commit receipt key must be an origin or actuals key")
         with self._lock:
             return self._commits.get(key)
+
+    def settlement_receipt(self, period: pd.Timestamp) -> CommitReceipt | None:
+        """Return the receipt containing one durable settlement period, when present."""
+        self._ledger.calendar.require_member(period, name="settlement-receipt period")
+        with self._lock:
+            matches = tuple(
+                receipt
+                for receipt in self._commits.values()
+                if period in receipt.settlement_periods
+            )
+        if len(matches) > 1:
+            raise LedgerError(f"settlement period {period} has multiple journal receipts")
+        return None if not matches else matches[0]
 
     def commit(self, write: OriginCommit) -> CommitReceipt:
         """Journal and publish a write atomically; return its repair receipt."""

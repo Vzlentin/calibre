@@ -244,23 +244,12 @@ class TimeLoop:
         first_period = request.origins[0]
         if initial_snapshot.frontier is not None and initial_snapshot.frontier < request.origins[0]:
             first_period = calendar.advance(initial_snapshot.frontier, 1)
-        frontier_receipt = (
-            None
-            if initial_snapshot.frontier is None
-            else ledger_sink.receipt(initial_snapshot.frontier)
-        )
-        if initial_snapshot.frontier is not None and frontier_receipt is None:
-            raise TimeLoopError(
-                f"settlement frontier {initial_snapshot.frontier} has no commit receipt"
-            )
         if (
             initial_snapshot.frontier is not None
-            and frontier_receipt is not None
-            and frontier_receipt.settlement_periods != (initial_snapshot.frontier,)
+            and ledger_sink.settlement_receipt(initial_snapshot.frontier) is None
         ):
             raise TimeLoopError(
-                f"settlement frontier receipt at {initial_snapshot.frontier} does not contain "
-                "exactly that settlement period"
+                f"settlement frontier {initial_snapshot.frontier} has no journal receipt"
             )
 
         self._engine = engine
@@ -277,7 +266,6 @@ class TimeLoop:
             first_period,
             final_period,
         )
-        self._resume_receipt = frontier_receipt
         self._spine = Spine(engine, reporter=reporter)
         uncommitted_periods = tuple(
             period
@@ -301,8 +289,6 @@ class TimeLoop:
     def run(self) -> TimeLoopResult:
         """Run or resume the complete schedule from its first uncommitted period."""
         receipts = self._receipt_prefix()
-        if self._resume_receipt is not None:
-            self._engine.commit(self._resume_receipt)
         for period in self._settlement_periods:
             receipt = receipts.get(period)
             if receipt is not None:
@@ -427,15 +413,17 @@ class TimeLoop:
         receipts: dict[pd.Timestamp, CommitReceipt] = {}
         first_missing: pd.Timestamp | None = None
         for period in self._settlement_periods:
-            receipt = self._ledger_sink.receipt(period)
+            receipt = self._ledger_sink.settlement_receipt(period)
             if receipt is None:
+                origin_receipt = self._ledger_sink.receipt(period)
+                if origin_receipt is not None:
+                    raise TimeLoopError(
+                        f"commit receipt at {period} does not contain exactly that "
+                        "settlement period"
+                    )
                 if first_missing is None:
                     first_missing = period
                 continue
-            if receipt.settlement_periods != (period,):
-                raise TimeLoopError(
-                    f"commit receipt at {period} does not contain exactly that settlement period"
-                )
             if first_missing is not None:
                 raise TimeLoopError(
                     f"ledger receipt at {period} follows uncommitted period {first_missing}"
