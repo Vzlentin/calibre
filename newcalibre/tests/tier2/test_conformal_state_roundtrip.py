@@ -197,6 +197,71 @@ def test_weighted_restart_matches_finite_and_heldout_mass_continuations(
     assert continued_observe == restored_observe
 
 
+def test_sequential_restart_matches_finite_unresolvable_and_trivial_cover_continuation() -> None:
+    configuration = {
+        "method": "sequential-adaptive-per-step",
+        "coverage": 0.5,
+        "calibration_window": 6,
+        "learning_rate": 2.0,
+    }
+    runtime = resolve_method(configuration)
+    label = derive_partition_label(_MODEL, "global", runtime.manifest.emission_scope)
+    seed = runtime.calibrate({label: [1.0, 3.0]})
+    finite = runtime.apply(
+        _frame((4.0,), origin=pd.Timestamp("2026-05-04")),
+        seed,
+    )
+    missed = runtime.observe(
+        _delivery(
+            finite,
+            (8.0,),
+            (CensoringAssertion.UNCENSORED,),
+        ),
+        seed,
+    )
+    after_finite = _combined_states(seed, finite, missed.state_updates)
+    restored = resolve_method(configuration, states=after_finite)
+
+    next_frame = _frame((4.0,), origin=pd.Timestamp("2026-05-11"))
+    continued_unresolvable = runtime.apply(next_frame, after_finite)
+    restored_unresolvable = restored.apply(next_frame, after_finite)
+    _assert_apply_equal(continued_unresolvable, restored_unresolvable)
+    unresolvable_facts = next(iter(continued_unresolvable.issuances.values()))
+    assert unresolvable_facts.bounds_null_reason == "unresolvable-working-level"
+    assert math.isnan(unresolvable_facts.upper_bound)
+
+    trivial_delivery = _delivery(
+        continued_unresolvable,
+        (100.0,),
+        (CensoringAssertion.UNCENSORED,),
+    )
+    continued_trivial = runtime.observe(trivial_delivery, after_finite)
+    restored_trivial = restored.observe(trivial_delivery, after_finite)
+    assert continued_trivial == restored_trivial
+    after_trivial = _combined_states(
+        after_finite,
+        continued_unresolvable,
+        continued_trivial.state_updates,
+    )
+    freshly_restored = resolve_method(configuration, states=after_trivial)
+
+    later_frame = _frame((4.0,), origin=pd.Timestamp("2026-05-18"))
+    continued_finite = runtime.apply(later_frame, after_trivial)
+    restored_finite = freshly_restored.apply(later_frame, after_trivial)
+    _assert_apply_equal(continued_finite, restored_finite)
+    assert next(iter(continued_finite.issuances.values())).bounds_null_reason is None
+
+    finite_delivery = _delivery(
+        continued_finite,
+        (5.0,),
+        (CensoringAssertion.UNCENSORED,),
+    )
+    assert runtime.observe(finite_delivery, after_trivial) == freshly_restored.observe(
+        finite_delivery,
+        after_trivial,
+    )
+
+
 def test_window_restart_matches_after_incomplete_complete_censored_and_undeclared_script() -> None:
     configuration = {
         "method": "split-window-sum",

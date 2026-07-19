@@ -318,6 +318,49 @@ def test_real_weighted_runtime_escapes_cold_start_at_declared_boundary() -> None
     assert all(isinstance(value, bytes) for value in snapshot.values())
 
 
+def test_sequential_adaptive_runtime_closes_feedback_through_the_generic_loop() -> None:
+    configuration = {
+        "method": "sequential-adaptive-per-step",
+        "coverage": 0.5,
+        "calibration_window": 20,
+        "learning_rate": 0.25,
+    }
+    panel = _panel()
+    first, second, engine, states, sink, session = _run_two_origins(
+        forecast_panel=panel,
+        actuals_panel=panel,
+        configuration=configuration,
+    )
+    third = Spine(engine).run_origin(
+        OriginRequest(
+            session=session,
+            origin=pd.Timestamp("2026-01-05"),
+            scope=Scope.GLOBAL,
+        )
+    )
+    _lower, upper = interval_columns(0.5)
+    partition = derive_partition_label(
+        "observe-fixture",
+        "global",
+        EmissionScope.PER_STEP,
+    )
+    snapshot = states.snapshot(session)
+    payload = JsonStateCodec("sequential-adaptive-per-step", 1).decode(
+        snapshot[partition],
+        expected_label=partition,
+    )
+
+    assert math.isnan(float(first.forecasts.frame[upper].iloc[0]))
+    assert float(second.forecasts.frame[upper].iloc[0]) == 4.0
+    assert float(third.forecasts.frame[upper].iloc[0]) == 5.0
+    assert isinstance(payload, dict)
+    assert payload["delivered_score_count"] == 3
+    assert payload["feedback_count"] == 1
+    assert payload["raw_alpha"] == 0.625
+    assert len(sink.observe_annotations) == 3
+    assert all(value.advanced_delivered_score for value in sink.observe_annotations)
+
+
 def test_observe_before_issue_changes_only_the_perturbed_next_bound() -> None:
     configuration = {
         "method": "split-per-step",
@@ -435,8 +478,14 @@ def test_removed_callback_and_partition_surfaces_are_structurally_absent() -> No
     assert violations == {}
 
 
-def test_weighted_method_addition_has_no_engine_or_observe_branch() -> None:
-    identifiers = ("weighted-per-step", "WeightedPerStep", "WeightedConformal")
+def test_registered_method_additions_have_no_engine_or_observe_branch() -> None:
+    identifiers = (
+        "weighted-per-step",
+        "WeightedPerStep",
+        "WeightedConformal",
+        "sequential-adaptive-per-step",
+        "SequentialAdaptive",
+    )
     source_root = Path(__file__).parents[2] / "src" / "newcalibre"
     violations = {
         str(path.relative_to(source_root)): value
