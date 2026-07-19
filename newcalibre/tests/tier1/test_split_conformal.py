@@ -145,7 +145,10 @@ def test_rank_readiness_uses_the_strict_boundary_and_conservative_order_statisti
     ready = runtime.apply(_frame(), ten)
     assert ready.forecasts.loc[0, lower] == 0.0
     assert ready.forecasts.loc[0, upper] == 14.0
-    assert next(iter(ready.issuances.values())).calibration_ready
+    ready_facts = next(iter(ready.issuances.values()))
+    assert ready_facts.calibration_ready
+    assert ready_facts.working_level == pytest.approx(0.1)
+    assert ready_facts.effective_descriptor.level == 0.9
 
     nonmax_runtime, nonmax_label, nonmax = _states(
         "split-per-step",
@@ -310,7 +313,7 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
         ("method", "wrong split method"),
         ("form", "wrong emission form"),
         ("scope", "wrong emission scope"),
-        ("working-level", "wrong working level"),
+        ("working-level", "wrong working alpha"),
     ],
 )
 def test_observe_rejects_tampered_issuance_identity_before_state_advancement(
@@ -343,11 +346,7 @@ def test_observe_rejects_tampered_issuance_identity_before_state_advancement(
             ),
         )
     else:
-        tampered = replace(
-            issued,
-            working_level=0.6,
-            effective_descriptor=replace(issued.effective_descriptor, level=0.6),
-        )
+        tampered = replace(issued, working_level=0.6)
     before = dict(states)
 
     with pytest.raises(RuntimeContractError, match=message):

@@ -332,7 +332,7 @@ class WeightedConformalRuntime:
                 emission_form=self.manifest.emission_form,
                 emission_scope=self.manifest.emission_scope,
                 partition_label=label,
-                working_level=self._config.coverage,
+                working_level=1.0 - self._config.coverage,
                 state_reference=state_references[label],
                 lower_bound=lower,
                 upper_bound=upper,
@@ -468,8 +468,8 @@ class WeightedConformalRuntime:
                 raise RuntimeContractError("delivered issuance has the wrong emission form")
             if issued.emission_scope is not self.manifest.emission_scope:
                 raise RuntimeContractError("delivered issuance has the wrong emission scope")
-            if issued.working_level != self._config.coverage:
-                raise RuntimeContractError("delivered issuance has the wrong working level")
+            if issued.working_level != 1.0 - self._config.coverage:
+                raise RuntimeContractError("delivered issuance has the wrong working alpha")
             expected = self._partition_label(
                 observation.forecast_key.model_name,
                 observation.forecast_key.series_key,

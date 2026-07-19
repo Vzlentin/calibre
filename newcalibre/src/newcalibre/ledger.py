@@ -1409,9 +1409,11 @@ def _validate_observation_issuance(
     values: Mapping[str, object],
     facts: IssuedBoundFacts,
 ) -> IssuedBoundFacts:
-    lower_column, upper_column = interval_columns(facts.working_level)
+    lower_column, upper_column = interval_columns(facts.effective_descriptor.level)
     if lower_column not in values or upper_column not in values:
-        raise LedgerError("observation issuance working level must identify forecast bound columns")
+        raise LedgerError(
+            "observation issuance descriptor level must identify forecast bound columns"
+        )
     lower = values[lower_column]
     upper = values[upper_column]
     if not _same_optional_bound(lower, facts.lower_bound) or not _same_optional_bound(

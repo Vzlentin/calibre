@@ -105,7 +105,7 @@ def _observation_facts(step: int, *, ready: bool = True) -> IssuedBoundFacts:
             "global",
             EmissionScope.PER_STEP,
         ),
-        working_level=0.5,
+        working_level=0.25,
         state_reference="split-per-step:fixture",
         lower_bound=lower,
         upper_bound=upper,
@@ -266,6 +266,8 @@ def test_pending_projection_preserves_missing_facts_and_cold_start_nan_bounds() 
 
     issued = ledger.pending_observations[0].issued
     assert issued is not None
+    assert issued.working_level == 0.25
+    assert issued.effective_descriptor.level == 0.5
     assert math.isnan(issued.lower_bound)
     assert math.isnan(issued.upper_bound)
     assert plain.pending_observations[0].issued is None

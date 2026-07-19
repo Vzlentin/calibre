@@ -361,6 +361,43 @@ def test_delivery_validates_complete_keys_values_censoring_and_issued_facts() ->
         )
 
 
+def test_issued_bound_facts_accept_unclipped_finite_working_levels() -> None:
+    label = _partition()
+
+    for working_level in (-2.0, 3.0):
+        facts = IssuedBoundFacts(
+            method_name="fixture",
+            emission_form=EmissionForm.ONE_SIDED_UPPER,
+            emission_scope=EmissionScope.PER_STEP,
+            partition_label=label,
+            working_level=working_level,
+            state_reference="fixture:7",
+            lower_bound=0.0,
+            upper_bound=8.0,
+            calibration_ready=True,
+            bounds_null_reason=None,
+            effective_descriptor=_descriptor(),
+        )
+        assert facts.working_level == working_level
+        assert facts.effective_descriptor.level == 0.9
+
+    for working_level in (math.nan, math.inf, -math.inf):
+        with pytest.raises(RuntimeContractError, match="working level"):
+            IssuedBoundFacts(
+                method_name="fixture",
+                emission_form=EmissionForm.ONE_SIDED_UPPER,
+                emission_scope=EmissionScope.PER_STEP,
+                partition_label=label,
+                working_level=working_level,
+                state_reference="fixture:7",
+                lower_bound=0.0,
+                upper_bound=8.0,
+                calibration_ready=True,
+                bounds_null_reason=None,
+                effective_descriptor=_descriptor(),
+            )
+
+
 def test_issued_bound_facts_reject_impossible_finite_bound_states() -> None:
     label = _partition()
     common = {
@@ -516,8 +553,22 @@ def test_calibration_result_requires_exact_row_keyed_issuance_for_owned_bounds()
     )
     key = _key("series")
 
-    result = CalibrationResult(frame, {}, {key: _issued(label)})
+    raw_alpha_facts = _issued(label).__class__(
+        method_name="fixture",
+        emission_form=EmissionForm.ONE_SIDED_UPPER,
+        emission_scope=EmissionScope.PER_STEP,
+        partition_label=label,
+        working_level=-0.25,
+        state_reference="fixture:7",
+        lower_bound=0.0,
+        upper_bound=8.0,
+        calibration_ready=True,
+        bounds_null_reason=None,
+        effective_descriptor=_descriptor(),
+    )
+    result = CalibrationResult(frame, {}, {key: raw_alpha_facts})
     assert result.issuances[key].upper_bound == 8.0
+    assert result.issuances[key].working_level == -0.25
     with pytest.raises(RuntimeContractError, match="exactly cover"):
         CalibrationResult(frame, {})
     with pytest.raises(RuntimeContractError, match="exactly cover"):
