@@ -1,0 +1,97 @@
+schema: 1
+dataset: vn2
+series_count: 599
+calendar_frequency: W-MON
+history:
+  first_week: "2021-04-12"
+  initial_last_week: "2024-04-08"
+  initial_periods: 157
+decision:
+  round_count: 6
+  lead_time: 2
+  review_period: 1
+  protection_period: 3
+  task_horizon: 3
+  drain_periods: 2
+  origins:
+    - "2024-04-15"
+    - "2024-04-22"
+    - "2024-04-29"
+    - "2024-05-06"
+    - "2024-05-13"
+    - "2024-05-20"
+cost:
+  currency: EUR
+  underage_rate: 1.0
+  overage_rate: 0.2
+  holding_rate: 0.2
+  shortage_rate: 1.0
+actuals_semantics: censored_sales_surrogate
+stockout_rule: lost-sales
+files:
+  sales_reveals:
+    - week_0_sales.csv
+    - week_1_sales.csv
+    - week_2_sales.csv
+    - week_3_sales.csv
+    - week_4_sales.csv
+    - week_5_sales.csv
+    - week_6_sales.csv
+    - week_7_sales.csv
+    - week_8_sales.csv
+  master: week_0_master.csv
+  in_stock: week_0_in_stock.csv
+  initial_state: week_0_initial_state.csv
+columns:
+  series_keys:
+    - Store
+    - Product
+  master_attributes:
+    - ProductGroup
+    - Division
+    - Department
+    - DepartmentGroup
+    - StoreFormat
+    - Format
+  initial_state_columns:
+    - Store
+    - Product
+    - Start Inventory
+    - Sales
+    - Missed Sales
+    - End Inventory
+    - In Transit W+1
+    - In Transit W+2
+    - Holding Cost
+    - Shortage Cost
+    - Cumulative Holding Cost
+    - Cumulative Shortage Cost
+  initial_on_hand: End Inventory
+  initial_pipeline:
+    - In Transit W+1
+    - In Transit W+2
+model_config:
+  backend: vn2-seasonal-naive-native-median
+  m: 52
+  model_name: vn2-seasonal-naive-native-median
+  quantile_levels:
+    - 0.5
+  censoring_aware: false
+conformal_config:
+  method: split-window-sum
+  coverage: 0.8333333333333334
+  calibration_window: 5000
+  partition_by: global
+  upper_floor: null
+  upper_cap: null
+  protection_period: 3
+ordering_policy:
+  name: rs
+  coverage: 0.8333333333333334
+  quantile: null
+  explicit_decision_fractile: null
+  reorder_point: null
+  reorder_point_scale: null
+  target_cap: null
+  target_floor: null
+  target_scale: null
