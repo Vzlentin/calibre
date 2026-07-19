@@ -33,7 +33,7 @@ BOTTOM_UP_DECLARATION: Final = ReconcilerDeclaration(
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class NoReconciliation:
     """Validate active reconciliation input while preserving point rows exactly."""
 
@@ -52,7 +52,7 @@ class NoReconciliation:
         return apply_none(frame, hierarchy, context, declaration=self.declaration)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BottomUpReconciler:
     """Synthesize only aggregates whose complete bottom membership is present."""
 

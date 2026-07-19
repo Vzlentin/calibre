@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from weakref import WeakValueDictionary
 
 from newcalibre.reconcile.protocol import Reconciler, ReconcilerDeclaration
 
@@ -14,11 +15,15 @@ class ReconciliationRegistryError(ValueError):
     """Report an invalid strategy registration or normalized lookup."""
 
 
+def _issued_instances() -> WeakValueDictionary[int, Reconciler]:
+    return WeakValueDictionary()
+
+
 @dataclass(slots=True)
 class _Registration:
     declaration: ReconcilerDeclaration
     factory: ReconcilerFactory
-    issued: list[Reconciler] = field(default_factory=list)
+    issued: WeakValueDictionary[int, Reconciler] = field(default_factory=_issued_instances)
 
 
 class ReconcilerRegistry:
@@ -74,9 +79,15 @@ class ReconcilerRegistry:
                 f"factory for strategy {registration.declaration.name!r} "
                 "returned a mismatched declaration"
             )
-        if any(reconciler is issued for issued in registration.issued):
+        identity = id(reconciler)
+        if registration.issued.get(identity) is reconciler:
             raise ReconciliationRegistryError("factory must return a fresh reconciler instance")
-        registration.issued.append(reconciler)
+        try:
+            registration.issued[identity] = reconciler
+        except TypeError as error:
+            raise ReconciliationRegistryError(
+                "factory must return a weak-reference-capable reconciler"
+            ) from error
         return reconciler
 
     def _registration(self, name: str) -> _Registration:

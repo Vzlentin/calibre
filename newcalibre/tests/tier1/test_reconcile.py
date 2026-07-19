@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
 from dataclasses import FrozenInstanceError
 from typing import Any, cast
 
@@ -29,11 +31,13 @@ from newcalibre.reconcile import (
     NONE_DECLARATION,
     MatrixCapability,
     Reconciler,
+    ReconcilerRegistry,
     ReconciliationContext,
     ReconciliationError,
     ReconciliationInputFamily,
     ReconciliationRegistryError,
     available_strategies,
+    build_bottom_up,
     coherence_tolerance,
     resolve_strategy,
     strategy_declaration,
@@ -124,6 +128,22 @@ def test_registry_unknown_name_lists_available_strategies() -> None:
         resolve_strategy("projection")
 
 
+def test_registry_rejects_a_reused_live_reconciler_without_retaining_discarded_ones() -> None:
+    registry = ReconcilerRegistry()
+    singleton = build_bottom_up()
+    registry.register(BOTTOM_UP_DECLARATION, lambda: singleton)
+
+    assert registry.resolve(BOTTOM_UP) is singleton
+    with pytest.raises(ReconciliationRegistryError, match="fresh reconciler"):
+        registry.resolve(BOTTOM_UP)
+
+    reconciler = resolve_strategy(BOTTOM_UP)
+    discarded = weakref.ref(reconciler)
+    del reconciler
+    gc.collect()
+    assert discarded() is None
+
+
 @pytest.mark.parametrize("strategy_name", available_strategies())
 def test_no_hierarchy_and_empty_frame_are_exact_identities(strategy_name: str) -> None:
     strategy = resolve_strategy(strategy_name)
@@ -162,9 +182,7 @@ def test_every_native_strategy_rejects_distributional_columns(
 
 
 @pytest.mark.parametrize("strategy_name", available_strategies())
-def test_native_strategies_reject_uncovered_duplicate_and_aggregate_rows(
-    strategy_name: str,
-) -> None:
+def test_native_strategies_reject_uncovered_and_duplicate_rows(strategy_name: str) -> None:
     hierarchy = _hierarchy()
     strategy = resolve_strategy(strategy_name)
     uncovered = _frame({"foreign": 1.0})
@@ -172,15 +190,20 @@ def test_native_strategies_reject_uncovered_duplicate_and_aggregate_rows(
         [_frame({"a": 1.0}), _frame({"a": 2.0})],
         ignore_index=True,
     )
-    aggregate = _frame({"a": 1.0})
-    aggregate.loc[aggregate.index[0], SERIES_KEY] = hierarchy.node_labels[-1]
 
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*not covered"):
         strategy(uncovered, hierarchy, ReconciliationContext())
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*duplicate"):
         strategy(duplicate, hierarchy, ReconciliationContext())
+
+
+def test_none_rejects_aggregate_rows() -> None:
+    hierarchy = _hierarchy()
+    aggregate = _frame({"a": 1.0})
+    aggregate.loc[aggregate.index[0], SERIES_KEY] = hierarchy.node_labels[-1]
+
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*bottom-node rows"):
-        strategy(aggregate, hierarchy, ReconciliationContext())
+        resolve_strategy(NONE)(aggregate, hierarchy, ReconciliationContext())
 
 
 def test_bottom_up_suppresses_partial_aggregates_instead_of_summing_them() -> None:
@@ -273,7 +296,7 @@ def test_registered_native_strategy_is_a_deterministic_fixed_point(strategy_name
     strategy = resolve_strategy(strategy_name)
 
     first = strategy(frame, hierarchy, ReconciliationContext())
-    second = strategy(frame, hierarchy, ReconciliationContext())
+    second = strategy(first, hierarchy, ReconciliationContext())
     bound = coherence_tolerance(
         reduction_width=len(hierarchy.bottom_series),
         vector_magnitude=float(first[POINT_FORECAST].abs().max()),

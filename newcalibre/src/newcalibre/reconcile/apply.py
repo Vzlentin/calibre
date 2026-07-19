@@ -71,12 +71,14 @@ def apply_bottom_up(
     active = _active_inputs(frame, hierarchy, context, declaration=declaration)
     if active is None:
         return frame
-    sections = _validated_sections(frame, active)
+    sections = _validated_sections(frame, active, allow_aggregate_rows=True)
     matrix = build_sparse_summing_matrix(active)
+    bottom_labels = set(active.bottom_series)
     aggregate_rows: list[pd.DataFrame] = []
 
     for section in sections:
-        source = frame.iloc[list(section.positions)]
+        section_rows = frame.iloc[list(section.positions)]
+        source = section_rows.loc[section_rows[SERIES_KEY].isin(bottom_labels)]
         values = dict(zip(source[SERIES_KEY], source[POINT_FORECAST], strict=True))
         eligible = tuple(
             node
@@ -98,6 +100,14 @@ def apply_bottom_up(
             matrix=matrix,
             section=section,
         )
+        _validate_existing_aggregates(
+            section_rows,
+            bottom_labels=bottom_labels,
+            eligible=eligible,
+            aggregated=aggregated,
+            matrix=matrix,
+            section=section,
+        )
         if not eligible:
             continue
         rows = source.iloc[[0] * len(eligible)].copy(deep=True).reset_index(drop=True)
@@ -113,7 +123,7 @@ def apply_bottom_up(
         rows[POINT_FORECAST] = point_values
         aggregate_rows.append(rows)
 
-    bottom_rows = frame.copy(deep=True)
+    bottom_rows = frame.loc[frame[SERIES_KEY].isin(bottom_labels)].copy(deep=True)
     if not aggregate_rows:
         return bottom_rows
     return pd.concat([bottom_rows, *aggregate_rows], ignore_index=True)
@@ -146,6 +156,8 @@ def _active_inputs(
 def _validated_sections(
     frame: pd.DataFrame,
     hierarchy: HierarchyIndex,
+    *,
+    allow_aggregate_rows: bool = False,
 ) -> tuple[_CrossSection, ...]:
     if frame.columns.has_duplicates:
         raise ReconciliationError("reconciliation frame cannot have duplicate column labels")
@@ -221,11 +233,57 @@ def _validated_sections(
                 f"{section.description} contains series not covered by the hierarchy: {uncovered}"
             )
         non_bottom = sorted(set(labels) - bottoms, key=str.encode)
-        if non_bottom:
+        if non_bottom and not allow_aggregate_rows:
             raise ReconciliationError(
                 f"{section.description} requires bottom-node rows only: {non_bottom}"
             )
     return tuple(sections)
+
+
+def _validate_existing_aggregates(
+    source: pd.DataFrame,
+    *,
+    bottom_labels: set[str],
+    eligible: tuple[HierarchyNode, ...],
+    aggregated: dict[str, int | float | None],
+    matrix: SparseSummingMatrix,
+    section: _CrossSection,
+) -> None:
+    existing = source.loc[~source[SERIES_KEY].isin(bottom_labels)]
+    if existing.empty:
+        return
+    eligible_labels = {node.label for node in eligible}
+    ineligible = sorted(set(existing[SERIES_KEY]) - eligible_labels, key=str.encode)
+    if ineligible:
+        raise ReconciliationError(
+            f"{section.description} contains aggregate rows without complete bottom "
+            f"membership: {ineligible}"
+        )
+    try:
+        actual = existing[POINT_FORECAST].to_numpy(dtype=np.float64, na_value=np.nan)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ReconciliationError(
+            f"{section.description} aggregate point forecasts must be real numeric values"
+        ) from error
+    expected = np.asarray(
+        [
+            np.nan if aggregated[label] is None else aggregated[label]
+            for label in existing[SERIES_KEY]
+        ],
+        dtype=np.float64,
+    )
+    finite = np.abs(np.concatenate((actual, expected)))
+    finite = finite[np.isfinite(finite)]
+    magnitude = float(finite.max()) if finite.size else 0.0
+    bottom_values = source.loc[source[SERIES_KEY].isin(bottom_labels), SERIES_KEY]
+    bound = coherence_tolerance(
+        reduction_width=matrix.subset(bottom_values).reduction_width,
+        vector_magnitude=magnitude,
+    )
+    if not np.allclose(actual, expected, rtol=0.0, atol=bound, equal_nan=True):
+        raise ReconciliationError(
+            f"{section.description} contains aggregate rows inconsistent with bottom forecasts"
+        )
 
 
 def _verify_cross_section(
