@@ -180,7 +180,10 @@ def settle(request: SettlementRequest) -> SettlementResult:
             except LedgerError as error:
                 raise SettlementError(str(error)) from error
             current_quantity = _finite_sum(
-                staged_origin_by_series.get(series_key, ()),
+                (
+                    request.snapshot.origin_order_quantities.get((series_key, period), 0.0),
+                    *staged_origin_by_series.get(series_key, ()),
+                ),
                 name="current-order quantity",
             )
             on_order = _finite_nonnegative_sum(
@@ -264,7 +267,26 @@ def validate_snapshot_state(
     for series_key, position in positions.items():
         if position.backorders != 0.0:
             raise SettlementError("lost-sales settlement requires zero opening backorders")
-        if position.on_order != snapshot.open_order_quantities[series_key]:
+        if snapshot.window_opening_positions:
+            expected_position = snapshot.window_opening_positions.get(series_key)
+            if expected_position != position:
+                raise SettlementError(
+                    "settlement opening inventory must match the compact ledger index"
+                )
+            expected_opening = position.on_order
+        else:
+            window_orders = _finite_sum(
+                (
+                    snapshot.origin_order_quantities.get((series_key, period), 0.0)
+                    for period in snapshot.periods
+                ),
+                name="settlement window order quantity",
+            )
+            expected_opening = _finite_nonnegative_sum(
+                (snapshot.open_order_quantities[series_key], -window_orders),
+                name="settlement opening on_order",
+            )
+        if position.on_order != expected_opening:
             raise SettlementError(
                 f"inventory on_order for {series_key!r} does not match the compact ledger index"
             )

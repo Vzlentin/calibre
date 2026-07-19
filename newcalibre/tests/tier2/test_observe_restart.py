@@ -223,7 +223,7 @@ def _seed_foreign_state(
         session,
         label,
         value,
-        origin=pd.Timestamp("2026-01-01"),
+        sequence=0,
     )
     return label, value
 

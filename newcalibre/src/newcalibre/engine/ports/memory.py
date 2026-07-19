@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from threading import RLock
 from types import MappingProxyType
 from typing import TypeVar
 
@@ -18,6 +19,7 @@ from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
     CensoringAssertion,
+    InventoryPosition,
     Panel,
     SessionIdentity,
     StockoutRule,
@@ -29,6 +31,8 @@ from newcalibre.engine._session import (
 )
 from newcalibre.engine.ports import (
     ActualKey,
+    ActualsCommitKey,
+    CommitKey,
     CommitReceipt,
     OriginCommit,
     SettlementSnapshot,
@@ -140,7 +144,7 @@ class InMemoryCalibrationStateStore:
     """Keep calibration-state bytes by typed session and state label."""
 
     def __init__(self) -> None:
-        self._states: dict[tuple[SessionIdentity, str], tuple[pd.Timestamp, bytes]] = {}
+        self._states: dict[tuple[SessionIdentity, str], tuple[int, bytes]] = {}
 
     def snapshot(self, session: SessionIdentity) -> Mapping[str, bytes]:
         """Return a defensive immutable snapshot of one session's state rows."""
@@ -149,7 +153,7 @@ class InMemoryCalibrationStateStore:
         return MappingProxyType(
             {
                 label: value
-                for (stored_session, label), (_origin, value) in self._states.items()
+                for (stored_session, label), (_sequence, value) in self._states.items()
                 if stored_session == session
             }
         )
@@ -160,28 +164,28 @@ class InMemoryCalibrationStateStore:
         partition: str,
         value: bytes,
         *,
-        origin: pd.Timestamp,
+        sequence: int,
     ) -> None:
-        """Persist state monotonically by origin with idempotent same-origin retries."""
+        """Persist state monotonically by journal sequence with idempotent retries."""
         _require_session_partition(session, partition)
         if not isinstance(value, bytes):
             raise TypeError("calibration state must be bytes")
-        if not isinstance(origin, pd.Timestamp):
-            raise TypeError("calibration state origin must be a pandas Timestamp")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+            raise TypeError("calibration state sequence must be a non-negative integer")
         key = (session, partition)
         stored = self._states.get(key)
         if stored is not None:
-            stored_origin, stored_value = stored
-            if origin < stored_origin:
+            stored_sequence, stored_value = stored
+            if sequence < stored_sequence:
                 return
-            if origin == stored_origin and value != stored_value:
-                raise ValueError("calibration state origin already holds different bytes")
-        self._states[key] = (origin, value)
+            if sequence == stored_sequence and value != stored_value:
+                raise ValueError("calibration state sequence already holds different bytes")
+        self._states[key] = (sequence, value)
 
     @property
     def states(self) -> Mapping[tuple[SessionIdentity, str], bytes]:
         """Return an immutable state snapshot for diagnostics."""
-        return MappingProxyType({key: value for key, (_origin, value) in self._states.items()})
+        return MappingProxyType({key: value for key, (_sequence, value) in self._states.items()})
 
 
 class InMemoryLedgerSink:
@@ -194,11 +198,15 @@ class InMemoryLedgerSink:
         calendar: Calendar,
         initial_arrivals: Mapping[ActualKey, float] | None = None,
     ) -> None:
+        self._lock = RLock()
         self._ledger = Ledger(session=session, calendar=calendar)
         self._forecast_rows: dict[object, ForecastRow] = {}
         self._order_keys: set[object] = set()
         self._settlement_keys: set[object] = set()
-        self._commits: dict[pd.Timestamp, CommitReceipt] = {}
+        self._commits: dict[CommitKey, CommitReceipt] = {}
+        self._next_sequence = 1
+        self._earliest_origin: pd.Timestamp | None = None
+        self._latest_origin: pd.Timestamp | None = None
         self._decision = session_decision_inputs(session)
         if self._decision is None and initial_arrivals is not None:
             if not isinstance(initial_arrivals, Mapping):
@@ -225,6 +233,7 @@ class InMemoryLedgerSink:
             if self._settlement_index is None
             else self._settlement_index.initial_arrivals
         )
+        self._initial_positions: Mapping[str, InventoryPosition] = MappingProxyType({})
 
     @property
     def session(self) -> SessionIdentity:
@@ -245,6 +254,16 @@ class InMemoryLedgerSink:
     def pending_observations(self) -> tuple[PendingObservation, ...]:
         """Return the ledger's defensive pending-observation snapshot."""
         return self._ledger.pending_observations
+
+    @property
+    def earliest_origin(self) -> pd.Timestamp | None:
+        """Return the earliest committed forecast origin, when one exists."""
+        return self._earliest_origin
+
+    @property
+    def latest_origin(self) -> pd.Timestamp | None:
+        """Return the latest committed forecast origin, when one exists."""
+        return self._latest_origin
 
     @property
     def observation_resolutions(self):
@@ -284,6 +303,8 @@ class InMemoryLedgerSink:
             orders=self._ledger.orders,
             settlements=self._ledger.settlements,
         )
+        if not self._ledger.settlements and self._initial_positions:
+            self._settlement_index.apply_initial_positions(self._initial_positions)
         return self._settlement_index.audit()
 
     def settlement_index_audit(self) -> SettlementIndexAudit:
@@ -292,22 +313,43 @@ class InMemoryLedgerSink:
             raise LedgerError("settlement index audit requires a decision configuration")
         return self._settlement_index.audit()
 
-    def receipt(self, origin: pd.Timestamp) -> CommitReceipt | None:
-        """Return the exact immutable receipt for a committed origin."""
-        self._ledger.calendar.require_member(origin, name="commit-receipt origin")
-        return self._commits.get(origin)
+    def receipt(self, key: CommitKey) -> CommitReceipt | None:
+        """Return the exact immutable receipt for a committed natural key."""
+        if isinstance(key, pd.Timestamp):
+            self._ledger.calendar.require_member(key, name="commit-receipt origin")
+        elif isinstance(key, ActualsCommitKey):
+            for _series_key, timestamp in key.keys:
+                self._ledger.calendar.require_member(
+                    timestamp,
+                    name="commit-receipt actual timestamp",
+                )
+        else:
+            raise TypeError("commit receipt key must be an origin or actuals key")
+        with self._lock:
+            return self._commits.get(key)
 
     def commit(self, write: OriginCommit) -> CommitReceipt:
         """Journal and publish a write atomically; return its repair receipt."""
+        with self._lock:
+            return self._commit(write)
+
+    def _commit(self, write: OriginCommit) -> CommitReceipt:
         if not isinstance(write, OriginCommit):
             raise TypeError("ledger sink commit requires an OriginCommit")
         if write.session != self._ledger.session:
             raise LedgerError("ledger commit session does not match the sink session")
-        previous = self._commits.get(write.origin)
+        key = write.commit_key
+        previous = self._commits.get(key)
         if previous is not None:
             if previous.digest == write.digest:
                 return previous
-            raise LedgerError(f"origin {write.origin} already has a different committed write")
+            raise LedgerError(f"journal key {key!r} already has a different committed write")
+        if (
+            write.forecasts
+            and self._latest_origin is not None
+            and write.origin <= self._latest_origin
+        ):
+            raise LedgerError("forecast origins must advance strictly monotonically")
 
         staged = _stage_new_rows(write, calendar=self._ledger.calendar)
         _require_origin_rows(write, staged=staged)
@@ -323,7 +365,25 @@ class InMemoryLedgerSink:
             (row.key for row in staged.settlements),
             "settlement",
         )
-        settlement_delta = self._validated_settlement_delta(write)
+        initial_positions = None
+        if self._settlement_index is not None and write.inventory_positions:
+            if self._settlement_index.has_initial_positions:
+                supplied_positions = dict(write.inventory_positions)
+                durable_positions = dict(
+                    self._settlement_index.snapshot((write.origin,)).current_positions
+                )
+                if supplied_positions not in (dict(self._initial_positions), durable_positions):
+                    raise LedgerError(
+                        "origin inventory positions do not match durable inventory state"
+                    )
+            else:
+                initial_positions = self._settlement_index.validate_initial_positions(
+                    write.inventory_positions
+                )
+        settlement_delta = self._validated_settlement_delta(
+            write,
+            initial_positions=initial_positions,
+        )
 
         # The observe cycle validates and publishes first. Every later family
         # was prevalidated against scratch/indexed state, so only infallible
@@ -340,14 +400,29 @@ class InMemoryLedgerSink:
         self._forecast_rows.update((row.key, row) for row in staged.forecasts)
         self._order_keys.update(row.key for row in write.orders)
         self._settlement_keys.update(row.key for row in write.settlements)
+        if initial_positions is not None:
+            assert self._settlement_index is not None
+            self._settlement_index.apply_initial_positions(initial_positions)
+            self._initial_positions = MappingProxyType(dict(initial_positions))
         if settlement_delta is not None:
             assert self._settlement_index is not None
             self._settlement_index.apply(settlement_delta)
-        receipt = CommitReceipt.from_commit(write)
-        self._commits[write.origin] = receipt
+        receipt = CommitReceipt.from_commit(write, sequence=self._next_sequence)
+        self._next_sequence += 1
+        self._commits[key] = receipt
+        if write.forecasts:
+            if self._earliest_origin is None or write.origin < self._earliest_origin:
+                self._earliest_origin = write.origin
+            if self._latest_origin is None or write.origin > self._latest_origin:
+                self._latest_origin = write.origin
         return receipt
 
-    def _validated_settlement_delta(self, write: OriginCommit):
+    def _validated_settlement_delta(
+        self,
+        write: OriginCommit,
+        *,
+        initial_positions: Mapping[str, InventoryPosition] | None,
+    ):
         """Validate only newly appended settlement facts against the compact index."""
         if not write.orders and not write.settlements:
             return None
@@ -365,6 +440,7 @@ class InMemoryLedgerSink:
         return self._settlement_index.validate_delta(
             orders=write.orders,
             settlements=write.settlements,
+            initial_positions=initial_positions,
         )
 
     @property

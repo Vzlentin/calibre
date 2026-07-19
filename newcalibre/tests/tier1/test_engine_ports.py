@@ -127,17 +127,17 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
 
     states = InMemoryCalibrationStateStore()
     session = _session()
-    states.save(session, "series:a", b"state", origin=ORIGIN_DATE)
+    states.save(session, "series:a", b"state", sequence=1)
     assert states.snapshot(session) == {"series:a": b"state"}
     states.save(
         session,
         "series:a",
         b"stale",
-        origin=pd.Timestamp("2026-01-04"),
+        sequence=0,
     )
     assert states.snapshot(session) == {"series:a": b"state"}
     with pytest.raises(ValueError, match="already holds different bytes"):
-        states.save(session, "series:a", b"conflict", origin=ORIGIN_DATE)
+        states.save(session, "series:a", b"conflict", sequence=1)
 
     dispatch = InProcessDispatch()
     assert dispatch.map(lambda value: value * 2, (3, 1, 2)) == (6, 2, 4)
@@ -333,7 +333,7 @@ def test_commit_digest_is_sensitive_to_every_observe_materialization_family() ->
         observe_cycle=variants[-1],
         state_updates={"state": b"value"},
     )
-    receipt = CommitReceipt.from_commit(committed)
+    receipt = CommitReceipt.from_commit(committed, sequence=1)
     assert receipt.observe_cycle == committed.observe_cycle
     assert receipt.state_updates == committed.state_updates
     assert receipt.digest == committed.digest
@@ -406,6 +406,7 @@ def test_commit_receipt_rejects_noncanonical_digests(digest: str) -> None:
             origin=ORIGIN_DATE,
             digest=digest,
             state_updates={},
+            sequence=0,
         )
 
 
@@ -416,6 +417,7 @@ def test_commit_receipt_validates_and_freezes_state_updates() -> None:
         origin=ORIGIN_DATE,
         digest="a" * 64,
         state_updates=state_updates,
+        sequence=0,
     )
     state_updates["series:a"] = b"mutated"
     assert receipt.state_updates == {"series:a": b"state"}
@@ -426,6 +428,7 @@ def test_commit_receipt_validates_and_freezes_state_updates() -> None:
             origin=ORIGIN_DATE,
             digest="a" * 64,
             state_updates={" untrimmed": b"state"},
+            sequence=0,
         )
     with pytest.raises(TypeError, match="must contain bytes"):
         CommitReceipt(
@@ -433,4 +436,5 @@ def test_commit_receipt_validates_and_freezes_state_updates() -> None:
             origin=ORIGIN_DATE,
             digest="a" * 64,
             state_updates={"series:a": "state"},  # type: ignore[dict-item]
+            sequence=0,
         )

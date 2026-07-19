@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from itertools import pairwise
-from numbers import Real
+from numbers import Integral, Real
 from types import MappingProxyType
 from typing import Protocol, TypeVar, runtime_checkable
 
@@ -32,6 +32,22 @@ from newcalibre.ledger import (
 from newcalibre.observe import ActualsSubmission, ObserveCycle, ObservedActual, PendingObservation
 
 type ActualKey = tuple[str, pd.Timestamp]
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ActualsCommitKey:
+    """Identify one atomic actuals transaction by its canonical natural keys."""
+
+    keys: tuple[ActualKey, ...]
+
+    def __init__(self, keys: Sequence[ActualKey]) -> None:
+        canonical = _canonical_actual_keys(keys)
+        if not canonical:
+            raise ValueError("actuals commit key must not be empty")
+        object.__setattr__(self, "keys", canonical)
+
+
+type CommitKey = pd.Timestamp | ActualsCommitKey
 
 _Input = TypeVar("_Input")
 _Output = TypeVar("_Output")
@@ -86,7 +102,7 @@ class ForecastWrite:
 
 @dataclass(frozen=True, slots=True)
 class OriginCommit:
-    """Journal one origin's complete durable payload for idempotent repair."""
+    """Journal one complete durable payload for idempotent repair."""
 
     session: SessionIdentity
     origin: pd.Timestamp
@@ -95,6 +111,9 @@ class OriginCommit:
     orders: tuple[OrderRow, ...] = ()
     settlements: tuple[SettlementRecord, ...] = ()
     state_updates: Mapping[str, bytes] = field(default_factory=dict)
+    actual_keys: tuple[ActualKey, ...] = ()
+    input_fingerprint: str | None = None
+    inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     _digest: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -116,12 +135,28 @@ class OriginCommit:
             if not isinstance(value, bytes):
                 raise TypeError("origin commit state updates must contain bytes")
             updates[partition] = value
+        actual_keys = _canonical_actual_keys(self.actual_keys)
+        fingerprint = _optional_sha256(self.input_fingerprint, name="input fingerprint")
+        positions = _frozen_inventory_positions(
+            self.inventory_positions,
+            name="origin commit inventory positions",
+        )
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        object.__setattr__(self, "actual_keys", actual_keys)
+        object.__setattr__(self, "input_fingerprint", fingerprint)
+        object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         object.__setattr__(self, "_digest", _origin_commit_digest(self))
 
     @property
+    def commit_key(self) -> CommitKey:
+        """Return the internally derived journal key for this transaction."""
+        if self.actual_keys:
+            return ActualsCommitKey(self.actual_keys)
+        return self.origin
+
+    @property
     def digest(self) -> str:
-        """Return the compact identity of the complete origin payload."""
+        """Return the compact identity of the complete journal payload."""
         return self._digest
 
 
@@ -133,19 +168,29 @@ class CommitReceipt:
     origin: pd.Timestamp
     digest: str
     state_updates: Mapping[str, bytes]
+    sequence: int
     observe_cycle: ObserveCycle = field(default_factory=ObserveCycle)
     settlement_periods: tuple[pd.Timestamp, ...] = ()
+    actual_keys: tuple[ActualKey, ...] = ()
+    input_fingerprint: str | None = None
+    orders: tuple[OrderRow, ...] = ()
+    inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
 
     @classmethod
-    def from_commit(cls, commit: OriginCommit) -> CommitReceipt:
+    def from_commit(cls, commit: OriginCommit, *, sequence: int) -> CommitReceipt:
         """Compact a materialized commit after its ledger facts publish."""
         return cls(
             session=commit.session,
             origin=commit.origin,
             digest=commit.digest,
             state_updates=commit.state_updates,
+            sequence=sequence,
             observe_cycle=commit.observe_cycle,
             settlement_periods=tuple(sorted({record.period for record in commit.settlements})),
+            actual_keys=commit.actual_keys,
+            input_fingerprint=commit.input_fingerprint,
+            orders=commit.orders,
+            inventory_positions=commit.inventory_positions,
         )
 
     def __post_init__(self) -> None:
@@ -162,6 +207,12 @@ class CommitReceipt:
             raise ValueError("commit receipt digest must be a SHA-256 hex string")
         if not isinstance(self.state_updates, Mapping):
             raise TypeError("commit receipt state updates must be a mapping")
+        if (
+            not isinstance(self.sequence, Integral)
+            or isinstance(self.sequence, bool)
+            or self.sequence < 0
+        ):
+            raise ValueError("commit receipt sequence must be a non-negative integer")
         if not isinstance(self.observe_cycle, ObserveCycle):
             raise TypeError("commit receipt observe cycle must be an ObserveCycle")
         updates: dict[str, bytes] = {}
@@ -181,8 +232,29 @@ class CommitReceipt:
             raise ValueError(
                 "commit receipt settlement periods must be strictly increasing and unique"
             )
+        actual_keys = _canonical_actual_keys(self.actual_keys)
+        fingerprint = _optional_sha256(self.input_fingerprint, name="input fingerprint")
+        orders = tuple(self.orders)
+        if any(not isinstance(order, OrderRow) for order in orders):
+            raise TypeError("commit receipt orders must contain OrderRow values")
+        positions = _frozen_inventory_positions(
+            self.inventory_positions,
+            name="commit receipt inventory positions",
+        )
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        object.__setattr__(self, "sequence", int(self.sequence))
         object.__setattr__(self, "settlement_periods", settlement_periods)
+        object.__setattr__(self, "actual_keys", actual_keys)
+        object.__setattr__(self, "input_fingerprint", fingerprint)
+        object.__setattr__(self, "orders", orders)
+        object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
+
+    @property
+    def commit_key(self) -> CommitKey:
+        """Return the internally derived journal key for this transaction."""
+        if self.actual_keys:
+            return ActualsCommitKey(self.actual_keys)
+        return self.origin
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +269,9 @@ class SettlementSnapshot:
     open_order_quantities: Mapping[str, float]
     due_arrivals: Mapping[ActualKey, float]
     actuals_semantics: ActualsSemantics | None
+    origin_order_quantities: Mapping[ActualKey, float] = field(default_factory=dict)
+    current_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
+    window_opening_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
@@ -231,6 +306,10 @@ class SettlementSnapshot:
             self.due_arrivals,
             name="settlement snapshot due arrivals",
         )
+        origin_quantities = _frozen_nonnegative_quantities(
+            self.origin_order_quantities,
+            name="settlement snapshot origin-order quantities",
+        )
         period_set = set(periods)
         if any(
             not isinstance(key, tuple)
@@ -242,6 +321,18 @@ class SettlementSnapshot:
             for key in due_arrivals
         ):
             raise ValueError("settlement snapshot due arrivals must be keyed inside its window")
+        if any(
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or not isinstance(key[0], str)
+            or not key[0]
+            or not isinstance(key[1], pd.Timestamp)
+            or key[1] not in period_set
+            for key in origin_quantities
+        ):
+            raise ValueError(
+                "settlement snapshot origin-order quantities must be keyed inside its window"
+            )
         if self.actuals_semantics is not None and not isinstance(
             self.actuals_semantics,
             ActualsSemantics,
@@ -249,10 +340,29 @@ class SettlementSnapshot:
             raise TypeError(
                 "settlement snapshot actuals semantics must be ActualsSemantics or None"
             )
+        current_positions = _frozen_inventory_positions(
+            self.current_positions,
+            name="settlement snapshot current positions",
+        )
+        opening_positions = _frozen_inventory_positions(
+            self.window_opening_positions,
+            name="settlement snapshot window opening positions",
+        )
         object.__setattr__(self, "periods", periods)
         object.__setattr__(self, "latest_positions", MappingProxyType(latest_positions))
         object.__setattr__(self, "open_order_quantities", MappingProxyType(open_quantities))
         object.__setattr__(self, "due_arrivals", MappingProxyType(due_arrivals))
+        object.__setattr__(
+            self,
+            "origin_order_quantities",
+            MappingProxyType(origin_quantities),
+        )
+        object.__setattr__(self, "current_positions", MappingProxyType(current_positions))
+        object.__setattr__(
+            self,
+            "window_opening_positions",
+            MappingProxyType(opening_positions),
+        )
 
 
 @runtime_checkable
@@ -305,9 +415,9 @@ class CalibrationStateStore(Protocol):
         partition: str,
         value: bytes,
         *,
-        origin: pd.Timestamp,
+        sequence: int,
     ) -> None:
-        """Persist a partition value without allowing an older origin to replace it."""
+        """Persist a partition value without allowing an older journal entry to replace it."""
         ...
 
 
@@ -335,6 +445,16 @@ class LedgerSink(Protocol):
         """Return a defensive pending-observation snapshot."""
         ...
 
+    @property
+    def earliest_origin(self) -> pd.Timestamp | None:
+        """Return the earliest committed forecast origin, when one exists."""
+        ...
+
+    @property
+    def latest_origin(self) -> pd.Timestamp | None:
+        """Return the latest committed forecast origin, when one exists."""
+        ...
+
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
         """Return pending rows due strictly before ``origin``."""
         ...
@@ -346,8 +466,8 @@ class LedgerSink(Protocol):
         """Return the compact indexed facts needed by ``periods``."""
         ...
 
-    def receipt(self, origin: pd.Timestamp) -> CommitReceipt | None:
-        """Return the immutable commit receipt for an origin, when present."""
+    def receipt(self, key: CommitKey) -> CommitReceipt | None:
+        """Return the immutable commit receipt for a natural journal key, when present."""
         ...
 
     def commit(self, write: OriginCommit) -> CommitReceipt:
@@ -390,7 +510,7 @@ def _forecast_write_digest(write: ForecastWrite) -> str:
 
 def _origin_commit_digest(commit: OriginCommit) -> str:
     digest = hashlib.sha256()
-    _update_digest(digest, b"schema", b"newcalibre.origin-commit/v1")
+    _update_digest(digest, b"schema", b"newcalibre.origin-commit/v2")
     _update_digest(digest, b"session", commit.session.value.encode())
     _update_digest(
         digest,
@@ -424,6 +544,17 @@ def _origin_commit_digest(commit: OriginCommit) -> str:
     )
     _update_digest(digest, b"orders", _canonical_value_bytes(commit.orders))
     _update_digest(digest, b"settlements", _canonical_value_bytes(commit.settlements))
+    _update_digest(digest, b"actual-keys", _canonical_value_bytes(commit.actual_keys))
+    _update_digest(
+        digest,
+        b"input-fingerprint",
+        _canonical_value_bytes(commit.input_fingerprint),
+    )
+    _update_digest(
+        digest,
+        b"inventory-positions",
+        _canonical_value_bytes(commit.inventory_positions),
+    )
     _update_digest(digest, b"state-count", len(commit.state_updates).to_bytes(8, "big"))
     for partition, state in sorted(commit.state_updates.items()):
         _update_digest(digest, b"state-partition", partition.encode())
@@ -491,6 +622,60 @@ def _type_name(value: object) -> str:
     return f"{value_type.__module__}.{value_type.__qualname__}"
 
 
+def _canonical_actual_keys(values: Sequence[ActualKey]) -> tuple[ActualKey, ...]:
+    if isinstance(values, (str, bytes)):
+        raise TypeError("actual keys must be a sequence")
+    keys = tuple(values)
+    for key in keys:
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise ValueError("actual keys must be series/timestamp tuples")
+        series_key, timestamp = key
+        if not isinstance(series_key, str) or not series_key:
+            raise ValueError("actual key series must be a non-empty string")
+        try:
+            series_key.encode("utf-8")
+        except UnicodeError as error:
+            raise ValueError("actual key series must be valid UTF-8") from error
+        if not isinstance(timestamp, pd.Timestamp) or pd.isna(timestamp):
+            raise TypeError("actual key timestamp must be a pandas Timestamp")
+        if timestamp.tz is not None:
+            raise ValueError("actual key timestamp must be timezone-naive")
+    canonical = tuple(sorted(keys, key=lambda key: (key[0].encode(), key[1])))
+    if len(set(canonical)) != len(canonical):
+        raise ValueError("actual keys must be unique")
+    return canonical
+
+
+def _optional_sha256(value: str | None, *, name: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} must be a SHA-256 hex string")
+    return value
+
+
+def _frozen_inventory_positions(
+    values: Mapping[str, InventoryPosition],
+    *,
+    name: str,
+) -> dict[str, InventoryPosition]:
+    if not isinstance(values, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    positions: dict[str, InventoryPosition] = {}
+    for series_key, position in values.items():
+        if not isinstance(series_key, str) or not series_key:
+            raise ValueError(f"{name} series keys must be non-empty strings")
+        if not isinstance(position, InventoryPosition):
+            raise TypeError(f"{name} must contain InventoryPosition values")
+        positions[series_key] = position
+    return positions
+
+
 def _frozen_nonnegative_quantities[Key](
     values: Mapping[Key, float],
     *,
@@ -514,9 +699,11 @@ def _frozen_nonnegative_quantities[Key](
 
 __all__ = [
     "ActualKey",
+    "ActualsCommitKey",
     "ActualsSource",
     "ArtifactStore",
     "CalibrationStateStore",
+    "CommitKey",
     "CommitReceipt",
     "DispatchBackend",
     "ForecastWrite",

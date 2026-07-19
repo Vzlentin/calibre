@@ -1,8 +1,18 @@
 """Expose the chapter-03 engine spine, settlement core, and six ports."""
 
 from newcalibre.engine.errors import EngineError
+from newcalibre.engine.event_driver import (
+    ActualsEvent,
+    ActualsOutcome,
+    DriverEvent,
+    EventDriver,
+    EventDriverError,
+    OriginEvent,
+    OriginOutcome,
+)
 from newcalibre.engine.ports import (
     ActualKey,
+    ActualsCommitKey,
     ActualsSource,
     ArtifactStore,
     CalibrationStateStore,
@@ -60,6 +70,9 @@ from newcalibre.engine.time_loop import (
 __all__ = [
     "ENGINE_VERBS",
     "ActualKey",
+    "ActualsCommitKey",
+    "ActualsEvent",
+    "ActualsOutcome",
     "ActualsSource",
     "ArtifactStore",
     "CalibrationResult",
@@ -72,7 +85,10 @@ __all__ = [
     "DecisionBatch",
     "DispatchBackend",
     "Engine",
+    "DriverEvent",
     "EngineError",
+    "EventDriver",
+    "EventDriverError",
     "FittedTask",
     "ForecastBatch",
     "ForecastWrite",
@@ -87,6 +103,8 @@ __all__ = [
     "OrderProposal",
     "OrderRequest",
     "OriginCommit",
+    "OriginEvent",
+    "OriginOutcome",
     "OriginRequest",
     "OriginResult",
     "PanelSource",
