@@ -24,11 +24,16 @@ from newcalibre.conformal.methods import (
     SPLIT_PER_STEP_MANIFEST,
     SPLIT_WINDOW_SUM,
     SPLIT_WINDOW_SUM_MANIFEST,
+    WEIGHTED_PER_STEP,
+    WEIGHTED_PER_STEP_MANIFEST,
     SplitConformalRuntime,
     SplitPerStepConfig,
     SplitWindowSumConfig,
+    WeightedConformalRuntime,
+    WeightedPerStepConfig,
     build_split_per_step,
     build_split_window_sum,
+    build_weighted_per_step,
 )
 from newcalibre.conformal.registry import ConformalRegistry, ConformalRegistryError
 from newcalibre.conformal.runtime import ConformalRuntime, require_calibration_context
@@ -58,6 +63,12 @@ _BUILTIN_METHODS.register(
     SPLIT_WINDOW_SUM_MANIFEST,
     SplitWindowSumConfig,
     build_split_window_sum,
+)
+_BUILTIN_METHODS.register(
+    WEIGHTED_PER_STEP,
+    WEIGHTED_PER_STEP_MANIFEST,
+    WeightedPerStepConfig,
+    build_weighted_per_step,
 )
 
 
@@ -114,6 +125,10 @@ __all__ = [
     "SplitConformalRuntime",
     "SplitPerStepConfig",
     "SplitWindowSumConfig",
+    "WEIGHTED_PER_STEP",
+    "WEIGHTED_PER_STEP_MANIFEST",
+    "WeightedConformalRuntime",
+    "WeightedPerStepConfig",
     "available_methods",
     "derive_partition_label",
     "method_config_schema",

@@ -1,4 +1,4 @@
-"""Expose the built-in split-conformal method family."""
+"""Expose the built-in conformal method families."""
 
 from newcalibre.conformal.methods.split import (
     SPLIT_PER_STEP,
@@ -11,6 +11,13 @@ from newcalibre.conformal.methods.split import (
     build_split_per_step,
     build_split_window_sum,
 )
+from newcalibre.conformal.methods.weighted import (
+    WEIGHTED_PER_STEP,
+    WEIGHTED_PER_STEP_MANIFEST,
+    WeightedConformalRuntime,
+    WeightedPerStepConfig,
+    build_weighted_per_step,
+)
 
 __all__ = [
     "SPLIT_PER_STEP",
@@ -20,6 +27,11 @@ __all__ = [
     "SplitConformalRuntime",
     "SplitPerStepConfig",
     "SplitWindowSumConfig",
+    "WEIGHTED_PER_STEP",
+    "WEIGHTED_PER_STEP_MANIFEST",
+    "WeightedConformalRuntime",
+    "WeightedPerStepConfig",
     "build_split_per_step",
     "build_split_window_sum",
+    "build_weighted_per_step",
 ]
