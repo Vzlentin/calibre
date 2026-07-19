@@ -317,7 +317,9 @@ class SequentialAdaptiveConformalRuntime:
 
         for row in rows:
             label = self._partition_label(row.key.model_name, row.key.series_key)
-            partition = decoded.get(label, self._empty_partition())
+            partition = decoded.get(label)
+            if partition is None:
+                partition = self._empty_partition()
             ready = len(partition.scores) >= minimum
             if not ready:
                 lower = math.nan

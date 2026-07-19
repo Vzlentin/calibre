@@ -553,7 +553,7 @@ def test_calibration_result_requires_exact_row_keyed_issuance_for_owned_bounds()
     )
     key = _key("series")
 
-    raw_alpha_facts = _issued(label).__class__(
+    raw_alpha_facts = IssuedBoundFacts(
         method_name="fixture",
         emission_form=EmissionForm.ONE_SIDED_UPPER,
         emission_scope=EmissionScope.PER_STEP,
