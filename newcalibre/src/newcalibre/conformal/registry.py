@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
+import pandas as pd
 from pydantic import BaseModel, ValidationError
 
 from newcalibre.conformal.manifest import MethodManifest
 from newcalibre.conformal.runtime import ConformalRuntime
 from newcalibre.conformal.state import StateCodecError, validate_state_blob
+from newcalibre.conformal.types import (
+    CalibrationContext,
+    CalibrationResult,
+    Delivery,
+    ObserveEffect,
+    RuntimeContractError,
+)
 
 RuntimeFactory = Callable[[BaseModel, Mapping[str, bytes]], ConformalRuntime]
 
@@ -24,7 +32,79 @@ class _Registration:
     manifest: MethodManifest
     config_schema: type[BaseModel]
     factory: RuntimeFactory
-    last_runtime: ConformalRuntime
+    issued_runtimes: list[ConformalRuntime]
+
+
+class _ResultValidatingRuntime:
+    __slots__ = ("_config", "_manifest", "_runtime")
+
+    def __init__(
+        self,
+        runtime: ConformalRuntime,
+        *,
+        manifest: MethodManifest,
+        config: BaseModel,
+    ) -> None:
+        self._runtime = runtime
+        self._manifest = manifest
+        self._config = config
+
+    @property
+    def manifest(self) -> MethodManifest:
+        return self._manifest
+
+    @property
+    def config(self) -> BaseModel:
+        return self._config
+
+    def calibrate(
+        self,
+        scores: Mapping[str, Sequence[float]],
+    ) -> Mapping[str, bytes]:
+        states = self._runtime.calibrate(scores)
+        return MappingProxyType(
+            _validated_emitted_states(states, manifest=self.manifest, verb="calibrate")
+        )
+
+    def apply(
+        self,
+        forecasts: pd.DataFrame,
+        states: Mapping[str, bytes | None],
+        *,
+        context: CalibrationContext | None = None,
+    ) -> CalibrationResult:
+        result = self._runtime.apply(forecasts, states, context=context)
+        if not isinstance(result, CalibrationResult):
+            raise RuntimeContractError("apply must return a CalibrationResult")
+        _validated_emitted_states(
+            result.state_updates,
+            manifest=self.manifest,
+            verb="apply",
+        )
+        return result
+
+    def observe(
+        self,
+        delivery: Delivery,
+        states: Mapping[str, bytes | None],
+        *,
+        context: CalibrationContext | None = None,
+    ) -> ObserveEffect:
+        effect = self._runtime.observe(delivery, states, context=context)
+        if not isinstance(effect, ObserveEffect):
+            raise RuntimeContractError("observe must return an ObserveEffect")
+        expected_keys = {value.forecast_key for value in delivery.observations}
+        actual_keys = {value.forecast_key for value in effect.annotations}
+        if actual_keys != expected_keys:
+            raise RuntimeContractError(
+                "observe annotations must exactly cover the delivered forecast keys"
+            )
+        _validated_emitted_states(
+            effect.state_updates,
+            manifest=self.manifest,
+            verb="observe",
+        )
+        return effect
 
 
 class ConformalRegistry:
@@ -98,7 +178,7 @@ class ConformalRegistry:
             manifest=manifest,
             config_schema=config_schema,
             factory=factory,
-            last_runtime=second,
+            issued_runtimes=[first, second],
         )
 
     def config_schema(self, method_name: str) -> type[BaseModel]:
@@ -154,10 +234,14 @@ class ConformalRegistry:
             config_schema=registration.config_schema,
             expected_config=config,
         )
-        if runtime is registration.last_runtime:
+        if any(runtime is issued for issued in registration.issued_runtimes):
             raise ConformalRegistryError("factory must return a fresh runtime instance")
-        registration.last_runtime = runtime
-        return runtime
+        registration.issued_runtimes.append(runtime)
+        return _ResultValidatingRuntime(
+            runtime,
+            manifest=registration.manifest,
+            config=config,
+        )
 
     def _registration_for(self, method_name: str) -> _Registration:
         if not isinstance(method_name, str) or not method_name:
@@ -216,6 +300,34 @@ def _validate_runtime(
         raise ConformalRegistryError(
             "runtime configuration must equal the registry-validated configuration"
         )
+
+
+def _validated_emitted_states(
+    states: object,
+    *,
+    manifest: MethodManifest,
+    verb: str,
+) -> dict[str, bytes]:
+    if not isinstance(states, Mapping):
+        raise RuntimeContractError(f"{verb} state updates must be a mapping")
+    snapshot = dict(states)
+    for label, state in snapshot.items():
+        if not isinstance(label, str):
+            raise RuntimeContractError(f"{verb} state labels must be strings")
+        if not isinstance(state, bytes):
+            raise RuntimeContractError(f"{verb} state values must be immutable bytes")
+        try:
+            validate_state_blob(
+                state,
+                method_name=manifest.name,
+                schema_version=manifest.state_schema_version,
+                expected_label=label,
+            )
+        except StateCodecError as error:
+            raise RuntimeContractError(
+                f"{verb} emitted invalid state for label {label!r}: {error}"
+            ) from error
+    return snapshot
 
 
 def _validated_states(

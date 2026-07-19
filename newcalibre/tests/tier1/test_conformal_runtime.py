@@ -330,6 +330,41 @@ def test_delivery_validates_complete_keys_values_censoring_and_issued_facts() ->
         )
 
 
+def test_issued_bound_facts_reject_impossible_finite_bound_states() -> None:
+    label = _partition()
+    common = {
+        "method_name": "fixture",
+        "partition_label": label,
+        "working_level": 0.9,
+        "state_reference": "fixture:7",
+        "bounds_null_reason": None,
+    }
+
+    with pytest.raises(RuntimeContractError, match="lower bound cannot exceed"):
+        IssuedBoundFacts(
+            **common,
+            lower_bound=9.0,
+            upper_bound=8.0,
+            calibration_ready=True,
+        )
+    with pytest.raises(RuntimeContractError, match="require calibration readiness"):
+        IssuedBoundFacts(
+            **common,
+            lower_bound=0.0,
+            upper_bound=8.0,
+            calibration_ready=False,
+        )
+
+    declared_non_finite = IssuedBoundFacts(
+        **(common | {"bounds_null_reason": "method-declared non-finite"}),
+        lower_bound=math.nan,
+        upper_bound=math.nan,
+        calibration_ready=True,
+    )
+    assert declared_non_finite.calibration_ready
+    assert math.isnan(declared_non_finite.lower_bound)
+
+
 def test_calibration_context_exposes_only_row_aligned_immutable_hierarchy_facts() -> None:
     context = CalibrationContext(
         series_keys=cast(Any, ["sku-b", "sku-a"]),

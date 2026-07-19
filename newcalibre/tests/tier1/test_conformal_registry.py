@@ -6,12 +6,12 @@ import inspect
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
+from typing import ClassVar
 
 import pandas as pd
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-import newcalibre.conformal as conformal_package
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     AssumptionClass,
@@ -32,6 +32,7 @@ from newcalibre.conformal import (
     ObserveEffect,
     PostWarmupNonFinite,
     ResolvedObservation,
+    RuntimeContractError,
     derive_partition_label,
     require_calibration_context,
 )
@@ -103,15 +104,17 @@ class _FixtureCodec:
 
 
 class _FixtureRuntime:
-    instances = 0
+    instances: ClassVar[int] = 0
+    constructed: ClassVar[list[_FixtureRuntime]] = []
 
     def __init__(
         self,
         config: _FixtureConfig,
         states: Mapping[str, bytes],
     ) -> None:
-        type(self).instances += 1
-        self.instance_number = type(self).instances
+        _FixtureRuntime.instances += 1
+        self.instance_number = _FixtureRuntime.instances
+        _FixtureRuntime.constructed.append(self)
         self._config = config
         self._states = MappingProxyType(dict(states))
         self._codec = _FixtureCodec()
@@ -199,6 +202,48 @@ class _FixtureRuntime:
         return ObserveEffect({delivery.partition_label: update}, annotations)
 
 
+class _InvalidStateOutputRuntime(_FixtureRuntime):
+    def __init__(
+        self,
+        config: _FixtureConfig,
+        states: Mapping[str, bytes],
+        invalid_state: bytes,
+    ) -> None:
+        super().__init__(config, states)
+        self._invalid_state = invalid_state
+
+    def calibrate(
+        self,
+        scores: Mapping[str, Sequence[float]],
+    ) -> Mapping[str, bytes]:
+        label = next(iter(scores))
+        return {label: self._invalid_state}
+
+    def apply(
+        self,
+        forecasts: pd.DataFrame,
+        states: Mapping[str, bytes | None],
+        *,
+        context: CalibrationContext | None = None,
+    ) -> CalibrationResult:
+        result = super().apply(forecasts, states, context=context)
+        label = next(iter(states))
+        return CalibrationResult(result.forecasts, {label: self._invalid_state})
+
+    def observe(
+        self,
+        delivery: Delivery,
+        states: Mapping[str, bytes | None],
+        *,
+        context: CalibrationContext | None = None,
+    ) -> ObserveEffect:
+        effect = super().observe(delivery, states, context=context)
+        return ObserveEffect(
+            {delivery.partition_label: self._invalid_state},
+            effect.annotations,
+        )
+
+
 def _observation(
     series_key: str,
     *,
@@ -261,10 +306,12 @@ def test_registry_registers_and_constructs_a_fixture_with_schema_parity() -> Non
 def test_fixture_executes_calibrate_apply_observe_and_factory_restoration() -> None:
     registry = _registry()
     original = registry.resolve({"method": "fixture"})
+    original_implementation = _FixtureRuntime.constructed[-1]
     partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
 
     calibrated_states = original.calibrate({partition: [1.0, 2.0]})
     restored = registry.resolve({"method": "fixture"}, states=calibrated_states)
+    restored_implementation = _FixtureRuntime.constructed[-1]
     frame = pd.DataFrame({"series_key": ["sku"], "point_forecast": [4.0]})
     applied = restored.apply(frame, calibrated_states)
     observed = restored.observe(
@@ -273,9 +320,9 @@ def test_fixture_executes_calibrate_apply_observe_and_factory_restoration() -> N
     )
 
     assert restored is not original
-    assert isinstance(restored, _FixtureRuntime)
-    assert restored.instance_number != original.instance_number
-    assert restored.restored_states == calibrated_states
+    assert restored_implementation is not original_implementation
+    assert restored_implementation.instance_number != original_implementation.instance_number
+    assert restored_implementation.restored_states == calibrated_states
     assert applied.forecasts.loc[0, "upper_0.9"] == 5.0
     assert observed.annotations[0].score == 3.0
     assert _FixtureCodec().decode_partition(
@@ -400,15 +447,141 @@ def test_factory_must_return_a_fresh_runtime_instance() -> None:
         )
 
 
-def test_fixture_extension_and_production_registry_have_no_engine_coupling() -> None:
-    fixture_path = Path(inspect.getsourcefile(_FixtureRuntime) or "")
-    conformal_root = Path(inspect.getsourcefile(conformal_package) or "").parent
-    production_sources = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted(conformal_root.glob("*.py"))
+def test_factory_cannot_alternate_between_previously_issued_instances() -> None:
+    registry = ConformalRegistry()
+    cached = (
+        _FixtureRuntime(_FixtureConfig(), {}),
+        _FixtureRuntime(_FixtureConfig(), {}),
     )
+    call_count = 0
+
+    def alternating_factory(
+        config: BaseModel,
+        states: Mapping[str, bytes],
+    ) -> ConformalRuntime:
+        nonlocal call_count
+        del config, states
+        runtime = cached[call_count % len(cached)]
+        call_count += 1
+        return runtime
+
+    registry.register(
+        "fixture",
+        FIXTURE_MANIFEST,
+        _FixtureConfig,
+        alternating_factory,
+    )
+    with pytest.raises(ConformalRegistryError, match="fresh runtime"):
+        registry.resolve({"method": "fixture"})
+
+
+@pytest.mark.parametrize("verb", ["calibrate", "apply", "observe"])
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["corrupt", "wrong-method", "wrong-version", "wrong-label"],
+)
+def test_registry_rejects_invalid_state_emitted_by_every_runtime_verb(
+    verb: str,
+    invalid_kind: str,
+) -> None:
+    partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
+    other_partition = derive_partition_label("fixture-model", "other", EmissionScope.PER_STEP)
+    invalid_states = {
+        "corrupt": b"corrupt",
+        "wrong-method": JsonStateCodec("other", 1).encode(partition, {"count": 0}),
+        "wrong-version": JsonStateCodec("fixture", 2).encode(partition, {"count": 0}),
+        "wrong-label": JsonStateCodec("fixture", 1).encode(other_partition, {"count": 0}),
+    }
+    invalid_state = invalid_states[invalid_kind]
+
+    def invalid_output_factory(
+        config: BaseModel,
+        states: Mapping[str, bytes],
+    ) -> ConformalRuntime:
+        assert isinstance(config, _FixtureConfig)
+        return _InvalidStateOutputRuntime(config, states, invalid_state)
+
+    registry = ConformalRegistry()
+    registry.register(
+        "fixture",
+        FIXTURE_MANIFEST,
+        _FixtureConfig,
+        invalid_output_factory,
+    )
+    runtime = registry.resolve({"method": "fixture"})
+    frame = pd.DataFrame({"series_key": ["sku"], "point_forecast": [4.0]})
+    delivery = Delivery(
+        partition,
+        (_observation("sku", partition_label=partition, actual=7.0),),
+    )
+
+    with pytest.raises(RuntimeContractError, match=f"{verb} emitted invalid state"):
+        if verb == "calibrate":
+            runtime.calibrate({partition: [1.0]})
+        elif verb == "apply":
+            runtime.apply(frame, {partition: None})
+        else:
+            runtime.observe(delivery, {})
+
+
+@pytest.mark.parametrize("mismatch", ["missing", "extra"])
+def test_registry_requires_observe_annotations_for_exactly_the_delivered_rows(
+    mismatch: str,
+) -> None:
+    class InvalidAnnotationRuntime(_FixtureRuntime):
+        def observe(
+            self,
+            delivery: Delivery,
+            states: Mapping[str, bytes | None],
+            *,
+            context: CalibrationContext | None = None,
+        ) -> ObserveEffect:
+            effect = super().observe(delivery, states, context=context)
+            if mismatch == "missing":
+                annotations = effect.annotations[:-1]
+            else:
+                extra_key = _observation(
+                    "unexpected",
+                    partition_label=delivery.partition_label,
+                    actual=7.0,
+                ).forecast_key
+                annotations = (
+                    *effect.annotations,
+                    ObserveAnnotation(extra_key, 3.0, None, True),
+                )
+            return ObserveEffect({}, annotations)
+
+    def invalid_annotation_factory(
+        config: BaseModel,
+        states: Mapping[str, bytes],
+    ) -> ConformalRuntime:
+        assert isinstance(config, _FixtureConfig)
+        return InvalidAnnotationRuntime(config, states)
+
+    registry = ConformalRegistry()
+    registry.register(
+        "fixture",
+        FIXTURE_MANIFEST,
+        _FixtureConfig,
+        invalid_annotation_factory,
+    )
+    runtime = registry.resolve({"method": "fixture"})
+    partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
+    delivery = Delivery(
+        partition,
+        (
+            _observation("sku-a", partition_label=partition, actual=7.0),
+            _observation("sku-b", partition_label=partition, actual=8.0),
+        ),
+    )
+
+    with pytest.raises(RuntimeContractError, match="exactly cover"):
+        runtime.observe(delivery, {})
+
+
+def test_fixture_extension_is_test_owned_and_runs_without_engine_changes() -> None:
+    fixture_path = Path(inspect.getsourcefile(_FixtureRuntime) or "")
 
     assert fixture_path.name == "test_conformal_registry.py"
     assert "tests/tier1" in fixture_path.as_posix()
-    assert "newcalibre.engine" not in production_sources
-    assert "_FixtureRuntime" not in production_sources
     assert _registry().resolve({"method": "fixture"}).manifest.name == "fixture"

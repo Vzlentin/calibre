@@ -213,6 +213,10 @@ class IssuedBoundFacts:
         if not isinstance(self.calibration_ready, bool):
             raise RuntimeContractError("calibration readiness must be a boolean")
         if lower_finite:
+            if lower > upper:
+                raise RuntimeContractError("issued lower bound cannot exceed upper bound")
+            if not self.calibration_ready:
+                raise RuntimeContractError("finite bounds require calibration readiness")
             if self.bounds_null_reason is not None:
                 raise RuntimeContractError("finite bounds cannot carry a bounds null reason")
         else:

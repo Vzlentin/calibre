@@ -16,6 +16,7 @@ PACKAGE_INIT = PACKAGE_ROOT / "__init__.py"
 SCRIPT_ROOT = Path(__file__).resolve().parents[2] / "scripts"
 VN2_DATA_SCRIPT = SCRIPT_ROOT / "vn2_data.py"
 ORDERING_ROOT = PACKAGE_ROOT / "ordering"
+CONFORMAL_ROOT = PACKAGE_ROOT / "conformal"
 OBJECTIVE_MODULE = PACKAGE_ROOT / "ordering" / "_objective.py"
 ENGINE_IMPORT_ROOT = "newcalibre.engine"
 SETTLE_PATH_ALLOWED_ATTRIBUTES = frozenset(
@@ -161,6 +162,24 @@ def test_layering_detector_bites_for_successor_scripts(tmp_path: Path) -> None:
 
 def test_ordering_has_no_engine_import_dependency() -> None:
     assert not _engine_import_violations(ORDERING_ROOT)
+
+
+def test_conformal_has_no_engine_import_dependency() -> None:
+    assert not _engine_import_violations(
+        CONFORMAL_ROOT,
+        root_package="newcalibre.conformal",
+    )
+
+
+def test_conformal_engine_import_detector_bites_on_relative_import(tmp_path: Path) -> None:
+    probe = tmp_path / "conformal" / "runtime.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text("from .. import engine as hidden\n", encoding="utf-8")
+
+    assert _engine_import_violations(
+        probe.parent,
+        root_package="newcalibre.conformal",
+    ) == ["runtime.py:1: import newcalibre.engine"]
 
 
 def test_ordering_engine_import_detector_bites_on_supported_forms(tmp_path: Path) -> None:
