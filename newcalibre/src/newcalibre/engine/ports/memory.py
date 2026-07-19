@@ -204,9 +204,11 @@ class InMemoryLedgerSink:
         self._order_keys: set[object] = set()
         self._settlement_keys: set[object] = set()
         self._commits: dict[CommitKey, CommitReceipt] = {}
+        self._settlement_receipts: dict[pd.Timestamp, CommitReceipt | None] = {}
         self._next_sequence = 1
         self._earliest_origin: pd.Timestamp | None = None
         self._latest_origin: pd.Timestamp | None = None
+        self._forecast_origin_count = 0
         self._decision = session_decision_inputs(session)
         if self._decision is None and initial_arrivals is not None:
             if not isinstance(initial_arrivals, Mapping):
@@ -266,9 +268,9 @@ class InMemoryLedgerSink:
         return self._latest_origin
 
     @property
-    def forecast_origins(self) -> tuple[pd.Timestamp, ...]:
-        """Return committed forecast origins in canonical sequence order."""
-        return tuple(sorted({row.origin for row in self._ledger.forecasts}))
+    def forecast_origin_count(self) -> int:
+        """Return the number of committed forecast origins."""
+        return self._forecast_origin_count
 
     @property
     def observation_resolutions(self):
@@ -337,14 +339,10 @@ class InMemoryLedgerSink:
         """Return the receipt containing one durable settlement period, when present."""
         self._ledger.calendar.require_member(period, name="settlement-receipt period")
         with self._lock:
-            matches = tuple(
-                receipt
-                for receipt in self._commits.values()
-                if period in receipt.settlement_periods
-            )
-        if len(matches) > 1:
-            raise LedgerError(f"settlement period {period} has multiple journal receipts")
-        return None if not matches else matches[0]
+            receipt = self._settlement_receipts.get(period)
+            if period in self._settlement_receipts and receipt is None:
+                raise LedgerError(f"settlement period {period} has multiple journal receipts")
+            return receipt
 
     def commit(self, write: OriginCommit) -> CommitReceipt:
         """Journal and publish a write atomically; return its repair receipt."""
@@ -428,7 +426,14 @@ class InMemoryLedgerSink:
         receipt = CommitReceipt.from_commit(write, sequence=self._next_sequence)
         self._next_sequence += 1
         self._commits[key] = receipt
+        for period in receipt.settlement_periods:
+            previous = self._settlement_receipts.get(period)
+            if period in self._settlement_receipts and previous != receipt:
+                self._settlement_receipts[period] = None
+            else:
+                self._settlement_receipts[period] = receipt
         if write.forecasts:
+            self._forecast_origin_count += 1
             if self._earliest_origin is None or write.origin < self._earliest_origin:
                 self._earliest_origin = write.origin
             if self._latest_origin is None or write.origin > self._latest_origin:

@@ -1012,7 +1012,7 @@ def test_receipt_hole_before_a_later_origin_is_rejected_before_callbacks() -> No
     )
     later = ORIGINS[1]
     for index, period in enumerate((ORIGINS[0], later), start=1):
-        runtime.sink._commits[period] = CommitReceipt(  # type: ignore[attr-defined]
+        receipt = CommitReceipt(
             session=session,
             origin=period,
             digest=str(index) * 64,
@@ -1020,6 +1020,8 @@ def test_receipt_hole_before_a_later_origin_is_rejected_before_callbacks() -> No
             sequence=index,
             settlement_periods=(period,),
         )
+        runtime.sink._commits[period] = receipt  # type: ignore[attr-defined]
+        runtime.sink._settlement_receipts[period] = receipt  # type: ignore[attr-defined]
     loop = TimeLoop(
         engine=runtime.engine,
         actuals_source=runtime.actuals,

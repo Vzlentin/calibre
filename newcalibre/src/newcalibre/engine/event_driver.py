@@ -395,7 +395,7 @@ class EventDriver:
         decision = session_decision_inputs(session)
         if decision is None:
             return True
-        return len(self._ledger_sink.forecast_origins) % decision.timing.review_period == 0
+        return self._ledger_sink.forecast_origin_count % decision.timing.review_period == 0
 
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:

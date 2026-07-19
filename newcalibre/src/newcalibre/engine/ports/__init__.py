@@ -456,8 +456,8 @@ class LedgerSink(Protocol):
         ...
 
     @property
-    def forecast_origins(self) -> tuple[pd.Timestamp, ...]:
-        """Return committed forecast origins in canonical sequence order."""
+    def forecast_origin_count(self) -> int:
+        """Return the number of committed forecast origins."""
         ...
 
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:

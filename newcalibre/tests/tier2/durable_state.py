@@ -4,23 +4,62 @@ from __future__ import annotations
 
 import math
 import struct
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from numbers import Integral, Real
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
 
-from newcalibre.domain import SessionIdentity
+from newcalibre.conformal import ObserveAnnotation
+from newcalibre.domain import Calendar, SessionIdentity
 from newcalibre.engine import (
     InMemoryArtifactStore,
     InMemoryCalibrationStateStore,
-    InMemoryLedgerSink,
+    SettlementSnapshot,
 )
 from newcalibre.ledger import ForecastRow, OrderRow, SettlementRecord
+from newcalibre.observe import ObservationResolution, ObservedActual, PendingObservation
 
 _Normalized = object
+
+
+class _DurableStateSink(Protocol):
+    """Expose only the durable sink facts consumed by the projection."""
+
+    @property
+    def session(self) -> SessionIdentity: ...
+
+    @property
+    def calendar(self) -> Calendar: ...
+
+    @property
+    def latest_origin(self) -> pd.Timestamp | None: ...
+
+    @property
+    def forecasts(self) -> tuple[ForecastRow, ...]: ...
+
+    @property
+    def orders(self) -> tuple[OrderRow, ...]: ...
+
+    @property
+    def settlements(self) -> tuple[SettlementRecord, ...]: ...
+
+    @property
+    def observed_history(self) -> tuple[ObservedActual, ...]: ...
+
+    @property
+    def pending_observations(self) -> tuple[PendingObservation, ...]: ...
+
+    @property
+    def observation_resolutions(self) -> tuple[ObservationResolution, ...]: ...
+
+    @property
+    def observe_annotations(self) -> tuple[ObserveAnnotation, ...]: ...
+
+    def settlement_snapshot(self, periods: Sequence[pd.Timestamp]) -> SettlementSnapshot: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +82,7 @@ class DurableState:
 
 
 def project_durable_state(
-    sink: InMemoryLedgerSink,
+    sink: _DurableStateSink,
     states: InMemoryCalibrationStateStore,
     artifacts: InMemoryArtifactStore,
 ) -> DurableState:
@@ -200,7 +239,7 @@ def _settlement(row: SettlementRecord) -> _Normalized:
 
 
 def _inventory_state(
-    sink: InMemoryLedgerSink,
+    sink: _DurableStateSink,
 ) -> tuple[tuple[_Normalized, ...], tuple[_Normalized, ...]]:
     if sink.settlements:
         frontier = max(row.period for row in sink.settlements)

@@ -156,7 +156,7 @@ def test_durable_state_ignores_physical_order_and_transaction_grouping() -> None
     event_world = run_event_world(None)
 
     reordered = project_durable_state(
-        _ReorderedSnapshots(event_world.sink),  # type: ignore[arg-type]
+        _ReorderedSnapshots(event_world.sink),
         event_world.states,
         event_world.artifacts,
     )
