@@ -17,6 +17,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parents[2] / "scripts"
 VN2_DATA_SCRIPT = SCRIPT_ROOT / "vn2_data.py"
 ORDERING_ROOT = PACKAGE_ROOT / "ordering"
 CONFORMAL_ROOT = PACKAGE_ROOT / "conformal"
+SPLIT_METHOD_MODULE = CONFORMAL_ROOT / "methods" / "split.py"
 OBJECTIVE_MODULE = PACKAGE_ROOT / "ordering" / "_objective.py"
 ENGINE_IMPORT_ROOT = "newcalibre.engine"
 SETTLE_PATH_ALLOWED_ATTRIBUTES = frozenset(
@@ -83,6 +84,20 @@ def _engine_imports(path: Path, *, package: str) -> list[tuple[int, str]]:
 
 def _is_engine_module(module: str) -> bool:
     return module == ENGINE_IMPORT_ROOT or module.startswith(f"{ENGINE_IMPORT_ROOT}.")
+
+
+def _method_manifest_declarations(root: Path) -> list[Path]:
+    declarations: list[Path] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "MethodManifest"
+            for node in ast.walk(tree)
+        ):
+            declarations.append(path)
+    return declarations
 
 
 def _settle_path_boundary_violations(path: Path) -> list[str]:
@@ -169,6 +184,22 @@ def test_conformal_has_no_engine_import_dependency() -> None:
         CONFORMAL_ROOT,
         root_package="newcalibre.conformal",
     )
+
+
+def test_production_conformal_methods_are_owned_only_by_the_conformal_package() -> None:
+    declarations = _method_manifest_declarations(PACKAGE_ROOT)
+
+    assert SPLIT_METHOD_MODULE in declarations
+    assert all(path.is_relative_to(CONFORMAL_ROOT) for path in declarations)
+
+
+def test_conformal_method_owner_detector_bites_outside_the_package(tmp_path: Path) -> None:
+    probe = tmp_path / "ordering" / "split.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text("METHOD = MethodManifest(name='wrong-owner')\n", encoding="utf-8")
+
+    assert _method_manifest_declarations(tmp_path) == [probe]
+    assert not probe.is_relative_to(tmp_path / "conformal")
 
 
 def test_conformal_engine_import_detector_bites_on_relative_import(tmp_path: Path) -> None:

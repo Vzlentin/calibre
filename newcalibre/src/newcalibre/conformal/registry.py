@@ -9,7 +9,11 @@ from types import MappingProxyType
 import pandas as pd
 from pydantic import BaseModel, ValidationError
 
-from newcalibre.conformal.manifest import MethodManifest
+from newcalibre.conformal.manifest import (
+    MethodManifest,
+    MethodManifestError,
+    PostWarmupNonFinite,
+)
 from newcalibre.conformal.runtime import ConformalRuntime
 from newcalibre.conformal.state import StateCodecError, validate_state_blob
 from newcalibre.conformal.types import (
@@ -19,6 +23,7 @@ from newcalibre.conformal.types import (
     ObserveEffect,
     RuntimeContractError,
 )
+from newcalibre.domain import GuaranteeClaim
 
 RuntimeFactory = Callable[[BaseModel, Mapping[str, bytes]], ConformalRuntime]
 
@@ -81,6 +86,48 @@ class _ResultValidatingRuntime:
             manifest=self.manifest,
             verb="apply",
         )
+        for facts in result.issuances.values():
+            if facts.method_name != self.manifest.name:
+                raise RuntimeContractError(
+                    "apply issuance method must equal the runtime manifest name"
+                )
+            if facts.emission_form is not self.manifest.emission_form:
+                raise RuntimeContractError(
+                    "apply issuance form must equal the runtime manifest form"
+                )
+            if facts.emission_scope is not self.manifest.emission_scope:
+                raise RuntimeContractError(
+                    "apply issuance scope must equal the runtime manifest scope"
+                )
+            declaration_matches = any(
+                facts.effective_descriptor.type.claim is declaration.claim
+                and facts.effective_descriptor.type.currency is declaration.currency
+                and facts.effective_descriptor.type.declared_slack == declaration.declared_slack
+                for declaration in self.manifest.guarantees
+            )
+            claim = facts.effective_descriptor.type.claim
+            if claim is not GuaranteeClaim.NONE and not declaration_matches:
+                raise RuntimeContractError(
+                    "apply issuance descriptor is not declared by the runtime manifest"
+                )
+            declared_clamps = {clamp.name for clamp in self.manifest.clamps}
+            if any(binding.name not in declared_clamps for binding in facts.bindings):
+                raise RuntimeContractError(
+                    "apply issuance binding is not declared by the runtime manifest"
+                )
+            has_binding = any(binding.bound for binding in facts.bindings)
+            if (claim is GuaranteeClaim.NONE) != has_binding:
+                raise RuntimeContractError(
+                    "apply issuance claim must be voided exactly when a clamp binds"
+                )
+            if (
+                facts.calibration_ready
+                and not pd.notna(facts.upper_bound)
+                and self.manifest.post_warmup_non_finite is PostWarmupNonFinite.FORBIDDEN
+            ):
+                raise RuntimeContractError(
+                    "apply emitted an undeclared post-readiness non-finite bound"
+                )
         return result
 
     def observe(
@@ -145,6 +192,16 @@ class ConformalRegistry:
             raise ConformalRegistryError(
                 "conformal config schemas must define valid runtime defaults for every field"
             ) from error
+        try:
+            minimum = manifest.minimum_calibration_scores(default_config)
+        except MethodManifestError as error:
+            raise ConformalRegistryError(
+                f"default calibration requirement is invalid: {error}"
+            ) from error
+        if minimum > manifest.state_bound:
+            raise ConformalRegistryError(
+                "default calibration requirement exceeds the declared state bound"
+            )
 
         empty_states: Mapping[str, bytes] = MappingProxyType({})
         first = _call_factory(

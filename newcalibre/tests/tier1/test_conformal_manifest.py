@@ -6,13 +6,16 @@ from dataclasses import FrozenInstanceError, replace
 from typing import Any, cast
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from newcalibre.conformal import (
     AssumptionClass,
     CensoringPolicy,
     ClampDeclaration,
     ClampGuaranteeImpact,
+    ConservativeRankRequirement,
     EmissionForm,
+    FixedCountRequirement,
     GuaranteeDeclaration,
     JointClaim,
     MethodManifest,
@@ -22,6 +25,12 @@ from newcalibre.conformal import (
 from newcalibre.domain import EmissionScope, GuaranteeClaim, GuaranteeCurrency
 
 pytestmark = pytest.mark.tier1
+
+
+class _Config(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    coverage: float = 0.9
 
 
 def _guarantee(
@@ -46,7 +55,7 @@ def _manifest(**overrides: object) -> MethodManifest:
         "emission_scope": EmissionScope.PER_STEP,
         "guarantees": (_guarantee(),),
         "assumption_class": AssumptionClass.EXCHANGEABLE,
-        "minimum_calibration_scores": 1,
+        "calibration_requirement": FixedCountRequirement(1),
         "order_sensitive": False,
         "censoring_policy": CensoringPolicy.REQUIRES_UNCENSORED,
         "imputation_policy": None,
@@ -85,7 +94,7 @@ def test_complete_manifest_is_immutable_and_carries_every_declaration() -> None:
             ),
         ),
         assumption_class=AssumptionClass.WEIGHTED,
-        minimum_calibration_scores=10,
+        calibration_requirement=FixedCountRequirement(10),
         order_sensitive=True,
         censoring_policy=CensoringPolicy.CONSUMES_CENSORING_FACTS,
         state_bound=128,
@@ -101,7 +110,7 @@ def test_complete_manifest_is_immutable_and_carries_every_declaration() -> None:
     assert manifest.emission_scope is EmissionScope.WINDOW_SUM
     assert manifest.guarantees[1].loss_name == "pinball"
     assert manifest.assumption_class is AssumptionClass.WEIGHTED
-    assert manifest.minimum_calibration_scores == 10
+    assert manifest.minimum_calibration_scores(_Config()) == 10
     assert manifest.order_sensitive
     assert manifest.censoring_policy is CensoringPolicy.CONSUMES_CENSORING_FACTS
     assert manifest.state_bound == 128
@@ -256,8 +265,6 @@ def test_manifest_rejects_malformed_identity_counts_flags_and_members() -> None:
         with pytest.raises(MethodManifestError, match="method name"):
             _manifest(name=name)
     for field, value in (
-        ("minimum_calibration_scores", -1),
-        ("minimum_calibration_scores", True),
         ("state_bound", -1),
         ("state_bound", 1.5),
         ("state_schema_version", 0),
@@ -265,6 +272,11 @@ def test_manifest_rejects_malformed_identity_counts_flags_and_members() -> None:
     ):
         with pytest.raises(MethodManifestError, match=field.replace("_", " ")):
             _manifest(**{field: value})
+    for value in (-1, True):
+        with pytest.raises(MethodManifestError, match="fixed calibration count"):
+            FixedCountRequirement(value)  # type: ignore[arg-type]
+    with pytest.raises(MethodManifestError, match="calibration requirement"):
+        _manifest(calibration_requirement=cast(Any, object()))
     for field, message in (
         ("order_sensitive", "order sensitivity"),
         ("consumes_calibration_context", "consumes calibration context"),
@@ -278,6 +290,19 @@ def test_manifest_rejects_malformed_identity_counts_flags_and_members() -> None:
         _manifest(hosted_submodels=("",))
     with pytest.raises(MethodManifestError, match="clamp declaration"):
         _manifest(clamps=(cast(Any, "cap"),))
+
+
+def test_dynamic_conservative_rank_requirement_matches_the_strict_boundary() -> None:
+    requirement = ConservativeRankRequirement()
+
+    assert requirement.minimum_scores(_Config(coverage=0.9)) == 10
+    assert requirement.minimum_scores(_Config(coverage=0.8)) == 5
+    assert (
+        _manifest(calibration_requirement=requirement).minimum_calibration_scores(
+            _Config(coverage=0.9)
+        )
+        == 10
+    )
 
 
 def test_manifest_rejects_joint_or_simultaneous_claim_forgery() -> None:
