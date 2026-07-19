@@ -15,7 +15,6 @@ from scipy.sparse import linalg as sparse_linalg
 from newcalibre.domain import (
     ACTUAL_VALUE,
     FITTED_VALUE,
-    MODEL_NAME,
     SERIES_KEY,
     TIMESTAMP,
     HierarchyIndex,
@@ -29,7 +28,8 @@ from newcalibre.reconcile.preflight import (
     DENSE_WORKSPACE_CEILING_BYTES,
     REJECTED_AT_SCALE,
     SPARSE_REQUIRED,
-    metadata_from_hierarchy,
+    ProjectionMetadata,
+    ProjectionPreflight,
     preflight_projection,
 )
 from newcalibre.reconcile.protocol import (
@@ -224,9 +224,7 @@ class ProjectionReconciler:
         context: ReconciliationContext,
     ) -> pd.DataFrame:
         """Reconcile every complete node cross-section in place by row key."""
-        fitted_snapshot: pd.DataFrame | None = None
-        model_frames: dict[str, pd.DataFrame] = {}
-        full_matrices: dict[bool, DenseSummingMatrix | SparseSummingMatrix] = {}
+        model_frames: dict[tuple[str, tuple[str, ...]], pd.DataFrame] = {}
         section_matrices: dict[
             tuple[bool, tuple[str, ...]], DenseSummingMatrix | SparseSummingMatrix
         ] = {}
@@ -239,32 +237,60 @@ class ProjectionReconciler:
             context: ReconciliationContext,
             base_forecast: np.ndarray,
         ) -> np.ndarray:
-            nonlocal fitted_snapshot
-            model_frame: pd.DataFrame | None = None
-            if self.declaration.requires_fitted_values:
-                if fitted_snapshot is None:
+            try:
+                preflight = _preflight_section(
+                    self.declaration.name,
+                    section,
+                    hierarchy,
+                    residual_periods=0,
+                    ceiling_bytes=self.dense_workspace_ceiling_bytes,
+                )
+                _require_admitted(
+                    preflight,
+                    strategy=self.declaration.name,
+                    section=section,
+                )
+                model_frame: pd.DataFrame | None = None
+                if self.declaration.requires_fitted_values:
                     fitted_values = context.fitted_values
                     if fitted_values is None:
                         raise ReconciliationError(
                             f"strategy {self.declaration.name!r} requires fitted values"
                         )
-                    fitted_snapshot = fitted_values.frame
-                model = section.identity[0]
-                if model not in model_frames:
-                    selected = fitted_snapshot.loc[fitted_snapshot[MODEL_NAME] == model]
-                    if selected.empty:
+                    model = section.identity[0]
+                    residual_periods = fitted_values.residual_periods_for(
+                        model,
+                        section.node_labels,
+                    )
+                    if residual_periods is None:
                         raise ReconciliationError(
                             f"{section.description} has no fitted values for model {model!r}"
                         )
-                    model_frames[model] = selected
-                model_frame = model_frames[model]
-            try:
+                    preflight = _preflight_section(
+                        self.declaration.name,
+                        section,
+                        hierarchy,
+                        residual_periods=residual_periods,
+                        ceiling_bytes=self.dense_workspace_ceiling_bytes,
+                    )
+                    _require_admitted(
+                        preflight,
+                        strategy=self.declaration.name,
+                        section=section,
+                    )
+                    residual_key = (model, section.node_labels)
+                    if residual_key not in model_frames:
+                        model_frames[residual_key] = fitted_values.select_model_series(
+                            model,
+                            section.node_labels,
+                        )
+                    model_frame = model_frames[residual_key]
                 return self._reconcile_section(
                     section,
                     hierarchy,
                     base_forecast,
+                    preflight=preflight,
                     model_frame=model_frame,
-                    full_matrices=full_matrices,
                     section_matrices=section_matrices,
                     aligned_fitted=aligned_fitted,
                     variance_weights=variance_weights,
@@ -290,43 +316,23 @@ class ProjectionReconciler:
         hierarchy: HierarchyIndex,
         base_forecast: np.ndarray,
         *,
+        preflight: ProjectionPreflight,
         model_frame: pd.DataFrame | None,
-        full_matrices: dict[bool, DenseSummingMatrix | SparseSummingMatrix],
         section_matrices: dict[
             tuple[bool, tuple[str, ...]], DenseSummingMatrix | SparseSummingMatrix
         ],
         aligned_fitted: dict[tuple[str, tuple[str, ...]], tuple[np.ndarray, np.ndarray]],
         variance_weights: dict[tuple[str, tuple[str, ...]], VarianceWeights],
     ) -> np.ndarray:
-        residual_periods = 0
-        if model_frame is not None:
-            residual_periods = int(model_frame[TIMESTAMP].nunique())
-        metadata = metadata_from_hierarchy(
-            hierarchy,
-            residual_periods=residual_periods,
-        )
-        preflight = preflight_projection(
-            self.declaration.name,
-            metadata,
-            ceiling_bytes=self.dense_workspace_ceiling_bytes,
-        )
-        if preflight.decision == REJECTED_AT_SCALE:
-            raise ReconciliationError(
-                f"strategy {self.declaration.name!r} {section.description}: {preflight.reason}"
-            )
         use_sparse = self.declaration.name == WLS_VAR or preflight.decision == SPARSE_REQUIRED
         matrix_key = (use_sparse, section.bottom_ids)
         matrix = section_matrices.get(matrix_key)
         if matrix is None:
-            full_matrix = full_matrices.get(use_sparse)
-            if full_matrix is None:
-                full_matrix = (
-                    build_sparse_summing_matrix(hierarchy)
-                    if use_sparse
-                    else build_dense_summing_matrix(hierarchy)
-                )
-                full_matrices[use_sparse] = full_matrix
-            matrix = full_matrix.subset(section.bottom_ids)
+            matrix = (
+                build_sparse_summing_matrix(hierarchy, bottom_ids=section.bottom_ids)
+                if use_sparse
+                else build_dense_summing_matrix(hierarchy, bottom_ids=section.bottom_ids)
+            )
             section_matrices[matrix_key] = matrix
         if matrix.node_labels != section.node_labels:
             raise ReconciliationError(
@@ -349,8 +355,6 @@ class ProjectionReconciler:
                 )
                 aligned_fitted[residual_key] = aligned
             project_actuals, project_fitted = aligned
-            actuals = project_actuals[list(layout.permutation)]
-            fitted = project_fitted[list(layout.permutation)]
             if self.declaration.name == WLS_VAR:
                 project_variance = variance_weights.get(residual_key)
                 if project_variance is None:
@@ -360,6 +364,9 @@ class ProjectionReconciler:
                     values=project_variance.values[list(layout.permutation)],
                     floor=project_variance.floor,
                 )
+            else:
+                actuals = project_actuals[list(layout.permutation)]
+                fitted = project_fitted[list(layout.permutation)]
 
         if use_sparse:
             if not isinstance(matrix, SparseSummingMatrix):
@@ -391,6 +398,35 @@ class ProjectionReconciler:
         reconciled = layout.to_project_vector(np.asarray(result["mean"])[:, 0])
         _verify_coherence(matrix, reconciled, section=section)
         return reconciled
+
+
+def _preflight_section(
+    strategy: str,
+    section: _ProjectionSection,
+    hierarchy: HierarchyIndex,
+    *,
+    residual_periods: int,
+    ceiling_bytes: int,
+) -> ProjectionPreflight:
+    metadata = ProjectionMetadata(
+        n_bottom=len(section.bottom_ids),
+        n_nodes=len(section.node_labels),
+        n_attributes=len(hierarchy.attribute_names),
+        residual_periods=residual_periods,
+    )
+    return preflight_projection(strategy, metadata, ceiling_bytes=ceiling_bytes)
+
+
+def _require_admitted(
+    preflight: ProjectionPreflight,
+    *,
+    strategy: str,
+    section: _ProjectionSection,
+) -> None:
+    if preflight.decision == REJECTED_AT_SCALE:
+        raise ReconciliationError(
+            f"strategy {strategy!r} {section.description}: {preflight.reason}"
+        )
 
 
 def derive_variance_weights(residuals: np.ndarray) -> VarianceWeights:

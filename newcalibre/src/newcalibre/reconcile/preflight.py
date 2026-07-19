@@ -14,10 +14,9 @@ SPARSE_REQUIRED: Final = "sparse_required"
 REJECTED_AT_SCALE: Final = "rejected_at_scale"
 
 _INT32_BYTES = 4
-_FACTOR_TEMPORARIES = 1
+_BOOL_BYTES = 1
 _ITERATIVE_VECTOR_COUNT_BOTTOM = 4
 _ITERATIVE_VECTOR_COUNT_NODES = 2
-_RESIDUAL_WIDE_MATRICES = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,32 +184,40 @@ def _dense_components(
     *,
     formulation: _Formulation,
 ) -> tuple[WorkspaceComponent, ...]:
+    """Bound adapter conversions and every pinned dense MinTrace matrix."""
+    n_nodes = metadata.n_nodes
+    n_bottom = metadata.n_bottom
+    n_aggregates = n_nodes - n_bottom
+    dtype_bytes = metadata.dtype_bytes
+    summing_bytes = n_nodes * n_bottom * dtype_bytes
+    aggregate_node_bytes = n_aggregates * n_nodes * dtype_bytes
+    # Pinned MinTrace retains J + U.T (N²), W (N²), U.T@W (A×N),
+    # its coefficient/RHS pair (A×N), solve copies, and projection products.
     items = [
+        WorkspaceComponent("summing_matrix_canonical", summing_bytes),
+        WorkspaceComponent("summing_matrix_conversion_temporary", summing_bytes),
+        WorkspaceComponent("summing_matrix_nixtla", summing_bytes),
+        WorkspaceComponent("constraint_matrices", n_nodes * n_nodes * dtype_bytes),
+        WorkspaceComponent("weights_dense", n_nodes * n_nodes * dtype_bytes),
+        WorkspaceComponent("weighted_constraints", aggregate_node_bytes),
+        WorkspaceComponent("linear_system", aggregate_node_bytes),
+        WorkspaceComponent("factor_temporary", aggregate_node_bytes),
         WorkspaceComponent(
-            "summing_matrix_dense",
-            metadata.n_nodes * metadata.n_bottom * metadata.dtype_bytes,
-        )
+            "projection_intermediates",
+            (n_aggregates * n_bottom + 2 * n_bottom * n_nodes) * dtype_bytes,
+        ),
     ]
     if formulation.full_covariance:
         items.append(
             WorkspaceComponent(
-                "covariance_dense",
-                metadata.n_nodes * metadata.n_nodes * metadata.dtype_bytes,
+                "covariance_estimator_temporary",
+                n_nodes * n_nodes * dtype_bytes,
             )
         )
     else:
-        items.append(
-            WorkspaceComponent("weights_diagonal", metadata.n_nodes * metadata.dtype_bytes)
-        )
-    normal_bytes = metadata.n_bottom * metadata.n_bottom * metadata.dtype_bytes
-    items.extend(
-        (
-            WorkspaceComponent("normal_equations", normal_bytes),
-            WorkspaceComponent("factor_temporary", _FACTOR_TEMPORARIES * normal_bytes),
-        )
-    )
+        items.append(WorkspaceComponent("weights_diagonal", n_nodes * dtype_bytes))
     if formulation.requires_residuals:
-        items.append(WorkspaceComponent("residual_wide", _residual_wide_bytes(metadata)))
+        items.extend(_dense_residual_components(metadata))
     return tuple(items)
 
 
@@ -240,16 +247,28 @@ def _sparse_components(
         ),
     ]
     if formulation.requires_residuals:
-        items.append(WorkspaceComponent("residual_wide", _residual_wide_bytes(metadata)))
+        one_matrix = metadata.n_nodes * metadata.residual_periods * metadata.dtype_bytes
+        items.extend(
+            (
+                WorkspaceComponent("residual_aligned_project", 2 * one_matrix),
+                WorkspaceComponent("residual_variance_temporary", one_matrix),
+            )
+        )
     return tuple(items)
 
 
-def _residual_wide_bytes(metadata: ProjectionMetadata) -> int:
+def _dense_residual_components(
+    metadata: ProjectionMetadata,
+) -> tuple[WorkspaceComponent, ...]:
+    one_matrix = metadata.n_nodes * metadata.residual_periods * metadata.dtype_bytes
     return (
-        _RESIDUAL_WIDE_MATRICES
-        * metadata.n_nodes
-        * metadata.residual_periods
-        * metadata.dtype_bytes
+        WorkspaceComponent("residual_aligned_project", 2 * one_matrix),
+        WorkspaceComponent("residual_aligned_nixtla", 2 * one_matrix),
+        WorkspaceComponent("residual_upstream", one_matrix),
+        WorkspaceComponent(
+            "residual_nan_mask",
+            metadata.n_nodes * metadata.residual_periods * _BOOL_BYTES,
+        ),
     )
 
 

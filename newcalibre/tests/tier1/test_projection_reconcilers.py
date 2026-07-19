@@ -31,6 +31,7 @@ from newcalibre.domain import (
 )
 from newcalibre.reconcile import (
     NixtlaLayout,
+    ProjectionMetadata,
     ReconciliationContext,
     ReconciliationError,
     SparseSummingMatrix,
@@ -42,6 +43,7 @@ from newcalibre.reconcile import (
     coherence_tolerance,
     covariance_estimator_tolerance,
     derive_variance_weights,
+    preflight_projection,
 )
 from newcalibre.reconcile.nixtla import SPARSE_SOLVER_TOLERANCE
 
@@ -418,7 +420,11 @@ def test_one_membership_corruption_bites_the_reference_gate(
 
     import newcalibre.reconcile.nixtla as nixtla
 
-    monkeypatch.setattr(nixtla, "build_sparse_summing_matrix", lambda _hierarchy: corrupted)
+    monkeypatch.setattr(
+        nixtla,
+        "build_sparse_summing_matrix",
+        lambda _hierarchy, *, bottom_ids=None: corrupted.subset(bottom_ids),
+    )
     actual = _canonical_points(
         build_wls_struct(dense_workspace_ceiling_bytes=0)(
             _frame(hierarchy),
@@ -522,10 +528,14 @@ def test_fitted_value_order_is_irrelevant_and_history_is_reused_across_horizons(
         aligned_calls += 1
         return align(*args, **kwargs)
 
-    def count_matrix(hierarchy: HierarchyIndex):
+    def count_matrix(
+        hierarchy: HierarchyIndex,
+        *,
+        bottom_ids: tuple[str, ...] | None = None,
+    ):
         nonlocal matrix_calls
         matrix_calls += 1
-        return build_matrix(hierarchy)
+        return build_matrix(hierarchy, bottom_ids=bottom_ids)
 
     monkeypatch.setattr(nixtla, "_aligned_fitted_matrices", count_alignment)
     monkeypatch.setattr(nixtla, "build_sparse_summing_matrix", count_matrix)
@@ -595,7 +605,7 @@ def test_mint_shrink_matches_independent_reference_at_and_below_ceiling() -> Non
     reference = covariance_projection(dense, _BASE_FORECAST, covariance)
 
     actual = _canonical_points(
-        build_mint_shrink(dense_workspace_ceiling_bytes=3_840)(
+        build_mint_shrink(dense_workspace_ceiling_bytes=12_288)(
             _frame(hierarchy),
             hierarchy,
             _context(hierarchy),
@@ -612,6 +622,63 @@ def test_mint_shrink_matches_independent_reference_at_and_below_ceiling() -> Non
     )
 
 
+def test_mint_shrink_preflights_and_builds_only_the_applicable_subset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = _hierarchy()
+    bottoms = ("s1", "s4")
+    applicable = _applicable_labels(hierarchy, bottoms)
+    subset_estimate = preflight_projection(
+        "mint_shrink",
+        ProjectionMetadata(
+            n_bottom=len(bottoms),
+            n_nodes=len(applicable),
+            n_attributes=len(hierarchy.attribute_names),
+            residual_periods=8,
+        ),
+    )
+    fitted = _fitted_frame(hierarchy)
+    outside_label = next(label for label in hierarchy.node_labels if label not in applicable)
+    extra = fitted.loc[fitted[SERIES_KEY] == outside_label].iloc[[0] * 20].copy(deep=True)
+    extra[TIMESTAMP] = pd.date_range("2024-01-01", periods=len(extra), freq="D")
+    fitted = pd.concat([fitted, extra], ignore_index=True)
+    full_estimate = preflight_projection(
+        "mint_shrink",
+        ProjectionMetadata(
+            n_bottom=len(hierarchy.bottom_series),
+            n_nodes=len(hierarchy.node_labels),
+            n_attributes=len(hierarchy.attribute_names),
+            residual_periods=int(fitted[TIMESTAMP].nunique()),
+        ),
+    )
+    assert subset_estimate.dense_workspace_bytes < full_estimate.dense_workspace_bytes
+
+    import newcalibre.reconcile.nixtla as nixtla
+
+    original = nixtla.build_dense_summing_matrix
+    built_subsets: list[tuple[str, ...] | None] = []
+
+    def build_subset(
+        hierarchy: HierarchyIndex,
+        *,
+        bottom_ids: tuple[str, ...] | None = None,
+    ):
+        built_subsets.append(bottom_ids)
+        return original(hierarchy, bottom_ids=bottom_ids)
+
+    monkeypatch.setattr(nixtla, "build_dense_summing_matrix", build_subset)
+    result = build_mint_shrink(
+        dense_workspace_ceiling_bytes=subset_estimate.dense_workspace_bytes,
+    )(
+        _frame(hierarchy, labels=applicable),
+        hierarchy,
+        _context(hierarchy, frame=fitted),
+    )
+
+    assert tuple(result[SERIES_KEY]) == applicable
+    assert built_subsets == [bottoms]
+
+
 def test_mint_shrink_rejects_before_residual_widening_or_matrix_allocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -623,6 +690,7 @@ def test_mint_shrink_rejects_before_residual_widening_or_matrix_allocation(
 
     monkeypatch.setattr(nixtla, "build_dense_summing_matrix", forbidden)
     monkeypatch.setattr(nixtla, "_aligned_fitted_matrices", forbidden)
+    monkeypatch.setattr(FittedValues, "frame", property(forbidden))
 
     with pytest.raises(
         ReconciliationError,
