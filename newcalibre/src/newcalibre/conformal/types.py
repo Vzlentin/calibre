@@ -1,0 +1,456 @@
+"""Define immutable runtime values and collision-proof state addressing."""
+
+from __future__ import annotations
+
+import base64
+import json
+import math
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from numbers import Integral, Real
+from types import MappingProxyType
+from typing import Final, cast
+
+import pandas as pd
+
+from newcalibre.domain import CensoringAssertion, EmissionScope
+from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
+
+_PARTITION_PREFIX: Final = "p1."
+_METHOD_PREFIX: Final = "m1."
+_METHOD_SCOPE_PAYLOAD: Final = {
+    "namespace": "newcalibre.conformal",
+    "scope": "method",
+    "version": 1,
+}
+
+
+class RuntimeContractError(ValueError):
+    """Report an invalid conformal runtime value or call contract."""
+
+
+def _encoded_label(prefix: str, payload: object) -> str:
+    try:
+        raw = canonical_json_bytes(payload, path="conformal state label")
+    except CanonicalJsonError as error:
+        raise RuntimeContractError(str(error)) from error
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    return f"{prefix}{token}"
+
+
+METHOD_SCOPE_LABEL: Final = _encoded_label(_METHOD_PREFIX, _METHOD_SCOPE_PAYLOAD)
+
+
+def derive_partition_label(
+    model_name: str,
+    partition_value: str | bool | int | float,
+    horizon_scope: EmissionScope,
+) -> str:
+    """Derive an injective data label from model, typed value, and horizon scope."""
+    model = _require_text(model_name, name="model name", trimmed=True)
+    if not isinstance(horizon_scope, EmissionScope):
+        raise RuntimeContractError("horizon scope must be an EmissionScope")
+    tag, value = _partition_value(partition_value)
+    return _encoded_label(
+        _PARTITION_PREFIX,
+        {
+            "horizon_scope": horizon_scope.value,
+            "model_name": model,
+            "partition_value": {"tag": tag, "value": value},
+        },
+    )
+
+
+def _partition_value(value: object) -> tuple[str, object]:
+    if isinstance(value, str):
+        return "string", _require_text(value, name="partition value")
+    if isinstance(value, bool):
+        return "boolean", value
+    if isinstance(value, Integral):
+        return "integer", int(value)
+    if isinstance(value, Real):
+        normalized = _finite_real(value, name="partition value")
+        if normalized == 0.0:
+            normalized = 0.0
+        return "float", float(normalized).hex()
+    raise RuntimeContractError(
+        "partition value must be a string, boolean, integer, or finite float"
+    )
+
+
+def _decode_label(label: object) -> tuple[str, object]:
+    text = _require_text(label, name="state label")
+    if text.startswith(_PARTITION_PREFIX):
+        prefix = _PARTITION_PREFIX
+        scope = "partition"
+    elif text.startswith(_METHOD_PREFIX):
+        prefix = _METHOD_PREFIX
+        scope = "method"
+    else:
+        raise RuntimeContractError("state label has an unknown structural namespace")
+    token = text.removeprefix(prefix)
+    if not token:
+        raise RuntimeContractError("state label payload must not be empty")
+    try:
+        padding = "=" * (-len(token) % 4)
+        raw = base64.b64decode(
+            token + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        decoded = raw.decode("utf-8")
+    except (UnicodeError, ValueError) as error:
+        raise RuntimeContractError(
+            "state label payload must be canonical base64url UTF-8"
+        ) from error
+
+    try:
+        payload = json.loads(decoded)
+        canonical = canonical_json_bytes(payload, path="conformal state label")
+    except (CanonicalJsonError, json.JSONDecodeError) as error:
+        raise RuntimeContractError("state label payload must be canonical JSON") from error
+    if raw != canonical or _encoded_label(prefix, payload) != text:
+        raise RuntimeContractError("state label payload must use canonical encoding")
+    if scope == "method":
+        if payload != _METHOD_SCOPE_PAYLOAD or text != METHOD_SCOPE_LABEL:
+            raise RuntimeContractError("method-scope state label is not the reserved label")
+        return scope, payload
+    _validate_partition_payload(payload)
+    return scope, payload
+
+
+def _validate_partition_payload(payload: object) -> None:
+    if not isinstance(payload, dict) or set(payload) != {
+        "horizon_scope",
+        "model_name",
+        "partition_value",
+    }:
+        raise RuntimeContractError("partition state label has malformed fields")
+    fields = cast(dict[str, object], payload)
+    _require_text(fields["model_name"], name="partition label model name", trimmed=True)
+    try:
+        EmissionScope(fields["horizon_scope"])
+    except (TypeError, ValueError) as error:
+        raise RuntimeContractError("partition state label has an invalid horizon scope") from error
+    value = fields["partition_value"]
+    if not isinstance(value, dict) or set(value) != {"tag", "value"}:
+        raise RuntimeContractError("partition state label has a malformed typed value")
+    typed_value = cast(dict[str, object], value)
+    tag = typed_value["tag"]
+    scalar = typed_value["value"]
+    valid = (
+        (tag == "string" and isinstance(scalar, str) and bool(scalar))
+        or (tag == "boolean" and isinstance(scalar, bool))
+        or (tag == "integer" and isinstance(scalar, int) and not isinstance(scalar, bool))
+        or (tag == "float" and isinstance(scalar, str) and _is_canonical_float_hex(scalar))
+    )
+    if not valid:
+        raise RuntimeContractError("partition state label has a malformed typed value")
+
+
+def _is_canonical_float_hex(value: str) -> bool:
+    try:
+        parsed = float.fromhex(value)
+    except ValueError:
+        return False
+    if not math.isfinite(parsed):
+        return False
+    if parsed == 0.0:
+        parsed = 0.0
+    return parsed.hex() == value
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastKey:
+    """Identify one forecast row completely."""
+
+    series_key: str
+    origin: pd.Timestamp
+    horizon_step: int
+    model_name: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.series_key, name="series key")
+        _require_timestamp(self.origin, name="origin")
+        if (
+            isinstance(self.horizon_step, bool)
+            or not isinstance(self.horizon_step, Integral)
+            or self.horizon_step < 1
+        ):
+            raise RuntimeContractError("horizon step must be a positive integer")
+        _require_text(self.model_name, name="model name")
+        object.__setattr__(self, "horizon_step", int(self.horizon_step))
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedBoundFacts:
+    """Carry the immutable calibration facts recorded when one row was issued."""
+
+    method_name: str
+    partition_label: str
+    working_level: float
+    state_reference: str
+    lower_bound: float
+    upper_bound: float
+    calibration_ready: bool
+    bounds_null_reason: str | None
+
+    def __post_init__(self) -> None:
+        _require_text(self.method_name, name="issued method name", trimmed=True)
+        scope, _ = _decode_label(self.partition_label)
+        if scope != "partition":
+            raise RuntimeContractError("issued partition label must be a data-derived label")
+        level = _finite_real(self.working_level, name="working level")
+        if not 0.0 <= level <= 1.0:
+            raise RuntimeContractError("working level must lie between zero and one")
+        _require_text(self.state_reference, name="state reference")
+        lower = _finite_or_nan_real(self.lower_bound, name="lower bound")
+        upper = _finite_or_nan_real(self.upper_bound, name="upper bound")
+        lower_finite = math.isfinite(lower)
+        upper_finite = math.isfinite(upper)
+        if lower_finite != upper_finite:
+            raise RuntimeContractError("issued lower and upper bounds must be finite together")
+        if not isinstance(self.calibration_ready, bool):
+            raise RuntimeContractError("calibration readiness must be a boolean")
+        if lower_finite:
+            if lower > upper:
+                raise RuntimeContractError("issued lower bound cannot exceed upper bound")
+            if not self.calibration_ready:
+                raise RuntimeContractError("finite bounds require calibration readiness")
+            if self.bounds_null_reason is not None:
+                raise RuntimeContractError("finite bounds cannot carry a bounds null reason")
+        else:
+            _require_text(self.bounds_null_reason, name="bounds null reason")
+        object.__setattr__(self, "working_level", level)
+        object.__setattr__(self, "lower_bound", lower)
+        object.__setattr__(self, "upper_bound", upper)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedObservation:
+    """Carry one resolved forecast row into a conformal observe call."""
+
+    forecast_key: ForecastKey
+    target_timestamp: pd.Timestamp
+    actual: float
+    point_forecast: float
+    censoring_assertion: CensoringAssertion | None
+    availability_bound: float | None
+    issued: IssuedBoundFacts
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.forecast_key, ForecastKey):
+            raise RuntimeContractError("forecast key must be a ForecastKey")
+        _require_timestamp(self.target_timestamp, name="target timestamp")
+        actual = _finite_real(self.actual, name="actual")
+        point = _finite_real(self.point_forecast, name="point forecast")
+        if self.censoring_assertion is not None and not isinstance(
+            self.censoring_assertion,
+            CensoringAssertion,
+        ):
+            raise RuntimeContractError(
+                "censoring assertion must be a CensoringAssertion or undeclared"
+            )
+        availability = self.availability_bound
+        if availability is not None:
+            availability = _finite_real(availability, name="availability bound")
+        if not isinstance(self.issued, IssuedBoundFacts):
+            raise RuntimeContractError("issued facts must be IssuedBoundFacts")
+        object.__setattr__(self, "actual", actual)
+        object.__setattr__(self, "point_forecast", point)
+        object.__setattr__(self, "availability_bound", availability)
+
+
+@dataclass(frozen=True, slots=True)
+class Delivery:
+    """Deliver one partition's observations in caller-supplied order."""
+
+    partition_label: str
+    observations: tuple[ResolvedObservation, ...]
+
+    def __post_init__(self) -> None:
+        scope, _ = _decode_label(self.partition_label)
+        if scope != "partition":
+            raise RuntimeContractError("delivery partition label must be data-derived")
+        observations = _snapshot_iterable(self.observations, name="delivery observations")
+        if not observations:
+            raise RuntimeContractError("delivery observations must not be empty")
+        if any(not isinstance(value, ResolvedObservation) for value in observations):
+            raise RuntimeContractError("every delivery observation must be a ResolvedObservation")
+        if any(value.issued.partition_label != self.partition_label for value in observations):
+            raise RuntimeContractError("every issued partition must match the delivery partition")
+        keys = tuple(value.forecast_key for value in observations)
+        if len(set(keys)) != len(keys):
+            raise RuntimeContractError("delivery contains a duplicate forecast key")
+        object.__setattr__(self, "observations", observations)
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationContext:
+    """Expose only row-aligned immutable facts from the declared hierarchy."""
+
+    series_keys: tuple[str, ...]
+    lattice_levels: tuple[str, ...]
+    aggregate_memberships: tuple[tuple[str, ...], ...]
+
+    def __post_init__(self) -> None:
+        keys = _snapshot_iterable(self.series_keys, name="context series keys")
+        levels = _snapshot_iterable(self.lattice_levels, name="context lattice levels")
+        memberships_raw = _snapshot_iterable(
+            self.aggregate_memberships,
+            name="context aggregate memberships",
+        )
+        if len(keys) != len(levels) or len(keys) != len(memberships_raw):
+            raise RuntimeContractError("calibration context facts must be row-aligned")
+        for value in keys:
+            _require_text(value, name="context series key")
+        for value in levels:
+            _require_text(value, name="context lattice level")
+        memberships: list[tuple[str, ...]] = []
+        for row in memberships_raw:
+            values = _snapshot_iterable(row, name="aggregate membership row")
+            for value in values:
+                _require_text(value, name="aggregate membership")
+            if len(set(values)) != len(values):
+                raise RuntimeContractError("aggregate memberships must be unique per row")
+            memberships.append(values)
+        object.__setattr__(self, "series_keys", keys)
+        object.__setattr__(self, "lattice_levels", levels)
+        object.__setattr__(self, "aggregate_memberships", tuple(memberships))
+
+    @property
+    def class_assignments(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Derive one class assignment per row solely from hierarchy facts."""
+        return tuple(zip(self.lattice_levels, self.aggregate_memberships, strict=True))
+
+
+@dataclass(frozen=True, slots=True)
+class ObserveAnnotation:
+    """Record one scored or attributable excluded observation."""
+
+    forecast_key: ForecastKey
+    score: float | None
+    exclusion_cause: str | None
+    advanced_delivered_score: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.forecast_key, ForecastKey):
+            raise RuntimeContractError("annotation forecast key must be a ForecastKey")
+        has_score = self.score is not None
+        has_cause = self.exclusion_cause is not None
+        if has_score == has_cause:
+            raise RuntimeContractError(
+                "an observe annotation requires exactly one of score or exclusion cause"
+            )
+        if has_score:
+            object.__setattr__(self, "score", _finite_real(self.score, name="annotation score"))
+        else:
+            _require_text(self.exclusion_cause, name="exclusion cause")
+        if not isinstance(self.advanced_delivered_score, bool):
+            raise RuntimeContractError("delivered-score advancement must be a boolean")
+        if self.advanced_delivered_score and not has_score:
+            raise RuntimeContractError("only a scored observation may advance delivered score")
+
+
+@dataclass(frozen=True, slots=True)
+class ObserveEffect:
+    """Return opaque state updates and row-aligned observe annotations."""
+
+    state_updates: Mapping[str, bytes]
+    annotations: tuple[ObserveAnnotation, ...]
+
+    def __post_init__(self) -> None:
+        updates = _snapshot_state_updates(self.state_updates)
+        annotations = _snapshot_iterable(self.annotations, name="observe annotations")
+        if any(not isinstance(value, ObserveAnnotation) for value in annotations):
+            raise RuntimeContractError("every observe annotation must be an ObserveAnnotation")
+        keys = tuple(value.forecast_key for value in annotations)
+        if len(set(keys)) != len(keys):
+            raise RuntimeContractError("observe annotations contain a duplicate forecast key")
+        object.__setattr__(self, "state_updates", MappingProxyType(updates))
+        object.__setattr__(self, "annotations", annotations)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class CalibrationResult:
+    """Return a defensive calibrated-frame snapshot and opaque state updates."""
+
+    _forecasts: pd.DataFrame = field(repr=False)
+    state_updates: Mapping[str, bytes]
+
+    def __init__(
+        self,
+        forecasts: pd.DataFrame,
+        state_updates: Mapping[str, bytes],
+    ) -> None:
+        if not isinstance(forecasts, pd.DataFrame):
+            raise RuntimeContractError("calibrated forecasts must be a pandas DataFrame")
+        if forecasts.columns.has_duplicates:
+            raise RuntimeContractError("calibrated forecasts cannot have duplicate columns")
+        snapshot = forecasts.copy(deep=True)
+        snapshot.attrs = {}
+        updates = _snapshot_state_updates(state_updates)
+        object.__setattr__(self, "_forecasts", snapshot)
+        object.__setattr__(self, "state_updates", MappingProxyType(updates))
+
+    @property
+    def forecasts(self) -> pd.DataFrame:
+        """Return an isolated copy of the calibrated forecasts."""
+        return self._forecasts.copy(deep=True)
+
+
+def _snapshot_state_updates(values: object) -> dict[str, bytes]:
+    if not isinstance(values, Mapping):
+        raise RuntimeContractError("state updates must be a mapping")
+    snapshot = dict(values)
+    for label, state in snapshot.items():
+        _decode_label(label)
+        if not isinstance(state, bytes):
+            raise RuntimeContractError("state updates must contain immutable bytes")
+    return snapshot
+
+
+def _snapshot_iterable(values: object, *, name: str) -> tuple:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
+        raise RuntimeContractError(f"{name} must be an iterable of values")
+    return tuple(values)
+
+
+def _require_timestamp(value: object, *, name: str) -> pd.Timestamp:
+    if not isinstance(value, pd.Timestamp) or pd.isna(value):
+        raise RuntimeContractError(f"{name} must be a pandas Timestamp")
+    if value.tz is not None:
+        raise RuntimeContractError(f"{name} must be timezone-naive")
+    return value
+
+
+def _finite_real(value: object, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise RuntimeContractError(f"{name} must be a finite real number")
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError) as error:
+        raise RuntimeContractError(f"{name} must be a finite real number") from error
+    if not math.isfinite(normalized):
+        raise RuntimeContractError(f"{name} must be a finite real number")
+    return 0.0 if normalized == 0.0 else normalized
+
+
+def _finite_or_nan_real(value: object, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise RuntimeContractError(f"{name} must be a real number or NaN")
+    normalized = float(value)
+    if math.isinf(normalized):
+        raise RuntimeContractError(f"{name} cannot be infinite")
+    return 0.0 if normalized == 0.0 else normalized
+
+
+def _require_text(value: object, *, name: str, trimmed: bool = False) -> str:
+    if not isinstance(value, str) or not value or (trimmed and value != value.strip()):
+        qualifier = " non-empty trimmed" if trimmed else " non-empty"
+        raise RuntimeContractError(f"{name} must be a{qualifier} string")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as error:
+        raise RuntimeContractError(f"{name} must be valid UTF-8") from error
+    return value
