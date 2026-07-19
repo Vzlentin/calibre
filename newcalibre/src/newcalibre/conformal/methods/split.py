@@ -74,7 +74,11 @@ class _SplitConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     coverage: float = Field(default=0.9, gt=0.0, lt=1.0, allow_inf_nan=False)
-    calibration_window: int = Field(default=_MAX_CALIBRATION_WINDOW, ge=1, le=5000)
+    calibration_window: int = Field(
+        default=_MAX_CALIBRATION_WINDOW,
+        ge=1,
+        le=_MAX_CALIBRATION_WINDOW,
+    )
     partition_by: Literal["global", "series"] = "global"
     upper_floor: float | None = None
     upper_cap: float | None = None
@@ -88,7 +92,7 @@ class _SplitConfig(BaseModel):
 
     @model_validator(mode="after")
     def _valid_rank_and_clamps(self) -> _SplitConfig:
-        minimum = _minimum_scores(self.coverage)
+        minimum = ConservativeRankRequirement().minimum_scores(self)
         if minimum > self.calibration_window:
             raise ValueError("calibration_window cannot satisfy the configured conservative rank")
         if (
@@ -337,6 +341,8 @@ class SplitConformalRuntime:
         upper_values: list[float] = []
         issuances: dict[ForecastKey, IssuedBoundFacts] = {}
         minimum = self.manifest.minimum_calibration_scores(self._config)
+        radii: dict[str, float] = {}
+        state_references: dict[str, str] = {}
 
         for row in rows:
             raw_upper = math.nan
@@ -356,12 +362,14 @@ class SplitConformalRuntime:
                 upper = math.nan
                 null_reason = _WARMUP_CAUSE
             else:
-                rank = math.ceil((len(partition.scores) + 1) * self._config.coverage)
-                if rank > len(partition.scores):
-                    raise RuntimeContractError(
-                        "split conservative rank exceeds available ready scores"
-                    )
-                radius = sorted(partition.scores)[rank - 1]
+                if label not in radii:
+                    rank = math.ceil((len(partition.scores) + 1) * self._config.coverage)
+                    if rank > len(partition.scores):
+                        raise RuntimeContractError(
+                            "split conservative rank exceeds available ready scores"
+                        )
+                    radii[label] = sorted(partition.scores)[rank - 1]
+                radius = radii[label]
                 center = (
                     row.point_forecast
                     if self.manifest.emission_scope is EmissionScope.PER_STEP
@@ -380,10 +388,12 @@ class SplitConformalRuntime:
                 partition.scored_series,
                 voided=math.isfinite(upper) and upper != raw_upper,
             )
-            state_reference = _state_reference(
-                self.manifest.name,
-                self._codec.encode_partition(label, partition),
-            )
+            if label not in state_references:
+                state_references[label] = _state_reference(
+                    self.manifest.name,
+                    self._codec.encode_partition(label, partition),
+                )
+            state_reference = state_references[label]
             facts = IssuedBoundFacts(
                 method_name=self.manifest.name,
                 emission_form=self.manifest.emission_form,
@@ -584,12 +594,12 @@ class SplitConformalRuntime:
                 continue
             score = abs(observation.actual - observation.point_forecast)
             scores.append(score)
-            del scores[: max(0, len(scores) - self._config.calibration_window)]
             count += 1
             if observation.censoring_assertion is None:
                 scored_series = ScoredSeries.RECORDED_SALES
             annotations.append(ObserveAnnotation(observation.forecast_key, score, None, True))
-        return _PartitionState(tuple(scores), count, scored_series), tuple(annotations)
+        bounded_scores = scores[-self._config.calibration_window :]
+        return _PartitionState(tuple(bounded_scores), count, scored_series), tuple(annotations)
 
     def _observe_window(
         self,
@@ -683,15 +693,6 @@ def build_split_window_sum(
     if not isinstance(config, SplitWindowSumConfig):
         raise RuntimeContractError("window-sum split factory requires SplitWindowSumConfig")
     return SplitConformalRuntime(config, states, manifest=SPLIT_WINDOW_SUM_MANIFEST)
-
-
-def _minimum_scores(coverage: float) -> int:
-    class _Coverage(BaseModel):
-        model_config = ConfigDict(frozen=True, extra="forbid")
-
-        coverage: float
-
-    return ConservativeRankRequirement().minimum_scores(_Coverage(coverage=coverage))
 
 
 def _state_score(value: object) -> float:
