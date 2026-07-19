@@ -36,6 +36,7 @@ from newcalibre.conformal.types import (
     IssuedBoundFacts,
     ObserveAnnotation,
     ObserveEffect,
+    ResolvedObservation,
     RuntimeContractError,
     _decode_label,
     derive_partition_label,
@@ -609,8 +610,41 @@ class SplitConformalRuntime:
         partition: _PartitionState,
     ) -> tuple[_PartitionState, tuple[ObserveAnnotation, ...]]:
         observations = delivery.observations
-        if len(observations) != self._protection_period:
-            raise RuntimeContractError("window-sum observe requires one complete protection window")
+        if len(observations) % self._protection_period:
+            raise RuntimeContractError(
+                "window-sum observe requires one or more complete protection windows"
+            )
+        windows: dict[
+            tuple[str, str, pd.Timestamp],
+            list[ResolvedObservation],
+        ] = {}
+        for observation in observations:
+            key = observation.forecast_key
+            windows.setdefault((key.series_key, key.model_name, key.origin), []).append(observation)
+
+        current = partition
+        annotations: dict[ForecastKey, ObserveAnnotation] = {}
+        ordered_keys = sorted(
+            windows,
+            key=lambda key: (key[2], key[0].encode(), key[1].encode()),
+        )
+        for key in ordered_keys:
+            window = tuple(windows[key])
+            if len(window) != self._protection_period:
+                raise RuntimeContractError(
+                    "window-sum observe requires one or more complete protection windows"
+                )
+            current, window_annotations = self._observe_one_window(window, current)
+            annotations.update(
+                (annotation.forecast_key, annotation) for annotation in window_annotations
+            )
+        return current, tuple(annotations[observation.forecast_key] for observation in observations)
+
+    def _observe_one_window(
+        self,
+        observations: tuple[ResolvedObservation, ...],
+        partition: _PartitionState,
+    ) -> tuple[_PartitionState, tuple[ObserveAnnotation, ...]]:
         first = observations[0].forecast_key
         if any(
             observation.forecast_key.series_key != first.series_key

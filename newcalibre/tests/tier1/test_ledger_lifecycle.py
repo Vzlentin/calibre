@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pandas as pd
 import pytest
 
+from newcalibre.conformal import (
+    EmissionForm,
+    IssuedBoundFacts,
+    derive_partition_label,
+)
+from newcalibre.conformal import (
+    ForecastKey as ConformalForecastKey,
+)
 from newcalibre.domain import (
     ACTUAL_VALUE,
     HORIZON_STEP,
@@ -21,6 +30,7 @@ from newcalibre.domain import (
     DecisionScopeKind,
     EmissionScope,
     GuaranteeClaim,
+    GuaranteeCurrency,
     GuaranteeDescriptor,
     GuaranteeType,
     ScoredSeries,
@@ -32,9 +42,11 @@ from newcalibre.ledger import (
     BoundKey,
     ForecastIssuance,
     ForecastKey,
+    GuaranteedSide,
     Ledger,
     LedgerError,
 )
+from newcalibre.observe import PendingObservation
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ISSUE_ORIGIN = pd.Timestamp("2026-01-01")
@@ -78,6 +90,41 @@ def _key(step: int) -> ForecastKey:
     return ("sku-a", ISSUE_ORIGIN, step, "seasonal")
 
 
+def _observation_facts(step: int, *, ready: bool = True) -> IssuedBoundFacts:
+    lower = 0.0 if ready else math.nan
+    upper = float(step * 10 + 2) if ready else math.nan
+    return IssuedBoundFacts(
+        method_name="split-per-step",
+        emission_form=EmissionForm.ONE_SIDED_UPPER,
+        emission_scope=EmissionScope.PER_STEP,
+        partition_label=derive_partition_label(
+            "seasonal",
+            "global",
+            EmissionScope.PER_STEP,
+        ),
+        working_level=0.5,
+        state_reference="split-per-step:fixture",
+        lower_bound=lower,
+        upper_bound=upper,
+        calibration_ready=ready,
+        bounds_null_reason=None if ready else "warm-up",
+        effective_descriptor=GuaranteeDescriptor(
+            type=GuaranteeType(
+                claim=GuaranteeClaim.ONE_SIDED_COVERAGE,
+                currency=GuaranteeCurrency.FINITE_SAMPLE_MARGINAL,
+                declared_slack=None,
+            ),
+            level=0.5,
+            scored_series=ScoredSeries.DEMAND_HONEST,
+            window=EmissionScope.PER_STEP,
+            scope=DecisionScope(
+                kind=DecisionScopeKind.PER_DECISION_NODE,
+                class_system_name=None,
+            ),
+        ),
+    )
+
+
 def _frame(*, steps: tuple[int, ...] = (2, 1, 3, 4)) -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -115,6 +162,136 @@ def _assert_empty_due_frame(frame: pd.DataFrame) -> None:
     assert str(frame[ORIGIN].dtype) == "datetime64[ns]"
     assert isinstance(frame[MODEL_NAME].dtype, pd.StringDtype)
     validate_forecast_frame(frame, calendar=CALENDAR)
+
+
+def test_pending_observation_projection_is_exact_append_ordered_and_defensive() -> None:
+    frame = _frame(steps=(2, 1))
+    lower, upper = "lower_0.5", "upper_0.5"
+    frame[lower] = pd.Series([0.0, 0.0], dtype="float64")
+    frame[upper] = pd.Series([22.0, 12.0], dtype="float64")
+    facts = {_key(step): _observation_facts(step) for step in (2, 1)}
+    no_claim = _issuance()
+    upper_claim = ForecastIssuance(
+        descriptor=_observation_facts(1).effective_descriptor,
+        guaranteed_side=GuaranteedSide.UPPER,
+        calibration_ready=True,
+        bounds_finite=True,
+        bounds_null_reason=None,
+    )
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    ledger.append_forecasts(
+        frame,
+        issuances={_key(step): {(lower,): no_claim, (upper,): upper_claim} for step in (2, 1)},
+        observation_issuances=facts,
+    )
+
+    first = ledger.pending_observations
+    second = ledger.pending_observations
+
+    assert first == (
+        PendingObservation(
+            ConformalForecastKey("sku-a", ISSUE_ORIGIN, 2, "seasonal"),
+            pd.Timestamp("2026-01-02"),
+            20.0,
+            facts[_key(2)],
+        ),
+        PendingObservation(
+            ConformalForecastKey("sku-a", ISSUE_ORIGIN, 1, "seasonal"),
+            pd.Timestamp("2026-01-01"),
+            10.0,
+            facts[_key(1)],
+        ),
+    )
+    assert second == first
+    assert second is not first
+    assert second[0] is not first[0]
+    assert second[0].issued is not first[0].issued
+
+
+def test_pending_projection_preserves_missing_facts_and_cold_start_nan_bounds() -> None:
+    cold = _frame(steps=(1,))
+    lower, upper = "lower_0.5", "upper_0.5"
+    cold[lower] = pd.Series([math.nan], dtype="float64")
+    cold[upper] = pd.Series([math.nan], dtype="float64")
+    nonfinite = ForecastIssuance(
+        descriptor=_observation_facts(1, ready=False).effective_descriptor,
+        guaranteed_side=GuaranteedSide.UPPER,
+        calibration_ready=False,
+        bounds_finite=False,
+        bounds_null_reason="warm-up",
+    )
+    no_claim_nonfinite = ForecastIssuance(
+        descriptor=_issuance().descriptor,
+        guaranteed_side=None,
+        calibration_ready=False,
+        bounds_finite=False,
+        bounds_null_reason="warm-up",
+    )
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    ledger.append_forecasts(
+        cold,
+        issuances={_key(1): {(lower,): no_claim_nonfinite, (upper,): nonfinite}},
+        observation_issuances={_key(1): _observation_facts(1, ready=False)},
+    )
+    plain = Ledger(session=_session(), calendar=CALENDAR)
+    plain.append_forecasts(
+        _frame(steps=(2,)),
+        issuances={_key(2): {QUANTILE: _issuance()}},
+    )
+
+    issued = ledger.pending_observations[0].issued
+    assert issued is not None
+    assert math.isnan(issued.lower_bound)
+    assert math.isnan(issued.upper_bound)
+    assert plain.pending_observations[0].issued is None
+
+
+def test_observation_issuance_projection_rejects_mismatched_or_foreign_facts_atomically() -> None:
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+    frame = _frame(steps=(1,))
+
+    with pytest.raises(LedgerError, match="bound columns"):
+        ledger.append_forecasts(
+            frame,
+            issuances={_key(1): {QUANTILE: _issuance()}},
+            observation_issuances={_key(1): _observation_facts(1)},
+        )
+    with pytest.raises(LedgerError, match="unknown forecast key"):
+        ledger.append_forecasts(
+            frame,
+            issuances={_key(1): {QUANTILE: _issuance()}},
+            observation_issuances={_key(2): _observation_facts(2)},
+        )
+
+    assert ledger.forecasts == ()
+    assert ledger.pending_observations == ()
+
+
+def test_observation_issuance_rejects_payload_bound_mismatch_atomically() -> None:
+    frame = _frame(steps=(1,))
+    lower, upper = "lower_0.5", "upper_0.5"
+    frame[lower] = pd.Series([0.0], dtype="float64")
+    frame[upper] = pd.Series([12.0], dtype="float64")
+    matching = _observation_facts(1)
+    mismatched = replace(matching, upper_bound=13.0)
+    upper_claim = ForecastIssuance(
+        descriptor=matching.effective_descriptor,
+        guaranteed_side=GuaranteedSide.UPPER,
+        calibration_ready=True,
+        bounds_finite=True,
+        bounds_null_reason=None,
+    )
+    ledger = Ledger(session=_session(), calendar=CALENDAR)
+
+    with pytest.raises(LedgerError, match="bounds must equal the forecast payload"):
+        ledger.append_forecasts(
+            frame,
+            issuances={_key(1): {(lower,): _issuance(), (upper,): upper_claim}},
+            observation_issuances={_key(1): mismatched},
+        )
+
+    assert ledger.forecasts == ()
+    assert ledger.pending_observations == ()
 
 
 def test_empty_ledger_due_frame_has_a_stable_valid_schema() -> None:

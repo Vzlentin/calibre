@@ -413,6 +413,41 @@ def test_window_observe_scores_once_on_terminal_and_preserves_canonical_annotati
     assert payload["delivered_score_count"] == 3
 
 
+def test_window_observe_batches_canonical_windows_like_consecutive_calls() -> None:
+    runtime, label, states = _states(
+        "split-window-sum",
+        [1.0, 2.0],
+        configuration={"coverage": 0.5, "protection_period": 2},
+    )
+    issued = runtime.apply(_frame((2.0, 3.0)), states)
+    first = _observations(
+        issued,
+        (4.0, 5.0),
+        (CensoringAssertion.UNCENSORED,) * 2,
+    )
+    next_origin = _ORIGIN + pd.Timedelta(days=1)
+    second = tuple(
+        replace(
+            observation,
+            forecast_key=replace(observation.forecast_key, origin=next_origin),
+            target_timestamp=observation.target_timestamp + pd.Timedelta(days=1),
+        )
+        for observation in first
+    )
+
+    batched = runtime.observe(Delivery(label, (*first, *second)), states)
+    first_effect = runtime.observe(Delivery(label, first), states)
+    consecutive = runtime.observe(
+        Delivery(label, second),
+        {**states, **first_effect.state_updates},
+    )
+
+    assert batched.state_updates == consecutive.state_updates
+    assert batched.annotations == (*first_effect.annotations, *consecutive.annotations)
+    payload = _payload("split-window-sum", batched.state_updates[label], label=label)
+    assert payload["delivered_score_count"] == 4
+
+
 def test_window_censoring_excludes_the_composite_without_state_advancement() -> None:
     runtime, label, states = _states(
         "split-window-sum",
@@ -470,7 +505,10 @@ def test_window_observe_refuses_partial_foreign_out_of_range_and_noncanonical_me
         observations[1],
         forecast_key=replace(observations[1].forecast_key, series_key="foreign"),
     )
-    with pytest.raises(RuntimeContractError, match="declared partition|share series"):
+    with pytest.raises(
+        RuntimeContractError,
+        match="declared partition|share series|complete protection window",
+    ):
         runtime.observe(Delivery(label, (observations[0], foreign, observations[2])), states)
 
     out_of_range = replace(
