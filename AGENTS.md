@@ -77,9 +77,9 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
   docstring. Methods by convention (not gated). Private helpers only when the
   intent is non-obvious.
 - **Comments explain *why*, not *what*.** Drop redundant, duplicated, or stale
-  comments. **No private references** in shipped prose — no vault pointers
-  (`lessons.md`), dead roadmap phases (`P0.3`), or plan/review thread IDs (`FIX
-  #N`, `REVIEW #N`, bare `#N`). Inline the load-bearing substance in 1–2 lines;
+  comments. **No private references** in shipped prose — no vault pointers, dead
+  roadmap phases (`P0.3`), or plan/review thread IDs (`FIX #N`, `REVIEW #N`, bare
+  `#N`). Inline the load-bearing substance in 1–2 lines;
   keep a public anchor (issue/PR/code path) only when it helps an outsider.
 - **Enforced subset (ruff `D`).** Gated: `D100`/`D104` (module + package),
   `D101`/`D103` (class + function), `D205`/`D212`/`D415` (summary format). `D102`
@@ -137,15 +137,16 @@ will fool you into thinking the vault is absent and degrading to fallback mode.
 **Resolve the path from `.env` first** (e.g. `grep OBSIDIAN_VAULT_PATH .env`, or
 source `.env`) and use that value; treat the vault as truly unavailable only if
 `.env` has no such line. The project folder is
-`Projects/Calibre/`; canon files: `architecture.md`, `lessons.md`,
-`vision.md`, `ROADMAP.md`, plus `plans/` and `archive/`. Reusable per-problem
-learnings live in `Projects/Calibre/solutions/` (knowledge-track docs by category —
+`Projects/Calibre/`; canon files: `architecture.md`, `vision.md`, `ROADMAP.md`, plus
+`plans/` and `archive/`. Reusable per-problem learnings live in
+`Projects/Calibre/solutions/` (knowledge-track docs by category —
 architecture-patterns, design-patterns, conventions, performance-issues, workflow,
 … — with `module`/`tags`/`applies_when` frontmatter), the shared domain vocabulary
 in `Projects/Calibre/CONCEPTS.md`, and postponed work in
-`Projects/Calibre/deferred-findings-register.md`; consult them when implementing or
-debugging in a documented area. If `.env` carries no `OBSIDIAN_VAULT_PATH` line
-(truly unset — not merely absent from the live shell), durable memory is skipped
+`Projects/Calibre/deferred-findings-register.md`. Read only the smallest relevant
+solution notes when implementing or debugging; never bulk-load the store. If `.env`
+carries no `OBSIDIAN_VAULT_PATH` line (truly unset — not merely absent from the live
+shell), durable memory is skipped
 (per the skill). `docs/plans/`, `docs/adr/`, and `CONTEXT.md` are public-safe
 redirectors to the vault (see `docs/agents/domain.md`), not artifact stores — a
 skill may write a temporary local plan under `docs/plans/` if the vault is

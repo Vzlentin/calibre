@@ -17,8 +17,8 @@ is `Projects/Calibre/`.
   `README.md` index). Read the ADRs that touch the area you're about to work in.
 - **Plans** — `<vault>/Projects/Calibre/plans/` (`YYYY-MM-DD-NNN-<slug>-plan.md`
   plus `reviews/`). Read the plan for any work item before implementing.
-- **Broader context** — the vault also holds `architecture.md`, `lessons.md`,
-  `vision.md`, `ROADMAP.md`, `STRATEGY.md`, `solutions/` (per-problem learnings).
+- **Broader context** — the vault also holds `architecture.md`, `vision.md`,
+  `ROADMAP.md`, `STRATEGY.md`, and `solutions/` (scoped per-problem learnings).
   See AGENTS.md → *Agent memory* for the full map and consumer rules; this file
   covers only the glossary + ADRs + plans the Matt Pocock skills look for.
 
