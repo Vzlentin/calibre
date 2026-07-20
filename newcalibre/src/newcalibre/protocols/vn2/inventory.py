@@ -59,6 +59,7 @@ class VN2InputInventory:
 
     schema: int
     dataset: str
+    content_sha256: str
     source_manifest: str
     source_manifest_sha256: str
     minted_run_id: str
@@ -75,7 +76,7 @@ def load_vn2_inventory(path: Path) -> VN2InputInventory:
     """Load the approved inventory or reject its complete schema."""
     if not isinstance(path, Path):
         raise VN2InputError("inventory path must be a pathlib.Path")
-    raw = load_unique_json(path, subject=f"inventory {path}")
+    raw, raw_bytes = _load_unique_json_payload(path, subject=f"inventory {path}")
     if not isinstance(raw, dict) or set(raw) != _INVENTORY_KEYS:
         raise VN2InputError("inventory must contain the exact keys defined by schema 1")
     payload = cast(dict[str, object], raw)
@@ -113,6 +114,7 @@ def load_vn2_inventory(path: Path) -> VN2InputInventory:
     return VN2InputInventory(
         schema=1,
         dataset="vn2",
+        content_sha256=hashlib.sha256(raw_bytes).hexdigest(),
         source_manifest=source_manifest,
         source_manifest_sha256=source_digest,
         minted_run_id=run_id,
@@ -209,12 +211,20 @@ def download_vn2_inputs(
 
 def load_unique_json(path: Path, *, subject: str) -> object:
     """Load UTF-8 JSON while refusing duplicate object keys at every depth."""
+    value, _raw_bytes = _load_unique_json_payload(path, subject=subject)
+    return value
+
+
+def _load_unique_json_payload(path: Path, *, subject: str) -> tuple[object, bytes]:
+    """Return strict decoded JSON together with the exact consumed bytes."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+        raw_bytes = path.read_bytes()
+        value = json.loads(raw_bytes.decode("utf-8"), object_pairs_hook=_unique_object)
     except _DuplicateJSONKey as error:
         raise VN2InputError(f"{subject} contains duplicate JSON key {error.key!r}") from error
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise VN2InputError(f"{subject} is not readable canonical JSON") from error
+    return value, raw_bytes
 
 
 def _unique_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:

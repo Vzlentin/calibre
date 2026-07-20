@@ -152,6 +152,11 @@ def render_advisory_result(
     trusted_config = load_vn2_config(Path(config_path))
     if trusted_config != config:
         raise VN2ResultError("advisory configuration does not match trusted config bytes")
+    input_inventory_digest = _bound_input_inventory_digest(
+        result,
+        Path(input_inventory_path),
+        name="advisory input inventory",
+    )
     conformal = config.conformal_config
     if conformal is None or conformal.get("method") != SPLIT_WINDOW_SUM:
         raise VN2ResultError("advisory projection requires split-window-sum configuration")
@@ -164,6 +169,7 @@ def render_advisory_result(
     if ordering.get("coverage") != coverage or ordering.get("quantile") is not None:
         raise VN2ResultError("advisory ordering must consume the calibrated cost-fractile bound")
 
+    _identities, _orders, settlements = _validated_engine_rows(result, config=config)
     lower, upper = interval_columns(coverage)
     selected = tuple(
         outcome for outcome in result.coverage_report.outcomes if outcome.bound_key == (upper,)
@@ -238,14 +244,12 @@ def render_advisory_result(
     if any(not math.isfinite(value) for value in width_quantiles.values()):
         raise VN2ResultError("advisory width quantiles must be finite")
 
-    holding = math.fsum(record.holding.amount for record in result.settlements)
-    shortage = math.fsum(record.shortage.amount for record in result.settlements)
+    holding = math.fsum(record.holding.amount for record in settlements)
+    shortage = math.fsum(record.shortage.amount for record in settlements)
     total = math.fsum((holding, shortage))
     if any(not math.isfinite(value) or value < 0.0 for value in (holding, shortage, total)):
         raise VN2ResultError("advisory settlement cost reductions must be finite and non-negative")
-    if any(
-        record.actuals_semantics is not config.actuals_semantics for record in result.settlements
-    ):
+    if any(record.actuals_semantics is not config.actuals_semantics for record in settlements):
         raise VN2ResultError("advisory settlements carry mixed actuals semantics")
 
     advisory = {
@@ -275,10 +279,7 @@ def render_advisory_result(
         },
         "identity": {
             "config_sha256": _file_digest(Path(config_path), name="advisory config"),
-            "input_inventory_sha256": _file_digest(
-                Path(input_inventory_path),
-                name="advisory input inventory",
-            ),
+            "input_inventory_sha256": input_inventory_digest,
             "lock_sha256": _file_digest(Path(lock_path), name="advisory lock"),
             "platform": PLATFORM,
             "session_id": result.session.value,
@@ -318,7 +319,11 @@ def emit_result_bundle(
         raise VN2ResultError("configuration object does not match trusted config bytes")
     trusted = {
         "config_digest": _file_digest(Path(config_path), name="config"),
-        "input_inventory_digest": _file_digest(Path(input_inventory_path), name="input inventory"),
+        "input_inventory_digest": _bound_input_inventory_digest(
+            result,
+            Path(input_inventory_path),
+            name="input inventory",
+        ),
         "lock_digest": _file_digest(Path(lock_path), name="lock"),
     }
     identities, orders, settlements = _validated_engine_rows(result, config=config)
@@ -792,6 +797,19 @@ def _read_regular(path: Path, *, name: str) -> bytes:
 
 def _file_digest(path: Path, *, name: str) -> str:
     return _sha256(_read_regular(path, name=name))
+
+
+def _bound_input_inventory_digest(
+    result: VN2RunResult,
+    path: Path,
+    *,
+    name: str,
+) -> str:
+    """Require artifact identity to match the inventory that produced the run."""
+    digest = _file_digest(path, name=name)
+    if digest != result.input_inventory_sha256:
+        raise VN2ResultError(f"{name} does not match the VN2 run input inventory")
+    return digest
 
 
 def _sha256(payload: bytes) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -42,6 +43,8 @@ from newcalibre.protocols.vn2.loader import VN2DataError, VN2Dataset, VN2RoundIn
 
 type VN2SeriesIdentity = tuple[int, int]
 
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
 
 @dataclass(frozen=True, slots=True)
 class VN2RunResult:
@@ -49,6 +52,7 @@ class VN2RunResult:
 
     session: SessionIdentity
     time_loop: TimeLoopResult
+    input_inventory_sha256: str
     forecasts: tuple[ForecastRow, ...]
     coverage_report: CoverageReport
     orders: tuple[OrderRow, ...]
@@ -60,6 +64,11 @@ class VN2RunResult:
             raise TypeError("VN2 run session must be a SessionIdentity")
         if not isinstance(self.time_loop, TimeLoopResult):
             raise TypeError("VN2 run time loop must be a TimeLoopResult")
+        if (
+            not isinstance(self.input_inventory_sha256, str)
+            or _SHA256.fullmatch(self.input_inventory_sha256) is None
+        ):
+            raise TypeError("VN2 run input inventory identity must be a sha256 digest")
         forecasts = tuple(self.forecasts)
         if any(not isinstance(row, ForecastRow) for row in forecasts):
             raise TypeError("VN2 run forecasts must contain ForecastRow values")
@@ -158,6 +167,7 @@ def run_vn2(dataset: VN2Dataset) -> VN2RunResult:
     return VN2RunResult(
         session=session,
         time_loop=time_loop,
+        input_inventory_sha256=dataset.input_inventory_sha256,
         forecasts=sink.forecasts,
         coverage_report=sink.coverage_report(),
         orders=sink.orders,

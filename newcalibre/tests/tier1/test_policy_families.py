@@ -969,6 +969,31 @@ def test_rs_refuses_every_nonfinite_value_it_would_consume(value: float) -> None
         dispatch_policy(_request(_configuration("rs"), frame, issuances))
 
 
+def test_uniform_declared_window_warmup_returns_no_decisions_after_validation() -> None:
+    upper = interval_columns(0.8)[1]
+    descriptor = _descriptor(window=EmissionScope.WINDOW_SUM)
+    frame = _frame(columns={upper: [math.nan, math.nan, math.nan]})
+    issuances = _upper_issuances(descriptor, finite=(False, False, False))
+    for row_issuances in issuances.values():
+        issuance = row_issuances[(upper,)]
+        row_issuances[(upper,)] = replace(issuance, bounds_null_reason="warm-up")
+    configuration = _configuration("rs")
+
+    assert dispatch_policy(_request(configuration, frame, issuances)) == ()
+
+    with pytest.raises(OrderingInputError, match="inventory positions must exactly cover"):
+        dispatch_policy(
+            _request(
+                configuration,
+                frame,
+                issuances,
+                positions={"foreign": InventoryPosition(0.0, 0.0, 0.0)},
+            )
+        )
+    with pytest.raises(OrderingInputError, match="missing required columns"):
+        dispatch_policy(_request(configuration, frame.drop(columns=[MODEL_NAME]), issuances))
+
+
 def test_cumulative_refuses_a_nonfinite_terminal_without_consuming_null_prefix() -> None:
     upper = interval_columns(0.8)[1]
     descriptor = _descriptor(window=EmissionScope.WINDOW_SUM)

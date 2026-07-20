@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -331,6 +332,27 @@ def test_advisory_projection_recomputes_only_calibrated_ordinary_ledger_facts(
         "configured": {"upper_cap": None, "upper_floor": None},
         "issued": [],
     }
+
+    truncated = replace(result, settlements=result.settlements[:-1])
+    with pytest.raises(VN2ResultError, match="settlement spine is incomplete"):
+        render_advisory_result(
+            truncated,
+            config=config,
+            config_path=config_path,
+            input_inventory_path=inventory,
+            lock_path=lock,
+        )
+
+    mismatched_inventory = tmp_path / "mismatched-inventory.json"
+    mismatched_inventory.write_bytes(inventory.read_bytes() + b" ")
+    with pytest.raises(VN2ResultError, match="does not match the VN2 run input inventory"):
+        render_advisory_result(
+            result,
+            config=config,
+            config_path=config_path,
+            input_inventory_path=mismatched_inventory,
+            lock_path=lock,
+        )
 
 
 def test_manifest_digest_binds_exact_manifest_bytes(tmp_path: Path) -> None:

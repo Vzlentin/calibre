@@ -57,6 +57,7 @@ class VN2Dataset:
     """Own validated reveals while exposing only origin-safe round snapshots."""
 
     _config: VN2ProtocolConfig
+    _input_inventory_sha256: str
     _sales: pd.DataFrame
     _master: pd.DataFrame
     _in_stock: pd.DataFrame
@@ -70,6 +71,7 @@ class VN2Dataset:
         cls,
         *,
         config: VN2ProtocolConfig,
+        input_inventory_sha256: str,
         sales: pd.DataFrame,
         master: pd.DataFrame,
         in_stock: pd.DataFrame,
@@ -77,6 +79,7 @@ class VN2Dataset:
     ) -> Self:
         instance = object.__new__(cls)
         instance._config = config
+        instance._input_inventory_sha256 = input_inventory_sha256
         instance._sales = sales
         instance._master = master
         instance._in_stock = in_stock
@@ -87,6 +90,11 @@ class VN2Dataset:
     def config(self) -> VN2ProtocolConfig:
         """Return the immutable protocol configuration used for validation."""
         return self._config
+
+    @property
+    def input_inventory_sha256(self) -> str:
+        """Return the exact input-inventory identity verified by the loader."""
+        return self._input_inventory_sha256
 
     def round_input(self, round_number: int) -> VN2RoundInput:
         """Return all reveals before the configured origin and its static facts."""
@@ -214,6 +222,7 @@ def load_vn2_dataset(
     )
     return VN2Dataset._from_validated(
         config=config,
+        input_inventory_sha256=inventory.content_sha256,
         sales=sales,
         master=master,
         in_stock=in_stock,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -76,11 +77,12 @@ def _forbidden_vn2_imports(modules: set[str]) -> set[str]:
 def test_run_vn2_returns_raw_row_exact_engine_facts_with_hand_checked_costs(
     tmp_path: Path,
 ) -> None:
-    dataset, _data, _inventory = _dataset(tmp_path)
+    dataset, _data, inventory = _dataset(tmp_path)
 
     result = run_vn2(dataset)
 
     assert isinstance(result, VN2RunResult)
+    assert result.input_inventory_sha256 == hashlib.sha256(inventory.read_bytes()).hexdigest()
     assert result.time_loop.decision_origins == dataset.config.decision_origins
     assert result.time_loop.settlement_periods == dataset.config.realized_periods
     assert len(result.orders) == dataset.config.series_count * dataset.config.round_count
