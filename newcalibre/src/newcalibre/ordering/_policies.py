@@ -140,6 +140,8 @@ def dispatch_policy(request: PolicyRequest) -> tuple[PolicyDecision, ...]:
         raise OrderingInputError("dispatch requires a PolicyRequest")
     groups = _decision_groups(request)
     configuration = request.configuration
+    if _is_uniform_declared_window_warmup(groups, configuration):
+        return ()
     explicit_quantile_descriptor = (
         _nonengine_quantile_descriptor(configuration.explicit_quantile)
         if configuration.policy in {"rs", "rss"} and configuration.explicit_quantile is not None
@@ -288,6 +290,36 @@ def _decision_groups(request: PolicyRequest) -> tuple[_DecisionGroup, ...]:
             key=lambda item: (item[0][0].encode(), item[0][2].encode()),
         )
     )
+
+
+def _is_uniform_declared_window_warmup(
+    groups: tuple[_DecisionGroup, ...],
+    configuration: OrderingConfiguration,
+) -> bool:
+    """Return whether every validated window group declares terminal warm-up."""
+    if (
+        configuration.policy not in {"rs", "rss"}
+        or configuration.explicit_quantile is not None
+        or configuration.coverage is None
+    ):
+        return False
+    upper = interval_columns(configuration.coverage)[1]
+    terminal = configuration.protection_period
+    for group in groups:
+        issuance = _matching_issuance(
+            group.rows[terminal],
+            (upper,),
+            exact=True,
+            missing_ok=True,
+        )
+        if (
+            issuance is None
+            or issuance.calibration_ready
+            or issuance.bounds_finite
+            or issuance.bounds_null_reason != "warm-up"
+        ):
+            return False
+    return True
 
 
 def _newsvendor_target(

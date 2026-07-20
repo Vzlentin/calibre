@@ -8,6 +8,7 @@ from newcalibre.protocols.vn2.artifacts import (
     VN2ResultManifest,
     emit_result_bundle,
     load_result_bundle,
+    render_advisory_result,
 )
 from newcalibre.protocols.vn2.config import (
     VN2ColumnConfig,
@@ -85,6 +86,7 @@ __all__ = [
     "load_vn2_config",
     "load_vn2_dataset",
     "load_vn2_inventory",
+    "render_advisory_result",
     "resolve_vn2_adapter",
     "run_vn2",
     "validate_tracking_append",

@@ -5,6 +5,7 @@ All assertions are exact tolerance-class-1 configuration or refusal facts.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
@@ -12,8 +13,9 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.vn2_fixtures import synthetic_config_payload, write_config
+from tests.vn2_fixtures import calibrated_config_payload, synthetic_config_payload, write_config
 
+from newcalibre.conformal import SPLIT_WINDOW_SUM
 from newcalibre.domain import ActualsSemantics, StockoutRule
 from newcalibre.protocols.vn2 import VN2ConfigError, VN2ProtocolConfig, load_vn2_config
 
@@ -21,6 +23,8 @@ pytestmark = pytest.mark.tier1
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL_CONFIG = PROJECT_ROOT / "benchmarks" / "vn2" / "protocol.yaml"
+ADVISORY_CONFIG = PROJECT_ROOT / "benchmarks" / "vn2" / "gate-b-split-window-sum.yaml"
+GATE_A_CONFIG_SHA256 = "979b6d39e0d0e1c52a91995c8d2fdf6de7430e0d202a442c354de2678033a370"
 
 
 def test_protocol_configuration_cannot_bypass_validation() -> None:
@@ -72,6 +76,27 @@ def test_committed_protocol_configuration_carries_every_gate_a_fact() -> None:
         "target_floor": None,
         "target_scale": None,
     }
+
+
+def test_committed_gate_a_configuration_bytes_remain_unchanged() -> None:
+    assert hashlib.sha256(PROTOCOL_CONFIG.read_bytes()).hexdigest() == GATE_A_CONFIG_SHA256
+
+
+def test_advisory_configuration_uses_registered_split_window_sum_at_cost_fractile() -> None:
+    config = load_vn2_config(ADVISORY_CONFIG)
+    coverage = config.cost_structure.critical_ratio
+
+    assert config.conformal_config == {
+        "calibration_window": 5000,
+        "coverage": coverage,
+        "method": SPLIT_WINDOW_SUM,
+        "partition_by": "global",
+        "protection_period": config.timing.protection_period,
+        "upper_cap": None,
+        "upper_floor": None,
+    }
+    assert config.ordering_policy["coverage"] == coverage
+    assert config.ordering_policy["quantile"] is None
 
 
 def test_protocol_constants_are_data_and_can_change_as_one_consistent_configuration(
@@ -182,7 +207,7 @@ def _put(payload: dict[str, Any], section: str, key: str, value: object) -> None
         ),
         (
             lambda payload: payload.update(conformal_config={"coverage": 0.9}),
-            "conformal_config.*null",
+            "conformal_config",
         ),
     ],
     ids=[
@@ -212,6 +237,68 @@ def test_protocol_configuration_refuses_inconsistent_or_ambiguous_facts(
 ) -> None:
     with pytest.raises(VN2ConfigError, match=pattern):
         load_vn2_config(_mutated_config(tmp_path, mutation))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "pattern"),
+    [
+        (
+            lambda payload: payload["conformal_config"].update(method="unknown"),
+            "method",
+        ),
+        (
+            lambda payload: payload["conformal_config"].update(extra=True),
+            "exact keys",
+        ),
+        (
+            lambda payload: payload["conformal_config"].update(upper_floor=0.0),
+            "clamps",
+        ),
+        (
+            lambda payload: payload["conformal_config"].update(protection_period=2),
+            "protection_period",
+        ),
+        (
+            lambda payload: payload["conformal_config"].update(coverage=0.8),
+            "critical ratio",
+        ),
+        (
+            lambda payload: payload["ordering_policy"].update(coverage=0.8),
+            "coverage",
+        ),
+        (
+            lambda payload: payload["ordering_policy"].update(quantile=0.5),
+            "quantile.*null",
+        ),
+    ],
+    ids=[
+        "unknown-method",
+        "unknown-field",
+        "non-null-clamp",
+        "protection-period-drift",
+        "fractile-drift",
+        "ordering-coverage-drift",
+        "native-selector-retained",
+    ],
+)
+def test_advisory_configuration_refuses_calibration_drift(
+    tmp_path: Path,
+    mutation: Callable[[dict[str, Any]], object],
+    pattern: str,
+) -> None:
+    payload = calibrated_config_payload()
+    mutation(payload)
+
+    with pytest.raises(VN2ConfigError, match=pattern):
+        load_vn2_config(write_config(tmp_path / "invalid-advisory.yaml", payload))
+
+
+def test_null_conformal_configuration_requires_native_quantile_selector(tmp_path: Path) -> None:
+    payload = synthetic_config_payload()
+    payload["ordering_policy"]["quantile"] = None
+
+    with pytest.raises(VN2ConfigError, match="quantile.*0.5"):
+        load_vn2_config(write_config(tmp_path / "invalid-native.yaml", payload))
 
 
 def test_loaded_configuration_does_not_retain_mutable_yaml_values(tmp_path: Path) -> None:

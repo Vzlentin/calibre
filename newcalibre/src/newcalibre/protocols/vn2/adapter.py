@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -36,11 +37,13 @@ from newcalibre.engine import (
     TimeLoopRequest,
     TimeLoopResult,
 )
-from newcalibre.ledger import OrderRow, SettlementRecord
+from newcalibre.ledger import CoverageReport, ForecastRow, OrderRow, SettlementRecord
 from newcalibre.protocols.vn2.forecasting import resolve_vn2_adapter
 from newcalibre.protocols.vn2.loader import VN2DataError, VN2Dataset, VN2RoundInput
 
 type VN2SeriesIdentity = tuple[int, int]
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +52,9 @@ class VN2RunResult:
 
     session: SessionIdentity
     time_loop: TimeLoopResult
+    input_inventory_sha256: str
+    forecasts: tuple[ForecastRow, ...]
+    coverage_report: CoverageReport
     orders: tuple[OrderRow, ...]
     settlements: tuple[SettlementRecord, ...]
     series_identities: Mapping[str, VN2SeriesIdentity]
@@ -58,6 +64,16 @@ class VN2RunResult:
             raise TypeError("VN2 run session must be a SessionIdentity")
         if not isinstance(self.time_loop, TimeLoopResult):
             raise TypeError("VN2 run time loop must be a TimeLoopResult")
+        if (
+            not isinstance(self.input_inventory_sha256, str)
+            or _SHA256.fullmatch(self.input_inventory_sha256) is None
+        ):
+            raise TypeError("VN2 run input inventory identity must be a sha256 digest")
+        forecasts = tuple(self.forecasts)
+        if any(not isinstance(row, ForecastRow) for row in forecasts):
+            raise TypeError("VN2 run forecasts must contain ForecastRow values")
+        if not isinstance(self.coverage_report, CoverageReport):
+            raise TypeError("VN2 run coverage report must be a CoverageReport")
         orders = tuple(self.orders)
         settlements = tuple(self.settlements)
         if any(not isinstance(row, OrderRow) for row in orders):
@@ -73,6 +89,7 @@ class VN2RunResult:
             for key, identity in identities.items()
         ):
             raise TypeError("VN2 series identities must map strings to integer pairs")
+        object.__setattr__(self, "forecasts", forecasts)
         object.__setattr__(self, "orders", orders)
         object.__setattr__(self, "settlements", settlements)
         object.__setattr__(self, "series_identities", MappingProxyType(identities))
@@ -150,6 +167,9 @@ def run_vn2(dataset: VN2Dataset) -> VN2RunResult:
     return VN2RunResult(
         session=session,
         time_loop=time_loop,
+        input_inventory_sha256=dataset.input_inventory_sha256,
+        forecasts=sink.forecasts,
+        coverage_report=sink.coverage_report(),
         orders=sink.orders,
         settlements=sink.settlements,
         series_identities=identities,

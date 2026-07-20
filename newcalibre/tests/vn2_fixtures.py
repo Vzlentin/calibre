@@ -110,6 +110,24 @@ def synthetic_config_payload() -> dict[str, Any]:
     }
 
 
+def calibrated_config_payload() -> dict[str, Any]:
+    """Return the synthetic configuration with cost-fractile window calibration."""
+    payload = synthetic_config_payload()
+    coverage = 1.0 / 1.2
+    payload["conformal_config"] = {
+        "method": "split-window-sum",
+        "coverage": coverage,
+        "calibration_window": 5000,
+        "partition_by": "global",
+        "upper_floor": None,
+        "upper_cap": None,
+        "protection_period": 3,
+    }
+    payload["ordering_policy"]["coverage"] = coverage
+    payload["ordering_policy"]["quantile"] = None
+    return payload
+
+
 def write_config(path: Path, payload: dict[str, Any] | None = None) -> Path:
     """Write one test-only YAML configuration and return its path."""
     path.write_text(

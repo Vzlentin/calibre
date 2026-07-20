@@ -44,6 +44,7 @@ def test_committed_inventory_is_the_exact_approved_inventory_blob() -> None:
 
     assert hashlib.sha256(payload).hexdigest() == APPROVED_LF_SHA256
     inventory = load_vn2_inventory(APPROVED_INVENTORY)
+    assert inventory.content_sha256 == hashlib.sha256(approved).hexdigest()
     assert EXPECTED_INPUT_COUNT == 12
     assert len(inventory.files) == EXPECTED_INPUT_COUNT
     assert tuple(entry.name for entry in inventory.files) == (

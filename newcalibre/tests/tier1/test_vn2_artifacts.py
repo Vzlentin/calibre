@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 from tests.vn2_fixtures import (
     BASE_WEEKS,
+    REVEAL_WEEKS,
+    SALES_FILES,
+    calibrated_config_payload,
     refresh_inventory,
     synthetic_config_payload,
     write_config,
     write_dataset,
 )
 
+from newcalibre.domain import interval_columns
 from newcalibre.protocols.vn2 import (
+    PLATFORM,
     VN2ProtocolConfig,
     VN2ResultError,
     VN2RunResult,
@@ -24,6 +32,7 @@ from newcalibre.protocols.vn2 import (
     load_result_bundle,
     load_vn2_config,
     load_vn2_dataset,
+    render_advisory_result,
     run_vn2,
 )
 
@@ -214,6 +223,136 @@ def test_r3_and_r4_are_reduced_from_r2_costs(tmp_path: Path) -> None:
     assert [row["round"] for row in r4["decision_rounds"]] == list(range(1, 7))
     assert len(r4["drain"]["periods"]) == 2
     assert bundle.holding_cost + bundle.shortage_cost == bundle.total_cost
+
+
+def test_advisory_projection_recomputes_only_calibrated_ordinary_ledger_facts(
+    tmp_path: Path,
+) -> None:
+    data, inventory, config_path = write_dataset(tmp_path)
+    for filename in SALES_FILES:
+        path = data / filename
+        frame = pd.read_csv(path)
+        changed = False
+        for week in REVEAL_WEEKS[-3:]:
+            if week in frame:
+                frame.loc[0, week] = 50.0
+                changed = True
+        if changed:
+            frame.to_csv(path, index=False, lineterminator="\n")
+    refresh_inventory(data, inventory)
+    payload = calibrated_config_payload()
+    payload["model_config"]["m"] = len(BASE_WEEKS)
+    write_config(config_path, payload)
+    config = load_vn2_config(config_path)
+    result = run_vn2(load_vn2_dataset(data, inventory, config))
+    lock = tmp_path / "uv.lock"
+    lock.write_bytes(b"synthetic lock\n")
+
+    rendered = render_advisory_result(
+        result,
+        config=config,
+        config_path=config_path,
+        input_inventory_path=inventory,
+        lock_path=lock,
+    )
+    advisory = json.loads(rendered)
+
+    coverage = config.cost_structure.critical_ratio
+    lower, upper = interval_columns(coverage)
+    outcomes = [
+        outcome for outcome in result.coverage_report.outcomes if outcome.bound_key == (upper,)
+    ]
+    scored = [outcome for outcome in outcomes if outcome.scored]
+    rows = {row.key: row for row in result.forecasts}
+    widths = [
+        float(rows[outcome.forecast_key].values[upper])
+        - float(rows[outcome.forecast_key].values[lower])
+        for outcome in scored
+    ]
+    assert rendered.endswith(b"\n") and b"\r" not in rendered
+    assert advisory["status"] == "advisory"
+    assert advisory["calibration"]["bound_key"] == [upper]
+    assert advisory["calibration"]["counts"] == {
+        "covered": sum(outcome.covered is True for outcome in outcomes),
+        "pending": sum(not outcome.resolved for outcome in outcomes),
+        "resolved": sum(outcome.resolved for outcome in outcomes),
+        "scored": len(scored),
+        "total": len(outcomes),
+        "unscored": sum(outcome.resolved and not outcome.scored for outcome in outcomes),
+    }
+    direct_covered = []
+    for outcome in scored:
+        row = rows[outcome.forecast_key]
+        window = [
+            candidate
+            for candidate in result.forecasts
+            if candidate.series_key == row.series_key
+            and candidate.origin == row.origin
+            and candidate.model_name == row.model_name
+            and candidate.horizon_step <= config.timing.protection_period
+        ]
+        actual_sum = math.fsum(float(candidate.actual_value) for candidate in window)
+        covered = actual_sum <= float(row.values[upper])
+        direct_covered.append(covered)
+        assert outcome.covered is covered
+    assert advisory["calibration"]["realized_coverage"] == (
+        sum(direct_covered) / len(direct_covered)
+    )
+    assert advisory["calibration"]["widths"] == {
+        "method": "linear",
+        "quantiles": {
+            str(level): float(np.quantile(widths, level, method="linear"))
+            for level in (0, 0.25, 0.5, 0.75, 1)
+        },
+    }
+    assert all(math.isfinite(value) and value >= 0.0 for value in widths)
+    assert all(float(rows[outcome.forecast_key].values[lower]) == 0.0 for outcome in scored)
+
+    holding = math.fsum(record.holding.amount for record in result.settlements)
+    shortage = math.fsum(record.shortage.amount for record in result.settlements)
+    assert advisory["costs"] == {
+        "currency": config.currency,
+        "holding": holding,
+        "shortage": shortage,
+        "total": math.fsum((holding, shortage)),
+    }
+    assert advisory["identity"] == {
+        "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        "input_inventory_sha256": hashlib.sha256(inventory.read_bytes()).hexdigest(),
+        "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "platform": PLATFORM,
+        "session_id": result.session.value,
+    }
+    assert advisory["semantics"] == {
+        "actuals": "censored_sales_surrogate",
+        "censoring_contract": "recorded-sales-under-censored-sales-surrogate",
+        "scored_series": "recorded-sales",
+    }
+    assert advisory["clamps"] == {
+        "configured": {"upper_cap": None, "upper_floor": None},
+        "issued": [],
+    }
+
+    truncated = replace(result, settlements=result.settlements[:-1])
+    with pytest.raises(VN2ResultError, match="settlement spine is incomplete"):
+        render_advisory_result(
+            truncated,
+            config=config,
+            config_path=config_path,
+            input_inventory_path=inventory,
+            lock_path=lock,
+        )
+
+    mismatched_inventory = tmp_path / "mismatched-inventory.json"
+    mismatched_inventory.write_bytes(inventory.read_bytes() + b" ")
+    with pytest.raises(VN2ResultError, match="does not match the VN2 run input inventory"):
+        render_advisory_result(
+            result,
+            config=config,
+            config_path=config_path,
+            input_inventory_path=mismatched_inventory,
+            lock_path=lock,
+        )
 
 
 def test_manifest_digest_binds_exact_manifest_bytes(tmp_path: Path) -> None:

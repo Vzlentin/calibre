@@ -12,7 +12,9 @@ from typing import cast
 
 import pandas as pd
 import yaml
+from pydantic import ValidationError
 
+from newcalibre.conformal import SPLIT_WINDOW_SUM, method_config_schema
 from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
@@ -190,7 +192,7 @@ class VN2ProtocolConfig:
     stockout_rule: StockoutRule
     files: VN2FileConfig
     columns: VN2ColumnConfig
-    conformal_config: None
+    _conformal_config_json: bytes | None = field(repr=False)
     _model_config_json: bytes = field(repr=False)
     _ordering_policy_json: bytes = field(repr=False)
 
@@ -206,6 +208,13 @@ class VN2ProtocolConfig:
     def shortage_rate(self) -> float:
         """Return the protocol shortage rate from the authoritative cost structure."""
         return self.cost_structure.shortage
+
+    @property
+    def conformal_config(self) -> dict[str, object] | None:
+        """Return an isolated registered conformal configuration snapshot."""
+        if self._conformal_config_json is None:
+            return None
+        return cast(dict[str, object], json.loads(self._conformal_config_json))
 
     @property
     def model_config(self) -> dict[str, object]:
@@ -274,9 +283,16 @@ def _load_vn2_config_bytes(payload: bytes, *, path: Path) -> VN2ProtocolConfig:
     )
     columns = _parse_columns(top["columns"], lead_time=timing.lead_time)
     model = _parse_model_config(top["model_config"])
-    if top["conformal_config"] is not None:
-        raise VN2ConfigError("Gate-A conformal_config must be explicit null")
-    ordering = _parse_ordering_policy(top["ordering_policy"])
+    conformal = _parse_conformal_config(
+        top["conformal_config"],
+        protection_period=timing.protection_period,
+        critical_ratio=cost_structure.critical_ratio,
+    )
+    ordering = _parse_ordering_policy(
+        top["ordering_policy"],
+        conformal=conformal,
+        critical_ratio=cost_structure.critical_ratio,
+    )
 
     config = object.__new__(VN2ProtocolConfig)
     object.__setattr__(config, "dataset", "vn2")
@@ -295,7 +311,11 @@ def _load_vn2_config_bytes(payload: bytes, *, path: Path) -> VN2ProtocolConfig:
     object.__setattr__(config, "stockout_rule", stockout_rule)
     object.__setattr__(config, "files", files)
     object.__setattr__(config, "columns", columns)
-    object.__setattr__(config, "conformal_config", None)
+    object.__setattr__(
+        config,
+        "_conformal_config_json",
+        None if conformal is None else _canonical_json(conformal),
+    )
     object.__setattr__(config, "_model_config_json", _canonical_json(model))
     object.__setattr__(config, "_ordering_policy_json", _canonical_json(ordering))
     return config
@@ -530,14 +550,72 @@ def _parse_model_config(value: object) -> dict[str, object]:
     return dict(payload)
 
 
-def _parse_ordering_policy(value: object) -> dict[str, object]:
+def _parse_conformal_config(
+    value: object,
+    *,
+    protection_period: int,
+    critical_ratio: float,
+) -> dict[str, object] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise VN2ConfigError("conformal_config must be null or a string-keyed mapping")
+    candidate = dict(cast(Mapping[str, object], value))
+    if candidate.get("method") != SPLIT_WINDOW_SUM:
+        raise VN2ConfigError(
+            f"conformal_config method must equal the registered {SPLIT_WINDOW_SUM!r} method"
+        )
+    schema = method_config_schema(SPLIT_WINDOW_SUM)
+    expected_keys = frozenset({"method", *schema.model_fields})
+    payload = _exact_mapping(candidate, keys=expected_keys, surface="conformal_config")
+    method = payload.pop("method")
+    try:
+        validated = schema.model_validate(payload, strict=True)
+    except ValidationError as error:
+        raise VN2ConfigError(f"invalid conformal_config: {error}") from error
+    normalized = cast(dict[str, object], validated.model_dump(mode="python"))
+    normalized["method"] = method
+    if normalized["partition_by"] != "global":
+        raise VN2ConfigError("conformal_config partition_by must equal 'global'")
+    if normalized["protection_period"] != protection_period:
+        raise VN2ConfigError(
+            "conformal_config protection_period must equal decision protection_period"
+        )
+    if normalized["upper_floor"] is not None or normalized["upper_cap"] is not None:
+        raise VN2ConfigError("conformal_config clamps must be explicit null")
+    if normalized["coverage"] != critical_ratio:
+        raise VN2ConfigError("conformal_config coverage must equal the cost critical ratio")
+    return normalized
+
+
+def _parse_ordering_policy(
+    value: object,
+    *,
+    conformal: Mapping[str, object] | None,
+    critical_ratio: float,
+) -> dict[str, object]:
     payload = _exact_mapping(value, keys=_ORDERING_KEYS, surface="ordering_policy")
     if payload["name"] != "rs":
         raise VN2ConfigError("ordering_policy name must equal 'rs'")
-    quantile = payload["quantile"]
-    if isinstance(quantile, bool) or not isinstance(quantile, Real) or float(quantile) != 0.5:
-        raise VN2ConfigError("ordering_policy quantile must equal 0.5")
-    nullable = _ORDERING_KEYS - {"name", "quantile"}
+    if conformal is None:
+        quantile = payload["quantile"]
+        if isinstance(quantile, bool) or not isinstance(quantile, Real) or float(quantile) != 0.5:
+            raise VN2ConfigError("ordering_policy quantile must equal 0.5")
+        nullable = _ORDERING_KEYS - {"name", "quantile"}
+    else:
+        if payload["quantile"] is not None:
+            raise VN2ConfigError("calibrated ordering_policy quantile must be explicit null")
+        coverage = payload["coverage"]
+        if (
+            isinstance(coverage, bool)
+            or not isinstance(coverage, Real)
+            or float(coverage) != critical_ratio
+            or float(coverage) != conformal["coverage"]
+        ):
+            raise VN2ConfigError(
+                "calibrated ordering_policy coverage must equal conformal coverage and cost ratio"
+            )
+        nullable = _ORDERING_KEYS - {"name", "coverage", "quantile"}
     non_null = sorted(key for key in nullable if payload[key] is not None)
     if non_null:
         raise VN2ConfigError(
