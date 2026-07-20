@@ -206,25 +206,17 @@ def _is_uniform_conformal_warmup(
     if frame.empty or any(column not in frame for column in required):
         return False
     terminal = configuration.protection_period
-    records = [
-        dict(zip(required, values, strict=True))
-        for values in frame.loc[:, list(required)].itertuples(index=False, name=None)
-    ]
-    groups = {(row[SERIES_KEY], row[ORIGIN], row[MODEL_NAME]) for row in records}
-    terminal_rows = [row for row in records if row[HORIZON_STEP] == terminal]
-    terminal_groups = {(row[SERIES_KEY], row[ORIGIN], row[MODEL_NAME]) for row in terminal_rows}
+    records = tuple(frame.loc[:, list(required)].itertuples(index=False, name=None))
+    groups = {(series, origin, model) for series, origin, _step, model in records}
+    terminal_rows = tuple(row for row in records if row[2] == terminal)
+    terminal_groups = {(series, origin, model) for series, origin, _step, model in terminal_rows}
     if not groups or terminal_groups != groups or len(terminal_rows) != len(groups):
         return False
 
     upper_key = (interval_columns(configuration.coverage)[1],)
     warmup: list[bool] = []
-    for row in terminal_rows:
-        key = (
-            row[SERIES_KEY],
-            row[ORIGIN],
-            row[HORIZON_STEP],
-            row[MODEL_NAME],
-        )
+    for series, origin, horizon_step, model in terminal_rows:
+        key = (series, origin, horizon_step, model)
         row_issuances = issuances.get(key)
         if row_issuances is None:
             return False

@@ -17,6 +17,7 @@ from typing import cast
 
 import numpy as np
 
+from newcalibre.conformal import SPLIT_WINDOW_SUM
 from newcalibre.domain import (
     EmissionScope,
     GuaranteeClaim,
@@ -152,7 +153,7 @@ def render_advisory_result(
     if trusted_config != config:
         raise VN2ResultError("advisory configuration does not match trusted config bytes")
     conformal = config.conformal_config
-    if conformal is None or conformal.get("method") != "split-window-sum":
+    if conformal is None or conformal.get("method") != SPLIT_WINDOW_SUM:
         raise VN2ResultError("advisory projection requires split-window-sum configuration")
     coverage = config.cost_structure.critical_ratio
     if conformal.get("coverage") != coverage:
