@@ -9,7 +9,17 @@ from numbers import Real
 
 import pandas as pd
 
-from newcalibre.domain import Calendar, DecisionEvidence, InventoryPosition, SessionIdentity
+from newcalibre.domain import (
+    HORIZON_STEP,
+    MODEL_NAME,
+    ORIGIN,
+    SERIES_KEY,
+    Calendar,
+    DecisionEvidence,
+    InventoryPosition,
+    SessionIdentity,
+    interval_columns,
+)
 from newcalibre.engine.errors import EngineError
 from newcalibre.ledger import BoundKey, ForecastIssuance, ForecastKey, OrderRow
 from newcalibre.ordering import OrderingConfiguration, PolicyRequest, dispatch_policy
@@ -54,6 +64,12 @@ class ConfiguredPolicyOrderer:
         configuration: OrderingConfiguration,
     ) -> tuple[OrderProposal, ...]:
         """Return evidence-complete proposals without mutating engine inputs."""
+        if _is_uniform_conformal_warmup(
+            frame,
+            issuances=issuances,
+            configuration=configuration,
+        ):
+            return ()
         decisions = dispatch_policy(
             PolicyRequest(
                 frame=frame,
@@ -175,6 +191,52 @@ def materialize_decisions(
         )
         for series_key, model_name in decisions.requested
     )
+
+
+def _is_uniform_conformal_warmup(
+    frame: pd.DataFrame,
+    *,
+    issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]],
+    configuration: OrderingConfiguration,
+) -> bool:
+    """Return whether every requested window decision is in declared warm-up."""
+    if configuration.explicit_quantile is not None or configuration.coverage is None:
+        return False
+    required = (SERIES_KEY, ORIGIN, HORIZON_STEP, MODEL_NAME)
+    if frame.empty or any(column not in frame for column in required):
+        return False
+    terminal = configuration.protection_period
+    records = [
+        dict(zip(required, values, strict=True))
+        for values in frame.loc[:, list(required)].itertuples(index=False, name=None)
+    ]
+    groups = {(row[SERIES_KEY], row[ORIGIN], row[MODEL_NAME]) for row in records}
+    terminal_rows = [row for row in records if row[HORIZON_STEP] == terminal]
+    terminal_groups = {(row[SERIES_KEY], row[ORIGIN], row[MODEL_NAME]) for row in terminal_rows}
+    if not groups or terminal_groups != groups or len(terminal_rows) != len(groups):
+        return False
+
+    upper_key = (interval_columns(configuration.coverage)[1],)
+    warmup: list[bool] = []
+    for row in terminal_rows:
+        key = (
+            row[SERIES_KEY],
+            row[ORIGIN],
+            row[HORIZON_STEP],
+            row[MODEL_NAME],
+        )
+        row_issuances = issuances.get(key)
+        if row_issuances is None:
+            return False
+        issuance = row_issuances.get(upper_key)
+        if issuance is None:
+            return False
+        warmup.append(
+            not issuance.calibration_ready
+            and not issuance.bounds_finite
+            and issuance.bounds_null_reason == "warm-up"
+        )
+    return all(warmup)
 
 
 def _validate_decision_key(key: object) -> None:

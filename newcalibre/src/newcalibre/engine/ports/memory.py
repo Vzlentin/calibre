@@ -39,10 +39,12 @@ from newcalibre.engine.ports import (
 )
 from newcalibre.engine.settlement._state import SettlementIndex, SettlementIndexAudit
 from newcalibre.ledger import (
+    CoverageReport,
     ForecastRow,
     Ledger,
     LedgerError,
     OrderRow,
+    PredicateRegistry,
     SettlementRecord,
 )
 from newcalibre.observe import ActualRecord, ActualsSubmission, ObservedActual, PendingObservation
@@ -470,6 +472,10 @@ class InMemoryLedgerSink:
             settlements=write.settlements,
             initial_positions=initial_positions,
         )
+
+    def coverage_report(self) -> CoverageReport:
+        """Return the owned ledger's complete registered coverage projection."""
+        return self._ledger.coverage_report(PredicateRegistry.gate_a())
 
     @property
     def forecasts(self) -> tuple[ForecastRow, ...]:

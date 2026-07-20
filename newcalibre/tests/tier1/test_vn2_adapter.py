@@ -13,13 +13,14 @@ from tests.vn2_fixtures import (
     REVEAL_WEEKS,
     SALES_FILES,
     STATIC_FILES,
+    calibrated_config_payload,
     refresh_inventory,
     synthetic_config_payload,
     write_config,
     write_dataset,
 )
 
-from newcalibre.domain import ActualsSemantics, GuaranteeClaim, quantile_column
+from newcalibre.domain import ActualsSemantics, GuaranteeClaim, interval_columns, quantile_column
 from newcalibre.protocols.vn2 import (
     VN2RunResult,
     load_vn2_config,
@@ -136,6 +137,40 @@ def test_run_vn2_returns_raw_row_exact_engine_facts_with_hand_checked_costs(
         for record in result.settlements
     )
     assert result.time_loop.inventory_positions["0_126"].on_order == 0.0
+
+
+def test_calibrated_run_exposes_ordinary_forecasts_coverage_and_cold_start_orders(
+    tmp_path: Path,
+) -> None:
+    payload = calibrated_config_payload()
+    dataset, *_ = _dataset(tmp_path, payload=payload)
+
+    result = run_vn2(dataset)
+
+    coverage = dataset.config.cost_structure.critical_ratio
+    upper = interval_columns(coverage)[1]
+    calibrated = [
+        outcome for outcome in result.coverage_report.outcomes if outcome.bound_key == (upper,)
+    ]
+    native = [
+        outcome
+        for outcome in result.coverage_report.outcomes
+        if outcome.bound_key == (quantile_column(0.5),)
+    ]
+    assert len(result.forecasts) == (
+        dataset.config.series_count * dataset.config.round_count * dataset.config.task_horizon
+    )
+    assert len(calibrated) == len(result.forecasts)
+    assert not native
+    assert all(quantile_column(0.5) in row.values for row in result.forecasts)
+    assert any(outcome.scored for outcome in calibrated)
+
+    ready_orders = [order for order in result.orders if order.evidence is not None]
+    cold_orders = [order for order in result.orders if order.evidence is None]
+    assert cold_orders
+    assert all(order.quantity == 0.0 for order in cold_orders)
+    assert ready_orders
+    assert all(order.evidence.source_columns == (upper,) for order in ready_orders)
 
 
 def test_run_vn2_obeys_alternate_review_and_lead_cadence(tmp_path: Path) -> None:

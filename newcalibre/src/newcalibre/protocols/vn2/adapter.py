@@ -36,7 +36,7 @@ from newcalibre.engine import (
     TimeLoopRequest,
     TimeLoopResult,
 )
-from newcalibre.ledger import OrderRow, SettlementRecord
+from newcalibre.ledger import CoverageReport, ForecastRow, OrderRow, SettlementRecord
 from newcalibre.protocols.vn2.forecasting import resolve_vn2_adapter
 from newcalibre.protocols.vn2.loader import VN2DataError, VN2Dataset, VN2RoundInput
 
@@ -49,6 +49,8 @@ class VN2RunResult:
 
     session: SessionIdentity
     time_loop: TimeLoopResult
+    forecasts: tuple[ForecastRow, ...]
+    coverage_report: CoverageReport
     orders: tuple[OrderRow, ...]
     settlements: tuple[SettlementRecord, ...]
     series_identities: Mapping[str, VN2SeriesIdentity]
@@ -58,6 +60,11 @@ class VN2RunResult:
             raise TypeError("VN2 run session must be a SessionIdentity")
         if not isinstance(self.time_loop, TimeLoopResult):
             raise TypeError("VN2 run time loop must be a TimeLoopResult")
+        forecasts = tuple(self.forecasts)
+        if any(not isinstance(row, ForecastRow) for row in forecasts):
+            raise TypeError("VN2 run forecasts must contain ForecastRow values")
+        if not isinstance(self.coverage_report, CoverageReport):
+            raise TypeError("VN2 run coverage report must be a CoverageReport")
         orders = tuple(self.orders)
         settlements = tuple(self.settlements)
         if any(not isinstance(row, OrderRow) for row in orders):
@@ -73,6 +80,7 @@ class VN2RunResult:
             for key, identity in identities.items()
         ):
             raise TypeError("VN2 series identities must map strings to integer pairs")
+        object.__setattr__(self, "forecasts", forecasts)
         object.__setattr__(self, "orders", orders)
         object.__setattr__(self, "settlements", settlements)
         object.__setattr__(self, "series_identities", MappingProxyType(identities))
@@ -150,6 +158,8 @@ def run_vn2(dataset: VN2Dataset) -> VN2RunResult:
     return VN2RunResult(
         session=session,
         time_loop=time_loop,
+        forecasts=sink.forecasts,
+        coverage_report=sink.coverage_report(),
         orders=sink.orders,
         settlements=sink.settlements,
         series_identities=identities,

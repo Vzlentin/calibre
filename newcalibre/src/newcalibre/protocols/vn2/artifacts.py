@@ -8,12 +8,22 @@ import math
 import re
 import shutil
 import tempfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
+import numpy as np
+
+from newcalibre.domain import (
+    EmissionScope,
+    GuaranteeClaim,
+    GuaranteeCurrency,
+    ScoredSeries,
+    interval_columns,
+)
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.ledger import OrderRow, SettlementRecord
 from newcalibre.protocols.vn2.adapter import VN2RunResult
@@ -125,6 +135,162 @@ class VN2ResultBundle:
     holding_cost: float
     shortage_cost: float
     total_cost: float
+
+
+def render_advisory_result(
+    result: VN2RunResult,
+    *,
+    config: VN2ProtocolConfig,
+    config_path: Path,
+    input_inventory_path: Path,
+    lock_path: Path,
+) -> bytes:
+    """Render one canonical advisory projection from generic ledger facts."""
+    if not isinstance(result, VN2RunResult) or not isinstance(config, VN2ProtocolConfig):
+        raise VN2ResultError("advisory projection requires VN2RunResult and VN2ProtocolConfig")
+    trusted_config = load_vn2_config(Path(config_path))
+    if trusted_config != config:
+        raise VN2ResultError("advisory configuration does not match trusted config bytes")
+    conformal = config.conformal_config
+    if conformal is None or conformal.get("method") != "split-window-sum":
+        raise VN2ResultError("advisory projection requires split-window-sum configuration")
+    coverage = config.cost_structure.critical_ratio
+    if conformal.get("coverage") != coverage:
+        raise VN2ResultError("advisory conformal coverage must equal the cost critical ratio")
+    if conformal.get("upper_floor") is not None or conformal.get("upper_cap") is not None:
+        raise VN2ResultError("advisory projection requires explicit null configured clamps")
+    ordering = config.ordering_policy
+    if ordering.get("coverage") != coverage or ordering.get("quantile") is not None:
+        raise VN2ResultError("advisory ordering must consume the calibrated cost-fractile bound")
+
+    lower, upper = interval_columns(coverage)
+    selected = tuple(
+        outcome for outcome in result.coverage_report.outcomes if outcome.bound_key == (upper,)
+    )
+    rows = {row.key: row for row in result.forecasts}
+    if len(rows) != len(result.forecasts):
+        raise VN2ResultError("advisory forecast facts contain duplicate keys")
+    if not selected or {outcome.forecast_key for outcome in selected} != set(rows):
+        raise VN2ResultError("advisory calibrated outcomes must exactly cover forecast rows")
+    if len(selected) != len(rows):
+        raise VN2ResultError("advisory calibrated outcomes contain duplicate forecast keys")
+
+    for outcome in selected:
+        row = rows[outcome.forecast_key]
+        facts = row.observation_issuance
+        if facts is None or facts.method_name != conformal["method"]:
+            raise VN2ResultError("advisory forecast is missing its calibrated issuance")
+        descriptor = outcome.target.descriptor
+        if (
+            facts.effective_descriptor != descriptor
+            or facts.emission_scope is not EmissionScope.WINDOW_SUM
+            or descriptor.window is not EmissionScope.WINDOW_SUM
+            or descriptor.level != coverage
+            or descriptor.type.claim is not GuaranteeClaim.ONE_SIDED_COVERAGE
+            or descriptor.type.currency is not GuaranteeCurrency.FINITE_SAMPLE_MARGINAL
+        ):
+            raise VN2ResultError("advisory calibrated descriptors are missing or mixed")
+        if facts.bindings:
+            raise VN2ResultError("advisory calibrated issuance unexpectedly carries a clamp")
+        if lower not in row.values or upper not in row.values:
+            raise VN2ResultError("advisory forecast is missing configured interval columns")
+
+    counts = {
+        "covered": sum(outcome.covered is True for outcome in selected),
+        "pending": sum(not outcome.resolved for outcome in selected),
+        "resolved": sum(outcome.resolved for outcome in selected),
+        "scored": sum(outcome.scored for outcome in selected),
+        "total": len(selected),
+        "unscored": sum(outcome.resolved and not outcome.scored for outcome in selected),
+    }
+    if counts["pending"]:
+        raise VN2ResultError("advisory run must resolve every calibrated outcome")
+    if counts["resolved"] != counts["scored"] + counts["unscored"]:
+        raise VN2ResultError("advisory calibrated counts do not reconcile")
+    causes = Counter(
+        cast(str, outcome.unscored_reason)
+        for outcome in selected
+        if outcome.resolved and not outcome.scored
+    )
+    if any(not cause for cause in causes) or sum(causes.values()) != counts["unscored"]:
+        raise VN2ResultError("advisory unscored outcomes require complete named causes")
+
+    scored = tuple(outcome for outcome in selected if outcome.scored)
+    if not scored or any(outcome.covered is None for outcome in scored):
+        raise VN2ResultError("advisory coverage requires scored coverage outcomes")
+    scored_series = {outcome.target.descriptor.scored_series for outcome in scored}
+    if scored_series != {ScoredSeries.RECORDED_SALES}:
+        raise VN2ResultError("advisory scored outcomes require one recorded-sales descriptor")
+    widths: list[float] = []
+    for outcome in scored:
+        row = rows[outcome.forecast_key]
+        lower_value = _finite_number(row.values[lower], name="advisory lower bound")
+        upper_value = _finite_number(row.values[upper], name="advisory upper bound")
+        width = upper_value - lower_value
+        if width < 0.0:
+            raise VN2ResultError("advisory interval width must be non-negative")
+        widths.append(width)
+    levels = (0, 0.25, 0.5, 0.75, 1)
+    width_quantiles = {
+        str(level): float(np.quantile(widths, level, method="linear")) for level in levels
+    }
+    if any(not math.isfinite(value) for value in width_quantiles.values()):
+        raise VN2ResultError("advisory width quantiles must be finite")
+
+    holding = math.fsum(record.holding.amount for record in result.settlements)
+    shortage = math.fsum(record.shortage.amount for record in result.settlements)
+    total = math.fsum((holding, shortage))
+    if any(not math.isfinite(value) or value < 0.0 for value in (holding, shortage, total)):
+        raise VN2ResultError("advisory settlement cost reductions must be finite and non-negative")
+    if any(
+        record.actuals_semantics is not config.actuals_semantics for record in result.settlements
+    ):
+        raise VN2ResultError("advisory settlements carry mixed actuals semantics")
+
+    advisory = {
+        "calibration": {
+            "bound_key": [upper],
+            "counts": counts,
+            "realized_coverage": counts["covered"] / counts["scored"],
+            "unscored_by_cause": dict(sorted(causes.items(), key=lambda item: item[0].encode())),
+            "widths": {
+                "method": "linear",
+                "quantiles": width_quantiles,
+            },
+        },
+        "clamps": {
+            "configured": {
+                "upper_cap": conformal["upper_cap"],
+                "upper_floor": conformal["upper_floor"],
+            },
+            "issued": [],
+        },
+        "configuration": conformal,
+        "costs": {
+            "currency": config.currency,
+            "holding": holding,
+            "shortage": shortage,
+            "total": total,
+        },
+        "identity": {
+            "config_sha256": _file_digest(Path(config_path), name="advisory config"),
+            "input_inventory_sha256": _file_digest(
+                Path(input_inventory_path),
+                name="advisory input inventory",
+            ),
+            "lock_sha256": _file_digest(Path(lock_path), name="advisory lock"),
+            "platform": PLATFORM,
+            "session_id": result.session.value,
+        },
+        "schema": 1,
+        "semantics": {
+            "actuals": config.actuals_semantics.value,
+            "censoring_contract": "recorded-sales-under-censored-sales-surrogate",
+            "scored_series": ScoredSeries.RECORDED_SALES.value,
+        },
+        "status": "advisory",
+    }
+    return _json_bytes(advisory)
 
 
 def emit_result_bundle(
@@ -662,6 +828,15 @@ def _positive_int(value: object, *, name: str) -> int:
     return result
 
 
+def _finite_number(value: object, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise VN2ResultError(f"{name} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise VN2ResultError(f"{name} must be finite")
+    return result
+
+
 def _nonnegative(value: object, *, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise VN2ResultError(f"{name} must be numeric")
@@ -678,4 +853,5 @@ __all__ = [
     "VN2ResultManifest",
     "emit_result_bundle",
     "load_result_bundle",
+    "render_advisory_result",
 ]

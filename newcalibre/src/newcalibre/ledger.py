@@ -30,6 +30,7 @@ from newcalibre.domain import (
     Calendar,
     CalendarError,
     DecisionEvidence,
+    EmissionScope,
     ForecastFrameError,
     GuaranteeClaim,
     GuaranteeCurrency,
@@ -1145,11 +1146,19 @@ class Ledger:
                     guaranteed_side=issuance.guaranteed_side,
                     bound_key=bound_key,
                 )
+                actual_value = row.actual_value
+                if issuance.bounds_finite and target.descriptor.window is EmissionScope.WINDOW_SUM:
+                    actual_value = _resolved_window_sum(
+                        self._forecasts,
+                        forecast_key=forecast_key,
+                    )
                 outcome = _score_bound(
                     forecast_key=forecast_key,
                     row=row,
+                    actual_value=actual_value,
                     target=target,
                     issuance=issuance,
+                    annotation=self._annotations.get(forecast_key),
                     registry=registry,
                 )
                 outcomes.append(outcome)
@@ -1212,15 +1221,40 @@ def _nan_equal(left: float, right: float) -> bool:
     return left == right or (math.isnan(left) and math.isnan(right))
 
 
+def _resolved_window_sum(
+    forecasts: Mapping[ForecastKey, ForecastRow],
+    *,
+    forecast_key: ForecastKey,
+) -> float | None:
+    series_key, origin, terminal_step, model_name = forecast_key
+    members: list[ForecastRow] = []
+    for step in range(1, terminal_step + 1):
+        key = (series_key, origin, step, model_name)
+        try:
+            members.append(forecasts[key])
+        except KeyError as error:
+            raise LedgerError(
+                "window-sum coverage requires every leading protection-window member"
+            ) from error
+    if any(member.actual_value is None for member in members):
+        return None
+    return _finite_real(
+        math.fsum(cast(float, member.actual_value) for member in members),
+        name="resolved window-sum actual",
+    )
+
+
 def _score_bound(
     *,
     forecast_key: ForecastKey,
     row: ForecastRow,
+    actual_value: float | None,
     target: CoverageTarget,
     issuance: ForecastIssuance,
+    annotation: ObserveAnnotation | None,
     registry: PredicateRegistry,
 ) -> ScoreOutcome:
-    if row.actual_value is None:
+    if actual_value is None:
         return ScoreOutcome(
             forecast_key=forecast_key,
             target=target,
@@ -1246,6 +1280,16 @@ def _score_bound(
             target,
             reason="not-engine-calibrated",
         )
+    if (
+        annotation is not None
+        and not annotation.advanced_delivered_score
+        and annotation.exclusion_cause in {"declared-censored", "declared-censored-window"}
+    ):
+        return _unscored_outcome(
+            forecast_key,
+            target,
+            reason=annotation.exclusion_cause,
+        )
 
     predicate_key: PredicateKey = (
         claim,
@@ -1263,7 +1307,7 @@ def _score_bound(
     bound_values = tuple(
         _finite_real(values[column], name="issued bound value") for column in target.bound_key
     )
-    result = registration.predicate(row.actual_value, bound_values, issuance)
+    result = registration.predicate(actual_value, bound_values, issuance)
     if not isinstance(result, PredicateResult):
         raise LedgerError("registered predicate must return a PredicateResult")
     return ScoreOutcome(
