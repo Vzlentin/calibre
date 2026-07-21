@@ -1,466 +1,664 @@
 # Gate C compute venue selection
 
+## Supersession notice
+
+**The earlier AWS recommendation in commit `66c92ea` is superseded and must not
+be used.** The owner requires Microsoft Azure in Europe
+([owner correction on issue 434][issue-434-correction]). AWS is now a rejected
+alternative because it violates that product constraint. All executable
+selection, provisioning, access, cost, preflight, and teardown instructions
+below are Azure-only.
+
 ## Executive recommendation
 
-Select **Amazon EC2 `c7a.8xlarge` in `us-east-1` (US East, N. Virginia),
-on-demand shared tenancy** for the Gate C trial and the later U17 acceptance
-run.
+Select **Microsoft Azure `Standard_NC16as_T4_v3` in West Europe
+(`westeurope`)**, pay-as-you-go Linux, for the issue-436 trial and the later
+U17 acceptance run.
 
 Pin this environment:
 
-- **Compute:** `c7a.8xlarge`, which AWS specifies as 64 GiB RAM, 32 vCPUs,
-  **32 CPU cores, and one thread per core** on AMD EPYC 9R14. This is 32
-  physical cores, not 32 SMT threads ([AWS compute-optimized instance
-  specifications][aws-co]).
-- **Image:** Canonical Ubuntu Server 24.04 LTS (Noble), release serial
-  `20260714`, AMD64, HVM, EBS gp3, AMI `ami-052355af2a014bd2c`. Canonical's
-  official locator listed this exact `us-east-1` image when this research was
-  done ([Ubuntu EC2 image locator][ubuntu-locator]). Issue 436 must verify the
-  owner is Canonical account `099720109477` before launch; Canonical documents
-  both that owner ID and the image-name query ([Canonical image discovery
-  guide][ubuntu-images]).
-- **Storage:** one encrypted **300 GiB gp3** root volume, 3,000 IOPS, 125 MiB/s,
-  `DeleteOnTermination=true`. gp3 includes this IOPS and throughput baseline
-  and supports 1 GiB through 64 TiB ([AWS gp3 documentation][aws-gp3]).
-- **Runtime:** managed CPython **3.12.13**, uv **0.11.30**, and the exact
-  candidate `newcalibre/uv.lock` installed with `uv sync --locked`. Pinning an
-  exact Python patch and uv release is supported by uv's first-party install
-  and Python-version interfaces ([uv installation][uv-install], [uv Python
-  versions][uv-python]).
-- **Thread policy:** `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`,
-  `MKL_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`,
-  `VECLIB_MAXIMUM_THREADS=1`, and `BLIS_NUM_THREADS=1`, inherited by every Ray
-  worker. U16/issue 439 may choose a worker count from its scaling curve, but
-  it must not change this one-thread-per-worker numeric policy.
-- **Provisioning and access:** one AWS CloudFormation stack that owns the VPC,
-  public subnet, internet route, no-ingress security group, instance role,
-  instance profile, EC2 instance, and volume. Access it only with AWS Systems
-  Manager Session Manager. Session Manager supports CLI access without an
-  inbound port, bastion, or SSH key ([AWS Session Manager][aws-session]).
-  Delete the stack after each run.
+- **Compute:** `Standard_NC16as_T4_v3`. Microsoft specifies this size as 16
+  vCPUs and 110 GB memory, within a series whose AMD EPYC 7V12 CPU cores are
+  explicitly **non-multithreaded**. Therefore, its 16 visible vCPUs are 16
+  physical CPU cores rather than 16 SMT threads. The size also contains one
+  NVIDIA T4 GPU, which Calibre will not configure or use
+  ([Azure NCasT4 v3 specification][azure-nc]).
+- **Region:** `westeurope`. The Azure Retail Prices API has a current West
+  Europe pay-as-you-go Linux meter for this exact size. No current primary
+  evidence makes another European region necessary. Subscription availability,
+  restrictions, and capacity remain issue-436 checks.
+- **Image rule:** Canonical publisher `Canonical`, offer
+  `ubuntu-24_04-lts`, SKU `server`, AMD64 Hyper-V Generation 2. Resolve the
+  newest West Europe version before deployment, record its exact four-part
+  URN, and pass that version—not `latest`—to Bicep. Canonical identifies
+  `Canonical:ubuntu-24_04-lts:server:latest` as the Ubuntu 24.04 LTS AMD64
+  Gen2 stream ([Canonical Azure image catalog][ubuntu-azure-image]).
+- **Storage:** one **512 GiB Premium SSD P20 (`Premium_LRS`) OS disk** with
+  2,300 provisioned IOPS and 150 MB/s throughput, read/write host caching,
+  storage-service encryption with a platform-managed key, and
+  `deleteOption: Delete`. Azure documents the P20 capacity and performance
+  contract, hourly-prorated managed-disk billing, and server-side encryption
+  at rest ([Azure managed disks][azure-disks], [Azure disk
+  encryption][azure-disk-encryption]).
+- **Temporary disk:** do not use it. The selected size exposes a 352 GiB local
+  temporary disk, but no environment, M5 input, result, or profile path may
+  resolve to it. It is not durable across VM lifecycle operations
+  ([Azure NCasT4 v3 specification][azure-nc]).
+- **Runtime:** uv-managed CPython **3.12.13**, uv **0.11.30**, and the exact
+  candidate `newcalibre/uv.lock` installed with `uv sync --locked`. Record the
+  candidate commit and lock SHA-256.
+- **Thread policy:** set `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+  `MKL_NUM_THREADS`, `NUMEXPR_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, and
+  `BLIS_NUM_THREADS` to `1` before any numeric import or Ray start. Set
+  `CUDA_VISIBLE_DEVICES` to the empty string; Ray starts with `num_gpus=0`.
+- **Provisioning and teardown:** one Bicep deployment in one dedicated resource
+  group. The resource group owns the VNet, subnet, no-inbound NSG, Standard
+  static public IPv4, NIC, VM, and generated OS disk. Delete the resource group
+  after each session.
+- **Access:** Azure Run Command through Azure RBAC and the Azure VM Agent. The
+  NSG has an explicit deny-all inbound rule; no SSH/RDP rule, password, private
+  key, or embedded credential is used. Run Command is an Azure control-plane
+  facility that uses the VM Agent to run Linux scripts
+  ([Azure Run Command][azure-run-command]).
 
-This is a venue selection, not a Gate C result. It does not assert that the
-workload passes. The unchanged U17 limits remain **full M5 <= 15 minutes wall
-clock, pre-origin overhead <= 60 seconds, and peak RSS <= 32 GB**
+This selects a venue; it does not assert a Gate C pass. The binding limits
+remain unchanged: **full M5 <= 15 minutes total wall time, pre-origin overhead
+<= 60 seconds, and peak RSS <= 32 GB**
 ([`[PRF-1]`, `[PRF-2]`, and `[PRF-20]` at revision `e5cb11b`][project-perf]).
-No trial observation may lower or reinterpret them.
+No Azure trial result may lower or reinterpret them.
 
 ### Fallback
 
-Use **Amazon EC2 `m7a.4xlarge` in `us-east-1` with the same AMI, storage,
-thread policy, CloudFormation topology, and Session Manager access** only if
-`c7a.8xlarge` cannot pass issue 436 because of account quota or current
-capacity. AWS specifies `m7a.4xlarge` as 64 GiB RAM, 16 vCPUs, **16 CPU cores,
-and one thread per core**, also on AMD EPYC 9R14 ([AWS general-purpose
-instance specifications][aws-gp]). It satisfies the 16-physical-core floor
-but has half the process-parallel capacity of the recommendation.
+Use **Microsoft Azure `Standard_F48s_v2` in `westeurope`** with the same image
+rule, P20 OS disk, Bicep topology, Run Command access, Python/uv pins, and
+thread policy only if the selected NC size cannot pass issue 436 because of
+regional restrictions, family quota, or current capacity.
 
-The fallback is not a silent U17 substitution. It must pass the same issue-436
-preflight, and the plan and environment manifest must name the one selected
-shape before any acceptance result is read.
+Microsoft specifies `Standard_F48s_v2` as 48 vCPUs and 96 GB memory and states
+that Fsv2 uses Intel Hyper-Threading. The public size page does not publish a
+physical-core count. The expected topology is **24 physical cores x 2 threads
+= 48 vCPUs**, but this remains inference until both the Azure SKU capability
+`vCPUsPerCore=2` and guest `lscpu` confirm it
+([Azure Fsv2 specification][azure-fsv2]). The fallback cannot be used if the
+control plane or guest exposes fewer than 16 physical cores.
+
+The fallback is not a silent substitution. It must pass the same issue-436
+checks with expected values changed to 48 logical CPUs, 24 physical cores, two
+threads/core, and at least 96 GB provider memory. The plan and environment
+manifest must name one selected shape before any acceptance result is read.
 
 ## Decision boundary
 
-ADR 0001 requires one workstation-class x86_64 Linux headline environment with
-at least 16 physical cores, 64 GB RAM, Python 3.12, a locked toolchain, and a
-declared thread policy. It leaves the concrete instance pending
-([ADR 0001, lines 65-94 at `e5cb11b`][project-adr]). The successor currently
-requires Python 3.12 and has a separate lockfile
-([`newcalibre/pyproject.toml`][project-toolchain],
-[`newcalibre/uv.lock`][project-lock]). The lockfile at this research revision
-has SHA-256
-`1de477cd122b6763955df2f2b59c12cbda40fe56816f3046083c2ae67ea63336`.
-U16 will add the final Ray-bearing dependency set ([issue 439][issue-439]), so
-the U17 manifest must record the later candidate lockfile digest, not copy
-this research-time digest.
+ADR 0001 requires a workstation-class x86_64 Linux environment with at least
+16 physical cores, at least 64 GB RAM, Python 3.12, a locked toolchain, and an
+explicit thread policy. It leaves the concrete instance pending
+([ADR 0001 at `e5cb11b`][project-adr]). The successor pins Python 3.12 in its
+project and lockfile ([successor project][project-toolchain], [successor
+lockfile][project-lock]). U16 will add the final Ray-bearing lock
+([issue 439][issue-439]); the U17 manifest must use that later candidate digest,
+not the research-time digest.
 
-The M5 workload has 30,490 bottom series, 33,563 lattice nodes, 64 daily
-origins in the reference configuration, and a 28-day horizon. The prior
-profile wrote about 2.6 GB of ledger files. The performance design requires
-streaming ledger I/O and sparse reconciliation
-([M5 protocol][project-m5], [performance storage requirements][project-storage]).
-A 300 GiB volume is therefore a conservative capacity allocation, not a claim
-about runtime. Issue 436 still measures the installed environment, downloaded
-data, free space, and scratch output.
+The selected Azure series gives a first-party physical-core statement without
+relying on vCPU arithmetic. The unused GPU is a deliberate trade: the NC size
+has a lower current West Europe list price than the ordinary D/F candidates,
+meets the RAM floor, and removes physical-core ambiguity. Issue 436 must still
+prove that the subscription can deploy it and that the guest exposes the
+published topology. If special-family quota or capacity makes it impractical,
+the preregistered Fsv2 fallback uses a normal compute family but binds physical
+topology to the trial.
+
+The M5 workload has 30,490 bottom series, 33,563 lattice nodes, a 28-day
+horizon, and 64 daily origins in the reference configuration
+([M5 protocol][project-m5]). The prior profile wrote about 2.6 GB of ledger
+files, while chapter 30 requires sparse reconciliation and streaming ledger
+I/O ([performance storage requirements][project-storage]). A 512 GiB P20 disk
+provides substantial capacity headroom. This is not a runtime claim; issue 436
+must still measure installed environments, data, scratch output, and free
+space.
 
 Ray must run as a normal single-machine local runtime with worker processes,
 not `local_mode=True`. Ray documents that `ray.init()` starts a local instance
-whose machine is the head node and that `ray.shutdown()` terminates the local
-processes ([Ray single-machine runtime][ray-single]). Calibre separately
-requires batch-placement invariance, a serial-order commit, and explicit
-numeric thread budgets ([`[DET-3]`-`[DET-5]` at `e5cb11b`][project-determinism]).
-The venue can support those checks, but only U16's same-engine tests can prove
-them.
+and that `ray.shutdown()` terminates its local processes
+([Ray single-machine runtime][ray-single]). Calibre separately requires
+batch-placement invariance, serial-order commit, and explicit numeric thread
+budgets ([`[DET-3]`-`[DET-5]` at `e5cb11b`][project-determinism]). The venue
+preflight proves platform support only. U16's tier-2 tests must prove Calibre's
+same-engine distributed identity.
 
 ## Requirements matrix
 
-| Requirement | Selected environment | Status before issue 436 | Issue-436 binding observation |
+| Requirement | Selected Azure environment | Status before issue 436 | Binding issue-436 observation |
 | --- | --- | --- | --- |
-| x86_64 Linux | AMD64 Ubuntu 24.04 AMI on AMD EPYC | Provider/image contract | `uname -m=x86_64`; IMDS AMI/region/type; `/etc/os-release` is Ubuntu 24.04 |
-| At least 16 physical cores | AWS table: 32 cores, one thread/core | **Meets with 2x headroom** | AWS API and `lscpu`: 32 CPUs, 32 cores, one thread/core; no cpuset restriction |
-| At least 64 GiB RAM | AWS table: 64 GiB | **Meets** | AWS API reports 65,536 MiB; guest memory is consistent after kernel reserve |
-| Python 3.12 and locked uv environment | CPython 3.12.13; uv 0.11.30; candidate lock | Exact versions selected | `uv --version`; Python version; `uv sync --locked`; no lockfile change; lock SHA recorded |
-| Numeric-library provenance | Wheels selected by the lock on Linux x86_64 | Must be observed | NumPy/SciPy versions and build configuration, shared-library mapping, and `threadpoolctl` output recorded |
-| Storage for input, environment, artifacts, profiles | Encrypted 300 GiB gp3 | Capacity is far above known ledger size | Control plane reports 300 GiB/3,000 IOPS/125 MiB/s; >= 200 GiB free after sync and M5 download |
-| Process/thread observability | Ubuntu `/proc`, cgroup v2, `ps`, `pidstat`, GNU `time` | Standard OS facilities | Ray worker PIDs/threads visible; `pidstat` samples; `/usr/bin/time -v` reports maximum RSS; cgroup memory files readable |
-| Deterministic single-node Ray support | 32 non-SMT cores; one local Ray node | Plausible, not proven | One live Ray node, multiple worker PIDs, 32 advertised CPUs, worker thread limits all one, repeated probe bytes equal |
-| Reproducible provisioning/teardown | One declarative CloudFormation stack | Method selected | Stack creation reaches `CREATE_COMPLETE`; exact AMI/template hashes recorded; deletion removes volume, ENIs, and VPC |
-| Practical one-off cost | About USD 1.680/hour including selected compute, 300 GiB gp3 planning allocation, and one public IPv4 address | Current estimate only | Current rate query, launch/termination timestamps, estimate, and later bill reference recorded |
-| Gate C budgets | 15 min / 60 s / 32 GB | **Unchanged and untested here** | U17 only; issue 436 must not run or claim the full acceptance verdict |
+| Azure in Europe | Azure West Europe (`westeurope`) | Owner constraint met; current retail meter exists | Subscription SKU catalog lists the exact size in West Europe without restrictions |
+| x86_64 Linux | AMD EPYC x86-64; Canonical Ubuntu 24.04 AMD64 Gen2 | Provider/image contract | Azure metadata, `uname -m=x86_64`, and Ubuntu `VERSION_ID=24.04` |
+| At least 16 physical cores | NC series explicitly non-multithreaded; selected size has 16 vCPUs | **Meets exactly** | SKU says 16 vCPUs and one vCPU/core; guest has 16 logical CPUs, 16 socket/core pairs, one thread/core |
+| At least 64 GiB RAM | Size table: 110 GB | **Meets** | SKU memory capability and guest `MemTotal` are recorded; guest has at least 100,000,000,000 bytes |
+| Python 3.12 and locked uv environment | CPython 3.12.13; uv 0.11.30; candidate lock | Versions selected | Exact versions, successful `uv sync --locked`, unchanged lock, commit and SHA-256 recorded |
+| Numeric provenance and thread policy | Locked Linux x86_64 wheels; six thread variables set to one | Must be observed | NumPy/SciPy build configuration and `threadpoolctl`; every Ray worker sees one-thread policy |
+| Storage | 512 GiB P20 Premium SSD; 2,300 IOPS; 150 MB/s | Provider contract | Azure disk object confirms size, SKU, performance, platform-key encryption, attachment, and deletion option |
+| Temporary storage | 352 GiB local disk exists but is forbidden for Calibre | Explicit non-use | All repo/data/result/profile paths resolve to the OS disk; temp mount is recorded but unused |
+| Process/RSS observability | Ubuntu `/proc`, cgroup v2, `ps`, `pidstat`, GNU `time` | Standard OS facilities | Ray PIDs/threads visible; `pidstat` samples; GNU `time` RSS; cgroup memory files readable |
+| Deterministic single-node Ray | 16 non-SMT CPU cores; GPU disabled | Plausible, not proven | One local Ray node, 16 CPU resources, multiple worker PIDs, repeated bytes equal, clean shutdown |
+| Reproducible provisioning | Bicep and exact image version in one resource group | Method selected | Bicep build/what-if/deploy outputs and file hashes recorded |
+| Secure command path | Azure Run Command; explicit deny-all inbound | Provider control-plane facility | NSG has no allow-inbound rule; Run Command succeeds through Azure RBAC/VM Agent |
+| Practical one-off cost | About USD 1.620/hour with VM, P20 disk allocation, and Standard IPv4 | Current estimate only | Live retail rates, deployment/deletion timestamps, estimate, and later bill reference recorded |
+| Gate C limits | 15 min / 60 s / 32 GB | **Unchanged and untested here** | U17 only; issue 436 cannot claim the full acceptance verdict |
 
-## Current option comparison
+## Azure option comparison
 
 ### Price timestamp and method
 
-Prices are public list prices in USD, without tax, discount, support, data
-egress, or attached-disk charges unless stated. They are dynamic and
-region-specific.
+The Azure Retail Prices API was queried at **2026-07-21T02:17:21Z** for
+`armRegionName=westeurope`, `priceType=Consumption`, USD retail billing. VM
+prices below are pay-as-you-go Linux meters. They exclude tax, support,
+outbound transfer, disk, and public IP. Prices are dynamic and region-specific.
+Issue 436 must query them again before launch.
 
-- **AWS:** official EC2 bulk-price snapshot version `20260721012550`, published
-  `2026-07-21T01:25:50Z`, region `us-east-1`, Linux, shared tenancy,
-  on-demand, no preinstalled software ([versioned AWS EC2 price
-  snapshot][aws-ec2-price]). The listed terms are effective
-  `2026-07-01T00:00:00Z`.
-- **Azure:** official Retail Prices API queried at `2026-07-21T01:28:15Z`,
-  billing currency USD, region `westeurope`, consumption meter only
-  ([Azure Retail Prices API query][azure-price]).
-
-| Option | Physical-core evidence | RAM and storage | Compute list price | Assessment |
+| Azure West Europe size | Physical-core evidence | RAM / local disk | Linux PAYG price | Assessment |
 | --- | --- | --- | ---: | --- |
-| **AWS `c7a.8xlarge`, `us-east-1`** | AWS: 32 vCPU, **32 cores, 1 thread/core**, AMD EPYC 9R14 | 64 GiB; EBS only | **$1.64224/h**; SKU `6MV5XKZYPVXSQCN4`, rate `6MV5XKZYPVXSQCN4.JRTCKXETXF.6YS6EN2CT7` | **Selected.** Most physical-core headroom, no SMT ambiguity, fixed documented processor family, and low absolute trial cost. |
-| AWS `m7a.4xlarge`, `us-east-1` | AWS: 16 vCPU, **16 cores, 1 thread/core**, AMD EPYC 9R14 | 64 GiB; EBS only | **$0.92736/h**; SKU `TTPYSE2GSHDGSMTX`, rate `TTPYSE2GSHDGSMTX.JRTCKXETXF.6YS6EN2CT7` | **Fallback.** Exact minimum and same processor family, but half the Ray process slots. |
-| AWS `c7i.8xlarge`, `us-east-1` | AWS: 32 vCPU, **16 cores, 2 threads/core**, Intel Xeon Sapphire Rapids | 64 GiB; EBS only | **$1.42800/h**; SKU `7RFUEP9XE7QPFUGE`, rate `7RFUEP9XE7QPFUGE.JRTCKXETXF.6YS6EN2CT7` | Meets the class. It is cheaper than C7a but supplies half as many physical cores and exposes SMT siblings. |
-| Azure `Standard_D32s_v5`, West Europe | Microsoft: 32 vCPU in a hyper-threaded configuration. The cited size page does not publish a physical-core count. Treat 16 cores as an expectation only and require guest preflight. Host CPU may be Emerald Rapids, Sapphire Rapids, or Ice Lake. | 128 GB; no local temp disk, so attach a managed disk | **$1.84000/h**; meter `4c9105f0-0fae-5bba-88c9-f2c736f78eb9` | Credible second provider, but a higher price, variable documented host CPU, attached-disk work, and no provider-published core count in the size table make it a weaker reference pin. |
+| **`Standard_NC16as_T4_v3`** | Microsoft: 16 vCPUs in a series with **non-multithreaded AMD EPYC cores** -> 16 physical cores | 110 GB / 352 GiB temp; one unused T4 GPU | **$1.505/h**; meter `e50945e6-2e4e-595e-9f17-5315266b8b27` | **Selected.** Explicit physical contract, enough RAM, lowest current compute price in this set. Special-family quota/capacity is the main risk. |
+| **`Standard_F48s_v2`** | 48 vCPUs with Intel Hyper-Threading -> expected 24 physical cores; provider page does not state the count | 96 GB / 384 GiB temp | **$2.328/h**; meter `dd086213-b92e-4f4a-935f-9ef09dd10353` | **Fallback.** More CPU margin and ordinary compute role, but topology and exact processor are trial-bound. |
+| `Standard_HB120-16rs_v3` | Microsoft: 16 active vCPUs and **no simultaneous multithreading** -> 16 physical cores | 448 GB / 480 GiB temp plus local NVMe | **$4.680/h**; meter `587efe50-7630-544e-8861-b3df5a8a09f1` | Explicit topology, but HPC quota, irrelevant InfiniBand/memory, and 3x selected compute price add friction. |
+| `Standard_D32s_v5` | 32 vCPUs in a hyper-threaded configuration -> expected 16 physical cores; not provider-published as a core count | 128 GB / no temp disk | **$1.840/h**; meter `4c9105f0-0fae-5bba-88c9-f2c736f78eb9` | Meets on expected topology only, has no physical-core margin, and may use one of several processor generations. |
 
-AWS core, thread, memory, processor, network, and EBS-only facts come from the
-provider's instance specification tables ([compute optimized][aws-co],
-[general purpose][aws-gp]). Azure facts come from Microsoft's Dsv5 page, which
-states the processor roster, hyper-threaded configuration, 32 vCPU/128 GB size,
-and lack of local temporary disk ([Azure Dsv5 specifications][azure-dsv5]).
-No physical-core claim is made for Azure because the provider page does not
-state that count.
+Primary specification sources are the Azure size pages for
+[NCasT4 v3][azure-nc], [Fsv2][azure-fsv2], [HBv3][azure-hbv3], and
+[Dsv5][azure-dsv5]. The HB constrained-size list confirms 16 active vCPUs and
+states that disabled vCPUs are unavailable
+([Azure constrained vCPU sizes][azure-constrained]). Current price evidence is
+from exact Azure Retail Prices API queries
+([NC price][azure-price-nc], [F48 price][azure-price-f48], [HB price][azure-price-hb],
+[D32 price][azure-price-d32]).
 
-### Why the selected shape is worth the small premium
+### Why West Europe remains the region
 
-The prior profile used essentially one of 14 laptop cores, while the successor
-architecture requires parallel work across permitted task/series axes. The
-performance chapter identifies idle-core parallelism as the largest untapped
-lever ([`[PRF-14]` at `e5cb11b`][project-parallel]). C7a gives U16 up to 32
-independent physical worker slots without SMT siblings. Compared with C7i, its
-compute premium is about $0.214/hour, which is immaterial for two short-lived
-runs but preserves twice the physical-core ceiling. Compared with the M7a
-fallback, the premium buys twice the physical cores while retaining the same
-RAM and documented CPU model.
+Every compared shape has a West Europe Linux consumption meter. The owner
+specified Azure in Europe and the prior research already used West Europe.
+There is no current primary evidence that another European region is required
+to obtain the selected size, Ubuntu image stream, or managed-disk type. A
+retail meter is not a capacity promise, so issue 436 must use the subscription's
+live `az vm list-skus` result. A West Europe restriction or quota failure
+invokes the West Europe fallback; it does not silently move the reference
+region.
 
-This reasoning does not assume linear speedup. U16 must report worker-count
-scaling and parallel efficiency, and U17 must use the preregistered worker
-count. The selected machine only provides the stronger ceiling.
+### Rejected alternatives
+
+- **AWS:** superseded by the binding Azure-only owner decision, regardless of
+  technical fit or price.
+- **HBv3:** valid explicit-core alternative, but it adds HPC-family quota,
+  InfiniBand, 448 GB RAM, and a much higher rate without improving the minimum
+  reference contract.
+- **D32s v5:** inexpensive and ordinary, but its exact 16-physical-core result
+  remains inferred and has no margin if topology differs.
+- **Spot/low-priority Azure VMs:** excluded. Interruption would turn the one
+  acceptance run into an avoidable operational non-verdict.
 
 ## Exact proposed environment
 
 | Field | Pin |
 | --- | --- |
-| Provider / region | AWS EC2 / `us-east-1` |
-| Purchase / tenancy | On-demand Linux / shared tenancy; no Spot, reservation, or Savings Plan |
-| Instance | `c7a.8xlarge` |
-| Provider CPU contract | AMD EPYC 9R14; 32 vCPUs; 32 cores; one thread/core |
-| Provider memory contract | 64 GiB |
-| Image | Canonical Ubuntu Server 24.04 LTS Noble, serial `20260714`, AMD64 HVM EBS gp3, `ami-052355af2a014bd2c` |
+| Provider / region | Microsoft Azure / `westeurope` |
+| Purchase model | Pay-as-you-go Linux, `priority: Regular`; no Spot, reservation, or savings assumption |
+| VM size | `Standard_NC16as_T4_v3` |
+| CPU contract | AMD EPYC 7V12; 16 visible non-multithreaded vCPUs -> 16 physical cores |
+| Memory contract | 110 GB |
+| GPU | One T4 physically present; no driver, CUDA package, Ray GPU resource, or workload use |
+| Image stream | `Canonical:ubuntu-24_04-lts:server:<resolved-version>`; AMD64, Gen2; exact version resolved and recorded before deployment |
 | Python | uv-managed CPython `3.12.13` |
 | uv | `0.11.30`; installer SHA-256 `f633daff5c2a1b5e550d5dab074f21ab2d5fda2d147babf4525844ff1276e57e` |
-| Project install | Exact candidate SHA; `uv sync --project newcalibre --locked --group dev --python 3.12.13`; candidate `newcalibre/uv.lock` SHA-256 in manifest |
-| Thread policy | Six variables listed above set to `1` before sync, import, Ray start, and benchmark |
-| Ray | Candidate-locked version; one local node; `local_mode=False`; dashboard disabled; no external Ray address |
-| Root storage | 300 GiB encrypted gp3; 3,000 IOPS; 125 MiB/s; delete on termination |
-| Network | Stack-owned VPC and public subnet; one temporary public IPv4; outbound HTTP/HTTPS for packages and public data; security group has no ingress |
-| Access | Session Manager through a least-privilege instance profile; no SSH key and no port 22 |
-| Provision / destroy | AWS CloudFormation create/delete from one reviewed template; stack tags include ticket, candidate SHA, and expiry time |
-| Evidence clock | UTC timestamps from the guest and AWS API |
+| Project install | Exact candidate commit; `uv sync --project newcalibre --locked --group dev --python 3.12.13`; lock SHA-256 in manifest |
+| Numeric thread policy | Six named variables set to `1`; `CUDA_VISIBLE_DEVICES` empty before import and Ray start |
+| Ray | Candidate-locked version; one local node; `local_mode=False`; dashboard disabled; `num_gpus=0`; no external address |
+| OS disk | 512 GiB Premium SSD P20 (`Premium_LRS`), 2,300 IOPS, 150 MB/s, read/write cache |
+| Encryption / deletion | Storage-service encryption with platform-managed key; OS disk and NIC `deleteOption: Delete`; resource-group deletion owns final cleanup |
+| Temporary storage | Present but never used for repo, environment, M5 data, results, or profiles |
+| Network | Dedicated VNet/subnet, Standard static IPv4 for outbound acquisition, NSG custom deny-all inbound |
+| Access | Azure Run Command authorized by Azure RBAC; no SSH/RDP rule and no embedded credential |
+| Provision / destroy | Bicep group deployment; dedicated tagged resource group; `az group delete` and absence checks |
+| Evidence clock | UTC operator and guest timestamps |
 
-### CloudFormation resource contract
+### Bicep resource contract
 
-Issue 436 should make one temporary template with these resources and no
-others:
+Issue 436 should create one temporary `gate-c.bicep` plus one credential-free
+cloud-init/bootstrap file. Bicep is Azure's declarative language for Azure
+resources ([Bicep overview][azure-bicep]). The deployment contains only:
 
-1. `AWS::EC2::VPC`, one `AWS::EC2::Subnet`, internet gateway attachment,
-   route table, and default route.
-2. A security group with **no ingress** and only required outbound HTTP/HTTPS
-   and DNS. The instance receives a temporary public IPv4 for low-friction
-   package and M5 acquisition.
-3. An IAM role and instance profile with `AmazonSSMManagedInstanceCore`. Do not
-   place credentials in user data, tags, outputs, or the artifact.
-4. One `AWS::EC2::Instance` with the exact AMI and shape above. Its block
-   mapping sets encrypted gp3, 300 GiB, 3,000 IOPS, 125 MiB/s, and delete on
-   termination.
-5. Outputs for instance ID, security-group ID, subnet ID, and VPC ID. Derive
-   the root-volume and primary-interface IDs from `describe-instances` after
-   launch. These IDs make teardown verification mechanical.
+1. One VNet, subnet, and NSG. A priority-100 custom rule denies all inbound
+   traffic. Keep the NSG's default outbound allow rule; the NIC's Standard
+   public IPv4 supplies explicit outbound connectivity. Do not add SSH or RDP
+   rules.
+2. One Standard, static IPv4 public IP and one NIC. The IP exists for outbound
+   package/data traffic, not inbound administration.
+3. One `Microsoft.Compute/virtualMachines` resource with `priority: Regular`,
+   system-assigned identity, the exact image version parameter, and no VM
+   credentials in source. If the API requires an administrator SSH public key,
+   pass a disposable public key as a deployment parameter; no inbound SSH rule
+   makes it unusable as an access path.
+4. One generated OS disk from the image with `Premium_LRS`, 512 GiB,
+   `ReadWrite` cache, and `deleteOption: Delete`. The NIC also uses
+   `deleteOption: Delete`. Disable boot diagnostics unless issue 436 explicitly
+   records its generated storage.
+5. Tags on every resource: ticket `434`, candidate SHA, purpose
+   `gate-c-preflight`, and UTC expiry.
+6. Outputs for VM ID, VM name, NIC ID, public-IP ID, subnet ID, and NSG ID. The
+   OS-disk ID is derived from `az vm show` after deployment.
 
-CloudFormation treats a template as the description of the resources to
-provision and manages them as one stack ([AWS CloudFormation overview][aws-cfn]).
-Store the template hash with the issue-436 evidence. Do not commit that
-temporary infrastructure from this research ticket.
+The resource group is the teardown boundary. Microsoft documents that deleting
+a resource group deletes its resources and that deletion can be verified
+([Azure resource-group deletion][azure-rg-delete]). Do not commit temporary
+infrastructure from this research task.
 
 ### Cost estimate
 
-The current selected compute rate is $1.64224/hour. The AWS price snapshot
-lists gp3 in `us-east-1` at $0.08/GB-month (SKU `JG3KUJMBRGHV3N8G`, rate
-`JG3KUJMBRGHV3N8G.JRTCKXETXF.6YS6EN2CT7`), and the versioned VPC snapshot
-lists one in-use public IPv4 at $0.005/hour (SKU `4GQUNXTFWVSGPUZK`, rate
-`4GQUNXTFWVSGPUZK.JRTCKXETXF.6YS6EN2CT7`) ([AWS EC2 price
-snapshot][aws-ec2-price], [AWS VPC price snapshot][aws-vpc-price]). Using 730
-hours/month only as a planning conversion:
+Current West Europe prices:
+
+- selected VM: **$1.505/hour**;
+- P20 LRS disk: **$80.54/month**, meter
+  `56bef7bd-ecf5-4e06-9587-37d3fc7ab5f4`;
+- Standard IPv4 static public IP: **$0.005/hour**, meter
+  `9c150bf9-2bad-430e-a53c-c213804f49ef`.
+
+The disk and IP values come from their exact West Europe Retail Prices API
+meters ([P20 price][azure-price-p20], [Standard IPv4 price][azure-price-ip]).
+
+Using 730 hours/month only as a planning conversion:
 
 ```text
-compute                         1.64224 / hour
-300 GiB gp3 planning allocation 0.03288 / hour
-one public IPv4                 0.00500 / hour
-estimated running total         1.68012 / hour
+NC16as_T4_v3 compute        1.50500 / hour
+P20 LRS allocation          0.11033 / hour
+Standard static IPv4        0.00500 / hour
+estimated selected total    1.62033 / hour
 ```
 
-Cap the trial at two hours and the acceptance session at two hours. The
-planning estimate is about **$6.72 total** for both sessions. It excludes tax,
-data egress, and any resource that stack deletion misses. Linux on-demand
-compute is billed per second with a 60-second minimum ([AWS on-demand
-pricing][aws-on-demand]); the issue must record actual timestamps and the
-post-run provider charge when available.
+Azure documents that managed-disk billing is prorated hourly from the monthly
+price ([Azure managed-disk billing][azure-disk-billing]). Cap the trial at two
+hours and the acceptance session at two hours: the selected planning total is
+about **$6.48**. The F48 fallback estimate for the same four hours is about
+**$9.77**. Both exclude tax, support, and outbound transfer. Record actual UTC
+timestamps and attach the later Azure cost record when available.
 
-## Issue 436 short-lived trial preflight
+## Issue 436 executable preflight
 
 ### Result rule
 
-Issue 436 passes only when every item below has its raw output attached or
-linked, every stated pass condition holds, and teardown is verified. A setup
-failure, quota failure, topology mismatch, package-resolution change, missing
-observability signal, or teardown leak is a **venue preflight failure**, not a
+Issue 436 passes only when every section below records raw output and every
+pass condition holds. A quota, restriction, allocation, topology, package,
+observability, cost-cap, or teardown failure is a venue preflight failure—not a
 Gate C verdict.
 
-Use current `origin/main` revision
+Use current `origin/main`
 `e5cb11bd5b4487724701d4cf5a4626c91031c0e1` for an immediate infrastructure
-trial. That revision does not yet contain U16's successor Ray dependency. The
-Ray probe below therefore uses the repository root's locked Ray environment
-for infrastructure validation only. Before U17, repeat the toolchain,
-thread-policy, Ray, and observability sections at the exact U16/U17 candidate
-SHA from `newcalibre/uv.lock`. A current-root Ray pass cannot certify the
-future successor backend.
+trial. This revision does not yet contain U16's successor Ray dependency. The
+immediate Ray probe therefore uses the repository root's locked Ray 2.54.1
+([root lock entry][project-root-ray]) only to validate infrastructure. Repeat
+the toolchain, thread, Ray, and observability sections from the final successor
+lock before U17.
 
-### 1. Verify quota, offering, image, and provider contract before launch
+### 1. Pin Azure CLI context and refresh current prices
 
-Run from the operator machine with AWS CLI credentials. The standard
-on-demand quota is regional and defaults to five vCPUs in a new account, while
-the selected shape needs 32; AWS identifies the adjustable standard-instance
-quota as `L-1216C47A` ([AWS EC2 quotas][aws-quotas]).
+Run on the operator machine. Do not put subscription or tenant identifiers in
+the public artifact.
 
 ```bash
 set -euo pipefail
-export AWS_REGION=us-east-1
-export INSTANCE_TYPE=c7a.8xlarge
-export AMI_ID=ami-052355af2a014bd2c
-export CANONICAL_OWNER=099720109477
-
-aws service-quotas get-service-quota \
-  --service-code ec2 \
-  --quota-code L-1216C47A \
-  --region "$AWS_REGION" \
-  --output json > quota.json
-jq -e '.Quota.Value >= 32' quota.json
-
-aws ec2 describe-instance-type-offerings \
-  --region "$AWS_REGION" \
-  --location-type availability-zone \
-  --filters "Name=instance-type,Values=$INSTANCE_TYPE" \
-  --output json > offerings.json
-jq -e '.InstanceTypeOfferings | length > 0' offerings.json
-
-aws ec2 describe-instance-types \
-  --region "$AWS_REGION" \
-  --instance-types "$INSTANCE_TYPE" \
-  --output json > instance-type.json
-jq -e '.InstanceTypes[0] |
-  .ProcessorInfo.SupportedArchitectures == ["x86_64"] and
-  .VCpuInfo.DefaultVCpus == 32 and
-  .VCpuInfo.DefaultCores == 32 and
-  .VCpuInfo.DefaultThreadsPerCore == 1 and
-  .MemoryInfo.SizeInMiB == 65536 and
-  .InstanceStorageSupported == false' instance-type.json
-
-aws ec2 describe-images \
-  --region "$AWS_REGION" \
-  --owners "$CANONICAL_OWNER" \
-  --image-ids "$AMI_ID" \
-  --output json > image.json
-jq -e --arg owner "$CANONICAL_OWNER" --arg image "$AMI_ID" '
-  .Images | length == 1 and
-  .[0].ImageId == $image and
-  .[0].OwnerId == $owner and
-  .[0].Name == "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260714" and
-  .[0].Architecture == "x86_64" and
-  .[0].VirtualizationType == "hvm" and
-  .[0].State == "available"' image.json
-```
-
-**Pass:** quota is at least 32; at least one AZ currently offers the shape; the
-API contract is 32/32/1 and 65,536 MiB; the exact AMI is available and owned by
-Canonical. AWS documents `describe-instance-type-offerings` as the mechanism
-to check an instance type by Availability Zone ([AWS instance discovery][aws-discovery]).
-If quota is below 32, request the increase before scheduling the paid trial.
-Do not substitute a shape inside the command.
-
-### 2. Create the stack and verify access isolation
-
-```bash
-set -euo pipefail
-export STACK=calibre-gate-c-436
-export TEMPLATE=gate-c-instance.yaml
+export LOCATION=westeurope
+export VM_SIZE=Standard_NC16as_T4_v3
+export FALLBACK_SIZE=Standard_F48s_v2
+export RG=calibre-gate-c-436
+export VM_NAME=calibre-gate-c
+export SOURCE_SHA=e5cb11bd5b4487724701d4cf5a4626c91031c0e1
 export STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export EXPIRES_AT="$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%SZ)"
-sha256sum "$TEMPLATE" > template.sha256
-aws cloudformation validate-template \
-  --region "$AWS_REGION" \
-  --template-body "file://$TEMPLATE" > template-validation.json
-aws cloudformation deploy \
-  --region "$AWS_REGION" \
-  --stack-name "$STACK" \
-  --template-file "$TEMPLATE" \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides \
-    InstanceType="$INSTANCE_TYPE" \
-    ImageId="$AMI_ID" \
-    RootVolumeGiB=300 \
-    CandidateSha=e5cb11bd5b4487724701d4cf5a4626c91031c0e1 \
-  --tags \
-    Key=Ticket,Value=434 \
-    Key=CandidateSha,Value=e5cb11bd5b4487724701d4cf5a4626c91031c0e1 \
-    Key=ExpiresAt,Value="$EXPIRES_AT"
 
-aws cloudformation describe-stacks \
-  --region "$AWS_REGION" \
-  --stack-name "$STACK" \
-  --query 'Stacks[0].Outputs' \
-  --output json > stack-outputs.json
-export INSTANCE_ID="$(jq -r '.[] | select(.OutputKey=="InstanceId").OutputValue' stack-outputs.json)"
-export SECURITY_GROUP_ID="$(jq -r '.[] | select(.OutputKey=="SecurityGroupId").OutputValue' stack-outputs.json)"
-aws ec2 describe-instances \
-  --region "$AWS_REGION" \
-  --instance-ids "$INSTANCE_ID" \
-  --output json > instance.json
-export VOLUME_ID="$(jq -r '.Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId' instance.json)"
-export NETWORK_INTERFACE_ID="$(jq -r '.Reservations[0].Instances[0].NetworkInterfaces[0].NetworkInterfaceId' instance.json)"
-test -n "$VOLUME_ID"
-test -n "$NETWORK_INTERFACE_ID"
+az version > azure-cli-version.json
+az account show --output json > azure-account-context.private.json
+az account show --query state --output tsv | grep -qx Enabled
 
-aws ec2 describe-security-groups \
-  --region "$AWS_REGION" \
-  --group-ids "$SECURITY_GROUP_ID" \
-  --output json > security-group.json
-jq -e '.SecurityGroups[0].IpPermissions | length == 0' security-group.json
-
-until test "$(aws ssm describe-instance-information \
-  --region "$AWS_REGION" \
-  --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-  --query 'InstanceInformationList[0].PingStatus' \
-  --output text)" = Online; do sleep 10; done
-
-aws ssm start-session --region "$AWS_REGION" --target "$INSTANCE_ID"
+PRICE_URL='https://prices.azure.com/api/retail/prices'
+PRICE_FILTER="armRegionName eq '$LOCATION' and armSkuName eq '$VM_SIZE' and priceType eq 'Consumption'"
+curl -G --fail --silent --show-error \
+  --data-urlencode "\$filter=$PRICE_FILTER" \
+  "$PRICE_URL" > selected-price.json
+jq -e '.Items[] |
+  select(.productName == "Virtual Machines NCasT4 v3 Series") |
+  select(.meterName == "NC16asT4 v3") |
+  .currencyCode == "USD" and .unitOfMeasure == "1 Hour" and .retailPrice > 0' \
+  selected-price.json
 ```
 
-**Pass:** stack is `CREATE_COMPLETE`; all outputs are nonempty; the security
-group has no ingress; SSM reports `Online`; access works without an SSH key or
-inbound rule.
+**Pass:** Azure CLI is recorded; the selected subscription is enabled; the live
+API returns one ordinary Linux consumption meter. Keep account context private
+or redact identifiers before attaching evidence. Record the current rate and
+query UTC time.
 
-### 3. Pin the bootstrap and repository
+### 2. Verify regional SKU capabilities, restrictions, and quotas
 
-Run inside the Session Manager shell. Do not run a distribution upgrade.
+Azure applies both total regional vCPU and VM-family vCPU quotas
+([Azure VM quotas][azure-quotas]). Query the exact live subscription catalog
+with the Azure CLI SKU and usage interfaces ([Azure VM CLI][azure-cli-vm]):
 
 ```bash
 set -euo pipefail
-sudo apt-get update
-sudo apt-get install -y curl git jq numactl procps sysstat time
+az vm list-skus \
+  --location "$LOCATION" \
+  --size "$VM_SIZE" \
+  --all \
+  --output json > selected-sku.json
 
+jq -e --arg location "$LOCATION" '
+  length == 1 and
+  .[0].resourceType == "virtualMachines" and
+  (.[0].locations | index($location)) != null and
+  (.[0].restrictions | length) == 0 and
+  ((.[0].capabilities | map({key: .name, value: .value}) | from_entries) as $c |
+    ($c.vCPUs | tonumber) == 16 and
+    (($c.vCPUsAvailable // $c.vCPUs) | tonumber) == 16 and
+    ($c.vCPUsPerCore | tonumber) == 1 and
+    ($c.MemoryGB | tonumber) >= 100 and
+    $c.PremiumIO == "True" and
+    ($c.HyperVGenerations | contains("V2"))))' selected-sku.json
+
+export SKU_FAMILY="$(jq -r '.[0].family' selected-sku.json)"
+export REQUIRED_VCPUS="$(jq -r '.[0].capabilities |
+  map({key: .name, value: .value}) | from_entries |
+  (.vCPUsAvailable // .vCPUs)' selected-sku.json)"
+
+az vm list-usage --location "$LOCATION" --output json > regional-usage.json
+jq -e --arg family "$SKU_FAMILY" --argjson required "$REQUIRED_VCPUS" '
+  ([.[] | select((.name.value | ascii_downcase) == ($family | ascii_downcase))][0]) as $family_usage |
+  ([.[] | select(.name.value == "cores")][0]) as $total_usage |
+  $family_usage != null and $total_usage != null and
+  ($family_usage.limit - $family_usage.currentValue) >= $required and
+  ($total_usage.limit - $total_usage.currentValue) >= $required' regional-usage.json
+```
+
+**Pass:** exactly one West Europe SKU entry has no restrictions; the live
+catalog reports 16 visible vCPUs, one vCPU/core, at least 100 GB memory,
+Premium I/O, and Gen2; both family and total regional quotas have 16 unused
+vCPUs. If this fails due to quota, request the increase before paid launch. If
+it fails due to restriction or capacity, run the same section for the
+preregistered F48 fallback and require 48 vCPUs, 24 physical cores inferred
+from `vCPUsPerCore=2`, and memory >= 90 GB.
+
+### 3. Resolve and pin the Canonical image before launch
+
+```bash
+set -euo pipefail
+export IMAGE_PUBLISHER=Canonical
+export IMAGE_OFFER=ubuntu-24_04-lts
+export IMAGE_SKU=server
+
+az vm image list \
+  --location "$LOCATION" \
+  --publisher "$IMAGE_PUBLISHER" \
+  --offer "$IMAGE_OFFER" \
+  --sku "$IMAGE_SKU" \
+  --architecture x64 \
+  --all \
+  --output json > ubuntu-images.json
+
+jq -e 'length > 0' ubuntu-images.json
+export IMAGE_VERSION="$(jq -r 'sort_by(.version) | last | .version' ubuntu-images.json)"
+test -n "$IMAGE_VERSION"
+test "$IMAGE_VERSION" != null
+export IMAGE_URN="$IMAGE_PUBLISHER:$IMAGE_OFFER:$IMAGE_SKU:$IMAGE_VERSION"
+az vm image show \
+  --location "$LOCATION" \
+  --urn "$IMAGE_URN" \
+  --output json > selected-image.json
+
+jq -e --arg version "$IMAGE_VERSION" '
+  .name == $version and
+  .location == "westeurope" and
+  .hyperVGeneration == "V2" and
+  .plan == null and
+  .osDiskImage.operatingSystem == "Linux"' selected-image.json
+printf '%s\n' "$IMAGE_URN" | tee selected-image-urn.txt
+sha256sum selected-image.json ubuntu-images.json > image-catalog.sha256
+```
+
+**Pass:** the exact version is nonempty, Linux, Gen2, plan-free, and in West
+Europe. Bicep receives `IMAGE_VERSION`; it never receives `latest`. Azure
+identifies image publisher, offer, SKU, and version as the reproducible URN
+fields and supports listing all regional versions
+([Azure image discovery][azure-image-discovery]).
+
+### 4. Build, review, and deploy the Bicep resource group
+
+Create a disposable public key only to satisfy the Linux OS profile. There is
+no SSH inbound rule and the private key is not copied to the VM or artifact.
+
+```bash
+set -euo pipefail
+export TEMPLATE=gate-c.bicep
+export CLOUD_INIT=cloud-init.yaml
+ssh-keygen -q -t ed25519 -N '' -f /tmp/gate-c-unused-key
+export ADMIN_PUBLIC_KEY="$(cat /tmp/gate-c-unused-key.pub)"
+
+az bicep version | tee bicep-version.txt
+az bicep build --file "$TEMPLATE" --outfile /tmp/gate-c.json
+sha256sum "$TEMPLATE" "$CLOUD_INIT" /tmp/gate-c.json > provisioning.sha256
+
+az group create \
+  --name "$RG" \
+  --location "$LOCATION" \
+  --tags Ticket=434 Purpose=gate-c-preflight CandidateSha="$SOURCE_SHA" ExpiresAt="$EXPIRES_AT" \
+  --output json > group-create.json
+
+az deployment group what-if \
+  --resource-group "$RG" \
+  --template-file "$TEMPLATE" \
+  --parameters \
+    vmName="$VM_NAME" \
+    vmSize="$VM_SIZE" \
+    imageVersion="$IMAGE_VERSION" \
+    adminPublicKey="$ADMIN_PUBLIC_KEY" \
+    candidateSha="$SOURCE_SHA" \
+    expiresAt="$EXPIRES_AT" \
+  --output json > deployment-what-if.json
+
+az deployment group create \
+  --resource-group "$RG" \
+  --name gate-c \
+  --mode Complete \
+  --template-file "$TEMPLATE" \
+  --parameters \
+    vmName="$VM_NAME" \
+    vmSize="$VM_SIZE" \
+    imageVersion="$IMAGE_VERSION" \
+    adminPublicKey="$ADMIN_PUBLIC_KEY" \
+    candidateSha="$SOURCE_SHA" \
+    expiresAt="$EXPIRES_AT" \
+  --output json > deployment.json
+
+jq -e '.properties.provisioningState == "Succeeded"' deployment.json
+```
+
+**Pass:** Bicep builds; hashes and what-if output are recorded; only declared
+resources appear; deployment succeeds. Delete the disposable key immediately
+after the VM Agent reports ready.
+
+### 5. Verify the Azure control-plane result and no-inbound access model
+
+```bash
+set -euo pipefail
+az vm show \
+  --resource-group "$RG" \
+  --name "$VM_NAME" \
+  --show-details \
+  --output json > vm.json
+jq -e --arg size "$VM_SIZE" --arg version "$IMAGE_VERSION" '
+  .hardwareProfile.vmSize == $size and
+  .provisioningState == "Succeeded" and
+  .powerState == "VM running" and
+  .storageProfile.imageReference.publisher == "Canonical" and
+  .storageProfile.imageReference.offer == "ubuntu-24_04-lts" and
+  .storageProfile.imageReference.sku == "server" and
+  .storageProfile.imageReference.version == $version and
+  .storageProfile.osDisk.diskSizeGb == 512 and
+  .storageProfile.osDisk.managedDisk.storageAccountType == "Premium_LRS" and
+  .storageProfile.osDisk.deleteOption == "Delete"' vm.json
+
+export OS_DISK_ID="$(jq -r '.storageProfile.osDisk.managedDisk.id' vm.json)"
+export NIC_ID="$(jq -r '.networkProfile.networkInterfaces[0].id' vm.json)"
+export NSG_ID="$(az network nic show --ids "$NIC_ID" --query networkSecurityGroup.id --output tsv)"
+export NSG_NAME="${NSG_ID##*/}"
+
+az disk show --ids "$OS_DISK_ID" --output json > os-disk.json
+jq -e '.diskSizeGb == 512 and
+  .sku.name == "Premium_LRS" and
+  .diskIOPSReadWrite == 2300 and
+  .diskMBpsReadWrite == 150 and
+  .encryption.type == "EncryptionAtRestWithPlatformKey" and
+  .diskState == "Attached"' os-disk.json
+
+az network nsg rule list \
+  --resource-group "$RG" \
+  --nsg-name "$NSG_NAME" \
+  --output json > nsg-rules.json
+jq -e 'any(.[];
+  .name == "DenyAllInbound" and
+  .priority == 100 and
+  .access == "Deny" and
+  .direction == "Inbound" and
+  .sourceAddressPrefix == "*" and
+  .destinationPortRange == "*")' nsg-rules.json
+
+az vm run-command invoke \
+  --resource-group "$RG" \
+  --name "$VM_NAME" \
+  --command-id RunShellScript \
+  --scripts 'echo RUN_COMMAND_OK' \
+  --output json > run-command-smoke.json
+jq -e '.value[] | select(.message | contains("RUN_COMMAND_OK"))' run-command-smoke.json
+rm -f /tmp/gate-c-unused-key /tmp/gate-c-unused-key.pub
+```
+
+**Pass:** exact VM/image/disk values match; disk encryption and performance are
+reported; the priority-100 inbound deny exists; Run Command works; no SSH
+private key remains. Do not add an inbound exception after this check.
+
+### 6. Bootstrap the exact source and locked environments
+
+Submit a credential-free script with Run Command. The script writes detailed
+output under `/opt/calibre-evidence` on the OS disk.
+
+```bash
+az vm run-command invoke \
+  --resource-group "$RG" \
+  --name "$VM_NAME" \
+  --command-id RunShellScript \
+  --scripts @guest-bootstrap.sh \
+  --output json > guest-bootstrap-command.json
+```
+
+`guest-bootstrap.sh` must execute:
+
+```bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C
+export PATH="/root/.local/bin:$PATH"
+SOURCE_SHA=e5cb11bd5b4487724701d4cf5a4626c91031c0e1
+mkdir -p /opt/calibre-evidence
+
+apt-get update
+apt-get install -y curl git jq numactl procps sysstat time
 curl -LsSf https://astral.sh/uv/0.11.30/install.sh -o /tmp/uv-install.sh
 echo 'f633daff5c2a1b5e550d5dab074f21ab2d5fda2d147babf4525844ff1276e57e  /tmp/uv-install.sh' \
   | sha256sum -c -
 sh /tmp/uv-install.sh
-export PATH="$HOME/.local/bin:$PATH"
 test "$(uv --version | awk '{print $1, $2}')" = 'uv 0.11.30'
 uv python install 3.12.13
 
-export SOURCE_SHA=e5cb11bd5b4487724701d4cf5a4626c91031c0e1
-git clone https://github.com/Vzlentin/calibre.git
-cd calibre
-git checkout --detach "$SOURCE_SHA"
-test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-test -z "$(git status --short)"
-sha256sum newcalibre/uv.lock uv.lock | tee lockfiles.sha256
-
+cat > /etc/profile.d/calibre-thread-policy.sh <<'EOF'
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export BLIS_NUM_THREADS=1
+export CUDA_VISIBLE_DEVICES=
+EOF
+. /etc/profile.d/calibre-thread-policy.sh
+
+git clone https://github.com/Vzlentin/calibre.git /opt/calibre
+cd /opt/calibre
+git checkout --detach "$SOURCE_SHA"
+test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+test -z "$(git status --short)"
+sha256sum newcalibre/uv.lock uv.lock | tee /opt/calibre-evidence/lockfiles.sha256
 
 uv sync --project newcalibre --locked --group dev --python 3.12.13
 uv sync --locked --extra dev --extra benchmarks --extra hierarchy --python 3.12.13
 git diff --exit-code -- newcalibre/uv.lock uv.lock
 ```
 
-**Pass:** uv and Python install exactly; both locked syncs succeed; `git status`
-was empty before local evidence files; lockfiles do not change. For the later
-candidate repetition, replace `SOURCE_SHA`, omit the root environment if
-successor Ray is locked, and record the new successor lock digest.
+**Pass:** exact uv and Python install; source SHA matches; repository starts
+clean; both locked syncs succeed without lock changes. For the later U16/U17
+candidate, replace `SOURCE_SHA`, use successor Ray, and record the new lock
+digest.
 
-### 4. Record instance, architecture, sockets, cores, threads, RAM, and OS
+### 7. Record metadata, architecture, topology, memory, and OS
+
+Run this guest section through Run Command:
 
 ```bash
 set -euo pipefail
-export LC_ALL=C
-mkdir -p preflight
-TOKEN="$(curl -fsS -X PUT \
-  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' \
-  http://169.254.169.254/latest/api/token)"
-for key in ami-id instance-id instance-type placement/region; do
-  curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" \
-    "http://169.254.169.254/latest/meta-data/$key"
-  printf '\n'
-done | tee preflight/imds.txt
+cd /opt/calibre
+. /etc/profile.d/calibre-thread-policy.sh
+E=/opt/calibre-evidence
 
-uname -a | tee preflight/uname.txt
+curl -fsS -H Metadata:true \
+  'http://169.254.169.254/metadata/instance?api-version=2021-02-01' \
+  > "$E/azure-instance-metadata.json"
+jq -e '.compute.location == "westeurope" and
+  .compute.vmSize == "Standard_NC16as_T4_v3" and
+  .compute.osType == "Linux" and
+  .compute.storageProfile.imageReference.publisher == "Canonical" and
+  .compute.storageProfile.imageReference.offer == "ubuntu-24_04-lts" and
+  .compute.storageProfile.imageReference.sku == "server"' \
+  "$E/azure-instance-metadata.json"
+
+uname -a | tee "$E/uname.txt"
 test "$(uname -m)" = x86_64
-cat /etc/os-release | tee preflight/os-release.txt
+cat /etc/os-release | tee "$E/os-release.txt"
 . /etc/os-release
 test "$ID" = ubuntu
 test "$VERSION_ID" = 24.04
 
-lscpu | tee preflight/lscpu.txt
-lscpu --json > preflight/lscpu.json
-lscpu --parse=CPU,CORE,SOCKET,NODE > preflight/lscpu-topology.csv
-test "$(lscpu -p=CPU | grep -vc '^#')" -eq 32
-test "$(lscpu -p=SOCKET,CORE | grep -v '^#' | sort -u | wc -l)" -eq 32
+lscpu | tee "$E/lscpu.txt"
+lscpu --json > "$E/lscpu.json"
+lscpu --parse=CPU,CORE,SOCKET,NODE > "$E/lscpu-topology.csv"
+test "$(lscpu -p=CPU | grep -vc '^#')" -eq 16
+test "$(lscpu -p=SOCKET,CORE | grep -v '^#' | sort -u | wc -l)" -eq 16
 test "$(lscpu | awk -F: '/Thread.s. per core/{gsub(/ /,"",$2); print $2}')" -eq 1
-test "$(nproc --all)" -eq 32
-test "$(nproc)" -eq 32
-numactl --hardware | tee preflight/numa.txt
+test "$(nproc --all)" -eq 16
+test "$(nproc)" -eq 16
+numactl --hardware | tee "$E/numa.txt"
 
-free -b | tee preflight/free-bytes.txt
+free -b | tee "$E/free-bytes.txt"
 awk '/MemTotal/{printf "%.0f\n", $2 * 1024}' /proc/meminfo \
-  | tee preflight/memtotal-bytes.txt
+  | tee "$E/memtotal-bytes.txt"
 test "$(awk '/MemTotal/{printf "%.0f\n", $2 * 1024}' /proc/meminfo)" \
-  -ge 64000000000
+  -ge 100000000000
 ```
 
-**Pass:** IMDS reports the selected AMI, type, and region; OS and architecture
-match; all 32 CPUs are online and available to the process; there are 32 unique
-core IDs and one thread/core; socket and NUMA topology are recorded; AWS still
-reports 65,536 MiB and guest `MemTotal` is at least 64,000,000,000 bytes after
-kernel reservation. `lscpu` is the Ubuntu utility that reports CPU, core,
-socket, and NUMA topology ([Ubuntu `lscpu` manual][ubuntu-lscpu]).
+**Pass:** metadata names the selected Azure environment; Ubuntu and x86_64
+match; all 16 CPUs are available; there are 16 physical socket/core pairs and
+one thread/core; socket/NUMA facts are recorded; guest memory is at least 100
+billion bytes. The provider's SKU capability and guest topology must agree.
 
-### 5. Record Python and numeric-library provenance
+### 8. Record Python and numeric-library provenance
 
 ```bash
+set -euo pipefail
+cd /opt/calibre
+. /etc/profile.d/calibre-thread-policy.sh
+E=/opt/calibre-evidence
+
 uv run --project newcalibre --locked --no-sync python - <<'PY' \
-  | tee preflight/python-numeric.txt
+  | tee "$E/python-numeric.txt"
 import importlib.metadata
 import json
 import platform
@@ -491,37 +689,25 @@ print("SCIPY_CONFIG")
 scipy.show_config()
 PY
 
-uv run --project newcalibre --locked --no-sync python - <<'PY' \
-  | tee preflight/shared-libraries.txt
-from pathlib import Path
-import numpy
-import scipy
-print(Path(numpy.__file__).resolve())
-print(Path(scipy.__file__).resolve())
-PY
-
 for var in OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS \
   NUMEXPR_NUM_THREADS VECLIB_MAXIMUM_THREADS BLIS_NUM_THREADS; do
   test "$(printenv "$var")" = 1
 done
-env | grep -E '^(OMP|OPENBLAS|MKL|NUMEXPR|VECLIB|BLIS)_.*THREAD' \
-  | sort | tee preflight/thread-policy.txt
+test -z "${CUDA_VISIBLE_DEVICES:-}"
+env | grep -E '^(OMP|OPENBLAS|MKL|NUMEXPR|VECLIB|BLIS|CUDA_VISIBLE)' \
+  | sort | tee "$E/thread-policy.txt"
 ```
 
-**Pass:** Python is 3.12.13; all package versions agree with the candidate
-lock; NumPy and SciPy report their actual BLAS/LAPACK build; no source build or
-unexpected resolver change occurred; all thread-policy variables equal one.
-The manifest must store the complete configuration output, not only package
-version strings.
+**Pass:** Python is 3.12.13; packages match the candidate lock; NumPy/SciPy
+report actual BLAS/LAPACK provenance; every thread limit is one; GPU visibility
+is empty. Store the complete configuration, not only version strings.
 
-### 6. Verify single-node Ray processes and inherited thread policy
+### 9. Verify local multi-process Ray and observability
 
-For the immediate `e5cb11b` trial, the root lock provides Ray 2.54.1
-([locked package entry][project-root-ray]). Write and run this infrastructure
-probe:
+For the immediate trial, write this root-lock infrastructure probe to
+`/tmp/ray_preflight.py`:
 
-```bash
-cat > /tmp/ray_preflight.py <<'PY'
+```python
 from __future__ import annotations
 
 import hashlib
@@ -542,7 +728,7 @@ THREAD_VARS = (
     "BLIS_NUM_THREADS",
 )
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=1, num_gpus=0)
 def probe(index: int) -> dict[str, object]:
     values = np.arange(100_000, dtype=np.int64) + index
     time.sleep(2)
@@ -551,16 +737,26 @@ def probe(index: int) -> dict[str, object]:
         "pid": os.getpid(),
         "affinity": sorted(os.sched_getaffinity(0)),
         "threads": {name: os.environ.get(name) for name in THREAD_VARS},
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "threadpools": threadpool_info(),
         "digest": hashlib.sha256(values.tobytes()).hexdigest(),
     }
 
-context = ray.init(num_cpus=32, include_dashboard=False, local_mode=False)
+context = ray.init(
+    num_cpus=16,
+    num_gpus=0,
+    include_dashboard=False,
+    local_mode=False,
+)
 assert len([node for node in ray.nodes() if node["Alive"]]) == 1
-assert int(ray.cluster_resources()["CPU"]) == 32
+assert int(ray.cluster_resources()["CPU"]) == 16
+assert ray.cluster_resources().get("GPU", 0) == 0
 
 def run() -> list[dict[str, object]]:
-    return sorted(ray.get([probe.remote(i) for i in range(32)]), key=lambda row: row["index"])
+    return sorted(
+        ray.get([probe.remote(index) for index in range(16)]),
+        key=lambda row: row["index"],
+    )
 
 first = run()
 second = run()
@@ -568,9 +764,10 @@ assert [row["digest"] for row in first] == [row["digest"] for row in second]
 driver_pid = os.getpid()
 worker_pids = {int(row["pid"]) for row in first}
 assert driver_pid not in worker_pids
-assert len(worker_pids) >= 16
+assert len(worker_pids) == 16
 for row in first + second:
     assert all(row["threads"][name] == "1" for name in THREAD_VARS)
+    assert row["cuda_visible_devices"] == ""
     assert all(int(pool["num_threads"]) == 1 for pool in row["threadpools"])
 
 print(json.dumps({
@@ -583,94 +780,79 @@ print(json.dumps({
     "first": first,
 }, sort_keys=True, indent=2, default=str))
 ray.shutdown()
-PY
+```
 
-pidstat -h -r -u -t -p ALL 1 8 > preflight/pidstat-ray.txt &
+Run it with process/thread sampling:
+
+```bash
+set -euo pipefail
+cd /opt/calibre
+. /etc/profile.d/calibre-thread-policy.sh
+E=/opt/calibre-evidence
+
+pidstat -h -r -u -t -p ALL 1 8 > "$E/pidstat-ray.txt" &
 PIDSTAT_PID=$!
 uv run --locked --no-sync python /tmp/ray_preflight.py \
-  > preflight/ray-process-probe.json &
+  > "$E/ray-process-probe.json" &
 RAY_PROBE_PID=$!
 sleep 3
 ps -eLo pid,ppid,lwp,psr,pcpu,pmem,rss,comm,args --sort=pid \
-  > preflight/ps-ray.txt
+  > "$E/ps-ray.txt"
 wait "$RAY_PROBE_PID"
 wait "$PIDSTAT_PID"
 uv run --locked --no-sync ray stop --force
 ! pgrep -fa 'raylet|gcs_server'
 ```
 
-**Pass:** one Ray node advertises 32 CPUs; at least 16 distinct worker
-processes execute concurrent tasks; worker PIDs differ from the driver; every
-worker sees all six thread limits as one; loaded numeric pools report one
-thread; two probe rounds have identical ordered digests; `pidstat` and `ps`
-show worker processes and threads; shutdown leaves no Ray control process.
+**Pass:** one Ray node advertises 16 CPU and zero GPU resources; exactly 16
+concurrent worker PIDs differ from the driver; all workers inherit one-thread
+numeric limits and an empty GPU view; repeated ordered digests match;
+`pidstat`/`ps` expose processes and threads; shutdown leaves no Ray control
+process. Repeat from the final successor lock and run U16's
+serial-equals-distributed tier-2 test. This probe cannot certify Calibre ledger
+identity ([test strategy][project-test]).
 
-This probe proves process launch, inspection, environment inheritance, and a
-small deterministic computation. It does **not** prove Calibre's distributed
-ledger identity. Repeat it from the successor candidate lock after U16, then
-run U16's tier-2 distributed-equals-sequential test. That same-engine identity
-is a permanent requirement ([test strategy at `e5cb11b`][project-test]).
-
-### 7. Verify storage, scratch space, and M5 acquisition
-
-First verify the control-plane volume:
+### 10. Verify disk placement, free space, M5 acquisition, timing, and RSS
 
 ```bash
-aws ec2 describe-volumes \
-  --region "$AWS_REGION" \
-  --volume-ids "$VOLUME_ID" \
-  --output json > volume.json
-jq -e '.Volumes[0] |
-  .Encrypted == true and
-  .VolumeType == "gp3" and
-  .Size == 300 and
-  .Iops == 3000 and
-  .Throughput == 125 and
-  .State == "in-use"' volume.json
-aws ec2 describe-instance-attribute \
-  --region "$AWS_REGION" \
-  --instance-id "$INSTANCE_ID" \
-  --attribute blockDeviceMapping \
-  --output json > block-device-mapping.json
-jq -e '.BlockDeviceMappings[0].Ebs.VolumeId == env.VOLUME_ID and
-  .BlockDeviceMappings[0].Ebs.DeleteOnTermination == true' \
-  block-device-mapping.json
-```
+set -euo pipefail
+cd /opt/calibre
+. /etc/profile.d/calibre-thread-policy.sh
+E=/opt/calibre-evidence
 
-Then run on the instance. The immediate-trial download command is the
-repository's current M5 downloader at this exact revision
-([source][project-m5-downloader]):
+lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL | tee "$E/lsblk.txt"
+findmnt --bytes | tee "$E/findmnt.txt"
+df -B1 / /dev/shm | tee "$E/df-bytes.txt"
+test "$(df -B1 --output=avail / | tail -1)" -ge 300000000000
+for path in /opt/calibre /opt/calibre/.venv /opt/calibre/newcalibre/.venv "$E"; do
+  test "$(findmnt -n -o TARGET -T "$path")" = /
+done
+findmnt /mnt > "$E/temporary-mount.txt" 2>&1 || true
 
-```bash
-lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL \
-  | tee preflight/lsblk.txt
-findmnt --bytes | tee preflight/findmnt.txt
-df -B1 / /dev/shm | tee preflight/df-bytes.txt
-test "$(df -B1 --output=avail / | tail -1)" -ge 200000000000
 test -r /sys/fs/cgroup/cgroup.controllers
 grep -qw memory /sys/fs/cgroup/cgroup.controllers
-cat /sys/fs/cgroup/memory.current | tee preflight/cgroup-memory-current.txt
+cat /sys/fs/cgroup/memory.current | tee "$E/cgroup-memory-current.txt"
 
-mkdir -p scratch
-/usr/bin/time -v -o preflight/storage-write-time.txt \
-  dd if=/dev/zero of=scratch/io-probe.bin bs=8M count=512 oflag=direct status=progress
+mkdir -p /opt/calibre-scratch
+/usr/bin/time -v -o "$E/storage-write-time.txt" \
+  dd if=/dev/zero of=/opt/calibre-scratch/io-probe.bin \
+    bs=8M count=512 oflag=direct status=progress
 sync
-sha256sum scratch/io-probe.bin | tee preflight/storage-probe.sha256
-rm scratch/io-probe.bin
+sha256sum /opt/calibre-scratch/io-probe.bin | tee "$E/storage-probe.sha256"
+rm /opt/calibre-scratch/io-probe.bin
 
-curl -fsSIL https://github.com/Vzlentin/calibre \
-  | tee preflight/github-head.txt
-curl -fsSIL https://pypi.org/simple/ \
-  | tee preflight/pypi-head.txt
-/usr/bin/time -v -o preflight/m5-download-time.txt \
+curl -fsSIL https://github.com/Vzlentin/calibre | tee "$E/github-head.txt"
+curl -fsSIL https://pypi.org/simple/ | tee "$E/pypi-head.txt"
+/usr/bin/time -v -o "$E/m5-download-time.txt" \
   uv run --locked --no-sync python benchmarks/m5/download_m5_data.py \
     --target data/m5
 sha256sum data/m5/sales_train_evaluation.csv data/m5/calendar.csv \
-  data/m5/sell_prices.csv | tee preflight/m5-input-sha256.txt
+  data/m5/sell_prices.csv | tee "$E/m5-input-sha256.txt"
 
-uv run --locked --no-sync python - <<'PY' | tee preflight/m5-shape.txt
+uv run --locked --no-sync python - <<'PY' | tee "$E/m5-shape.txt"
 from pathlib import Path
 import pandas as pd
+
 root = Path("data/m5")
 sales = root / "sales_train_evaluation.csv"
 header = pd.read_csv(sales, nrows=0)
@@ -687,211 +869,188 @@ assert str(dates.min().date()) == "2011-01-29"
 assert str(dates.max().date()) == "2016-05-22"
 PY
 
-du -sh .venv newcalibre/.venv data/m5 preflight | tee preflight/disk-use.txt
-df -B1 / | tee -a preflight/df-bytes.txt
-test "$(df -B1 --output=avail / | tail -1)" -ge 200000000000
-```
-
-**Pass:** provider volume facts match; the root and `/dev/shm` facts are
-recorded; cgroup v2 exposes memory accounting; the direct-write probe completes
-without error; HTTPS access works; M5 download completes; file digests are
-recorded; evaluation data has exactly 30,490 rows, `d_1..d_1941`, and the
-canonical date range; at least 200,000,000,000 bytes remain free. The M5 shape
-and evaluation phase are fixed by the public protocol
-([`[M5-D1]`-`[M5-D3]` at `e5cb11b`][project-m5-data]).
-
-When U15 replaces the predecessor downloader, rerun this section with U15's
-successor-owned acquisition and digest command. Do not treat successful public
-network access as dataset integrity.
-
-### 8. Verify timing and RSS tools
-
-```bash
-/usr/bin/time -v -o preflight/rss-probe-time.txt \
+/usr/bin/time -v -o "$E/rss-probe-time.txt" \
   uv run --project newcalibre --locked --no-sync python - <<'PY'
 import numpy as np
 value = np.ones(128 * 1024 * 1024, dtype=np.uint8)
 print(value.nbytes, int(value.sum()))
 PY
 
-grep -E 'Elapsed|Maximum resident set size' preflight/rss-probe-time.txt
-pidstat -V | tee preflight/pidstat-version.txt
-/usr/bin/time --version | head -1 | tee preflight/time-version.txt
+grep -E 'Elapsed|Maximum resident set size' "$E/rss-probe-time.txt"
+pidstat -V | tee "$E/pidstat-version.txt"
+/usr/bin/time --version | head -1 | tee "$E/time-version.txt"
+du -sh .venv newcalibre/.venv data/m5 "$E" | tee "$E/disk-use.txt"
+df -B1 / | tee -a "$E/df-bytes.txt"
+test "$(df -B1 --output=avail / | tail -1)" -ge 300000000000
 ```
 
-**Pass:** GNU `time` reports elapsed time and a nonzero maximum resident set
-for a known 128 MiB allocation; `pidstat` captured Ray process/thread CPU and
-RSS samples; cgroup memory accounting is readable. Ubuntu supplies documented
-`time` and `pidstat` interfaces ([Ubuntu GNU `time` manual][ubuntu-time],
-[Ubuntu `pidstat` manual][ubuntu-pidstat]).
+**Pass:** the root filesystem is the 512 GiB OS disk; all Calibre paths resolve
+to `/`, not temporary storage; >= 300 billion bytes remain free after both
+environments and M5 data; cgroup memory accounting works; direct I/O and HTTPS
+succeed; M5 digests are recorded; evaluation data has 30,490 rows,
+`d_1..d_1941`, and the canonical date range; GNU `time` reports elapsed and
+maximum RSS; `pidstat` reports process/thread samples. M5 dimensions come from
+`[M5-D1]`-`[M5-D3]` ([protocol source][project-m5-data]). When U15 provides its
+successor acquisition command, rerun with that command before U17.
 
-These tools are only independent preflight witnesses. U16's harness-owned
-stage timing and peak-RSS telemetry remains the acceptance source and must
-reconcile at least 99% of wall time as chapter 30 requires
-([`[PRF-30]`-`[PRF-33]` at `e5cb11b`][project-profile]).
+U16's harness-emitted per-stage timing and RSS remain the acceptance sources
+and must reconcile at least 99% of wall time
+([`[PRF-30]`-`[PRF-33]`][project-profile]).
 
-### 9. Estimate cost and enforce the trial time cap
+### 11. Record evidence summary and estimate trial cost
 
-From the operator machine, record the API launch time and a UTC stop time:
-
-```bash
-LAUNCHED_AT="$(aws ec2 describe-instances \
-  --region "$AWS_REGION" \
-  --instance-ids "$INSTANCE_ID" \
-  --query 'Reservations[0].Instances[0].LaunchTime' \
-  --output text)"
-ENDED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-START_SECONDS="$(date -u -d "$LAUNCHED_AT" +%s)"
-END_SECONDS="$(date -u -d "$ENDED_AT" +%s)"
-BILLED_SECONDS="$((END_SECONDS - START_SECONDS))"
-test "$BILLED_SECONDS" -le 7200
-awk -v seconds="$BILLED_SECONDS" 'BEGIN {
-  hours = seconds / 3600
-  compute = hours * 1.64224
-  storage = hours * (300 * 0.08 / 730)
-  ipv4 = hours * 0.005
-  printf "seconds=%d hours=%.6f compute=%.4f storage=%.4f ipv4=%.4f estimate=%.4f\n",
-         seconds, hours, compute, storage, ipv4, compute + storage + ipv4
-}' | tee cost-estimate.txt
-```
-
-**Pass:** paid instance time is no more than two hours and the estimate uses
-current recorded regional rates. Attach the later billing reference when it
-becomes available; label this calculation as an estimate.
-
-### 10. Tear down and prove deletion
-
-Capture output IDs before deletion, exit the Session Manager shell, then run:
+Run a final guest summary through Run Command:
 
 ```bash
 set -euo pipefail
-aws cloudformation delete-stack \
-  --region "$AWS_REGION" \
-  --stack-name "$STACK"
-aws cloudformation wait stack-delete-complete \
-  --region "$AWS_REGION" \
-  --stack-name "$STACK"
-
-STATE="$(aws ec2 describe-instances \
-  --region "$AWS_REGION" \
-  --instance-ids "$INSTANCE_ID" \
-  --query 'Reservations[0].Instances[0].State.Name' \
-  --output text)"
-test "$STATE" = terminated
-
-if aws ec2 describe-volumes \
-  --region "$AWS_REGION" \
-  --volume-ids "$VOLUME_ID" > volume-after-delete.json 2> volume-delete-error.txt; then
-  echo 'root volume still exists' >&2
-  exit 1
-fi
-grep -q 'InvalidVolume.NotFound' volume-delete-error.txt
-
-if aws ec2 describe-network-interfaces \
-  --region "$AWS_REGION" \
-  --network-interface-ids "$NETWORK_INTERFACE_ID" \
-  > interface-after-delete.json 2> interface-delete-error.txt; then
-  echo 'primary network interface still exists' >&2
-  exit 1
-fi
-grep -q 'InvalidNetworkInterfaceID.NotFound' interface-delete-error.txt
-
-if aws cloudformation describe-stacks \
-  --region "$AWS_REGION" \
-  --stack-name "$STACK" >/dev/null 2>&1; then
-  echo 'stack still exists' >&2
-  exit 1
-fi
+E=/opt/calibre-evidence
+sha256sum "$E"/* | sort > "$E/evidence-files.sha256"
+tar -C /opt -czf /opt/calibre-evidence.tar.gz calibre-evidence
+sha256sum /opt/calibre-evidence.tar.gz
+printf 'PREFLIGHT_COMPLETE %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-**Pass:** the stack no longer exists, the instance is terminated, and the
-captured root-volume and primary-interface IDs no longer exist. Record the
-deletion-complete UTC time. A failed deletion is a blocker until the leaked
-resource is removed and verified.
+Record operator-side elapsed time and estimate:
+
+```bash
+ENDED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+LAUNCHED_AT="$(jq -r '.timeCreated' vm.json)"
+test -n "$LAUNCHED_AT"
+START_SECONDS="$(date -u -d "$LAUNCHED_AT" +%s)"
+END_SECONDS="$(date -u -d "$ENDED_AT" +%s)"
+ELAPSED_SECONDS="$((END_SECONDS - START_SECONDS))"
+test "$ELAPSED_SECONDS" -le 7200
+
+VM_RATE="$(jq -r '.Items[] |
+  select(.productName == "Virtual Machines NCasT4 v3 Series") |
+  select(.meterName == "NC16asT4 v3") | .retailPrice' selected-price.json)"
+awk -v seconds="$ELAPSED_SECONDS" -v vm="$VM_RATE" 'BEGIN {
+  hours = seconds / 3600
+  disk = hours * (80.54 / 730)
+  ipv4 = hours * 0.005
+  printf "seconds=%d hours=%.6f vm=%.4f disk=%.4f ipv4=%.4f estimate=%.4f\n",
+         seconds, hours, hours * vm, disk, ipv4, hours * vm + disk + ipv4
+}' | tee cost-estimate.txt
+```
+
+**Pass:** evidence hashes and completion UTC exist; paid elapsed time is no more
+than two hours; estimate uses the refreshed VM rate and recorded disk/IP rates.
+Retrieve required evidence before teardown by the owner's approved Azure
+control-plane method; do not place a storage credential in Run Command or the
+artifact.
+
+### 12. Delete the resource group and prove teardown
+
+```bash
+set -euo pipefail
+az group delete --name "$RG" --yes --no-wait
+az group wait --name "$RG" --deleted
+
+test "$(az group exists --name "$RG")" = false
+test "$(az resource list \
+  --tag Ticket=434 \
+  --query "[?tags.Purpose=='gate-c-preflight' && tags.CandidateSha=='$SOURCE_SHA'] | length(@)" \
+  --output tsv)" -eq 0
+printf 'DELETE_COMPLETE %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  | tee delete-complete.txt
+```
+
+**Pass:** the resource group no longer exists and no subscription resource with
+the trial's ticket/purpose/candidate tags remains. A deletion failure blocks
+completion until every leaked disk, IP, NIC, VM, and network resource is
+removed and verified.
 
 ## Risks and remaining uncertainty
 
-1. **Account quota is the first operational uncertainty.** AWS documents a
-   default five-vCPU standard on-demand quota, below both the 32-vCPU primary
-   and 16-vCPU fallback. Existing account history can raise it automatically,
-   but issue 436 must query the actual account and request any increase
-   ([AWS EC2 quotas][aws-quotas]).
-2. **On-demand offering is not capacity assurance.** The offering API can show
-   a shape in an AZ while a later launch still lacks capacity. Record the AZ
-   used. Retry another offering AZ before invoking the fallback; do not change
-   region or shape without a recorded decision.
-3. **The final successor Ray lock does not exist at this research revision.**
-   The current trial can prove machine and root-locked Ray operation. It cannot
-   prove U16's final package set or Calibre dispatch invariance. Repeat the
-   relevant sections at the exact candidate SHA before U17.
-4. **64 GiB is the provider floor, not unlimited headroom.** The process RSS
-   gate is 32 GB, while Ray object-store memory, page cache, the OS, and
-   profiler also consume RAM. Issue 439 must set and report Ray object-store
-   and worker limits. U17 fails rather than moving the 32 GB gate if total
-   behavior causes pressure.
-5. **A shared on-demand host can vary in contention and turbo behavior.** Pin
-   the instance type, CPU model observed in the guest, AMI, lock, and thread
-   policy. Record the one acceptance run honestly; do not select a favorable
-   rerun after seeing a binding result.
-6. **Price and image catalogs change.** The exact price snapshot is versioned
-   here. Re-query the live rate before launch. Verify the pinned AMI is still
-   available and Canonical-owned; any AMI replacement changes the environment
-   manifest and needs an explicit record.
-7. **The trial is not performance acceptance.** Small Ray, disk, and memory
-   probes only show that required facilities operate. The full-M5 harness is
-   the sole source of the 15-minute, 60-second, and 32-GB verdict.
+1. **Selected-family quota and availability are the main operational risks.**
+   GPU-family quotas can be zero or restricted per subscription. A retail
+   meter proves a regional price, not that this subscription can allocate the
+   VM. Issue 436 must bind live SKU restrictions, family quota, total quota,
+   and an actual allocation before the plan uses the venue.
+2. **The unused GPU is intentional but nonrepresentative.** No GPU driver,
+   CUDA dependency, or Ray GPU resource is allowed. The size is selected for
+   its explicit non-SMT CPU contract, RAM, and current price. If the GPU family
+   causes allocation friction, use only the preregistered F48 fallback after
+   its physical topology passes.
+3. **The fallback topology is inferred until provisioned.** Fsv2 documents
+   Hyper-Threading but not physical-core count. Both `vCPUsPerCore=2` and guest
+   `lscpu` must show 24 physical cores. A mismatch is a fallback failure.
+4. **The final successor Ray lock does not exist at this research revision.**
+   Current root-locked Ray can prove Azure process launch and observability,
+   not U16's package set or dispatch identity. Repeat from the final lock.
+5. **Temporary storage can create false evidence.** Azure local disks are not
+   the artifact store. Every data/result/profile path must resolve to the P20
+   OS disk, and the resource-group deletion remains the lifecycle boundary.
+6. **Shared-cloud performance can vary.** Record CPU model, NUMA topology,
+   image version, lock, and thread policy. Do not select a favorable rerun
+   after reading a binding U17 result.
+7. **Price and image catalogs change.** Resolve the exact image and refresh
+   prices immediately before launch. Any image or region change alters the
+   environment manifest and requires an explicit decision.
+8. **The trial is not performance acceptance.** Small CPU, Ray, disk, network,
+   and RSS probes only prove venue facilities. U17 alone decides the unchanged
+   15-minute, 60-second, and 32-GB limits.
 
 ### Primary issue-436 uncertainty
 
-The main question that paper research cannot settle is whether the actual AWS
-account can launch the selected C7a allocation and whether that allocation,
-with the exact locked candidate, exposes the documented 32/32/1 topology while
-Ray workers inherit one-thread numeric limits and remain fully observable.
-Issue 436 must settle that with the raw control-plane and guest observations
-above. Full-M5 speed remains deliberately deferred to U17.
+Paper research cannot prove that the owner's Azure subscription can allocate
+`Standard_NC16as_T4_v3` in West Europe. Issue 436 must settle the live regional
+SKU restrictions and both quotas, then prove on the allocated guest that Azure
+exposes **16 logical CPUs as 16 physical non-SMT cores** and that the exact
+locked Ray environment inherits one-thread numeric limits. Full-M5 speed
+remains deliberately deferred to U17.
+
+## Conclusion
+
+The Gate C reference venue is **Azure West Europe
+`Standard_NC16as_T4_v3`**, pay-as-you-go Linux, on an exact resolved Canonical
+Ubuntu 24.04 Gen2 image and a 512 GiB P20 Premium SSD OS disk, provisioned by
+Bicep and operated through Azure Run Command with all inbound traffic denied.
+The only fallback is **Azure West Europe `Standard_F48s_v2`**, contingent on a
+verified 24-physical-core topology. The prior AWS recommendation is void.
 
 ## Primary sources
 
 ### Calibre authorities at `e5cb11bd5b4487724701d4cf5a4626c91031c0e1`
 
-- [ADR 0001 reference-environment decision][project-adr]
-- [Chapter 30 performance budgets and deliverables][project-perf]
+- [ADR 0001 reference environment][project-adr]
+- [Chapter 30 budgets, storage, and profile requirements][project-perf]
 - [Chapter 21 M5 protocol][project-m5]
-- [Chapter 03 determinism and thread policy][project-determinism]
+- [Chapter 03 determinism and thread budgets][project-determinism]
 - [Chapter 50 same-engine distributed identity][project-test]
-- [Successor Python and dependency declaration][project-toolchain]
-- [Successor lockfile][project-lock]
-- [Issue 434: Select the Gate C compute venue](https://github.com/Vzlentin/calibre/issues/434)
-- [Issue 436: Verify the selected Gate C instance](https://github.com/Vzlentin/calibre/issues/436)
+- [Successor project and lockfile][project-toolchain]
+- [Issue 434 owner correction][issue-434-correction]
+- [Issue 436 verification ticket](https://github.com/Vzlentin/calibre/issues/436)
 
-### Provider, OS, toolchain, and runtime authorities
+### Azure, Canonical, uv, and Ray authorities
 
-- [AWS compute-optimized instance specifications][aws-co]
-- [AWS general-purpose instance specifications][aws-gp]
-- [Versioned AWS EC2 price snapshot][aws-ec2-price]
-- [Versioned AWS VPC price snapshot][aws-vpc-price]
-- [AWS gp3 volume specification][aws-gp3]
-- [AWS EC2 on-demand billing][aws-on-demand]
-- [AWS EC2 instance quotas][aws-quotas]
-- [AWS instance offering discovery][aws-discovery]
-- [AWS Systems Manager Session Manager][aws-session]
-- [AWS CloudFormation overview][aws-cfn]
-- [Canonical Ubuntu EC2 image locator][ubuntu-locator]
-- [Canonical Ubuntu image discovery and owner verification][ubuntu-images]
-- [Microsoft Azure Dsv5 size specification][azure-dsv5]
-- [Microsoft Azure Retail Prices API][azure-price]
-- [uv installation and version pinning][uv-install]
-- [uv Python version pinning][uv-python]
-- [uv locked synchronization][uv-sync]
-- [Ray single-machine startup and shutdown][ray-single]
+- [NCasT4 v3 size specification][azure-nc]
+- [Fsv2 size specification][azure-fsv2]
+- [HBv3 size specification][azure-hbv3]
+- [Dsv5 size specification][azure-dsv5]
+- [Constrained vCPU semantics and HB active-vCPU roster][azure-constrained]
+- [Azure Retail Prices API queries][azure-price-nc]
+- [West Europe P20 price][azure-price-p20] and [Standard IPv4 price][azure-price-ip]
+- [Azure Premium SSD P20 contract and billing][azure-disks]
+- [Azure managed-disk encryption][azure-disk-encryption]
+- [Canonical Ubuntu 24.04 Azure URN][ubuntu-azure-image]
+- [Azure image discovery][azure-image-discovery]
+- [Azure VM quotas][azure-quotas] and [Azure VM CLI][azure-cli-vm]
+- [Bicep overview][azure-bicep]
+- [Azure Run Command][azure-run-command]
+- [Azure resource-group deletion][azure-rg-delete]
+- [uv installation][uv-install], [Python pinning][uv-python], and
+  [locked synchronization][uv-sync]
+- [Ray single-machine runtime][ray-single]
 - [Ubuntu `lscpu`][ubuntu-lscpu], [GNU `time`][ubuntu-time], and
   [`pidstat`][ubuntu-pidstat] manuals
 
+[issue-434-correction]: https://github.com/Vzlentin/calibre/issues/434#issuecomment-5035142835
+[issue-439]: https://github.com/Vzlentin/calibre/issues/439
 [project-adr]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/adr/0001-reference-environment.md#L65-L94
 [project-perf]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/30-performance.md#L109-L123
 [project-storage]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/30-performance.md#L177-L191
 [project-profile]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/30-performance.md#L197-L221
-[project-parallel]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/30-performance.md#L163-L174
 [project-m5]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/21-protocol-m5.md#L68-L147
 [project-m5-data]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/21-protocol-m5.md#L31-L60
 [project-determinism]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/docs/spec/03-engine-core.md#L153-L177
@@ -899,22 +1058,27 @@ above. Full-M5 speed remains deliberately deferred to U17.
 [project-toolchain]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/newcalibre/pyproject.toml#L1-L17
 [project-lock]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/newcalibre/uv.lock#L1-L3
 [project-root-ray]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/uv.lock#L3959-L3961
-[project-m5-downloader]: https://github.com/Vzlentin/calibre/blob/e5cb11bd5b4487724701d4cf5a4626c91031c0e1/benchmarks/m5/download_m5_data.py
-[issue-439]: https://github.com/Vzlentin/calibre/issues/439
-[aws-co]: https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html
-[aws-gp]: https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html
-[aws-ec2-price]: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/20260721012550/us-east-1/index.json
-[aws-vpc-price]: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonVPC/20260713171339/us-east-1/index.json
-[aws-gp3]: https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html#gp3-ebs-volume-type
-[aws-on-demand]: https://aws.amazon.com/ec2/pricing/on-demand/
-[aws-quotas]: https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-instance-quotas.html#on-demand-instance-quotas
-[aws-discovery]: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-discovery.html#instance-discovery-cli
-[aws-session]: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html
-[aws-cfn]: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html
-[ubuntu-locator]: https://cloud-images.ubuntu.com/locator/ec2/releasesTable
-[ubuntu-images]: https://documentation.ubuntu.com/aws/aws-how-to/instances/find-ubuntu-images/
+[azure-nc]: https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/gpu-accelerated/ncast4v3-series
+[azure-fsv2]: https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/compute-optimized/fsv2-series
+[azure-hbv3]: https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/high-performance-compute/hbv3-series
 [azure-dsv5]: https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dsv5-series
-[azure-price]: https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27westeurope%27%20and%20armSkuName%20eq%20%27Standard_D32s_v5%27%20and%20priceType%20eq%20%27Consumption%27
+[azure-constrained]: https://learn.microsoft.com/en-us/azure/virtual-machines/constrained-vcpu
+[azure-price-nc]: https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27westeurope%27%20and%20armSkuName%20eq%20%27Standard_NC16as_T4_v3%27%20and%20priceType%20eq%20%27Consumption%27
+[azure-price-f48]: https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27westeurope%27%20and%20armSkuName%20eq%20%27Standard_F48s_v2%27%20and%20priceType%20eq%20%27Consumption%27
+[azure-price-hb]: https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27westeurope%27%20and%20armSkuName%20eq%20%27Standard_HB120-16rs_v3%27%20and%20priceType%20eq%20%27Consumption%27
+[azure-price-d32]: https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27westeurope%27%20and%20armSkuName%20eq%20%27Standard_D32s_v5%27%20and%20priceType%20eq%20%27Consumption%27
+[azure-price-p20]: https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27westeurope%27%20and%20meterId%20eq%20%2756bef7bd-ecf5-4e06-9587-37d3fc7ab5f4%27%20and%20priceType%20eq%20%27Consumption%27
+[azure-price-ip]: https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27westeurope%27%20and%20meterId%20eq%20%279c150bf9-2bad-430e-a53c-c213804f49ef%27%20and%20priceType%20eq%20%27Consumption%27
+[azure-disks]: https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#premium-ssd-size
+[azure-disk-encryption]: https://learn.microsoft.com/en-us/azure/virtual-machines/disk-encryption
+[azure-disk-billing]: https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#billing
+[ubuntu-azure-image]: https://documentation.ubuntu.com/azure/azure-how-to/instances/find-ubuntu-images/#ubuntu-24-04-lts-noble-numbat
+[azure-image-discovery]: https://learn.microsoft.com/en-us/azure/virtual-machines/linux/cli-ps-findimage#look-at-all-available-images
+[azure-quotas]: https://learn.microsoft.com/en-us/azure/virtual-machines/quotas
+[azure-cli-vm]: https://learn.microsoft.com/en-us/cli/azure/vm#az-vm-list-skus
+[azure-bicep]: https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/overview
+[azure-run-command]: https://learn.microsoft.com/en-us/azure/virtual-machines/run-command-overview
+[azure-rg-delete]: https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/delete-resource-group
 [uv-install]: https://docs.astral.sh/uv/getting-started/installation/#standalone-installer
 [uv-python]: https://docs.astral.sh/uv/concepts/python-versions/#installing-a-python-version
 [uv-sync]: https://docs.astral.sh/uv/concepts/projects/sync/#automatic-lock-and-sync
