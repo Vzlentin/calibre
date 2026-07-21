@@ -1,14 +1,10 @@
 # Architecture Decision Records
 
-Calibre's ADRs live in the Obsidian vault, not the repo:
+Canonical ADR target: [successor ADRs](../spec/adr/)
 
-`$OBSIDIAN_VAULT_PATH/Projects/Calibre/adr/`
+`docs/spec/adr/` is Calibre's sole successor ADR series. Read its `README.md`
+index, continue its numbering, and preserve each decision's status.
 
-Numbered `NNNN-<slug>.md` with a `README.md` index. Read the ADRs that touch the
-area you're about to work in, and flag any contradiction explicitly rather than
-silently overriding.
-
-This directory is a **public-safe redirector**: it names *where* the ADRs live,
-never an ADR body. New ADRs land in the vault at the next number in sequence (see
-the vault `adr/README.md`). See `docs/agents/domain.md` for the full consumer
+This conventional directory is a discovery redirector only. Do not create or
+copy ADR bodies here. See `docs/agents/domain.md` for authority and leak-review
 rules.
