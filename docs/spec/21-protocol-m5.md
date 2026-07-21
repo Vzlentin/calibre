@@ -2,15 +2,16 @@
 title: "External protocol — the M5 hierarchical retail benchmark"
 status: draft
 invalidation-tags: []
-date: 2026-07-08
+date: 2026-07-20
 ---
 
 # 21 — External protocol: M5
 
 This chapter restates the M5 forecasting benchmark, as this program uses it,
 as a complete, engine-independent protocol: the data contract, the aggregation
-lattice, the rolling-origin backtest shape, and the acceptance scoring over a
-resolved ledger. Any implementation — including one written from scratch
+lattice, the rolling-origin backtest shape, and diagnostic scoring with exact
+acceptance validity over a resolved ledger. Any implementation — including one
+written from scratch
 against this chapter and the public M5 release alone — must be able to run and
 score the protocol from these statements. Vocabulary is chapter 02's, used
 without redefinition; facts carry stable tags (`[M5-*]`). The
@@ -25,9 +26,9 @@ owned by chapters 04/07/05; how the pipeline is declared is chapter 10. One
 normative bridge binds them:
 
 - `[M5-0]` **Protocol as data.** Every protocol input defined below — dataset
-  phase, target coverage, origin window, horizon, tolerance derivation —
-  enters an implementation as configuration, never as a hard-coded literal in
-  engine or scoring code. Only the horizon (28) and the lattice construction
+  phase, target coverage, origin window, horizon, and method readiness
+  requirement — enters an implementation as configuration, never as a
+  hard-coded literal in engine or scoring code. Only the horizon (28) and the lattice construction
   rule are protocol-fixed structural facts.
 
 ## Define the data contract
@@ -50,7 +51,7 @@ Walmart daily unit sales for 3,049 products across 10 stores in 3 US states.
 - `[M5-D3]` **Phases.** Two release variants exist: *validation* (1,913 days,
   2011-01-29 through 2016-04-24) and *evaluation* (1,941 days, through
   2016-05-22 — 28 additional final days). The phase is a declared protocol
-  input; **evaluation is the canonical acceptance phase**. A run must state
+  input; **evaluation is the canonical full-run phase**. A run must state
   its phase and re-derive its origin window (`[M5-B4]`) from that phase's
   actual history end, never assume the other variant's.
 - `[M5-D4]` **Censoring is real and unindicated.** Recorded sales are
@@ -89,9 +90,9 @@ Walmart daily unit sales for 3,049 products across 10 stores in 3 US states.
   public competition scores 12 aggregation levels (42,840 series), including
   cross-classified levels such as state×category and item×state. This
   protocol's scored node set is the **marginal lattice of `[M5-H2]` only**. A
-  replication may compute the cross-classified levels, but the acceptance
-  gate (`[M5-A*]`) is defined over the marginal lattice and its seven level
-  classes.
+  replication may compute the cross-classified levels, but the diagnostic and
+  validity contract (`[M5-A*]`) is defined over the marginal lattice and its
+  seven level classes.
 - `[M5-H4]` **Level identity from node identity.** Every node label must
   encode its level class recoverably from the label alone (e.g. bare series
   keys at bottom, `attribute=value` aggregates, a reserved total label), so
@@ -140,53 +141,61 @@ Walmart daily unit sales for 3,049 products across 10 stores in 3 US states.
   requires at least `10 + 54 = 64` daily origins; one prior configuration ran
   exactly 64 (2016-03-20 through 2016-05-22 on the evaluation phase).
 
-## Define acceptance scoring
+## Define diagnostic scoring and acceptance validity
 
 The resolved ledger is the sole scoring surface: one row per
 `(node, origin, horizon step, model)`, scored/resolved/covered per the shared
 predicate `[LED-4]`, with denominator discipline `[LED-5]` throughout. All
 coverage quantities below carry the **sales-coverage** label per `[M5-X2]`.
+Coverage values are mandatory diagnostics. They never affect protocol
+acceptance or Gate C status; acceptance force in this section attaches only
+to exact scoring completeness and artifact validity.
 
-- `[M5-A1]` **Population sales-coverage.** The share of covered rows among all
-  scored rows, pooled over every node, origin, and horizon step, compared to
-  the target coverage within a population tolerance band.
-- `[M5-A2]` **Per-level sales-coverage.** Per-node coverage is computed per
-  `(node, model)` over that node's scored rows; a level's statistic is the
-  unweighted mean of its scored nodes' coverages, compared to the target
-  within a per-level band (wider than the population band, since node-level
-  counts are smaller). Pooled per-level coverage is reported alongside as a
-  diagnostic, never gated.
-- `[M5-A3]` **Completeness floor.** The scored/resolved ratio — at population
-  level and within every level class — must reach a declared minimum. Below
-  the floor the verdict is **undetermined**, not failed and never passed:
-  coverage computed over a thin finite-bound subset (e.g. when warm-up
-  dominates) is neither accepted as calibration nor booked as miscoverage.
-- `[M5-A4]` **Bands are derived, never inherited.** Tolerance bands are
-  re-derived on any new engine from the sampling variance of the coverage
-  estimator at the run's *actual* scored-row counts (accounting for
-  within-series and cross-node dependence, e.g. an effective-sample-size
-  correction), and the derivation is recorded next to the verdict. No band
-  constant carries over from a previous engine or an earlier run shape.
-- `[M5-A5]` **Per-node outliers are diagnostics.** Nodes whose coverage error
-  exceeds a declared diagnostic tolerance are emitted and counted, but never
-  gate acceptance: the protocol makes no conditional per-node coverage claim.
-  All per-node and per-level rows diagnose realized *marginal* coverage
-  around reconciled point forecasts — not coherent interval boxes, not
-  simultaneous guarantees (lattice-wide joint claims are inadmissible under
-  chapter 02's hierarchical-coverage binding, chapter 41).
-- `[M5-A6]` **Outputs and verdict logic.** A scoring run produces a
-  machine-readable summary (verdict, per-criterion statuses, target, bands
-  and their derivation, row counts, scored ratios, and the sales-coverage
-  label), a per-node table, and a human-readable report. The verdict passes
-  only if every criterion passes; any undetermined criterion makes the
-  verdict undetermined; undetermined never passes. A non-pass verdict must
-  fail the run's acceptance, machine-checkably.
+- `[M5-A1]` **Population sales-coverage diagnostic.** Report the share of
+  covered rows among all scored rows, pooled over every node, origin, and
+  horizon step, with the target, signed deviation (`estimate − target`), and
+  scored/resolved/total counts. The value is descriptive and never receives
+  a pass, fail, or undetermined status.
+- `[M5-A2]` **Per-level sales-coverage diagnostics.** Compute per-node
+  coverage per `(node, model)` over that node's scored rows. For every level
+  class, report the unweighted mean of scored-node coverages, the pooled
+  per-level rate, the target and signed deviations, and
+  scored/resolved/total counts. Every level statistic is descriptive and
+  never gates acceptance.
+- `[M5-A3]` **Exact scoring completeness.** Before reading covered/uncovered
+  outcomes, derive a deterministic eligibility mask from the ledger's
+  resolution state and the run's declared method readiness requirement, target coverage, partition
+  scheme, origin window, and horizon. The scored mask must equal that
+  eligibility mask exactly at population level and within every level class.
+  A missing eligible row or an early ineligible scored row makes the artifact
+  invalid and blocks acceptance. Every excluded row remains attributable
+  from the ledger alone (`[LED-7]`).
+- `[M5-A4]` **No inferential acceptance criterion.** The protocol neither
+  derives nor consumes tolerance bands, confidence intervals, bootstrap
+  intervals, power criteria, or any other statistical threshold over M5
+  sales-coverage diagnostics. Separately declared research may analyze
+  diagnostic uncertainty, but that analysis stays outside the protocol
+  status and cannot affect Gate C or configuration selection.
+- `[M5-A5]` **Per-node sales-coverage diagnostics.** Emit one row per
+  `(node, model)` with coverage, target deviation, level identity, and
+  scored/resolved/total counts. Per-node rows make no conditional,
+  coherent-box, joint, or simultaneous claim. Rankings or descriptive flags
+  may aid investigation, but no per-node value or threshold affects Gate C.
+- `[M5-A6]` **Outputs and validity logic.** A scoring run produces a
+  machine-readable summary, a per-node table, and a human-readable report.
+  Each carries the sales-coverage label, declared reconciler, phase,
+  conformal method, partition scheme, origin window, target, diagnostic
+  estimates, counts, and exact-mask result. The machine status is `VALID`
+  only when schemas, labels, identities, and exact completeness hold;
+  otherwise it is `INVALID` and blocks acceptance. No coverage estimate
+  contributes to that status, and no coverage-based pass/fail verdict is
+  emitted.
 
 ## State the sales-coverage exemption
 
 Ruling, ratified and dataset-scoped (`[ANNEX:21-m5-scoring-exemption-record]`):
 
-- `[M5-X1]` **M5 acceptance coverage is sales-coverage by definition.** Every
+- `[M5-X1]` **M5 diagnostics are sales-coverage by definition.** Every
   ledger row resolves against recorded unit sales — availability-censored,
   with no stockout indicator and no recoverable demand ground truth
   (`[M5-D4]`). Imputing demand to score against would score one model with
@@ -212,14 +221,16 @@ Ruling, ratified and dataset-scoped (`[ANNEX:21-m5-scoring-exemption-record]`):
 ## Declare the reconciler with every figure
 
 - `[M5-R1]` **Reconciliation strategy is a coverage lever, not
-  coverage-neutral.** Evidence-grade observation from full-scale acceptance
-  runs of the prior engine at a 90% target, same models and conformal
-  settings: structural-weights reconciliation landed population
-  sales-coverage near target (~91.0%) where bottom-up aggregation
-  over-covered (~94.9%). Consequently any quoted M5 coverage figure must
-  declare its reconciliation strategy — alongside its phase, conformal method,
-  partition scheme, and origin window — or it is not a reproducible claim.
-  This is a reporting obligation, not a strategy prescription.
+  coverage-neutral.** Evidence-grade observation from full-scale runs of the
+  prior engine at a 90% target, same models and conformal settings:
+  structural-weights reconciliation landed population sales-coverage near
+  target (~91.0%) where bottom-up aggregation over-covered (~94.9%).
+  Consequently any quoted M5 coverage figure must declare its reconciliation
+  strategy — alongside its phase, conformal method, partition scheme, and
+  origin window — or it is not a reproducible claim. This is a reporting
+  obligation, not a strategy prescription. A Gate C configuration is
+  selected independently of observed M5 sales-coverage; diagnostic values
+  never tune or select the strategy.
 
 ## Bound the protocol's role
 
@@ -229,10 +240,11 @@ Ruling, ratified and dataset-scoped (`[ANNEX:21-m5-scoring-exemption-record]`):
   coverage accounting at retail scale. By `[M5-X2]`/`[M5-X4]` and chapter
   01's flagship discipline, no flagship or honesty headline may bind to M5
   sales-coverage; decision-grade claims live on censoring-honest measurements.
-- `[M5-N2]` **Non-carry rule.** No coverage figure, verdict, band constant,
-  or sales-scored baseline produced by a previous engine is a protocol
-  constant, a target, or a comparison baseline for a replication. A
-  replication is judged by conformance to `[M5-D*]`/`[M5-H*]`/`[M5-B*]`/
+- `[M5-N2]` **Non-carry rule.** No coverage figure, statistical interval,
+  diagnostic threshold, or sales-scored baseline produced by a previous
+  engine is a protocol constant, a target, or a comparison baseline for a
+  replication. A replication is judged by conformance to
+  `[M5-D*]`/`[M5-H*]`/`[M5-B*]`/
   `[M5-A*]`, never by proximity to an inherited number.
 
 ## Conformance
@@ -252,12 +264,16 @@ A conforming implementation must demonstrate, by test:
 4. Every reported coverage quantity carries scored/resolved/total counts, and
    the scored-row predicate is the shared one, never re-derived (`[M5-A1]`,
    `[LED-4]`, `[LED-5]`).
-5. Verdict logic, by property test: any undetermined criterion yields an
-   undetermined verdict; a below-floor scored ratio never passes and never
-   fails; only all-pass passes (`[M5-A3]`, `[M5-A6]`).
-6. The machine-readable summary of every M5 scoring run carries the
+5. Exact completeness, by property test: exact eligibility/scored-mask
+   equality is valid; removing one eligible scored row or scoring one
+   ineligible row makes the artifact invalid (`[M5-A3]`, `[M5-A6]`).
+6. Coverage values do not affect validity: otherwise-identical synthetic
+   artifacts with 0%, target, and 100% sales-coverage retain the same
+   `VALID` status when their schemas and masks are valid (`[M5-A4]`,
+   `[M5-A6]`).
+7. The machine-readable summary of every M5 scoring run carries the
    sales-coverage label; its absence is a test failure (`[M5-X2]`).
-7. All protocol inputs are supplied as configuration and changing them
+8. All protocol inputs are supplied as configuration and changing them
    requires no code change (`[M5-0]`).
 
 ## Provenance
@@ -276,9 +292,10 @@ contiguity guard, phase resolution, hierarchy attribute extraction),
 `calibre/reconciliation/summing.py` (marginal lattice, node-label scheme,
 sparse representation), and `calibre/evaluation/m5_coverage.py` (the scorer,
 relocated engine-side from the benchmark directory: per-level averaging,
-completeness-as-undetermined verdict logic, outlier diagnostics, report
-shape). Negative space: that engine's gate constants (±3.0 pp population,
-±5.0 pp per-level, 0.50 scored-ratio floor, 0.10 outlier tolerance) are what
-`[M5-A4]` forbids inheriting; its summary carried no sales-coverage label —
-`[M5-X2]` closes that gap; its acceptance runs supplied the
-reconciler-as-lever evidence behind `[M5-R1]`.
+legacy completeness-as-undetermined verdict logic, outlier diagnostics, and
+report shape). Negative space: that engine's gate constants (±3.0 pp population,
+±5.0 pp per-level, 0.50 scored-ratio floor, 0.10 outlier tolerance) are
+retired value-based gate inputs; `[M5-A4]` makes the whole statistical gate
+inadmissible. Its summary carried no sales-coverage label — `[M5-X2]` closes
+that gap; its full-scale runs supplied the reconciler-as-lever evidence
+behind `[M5-R1]`.

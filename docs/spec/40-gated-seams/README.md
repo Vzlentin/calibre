@@ -2,7 +2,7 @@
 title: "Gated seams — chapter directory"
 status: draft
 invalidation-tags: []
-date: 2026-07-08
+date: 2026-07-20
 ---
 
 # 40 — Gated seams
@@ -38,7 +38,7 @@ deferring here. Every hook is now bound; the table records where.
 | `08-ordering-and-cost.md` | The cost functional above the bottom level — what "optimal" means there. | Chapter 41, `[SEAM-4]`; bound in chapter 08. |
 | `09-tuning.md` | The default tuning objective, bound symbolically to the chapter 08 objective. | Chapter 41, `[SEAM-4]`, through chapter 08's exported objective; bound in chapter 09. |
 | `20-protocol-vn2.md` | Which headline figure the rewrite reports on VN2. | Chapter 42, `[FLG-1]`/`[FLG-2]`; bound in chapter 20. |
-| `21-protocol-m5.md` | The scoring-target ruling for M5 acceptance scoring. | Bound in chapter 21 (`[M5-X*]`) — ratified ahead of the gate; no slot remained. |
+| `21-protocol-m5.md` | The sales-scoring role for M5 hierarchical diagnostics. | Bound in chapter 21 (`[M5-X*]`) — ratified ahead of the gate; no slot remained. |
 | `50-test-and-oracle-strategy.md` | Which joint or simultaneous coverage claims the test oracle may state. | Chapter 41, `[SEAM-5]`/`[SEAM-6]`; bound in chapter 50. |
 
 ## State the drafting rules
