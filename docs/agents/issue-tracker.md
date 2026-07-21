@@ -1,22 +1,24 @@
-# Issue tracker: GitHub (hybrid with the vault)
+# Issue tracker: GitHub
 
 Issues and PRDs for this repo live as GitHub issues in `Vzlentin/calibre`,
-governed by a hybrid rule — **GitHub holds live status + work orders; the
-Obsidian vault's `ROADMAP.md` holds durable rationale.** Don't mirror one into
-the other. Use the `gh` CLI for all issue operations.
+governed by one status rule: **GitHub holds live status and work orders.** The
+configured project-memory bundle may hold durable architecture and rationale,
+but never a mirrored issue-status checklist. Start its discovery at
+`Projects/Calibre/index.md`. Use the `gh` CLI for all issue operations.
 
 ## Existing workflow (don't re-invent)
 
-These conventions are already in force (see AGENTS.md → *Roadmap: GitHub for
-status, vault for rationale*):
+These conventions are already in force (see AGENTS.md → *Program status*):
 
 - **One issue per backlog item.** The issue body holds the full
   symptom/fix/files spec — enough for an AFK agent to act without extra context.
 - **Status updates for free via `closes #N`.** A merged PR that closes an issue
   updates its status automatically; prefer this over manual state edits.
-- **Milestones track the active wave.** The active milestone is named in the
-  vault's `ROADMAP.md` — **don't hard-code it here** (a renamed milestone is the
-  drift #89 fixed). List open milestones and their issues:
+- **Milestones group program work.** Derive the current execution frontier from
+  open GitHub issues and their dependencies, not from a vault filename or a
+  hard-coded milestone name. An administratively open milestone with no open
+  issues is not evidence of active work. List open milestones and inspect their
+  issues:
 
   ```bash
   gh api repos/Vzlentin/calibre/milestones --jq '.[] | select(.state=="open") | .title'
@@ -85,8 +87,9 @@ either — resolve with `gh pr view 42` and fall back to `gh issue view 42`.
 ## When a skill says "publish to the issue tracker"
 
 Create a GitHub issue with the full spec in the body. Apply the appropriate
-triage label; assign a milestone only if the work is active-wave (milestone name
-comes from the vault `ROADMAP.md` — never hard-code it).
+triage label; assign a milestone only when the issue belongs to a current GitHub
+program and its dependencies support that placement. Never infer milestone
+membership from project-memory prose.
 
 ## When a skill says "fetch the relevant ticket"
 
