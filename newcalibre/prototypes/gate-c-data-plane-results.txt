@@ -1,0 +1,53 @@
+PROTOTYPE — no production interfaces or persistence
+SHAPE days=1941 origins=64 horizon=28 conformal_cycles=64
+
+=== 1,000 series ===
+ACTION stage immutable history
+STATE history rows=1,877,000 scan_copy=17.9MiB indexed_view=0.0001MiB
+ACTION append forecast batches and resolve due rows
+STATE ledger stream_rows=1,792,000 resolved=1,792,000 pending=0 scan_peak_hot=5.4MiB indexed_peak_hot=1.7MiB
+ACTION update all conformal partitions in canonical order
+STATE conformal partitions=28,000 cycles=64 mean_checksum=11059.920000 level_checksum=349.198000
+
+=== 10,000 series ===
+ACTION stage immutable history
+STATE history rows=18,770,000 scan_copy=179.0MiB indexed_view=0.0001MiB
+ACTION append forecast batches and resolve due rows
+STATE ledger stream_rows=17,920,000 resolved=17,920,000 pending=0 scan_peak_hot=53.8MiB indexed_peak_hot=16.6MiB
+ACTION update all conformal partitions in canonical order
+STATE conformal partitions=280,000 cycles=64 mean_checksum=110599.650000 level_checksum=3491.782000
+
+=== comparison ===
+series | history scan/indexed ms | panel scan/indexed MiB | ledger scan/indexed s | ledger hot scan/indexed MiB | conformal scalar/batched s | state scalar/batched MiB
+ 1,000 |    34.90/0.0136   |     18.5/7.6      |    0.724/0.021    |      5.4/1.7      |    0.661/0.017    |      5.7/0.5     
+10,000 |   302.19/0.0168   |    185.1/76.4     |    7.046/0.197    |     53.8/16.6     |    7.297/0.160    |     54.9/5.3     
+
+VERDICT candidate B: indexed columnar batches
+- History is one calendar-aligned immutable value plane plus a presence bitmap; origin and series slices are zero-copy views.
+- Ledger forecast rows are immutable Arrow-shaped append batches; a target-time index owns only unresolved spans and resolutions append as a side stream.
+- Conformal routing uses integer partition IDs and one batch call per origin; methods update columnar state arrays without a Python call per partition.
+- Keep pandas and string labels at ingestion/export adapters, not in the hot per-origin path.
+Largest-scale speedups: history=17999.3x, ledger=35.8x, conformal=45.7x.
+	Command being timed: "uv run python prototypes/gate_c_data_plane.py"
+	User time (seconds): 18.57
+	System time (seconds): 1.23
+	Percent of CPU this job got: 114%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:17.34
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 828660
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 313976
+	Voluntary context switches: 46
+	Involuntary context switches: 76
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
