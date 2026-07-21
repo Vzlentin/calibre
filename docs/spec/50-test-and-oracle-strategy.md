@@ -2,7 +2,7 @@
 title: "Test and oracle strategy"
 status: draft
 invalidation-tags: []
-date: 2026-07-08
+date: 2026-07-20
 ---
 
 # 50 — Test and oracle strategy
@@ -199,15 +199,15 @@ honesty. Where a dataset cannot supply demand, the scoring label is owned by
 that dataset's protocol chapter (chapter 21 states the ratified
 sales-coverage exemption, `[M5-X1]`–`[M5-X5]`).
 
-Coverage acceptance at scale asserts the per-node and per-level statistics
-defined structurally in chapter 02 ("hierarchical coverage"), with bands
-derived from sampling variance at the run's own scored-row count `[LED-5]`
-and a minimum scored-ratio floor. Chapter 41 (40-gated-seams/) rules
+M5 coverage at scale is diagnostic. Protocol acceptance asserts exact equality
+between the deterministic eligibility mask and the scored mask, plus artifact
+validity; no population, per-level, or per-node coverage value contributes to
+the status (`[M5-A1]`–`[M5-A6]`). Chapter 41 (40-gated-seams/) rules
 lattice-wide joint or simultaneous coverage claims inadmissible
 (`[SEAM-5]`, `[SEAM-6]`); no oracle property or gate mints one. The only
 admissible conditional claim is class-conditional coverage, scored per its
-registered ledger predicate (chapter 02) at decision scope; per-node and
-per-level statistics remain diagnostics.
+registered ledger predicate (chapter 02) at decision scope; M5 per-node and
+per-level sales-coverage statistics remain diagnostics.
 
 ## Ship a witness with every numeric gate
 
@@ -237,7 +237,7 @@ structurally (behavioral properties over the same surface) or not at all.
 | 1 | Oracle-property suite on synthetic fixtures: the carried corpus as fast unit/property tests | 1, 2, 3 | Every commit | Permanent — outlives the oracle |
 | 2 | Self-consistency suite: resume, serialization, distribution invariance, seeded determinism | 4 | Every merge | Permanent, per-engine |
 | 3 | Cross-engine equivalence harness: conditional replay against pinned-tag oracle captures; the frozen engine's side of reference-implementation comparisons | 2, 3, 6 | Scheduled / pre-release | Deleted with the oracle |
-| 4 | Protocol acceptance at scale (statistical coverage bands, scored-ratio floor, machine-readable summary, nonzero exit on non-PASS); the rewrite's side of reference-implementation gates (engine-independent references — closed-form, or third-party implementations at pinned commits) | 3, 5 | Scheduled | Permanent — statistical bands re-derived per run scale, reference pins immutable |
+| 4 | Protocol acceptance at scale (protocol-specific numeric gates, exact completeness and artifact validity, machine-readable summary, nonzero exit on a binding failure); the rewrite's side of reference-implementation gates (engine-independent references — closed-form, or third-party implementations at pinned commits) | 1, 3, 5 | Scheduled | Permanent — protocol criteria and reference pins remain immutable |
 
 Lifecycle rules:
 

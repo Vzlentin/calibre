@@ -101,9 +101,11 @@ Always prefix Python tooling with `uv run`. Never invoke `python`, `pytest`,
   LightGBM float divergence (SIMD/FMA/libm) plus Accelerate-vs-OpenBLAS, **not** a
   regression and **not** threading (single- and multi-thread agree bit-for-bit).
   Don't chase the macOS delta or loosen 4992.20.
-- Reconciliation strategy is an M5-coverage lever, not coverage-neutral: `wls_struct`
-  lands population coverage on-target (~90.97%) where `bottom_up` over-covers (~94.92%).
-  Weigh the reconciler choice, not just conformal knobs, on a coverage miss.
+- Reconciliation strategy moves M5 sales-coverage diagnostics: `wls_struct`
+  produced ~90.97% where `bottom_up` produced ~94.92% in one full-scale run.
+  Always report the reconciler, but never tune or select the Gate C configuration
+  by closeness to the diagnostic target; select it for architectural
+  representativeness and scale.
 
 ## Worktrees
 
