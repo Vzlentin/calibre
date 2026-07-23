@@ -5,36 +5,34 @@
 Calibre is a demand planning engine: probabilistic forecasting + conformal
 intervals + ordering policies, exercised through backtesting pipelines.
 
-See [`README.md`](README.md) for the full architecture, all API endpoints, and
-benchmark/deployment detail. This file is the quick orientation; the README is
-canonical.
+See [`docs/spec/00-overview.md`](docs/spec/00-overview.md) for normative
+successor design and [`newcalibre/README.md`](newcalibre/README.md) for the
+implemented successor surface. The root [`README.md`](README.md) also documents
+the frozen predecessor while both trees coexist.
 
 ## Architecture
 
-Pipeline: load dataset → build `ForecastTask`s → fit model adapters →
-reconciliation (when hierarchical) → conformal calibration → ordering policy →
-ledger + metrics. Orchestrated by `execution/backend.py::BackendEngine`.
+Successor pipeline: load canonical domain inputs → resolve admissible actuals →
+fit/predict → point reconciliation → conformal calibration → order → settle →
+commit to the ledger. The I/O-free engine under
+`newcalibre/src/newcalibre/engine/` is driven by both time-loop and event
+frontiers.
 
-| Module             | Responsibility                                              |
-| ------------------ | ----------------------------------------------------------- |
-| `core/`            | `ForecastFrame`, `ForecastTask`, metrics, logging/tracing   |
-| `forecasting/`     | Adapter registry + model adapters (`features/` for transforms) |
-| `reconciliation/`  | `Reconciler` protocol + strategy registry + summing matrix (point reconcile between predict and calibrate) |
-| `conformal/`       | Conformal calibration (see Gotchas re: stable interface)    |
-| `ordering/`        | Order policies + inventory `simulation/`                    |
-| `execution/`       | `BackendEngine`, ledger, dataset registry, I/O, task builder |
-| `evaluation/`      | Scoring and metric computation                              |
-| `tuning/`          | Ray Tune + Optuna hyper-parameter search                    |
-| `storage/`         | Postgres state store + Alembic `migrations/`                |
-| `api/`             | FastAPI routes and schemas                                  |
-| `cli/`             | CLI entrypoint, YAML config loader, commands                |
+| Successor module | Responsibility |
+| --- | --- |
+| `domain/` | Canonical identities, panels, tasks, frames, decisions, costs, and evidence |
+| `engine/` | Closed verb surface, drivers, ports, ordering, settlement, and commit |
+| `forecasting/` | Forecast adapter protocol, registry, and model adapters |
+| `reconcile/` | Point-reconciliation protocol, strategies, summing structures, and preflight |
+| `conformal/` | Method manifests, runtime, state, and registered families |
+| `observe/` | Actual acceptance, pending-window resolution, delivery, and state updates |
+| `ordering/` | Cost objectives and ordering-policy families |
+| `protocols/` | External protocol bindings and evidence artifacts |
+| `oracle/` | Manifest-checked behavior capture support used only before cutover |
 
-Entry points: CLI `calibre.cli.main:app`, API `calibre.api.main:app`.
-
-The architecture spec for the greenfield rewrite lives at `docs/spec/`
-(start at `docs/spec/00-overview.md`). It describes the successor engine,
-not this codebase; this repo remains the behavior reference until cutover.
-See *Agent memory* below for the editing rule that governs it.
+The predecessor package under `calibre/` is the frozen oracle only at tag
+`oracle-freeze-2026-07-06`. Later root-tree changes do not redefine the oracle.
+Its CLI and API remain coexistence surfaces, not successor architecture.
 
 ## Commands
 
@@ -127,59 +125,39 @@ New worktrees auto-run `setup-worktree-unix` from `.cursor/worktrees.json`
 
 ## Agent memory
 
-Long-lived project memory lives in an Obsidian vault and is governed by the
-**user-level** `project-memory` skill (`~/.agents/skills/project-memory/SKILL.md`,
-from the public `Vzlentin/dotfiles` repo). Read it at the start of any
-non-trivial task. Hermes agents: use the `obsidian` skill instead.
+Long-lived project memory is governed by the user-level `project-memory` skill.
+Resolve `$OBSIDIAN_VAULT_PATH` from the environment or this repository's `.env`;
+an empty shell variable alone does not prove the vault is unavailable.
 
-The vault root is `$OBSIDIAN_VAULT_PATH` — but **on this machine that variable
-is defined in the repo's `.env`, which is not auto-exported into your shell.** A
-bare `echo $OBSIDIAN_VAULT_PATH` (or `$env:OBSIDIAN_VAULT_PATH`) reads empty and
-will fool you into thinking the vault is absent and degrading to fallback mode.
-**Resolve the path from `.env` first** (e.g. `grep OBSIDIAN_VAULT_PATH .env`, or
-source `.env`) and use that value; treat the vault as truly unavailable only if
-`.env` has no such line. The project folder is
-`Projects/Calibre/`; canon files: `architecture.md`, `vision.md`, `ROADMAP.md`, plus
-`plans/` and `archive/`. Reusable per-problem learnings live in
-`Projects/Calibre/solutions/` (knowledge-track docs by category —
-architecture-patterns, design-patterns, conventions, performance-issues, workflow,
-… — with `module`/`tags`/`applies_when` frontmatter), the shared domain vocabulary
-in `Projects/Calibre/CONCEPTS.md`, and postponed work in
-`Projects/Calibre/deferred-findings-register.md`. Read only the smallest relevant
-solution notes when implementing or debugging; never bulk-load the store. If `.env`
-carries no `OBSIDIAN_VAULT_PATH` line (truly unset — not merely absent from the live
-shell), durable memory is skipped
-(per the skill). `docs/plans/`, `docs/adr/`, and `CONTEXT.md` are public-safe
-redirectors to the vault (see `docs/agents/domain.md`), not artifact stores — a
-skill may write a temporary local plan under `docs/plans/` if the vault is
-unreachable, then relocate it on vault return. **`docs/spec/` is the one
-deliberate exception**: the repo's single durable public artifact store,
-holding the public layer of the two-layer rewrite spec (private rationale
-stays in the vault behind opaque `[ANNEX:*]` pointers — never resolve or
-inline them in the repo). **Leak review before edit:** any change under
-`docs/spec/` requires an owner leak-review stamp on the landing's tracking
-issue *before* it lands; reviews are batched per landing, not per file (see
-`docs/agents/domain.md`).
+In vault mode, start at `Projects/Calibre/index.md`. Read
+`Projects/Calibre/CONTEXT.md` for domain language, follow only the relevant
+entry under `Projects/Calibre/architecture/`, and read the matching active plan
+under `Projects/Calibre/plans/`. Do not bulk-load the bundle or assume legacy
+monolithic canon, solution, lesson, or deferred-register files are operational.
 
-### Roadmap: GitHub for status, vault for rationale
+Authority is split deliberately:
 
-Hybrid, one source of truth per fact-type — don't mirror one into the other:
+- `docs/spec/` is normative successor design.
+- Successor source is implementation fact.
+- The vault architecture bundle is the navigational synthesis, including known
+  deltas and private rationale.
+- The `oracle-freeze-2026-07-06` tag is the frozen oracle; do not infer its
+  structure from later root-engine changes.
 
-- **Live status + work orders = GitHub.** Each backlog item is an issue whose
-  body holds the full symptom/fix/files spec; a merged `closes #N` PR updates
-  status for free. The active milestone is named in `ROADMAP.md` (vault) — don't
-  hard-code it here (a renamed milestone is the drift #89 fixed). List open
-  milestones and their issues:
+`CONTEXT.md` and `docs/plans/README.md` are public-safe redirectors.
+`docs/adr/README.md` points to `docs/spec/adr/`, the sole successor ADR series.
+If the vault is unavailable, proceed with repository sources and public-safe
+plan fallback; do not write private durable memory into the repository.
 
-  ```bash
-  gh api repos/Vzlentin/calibre/milestones --jq '.[] | select(.state=="open") | .title'
-  gh issue list --milestone "<title>"
-  ```
+Public `[ANNEX:*]` references remain opaque contracts. Never resolve them,
+identify their private storage, or inline their content. Any `docs/spec/` edit
+requires an owner leak-review stamp on its landing issue before merge; see
+`docs/agents/domain.md`.
 
-  Parked items carry `parked:phd` / `parked:saas` and sit outside any milestone.
-- **Durable rationale = `ROADMAP.md`** (vault): mission, how-we-work
-  cadence/gates, root-issue analysis (R1–R5), dependency ordering, parked
-  decisions. Read it for the *why*; it carries **no** issue-status checklist.
+### Program status
+
+GitHub milestones, issues, and dependencies are the live status and work-order
+surface. Do not mirror issue state into durable project-memory concepts.
 
 ## Agent skills
 
@@ -194,9 +172,8 @@ section directly.
 
 ### Issue tracker
 
-GitHub issues in `Vzlentin/calibre` — hybrid with the vault `ROADMAP.md` for
-rationale (status on GitHub, rationale in the vault); external PRs are a
-triage surface. See `docs/agents/issue-tracker.md`.
+GitHub issues in `Vzlentin/calibre` are the live status and work-order surface;
+external PRs are a triage surface. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
@@ -206,7 +183,9 @@ Five canonical triage roles → `needs-triage`, `needs-info`, `ready-for-agent`,
 
 ### Domain docs
 
-Domain docs live in the Obsidian vault, not the repo: glossary at
-`Projects/Calibre/CONCEPTS.md`, ADRs at `Projects/Calibre/adr/`, plans at
-`Projects/Calibre/plans/`. Repo `CONTEXT.md`, `docs/adr/`, `docs/plans/` are
-public-safe redirectors. See `docs/agents/domain.md`.
+Start project-memory discovery at the vault `Projects/Calibre/index.md`; the
+glossary is `Projects/Calibre/CONTEXT.md`, modular architecture is under
+`Projects/Calibre/architecture/`, and active plans are under
+`Projects/Calibre/plans/`. Successor ADRs live only in `docs/spec/adr/`;
+`CONTEXT.md`, `docs/adr/`, and `docs/plans/` are discovery redirectors. See
+`docs/agents/domain.md`.

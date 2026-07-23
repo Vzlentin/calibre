@@ -1,88 +1,62 @@
 # Domain Docs
 
-How the engineering skills should consume this project's domain documentation.
-**The canonical home is the Obsidian vault; the repo carries only public-safe
-redirectors.** Nothing durable — glossary, ADRs, plans — lives in the code repo.
+How engineering skills consume Calibre's domain documentation. Project memory is
+an OKF bundle in the configured Obsidian vault; the successor specification and
+its ADRs are canonical public artifacts in this repository.
 
-## Before exploring, read these (in the vault)
+## Progressive project-memory discovery
 
-Resolve the vault root from the repo's `.env` first (`grep OBSIDIAN_VAULT_PATH
-.env`) — do **not** trust a bare `$OBSIDIAN_VAULT_PATH` in the shell, which
-reads empty on this machine (see AGENTS.md → *Agent memory*). The project folder
-is `Projects/Calibre/`.
+Resolve `OBSIDIAN_VAULT_PATH` from the environment or the repository's `.env`.
+When the vault is available:
 
-- **Glossary** — `<vault>/Projects/Calibre/CONCEPTS.md`. The shared domain
-  vocabulary: terms, preferred names, and *Avoid* aliases.
-- **ADRs** — `<vault>/Projects/Calibre/adr/` (numbered `NNNN-<slug>.md` plus a
-  `README.md` index). Read the ADRs that touch the area you're about to work in.
-- **Plans** — `<vault>/Projects/Calibre/plans/` (`YYYY-MM-DD-NNN-<slug>-plan.md`
-  plus `reviews/`). Read the plan for any work item before implementing.
-- **Broader context** — the vault also holds `architecture.md`, `vision.md`,
-  `ROADMAP.md`, `STRATEGY.md`, and `solutions/` (scoped per-problem learnings).
-  See AGENTS.md → *Agent memory* for the full map and consumer rules; this file
-  covers only the glossary + ADRs + plans the Matt Pocock skills look for.
+1. Start at `Projects/Calibre/index.md`.
+2. Read `Projects/Calibre/CONTEXT.md` when domain vocabulary matters.
+3. Follow only the relevant entry under `Projects/Calibre/architecture/`.
+4. Read the matching active work order under `Projects/Calibre/plans/`.
 
-## Repo paths are redirectors, not bodies
+Indexes provide progressive disclosure. Do not bulk-load the bundle or assume a
+legacy monolithic architecture, solutions, lessons, or deferred-register file
+exists.
 
-The repo keeps **public-safe redirector** entrypoints at the conventional paths
-— they name *where* the vault store is, never an artifact body. Treat them as
-pointers and resolve into the vault:
+## Authority
 
-- `CONTEXT.md` → vault `Projects/Calibre/CONCEPTS.md` (glossary)
-- `docs/adr/README.md` → vault `Projects/Calibre/adr/` (ADRs)
-- `docs/plans/README.md` → vault `Projects/Calibre/plans/` (plans)
+- `docs/spec/` is normative successor design.
+- Successor implementation is implementation fact.
+- The vault architecture bundle is the navigational synthesis, including
+  implementation state, known deltas, and private rationale.
+- On disagreement, the public specification wins as the intended contract.
 
-If a skill reads `CONTEXT.md` expecting a glossary body, it will find a pointer
-instead — resolve to the vault `CONCEPTS.md` as above. Do **not** write ADRs or
-plans into the repo; new ones land in the vault at the next number/slug.
+Use stable prose names **Calibre** or **successor engine**, and **frozen oracle**.
+Temporary source-directory names are code anchors, not product vocabulary.
 
-## The one repo-resident artifact store: `docs/spec/`
+## Conventional redirectors
 
-`docs/spec/` is the deliberate exception to redirectors-only: the repo's
-single durable public artifact store, holding the **public layer** of the
-two-layer architecture spec for the greenfield rewrite (start at
-`docs/spec/00-overview.md`). Its private rationale annex stays in the vault;
-public files reference it only by opaque `[ANNEX:*]` pointers, each registered
-in `docs/spec/90-annex-registry.md`. Consumer rules:
+- Root `CONTEXT.md` points to the vault glossary.
+- `docs/plans/README.md` points to active vault plans. If the vault is
+  unavailable, temporary public-safe plans may live under `docs/plans/` and move
+  to the vault on return.
+- `docs/adr/README.md` points directly to `docs/spec/adr/`, the only successor
+  ADR series. Never create or copy successor ADR bodies under `docs/adr/`.
 
-- **Never resolve an `[ANNEX:*]` pointer in repo prose.** If a fact you need
-  sits behind one, the public chapter must restate it public-safely or the
-  work stops at the pointer — surface that, don't paraphrase annex content in.
-- **Leak review before edit.** Every change under `docs/spec/` requires an
-  owner leak-review stamp on the landing's tracking issue *before* it lands.
-  Reviews are batched per landing milestone, not per file; an unstamped edit
-  fails review regardless of content.
-- **The registry is the leak-review surface.** A pointer in use but not
-  registered — or annex material inlined anywhere in `docs/spec/` — fails
-  review (`docs/spec/90-annex-registry.md` states the full rules).
-- The spec describes the **successor engine**, not this codebase. Don't
-  "fix" a spec chapter to match current-engine behavior; divergence is
-  usually the point. Contradictions worth raising go to the tracking issue.
+## Specification editing
 
-## If the vault is unavailable
+Start at `docs/spec/00-overview.md`. Every change under `docs/spec/` requires an
+owner leak-review stamp on the landing issue before it lands. Reviews are
+batched per landing.
 
-If `.env` carries no `OBSIDIAN_VAULT_PATH` line (truly unset — not merely absent
-from the live shell), the vault is unavailable: **proceed silently**. Don't flag
-the absence; don't suggest creating the vault. The glossary and ADRs won't be
-available. A skill may write a **temporary** local plan under `docs/plans/` to
-keep work moving, then relocate it to the vault on return (see AGENTS.md →
-*Agent memory*); never write durable memory (ADRs, glossary, solutions) to a
-guessed repo path.
+Public `[ANNEX:*]` references remain opaque contracts. Do not resolve them,
+identify their private storage, or inline their material into repository prose.
+Every pointer in use must remain registered in `docs/spec/90-annex-registry.md`.
 
-## Use the glossary's vocabulary
+## Vault-unavailable behavior
 
-When your output names a domain concept (in an issue title, a refactor proposal,
-a hypothesis, a test name), use the term as defined in `CONCEPTS.md`. Don't drift
-to synonyms the glossary explicitly lists under *Avoid*.
+Proceed with repository sources and public-safe plan fallback. Do not invent a
+vault path or write private durable memory into the repository.
 
-If the concept you need isn't in the glossary yet, that's a signal — either
-you're inventing language the project doesn't use (reconsider) or there's a real
-gap (note it for `/domain-modeling`).
+## Vocabulary and decisions
 
-## Flag ADR conflicts
+Use terms from the canonical `CONTEXT.md`. A missing term is a prompt to
+reconsider or resolve the language, not to invent a competing synonym.
 
-If your output contradicts an existing ADR, surface it explicitly rather than
-silently overriding:
-
-> _Contradicts ADR-0007 (M5 coverage-neutrality gate runs the real pipeline) —
-> but worth reopening because…_
+Read relevant decisions from `docs/spec/adr/`. Surface a contradiction
+explicitly rather than silently overriding a ratified decision.
