@@ -428,14 +428,18 @@ def test_hierarchy_refuses_missing_extra_or_generated_label_collisions() -> None
         _compile_hierarchy(total_facts, (TOTAL_NODE_LABEL,))
 
 
-def test_m5_package_has_no_execution_or_evidence_surface() -> None:
+def test_m5_package_exposes_only_loading_verification_and_scoring() -> None:
     import newcalibre.protocols.m5 as m5
 
-    assert m5.__all__ == ["load_m5_config", "verify_m5_inputs"]
+    assert m5.__all__ == [
+        "M5Diagnostics",
+        "load_m5_config",
+        "score_m5",
+        "verify_m5_inputs",
+    ]
     forbidden = {
         "M5Lattice",
         "run_m5",
-        "score_m5",
         "emit_m5_results",
         "promote_m5_results",
         "M5EngineAdapter",

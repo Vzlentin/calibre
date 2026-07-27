@@ -250,6 +250,40 @@ def test_series_horizon_partitioning_isolates_state_and_readiness_per_step() -> 
     assert [facts.calibration_ready for facts in result.issuances.values()] == [True, False]
 
 
+def test_series_horizon_delivery_updates_only_its_declared_step() -> None:
+    runtime = resolve_method(
+        {
+            "method": "split-per-step",
+            "coverage": 0.5,
+            "partition_by": "series-horizon",
+        }
+    )
+    first_label = _partition(
+        EmissionScope.PER_STEP,
+        partition_by="series-horizon",
+        horizon_step=1,
+    )
+    second_label = _partition(
+        EmissionScope.PER_STEP,
+        partition_by="series-horizon",
+        horizon_step=2,
+    )
+    states = runtime.calibrate({first_label: [1.0, 2.0], second_label: [10.0, 20.0]})
+    issued = runtime.apply(_frame((4.0, 4.0)), states)
+    observations = _observations(
+        issued,
+        (7.0, 8.0),
+        (CensoringAssertion.UNCENSORED, CensoringAssertion.UNCENSORED),
+    )
+
+    effect = runtime.observe(Delivery(first_label, (observations[0],)), states)
+
+    assert set(effect.state_updates) == {first_label}
+    assert second_label not in effect.state_updates
+    with pytest.raises(RuntimeContractError, match="issued partition"):
+        Delivery(first_label, (observations[1],))
+
+
 def test_series_horizon_labels_cannot_collide_with_series_values() -> None:
     series_label = derive_partition_label(
         _MODEL,
