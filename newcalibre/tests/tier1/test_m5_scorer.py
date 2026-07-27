@@ -7,10 +7,13 @@ import inspect
 from collections.abc import Iterator
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 
 import pandas as pd
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from newcalibre.domain import (
     Calendar,
@@ -137,6 +140,67 @@ def _rows(
     return rows
 
 
+@st.composite
+def _mask_mismatch_cases(draw: st.DrawFn) -> tuple[str, int, int, tuple[bool, ...]]:
+    mismatch = draw(st.sampled_from(("missing", "early")))
+    horizon_step = draw(st.integers(min_value=1, max_value=28))
+    minimum = load_m5_config(_GATE_C).minimum_calibration_scores
+    target_origin = draw(
+        st.integers(
+            min_value=horizon_step + minimum - 1 if mismatch == "missing" else 0,
+            max_value=63,
+        )
+    )
+    resolutions = draw(st.lists(st.booleans(), min_size=64, max_size=64))
+    prior_end = max(0, target_origin - horizon_step + 1)
+    if mismatch == "missing":
+        resolutions[:minimum] = [True] * minimum
+    else:
+        retained = 0
+        for origin_index in range(prior_end):
+            if resolutions[origin_index] and retained < minimum - 1:
+                retained += 1
+            else:
+                resolutions[origin_index] = False
+    resolutions[target_origin] = True
+    return mismatch, horizon_step, target_origin, tuple(resolutions)
+
+
+def _rows_with_mask_mismatch(
+    case: tuple[str, int, int, tuple[bool, ...]],
+) -> list[_Row]:
+    mismatch, affected_horizon, target_origin, resolutions = case
+    config = load_m5_config(_GATE_C)
+    first_origin = pd.Timestamp("2026-01-01")
+    rows = _rows()
+    for position, (key, target, resolution, scores) in enumerate(rows):
+        if key.series_key != "bottom_item_store" or key.horizon_step != affected_horizon:
+            continue
+        origin_index = (key.origin - first_origin).days
+        resolved = resolutions[origin_index]
+        prior_end = max(0, origin_index - affected_horizon + 1)
+        eligible = resolved and sum(resolutions[:prior_end]) >= config.minimum_calibration_scores
+        scored = eligible
+        if origin_index == target_origin:
+            assert eligible == (mismatch == "missing")
+            scored = mismatch == "early"
+        score = replace(
+            scores[0],
+            resolved=resolved,
+            scored=scored,
+            value=1.0 if scored else None,
+            covered=True if scored else None,
+            unscored_reason=None if scored or not resolved else "warm-up",
+        )
+        rows[position] = (
+            key,
+            target,
+            resolution if resolved else None,
+            (score,),
+        )
+    return rows
+
+
 class _Reader:
     def __init__(
         self,
@@ -243,6 +307,30 @@ def test_mask_mismatches_are_attributed_without_suppressing_artifacts(
         "coverage-by-node.parquet",
         "report.md",
     }
+
+
+@given(case=_mask_mismatch_cases())
+@settings(max_examples=30, deadline=None)
+def test_exact_mask_completeness_holds_for_varied_resolution_histories(
+    case: tuple[str, int, int, tuple[bool, ...]],
+) -> None:
+    mismatch, _horizon_step, _target_origin, _resolutions = case
+    with TemporaryDirectory() as directory:
+        diagnostics = score_m5(
+            load_m5_config(_GATE_C),
+            _Reader(_rows_with_mask_mismatch(case)),
+            output_dir=Path(directory) / "diagnostics",
+        )
+
+    missing = int(mismatch == "missing")
+    early = int(mismatch == "early")
+    assert diagnostics.status == "INVALID"
+    assert diagnostics.population.missing_eligible == missing
+    assert diagnostics.population.early_scored == early
+    assert diagnostics.models[_MODEL].missing_eligible == missing
+    assert diagnostics.models[_MODEL].early_scored == early
+    assert diagnostics.levels["bottom"].missing_eligible == missing
+    assert diagnostics.levels["bottom"].early_scored == early
 
 
 @pytest.mark.parametrize("covered", [False, True])

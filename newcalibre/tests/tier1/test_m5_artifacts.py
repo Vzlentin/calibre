@@ -29,6 +29,8 @@ _EXPECTED_LEVELS = [
     "state",
     "total",
 ]
+_ELIGIBLE_PER_NODE = sum(range(27, 55))
+_MASK_IDENTITY = "resolved-and-series-horizon-ready-before-issuance"
 
 
 def test_artifacts_have_exact_names_canonical_summary_and_fixed_node_schema(
@@ -127,20 +129,34 @@ def test_all_projections_repeat_complete_context_and_sales_limitation(tmp_path: 
         "target": 0.9,
     }
     node_row = pq.read_table(diagnostics.by_node_path).to_pylist()[0]
-    for name in (
-        "dataset",
-        "phase",
-        "session_id",
-        "reconciler",
-        "conformal_method",
-        "conformal_partition",
-        "origin_start",
-        "origin_end",
-        "origin_count",
-        "horizon",
-        "target",
-    ):
-        assert node_row[name] == context[name]
+    assert node_row == {
+        "schema": 1,
+        "status": "VALID",
+        "metric": "sales-coverage",
+        "dataset": "m5",
+        "phase": "evaluation",
+        "session_id": diagnostics.context.session_id,
+        "reconciler": "wls_struct",
+        "conformal_method": "split-per-step",
+        "conformal_partition": "series-horizon",
+        "origin_start": "2026-01-01",
+        "origin_end": "2026-03-05",
+        "origin_count": 64,
+        "horizon": 28,
+        "level": "bottom",
+        "node": "bottom_item_store",
+        "model": "seasonal-naive",
+        "target": 0.9,
+        "coverage": 1.0,
+        "deviation": pytest.approx(0.1),
+        "total": 64 * 28,
+        "resolved": 64 * 28,
+        "eligible": _ELIGIBLE_PER_NODE,
+        "scored": _ELIGIBLE_PER_NODE,
+        "covered": _ELIGIBLE_PER_NODE,
+        "mask_identity": _MASK_IDENTITY,
+        "mask_equal": True,
+    }
 
     report = diagnostics.report_path.read_text(encoding="utf-8")
     assert report.endswith("\n")
@@ -184,7 +200,37 @@ def test_readable_mask_inconsistency_publishes_all_invalid_artifacts(tmp_path: P
     assert diagnostics.status == "INVALID"
     assert {path.name for path in diagnostics.summary_path.parent.iterdir()} == _EXPECTED_FILES
     assert json.loads(diagnostics.summary_path.read_bytes())["status"] == "INVALID"
-    assert set(pq.read_table(diagnostics.by_node_path)["status"].to_pylist()) == {"INVALID"}
+    node_rows = pq.read_table(diagnostics.by_node_path).to_pylist()
+    assert {row["status"] for row in node_rows} == {"INVALID"}
+    invalid_row = next(row for row in node_rows if row["node"] == "bottom_item_store")
+    assert invalid_row == {
+        "schema": 1,
+        "status": "INVALID",
+        "metric": "sales-coverage",
+        "dataset": "m5",
+        "phase": "evaluation",
+        "session_id": diagnostics.context.session_id,
+        "reconciler": "wls_struct",
+        "conformal_method": "split-per-step",
+        "conformal_partition": "series-horizon",
+        "origin_start": "2026-01-01",
+        "origin_end": "2026-03-05",
+        "origin_count": 64,
+        "horizon": 28,
+        "level": "bottom",
+        "node": "bottom_item_store",
+        "model": "seasonal-naive",
+        "target": 0.9,
+        "coverage": 1.0,
+        "deviation": pytest.approx(0.1),
+        "total": 64 * 28,
+        "resolved": 64 * 28,
+        "eligible": _ELIGIBLE_PER_NODE,
+        "scored": _ELIGIBLE_PER_NODE - 1,
+        "covered": _ELIGIBLE_PER_NODE - 1,
+        "mask_identity": _MASK_IDENTITY,
+        "mask_equal": False,
+    }
     assert "**Structural status:** INVALID" in diagnostics.report_path.read_text(encoding="utf-8")
 
 

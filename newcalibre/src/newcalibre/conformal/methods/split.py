@@ -114,6 +114,7 @@ class SplitPerStepConfig(_SplitConfig):
 class SplitWindowSumConfig(_SplitConfig):
     """Configure one-sided split conformal for protection-window sums."""
 
+    partition_by: Literal["global", "series"] = "global"
     protection_period: int = Field(default=1, ge=1)
 
 

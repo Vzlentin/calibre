@@ -687,9 +687,18 @@ def test_split_config_rejects_invalid_rank_window_and_clamps(
         resolve_method({"method": "split-per-step", **configuration})
 
 
-def test_window_config_requires_positive_protection_period() -> None:
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        {"protection_period": 0},
+        {"partition_by": "series-horizon"},
+    ],
+)
+def test_window_config_rejects_invalid_scope_configuration(
+    configuration: dict[str, object],
+) -> None:
     with pytest.raises(ConformalRegistryError, match="invalid configuration"):
-        resolve_method({"method": "split-window-sum", "protection_period": 0})
+        resolve_method({"method": "split-window-sum", **configuration})
 
 
 def test_split_private_codec_rejects_wrong_scope_and_malformed_restoration_payloads() -> None:
