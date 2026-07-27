@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Iterator, Mapping, Sequence
+from heapq import nsmallest
 from threading import RLock
 from types import MappingProxyType
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import pandas as pd
 
@@ -19,6 +20,7 @@ from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
     CensoringAssertion,
+    EmissionScope,
     InventoryPosition,
     Panel,
     SessionIdentity,
@@ -37,20 +39,35 @@ from newcalibre.engine.ports import (
     OriginCommit,
     SettlementSnapshot,
 )
+from newcalibre.engine.reporting import (
+    LedgerBatch,
+    LedgerBoundIssuance,
+    LedgerBoundScore,
+    LedgerColumn,
+    LedgerForecastKey,
+    LedgerObservationAnnotation,
+    LedgerResolution,
+    LedgerSelection,
+)
 from newcalibre.engine.settlement._state import SettlementIndex, SettlementIndexAudit
 from newcalibre.ledger import (
     CoverageReport,
+    CoverageTarget,
+    ForecastKey,
     ForecastRow,
     Ledger,
     LedgerError,
     OrderRow,
     PredicateRegistry,
     SettlementRecord,
+    _resolved_window_sum,
+    _score_bound,
 )
 from newcalibre.observe import ActualRecord, ActualsSubmission, ObservedActual, PendingObservation
 
 _Input = TypeVar("_Input")
 _Output = TypeVar("_Output")
+type _ScanKey = tuple[pd.Timestamp, str, str, int]
 
 
 class InMemoryPanelSource:
@@ -202,7 +219,7 @@ class InMemoryLedgerSink:
     ) -> None:
         self._lock = RLock()
         self._ledger = Ledger(session=session, calendar=calendar)
-        self._forecast_rows: dict[object, ForecastRow] = {}
+        self._forecast_rows: dict[ForecastKey, ForecastRow] = {}
         self._order_keys: set[object] = set()
         self._settlement_keys: set[object] = set()
         self._commits: dict[CommitKey, CommitReceipt] = {}
@@ -493,6 +510,190 @@ class InMemoryLedgerSink:
         return self._ledger.settlements
 
 
+class InMemoryLedgerReader:
+    """Stream bounded logical reporting batches from one closed in-memory sink."""
+
+    def __init__(self, sink: InMemoryLedgerSink) -> None:
+        if not isinstance(sink, InMemoryLedgerSink):
+            raise TypeError("in-memory ledger reader requires an InMemoryLedgerSink")
+        self._sink = sink
+        self._registry = PredicateRegistry.gate_a()
+
+    def scan(self, selection: LedgerSelection) -> Iterator[LedgerBatch]:
+        """Return canonical batches after validating the complete selection."""
+        if not isinstance(selection, LedgerSelection):
+            raise TypeError("ledger scan requires a LedgerSelection")
+        if selection.session != self._sink.session:
+            raise ValueError("ledger selection session does not match the reader session")
+        return self._scan(selection)
+
+    def _scan(self, selection: LedgerSelection) -> Iterator[LedgerBatch]:
+        cursor: _ScanKey | None = None
+        with self._sink._lock:
+            while entries := nsmallest(
+                selection.batch_size,
+                self._candidates(selection, after=cursor),
+                key=lambda entry: entry[0],
+            ):
+                keys: list[LedgerForecastKey] = []
+                columns: dict[str, list[object]] = {name: [] for name in selection.columns}
+                for _scan_key, forecast_key, row in entries:
+                    keys.append(
+                        LedgerForecastKey(
+                            series_key=row.series_key,
+                            origin=row.origin,
+                            horizon_step=row.horizon_step,
+                            model_name=row.model_name,
+                        )
+                    )
+                    for name, values in columns.items():
+                        values.append(
+                            self._project_column(
+                                name,
+                                forecast_key=forecast_key,
+                                row=row,
+                            )
+                        )
+                cursor = entries[-1][0]
+                yield LedgerBatch(
+                    session=selection.session,
+                    keys=keys,
+                    columns=columns,
+                    batch_size=selection.batch_size,
+                )
+
+    def _candidates(
+        self,
+        selection: LedgerSelection,
+        *,
+        after: _ScanKey | None,
+    ) -> Iterator[tuple[_ScanKey, ForecastKey, ForecastRow]]:
+        for forecast_key in self._sink._forecast_rows:
+            row = self._sink._ledger._forecasts[forecast_key]
+            if selection.origin_start is not None and row.origin < selection.origin_start:
+                continue
+            if selection.origin_end is not None and row.origin > selection.origin_end:
+                continue
+            scan_key = (row.origin, row.series_key, row.model_name, row.horizon_step)
+            if after is None or scan_key > after:
+                yield scan_key, forecast_key, row
+
+    def _project_column(
+        self,
+        name: str,
+        *,
+        forecast_key: ForecastKey,
+        row: ForecastRow,
+    ) -> object:
+        if name == LedgerColumn.SERIES_KEY.value:
+            return row.series_key
+        if name == LedgerColumn.ORIGIN.value:
+            return row.origin
+        if name == LedgerColumn.HORIZON_STEP.value:
+            return row.horizon_step
+        if name == LedgerColumn.MODEL_NAME.value:
+            return row.model_name
+        if name == LedgerColumn.TARGET_TIMESTAMP.value:
+            return row.target_timestamp
+        if name == LedgerColumn.POINT_FORECAST.value:
+            return row.point_forecast
+        if name == LedgerColumn.ISSUANCES.value:
+            return self._issuances(row)
+        if name == LedgerColumn.RESOLUTION.value:
+            return self._resolution(forecast_key)
+        if name == LedgerColumn.SCORES.value:
+            return self._scores(forecast_key, row=row)
+        raise AssertionError(f"unhandled ledger column {name!r}")
+
+    def _issuances(self, row: ForecastRow) -> tuple[LedgerBoundIssuance, ...]:
+        values = row.values
+        return tuple(
+            LedgerBoundIssuance(
+                bound_key=bound_key,
+                bound_values=cast(
+                    tuple[float | None, ...],
+                    tuple(values[column] for column in bound_key),
+                ),
+                descriptor=issuance.descriptor,
+                guaranteed_side=(
+                    None if issuance.guaranteed_side is None else issuance.guaranteed_side.value
+                ),
+                calibration_ready=issuance.calibration_ready,
+                bounds_finite=issuance.bounds_finite,
+                bounds_null_reason=issuance.bounds_null_reason,
+            )
+            for bound_key, issuance in row.issuances.items()
+        )
+
+    def _resolution(self, forecast_key: ForecastKey) -> LedgerResolution | None:
+        resolution = self._sink._ledger._resolutions.get(forecast_key)
+        if resolution is None:
+            return None
+        annotation = self._sink._ledger._annotations.get(forecast_key)
+        projected_annotation = (
+            None
+            if annotation is None
+            else LedgerObservationAnnotation(
+                score=annotation.score,
+                exclusion_cause=annotation.exclusion_cause,
+                advanced_delivered_score=annotation.advanced_delivered_score,
+            )
+        )
+        return LedgerResolution(
+            target_timestamp=resolution.target_timestamp,
+            actual_value=resolution.actual,
+            censoring_assertion=resolution.censoring_assertion,
+            availability_bound=resolution.availability_bound,
+            annotation=projected_annotation,
+        )
+
+    def _scores(
+        self,
+        forecast_key: ForecastKey,
+        *,
+        row: ForecastRow,
+    ) -> tuple[LedgerBoundScore, ...]:
+        outcomes: list[LedgerBoundScore] = []
+        for bound_key, issuance in row.issuances.items():
+            target = CoverageTarget(
+                descriptor=issuance.descriptor,
+                guaranteed_side=issuance.guaranteed_side,
+                bound_key=bound_key,
+            )
+            actual_value = row.actual_value
+            if issuance.bounds_finite and target.descriptor.window is EmissionScope.WINDOW_SUM:
+                actual_value = _resolved_window_sum(
+                    self._sink._ledger._forecasts,
+                    forecast_key=forecast_key,
+                )
+            outcome = _score_bound(
+                forecast_key=forecast_key,
+                row=row,
+                actual_value=actual_value,
+                target=target,
+                issuance=issuance,
+                annotation=self._sink._ledger._annotations.get(forecast_key),
+                registry=self._registry,
+            )
+            outcomes.append(
+                LedgerBoundScore(
+                    bound_key=outcome.bound_key,
+                    descriptor=outcome.target.descriptor,
+                    guaranteed_side=(
+                        None
+                        if outcome.target.guaranteed_side is None
+                        else outcome.target.guaranteed_side.value
+                    ),
+                    resolved=outcome.resolved,
+                    scored=outcome.scored,
+                    value=outcome.value,
+                    covered=outcome.covered,
+                    unscored_reason=outcome.unscored_reason,
+                )
+            )
+        return tuple(outcomes)
+
+
 class InProcessDispatch:
     """Execute work serially and preserve the supplied order."""
 
@@ -546,6 +747,7 @@ __all__ = [
     "InMemoryActualsSource",
     "InMemoryArtifactStore",
     "InMemoryCalibrationStateStore",
+    "InMemoryLedgerReader",
     "InMemoryLedgerSink",
     "InMemoryPanelSource",
     "InProcessDispatch",
