@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "dataset": "m5",
+  "files": [
+    {
+      "name": "calendar.csv",
+      "bytes": 112477,
+      "sha256": "568d0fe5f41790142379698732908e4e57432c1c6396f3f59fb880a9c2b54231"
+    },
+    {
+      "name": "sales_train_evaluation.csv",
+      "bytes": 121168898,
+      "sha256": "c21a519596680feb86f27a9e62f6c8b583f8be60c2c195f080ae8ca2990af2b7"
+    }
+  ]
+}
