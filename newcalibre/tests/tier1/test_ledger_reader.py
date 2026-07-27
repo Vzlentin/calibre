@@ -6,6 +6,7 @@ import gc
 import tracemalloc
 from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError
+from threading import Thread
 from typing import Any, cast
 
 import pandas as pd
@@ -49,6 +50,7 @@ from newcalibre.engine import (
     InMemoryLedgerReader,
     LedgerBatch,
     LedgerBoundIssuance,
+    LedgerBoundScore,
     LedgerColumn,
     LedgerForecastKey,
     LedgerReader,
@@ -81,7 +83,10 @@ def _session(*, tenant: str = "tenant-a") -> SessionIdentity:
     )
 
 
-def _descriptor() -> GuaranteeDescriptor:
+def _descriptor(
+    *,
+    window: EmissionScope = EmissionScope.PER_STEP,
+) -> GuaranteeDescriptor:
     return GuaranteeDescriptor(
         type=GuaranteeType(
             claim=GuaranteeClaim.ONE_SIDED_COVERAGE,
@@ -90,7 +95,7 @@ def _descriptor() -> GuaranteeDescriptor:
         ),
         level=0.9,
         scored_series=ScoredSeries.DEMAND_HONEST,
-        window=EmissionScope.PER_STEP,
+        window=window,
         scope=DecisionScope(
             kind=DecisionScopeKind.PER_DECISION_NODE,
             class_system_name=None,
@@ -104,6 +109,7 @@ def _row_write(
     origin: pd.Timestamp,
     horizon_step: int,
     model_name: str,
+    window: EmissionScope = EmissionScope.PER_STEP,
 ) -> ForecastWrite:
     lower, upper = interval_columns(0.9)
     frame = pd.DataFrame(
@@ -120,7 +126,7 @@ def _row_write(
         }
     )
     key: ForecastKey = (series_key, origin, horizon_step, model_name)
-    descriptor = _descriptor()
+    descriptor = _descriptor(window=window)
     observation_issuances = (
         {
             key: IssuedBoundFacts(
@@ -260,6 +266,67 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
                         "declared-censored",
                         False,
                     ),
+                ),
+            ),
+        )
+    )
+    return sink
+
+
+def _window_sum_sink() -> InMemoryLedgerSink:
+    session = _session()
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    models = ("complete-window", "partial-window")
+    sink.commit(
+        OriginCommit(
+            session=session,
+            origin=ORIGIN_DATE,
+            forecasts=tuple(
+                _row_write(
+                    series_key="a",
+                    origin=ORIGIN_DATE,
+                    horizon_step=step,
+                    model_name=model,
+                    window=EmissionScope.WINDOW_SUM,
+                )
+                for model in models
+                for step in (1, 2)
+            ),
+        )
+    )
+
+    pending_by_key = {
+        (
+            value.forecast_key.series_key,
+            value.forecast_key.origin,
+            value.forecast_key.horizon_step,
+            value.forecast_key.model_name,
+        ): value
+        for value in sink.pending_observations
+    }
+    actuals = {
+        ("a", ORIGIN_DATE, 1, "complete-window"): 4.0,
+        ("a", ORIGIN_DATE, 2, "complete-window"): 7.0,
+        ("a", ORIGIN_DATE, 1, "partial-window"): 6.0,
+    }
+    sink.commit(
+        OriginCommit(
+            session=session,
+            origin=pd.Timestamp("2026-01-04"),
+            observe_cycle=ObserveCycle(
+                resolutions=tuple(
+                    ObservationResolution(
+                        pending_by_key[key].forecast_key,
+                        pending_by_key[key].target_timestamp,
+                        actual,
+                        None,
+                        None,
+                    )
+                    for key, actual in actuals.items()
+                ),
+                pending_removals=tuple(pending_by_key[key].forecast_key for key in actuals),
+                pending_retentions=tuple(
+                    pending for key, pending in pending_by_key.items() if key not in actuals
                 ),
             ),
         )
@@ -470,6 +537,48 @@ def test_closed_scan_is_batch_invariant_and_origin_bounds_are_inclusive(
     assert {key.origin for key, _columns in selected} == {pd.Timestamp("2026-01-03")}
 
 
+def test_suspended_scan_releases_the_sink_lock_and_keeps_its_row_cutoff() -> None:
+    sink = _closed_sink()
+    reader = InMemoryLedgerReader(sink)
+    iterator = reader.scan(LedgerSelection(_session(), ("series_key",), 1))
+    first = next(iterator)
+    write = OriginCommit(
+        session=_session(),
+        origin=pd.Timestamp("2026-01-04"),
+        observe_cycle=ObserveCycle(pending_retentions=sink.pending_observations),
+        forecasts=(
+            _row_write(
+                series_key="a",
+                origin=pd.Timestamp("2026-01-04"),
+                horizon_step=1,
+                model_name="later-model",
+            ),
+        ),
+    )
+    errors: list[BaseException] = []
+
+    def commit_later_forecast() -> None:
+        try:
+            sink.commit(write)
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    thread = Thread(target=commit_later_forecast, daemon=True)
+    thread.start()
+    thread.join(timeout=2)
+    blocked = thread.is_alive()
+    if blocked:
+        iterator.close()
+        thread.join(timeout=2)
+
+    assert blocked is False
+    assert errors == []
+    rows = [*first.keys, *(key for batch in iterator for key in batch.keys)]
+    assert len(rows) == 5
+    assert all(key.model_name != "later-model" for key in rows)
+    assert len(_scan_rows(reader, batch_size=20)) == 6
+
+
 def test_scan_matches_owned_issuance_resolution_and_registered_scores() -> None:
     sink = _closed_sink()
     rows = dict(_scan_rows(InMemoryLedgerReader(sink), batch_size=2))
@@ -565,6 +674,43 @@ def test_scan_matches_owned_issuance_resolution_and_registered_scores() -> None:
             assert score.unscored_reason == expected_outcome.unscored_reason
 
 
+def test_window_sum_scan_matches_complete_and_partial_coverage_outcomes() -> None:
+    sink = _window_sum_sink()
+    rows = dict(_scan_rows(InMemoryLedgerReader(sink), batch_size=1))
+    outcomes = {
+        (outcome.forecast_key, outcome.bound_key): outcome
+        for outcome in sink.coverage_report().outcomes
+    }
+
+    for reported_key, columns in rows.items():
+        key: ForecastKey = (
+            reported_key.series_key,
+            reported_key.origin,
+            reported_key.horizon_step,
+            reported_key.model_name,
+        )
+        for score in cast(tuple[LedgerBoundScore, ...], columns["scores"]):
+            expected = outcomes[(key, score.bound_key)]
+            assert score.descriptor == expected.target.descriptor
+            assert score.guaranteed_side == expected.target.guaranteed_side
+            assert score.resolved is expected.resolved
+            assert score.scored is expected.scored
+            assert score.value == expected.value
+            assert score.covered is expected.covered
+            assert score.unscored_reason == expected.unscored_reason
+
+    complete = cast(
+        tuple[LedgerBoundScore, ...],
+        rows[LedgerForecastKey("a", ORIGIN_DATE, 2, "complete-window")]["scores"],
+    )
+    partial = cast(
+        tuple[LedgerBoundScore, ...],
+        rows[LedgerForecastKey("a", ORIGIN_DATE, 2, "partial-window")]["scores"],
+    )
+    assert all(score.resolved and score.scored for score in complete)
+    assert all(not score.resolved and not score.scored for score in partial)
+
+
 def test_consumer_mutation_cannot_change_stored_or_fresh_scan_facts() -> None:
     sink = _closed_sink()
     reader = InMemoryLedgerReader(sink)
@@ -644,6 +790,23 @@ def _many_row_sink(row_count: int) -> InMemoryLedgerSink:
         )
     )
     return sink
+
+
+def test_scan_reads_each_stored_row_once_across_many_batches() -> None:
+    sink = _many_row_sink(21)
+    stored = sink._ledger._forecasts
+    reads = 0
+
+    class CountingForecasts(dict[ForecastKey, object]):
+        def __getitem__(self, key: ForecastKey) -> object:
+            nonlocal reads
+            reads += 1
+            return super().__getitem__(key)
+
+    sink._ledger._forecasts = cast(Any, CountingForecasts(stored))
+
+    assert len(_scan_rows(InMemoryLedgerReader(sink), batch_size=3)) == 21
+    assert reads == 21
 
 
 def _scan_peak_bytes(sink: InMemoryLedgerSink) -> int:
