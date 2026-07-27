@@ -36,13 +36,22 @@ from newcalibre.domain import (
     SessionIdentity,
     StockoutRule,
 )
-from newcalibre.engine import CommitReceipt, ForecastWrite, OriginCommit
+from newcalibre.engine import (
+    CommitReceipt,
+    Engine,
+    EventDriver,
+    ForecastWrite,
+    OriginCommit,
+    Spine,
+    TimeLoop,
+)
 from newcalibre.engine import ports as engine_ports
 from newcalibre.engine.ports import SettlementSnapshot
 from newcalibre.engine.ports.memory import (
     InMemoryActualsSource,
     InMemoryArtifactStore,
     InMemoryCalibrationStateStore,
+    InMemoryLedgerReader,
     InMemoryLedgerSink,
     InMemoryPanelSource,
     InProcessDispatch,
@@ -194,6 +203,29 @@ def test_engine_declares_exactly_the_six_chapter_03_ports() -> None:
         "LedgerSink",
         "DispatchBackend",
     }
+    assert not hasattr(engine_ports, "LedgerReader")
+
+
+def test_reporting_adapter_is_structurally_absent_from_every_write_path() -> None:
+    write_path_modules = {
+        inspect.getmodule(value)
+        for value in (
+            Engine,
+            Spine,
+            TimeLoop,
+            EventDriver,
+            OriginCommit,
+            CommitReceipt,
+        )
+    }
+    assert None not in write_path_modules
+    for module in write_path_modules:
+        source = inspect.getsource(module)
+        assert "InMemoryLedgerReader" not in source
+        assert "engine.reporting" not in source
+
+    assert "InMemoryLedgerReader" not in inspect.getsource(InMemoryLedgerSink)
+    assert isinstance(InMemoryLedgerReader, type)
 
 
 def test_ledger_sink_exposes_only_a_period_bound_compact_settlement_snapshot() -> None:

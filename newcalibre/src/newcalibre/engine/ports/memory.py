@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Iterator, Mapping, Sequence
 from threading import RLock
 from types import MappingProxyType
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import pandas as pd
 
@@ -19,6 +19,7 @@ from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
     CensoringAssertion,
+    EmissionScope,
     InventoryPosition,
     Panel,
     SessionIdentity,
@@ -37,20 +38,35 @@ from newcalibre.engine.ports import (
     OriginCommit,
     SettlementSnapshot,
 )
+from newcalibre.engine.reporting import (
+    LedgerBatch,
+    LedgerBoundIssuance,
+    LedgerBoundScore,
+    LedgerColumn,
+    LedgerForecastKey,
+    LedgerObservationAnnotation,
+    LedgerResolution,
+    LedgerSelection,
+)
 from newcalibre.engine.settlement._state import SettlementIndex, SettlementIndexAudit
 from newcalibre.ledger import (
     CoverageReport,
+    CoverageTarget,
+    ForecastKey,
     ForecastRow,
     Ledger,
     LedgerError,
     OrderRow,
     PredicateRegistry,
     SettlementRecord,
+    _resolved_window_sum,
+    _score_bound,
 )
 from newcalibre.observe import ActualRecord, ActualsSubmission, ObservedActual, PendingObservation
 
 _Input = TypeVar("_Input")
 _Output = TypeVar("_Output")
+type _ForecastScanSegment = tuple[pd.Timestamp, tuple[ForecastKey, ...]]
 
 
 class InMemoryPanelSource:
@@ -202,7 +218,8 @@ class InMemoryLedgerSink:
     ) -> None:
         self._lock = RLock()
         self._ledger = Ledger(session=session, calendar=calendar)
-        self._forecast_rows: dict[object, ForecastRow] = {}
+        self._forecast_rows: dict[ForecastKey, ForecastRow] = {}
+        self._forecast_scan_segments: list[_ForecastScanSegment] = []
         self._order_keys: set[object] = set()
         self._settlement_keys: set[object] = set()
         self._commits: dict[CommitKey, CommitReceipt] = {}
@@ -371,12 +388,17 @@ class InMemoryLedgerSink:
 
         staged = _stage_new_rows(write, calendar=self._ledger.calendar)
         _require_origin_rows(write, staged=staged)
+        staged_forecasts = tuple((row.key, row) for row in staged.forecasts)
+        canonical_forecasts = tuple(
+            sorted(staged_forecasts, key=lambda item: _forecast_scan_key(item[0]))
+        )
+        canonical_forecast_keys = tuple(key for key, _row in canonical_forecasts)
         for label, value in write.observe_cycle.state_updates.items():
             if write.state_updates.get(label) != value:
                 raise LedgerError(
                     f"origin state updates do not preserve observe update for {label!r}"
                 )
-        _reject_collision(self._forecast_rows, (row.key for row in staged.forecasts), "forecast")
+        _reject_collision(self._forecast_rows, canonical_forecast_keys, "forecast")
         _reject_collision(self._order_keys, (row.key for row in staged.orders), "order")
         _reject_collision(
             self._settlement_keys,
@@ -420,7 +442,9 @@ class InMemoryLedgerSink:
             )
         self._ledger.append_orders(write.orders)
         self._ledger.append_settlements(write.settlements)
-        self._forecast_rows.update((row.key, row) for row in staged.forecasts)
+        self._forecast_rows.update(canonical_forecasts)
+        if canonical_forecast_keys:
+            self._forecast_scan_segments.append((write.origin, canonical_forecast_keys))
         self._order_keys.update(row.key for row in write.orders)
         self._settlement_keys.update(row.key for row in write.settlements)
         if initial_positions is not None:
@@ -493,6 +517,222 @@ class InMemoryLedgerSink:
         return self._ledger.settlements
 
 
+class InMemoryLedgerReader:
+    """Stream bounded logical reporting batches from one closed in-memory sink."""
+
+    def __init__(self, sink: InMemoryLedgerSink) -> None:
+        if not isinstance(sink, InMemoryLedgerSink):
+            raise TypeError("in-memory ledger reader requires an InMemoryLedgerSink")
+        self._sink = sink
+        self._registry = PredicateRegistry.gate_a()
+
+    def scan(self, selection: LedgerSelection) -> Iterator[LedgerBatch]:
+        """Return canonical batches after validating the complete selection."""
+        if not isinstance(selection, LedgerSelection):
+            raise TypeError("ledger scan requires a LedgerSelection")
+        if selection.session != self._sink.session:
+            raise ValueError("ledger selection session does not match the reader session")
+        with self._sink._lock:
+            segment_stop = len(self._sink._forecast_scan_segments)
+        return self._scan(selection, segment_stop=segment_stop)
+
+    def _scan(
+        self,
+        selection: LedgerSelection,
+        *,
+        segment_stop: int,
+    ) -> Iterator[LedgerBatch]:
+        segment_index = 0
+        row_index = 0
+        while True:
+            with self._sink._lock:
+                entries, segment_index, row_index = self._next_entries(
+                    selection,
+                    segment_index=segment_index,
+                    row_index=row_index,
+                    segment_stop=segment_stop,
+                )
+                if not entries:
+                    return
+                keys: list[LedgerForecastKey] = []
+                columns: dict[str, list[object]] = {name: [] for name in selection.columns}
+                for forecast_key, row in entries:
+                    keys.append(
+                        LedgerForecastKey(
+                            series_key=row.series_key,
+                            origin=row.origin,
+                            horizon_step=row.horizon_step,
+                            model_name=row.model_name,
+                        )
+                    )
+                    for name, values in columns.items():
+                        values.append(
+                            self._project_column(
+                                name,
+                                forecast_key=forecast_key,
+                                row=row,
+                            )
+                        )
+                batch = LedgerBatch(
+                    session=selection.session,
+                    keys=keys,
+                    columns=columns,
+                    batch_size=selection.batch_size,
+                )
+            yield batch
+
+    def _next_entries(
+        self,
+        selection: LedgerSelection,
+        *,
+        segment_index: int,
+        row_index: int,
+        segment_stop: int,
+    ) -> tuple[list[tuple[ForecastKey, ForecastRow]], int, int]:
+        """Collect the next canonical batch from the captured segment prefix."""
+        entries: list[tuple[ForecastKey, ForecastRow]] = []
+        segments = self._sink._forecast_scan_segments
+        while segment_index < segment_stop and len(entries) < selection.batch_size:
+            origin, forecast_keys = segments[segment_index]
+            if selection.origin_start is not None and origin < selection.origin_start:
+                segment_index += 1
+                row_index = 0
+                continue
+            if selection.origin_end is not None and origin > selection.origin_end:
+                return entries, segment_stop, 0
+            while row_index < len(forecast_keys) and len(entries) < selection.batch_size:
+                forecast_key = forecast_keys[row_index]
+                entries.append((forecast_key, self._sink._ledger._forecasts[forecast_key]))
+                row_index += 1
+            if row_index == len(forecast_keys):
+                segment_index += 1
+                row_index = 0
+        return entries, segment_index, row_index
+
+    def _project_column(
+        self,
+        name: str,
+        *,
+        forecast_key: ForecastKey,
+        row: ForecastRow,
+    ) -> object:
+        if name == LedgerColumn.SERIES_KEY.value:
+            return row.series_key
+        if name == LedgerColumn.ORIGIN.value:
+            return row.origin
+        if name == LedgerColumn.HORIZON_STEP.value:
+            return row.horizon_step
+        if name == LedgerColumn.MODEL_NAME.value:
+            return row.model_name
+        if name == LedgerColumn.TARGET_TIMESTAMP.value:
+            return row.target_timestamp
+        if name == LedgerColumn.POINT_FORECAST.value:
+            return row.point_forecast
+        if name == LedgerColumn.ISSUANCES.value:
+            return self._issuances(row)
+        if name == LedgerColumn.RESOLUTION.value:
+            return self._resolution(forecast_key)
+        if name == LedgerColumn.SCORES.value:
+            return self._scores(forecast_key, row=row)
+        raise AssertionError(f"unhandled ledger column {name!r}")
+
+    def _issuances(self, row: ForecastRow) -> tuple[LedgerBoundIssuance, ...]:
+        values = row.values
+        return tuple(
+            LedgerBoundIssuance(
+                bound_key=bound_key,
+                bound_values=cast(
+                    tuple[float | None, ...],
+                    tuple(values[column] for column in bound_key),
+                ),
+                descriptor=issuance.descriptor,
+                guaranteed_side=(
+                    None if issuance.guaranteed_side is None else issuance.guaranteed_side.value
+                ),
+                calibration_ready=issuance.calibration_ready,
+                bounds_finite=issuance.bounds_finite,
+                bounds_null_reason=issuance.bounds_null_reason,
+            )
+            for bound_key, issuance in row.issuances.items()
+        )
+
+    def _resolution(self, forecast_key: ForecastKey) -> LedgerResolution | None:
+        resolution = self._sink._ledger._resolutions.get(forecast_key)
+        if resolution is None:
+            return None
+        annotation = self._sink._ledger._annotations.get(forecast_key)
+        projected_annotation = (
+            None
+            if annotation is None
+            else LedgerObservationAnnotation(
+                score=annotation.score,
+                exclusion_cause=annotation.exclusion_cause,
+                advanced_delivered_score=annotation.advanced_delivered_score,
+            )
+        )
+        return LedgerResolution(
+            target_timestamp=resolution.target_timestamp,
+            actual_value=resolution.actual,
+            censoring_assertion=resolution.censoring_assertion,
+            availability_bound=resolution.availability_bound,
+            annotation=projected_annotation,
+        )
+
+    def _scores(
+        self,
+        forecast_key: ForecastKey,
+        *,
+        row: ForecastRow,
+    ) -> tuple[LedgerBoundScore, ...]:
+        outcomes: list[LedgerBoundScore] = []
+        window_sum_actual = (
+            _resolved_window_sum(
+                self._sink._ledger._forecasts,
+                forecast_key=forecast_key,
+            )
+            if any(
+                issuance.bounds_finite and issuance.descriptor.window is EmissionScope.WINDOW_SUM
+                for issuance in row.issuances.values()
+            )
+            else None
+        )
+        for bound_key, issuance in row.issuances.items():
+            target = CoverageTarget(
+                descriptor=issuance.descriptor,
+                guaranteed_side=issuance.guaranteed_side,
+                bound_key=bound_key,
+            )
+            actual_value = row.actual_value
+            if issuance.bounds_finite and target.descriptor.window is EmissionScope.WINDOW_SUM:
+                actual_value = window_sum_actual
+            outcome = _score_bound(
+                forecast_key=forecast_key,
+                row=row,
+                actual_value=actual_value,
+                target=target,
+                issuance=issuance,
+                annotation=self._sink._ledger._annotations.get(forecast_key),
+                registry=self._registry,
+            )
+            outcomes.append(
+                LedgerBoundScore(
+                    bound_key=outcome.bound_key,
+                    descriptor=outcome.target.descriptor,
+                    guaranteed_side=(
+                        None
+                        if outcome.target.guaranteed_side is None
+                        else outcome.target.guaranteed_side.value
+                    ),
+                    resolved=outcome.resolved,
+                    scored=outcome.scored,
+                    value=outcome.value,
+                    covered=outcome.covered,
+                    unscored_reason=outcome.unscored_reason,
+                )
+            )
+        return tuple(outcomes)
+
+
 class InProcessDispatch:
     """Execute work serially and preserve the supplied order."""
 
@@ -503,6 +743,11 @@ class InProcessDispatch:
     ) -> tuple[_Output, ...]:
         """Apply ``function`` once per item in deterministic order."""
         return tuple(function(item) for item in items)
+
+
+def _forecast_scan_key(key: ForecastKey) -> tuple[pd.Timestamp, str, str, int]:
+    series_key, origin, horizon_step, model_name = key
+    return origin, series_key, model_name, horizon_step
 
 
 def _stage_new_rows(write: OriginCommit, *, calendar: Calendar) -> Ledger:
@@ -546,6 +791,7 @@ __all__ = [
     "InMemoryActualsSource",
     "InMemoryArtifactStore",
     "InMemoryCalibrationStateStore",
+    "InMemoryLedgerReader",
     "InMemoryLedgerSink",
     "InMemoryPanelSource",
     "InProcessDispatch",
