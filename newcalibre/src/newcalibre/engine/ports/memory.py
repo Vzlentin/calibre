@@ -654,6 +654,17 @@ class InMemoryLedgerReader:
         row: ForecastRow,
     ) -> tuple[LedgerBoundScore, ...]:
         outcomes: list[LedgerBoundScore] = []
+        window_sum_actual = (
+            _resolved_window_sum(
+                self._sink._ledger._forecasts,
+                forecast_key=forecast_key,
+            )
+            if any(
+                issuance.bounds_finite and issuance.descriptor.window is EmissionScope.WINDOW_SUM
+                for issuance in row.issuances.values()
+            )
+            else None
+        )
         for bound_key, issuance in row.issuances.items():
             target = CoverageTarget(
                 descriptor=issuance.descriptor,
@@ -662,10 +673,7 @@ class InMemoryLedgerReader:
             )
             actual_value = row.actual_value
             if issuance.bounds_finite and target.descriptor.window is EmissionScope.WINDOW_SUM:
-                actual_value = _resolved_window_sum(
-                    self._sink._ledger._forecasts,
-                    forecast_key=forecast_key,
-                )
+                actual_value = window_sum_actual
             outcome = _score_bound(
                 forecast_key=forecast_key,
                 row=row,

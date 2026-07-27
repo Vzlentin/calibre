@@ -424,8 +424,6 @@ def test_reporting_values_are_deeply_immutable() -> None:
     with pytest.raises(FrozenInstanceError):
         cast(Any, resolution).actual_value = 4.0
 
-    assert LedgerBoundIssuance
-
 
 def test_reader_rejects_unknown_sessions_before_returning_an_iterator() -> None:
     reader = InMemoryLedgerReader(_closed_sink())
