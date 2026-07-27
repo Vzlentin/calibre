@@ -310,7 +310,11 @@ def _parse_conformal(value: object) -> tuple[str, dict[str, object], int]:
         raise M5ConfigError("pipeline conformal calibration_window must equal 10")
     if payload["upper_floor"] is not None or payload["upper_cap"] is not None:
         raise M5ConfigError("pipeline conformal clamps must be explicit null")
-    runtime_payload = {"method": SPLIT_PER_STEP, "partition_by": "series", **payload}
+    runtime_payload = {
+        "method": SPLIT_PER_STEP,
+        "partition_by": "series-horizon",
+        **payload,
+    }
     schema = method_config_schema(SPLIT_PER_STEP)
     try:
         validated = schema.model_validate(

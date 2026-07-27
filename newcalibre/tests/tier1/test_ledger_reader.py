@@ -56,6 +56,7 @@ from newcalibre.engine import (
     LedgerReader,
     LedgerResolution,
     LedgerSelection,
+    LedgerSessionMetadata,
     OriginCommit,
     reporting,
 )
@@ -462,11 +463,26 @@ def test_batch_snapshots_columns_and_enforces_alignment_and_bound() -> None:
 
 def test_reader_protocol_is_runtime_checkable() -> None:
     class Reader:
+        @property
+        def metadata(self) -> LedgerSessionMetadata:
+            return LedgerSessionMetadata(_session(), _session().series_keys)
+
         def scan(self, selection: LedgerSelection) -> Iterator[LedgerBatch]:
             del selection
             return iter(())
 
     assert isinstance(Reader(), LedgerReader)
+
+
+def test_reader_metadata_is_immutable_and_session_consistent() -> None:
+    reader = InMemoryLedgerReader(_closed_sink())
+
+    assert reader.metadata == LedgerSessionMetadata(_session(), ("a", "b"))
+    assert reader.metadata.series_keys == ("a", "b")
+    with pytest.raises(FrozenInstanceError):
+        cast(Any, reader.metadata).series_keys = ("mutated",)
+    with pytest.raises(ValueError, match="session"):
+        LedgerSessionMetadata(_session(), ("a",))
 
 
 def test_engine_exports_only_the_reporting_contract_and_adapter() -> None:

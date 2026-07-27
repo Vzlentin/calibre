@@ -47,6 +47,7 @@ from newcalibre.engine.reporting import (
     LedgerObservationAnnotation,
     LedgerResolution,
     LedgerSelection,
+    LedgerSessionMetadata,
 )
 from newcalibre.engine.settlement._state import SettlementIndex, SettlementIndexAudit
 from newcalibre.ledger import (
@@ -524,7 +525,13 @@ class InMemoryLedgerReader:
         if not isinstance(sink, InMemoryLedgerSink):
             raise TypeError("in-memory ledger reader requires an InMemoryLedgerSink")
         self._sink = sink
+        self._metadata = LedgerSessionMetadata(sink.session, sink.session.series_keys)
         self._registry = PredicateRegistry.gate_a()
+
+    @property
+    def metadata(self) -> LedgerSessionMetadata:
+        """Return immutable identity for the closed sink session."""
+        return self._metadata
 
     def scan(self, selection: LedgerSelection) -> Iterator[LedgerBatch]:
         """Return canonical batches after validating the complete selection."""

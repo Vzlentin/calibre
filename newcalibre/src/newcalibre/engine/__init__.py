@@ -43,6 +43,7 @@ from newcalibre.engine.reporting import (
     LedgerReader,
     LedgerResolution,
     LedgerSelection,
+    LedgerSessionMetadata,
 )
 from newcalibre.engine.settlement import (
     SettlementError,
@@ -120,6 +121,7 @@ __all__ = [
     "LedgerReader",
     "LedgerResolution",
     "LedgerSelection",
+    "LedgerSessionMetadata",
     "LedgerSink",
     "ObservationResult",
     "OrderProposal",

@@ -53,7 +53,7 @@ def test_gate_c_configuration_pins_registered_intent() -> None:
         "calibration_window": 10,
         "coverage": 0.9,
         "method": "split-per-step",
-        "partition_by": "series",
+        "partition_by": "series-horizon",
         "upper_cap": None,
         "upper_floor": None,
     }

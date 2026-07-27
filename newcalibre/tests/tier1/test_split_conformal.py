@@ -72,9 +72,15 @@ def _partition(
     *,
     series_key: str = "sku",
     partition_by: str = "global",
+    horizon_step: int = 1,
 ) -> str:
     value = "global" if partition_by == "global" else series_key
-    return derive_partition_label(_MODEL, value, scope)
+    return derive_partition_label(
+        _MODEL,
+        value,
+        scope,
+        horizon_step=horizon_step if partition_by == "series-horizon" else None,
+    )
 
 
 def _states(
@@ -208,6 +214,90 @@ def test_series_partitioning_uses_independent_score_states() -> None:
         a_label,
         b_label,
     ]
+
+
+def test_series_horizon_partitioning_isolates_state_and_readiness_per_step() -> None:
+    runtime = resolve_method(
+        {
+            "method": "split-per-step",
+            "coverage": 0.5,
+            "partition_by": "series-horizon",
+        }
+    )
+    first_label = _partition(
+        EmissionScope.PER_STEP,
+        partition_by="series-horizon",
+        horizon_step=1,
+    )
+    second_label = _partition(
+        EmissionScope.PER_STEP,
+        partition_by="series-horizon",
+        horizon_step=2,
+    )
+    assert first_label != second_label
+    states = runtime.calibrate({first_label: [1.0, 2.0], second_label: [10.0]})
+
+    result = runtime.apply(_frame((4.0, 4.0)), states)
+    lower, upper = interval_columns(0.5)
+
+    assert result.forecasts[upper].tolist()[0] == 6.0
+    assert math.isnan(result.forecasts[lower].tolist()[1])
+    assert math.isnan(result.forecasts[upper].tolist()[1])
+    assert [facts.partition_label for facts in result.issuances.values()] == [
+        first_label,
+        second_label,
+    ]
+    assert [facts.calibration_ready for facts in result.issuances.values()] == [True, False]
+
+
+def test_series_horizon_delivery_updates_only_its_declared_step() -> None:
+    runtime = resolve_method(
+        {
+            "method": "split-per-step",
+            "coverage": 0.5,
+            "partition_by": "series-horizon",
+        }
+    )
+    first_label = _partition(
+        EmissionScope.PER_STEP,
+        partition_by="series-horizon",
+        horizon_step=1,
+    )
+    second_label = _partition(
+        EmissionScope.PER_STEP,
+        partition_by="series-horizon",
+        horizon_step=2,
+    )
+    states = runtime.calibrate({first_label: [1.0, 2.0], second_label: [10.0, 20.0]})
+    issued = runtime.apply(_frame((4.0, 4.0)), states)
+    observations = _observations(
+        issued,
+        (7.0, 8.0),
+        (CensoringAssertion.UNCENSORED, CensoringAssertion.UNCENSORED),
+    )
+
+    effect = runtime.observe(Delivery(first_label, (observations[0],)), states)
+
+    assert set(effect.state_updates) == {first_label}
+    assert second_label not in effect.state_updates
+    with pytest.raises(RuntimeContractError, match="issued partition"):
+        Delivery(first_label, (observations[1],))
+
+
+def test_series_horizon_labels_cannot_collide_with_series_values() -> None:
+    series_label = derive_partition_label(
+        _MODEL,
+        "sku@1",
+        EmissionScope.PER_STEP,
+    )
+    horizon_label = derive_partition_label(
+        _MODEL,
+        "sku",
+        EmissionScope.PER_STEP,
+        horizon_step=1,
+    )
+
+    assert series_label != horizon_label
 
 
 def test_apply_ignores_poisoned_actuals_and_advances_only_method_issue_state() -> None:
@@ -597,9 +687,18 @@ def test_split_config_rejects_invalid_rank_window_and_clamps(
         resolve_method({"method": "split-per-step", **configuration})
 
 
-def test_window_config_requires_positive_protection_period() -> None:
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        {"protection_period": 0},
+        {"partition_by": "series-horizon"},
+    ],
+)
+def test_window_config_rejects_invalid_scope_configuration(
+    configuration: dict[str, object],
+) -> None:
     with pytest.raises(ConformalRegistryError, match="invalid configuration"):
-        resolve_method({"method": "split-window-sum", "protection_period": 0})
+        resolve_method({"method": "split-window-sum", **configuration})
 
 
 def test_split_private_codec_rejects_wrong_scope_and_malformed_restoration_payloads() -> None:
