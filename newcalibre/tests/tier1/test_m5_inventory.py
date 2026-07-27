@@ -206,6 +206,47 @@ def test_download_refuses_unapproved_names_and_overlong_bytes(tmp_path: Path) ->
     assert not (tmp_path / "download-long" / "calendar.csv").exists()
 
 
+def test_download_bounds_the_real_network_read_before_installing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path = _inventory_path(tmp_path)
+    read_sizes: list[int] = []
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, size: int) -> bytes:
+            read_sizes.append(size)
+            return b"x" * size
+
+    def fake_urlopen(_url: str, *, timeout: int) -> Response:
+        assert timeout == 120
+        return Response()
+
+    monkeypatch.setattr(
+        "newcalibre.protocols.m5.inventory.urllib.request.urlopen",
+        fake_urlopen,
+    )
+    target = tmp_path / "download-bounded"
+    with pytest.raises(M5InputError, match="size"):
+        download_m5_inputs(
+            target,
+            {
+                "calendar.csv": "https://example.test/calendar",
+                "sales_train_evaluation.csv": "https://example.test/sales",
+            },
+            inventory_path,
+        )
+
+    assert read_sizes == [len(b"calendar") + 1]
+    assert not (target / "calendar.csv").exists()
+
+
 def test_download_installs_only_verified_bytes_then_publicly_reverifies(tmp_path: Path) -> None:
     inventory_path = _inventory_path(tmp_path)
     payloads = {

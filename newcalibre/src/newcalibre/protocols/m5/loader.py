@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import io
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Self
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_bool_dtype
+from pandas.api.types import is_bool_dtype, is_integer_dtype
 
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.protocols.m5.config import M5ProtocolConfig
@@ -28,6 +27,9 @@ _SOURCE_FACTS = ("item_id", "dept_id", "cat_id", "store_id", "state_id")
 _METADATA_COLUMNS = ("id", *_SOURCE_FACTS)
 _EVALUATION_DAY_COUNT = 1941
 _DAY_COLUMNS = tuple(f"d_{index}" for index in range(1, _EVALUATION_DAY_COUNT + 1))
+_SIGNED_INT64_MAX = 2**63 - 1
+_SIGNED_INT64_BOUND = float(2**63)
+_FLOAT_INTEGER_AMBIGUITY_BOUND = float(2**53)
 
 
 class M5DataError(M5InputError):
@@ -96,15 +98,18 @@ class M5Dataset:
 
 
 def load_m5_dataset(
-    data_directory: Path,
-    inventory_path: Path,
+    project_root: Path,
     config: M5ProtocolConfig,
 ) -> M5Dataset:
-    """Verify exact inputs, validate the full release, then select population."""
+    """Verify configured inputs, validate the full release, then select population."""
+    if not isinstance(project_root, Path):
+        raise M5DataError("project root must be a pathlib.Path")
     if not isinstance(config, M5ProtocolConfig):
         raise M5DataError("config must be an M5ProtocolConfig")
     if config.phase != "evaluation":
         raise M5DataError("M5 loader requires the declared evaluation phase")
+    data_directory = project_root / config.data_dir
+    inventory_path = project_root / config.inventory_path
     try:
         inventory = verify_m5_inputs(data_directory, inventory_path)
         calendar = _read_csv(data_directory, inventory, _CALENDAR_NAME)
@@ -233,19 +238,29 @@ def _digest_rank(salt: str, series_key: str) -> bytes:
 def _integral_sales(series: pd.Series, *, day: str) -> pd.Series:
     try:
         numeric = pd.to_numeric(series, errors="raise")
-        values = numeric.to_numpy(dtype="float64", na_value=math.nan)
     except (TypeError, ValueError) as error:
         raise M5DataError(
             f"evaluation sales {day} values must be finite integral counts"
         ) from error
+    if numeric.isna().any():
+        raise M5DataError(f"evaluation sales {day} values must be finite integral counts")
+    if is_integer_dtype(numeric.dtype):
+        if (numeric < 0).any():
+            raise M5DataError(f"evaluation sales {day} values must be non-negative")
+        if (numeric > _SIGNED_INT64_MAX).any():
+            raise M5DataError(f"evaluation sales {day} values exceed signed 64-bit counts")
+        return numeric.astype("int64")
+
+    values = numeric.to_numpy(dtype="float64")
     if not np.isfinite(values).all() or not np.equal(values, np.floor(values)).all():
         raise M5DataError(f"evaluation sales {day} values must be finite integral counts")
     if (values < 0.0).any():
         raise M5DataError(f"evaluation sales {day} values must be non-negative")
-    try:
-        return pd.Series(values, index=series.index, name=series.name, dtype="int64")
-    except (OverflowError, TypeError, ValueError) as error:
-        raise M5DataError(f"evaluation sales {day} values exceed signed 64-bit counts") from error
+    if (values >= _SIGNED_INT64_BOUND).any():
+        raise M5DataError(f"evaluation sales {day} values exceed signed 64-bit counts")
+    if (values >= _FLOAT_INTEGER_AMBIGUITY_BOUND).any():
+        raise M5DataError(f"evaluation sales {day} values cannot be validated exactly")
+    return pd.Series(values, index=series.index, name=series.name, dtype="int64")
 
 
 def _hierarchy_strings(series: pd.Series, *, attribute: str) -> pd.Series:
