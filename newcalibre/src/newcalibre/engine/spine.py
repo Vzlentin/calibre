@@ -565,8 +565,14 @@ class Engine:
             session=self._ledger_sink.session,
             ledger_calendar=self._ledger_sink.calendar,
         )
-        if self._hierarchy.bottom_series != self._panel.series_keys:
-            raise _EngineError("hierarchy bottom series do not match the engine session panel")
+        hierarchy_node_series = tuple(sorted(self._hierarchy.node_labels, key=str.encode))
+        if self._panel.series_keys not in (
+            self._hierarchy.bottom_series,
+            hierarchy_node_series,
+        ):
+            raise _EngineError(
+                "engine panel series must exactly match the hierarchy bottoms or all nodes"
+            )
 
     def fit(self, request: OriginRequest) -> tuple[FittedTask, ...]:
         """Build deterministic tasks and fit or restore their adapters."""

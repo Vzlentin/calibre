@@ -1,0 +1,37 @@
+schema: 1
+dataset:
+  name: m5
+  phase: evaluation
+  data_dir: data/m5
+  inventory: benchmarks/m5/m5-inputs.json
+protocol:
+  horizon: 28
+  origin_count: 64
+  population:
+    kind: digest_rank
+    bottom_count: 8
+    salt: tier4-reduced-mechanics
+pipeline:
+  model:
+    backend: seasonal-naive
+    m: 7
+    model_name: seasonal-naive
+    quantile_levels: []
+    censoring_aware: false
+    scope: global
+  reconciliation:
+    strategy: wls_struct
+  conformal:
+    method: split-per-step
+    coverage: 0.9
+    calibration_window: 10
+    partition: series-horizon
+    upper_floor: null
+    upper_cap: null
+execution:
+  backend: ray
+  logical_shards: 16
+  workers: 16
+  numeric_threads_per_worker: 1
+  retries: 0
+output_dir: results/m5/tier4-reduced

@@ -9,4 +9,6 @@ __pycache__/
 build/
 dist/
 data/
+!tests/fixtures/m5/tiny/data/
+!tests/fixtures/m5/tiny/data/*.csv
 artifacts/

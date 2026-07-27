@@ -269,7 +269,9 @@ def test_download_installs_only_verified_bytes_then_publicly_reverifies(tmp_path
 def test_package_and_script_keep_acquisition_private() -> None:
     assert m5.__all__ == [
         "M5Diagnostics",
+        "M5RunResult",
         "load_m5_config",
+        "run_m5",
         "score_m5",
         "verify_m5_inputs",
     ]
