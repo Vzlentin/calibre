@@ -1187,6 +1187,7 @@ def _snapshot_commit_receipt(receipt: object) -> CommitReceipt:
         origin=receipt.origin,
         digest=receipt.digest,
         state_updates=dict(receipt.state_updates),
+        has_forecasts=receipt.has_forecasts,
         observe_cycle=receipt.observe_cycle,
         settlement_periods=tuple(receipt.settlement_periods),
         sequence=receipt.sequence,

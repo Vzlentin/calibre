@@ -525,6 +525,26 @@ def test_decision_free_loop_rejects_mismatched_ports_and_sessions_before_effects
     _assert_no_effects(runtime)
 
 
+def test_decision_free_loop_rejects_initial_inventory_before_effects() -> None:
+    session = _session(with_decision=False)
+    runtime = _runtime(
+        session=session,
+        forecast_panel=_panel(range(1, 13)),
+        enable_ordering=False,
+    )
+
+    with pytest.raises(TimeLoopError, match="empty initial inventory positions"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(session, positions={"a": INITIAL_POSITION}),
+        )
+
+    assert runtime.actuals.calls == []
+    _assert_no_effects(runtime)
+
+
 def test_decision_free_loop_runs_origins_and_closes_observations_without_settlement() -> None:
     session = _session(with_decision=False)
     panel = _panel(range(1, 13))
@@ -562,6 +582,70 @@ def test_decision_free_loop_runs_origins_and_closes_observations_without_settlem
     assert len(runtime.sink.observation_resolutions) == len(ORIGINS)
     assert runtime.sink.pending_observations == ()
     assert all(runtime.sink.receipt(origin) is not None for origin in expected_commit_origins)
+
+
+def test_decision_free_loop_refuses_close_receipt_at_a_new_forecast_origin() -> None:
+    session = _session(with_decision=False)
+    panel = _panel(range(1, 13))
+    first_origin = ORIGINS[0]
+    second_origin = CALENDAR.advance(first_origin, 1)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    artifacts = InMemoryArtifactStore()
+    states = InMemoryCalibrationStateStore()
+    first = _runtime(
+        session=session,
+        forecast_panel=panel,
+        artifacts=artifacts,
+        states=states,
+        sink=sink,
+        enable_ordering=False,
+    )
+
+    TimeLoop(
+        engine=first.engine,
+        actuals_source=first.actuals,
+        ledger_sink=sink,
+        request=_request(
+            session,
+            origins=(first_origin,),
+            settlement_end=first_origin,
+            positions={},
+        ),
+    ).run()
+
+    forecast_receipt = sink.receipt(first_origin)
+    close_receipt = sink.receipt(second_origin)
+    assert forecast_receipt is not None and forecast_receipt.has_forecasts
+    assert close_receipt is not None and not close_receipt.has_forecasts
+    durable_forecasts = sink.forecasts
+    resumed = _runtime(
+        session=session,
+        forecast_panel=panel,
+        artifacts=artifacts,
+        states=states,
+        sink=sink,
+        enable_ordering=False,
+    )
+
+    with pytest.raises(TimeLoopError, match="forecast origin.*contains no forecasts"):
+        TimeLoop(
+            engine=resumed.engine,
+            actuals_source=resumed.actuals,
+            ledger_sink=sink,
+            request=_request(
+                session,
+                origins=(second_origin,),
+                settlement_end=second_origin,
+                positions={},
+            ),
+        ).run()
+
+    assert resumed.actuals.calls == []
+    assert resumed.fit_histories == []
+    assert resumed.predicted_origins == []
+    assert resumed.order_origins == []
+    assert sink.forecasts == durable_forecasts
+    assert sink.receipt(second_origin) == close_receipt
 
 
 @pytest.mark.parametrize(

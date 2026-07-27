@@ -393,6 +393,10 @@ class TimeLoop:
         for period in self._decision_free_periods:
             receipt = self._ledger_sink.receipt(period)
             if receipt is not None:
+                if period in self._forecast_origins and not receipt.has_forecasts:
+                    raise TimeLoopError(
+                        f"commit receipt at forecast origin {period} contains no forecasts"
+                    )
                 receipt = self._engine.commit(receipt)
             elif period in self._forecast_origins:
                 result = self._spine.run_origin(
