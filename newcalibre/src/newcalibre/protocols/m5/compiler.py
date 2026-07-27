@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote
 
+import numpy as np
 import pandas as pd
 
 from newcalibre.domain import (
@@ -111,11 +112,11 @@ def _compile_panel(
         var_name="day",
         value_name=OBSERVED_VALUE,
     )
-    date_by_day = dict(zip(day_columns, dates, strict=True))
+    timestamp_blocks = np.repeat(np.asarray(dates, dtype="datetime64[ns]"), len(sales))
     frame = pd.DataFrame(
         {
             SERIES_KEY: long["series_key"].astype("string"),
-            TIMESTAMP: pd.to_datetime(long["day"].map(date_by_day)),
+            TIMESTAMP: pd.to_datetime(timestamp_blocks),
             OBSERVED_VALUE: long[OBSERVED_VALUE].astype("int64"),
         }
     )

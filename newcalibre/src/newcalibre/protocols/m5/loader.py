@@ -202,7 +202,7 @@ def _normalize_calendar(frame: pd.DataFrame) -> tuple[pd.Timestamp, ...]:
 def _select_population(frame: pd.DataFrame, *, config: M5ProtocolConfig) -> pd.DataFrame:
     population = config.population
     if population.kind == "full":
-        return frame.copy(deep=True)
+        return frame
     count = population.bottom_count
     salt = population.salt
     if count is None or salt is None:
@@ -216,7 +216,7 @@ def _select_population(frame: pd.DataFrame, *, config: M5ProtocolConfig) -> pd.D
         key=lambda series_key: (_digest_rank(salt, series_key), series_key.encode("utf-8")),
     )
     selected = set(ranked[:count])
-    return frame[frame["series_key"].isin(selected)].reset_index(drop=True).copy(deep=True)
+    return frame[frame["series_key"].isin(selected)].reset_index(drop=True)
 
 
 def _digest_rank(salt: str, series_key: str) -> bytes:

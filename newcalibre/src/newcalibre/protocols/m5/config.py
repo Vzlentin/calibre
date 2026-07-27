@@ -292,7 +292,7 @@ def _parse_reconciliation(value: object) -> str:
     if strategy != WLS_STRUCT:
         raise M5ConfigError(f"pipeline reconciliation strategy must equal {WLS_STRUCT!r}")
     try:
-        strategy_declaration(cast(str, strategy))
+        strategy_declaration(WLS_STRUCT)
     except ReconciliationRegistryError as error:
         raise M5ConfigError(f"invalid pipeline reconciliation: {error}") from error
     return WLS_STRUCT
