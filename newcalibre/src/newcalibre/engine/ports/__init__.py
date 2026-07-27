@@ -184,6 +184,7 @@ class CommitReceipt:
     digest: str
     state_updates: Mapping[str, bytes]
     sequence: int
+    has_forecasts: bool = False
     observe_cycle: ObserveCycle = field(default_factory=ObserveCycle)
     settlement_periods: tuple[pd.Timestamp, ...] = ()
     actual_keys: tuple[ActualKey, ...] = ()
@@ -200,6 +201,7 @@ class CommitReceipt:
             digest=commit.digest,
             state_updates=commit.state_updates,
             sequence=sequence,
+            has_forecasts=bool(commit.forecasts),
             observe_cycle=commit.observe_cycle,
             settlement_periods=tuple(sorted({record.period for record in commit.settlements})),
             actual_keys=commit.actual_keys,
@@ -228,6 +230,8 @@ class CommitReceipt:
             or self.sequence < 0
         ):
             raise ValueError("commit receipt sequence must be a non-negative integer")
+        if not isinstance(self.has_forecasts, bool):
+            raise TypeError("commit receipt has_forecasts must be a bool")
         if not isinstance(self.observe_cycle, ObserveCycle):
             raise TypeError("commit receipt observe cycle must be an ObserveCycle")
         updates: dict[str, bytes] = {}
@@ -458,6 +462,11 @@ class LedgerSink(Protocol):
     @property
     def pending_observations(self) -> tuple[PendingObservation, ...]:
         """Return a defensive pending-observation snapshot."""
+        ...
+
+    @property
+    def pending_observation_count(self) -> int:
+        """Return the number of pending observations without materializing them."""
         ...
 
     @property

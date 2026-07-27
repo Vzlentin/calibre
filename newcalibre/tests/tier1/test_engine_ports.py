@@ -234,6 +234,7 @@ def test_ledger_sink_exposes_only_a_period_bound_compact_settlement_snapshot() -
 
     snapshot = sink.settlement_snapshot((ORIGIN_DATE,))
 
+    assert sink.pending_observation_count == 0
     assert isinstance(snapshot, SettlementSnapshot)
     assert snapshot.periods == (ORIGIN_DATE,)
     assert snapshot.frontier is None

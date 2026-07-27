@@ -213,6 +213,7 @@ def test_pending_observation_projection_is_exact_append_ordered_and_defensive() 
     first = ledger.pending_observations
     second = ledger.pending_observations
 
+    assert ledger.pending_observation_count == 2
     assert first == (
         PendingObservation(
             ConformalForecastKey("sku-a", ISSUE_ORIGIN, 2, "seasonal"),

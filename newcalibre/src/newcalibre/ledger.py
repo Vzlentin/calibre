@@ -841,6 +841,11 @@ class Ledger:
         )
 
     @property
+    def pending_observation_count(self) -> int:
+        """Return the number of pending observations without materializing them."""
+        return len(self._pending_forecasts)
+
+    @property
     def observation_resolutions(self) -> tuple[ObservationResolution, ...]:
         """Return delivered censoring-aware row resolutions in commit order."""
         return tuple(self._resolutions.values())

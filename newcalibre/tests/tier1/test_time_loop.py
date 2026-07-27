@@ -35,6 +35,7 @@ from newcalibre.domain import (
 from newcalibre.engine import (
     CommitReceipt,
     Engine,
+    EngineError,
     InMemoryActualsSource,
     InMemoryArtifactStore,
     InMemoryCalibrationStateStore,
@@ -265,6 +266,7 @@ def _runtime(
     states: InMemoryCalibrationStateStore | None = None,
     sink: InMemoryLedgerSink | None = None,
     decision_series_key: str = "a",
+    enable_ordering: bool = True,
 ) -> Runtime:
     actuals = actuals or RecordingActualsSource(forecast_panel)
     artifacts = artifacts or InMemoryArtifactStore()
@@ -298,7 +300,7 @@ def _runtime(
             fit_histories,
             predicted_origins,
         ),
-        orderer=order,
+        orderer=order if enable_ordering else None,
     )
     return Runtime(
         engine=engine,
@@ -440,7 +442,7 @@ def test_request_rejects_empty_duplicate_and_decreasing_origins_before_effects(
     _assert_no_effects(runtime)
 
 
-def test_constructor_rejects_off_grid_and_partial_configuration_before_effects() -> None:
+def test_constructor_rejects_off_grid_and_invalid_inventory_before_effects() -> None:
     forecast_panel = _panel(range(101, 112))
     decision_session = _session()
     runtime = _runtime(session=decision_session, forecast_panel=forecast_panel)
@@ -459,18 +461,6 @@ def test_constructor_rejects_off_grid_and_partial_configuration_before_effects()
     assert runtime.actuals.calls == []
     _assert_no_effects(runtime)
 
-    no_decision_session = _session(with_decision=False)
-    incomplete = _runtime(session=no_decision_session, forecast_panel=forecast_panel)
-    with pytest.raises(TimeLoopError, match="complete decision configuration"):
-        TimeLoop(
-            engine=incomplete.engine,
-            actuals_source=incomplete.actuals,
-            ledger_sink=incomplete.sink,
-            request=_request(no_decision_session),
-        )
-    assert incomplete.actuals.calls == []
-    _assert_no_effects(incomplete)
-
     with pytest.raises(TimeLoopError, match="exactly match the decision series"):
         TimeLoop(
             engine=runtime.engine,
@@ -484,9 +474,178 @@ def test_constructor_rejects_off_grid_and_partial_configuration_before_effects()
     assert runtime.actuals.calls == []
     _assert_no_effects(runtime)
 
-    with pytest.raises(TimeLoopError, match="must not be empty"):
-        _request(decision_session, positions={})
+    with pytest.raises(TimeLoopError, match="exactly match the decision series"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(decision_session, positions={}),
+        )
     _assert_no_effects(runtime)
+
+
+def test_decision_free_loop_rejects_mismatched_ports_and_sessions_before_effects() -> None:
+    session = _session(with_decision=False)
+    panel = _panel(range(1, 13))
+    runtime = _runtime(
+        session=session,
+        forecast_panel=panel,
+        enable_ordering=False,
+    )
+    foreign_actuals = RecordingActualsSource(panel)
+    foreign_sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+
+    with pytest.raises(EngineError, match="actuals source does not belong"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=foreign_actuals,
+            ledger_sink=runtime.sink,
+            request=_request(session, positions={}),
+        )
+    with pytest.raises(EngineError, match="ledger sink does not belong"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=foreign_sink,
+            request=_request(session, positions={}),
+        )
+    with pytest.raises(TimeLoopError, match="session does not match"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(
+                _session(with_decision=False, series_keys=("other",)),
+                positions={},
+            ),
+        )
+
+    assert runtime.actuals.calls == []
+    assert foreign_actuals.calls == []
+    _assert_no_effects(runtime)
+
+
+def test_decision_free_loop_rejects_initial_inventory_before_effects() -> None:
+    session = _session(with_decision=False)
+    runtime = _runtime(
+        session=session,
+        forecast_panel=_panel(range(1, 13)),
+        enable_ordering=False,
+    )
+
+    with pytest.raises(TimeLoopError, match="empty initial inventory positions"):
+        TimeLoop(
+            engine=runtime.engine,
+            actuals_source=runtime.actuals,
+            ledger_sink=runtime.sink,
+            request=_request(session, positions={"a": INITIAL_POSITION}),
+        )
+
+    assert runtime.actuals.calls == []
+    _assert_no_effects(runtime)
+
+
+def test_decision_free_loop_runs_origins_and_closes_observations_without_settlement() -> None:
+    session = _session(with_decision=False)
+    panel = _panel(range(1, 13))
+    runtime = _runtime(
+        session=session,
+        forecast_panel=panel,
+        enable_ordering=False,
+    )
+    phase_events: list[PhaseEvent] = []
+
+    result = TimeLoop(
+        engine=runtime.engine,
+        actuals_source=runtime.actuals,
+        ledger_sink=runtime.sink,
+        request=_request(session, positions={}),
+        reporter=phase_events.append,
+    ).run()
+
+    expected_commit_origins = tuple(pd.date_range(ORIGINS[0], SETTLEMENT_END, freq="D")) + (
+        pd.Timestamp("2026-01-12"),
+    )
+    assert [event.phase.value for event in phase_events] == [
+        phase
+        for _origin in ORIGINS
+        for phase in ("Resolve", "Predict", "Reconcile", "Calibrate", "Order", "Commit")
+    ]
+    assert result.settlement_periods == ()
+    assert result.decision_origins == ()
+    assert tuple(receipt.origin for receipt in result.receipts) == expected_commit_origins
+    assert result.inventory_positions == {}
+    assert runtime.order_origins == []
+    assert runtime.sink.orders == ()
+    assert runtime.sink.settlements == ()
+    assert len(runtime.sink.forecasts) == len(ORIGINS)
+    assert len(runtime.sink.observation_resolutions) == len(ORIGINS)
+    assert runtime.sink.pending_observations == ()
+    assert all(runtime.sink.receipt(origin) is not None for origin in expected_commit_origins)
+
+
+def test_decision_free_loop_refuses_close_receipt_at_a_new_forecast_origin() -> None:
+    session = _session(with_decision=False)
+    panel = _panel(range(1, 13))
+    first_origin = ORIGINS[0]
+    second_origin = CALENDAR.advance(first_origin, 1)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    artifacts = InMemoryArtifactStore()
+    states = InMemoryCalibrationStateStore()
+    first = _runtime(
+        session=session,
+        forecast_panel=panel,
+        artifacts=artifacts,
+        states=states,
+        sink=sink,
+        enable_ordering=False,
+    )
+
+    TimeLoop(
+        engine=first.engine,
+        actuals_source=first.actuals,
+        ledger_sink=sink,
+        request=_request(
+            session,
+            origins=(first_origin,),
+            settlement_end=first_origin,
+            positions={},
+        ),
+    ).run()
+
+    forecast_receipt = sink.receipt(first_origin)
+    close_receipt = sink.receipt(second_origin)
+    assert forecast_receipt is not None and forecast_receipt.has_forecasts
+    assert close_receipt is not None and not close_receipt.has_forecasts
+    durable_forecasts = sink.forecasts
+    resumed = _runtime(
+        session=session,
+        forecast_panel=panel,
+        artifacts=artifacts,
+        states=states,
+        sink=sink,
+        enable_ordering=False,
+    )
+
+    with pytest.raises(TimeLoopError, match="forecast origin.*contains no forecasts"):
+        TimeLoop(
+            engine=resumed.engine,
+            actuals_source=resumed.actuals,
+            ledger_sink=sink,
+            request=_request(
+                session,
+                origins=(second_origin,),
+                settlement_end=second_origin,
+                positions={},
+            ),
+        ).run()
+
+    assert resumed.actuals.calls == []
+    assert resumed.fit_histories == []
+    assert resumed.predicted_origins == []
+    assert resumed.order_origins == []
+    assert sink.forecasts == durable_forecasts
+    assert sink.receipt(second_origin) == close_receipt
 
 
 @pytest.mark.parametrize(

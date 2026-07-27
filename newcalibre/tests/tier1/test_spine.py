@@ -104,6 +104,25 @@ def _panel(*, series_keys: tuple[str, ...] = ("a",)) -> Panel:
     )
 
 
+def _all_node_panel(panel: Panel, hierarchy: HierarchyIndex) -> Panel:
+    records: list[dict[str, object]] = []
+    for timestamp, section in panel.frame.groupby(TIMESTAMP, sort=True, observed=True):
+        values = dict(zip(section[SERIES_KEY], section[OBSERVED_VALUE], strict=True))
+        aggregated = hierarchy.aggregate(values)
+        records.extend(
+            {
+                SERIES_KEY: label,
+                TIMESTAMP: pd.Timestamp(timestamp),
+                OBSERVED_VALUE: float(aggregated[label]),
+            }
+            for label in hierarchy.node_labels
+        )
+    frame = pd.DataFrame.from_records(records)
+    frame[SERIES_KEY] = frame[SERIES_KEY].astype("string")
+    frame[OBSERVED_VALUE] = frame[OBSERVED_VALUE].astype("float64")
+    return Panel.from_frame(frame, calendar=panel.calendar)
+
+
 def _session(
     *,
     tenant: str = "tenant-a",
@@ -1188,6 +1207,87 @@ def test_bottom_up_preserves_bottom_issuances_and_excludes_aggregates_from_order
     assert seen_series == [("a",)]
     assert set(result.forecasts.frame[SERIES_KEY]) == {"a", "__total__"}
     assert tuple((row.series_key, row.quantity) for row in result.orders) == (("a", 0.0),)
+
+
+def test_complete_hierarchy_node_panel_forecasts_from_bottom_actuals() -> None:
+    bottom_panel = _panel(series_keys=("a", "b"))
+    hierarchy = HierarchyIndex.from_facts(
+        pd.DataFrame(
+            {
+                SERIES_KEY: ["a", "b"],
+                "department": ["all", "all"],
+            }
+        ),
+        bottom_series=bottom_panel.series_keys,
+    )
+    forecast_panel = _all_node_panel(bottom_panel, hierarchy)
+    session = _session(series_keys=forecast_panel.series_keys)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = Engine(
+        panel_source=InMemoryPanelSource(forecast_panel),
+        actuals_source=InMemoryActualsSource(
+            bottom_panel,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        ),
+        artifact_store=InMemoryArtifactStore(),
+        calibration_state_store=InMemoryCalibrationStateStore(),
+        ledger_sink=sink,
+        dispatch_backend=RecordingDispatch(),
+        hierarchy=hierarchy,
+        adapter_resolver=lambda _config: PersistentFixtureAdapter([]),
+        reconciliation_strategy="wls_struct",
+    )
+    origin = pd.Timestamp("2026-01-05")
+
+    Spine(engine).run_origin(OriginRequest(session=session, origin=origin, scope=Scope.GLOBAL))
+    observation = engine.observe(pd.Timestamp("2026-01-06"), session=session)
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=pd.Timestamp("2026-01-06"),
+            observe_cycle=observation.cycle,
+            state_updates=observation.cycle.state_updates,
+        )
+    )
+
+    resolved = {row.series_key: row.actual_value for row in sink.forecasts}
+    assert resolved == {
+        "a": 5.0,
+        "b": 5.0,
+        "__aggregate__:department:s:all": 10.0,
+        "__total__": 10.0,
+    }
+    assert {value.series_key for value in sink.observed_history} == {"a", "b"}
+    assert sink.pending_observations == ()
+
+
+@pytest.mark.parametrize("foreign", (False, True))
+def test_hierarchical_panel_refuses_partial_or_extra_node_sets(foreign: bool) -> None:
+    bottom_panel = _panel(series_keys=("a", "b"))
+    hierarchy = HierarchyIndex.from_facts(
+        pd.DataFrame(
+            {
+                SERIES_KEY: ["a", "b"],
+                "department": ["all", "all"],
+            }
+        ),
+        bottom_series=bottom_panel.series_keys,
+    )
+    node_series = tuple(sorted(hierarchy.node_labels, key=str.encode))
+    series_keys = (*node_series, "foreign") if foreign else node_series[:-1]
+    panel = _panel(series_keys=series_keys)
+    session = _session(series_keys=panel.series_keys)
+
+    with pytest.raises(EngineError, match="hierarchy bottoms or all nodes"):
+        _engine(
+            panel=panel,
+            events=[],
+            artifacts=InMemoryArtifactStore(),
+            states=InMemoryCalibrationStateStore(),
+            sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+            dispatch=RecordingDispatch(),
+            hierarchy=hierarchy,
+        )
 
 
 def test_real_conformal_apply_consumes_bottom_up_reconciled_points() -> None:

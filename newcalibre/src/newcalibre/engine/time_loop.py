@@ -103,8 +103,6 @@ class TimeLoopRequest:
             if not isinstance(position, InventoryPosition):
                 raise TypeError("initial inventory positions must contain InventoryPosition values")
             positions[series_key] = position
-        if not positions:
-            raise TimeLoopError("initial inventory positions must not be empty")
         if not isinstance(actuals_semantics, ActualsSemantics):
             raise TypeError("time-loop actuals semantics must be ActualsSemantics")
 
@@ -133,7 +131,7 @@ class TimeLoopResult:
         periods = tuple(self.settlement_periods)
         decisions = tuple(self.decision_origins)
         receipts = tuple(self.receipts)
-        if len(periods) != len(receipts):
+        if periods and len(periods) != len(receipts):
             raise TimeLoopError("time-loop result requires one receipt per settlement period")
         if any(not isinstance(receipt, CommitReceipt) for receipt in receipts):
             raise TypeError("time-loop result receipts must contain CommitReceipt values")
@@ -193,7 +191,28 @@ class TimeLoop:
             raise TimeLoopError("time-loop calendar does not match its session")
         decision = decision_from_definition(definition)
         if decision is None:
-            raise TimeLoopError("time loop requires a complete decision configuration")
+            if request.initial_inventory_positions:
+                raise TimeLoopError(
+                    "decision-free time loops require empty initial inventory positions"
+                )
+            self._engine = engine
+            self._actuals_source = actuals_source
+            self._ledger_sink = ledger_sink
+            self._request = request
+            self._calendar = calendar
+            self._series_keys = ()
+            self._decision_origins = ()
+            self._decision_origin_set = frozenset()
+            self._forecast_origins = frozenset(request.origins)
+            self._settlement_periods = ()
+            self._decision_free_periods = _calendar_window(
+                calendar,
+                request.origins[0],
+                request.settlement_end,
+            )
+            self._spine = Spine(engine, reporter=reporter)
+            self._actuals_by_key = MappingProxyType({})
+            return
         series_keys = decision.series_keys
         if set(request.initial_inventory_positions) != set(series_keys):
             raise TimeLoopError(
@@ -266,6 +285,7 @@ class TimeLoop:
             first_period,
             final_period,
         )
+        self._decision_free_periods: tuple[pd.Timestamp, ...] = ()
         self._spine = Spine(engine, reporter=reporter)
         uncommitted_periods = tuple(
             period
@@ -288,6 +308,8 @@ class TimeLoop:
 
     def run(self) -> TimeLoopResult:
         """Run or resume the complete schedule from its first uncommitted period."""
+        if self._decision_free_periods:
+            return self._run_decision_free()
         receipts = self._receipt_prefix()
         for period in self._settlement_periods:
             receipt = receipts.get(period)
@@ -352,18 +374,7 @@ class TimeLoop:
         next_period = self._calendar.advance(self._settlement_periods[-1], 1)
         final_observe_receipt = self._ledger_sink.receipt(next_period)
         if final_observe_receipt is None:
-            observation = self._engine.observe(
-                next_period,
-                session=self._request.session,
-            )
-            final_observe_receipt = self._engine.commit(
-                OriginCommit(
-                    session=self._request.session,
-                    origin=next_period,
-                    observe_cycle=observation.cycle,
-                    state_updates=observation.cycle.state_updates,
-                )
-            )
+            final_observe_receipt = self._commit_observation(next_period)
         else:
             self._engine.commit(final_observe_receipt)
         final_snapshot = self._ledger_sink.settlement_snapshot((next_period,))
@@ -374,6 +385,61 @@ class TimeLoop:
             decision_origins=self._decision_origins,
             receipts=tuple(receipts[period] for period in self._settlement_periods),
             inventory_positions=final_snapshot.latest_positions,
+        )
+
+    def _run_decision_free(self) -> TimeLoopResult:
+        """Run forecast and observation commits without inventory settlement."""
+        receipts: list[CommitReceipt] = []
+        for period in self._decision_free_periods:
+            receipt = self._ledger_sink.receipt(period)
+            if receipt is not None:
+                if period in self._forecast_origins and not receipt.has_forecasts:
+                    raise TimeLoopError(
+                        f"commit receipt at forecast origin {period} contains no forecasts"
+                    )
+                receipt = self._engine.commit(receipt)
+            elif period in self._forecast_origins:
+                result = self._spine.run_origin(
+                    OriginRequest(
+                        session=self._request.session,
+                        origin=period,
+                        scope=self._request.scope,
+                    )
+                )
+                receipt = result.receipt
+            else:
+                receipt = self._commit_observation(period)
+            if receipt.settlement_periods:
+                raise TimeLoopError(
+                    f"decision-free commit receipt at {period} contains settlement periods"
+                )
+            receipts.append(receipt)
+
+        close_origin = self._calendar.advance(self._decision_free_periods[-1], 1)
+        close_receipt = self._ledger_sink.receipt(close_origin)
+        if close_receipt is None:
+            close_receipt = self._commit_observation(close_origin)
+        else:
+            close_receipt = self._engine.commit(close_receipt)
+        if close_receipt.settlement_periods:
+            raise TimeLoopError("decision-free close commit contains settlement periods")
+        receipts.append(close_receipt)
+        return TimeLoopResult(
+            settlement_periods=(),
+            decision_origins=(),
+            receipts=tuple(receipts),
+            inventory_positions={},
+        )
+
+    def _commit_observation(self, origin: pd.Timestamp) -> CommitReceipt:
+        observation = self._engine.observe(origin, session=self._request.session)
+        return self._engine.commit(
+            OriginCommit(
+                session=self._request.session,
+                origin=origin,
+                observe_cycle=observation.cycle,
+                state_updates=observation.cycle.state_updates,
+            )
         )
 
     def _preflight_settlement_actuals(
