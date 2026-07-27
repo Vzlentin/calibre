@@ -267,7 +267,12 @@ def test_download_installs_only_verified_bytes_then_publicly_reverifies(tmp_path
 
 
 def test_package_and_script_keep_acquisition_private() -> None:
-    assert m5.__all__ == ["load_m5_config", "verify_m5_inputs"]
+    assert m5.__all__ == [
+        "M5Diagnostics",
+        "load_m5_config",
+        "score_m5",
+        "verify_m5_inputs",
+    ]
     assert not hasattr(m5, "download_m5_inputs")
     assert tuple(inspect.signature(verify_m5_inputs).parameters) == ("target", "inventory_path")
 
