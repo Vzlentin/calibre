@@ -72,6 +72,14 @@ def test_identity_can_only_be_created_from_defining_inputs() -> None:
         SessionIdentity()
 
 
+def test_identity_exposes_its_immutable_canonical_series_set() -> None:
+    identity = _derive()
+
+    assert identity.series_keys == ("sku-a", "sku-b")
+    with pytest.raises(TypeError):
+        identity.series_keys[0] = "mutated"  # type: ignore[index]
+
+
 def test_absent_optional_configurations_are_encoded_distinctly() -> None:
     absent_conformal = _derive(conformal_config=None)
     present_conformal = _derive(conformal_config={})

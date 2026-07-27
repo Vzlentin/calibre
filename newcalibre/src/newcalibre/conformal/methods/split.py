@@ -80,7 +80,7 @@ class _SplitConfig(BaseModel):
         ge=1,
         le=_MAX_CALIBRATION_WINDOW,
     )
-    partition_by: Literal["global", "series"] = "global"
+    partition_by: Literal["global", "series", "series-horizon"] = "global"
     upper_floor: float | None = None
     upper_cap: float | None = None
 
@@ -350,7 +350,11 @@ class SplitConformalRuntime:
         for row in rows:
             raw_upper = math.nan
             bindings: tuple[AppliedBinding, ...] = ()
-            label = self._partition_label(row.key.model_name, row.key.series_key)
+            label = self._partition_label(
+                row.key.model_name,
+                row.key.series_key,
+                row.key.horizon_step,
+            )
             partition = decoded.get(label, _empty_partition())
             ready = len(partition.scores) >= minimum
             emitted = self.manifest.emission_scope is EmissionScope.PER_STEP or (
@@ -459,9 +463,19 @@ class SplitConformalRuntime:
             raise RuntimeContractError("per-step split has no protection period")
         return self._config.protection_period
 
-    def _partition_label(self, model_name: str, series_key: str) -> str:
+    def _partition_label(
+        self,
+        model_name: str,
+        series_key: str,
+        horizon_step: int,
+    ) -> str:
         value = "global" if self._config.partition_by == "global" else series_key
-        return derive_partition_label(model_name, value, self.manifest.emission_scope)
+        return derive_partition_label(
+            model_name,
+            value,
+            self.manifest.emission_scope,
+            horizon_step=(horizon_step if self._config.partition_by == "series-horizon" else None),
+        )
 
     def _validate_states(
         self,
@@ -574,6 +588,7 @@ class SplitConformalRuntime:
             expected = self._partition_label(
                 observation.forecast_key.model_name,
                 observation.forecast_key.series_key,
+                observation.forecast_key.horizon_step,
             )
             if expected != delivery.partition_label:
                 raise RuntimeContractError(

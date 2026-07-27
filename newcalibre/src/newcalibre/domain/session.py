@@ -27,6 +27,7 @@ class SessionIdentity:
 
     _value: str
     _payload: bytes = field(repr=False, compare=False, hash=False)
+    _series_keys: tuple[str, ...] = field(repr=False, compare=False, hash=False)
 
     def __init__(self) -> None:
         raise TypeError("SessionIdentity must be created with derive()")
@@ -117,12 +118,18 @@ class SessionIdentity:
         instance = object.__new__(cls)
         object.__setattr__(instance, "_value", hashlib.sha256(encoded).hexdigest())
         object.__setattr__(instance, "_payload", encoded)
+        object.__setattr__(instance, "_series_keys", normalized_series)
         return instance
 
     @property
     def value(self) -> str:
         """Return the complete lowercase SHA-256 hex digest."""
         return self._value
+
+    @property
+    def series_keys(self) -> tuple[str, ...]:
+        """Return the immutable canonical session series set."""
+        return self._series_keys
 
     def to_bytes(self) -> bytes:
         """Return the immutable canonical identity preimage."""

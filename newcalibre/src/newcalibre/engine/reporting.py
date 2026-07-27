@@ -308,9 +308,30 @@ class LedgerBatch:
         return self.row_count
 
 
+@dataclass(frozen=True, slots=True)
+class LedgerSessionMetadata:
+    """Identify one reader session and its complete canonical series set."""
+
+    session: SessionIdentity
+    series_keys: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session, SessionIdentity):
+            raise TypeError("ledger metadata session must be a SessionIdentity")
+        if not isinstance(self.series_keys, tuple):
+            raise TypeError("ledger metadata series keys must be a tuple")
+        if self.series_keys != self.session.series_keys:
+            raise ValueError("ledger metadata series keys must match the session identity")
+
+
 @runtime_checkable
 class LedgerReader(Protocol):
     """Stream a closed logical forecast ledger in bounded canonical batches."""
+
+    @property
+    def metadata(self) -> LedgerSessionMetadata:
+        """Return immutable identity for the closed reader session."""
+        ...
 
     def scan(self, selection: LedgerSelection) -> Iterator[LedgerBatch]:
         """Return canonical immutable batches for ``selection``."""
@@ -462,4 +483,5 @@ __all__ = [
     "LedgerReader",
     "LedgerResolution",
     "LedgerSelection",
+    "LedgerSessionMetadata",
 ]

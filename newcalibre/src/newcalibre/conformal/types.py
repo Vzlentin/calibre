@@ -56,20 +56,26 @@ def derive_partition_label(
     model_name: str,
     partition_value: str | bool | int | float,
     horizon_scope: EmissionScope,
+    *,
+    horizon_step: int | None = None,
 ) -> str:
-    """Derive an injective data label from model, typed value, and horizon scope."""
+    """Derive an injective label from model, typed partition, scope, and step."""
     model = _require_text(model_name, name="model name", trimmed=True)
     if not isinstance(horizon_scope, EmissionScope):
         raise RuntimeContractError("horizon scope must be an EmissionScope")
     tag, value = _partition_value(partition_value)
-    return _encoded_label(
-        _PARTITION_PREFIX,
-        {
-            "horizon_scope": horizon_scope.value,
-            "model_name": model,
-            "partition_value": {"tag": tag, "value": value},
-        },
-    )
+    payload: dict[str, object] = {
+        "horizon_scope": horizon_scope.value,
+        "model_name": model,
+        "partition_value": {"tag": tag, "value": value},
+    }
+    if horizon_step is not None:
+        if isinstance(horizon_step, bool) or not isinstance(horizon_step, Integral):
+            raise RuntimeContractError("partition horizon step must be a positive integer")
+        if horizon_step < 1:
+            raise RuntimeContractError("partition horizon step must be a positive integer")
+        payload["horizon_step"] = int(horizon_step)
+    return _encoded_label(_PARTITION_PREFIX, payload)
 
 
 def _partition_value(value: object) -> tuple[str, object]:
@@ -131,11 +137,11 @@ def _decode_label(label: object) -> tuple[str, object]:
 
 
 def _validate_partition_payload(payload: object) -> None:
-    if not isinstance(payload, dict) or set(payload) != {
-        "horizon_scope",
-        "model_name",
-        "partition_value",
-    }:
+    base_fields = {"horizon_scope", "model_name", "partition_value"}
+    if not isinstance(payload, dict) or set(payload) not in (
+        base_fields,
+        {*base_fields, "horizon_step"},
+    ):
         raise RuntimeContractError("partition state label has malformed fields")
     fields = cast(dict[str, object], payload)
     _require_text(fields["model_name"], name="partition label model name", trimmed=True)
@@ -143,6 +149,11 @@ def _validate_partition_payload(payload: object) -> None:
         EmissionScope(fields["horizon_scope"])
     except (TypeError, ValueError) as error:
         raise RuntimeContractError("partition state label has an invalid horizon scope") from error
+    horizon_step = fields.get("horizon_step")
+    if horizon_step is not None and (
+        isinstance(horizon_step, bool) or not isinstance(horizon_step, int) or horizon_step < 1
+    ):
+        raise RuntimeContractError("partition state label has an invalid horizon step")
     value = fields["partition_value"]
     if not isinstance(value, dict) or set(value) != {"tag", "value"}:
         raise RuntimeContractError("partition state label has a malformed typed value")
