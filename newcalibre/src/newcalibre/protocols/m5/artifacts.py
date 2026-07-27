@@ -60,7 +60,7 @@ def _emit_artifacts(
     node_rows: Sequence[Mapping[str, object]],
 ) -> tuple[Path, Path, Path]:
     """Build all three projections and publish them through one directory rename."""
-    destination = Path(output_dir)
+    destination = output_dir
     if destination.exists() or destination.is_symlink():
         raise _M5ArtifactError("M5 diagnostic destination must not already exist")
     try:

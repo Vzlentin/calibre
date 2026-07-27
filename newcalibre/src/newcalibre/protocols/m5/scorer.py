@@ -231,7 +231,6 @@ class _Reducer:
         metadata: LedgerSessionMetadata,
         model_name: str,
         target: float,
-        method_name: str,
         emission_form: EmissionForm,
         guarantee_claim: GuaranteeClaim,
         guarantee_currency: object,
@@ -240,7 +239,7 @@ class _Reducer:
         self.metadata = metadata
         self.model_name = model_name
         self.target = target
-        self.method_name = method_name
+        self.expected_bound = (interval_columns(target)[1],)
         self.emission_form = emission_form
         self.guarantee_claim = guarantee_claim
         self.guarantee_currency = guarantee_currency
@@ -457,10 +456,9 @@ class _Reducer:
         resolved: bool,
     ) -> None:
         descriptor = score.descriptor
-        expected_bound = (interval_columns(self.target)[1],)
         wrong_shape = (
             self.emission_form is not EmissionForm.ONE_SIDED_UPPER
-            or score.bound_key != expected_bound
+            or score.bound_key != self.expected_bound
             or score.guaranteed_side != "upper"
             or descriptor.type.claim is not self.guarantee_claim
             or descriptor.type.currency is not self.guarantee_currency
@@ -557,7 +555,6 @@ def score_m5(
         metadata=metadata,
         model_name=model_name,
         target=target,
-        method_name=runtime.manifest.name,
         emission_form=runtime.manifest.emission_form,
         guarantee_claim=guarantee.claim,
         guarantee_currency=guarantee.currency,
