@@ -374,18 +374,7 @@ class TimeLoop:
         next_period = self._calendar.advance(self._settlement_periods[-1], 1)
         final_observe_receipt = self._ledger_sink.receipt(next_period)
         if final_observe_receipt is None:
-            observation = self._engine.observe(
-                next_period,
-                session=self._request.session,
-            )
-            final_observe_receipt = self._engine.commit(
-                OriginCommit(
-                    session=self._request.session,
-                    origin=next_period,
-                    observe_cycle=observation.cycle,
-                    state_updates=observation.cycle.state_updates,
-                )
-            )
+            final_observe_receipt = self._commit_observation(next_period)
         else:
             self._engine.commit(final_observe_receipt)
         final_snapshot = self._ledger_sink.settlement_snapshot((next_period,))
@@ -415,18 +404,7 @@ class TimeLoop:
                 )
                 receipt = result.receipt
             else:
-                observation = self._engine.observe(
-                    period,
-                    session=self._request.session,
-                )
-                receipt = self._engine.commit(
-                    OriginCommit(
-                        session=self._request.session,
-                        origin=period,
-                        observe_cycle=observation.cycle,
-                        state_updates=observation.cycle.state_updates,
-                    )
-                )
+                receipt = self._commit_observation(period)
             if receipt.settlement_periods:
                 raise TimeLoopError(
                     f"decision-free commit receipt at {period} contains settlement periods"
@@ -436,18 +414,7 @@ class TimeLoop:
         close_origin = self._calendar.advance(self._decision_free_periods[-1], 1)
         close_receipt = self._ledger_sink.receipt(close_origin)
         if close_receipt is None:
-            observation = self._engine.observe(
-                close_origin,
-                session=self._request.session,
-            )
-            close_receipt = self._engine.commit(
-                OriginCommit(
-                    session=self._request.session,
-                    origin=close_origin,
-                    observe_cycle=observation.cycle,
-                    state_updates=observation.cycle.state_updates,
-                )
-            )
+            close_receipt = self._commit_observation(close_origin)
         else:
             close_receipt = self._engine.commit(close_receipt)
         if close_receipt.settlement_periods:
@@ -458,6 +425,17 @@ class TimeLoop:
             decision_origins=(),
             receipts=tuple(receipts),
             inventory_positions={},
+        )
+
+    def _commit_observation(self, origin: pd.Timestamp) -> CommitReceipt:
+        observation = self._engine.observe(origin, session=self._request.session)
+        return self._engine.commit(
+            OriginCommit(
+                session=self._request.session,
+                origin=origin,
+                observe_cycle=observation.cycle,
+                state_updates=observation.cycle.state_updates,
+            )
         )
 
     def _preflight_settlement_actuals(

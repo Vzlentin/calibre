@@ -278,6 +278,11 @@ class InMemoryLedgerSink:
         return self._ledger.pending_observations
 
     @property
+    def pending_observation_count(self) -> int:
+        """Return the number of pending observations without materializing them."""
+        return self._ledger.pending_observation_count
+
+    @property
     def earliest_origin(self) -> pd.Timestamp | None:
         """Return the earliest committed forecast origin, when one exists."""
         return self._earliest_origin

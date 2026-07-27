@@ -461,6 +461,11 @@ class LedgerSink(Protocol):
         ...
 
     @property
+    def pending_observation_count(self) -> int:
+        """Return the number of pending observations without materializing them."""
+        ...
+
+    @property
     def earliest_origin(self) -> pd.Timestamp | None:
         """Return the earliest committed forecast origin, when one exists."""
         ...

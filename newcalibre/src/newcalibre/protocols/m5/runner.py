@@ -156,7 +156,7 @@ def run_m5(config_path: Path) -> M5RunResult:
         reader,
         output_dir=_PROJECT_ROOT / compiled.output_dir,
     )
-    pending_count = len(sink.pending_observations)
+    pending_count = sink.pending_observation_count
     return M5RunResult(
         session=session,
         input_inventory_sha256=dataset.input_inventory_sha256,
@@ -175,27 +175,24 @@ def run_m5(config_path: Path) -> M5RunResult:
 def _all_node_panel(panel: Panel, *, hierarchy: HierarchyIndex) -> Panel:
     """Aggregate complete bottom histories into one canonical all-node panel."""
     frame = panel.frame
-    node_values: dict[str, list[int | float | None]] = {
-        label: [] for label in hierarchy.node_labels
-    }
+    node_labels = hierarchy.node_labels
+    node_values: dict[str, list[int | float | None]] = {label: [] for label in node_labels}
     timestamps: list[pd.Timestamp] = []
     for timestamp, section in frame.groupby(TIMESTAMP, sort=True, observed=True):
         values = dict(zip(section[SERIES_KEY], section[OBSERVED_VALUE], strict=True))
         aggregated = hierarchy.aggregate(values)
         timestamps.append(cast(pd.Timestamp, timestamp))
-        for label in hierarchy.node_labels:
+        for label in node_labels:
             node_values[label].append(aggregated[label])
     row_count = len(timestamps)
     all_nodes = pd.DataFrame(
         {
             SERIES_KEY: pd.Series(
-                [label for label in hierarchy.node_labels for _ in range(row_count)],
+                [label for label in node_labels for _ in range(row_count)],
                 dtype="string",
             ),
-            TIMESTAMP: pd.to_datetime(timestamps * len(hierarchy.node_labels)),
-            OBSERVED_VALUE: [
-                value for label in hierarchy.node_labels for value in node_values[label]
-            ],
+            TIMESTAMP: pd.to_datetime(timestamps * len(node_labels)),
+            OBSERVED_VALUE: [value for label in node_labels for value in node_values[label]],
         }
     )
     return Panel.from_frame(all_nodes, calendar=panel.calendar)
