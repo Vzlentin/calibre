@@ -1,1 +1,1 @@
-"""Implement external benchmark protocols as data and adapters."""
+"""Implement strict external benchmark protocols and their bounded adapters."""
