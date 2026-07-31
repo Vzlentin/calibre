@@ -77,6 +77,24 @@ or the `_1` suffixed release variants, but validation has about 28 fewer days of
 history; recompute the origin window before treating a run as acceptance
 evidence.
 
+Scheduled and manually dispatched successor acceptance acquires its ignored M5
+inputs from public object storage. Configure the repository variable
+`OVENTI_DATASET_BASE_URL` to the public base URL above the protocol namespace;
+the workflow appends `/m5/<name>` for each safe basename declared by
+`newcalibre/benchmarks/m5/m5-inputs.json`. It does not list the origin or consult
+a secondary source. After either an exact cache restore or a cache-miss download,
+CI verifies the complete directory, byte sizes, and SHA-256 digests before
+running acceptance.
+
+Verify a populated local directory with the same inventory contract:
+
+```bash
+uv run --project newcalibre --locked --no-sync python \
+  newcalibre/scripts/m5_data.py verify \
+  --target newcalibre/data/m5 \
+  --inventory newcalibre/benchmarks/m5/m5-inputs.json
+```
+
 Cheap pre-run integrity checks:
 
 ```bash
