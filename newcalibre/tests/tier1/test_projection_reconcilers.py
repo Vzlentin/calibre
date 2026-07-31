@@ -321,7 +321,7 @@ def test_projection_sparse_support_bound_excludes_solver_tolerance() -> None:
     values = _BASE_FORECAST.copy()
     values[0] = -(SPARSE_SOLVER_TOLERANCE / 2.0)
 
-    assert _support_canonicalization_bound(values) < abs(values[0])
+    assert _support_canonicalization_bound(float(np.max(np.abs(values)))) < abs(values[0])
 
 
 def test_projection_support_validator_rejects_material_negative(

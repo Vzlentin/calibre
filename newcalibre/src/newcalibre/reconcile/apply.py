@@ -104,18 +104,7 @@ def apply_none(
     if context.target_support is TargetSupport.REAL:
         return frame
     result = frame.copy(deep=True)
-    points = result[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
-    for section in sections:
-        _enforce_target_support(
-            points,
-            section_positions=section.positions,
-            section_labels=tuple(result.iloc[list(section.positions)][SERIES_KEY]),
-            section=section,
-            context=context,
-            numerical_error_bound=0.0,
-        )
-    result[POINT_FORECAST] = points
-    return result
+    return _apply_target_support(result, sections=sections, context=context)
 
 
 def apply_bottom_up(
@@ -187,19 +176,10 @@ def apply_bottom_up(
         if not aggregate_rows
         else pd.concat([bottom_rows, *aggregate_rows], ignore_index=True)
     )
-    result_points = result[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
+    if context.target_support is TargetSupport.REAL:
+        return result
     result_sections = _validated_sections(result, active, allow_aggregate_rows=True)
-    for section in result_sections:
-        _enforce_target_support(
-            result_points,
-            section_positions=section.positions,
-            section_labels=tuple(result.iloc[list(section.positions)][SERIES_KEY]),
-            section=section,
-            context=context,
-            numerical_error_bound=0.0,
-        )
-    result[POINT_FORECAST] = result_points
-    return result
+    return _apply_target_support(result, sections=result_sections, context=context)
 
 
 def apply_projection(
@@ -236,24 +216,21 @@ def apply_projection(
                 f"{section.description} projection returned shape {reconciled.shape}; "
                 f"expected {base_forecast.shape}"
             )
-        if not np.all(np.isfinite(reconciled)):
-            raise ReconciliationError(
-                f"{section.description} projection returned non-finite point forecasts"
-            )
         reconciled_by_label = dict(zip(section.node_labels, reconciled, strict=True))
         restored = np.asarray(
             [reconciled_by_label[label] for label in source[SERIES_KEY]],
             dtype=np.float64,
         )
         result_points[list(section.positions)] = restored
-        _enforce_target_support(
-            result_points,
-            section_positions=section.positions,
-            section_labels=tuple(source[SERIES_KEY]),
-            section=section,
-            context=context,
-            numerical_error_bound=projection.numerical_error_bound,
-        )
+        if context.target_support is not TargetSupport.REAL:
+            _enforce_target_support(
+                result_points,
+                section_positions=section.positions,
+                section_labels=tuple(source[SERIES_KEY]),
+                section=section,
+                context=context,
+                numerical_error_bound=projection.numerical_error_bound,
+            )
     result[POINT_FORECAST] = result_points
     return result
 
@@ -267,6 +244,15 @@ def _apply_inactive_target_support(
         return frame
     sections = _inactive_sections(frame)
     result = frame.copy(deep=True)
+    return _apply_target_support(result, sections=sections, context=context)
+
+
+def _apply_target_support(
+    result: pd.DataFrame,
+    *,
+    sections: tuple[_CrossSection, ...],
+    context: ReconciliationContext,
+) -> pd.DataFrame:
     points = result[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
     for section in sections:
         _enforce_target_support(
@@ -322,7 +308,17 @@ def _inactive_sections(frame: pd.DataFrame) -> tuple[_CrossSection, ...]:
         )
     if frame[list(_CROSS_SECTION_COLUMNS)].isna().any(axis=None):
         raise ReconciliationError("reconciliation cross-section identity cannot be missing")
+    sections = _cross_sections(frame)
+    for section in sections:
+        labels = tuple(frame.iloc[list(section.positions)][SERIES_KEY])
+        if any(not isinstance(label, str) or not label for label in labels):
+            raise ReconciliationError(
+                f"{section.description} contains a missing or invalid series key"
+            )
+    return sections
 
+
+def _cross_sections(frame: pd.DataFrame) -> tuple[_CrossSection, ...]:
     grouped = frame.groupby(
         list(_CROSS_SECTION_COLUMNS),
         sort=False,
@@ -340,10 +336,9 @@ def _inactive_sections(frame: pd.DataFrame) -> tuple[_CrossSection, ...]:
             raise ReconciliationError("reconciliation origins must be pandas Timestamps")
         if not isinstance(step, Integral) or isinstance(step, bool) or step < 1:
             raise ReconciliationError("reconciliation horizon steps must be positive integers")
-        identity = (model, origin, int(step))
         sections.append(
             _CrossSection(
-                identity=identity,
+                identity=(model, origin, int(step)),
                 positions=tuple(int(position) for position in raw_positions),
             )
         )
@@ -354,12 +349,6 @@ def _inactive_sections(frame: pd.DataFrame) -> tuple[_CrossSection, ...]:
             section.identity[2],
         )
     )
-    for section in sections:
-        labels = tuple(frame.iloc[list(section.positions)][SERIES_KEY])
-        if any(not isinstance(label, str) or not label for label in labels):
-            raise ReconciliationError(
-                f"{section.description} contains a missing or invalid series key"
-            )
     return tuple(sections)
 
 
@@ -461,38 +450,7 @@ def _validated_sections(
         )
     if frame[list(_CROSS_SECTION_COLUMNS)].isna().any(axis=None):
         raise ReconciliationError("reconciliation cross-section identity cannot be missing")
-
-    grouped = frame.groupby(
-        list(_CROSS_SECTION_COLUMNS),
-        sort=False,
-        observed=True,
-        dropna=False,
-    ).indices
-    sections: list[_CrossSection] = []
-    for raw_identity, raw_positions in grouped.items():
-        if not isinstance(raw_identity, tuple) or len(raw_identity) != 3:
-            raise ReconciliationError("reconciliation produced an invalid cross-section key")
-        model, origin, step = raw_identity
-        if not isinstance(model, str) or not model:
-            raise ReconciliationError("reconciliation model names must be non-empty strings")
-        if not isinstance(origin, pd.Timestamp):
-            raise ReconciliationError("reconciliation origins must be pandas Timestamps")
-        if not isinstance(step, Integral) or isinstance(step, bool) or step < 1:
-            raise ReconciliationError("reconciliation horizon steps must be positive integers")
-        identity = (model, origin, int(step))
-        sections.append(
-            _CrossSection(
-                identity=identity,
-                positions=tuple(int(position) for position in raw_positions),
-            )
-        )
-    sections.sort(
-        key=lambda section: (
-            section.identity[0].encode(),
-            section.identity[1].value,
-            section.identity[2],
-        )
-    )
+    sections = _cross_sections(frame)
 
     known = set(hierarchy.node_labels)
     bottoms = set(hierarchy.bottom_series)
@@ -521,7 +479,7 @@ def _validated_sections(
             raise ReconciliationError(
                 f"{section.description} requires bottom-node rows only: {non_bottom}"
             )
-    return tuple(sections)
+    return sections
 
 
 def _validate_existing_aggregates(

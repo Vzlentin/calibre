@@ -604,18 +604,18 @@ def _coherent_projection_bound(
     use_sparse: bool,
 ) -> tuple[np.ndarray, float, float]:
     coherent = matrix.matvec(reconciled[: matrix.n_bottom])
-    magnitude = float(np.max(np.abs(np.concatenate((reconciled, coherent)))))
+    reconciled_magnitude = float(np.max(np.abs(reconciled))) if reconciled.size else 0.0
+    coherent_magnitude = float(np.max(np.abs(coherent))) if coherent.size else 0.0
     coherence_bound = coherence_tolerance(
         reduction_width=matrix.reduction_width,
-        vector_magnitude=magnitude,
+        vector_magnitude=max(reconciled_magnitude, coherent_magnitude),
         solver_tolerance=SPARSE_SOLVER_TOLERANCE if use_sparse else None,
     )
-    support_bound = _support_canonicalization_bound(reconciled)
+    support_bound = _support_canonicalization_bound(reconciled_magnitude)
     return coherent, coherence_bound, support_bound
 
 
-def _support_canonicalization_bound(reconciled: np.ndarray) -> float:
-    magnitude = float(np.max(np.abs(reconciled))) if reconciled.size else 0.0
+def _support_canonicalization_bound(magnitude: float) -> float:
     return float(8.0 * np.finfo(np.float64).eps * max(magnitude, 1.0))
 
 
