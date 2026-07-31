@@ -24,7 +24,7 @@ from newcalibre.protocols.m5.inventory import (
 _SALES_NAME = "sales_train_evaluation.csv"
 _CALENDAR_NAME = "calendar.csv"
 _SOURCE_FACTS = ("item_id", "dept_id", "cat_id", "store_id", "state_id")
-_METADATA_COLUMNS = ("id", *_SOURCE_FACTS)
+_METADATA_COLUMNS = _SOURCE_FACTS
 _EVALUATION_DAY_COUNT = 1941
 _DAY_COLUMNS = tuple(f"d_{index}" for index in range(1, _EVALUATION_DAY_COUNT + 1))
 _SIGNED_INT64_MAX = 2**63 - 1
