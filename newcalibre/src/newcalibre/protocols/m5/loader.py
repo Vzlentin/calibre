@@ -150,6 +150,8 @@ def _read_csv(
 
 def _normalize_sales(frame: pd.DataFrame) -> pd.DataFrame:
     _require_frame(frame, surface="evaluation sales")
+    if not frame.index.equals(pd.RangeIndex(len(frame))):
+        raise M5DataError("evaluation sales rows must contain exact field counts")
     expected = (*_SOURCE_FACTS, *_DAY_COLUMNS)
     if tuple(frame.columns) != expected:
         raise M5DataError(

@@ -70,6 +70,7 @@ def _write_release(
     *,
     rows: list[dict[str, object]] | None = None,
     sales_mutation: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
+    sales_payload_mutation: Callable[[str], str] | None = None,
     calendar_mutation: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
     start: str = "2011-01-29",
     extra_calendar_days: int = 0,
@@ -86,6 +87,9 @@ def _write_release(
     sales_path = target / "sales_train_evaluation.csv"
     calendar_path = target / "calendar.csv"
     sales.to_csv(sales_path, index=False)
+    if sales_payload_mutation is not None:
+        payload = sales_path.read_text(encoding="utf-8")
+        sales_path.write_text(sales_payload_mutation(payload), encoding="utf-8")
     calendar.to_csv(calendar_path, index=False)
     inventory = {
         "schema": 1,
@@ -176,7 +180,12 @@ def test_loader_rehashes_each_selected_input_before_parsing(
 @pytest.mark.parametrize(
     ("sales_mutation", "match"),
     [
-        (lambda frame: frame.assign(id="unexpected").loc[:, ["id", *frame.columns]], "metadata"),
+        (
+            lambda frame: frame.assign(
+                id=frame["item_id"] + "_" + frame["store_id"] + "_evaluation"
+            ).loc[:, ["id", *frame.columns]],
+            "metadata",
+        ),
         (
             lambda frame: frame[
                 [
@@ -204,6 +213,16 @@ def test_loader_rejects_invalid_evaluation_sales(
 ) -> None:
     _write_release(tmp_path, sales_mutation=sales_mutation)
     with pytest.raises(M5DataError, match=match):
+        load_m5_dataset(tmp_path, _config(tmp_path))
+
+
+def test_loader_rejects_rows_wider_than_the_sales_header(tmp_path: Path) -> None:
+    _write_release(
+        tmp_path,
+        sales_payload_mutation=lambda payload: payload.removeprefix("item_id,"),
+    )
+
+    with pytest.raises(M5DataError, match="field counts"):
         load_m5_dataset(tmp_path, _config(tmp_path))
 
 
