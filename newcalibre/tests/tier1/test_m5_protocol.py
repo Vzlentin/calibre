@@ -40,7 +40,6 @@ def _row(index: int) -> dict[str, object]:
     item = f"ITEM_{index}"
     store = f"STORE_{index % 3}"
     return {
-        "id": f"{item}_{store}_evaluation",
         "item_id": item,
         "dept_id": f"DEPT_{index % 2}",
         "cat_id": f"CAT_{index % 2}",
@@ -51,8 +50,7 @@ def _row(index: int) -> dict[str, object]:
 
 def _sales_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
     values: dict[str, object] = {
-        "id": [row["id"] for row in rows],
-        **{name: [row[name] for row in rows] for name in _SOURCE_FACTS},
+        name: [row[name] for row in rows] for name in _SOURCE_FACTS
     }
     for day in range(1, _DAY_COUNT + 1):
         values[f"d_{day}"] = [(index + day) % 11 for index in range(len(rows))]
@@ -111,6 +109,16 @@ def _inventory_entry(path: Path) -> dict[str, object]:
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
+
+
+def _with_id_column(frame: pd.DataFrame) -> pd.DataFrame:
+    mutated = frame.copy(deep=True)
+    mutated.insert(
+        0,
+        "id",
+        [f"{row.item_id}_{row.store_id}_evaluation" for row in frame.itertuples()],
+    )
+    return mutated
 
 
 def _config(tmp_path: Path, *, population: dict[str, object] | None = None):
@@ -180,7 +188,8 @@ def test_loader_rehashes_each_selected_input_before_parsing(
 @pytest.mark.parametrize(
     ("sales_mutation", "match"),
     [
-        (lambda frame: frame[[*frame.columns[:6], "d_2", "d_1", *frame.columns[8:]]], "day"),
+        (_with_id_column, "metadata"),
+        (lambda frame: frame[[*frame.columns[:5], "d_2", "d_1", *frame.columns[7:]]], "day"),
         (lambda frame: frame.rename(columns={"d_2": "d_2000"}), "day"),
         (lambda frame: frame.drop(columns="d_1941"), "day"),
         (lambda frame: frame.assign(dept_id=None), "hierarchy"),
