@@ -187,7 +187,6 @@ def apply_bottom_up(
         if not aggregate_rows
         else pd.concat([bottom_rows, *aggregate_rows], ignore_index=True)
     )
-    result = result.copy(deep=True)
     result_points = result[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
     result_sections = _validated_sections(result, active, allow_aggregate_rows=True)
     for section in result_sections:
