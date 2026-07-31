@@ -34,6 +34,7 @@ from newcalibre.domain import (
     Panel,
     Scope,
     SessionIdentity,
+    TargetSupport,
     interval_columns,
     target_timestamp,
 )
@@ -143,7 +144,7 @@ def _panel(
             for index, timestamp in enumerate(timestamps, start=1)
         ]
     ).astype({SERIES_KEY: "string", OBSERVED_VALUE: "float64"})
-    return Panel.from_frame(frame, calendar=_CALENDAR)
+    return Panel.from_frame(frame, calendar=_CALENDAR, target_support=TargetSupport.REAL)
 
 
 def _session(

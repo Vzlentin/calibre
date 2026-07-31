@@ -27,11 +27,13 @@ from newcalibre.domain import (
     TIMESTAMP,
     FittedValues,
     HierarchyIndex,
+    TargetSupport,
     interval_columns,
 )
 from newcalibre.reconcile import (
     NixtlaLayout,
     ProjectionMetadata,
+    ProjectionReconciler,
     ReconciliationContext,
     ReconciliationError,
     SparseSummingMatrix,
@@ -45,6 +47,7 @@ from newcalibre.reconcile import (
     derive_variance_weights,
     preflight_projection,
 )
+from newcalibre.reconcile.apply import ReconciledValues
 from newcalibre.reconcile.nixtla import SPARSE_SOLVER_TOLERANCE
 
 _BASE_FORECAST = np.array(
@@ -283,6 +286,85 @@ def test_wls_struct_dense_and_sparse_paths_match_independent_reference(
     pd.testing.assert_frame_equal(
         dense_result.drop(columns=[POINT_FORECAST]),
         frame.drop(columns=[POINT_FORECAST]),
+    )
+
+
+def test_projection_support_validator_canonicalizes_dense_roundoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = _hierarchy()
+    frame = _frame(hierarchy)
+    residue = -6.661338147750939e-16
+
+    def reconciled(
+        self: ProjectionReconciler,
+        *args: object,
+        **kwargs: object,
+    ) -> ReconciledValues:
+        del self, args, kwargs
+        values = _BASE_FORECAST.copy()
+        values[0] = residue
+        return ReconciledValues(values, abs(residue))
+
+    monkeypatch.setattr(ProjectionReconciler, "_reconcile_section", reconciled)
+
+    result = build_wls_struct()(
+        frame,
+        hierarchy,
+        ReconciliationContext(target_support=TargetSupport.NONNEGATIVE),
+    )
+
+    assert result.loc[result[SERIES_KEY] == hierarchy.node_labels[0], POINT_FORECAST].iat[0] == 0.0
+
+
+def test_projection_support_validator_rejects_material_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = _hierarchy()
+    frame = _frame(hierarchy)
+
+    def reconciled(
+        self: ProjectionReconciler,
+        *args: object,
+        **kwargs: object,
+    ) -> ReconciledValues:
+        del self, args, kwargs
+        values = _BASE_FORECAST.copy()
+        values[0] = -5.1e-2
+        return ReconciledValues(values, 1e-12)
+
+    monkeypatch.setattr(ProjectionReconciler, "_reconcile_section", reconciled)
+
+    with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*series='s1'"):
+        build_wls_struct()(
+            frame,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.NONNEGATIVE),
+        )
+
+
+def test_projection_support_validator_preserves_real_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = _hierarchy()
+    frame = _frame(hierarchy)
+
+    def reconciled(
+        self: ProjectionReconciler,
+        *args: object,
+        **kwargs: object,
+    ) -> ReconciledValues:
+        del self, args, kwargs
+        values = _BASE_FORECAST.copy()
+        values[0] = -5.1e-2
+        return ReconciledValues(values, 0.0)
+
+    monkeypatch.setattr(ProjectionReconciler, "_reconcile_section", reconciled)
+
+    result = build_wls_struct()(frame, hierarchy, ReconciliationContext())
+
+    assert (
+        result.loc[result[SERIES_KEY] == hierarchy.node_labels[0], POINT_FORECAST].iat[0] == -5.1e-2
     )
 
 

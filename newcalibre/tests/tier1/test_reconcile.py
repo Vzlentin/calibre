@@ -24,6 +24,7 @@ from newcalibre.domain import (
     FittedValues,
     HierarchyIndex,
     HierarchyNodeKind,
+    TargetSupport,
     interval_columns,
     quantile_column,
 )
@@ -241,6 +242,33 @@ def test_none_is_a_strict_point_frame_identity() -> None:
     result = resolve_strategy(NONE)(frame, _hierarchy(), ReconciliationContext())
 
     assert result is frame
+
+
+def test_support_validator_canonicalizes_admissible_nonnegative_residue() -> None:
+    frame = _frame({"a": -0.0, "b": 2.0, "c": 3.0})
+    frame.loc[frame[SERIES_KEY] == "a", POINT_FORECAST] = -0.0
+    context = ReconciliationContext(target_support=TargetSupport.NONNEGATIVE)
+
+    result = resolve_strategy(NONE)(frame, _hierarchy(), context)
+
+    assert result.loc[result[SERIES_KEY] == "a", POINT_FORECAST].iat[0] == 0.0
+
+
+def test_support_validator_rejects_material_negative_with_identity() -> None:
+    frame = _frame({"a": -5.1e-2, "b": 2.0, "c": 3.0})
+    context = ReconciliationContext(target_support=TargetSupport.NONNEGATIVE)
+
+    with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*series='a'"):
+        resolve_strategy(NONE)(frame, _hierarchy(), context)
+
+
+def test_real_target_support_preserves_negative_points() -> None:
+    frame = _frame({"a": -5.1e-2, "b": 2.0, "c": 3.0})
+
+    result = resolve_strategy(NONE)(frame, _hierarchy(), ReconciliationContext())
+
+    assert result is frame
+    assert result.loc[result[SERIES_KEY] == "a", POINT_FORECAST].iat[0] == -5.1e-2
 
 
 @pytest.mark.parametrize("strategy_name", available_strategies())

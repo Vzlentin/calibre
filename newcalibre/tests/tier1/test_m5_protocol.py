@@ -21,6 +21,7 @@ from newcalibre.domain import (
     TOTAL_NODE_LABEL,
     HierarchyError,
     HierarchyIndex,
+    TargetSupport,
 )
 from newcalibre.protocols.m5 import load_m5_config
 from newcalibre.protocols.m5.compiler import (
@@ -336,6 +337,7 @@ def test_compiler_builds_canonical_panel_hierarchy_origins_and_intent(tmp_path: 
     assert tuple(frame.columns) == (SERIES_KEY, TIMESTAMP, OBSERVED_VALUE)
     assert CENSOR_STATUS not in frame
     assert not compiled.panel.has_censoring_facts
+    assert compiled.panel.target_support is TargetSupport.NONNEGATIVE
     assert tuple(frame[SERIES_KEY].unique()) == compiled.panel.series_keys
     assert frame.equals(frame.sort_values([SERIES_KEY, TIMESTAMP]).reset_index(drop=True))
     assert len(compiled.origins) == 64

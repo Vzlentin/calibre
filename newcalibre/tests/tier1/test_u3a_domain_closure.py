@@ -40,6 +40,7 @@ from newcalibre.domain import (
     Panel,
     PanelError,
     Scope,
+    TargetSupport,
     validate_forecast_frame,
 )
 
@@ -102,7 +103,9 @@ def _task(
     model_config: dict[str, object] | None = None,
 ) -> ForecastTask:
     panel = Panel.from_frame(
-        frame if frame is not None else _panel_frame(), calendar=calendar or Calendar("W-MON")
+        frame if frame is not None else _panel_frame(),
+        calendar=calendar or Calendar("W-MON"),
+        target_support=TargetSupport.REAL,
     )
     return panel.forecast_tasks(
         origin=origin or pd.Timestamp(np.datetime64("2026-01-19", "ms")),
@@ -123,7 +126,7 @@ def test_multiplied_weekly_calendar_binds_panel_phase_and_round_trips_it() -> No
             OBSERVED_VALUE: pd.Series([1.0, 2.0], dtype="float64"),
         }
     )
-    panel = Panel.from_frame(frame, calendar=Calendar("2W-MON"))
+    panel = Panel.from_frame(frame, calendar=Calendar("2W-MON"), target_support=TargetSupport.REAL)
 
     assert panel.calendar.phase == pd.Timestamp(np.datetime64("2026-01-05", "ms"))
     assert panel.calendar.contains(pd.Timestamp("2026-01-05"))
@@ -159,7 +162,7 @@ def test_multiplied_calendar_rejects_observation_and_origin_off_bound_phase(
             OBSERVED_VALUE: pd.Series([1.0, 2.0], dtype="float64"),
         }
     )
-    panel = Panel.from_frame(frame, calendar=Calendar(frequency))
+    panel = Panel.from_frame(frame, calendar=Calendar(frequency), target_support=TargetSupport.REAL)
     bad_observation = pd.concat(
         [
             frame.iloc[::-1],
@@ -175,7 +178,9 @@ def test_multiplied_calendar_rejects_observation_and_origin_off_bound_phase(
     )
 
     with pytest.raises(PanelError, match="does not lie on calendar"):
-        Panel.from_frame(bad_observation, calendar=Calendar(frequency))
+        Panel.from_frame(
+            bad_observation, calendar=Calendar(frequency), target_support=TargetSupport.REAL
+        )
     with pytest.raises(PanelError, match="does not lie on calendar"):
         panel.forecast_tasks(
             origin=pd.Timestamp(invalid),
@@ -194,7 +199,7 @@ def test_weekly_anchor_refuses_a_monday_under_sunday_calendar() -> None:
         }
     )
     with pytest.raises(PanelError, match="does not lie on calendar"):
-        Panel.from_frame(frame, calendar=Calendar("W-SUN"))
+        Panel.from_frame(frame, calendar=Calendar("W-SUN"), target_support=TargetSupport.REAL)
 
 
 def test_unbound_calendar_cannot_answer_membership_without_dataset_phase() -> None:
@@ -238,7 +243,7 @@ def test_every_calendar_frequency_enforces_observation_and_origin_clock_phase(
             OBSERVED_VALUE: pd.Series([1.0, 2.0], dtype="float64"),
         }
     )
-    panel = Panel.from_frame(frame, calendar=Calendar(frequency))
+    panel = Panel.from_frame(frame, calendar=Calendar(frequency), target_support=TargetSupport.REAL)
     bad_observation = pd.concat(
         [
             frame,
@@ -255,7 +260,9 @@ def test_every_calendar_frequency_enforces_observation_and_origin_clock_phase(
 
     assert panel.calendar.phase == pd.Timestamp(valid[0])
     with pytest.raises(PanelError, match="does not lie on calendar"):
-        Panel.from_frame(bad_observation, calendar=Calendar(frequency))
+        Panel.from_frame(
+            bad_observation, calendar=Calendar(frequency), target_support=TargetSupport.REAL
+        )
     with pytest.raises(PanelError, match="does not lie on calendar"):
         panel.forecast_tasks(
             origin=pd.Timestamp(invalid_origin),
@@ -304,7 +311,7 @@ def test_panel_refuses_a_prebound_noncanonical_phase() -> None:
     calendar = Calendar("2W-MON", phase=pd.Timestamp(np.datetime64("2026-01-19", "ms")))
 
     with pytest.raises(PanelError, match="already bound"):
-        Panel.from_frame(frame, calendar=calendar)
+        Panel.from_frame(frame, calendar=calendar, target_support=TargetSupport.REAL)
 
 
 def test_rebinding_same_phase_in_another_resolution_retains_exact_representation() -> None:
@@ -319,7 +326,9 @@ def test_rebinding_same_phase_in_another_resolution_retains_exact_representation
 
 
 def test_censor_null_and_explicit_undeclared_share_one_transport_sentinel() -> None:
-    panel = Panel.from_frame(_panel_frame(), calendar=Calendar("W-MON"))
+    panel = Panel.from_frame(
+        _panel_frame(), calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+    )
     statuses = panel.frame[CENSOR_STATUS]
 
     assert panel.has_censoring_facts
@@ -332,13 +341,15 @@ def test_censor_null_and_explicit_undeclared_share_one_transport_sentinel() -> N
         .all()
     )
 
-    reingested = Panel.from_frame(panel.frame, calendar=panel.calendar)
+    reingested = Panel.from_frame(
+        panel.frame, calendar=panel.calendar, target_support=TargetSupport.REAL
+    )
     pd.testing.assert_frame_equal(reingested.frame, panel.frame)
 
 
 def test_absent_censor_fields_remain_absent_through_task_transport() -> None:
     frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
-    panel = Panel.from_frame(frame, calendar=Calendar("W-MON"))
+    panel = Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
     task = panel.forecast_tasks(
         origin=pd.Timestamp(np.datetime64("2026-01-19", "ms")),
         horizon=1,
@@ -357,7 +368,11 @@ def test_absent_censor_fields_remain_absent_through_task_transport() -> None:
 @pytest.mark.parametrize("column", REQUIRED_PANEL_COLUMNS)
 def test_panel_rejects_each_missing_required_column(column: str) -> None:
     with pytest.raises(PanelError, match="missing required"):
-        Panel.from_frame(_panel_frame().drop(columns=column), calendar=Calendar("W-MON"))
+        Panel.from_frame(
+            _panel_frame().drop(columns=column),
+            calendar=Calendar("W-MON"),
+            target_support=TargetSupport.REAL,
+        )
 
 
 @pytest.mark.parametrize(
@@ -372,7 +387,7 @@ def test_panel_rejects_each_mistyped_required_column(column: str, replacement: p
     frame = _panel_frame()
     frame[column] = replacement
     with pytest.raises(PanelError, match=column):
-        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+        Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
 
 
 @pytest.mark.parametrize(
@@ -409,7 +424,9 @@ def test_panel_rejects_invalid_status_bound_and_exogenous_values(
     mutation: Callable[[pd.DataFrame], pd.DataFrame], pattern: str
 ) -> None:
     with pytest.raises(PanelError, match=pattern):
-        Panel.from_frame(mutation(_panel_frame()), calendar=Calendar("W-MON"))
+        Panel.from_frame(
+            mutation(_panel_frame()), calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+        )
 
 
 def test_sparse_numeric_values_densify_losslessly_to_the_same_task_bytes() -> None:
@@ -647,7 +664,7 @@ def test_panel_rejects_numeric_dtypes_without_exact_arrow_round_trip(dtype: str)
     frame = _panel_frame()
     frame[OBSERVED_VALUE] = np.array([3, 1, 1, 2, 2, 3], dtype=dtype)
     with pytest.raises(PanelError, match="supported by Arrow"):
-        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+        Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
 
 
 def test_scope_is_not_representable_inside_adapter_configuration() -> None:
@@ -666,7 +683,7 @@ def test_task_rejects_configuration_and_column_labels_that_are_not_utf8_transpor
         dtype="object",
     )
     with pytest.raises(PanelError, match="UTF-8"):
-        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+        Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
 
 
 @pytest.mark.parametrize(
@@ -750,7 +767,7 @@ class _HistorySpy:
 @settings(max_examples=100, deadline=None)
 def test_no_at_or_after_origin_history_reaches_adapter(frame: pd.DataFrame, scope: Scope) -> None:
     origin = pd.Timestamp("2026-01-19")
-    panel = Panel.from_frame(frame, calendar=Calendar("W-MON"))
+    panel = Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
     tasks = panel.forecast_tasks(
         origin=origin,
         horizon=2,
@@ -889,7 +906,9 @@ def test_cross_surface_fixture_still_covers_every_forecast_required_column(colum
 
 
 def test_invalid_scope_objects_still_fail_before_adapter_configuration() -> None:
-    panel = Panel.from_frame(_panel_frame(), calendar=Calendar("W-MON"))
+    panel = Panel.from_frame(
+        _panel_frame(), calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+    )
     with pytest.raises(PanelError, match="scope"):
         panel.forecast_tasks(
             origin=pd.Timestamp("2026-01-19"),
@@ -897,3 +916,30 @@ def test_invalid_scope_objects_still_fail_before_adapter_configuration() -> None
             scope=cast(Scope, "global"),
             model_config={},
         )
+
+
+def test_panel_requires_explicit_target_support() -> None:
+    with pytest.raises(TypeError, match="target_support"):
+        Panel.from_frame(_panel_frame(), calendar=Calendar("W-MON"))  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("support", [TargetSupport.REAL, TargetSupport.NONNEGATIVE])
+def test_panel_target_support_round_trips(support: TargetSupport) -> None:
+    panel = Panel.from_frame(
+        _panel_frame(),
+        calendar=Calendar("W-MON"),
+        target_support=support,
+    )
+
+    assert panel.target_support is support
+
+
+def test_nonnegative_observations_do_not_select_support_implicitly() -> None:
+    panel = Panel.from_frame(
+        _panel_frame(),
+        calendar=Calendar("W-MON"),
+        target_support=TargetSupport.REAL,
+    )
+
+    assert panel.frame[OBSERVED_VALUE].ge(0).all()
+    assert panel.target_support is TargetSupport.REAL

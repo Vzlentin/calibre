@@ -23,6 +23,7 @@ from newcalibre.domain import (
     InventoryPosition,
     Panel,
     Scope,
+    TargetSupport,
     quantile_column,
     validate_forecast_frame,
 )
@@ -77,7 +78,9 @@ def _task(config: Mapping[str, object] | None = None) -> ForecastTask:
             "value": pd.Series(np.arange(1, 53), dtype="float64"),
         }
     )
-    return Panel.from_frame(history, calendar=Calendar("W-MON")).forecast_tasks(
+    return Panel.from_frame(
+        history, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+    ).forecast_tasks(
         horizon=3,
         origin=ORIGIN,
         scope=Scope.GLOBAL,

@@ -56,8 +56,9 @@ bound sections at the end of this chapter.
 - `[REC-5]` Strategies that need in-sample residuals receive **fitted
   values** through an explicit per-origin reconciliation context, keyed by
   `(series key, timestamp, model name)` per `[FRA-5]` — never through
-  forecast rows. Callers pass the context unconditionally, even to strategies
-  that ignore it; a residual-requiring strategy given no fitted values fails
+  forecast rows. The same context carries the panel target support `[PAN-5]`.
+  Callers pass the context unconditionally, even to strategies that ignore
+  fitted values; a residual-requiring strategy given no fitted values fails
   loudly before reconciling anything.
 
 ## Define the reconciler protocol
@@ -80,7 +81,8 @@ bound sections at the end of this chapter.
   dense-only). Run preparation reads these declarations to decide whether
   aggregate-node forecast tasks must be built, whether the fitted-values
   sidecar must be produced, and how to size the memory preflight — all before
-  execution starts.
+  execution starts. Every reconciler output must also satisfy the target
+  support carried in the reconciliation context.
 
 ## Define the strategy registry
 
@@ -208,6 +210,14 @@ Per cross-section (every origin):
   `[REC-12]` returns the same point values within the derived tolerance. For
   synthesis strategies this reads as: re-deriving aggregate values from the
   (unchanged) bottom block reproduces the synthesized values.
+- `[REC-25]` **Target-support postcondition.** After each cross-section is
+  reconciled, the common application layer enforces the context target
+  support `[PAN-5]` before calibration sees the points. For `REAL`, finite
+  point values pass unchanged. For `NONNEGATIVE`, an adapter supplies the
+  absolute numerical-error bound for its output; values in `[-bound, 0)` are
+  canonicalized to exactly `0.0`, and values below `-bound` are rejected with
+  the model name, origin, horizon step, and series key. Native strategies use
+  the same validator rather than private clipping logic.
 
 ## Treat strategy choice as an experimental knob
 

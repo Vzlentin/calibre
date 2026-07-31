@@ -18,6 +18,7 @@ from newcalibre.domain import (
     Calendar,
     HierarchyIndex,
     Panel,
+    TargetSupport,
 )
 from newcalibre.protocols.m5.config import M5ExecutionConfig, M5ProtocolConfig
 from newcalibre.protocols.m5.loader import M5DataError, M5Dataset
@@ -120,7 +121,11 @@ def _compile_panel(
             OBSERVED_VALUE: long[OBSERVED_VALUE].astype("int64"),
         }
     )
-    return Panel.from_frame(frame, calendar=Calendar("D"))
+    return Panel.from_frame(
+        frame,
+        calendar=Calendar("D"),
+        target_support=TargetSupport.NONNEGATIVE,
+    )
 
 
 def _compile_hierarchy(
