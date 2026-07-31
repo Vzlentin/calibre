@@ -40,6 +40,7 @@ from newcalibre.domain import (
     ScoredSeries,
     SessionIdentity,
     StockoutRule,
+    TargetSupport,
     target_timestamp,
 )
 from newcalibre.domain import (
@@ -261,7 +262,7 @@ def make_panel() -> Panel:
     frame = pd.DataFrame.from_records(rows).astype(
         {SERIES_KEY: "string", OBSERVED_VALUE: "float64"}
     )
-    return Panel.from_frame(frame, calendar=CALENDAR)
+    return Panel.from_frame(frame, calendar=CALENDAR, target_support=TargetSupport.REAL)
 
 
 def make_session(runtime_name: str | None) -> SessionIdentity:

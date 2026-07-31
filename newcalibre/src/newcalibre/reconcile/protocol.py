@@ -8,7 +8,7 @@ from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
-from newcalibre.domain import FittedValues, HierarchyIndex
+from newcalibre.domain import FittedValues, HierarchyIndex, TargetSupport
 
 
 class ReconciliationInputFamily(StrEnum):
@@ -52,10 +52,13 @@ class ReconciliationContext:
     """Carry optional per-origin sidecars outside the forecast frame."""
 
     fitted_values: FittedValues | None = None
+    target_support: TargetSupport = TargetSupport.REAL
 
     def __post_init__(self) -> None:
         if self.fitted_values is not None and not isinstance(self.fitted_values, FittedValues):
             raise TypeError("reconciliation fitted values must be FittedValues or None")
+        if not isinstance(self.target_support, TargetSupport):
+            raise TypeError("reconciliation target support must be a TargetSupport")
 
 
 @runtime_checkable
@@ -73,5 +76,5 @@ class Reconciler(Protocol):
         hierarchy: HierarchyIndex | None,
         context: ReconciliationContext,
     ) -> pd.DataFrame:
-        """Return point forecasts reconciled against the supplied hierarchy."""
+        """Return point forecasts reconciled inside context.target_support."""
         ...

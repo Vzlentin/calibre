@@ -44,6 +44,7 @@ from newcalibre.domain import (
     ScoredSeries,
     SessionIdentity,
     StockoutRule,
+    TargetSupport,
     interval_columns,
     quantile_column,
     target_timestamp,
@@ -86,7 +87,11 @@ ORDERING_POLICY = {"name": "newsvendor"}
 TIMING = DecisionTiming(lead_time=1, review_period=1)
 
 
-def _panel(*, series_keys: tuple[str, ...] = ("a",)) -> Panel:
+def _panel(
+    *,
+    series_keys: tuple[str, ...] = ("a",),
+    target_support: TargetSupport = TargetSupport.REAL,
+) -> Panel:
     timestamps = pd.date_range("2026-01-01", periods=7, freq="D")
     return Panel.from_frame(
         pd.DataFrame.from_records(
@@ -101,6 +106,7 @@ def _panel(*, series_keys: tuple[str, ...] = ("a",)) -> Panel:
             ]
         ).astype({SERIES_KEY: "string", OBSERVED_VALUE: "float64"}),
         calendar=CALENDAR,
+        target_support=target_support,
     )
 
 
@@ -120,7 +126,7 @@ def _all_node_panel(panel: Panel, hierarchy: HierarchyIndex) -> Panel:
     frame = pd.DataFrame.from_records(records)
     frame[SERIES_KEY] = frame[SERIES_KEY].astype("string")
     frame[OBSERVED_VALUE] = frame[OBSERVED_VALUE].astype("float64")
-    return Panel.from_frame(frame, calendar=panel.calendar)
+    return Panel.from_frame(frame, calendar=panel.calendar, target_support=TargetSupport.REAL)
 
 
 def _session(
@@ -471,6 +477,45 @@ def _engine(
         reconciliation_strategy=reconciliation_strategy,
         orderer=orderer,
     )
+
+
+def test_engine_supplies_panel_target_support_to_reconciler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[TargetSupport] = []
+
+    class RecordingReconciler:
+        def __call__(
+            self,
+            frame: pd.DataFrame,
+            hierarchy: HierarchyIndex | None,
+            context,
+        ) -> pd.DataFrame:
+            del hierarchy
+            seen.append(context.target_support)
+            return frame
+
+    monkeypatch.setattr(
+        "newcalibre.engine.spine.resolve_strategy",
+        lambda _name: RecordingReconciler(),
+    )
+    panel = _panel(target_support=TargetSupport.NONNEGATIVE)
+    session = _session()
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+        reconciliation_strategy="recording",
+    )
+    request = OriginRequest(session=session, origin=pd.Timestamp("2026-01-05"), scope=Scope.LOCAL)
+
+    predicted = engine.predict(engine.fit(request))
+    engine.reconcile(predicted)
+
+    assert seen == [TargetSupport.NONNEGATIVE]
 
 
 def test_spine_runs_fixed_phases_and_uses_every_port(
@@ -2153,6 +2198,7 @@ def test_engine_refuses_a_panel_outside_its_session_definition() -> None:
             }
         ),
         calendar=CALENDAR,
+        target_support=TargetSupport.REAL,
     )
     session = _session()
     with pytest.raises(EngineError, match="panel series set does not match"):

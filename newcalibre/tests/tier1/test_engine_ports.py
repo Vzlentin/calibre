@@ -35,6 +35,7 @@ from newcalibre.domain import (
     Panel,
     SessionIdentity,
     StockoutRule,
+    TargetSupport,
 )
 from newcalibre.engine import (
     CommitReceipt,
@@ -78,6 +79,7 @@ def _panel() -> Panel:
             }
         ),
         calendar=CALENDAR,
+        target_support=TargetSupport.REAL,
     )
 
 
@@ -166,7 +168,9 @@ def test_actuals_source_requires_and_enforces_observation_semantics() -> None:
         [1.5, None, 3.5],
         dtype="float64",
     )
-    censored_panel = Panel.from_frame(censored_frame, calendar=CALENDAR)
+    censored_panel = Panel.from_frame(
+        censored_frame, calendar=CALENDAR, target_support=TargetSupport.REAL
+    )
 
     with pytest.raises(ValueError, match="cannot supply demand-honest actuals"):
         InMemoryActualsSource(

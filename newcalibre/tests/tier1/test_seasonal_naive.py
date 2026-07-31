@@ -27,6 +27,7 @@ from newcalibre.domain import (
     ForecastTask,
     Panel,
     Scope,
+    TargetSupport,
     validate_forecast_frame,
 )
 from newcalibre.forecasting import (
@@ -81,7 +82,9 @@ def _task(
     config: Mapping[str, object] | None = None,
 ) -> ForecastTask:
     model_config = dict(config or _config())
-    return Panel.from_frame(history, calendar=Calendar("D")).forecast_tasks(
+    return Panel.from_frame(
+        history, calendar=Calendar("D"), target_support=TargetSupport.REAL
+    ).forecast_tasks(
         horizon=horizon,
         origin=ORIGIN_TIMESTAMP,
         scope=Scope.GLOBAL,
@@ -380,7 +383,9 @@ def test_weekly_anchored_calendar_uses_the_same_phase_lookup() -> None:
             "value": pd.Series(range(1, 9), dtype="float64"),
         }
     )
-    task = Panel.from_frame(history, calendar=Calendar("W-MON")).forecast_tasks(
+    task = Panel.from_frame(
+        history, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+    ).forecast_tasks(
         horizon=3,
         origin=pd.Timestamp("2026-03-02"),
         scope=Scope.GLOBAL,

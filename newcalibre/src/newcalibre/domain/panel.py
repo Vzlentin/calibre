@@ -94,6 +94,13 @@ class CensoringAssertion(StrEnum):
     UNCENSORED = "uncensored"
 
 
+class TargetSupport(StrEnum):
+    """Declare the mathematical support of a panel's forecast target."""
+
+    REAL = "real"
+    NONNEGATIVE = "nonnegative"
+
+
 @dataclass(frozen=True, slots=True, eq=False, init=False)
 class Panel:
     """Own a canonical defensive snapshot of a whole panel and its calendar."""
@@ -101,10 +108,21 @@ class Panel:
     _frame: pd.DataFrame = field(repr=False)
     _calendar: Calendar
     _series_keys: tuple[str, ...]
+    _target_support: TargetSupport
 
     @classmethod
-    def from_frame(cls, frame: pd.DataFrame, *, calendar: Calendar) -> Panel:
+    def from_frame(
+        cls,
+        frame: pd.DataFrame,
+        *,
+        calendar: Calendar,
+        target_support: TargetSupport,
+    ) -> Panel:
         """Validate and snapshot a non-empty long-format panel."""
+        if not isinstance(target_support, TargetSupport):
+            raise PanelError(
+                "target support must be TargetSupport.REAL or TargetSupport.NONNEGATIVE"
+            )
         normalized, bound_calendar = _canonicalize_panel_frame(
             frame,
             calendar=calendar,
@@ -116,6 +134,7 @@ class Panel:
         object.__setattr__(instance, "_frame", normalized)
         object.__setattr__(instance, "_calendar", bound_calendar)
         object.__setattr__(instance, "_series_keys", series_keys)
+        object.__setattr__(instance, "_target_support", target_support)
         return instance
 
     @property
@@ -132,6 +151,11 @@ class Panel:
     def series_keys(self) -> tuple[str, ...]:
         """Return exact opaque keys in deterministic UTF-8 byte order."""
         return self._series_keys
+
+    @property
+    def target_support(self) -> TargetSupport:
+        """Return the declared mathematical support for forecast targets."""
+        return self._target_support
 
     @property
     def has_censoring_facts(self) -> bool:

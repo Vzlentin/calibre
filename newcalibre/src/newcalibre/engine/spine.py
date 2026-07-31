@@ -617,7 +617,7 @@ class Engine:
         result = self._reconciler(
             forecasts.frame,
             self._reconciliation_hierarchy,
-            ReconciliationContext(),
+            ReconciliationContext(target_support=self._panel.target_support),
         )
         if not isinstance(result, pd.DataFrame):
             raise _EngineError("reconciliation strategy must return a pandas DataFrame")

@@ -22,6 +22,7 @@ from newcalibre.domain import (
     Panel,
     Scope,
     SessionIdentity,
+    TargetSupport,
 )
 from newcalibre.engine import (
     ActualKey,
@@ -232,6 +233,7 @@ def _panel(
     return Panel.from_frame(
         pd.concat((history, *realized), ignore_index=True),
         calendar=config.calendar,
+        target_support=TargetSupport.NONNEGATIVE,
     )
 
 

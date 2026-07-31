@@ -40,8 +40,10 @@ Walmart daily unit sales for 3,049 products across 10 stores in 3 US states.
   product sold at a store, key `item×store` — five categorical attribute
   columns (item, department, category, store, state), and one column per
   calendar day labelled `d_1, d_2, …` in day order. Values are non-negative
-  unit-sales counts. The bottom series key is the `(item, store)` pair
-  rendered as a single label.
+  unit-sales counts, so the compiled canonical panel declares
+  `NONNEGATIVE` target support `[PAN-5]`; this is a protocol fact, not a YAML
+  field. The bottom series key is the `(item, store)` pair rendered as a
+  single label.
 - `[M5-D2]` **Calendar table.** A companion table mapping each day label to a
   calendar date (plus event/SNAP fields). The label-to-date mapping is
   **positional**: `d_N` is the N-th day of a contiguous daily calendar. A

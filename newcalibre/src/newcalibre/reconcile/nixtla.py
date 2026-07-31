@@ -20,6 +20,7 @@ from newcalibre.domain import (
     HierarchyIndex,
 )
 from newcalibre.reconcile.apply import (
+    ReconciledValues,
     ReconciliationError,
     _ProjectionSection,
     apply_projection,
@@ -236,7 +237,7 @@ class ProjectionReconciler:
             hierarchy: HierarchyIndex,
             context: ReconciliationContext,
             base_forecast: np.ndarray,
-        ) -> np.ndarray:
+        ) -> ReconciledValues:
             try:
                 preflight = _preflight_section(
                     self.declaration.name,
@@ -323,7 +324,7 @@ class ProjectionReconciler:
         ],
         aligned_fitted: dict[tuple[str, tuple[str, ...]], tuple[np.ndarray, np.ndarray]],
         variance_weights: dict[tuple[str, tuple[str, ...]], VarianceWeights],
-    ) -> np.ndarray:
+    ) -> ReconciledValues:
         use_sparse = self.declaration.name == WLS_VAR or preflight.decision == SPARSE_REQUIRED
         matrix_key = (use_sparse, section.bottom_ids)
         matrix = section_matrices.get(matrix_key)
@@ -396,8 +397,13 @@ class ProjectionReconciler:
             y_hat_insample=fitted,
         )
         reconciled = layout.to_project_vector(np.asarray(result["mean"])[:, 0])
-        _verify_coherence(matrix, reconciled, section=section)
-        return reconciled
+        support_bound = _support_error_bound(
+            matrix,
+            reconciled,
+            use_sparse=use_sparse,
+        )
+        _verify_coherence(matrix, reconciled, section=section, use_sparse=use_sparse)
+        return ReconciledValues(reconciled, support_bound)
 
 
 def _preflight_section(
@@ -583,17 +589,29 @@ def _verify_coherence(
     reconciled: np.ndarray,
     *,
     section: _ProjectionSection,
+    use_sparse: bool,
 ) -> None:
     coherent = matrix.matvec(reconciled[: matrix.n_bottom])
-    magnitude = float(np.max(np.abs(np.concatenate((reconciled, coherent)))))
-    bound = coherence_tolerance(
-        reduction_width=matrix.reduction_width,
-        vector_magnitude=magnitude,
-    )
+    bound = _support_error_bound(matrix, reconciled, use_sparse=use_sparse)
     if not np.allclose(reconciled, coherent, rtol=0.0, atol=bound):
         raise ReconciliationError(
             f"{section.description} failed the derived summing-matrix coherence check"
         )
+
+
+def _support_error_bound(
+    matrix: DenseSummingMatrix | SparseSummingMatrix,
+    reconciled: np.ndarray,
+    *,
+    use_sparse: bool,
+) -> float:
+    coherent = matrix.matvec(reconciled[: matrix.n_bottom])
+    magnitude = float(np.max(np.abs(np.concatenate((reconciled, coherent)))))
+    return coherence_tolerance(
+        reduction_width=matrix.reduction_width,
+        vector_magnitude=magnitude,
+        solver_tolerance=SPARSE_SOLVER_TOLERANCE if use_sparse else None,
+    )
 
 
 def _layout_vector(values: np.ndarray, *, expected: int) -> np.ndarray:
