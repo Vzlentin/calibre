@@ -40,7 +40,6 @@ def _row(index: int) -> dict[str, object]:
     item = f"ITEM_{index}"
     store = f"STORE_{index % 3}"
     return {
-        "id": f"{item}_{store}_evaluation",
         "item_id": item,
         "dept_id": f"DEPT_{index % 2}",
         "cat_id": f"CAT_{index % 2}",
@@ -50,10 +49,7 @@ def _row(index: int) -> dict[str, object]:
 
 
 def _sales_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
-    values: dict[str, object] = {
-        "id": [row["id"] for row in rows],
-        **{name: [row[name] for row in rows] for name in _SOURCE_FACTS},
-    }
+    values: dict[str, object] = {name: [row[name] for row in rows] for name in _SOURCE_FACTS}
     for day in range(1, _DAY_COUNT + 1):
         values[f"d_{day}"] = [(index + day) % 11 for index in range(len(rows))]
     return pd.DataFrame(values)
@@ -74,6 +70,7 @@ def _write_release(
     *,
     rows: list[dict[str, object]] | None = None,
     sales_mutation: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
+    sales_payload_mutation: Callable[[str], str] | None = None,
     calendar_mutation: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
     start: str = "2011-01-29",
     extra_calendar_days: int = 0,
@@ -90,6 +87,9 @@ def _write_release(
     sales_path = target / "sales_train_evaluation.csv"
     calendar_path = target / "calendar.csv"
     sales.to_csv(sales_path, index=False)
+    if sales_payload_mutation is not None:
+        payload = sales_path.read_text(encoding="utf-8")
+        sales_path.write_text(sales_payload_mutation(payload), encoding="utf-8")
     calendar.to_csv(calendar_path, index=False)
     inventory = {
         "schema": 1,
@@ -180,7 +180,23 @@ def test_loader_rehashes_each_selected_input_before_parsing(
 @pytest.mark.parametrize(
     ("sales_mutation", "match"),
     [
-        (lambda frame: frame[[*frame.columns[:6], "d_2", "d_1", *frame.columns[8:]]], "day"),
+        (
+            lambda frame: frame.assign(
+                id=frame["item_id"] + "_" + frame["store_id"] + "_evaluation"
+            ).loc[:, ["id", *frame.columns]],
+            "metadata",
+        ),
+        (
+            lambda frame: frame[
+                [
+                    *_SOURCE_FACTS,
+                    "d_2",
+                    "d_1",
+                    *frame.columns[len(_SOURCE_FACTS) + 2 :],
+                ]
+            ],
+            "day",
+        ),
         (lambda frame: frame.rename(columns={"d_2": "d_2000"}), "day"),
         (lambda frame: frame.drop(columns="d_1941"), "day"),
         (lambda frame: frame.assign(dept_id=None), "hierarchy"),
@@ -197,6 +213,16 @@ def test_loader_rejects_invalid_evaluation_sales(
 ) -> None:
     _write_release(tmp_path, sales_mutation=sales_mutation)
     with pytest.raises(M5DataError, match=match):
+        load_m5_dataset(tmp_path, _config(tmp_path))
+
+
+def test_loader_rejects_rows_wider_than_the_sales_header(tmp_path: Path) -> None:
+    _write_release(
+        tmp_path,
+        sales_payload_mutation=lambda payload: payload.removeprefix("item_id,"),
+    )
+
+    with pytest.raises(M5DataError, match="field counts"):
         load_m5_dataset(tmp_path, _config(tmp_path))
 
 

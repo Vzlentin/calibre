@@ -24,7 +24,6 @@ from newcalibre.protocols.m5.inventory import (
 _SALES_NAME = "sales_train_evaluation.csv"
 _CALENDAR_NAME = "calendar.csv"
 _SOURCE_FACTS = ("item_id", "dept_id", "cat_id", "store_id", "state_id")
-_METADATA_COLUMNS = ("id", *_SOURCE_FACTS)
 _EVALUATION_DAY_COUNT = 1941
 _DAY_COLUMNS = tuple(f"d_{index}" for index in range(1, _EVALUATION_DAY_COUNT + 1))
 _SIGNED_INT64_MAX = 2**63 - 1
@@ -140,7 +139,7 @@ def _read_csv(
         payload = read_verified_m5_input(data_directory, name, inventory)
         return pd.read_csv(
             io.BytesIO(payload),
-            dtype={column: "string" for column in _METADATA_COLUMNS},
+            dtype={column: "string" for column in _SOURCE_FACTS},
             low_memory=False,
         )
     except M5InputError:
@@ -151,7 +150,9 @@ def _read_csv(
 
 def _normalize_sales(frame: pd.DataFrame) -> pd.DataFrame:
     _require_frame(frame, surface="evaluation sales")
-    expected = (*_METADATA_COLUMNS, *_DAY_COLUMNS)
+    if not frame.index.equals(pd.RangeIndex(len(frame))):
+        raise M5DataError("evaluation sales rows must contain exact field counts")
+    expected = (*_SOURCE_FACTS, *_DAY_COLUMNS)
     if tuple(frame.columns) != expected:
         raise M5DataError(
             "evaluation sales columns must contain exact metadata followed by day labels "
