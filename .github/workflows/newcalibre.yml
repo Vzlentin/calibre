@@ -119,24 +119,31 @@ jobs:
           test -f newcalibre/tests/tier3/test_conditional_replay.py
           test -f newcalibre/tests/tier4/test_vn2_acceptance.py
       - name: Restore canonical VN2 inputs
+        id: vn2-cache
         uses: actions/cache@v4
         with:
           path: newcalibre/data/vn2
           key: vn2-${{ hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json') }}
       - name: Acquire and verify VN2 inputs with successor tooling
+        env:
+          OVENTI_DATASET_BASE_URL: ${{ vars.OVENTI_DATASET_BASE_URL }}
         run: |
           set -euo pipefail
-          jq '{files: [.files[] | {name: .file_name, url: .url}]}' \
-            benchmarks/vn2/vn2_file_links.json > "${RUNNER_TEMP}/vn2-sources.json"
+          inventory=newcalibre/benchmarks/vn2/vn2-input-digests.json
+          target=newcalibre/data/vn2
+          if [[ "${{ steps.vn2-cache.outputs.cache-hit }}" != "true" ]]; then
+            : "${OVENTI_DATASET_BASE_URL:?OVENTI_DATASET_BASE_URL must be configured}"
+            mkdir -p "$target"
+            while IFS= read -r name; do
+              curl --fail --location --retry 3 \
+                --output "$target/$name" \
+                "${OVENTI_DATASET_BASE_URL%/}/vn2/$name"
+            done < <(jq -r '.files[].name' "$inventory")
+          fi
           uv sync --project newcalibre --locked --group dev
-          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py download \
-            --target newcalibre/data/vn2 \
-            --sources "${RUNNER_TEMP}/vn2-sources.json" \
-            --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json \
-            --if-missing
           uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify \
-            --target newcalibre/data/vn2 \
-            --inventory newcalibre/benchmarks/vn2/vn2-input-digests.json
+            --target "$target" \
+            --inventory "$inventory"
       - name: Run conditional replay and biting witness
         run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier3
       - name: Run generic-engine VN2 acceptance and R1-R4 emission

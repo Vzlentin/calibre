@@ -208,8 +208,6 @@ def refresh_inventory(
         "minted_run_id": "12345",
         "minted_sha": "a" * 40,
         "schema": 1,
-        "source_manifest": "synthetic-vn2-source.json",
-        "source_manifest_sha256": hashlib.sha256(b"synthetic-source").hexdigest(),
     }
     path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path

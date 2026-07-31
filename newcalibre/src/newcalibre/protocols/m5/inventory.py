@@ -1,14 +1,11 @@
-"""Acquire and verify only the compact consumed M5 input inventory."""
+"""Verify only the compact consumed M5 input inventory."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
-import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -18,8 +15,6 @@ _EXPECTED_NAMES = frozenset({"calendar.csv", "sales_train_evaluation.csv"})
 _INVENTORY_KEYS = frozenset({"schema", "dataset", "files"})
 _FILE_KEYS = frozenset({"bytes", "name", "sha256"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-
-type ByteFetcher = Callable[[str], bytes]
 
 
 class M5InputError(ValueError):
@@ -103,13 +98,19 @@ def load_m5_inventory(path: Path) -> M5InputInventory:
 
 
 def verify_m5_inputs(target: Path, inventory_path: Path) -> M5InputInventory:
-    """Verify each consumed regular file's exact byte size and SHA-256 digest."""
+    """Verify the exact directory entry set, byte sizes, and SHA-256 digests."""
     inventory = load_m5_inventory(inventory_path)
     if not isinstance(target, Path) or not target.is_dir():
         raise M5InputError(f"M5 input directory does not exist: {target}")
-    missing = sorted(name for name in inventory.by_name if not (target / name).exists())
-    if missing:
-        raise M5InputError(f"consumed M5 inputs are missing: {missing}")
+    expected = set(inventory.by_name)
+    try:
+        present = {entry.name for entry in target.iterdir()}
+    except OSError as error:
+        raise M5InputError(f"M5 input directory cannot be read: {target}") from error
+    missing = sorted(expected - present)
+    extra = sorted(present - expected)
+    if missing or extra:
+        raise M5InputError(f"file-set mismatch: missing={missing} extra={extra}")
     for entry in inventory.files:
         _verified_file_bytes(target / entry.name, entry)
     return inventory
@@ -129,57 +130,6 @@ def read_verified_m5_input(
     if entry is None:
         raise M5InputError(f"input {name!r} is absent from the approved inventory")
     return _verified_file_bytes(target / name, entry)
-
-
-def download_m5_inputs(
-    target: Path,
-    sources: Mapping[str, str],
-    inventory_path: Path,
-    *,
-    fetcher: ByteFetcher | None = None,
-) -> M5InputInventory:
-    """Fetch approved names, install verified bytes, and verify consumed files."""
-    inventory = load_m5_inventory(inventory_path)
-    if not isinstance(sources, Mapping):
-        raise M5InputError("download sources must be a name-to-URL mapping")
-    source_snapshot = dict(sources)
-    expected = set(inventory.by_name)
-    supplied = set(source_snapshot)
-    missing = sorted(expected - supplied)
-    extra = sorted(supplied - expected)
-    if missing or extra:
-        raise M5InputError(f"source names mismatch: missing={missing} extra={extra}")
-    if any(
-        not isinstance(url, str) or not url or url != url.strip()
-        for url in source_snapshot.values()
-    ):
-        raise M5InputError("every M5 source URL must be a non-empty trimmed string")
-    if not isinstance(target, Path):
-        raise M5InputError("target must be a pathlib.Path")
-    if fetcher is not None and not callable(fetcher):
-        raise M5InputError("fetcher must be callable")
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise M5InputError(f"cannot create M5 input directory: {target}") from error
-
-    for entry in inventory.files:
-        url = source_snapshot[entry.name]
-        try:
-            payload = _fetch_url(url, max_bytes=entry.bytes) if fetcher is None else fetcher(url)
-        except Exception as error:
-            raise M5InputError(f"download failed for {entry.name}: {error}") from error
-        if not isinstance(payload, bytes):
-            raise M5InputError(f"download for {entry.name} did not return bytes")
-        _verify_bytes(payload, entry)
-        _install_download(target / entry.name, payload, name=entry.name)
-    return verify_m5_inputs(target, inventory_path)
-
-
-def load_unique_json(path: Path, *, subject: str) -> object:
-    """Load UTF-8 JSON while refusing duplicate object keys at every depth."""
-    value, _raw_bytes = _load_unique_json_payload(path, subject=subject)
-    return value
 
 
 def _load_unique_json_payload(path: Path, *, subject: str) -> tuple[object, bytes]:
@@ -202,55 +152,6 @@ def _unique_object(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
             raise _DuplicateJSONKey(key)
         value[key] = item
     return value
-
-
-def _fetch_url(url: str, *, max_bytes: int) -> bytes:
-    try:
-        with urllib.request.urlopen(url, timeout=120) as response:
-            return response.read(max_bytes + 1)
-    except OSError as error:
-        raise M5InputError(f"source URL is unavailable: {url}") from error
-
-
-def _install_download(destination: Path, payload: bytes, *, name: str) -> None:
-    descriptor: int | None = None
-    temporary: Path | None = None
-    install_error: OSError | None = None
-    cleanup_errors: list[str] = []
-    try:
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=destination.parent,
-            prefix=f".{destination.name}.",
-            suffix=".part",
-        )
-        temporary = Path(temporary_name)
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = None
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, destination)
-        temporary = None
-    except OSError as error:
-        install_error = error
-    finally:
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError as error:
-                cleanup_errors.append(f"file descriptor: {error}")
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError as error:
-                cleanup_errors.append(f"temporary file: {error}")
-    if install_error is not None:
-        message = f"cannot install downloaded input {name}: {install_error}"
-        if cleanup_errors:
-            message += f"; cleanup failed ({'; '.join(cleanup_errors)})"
-        raise M5InputError(message) from install_error
-    if cleanup_errors:
-        raise M5InputError(f"cannot clean up downloaded input {name}: {'; '.join(cleanup_errors)}")
 
 
 def _verified_file_bytes(path: Path, entry: M5InputFile) -> bytes:

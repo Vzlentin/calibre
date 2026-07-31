@@ -1,4 +1,4 @@
-"""Prove M5 input verification and script-only acquisition boundaries."""
+"""Prove the M5 input verification-only boundary."""
 
 from __future__ import annotations
 
@@ -6,16 +6,18 @@ import hashlib
 import inspect
 import json
 import runpy
+import subprocess
+import sys
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 import newcalibre.protocols.m5 as m5
+import newcalibre.protocols.m5.inventory as inventory_module
 from newcalibre.protocols.m5 import verify_m5_inputs
 from newcalibre.protocols.m5.inventory import (
     M5InputError,
-    download_m5_inputs,
     load_m5_inventory,
     read_verified_m5_input,
 )
@@ -81,14 +83,16 @@ def test_committed_inventory_pins_only_consumed_canonical_inputs() -> None:
     assert tuple(inventory.by_name) == ("calendar.csv", "sales_train_evaluation.csv")
 
 
-def test_verification_accepts_unrelated_directory_entries(tmp_path: Path) -> None:
+def test_verification_rejects_unrelated_directory_entries(tmp_path: Path) -> None:
     target = _input_directory(tmp_path)
     (target / "sell_prices.csv").write_bytes(b"not consumed")
     (target / "notes.txt").write_text("ignored", encoding="utf-8")
 
-    inventory = verify_m5_inputs(target, _inventory_path(tmp_path))
-
-    assert set(inventory.by_name) == {"calendar.csv", "sales_train_evaluation.csv"}
+    with pytest.raises(
+        M5InputError,
+        match=r"file-set mismatch.*extra=.*notes\.txt.*sell_prices\.csv",
+    ):
+        verify_m5_inputs(target, _inventory_path(tmp_path))
 
 
 @pytest.mark.parametrize("name", ["calendar.csv", "sales_train_evaluation.csv"])
@@ -116,6 +120,28 @@ def test_verification_rejects_symlinked_consumed_file(tmp_path: Path) -> None:
     (target / "calendar.csv").symlink_to(target / "sales_train_evaluation.csv")
     with pytest.raises(M5InputError, match="regular file"):
         verify_m5_inputs(target, _inventory_path(tmp_path))
+
+
+def test_verification_translates_unreadable_input_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _input_directory(tmp_path)
+    inventory = _inventory_path(tmp_path)
+    permission_error = PermissionError("refused")
+
+    def refuse_iteration(_path: Path):
+        raise permission_error
+
+    monkeypatch.setattr(Path, "iterdir", refuse_iteration)
+
+    with pytest.raises(
+        M5InputError,
+        match=r"M5 input directory cannot be read: .*inputs",
+    ) as exc_info:
+        verify_m5_inputs(target, inventory)
+
+    assert exc_info.value.__cause__ is permission_error
 
 
 @pytest.mark.parametrize(
@@ -183,90 +209,7 @@ def test_selected_reads_rehash_immediately_before_consumption(tmp_path: Path) ->
         read_verified_m5_input(target, "calendar.csv", inventory)
 
 
-def test_download_refuses_unapproved_names_and_overlong_bytes(tmp_path: Path) -> None:
-    inventory_path = _inventory_path(tmp_path)
-    sources = {
-        "calendar.csv": "https://example.test/calendar",
-        "sales_train_evaluation.csv": "https://example.test/sales",
-    }
-    with pytest.raises(M5InputError, match="source names mismatch"):
-        download_m5_inputs(
-            tmp_path / "download-extra",
-            {**sources, "sell_prices.csv": "https://example.test/prices"},
-            inventory_path,
-            fetcher=lambda _url: b"",
-        )
-    with pytest.raises(M5InputError, match="size"):
-        download_m5_inputs(
-            tmp_path / "download-long",
-            sources,
-            inventory_path,
-            fetcher=lambda _url: b"x" * 20,
-        )
-    assert not (tmp_path / "download-long" / "calendar.csv").exists()
-
-
-def test_download_bounds_the_real_network_read_before_installing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    inventory_path = _inventory_path(tmp_path)
-    read_sizes: list[int] = []
-
-    class Response:
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def read(self, size: int) -> bytes:
-            read_sizes.append(size)
-            return b"x" * size
-
-    def fake_urlopen(_url: str, *, timeout: int) -> Response:
-        assert timeout == 120
-        return Response()
-
-    monkeypatch.setattr(
-        "newcalibre.protocols.m5.inventory.urllib.request.urlopen",
-        fake_urlopen,
-    )
-    target = tmp_path / "download-bounded"
-    with pytest.raises(M5InputError, match="size"):
-        download_m5_inputs(
-            target,
-            {
-                "calendar.csv": "https://example.test/calendar",
-                "sales_train_evaluation.csv": "https://example.test/sales",
-            },
-            inventory_path,
-        )
-
-    assert read_sizes == [len(b"calendar") + 1]
-    assert not (target / "calendar.csv").exists()
-
-
-def test_download_installs_only_verified_bytes_then_publicly_reverifies(tmp_path: Path) -> None:
-    inventory_path = _inventory_path(tmp_path)
-    payloads = {
-        "https://example.test/calendar": b"calendar",
-        "https://example.test/sales": b"sales",
-    }
-    target = tmp_path / "download"
-    inventory = download_m5_inputs(
-        target,
-        {
-            "calendar.csv": "https://example.test/calendar",
-            "sales_train_evaluation.csv": "https://example.test/sales",
-        },
-        inventory_path,
-        fetcher=lambda url: payloads[url],
-    )
-    assert inventory.content_sha256 == verify_m5_inputs(target, inventory_path).content_sha256
-
-
-def test_package_and_script_keep_acquisition_private() -> None:
+def test_package_and_script_are_verification_only() -> None:
     assert m5.__all__ == [
         "M5Diagnostics",
         "M5RunResult",
@@ -275,10 +218,52 @@ def test_package_and_script_keep_acquisition_private() -> None:
         "score_m5",
         "verify_m5_inputs",
     ]
+    assert not hasattr(inventory_module, "ByteFetcher")
+    assert not hasattr(inventory_module, "download_m5_inputs")
     assert not hasattr(m5, "download_m5_inputs")
     assert tuple(inspect.signature(verify_m5_inputs).parameters) == ("target", "inventory_path")
 
     namespace = runpy.run_path(str(_SCRIPT))
     parser = namespace["build_parser"]()
     commands = cast(object, parser._subparsers._group_actions[0]).choices  # type: ignore[attr-defined]
-    assert set(commands) == {"download", "verify"}
+    assert set(commands) == {"verify"}
+
+
+def _run_verify(target: Path, inventory: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "verify",
+            "--target",
+            str(target),
+            "--inventory",
+            str(inventory),
+        ],
+        cwd=_PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_verify_script_executes_successfully_against_exact_inputs(tmp_path: Path) -> None:
+    target = _input_directory(tmp_path)
+
+    result = _run_verify(target, _inventory_path(tmp_path))
+
+    assert result.returncode == 0
+    assert result.stdout == "verified 2 consumed M5 inputs\n"
+    assert result.stderr == ""
+
+
+def test_verify_script_reports_extra_input_attributably(tmp_path: Path) -> None:
+    target = _input_directory(tmp_path)
+    (target / "poison.csv").write_bytes(b"unexpected")
+
+    result = _run_verify(target, _inventory_path(tmp_path))
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "file-set mismatch" in result.stderr
+    assert "poison.csv" in result.stderr

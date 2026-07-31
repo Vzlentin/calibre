@@ -178,8 +178,6 @@ def test_calibrated_run_exposes_ordinary_forecasts_coverage_and_cold_start_order
 def test_run_vn2_obeys_alternate_review_and_lead_cadence(tmp_path: Path) -> None:
     data, inventory, config_path = write_dataset(tmp_path)
     sales_names = SALES_FILES[:7]
-    for name in set(SALES_FILES) - set(sales_names):
-        (data / name).unlink()
     in_stock = pd.read_csv(data / STATIC_FILES[1])[["Store", "Product", *BASE_WEEKS]]
     in_stock.to_csv(data / STATIC_FILES[1], index=False, lineterminator="\n")
     initial = pd.read_csv(data / STATIC_FILES[2]).drop(columns=["In Transit W+2"])
@@ -200,7 +198,7 @@ def test_run_vn2_obeys_alternate_review_and_lead_cadence(tmp_path: Path) -> None
     payload["columns"]["initial_state_columns"].remove("In Transit W+2")
     payload["columns"]["initial_pipeline"] = ["In Transit W+1"]
     write_config(config_path, payload)
-    refresh_inventory(data, inventory, names=(*STATIC_FILES, *sales_names))
+    refresh_inventory(data, inventory)
     dataset = load_vn2_dataset(data, inventory, load_vn2_config(config_path))
 
     result = run_vn2(dataset)
