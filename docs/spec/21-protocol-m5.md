@@ -16,7 +16,8 @@ against this chapter and the public M5 release alone — must be able to run and
 score the protocol from these statements. Vocabulary is chapter 02's, used
 without redefinition; facts carry stable tags (`[M5-*]`). The
 scoring-exemption ruling stated below is ratified; its decision record is
-`[ANNEX:21-m5-scoring-exemption-record]`.
+`[ANNEX:21-m5-scoring-exemption-record]`. ADR 0002 records why M5 sales
+compile to non-negative target support enforced by reconciliation.
 
 ## Scope the protocol, not the solution
 

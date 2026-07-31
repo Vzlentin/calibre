@@ -397,12 +397,12 @@ class ProjectionReconciler:
             y_hat_insample=fitted,
         )
         reconciled = layout.to_project_vector(np.asarray(result["mean"])[:, 0])
-        coherent, support_bound = _coherent_projection_bound(
+        coherent, coherence_bound, support_bound = _coherent_projection_bound(
             matrix,
             reconciled,
             use_sparse=use_sparse,
         )
-        _verify_coherence(reconciled, coherent, support_bound, section=section)
+        _verify_coherence(reconciled, coherent, coherence_bound, section=section)
         return ReconciledValues(reconciled, support_bound)
 
 
@@ -602,15 +602,21 @@ def _coherent_projection_bound(
     reconciled: np.ndarray,
     *,
     use_sparse: bool,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float, float]:
     coherent = matrix.matvec(reconciled[: matrix.n_bottom])
     magnitude = float(np.max(np.abs(np.concatenate((reconciled, coherent)))))
-    bound = coherence_tolerance(
+    coherence_bound = coherence_tolerance(
         reduction_width=matrix.reduction_width,
         vector_magnitude=magnitude,
         solver_tolerance=SPARSE_SOLVER_TOLERANCE if use_sparse else None,
     )
-    return coherent, bound
+    support_bound = _support_canonicalization_bound(reconciled)
+    return coherent, coherence_bound, support_bound
+
+
+def _support_canonicalization_bound(reconciled: np.ndarray) -> float:
+    magnitude = float(np.max(np.abs(reconciled))) if reconciled.size else 0.0
+    return float(8.0 * np.finfo(np.float64).eps * max(magnitude, 1.0))
 
 
 def _layout_vector(values: np.ndarray, *, expected: int) -> np.ndarray:
