@@ -18,7 +18,6 @@ from newcalibre.domain import (
     Panel,
     Scope,
     SessionIdentity,
-    TargetSupport,
 )
 from newcalibre.engine import (
     Engine,
@@ -199,7 +198,7 @@ def _all_node_panel(panel: Panel, *, hierarchy: HierarchyIndex) -> Panel:
     return Panel.from_frame(
         all_nodes,
         calendar=panel.calendar,
-        target_support=TargetSupport.NONNEGATIVE,
+        target_support=panel.target_support,
     )
 
 

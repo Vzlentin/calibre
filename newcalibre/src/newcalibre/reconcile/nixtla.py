@@ -397,12 +397,12 @@ class ProjectionReconciler:
             y_hat_insample=fitted,
         )
         reconciled = layout.to_project_vector(np.asarray(result["mean"])[:, 0])
-        support_bound = _support_error_bound(
+        coherent, support_bound = _coherent_projection_bound(
             matrix,
             reconciled,
             use_sparse=use_sparse,
         )
-        _verify_coherence(matrix, reconciled, section=section, use_sparse=use_sparse)
+        _verify_coherence(reconciled, coherent, support_bound, section=section)
         return ReconciledValues(reconciled, support_bound)
 
 
@@ -585,33 +585,32 @@ def _aligned_fitted_matrices(
 
 
 def _verify_coherence(
-    matrix: DenseSummingMatrix | SparseSummingMatrix,
     reconciled: np.ndarray,
+    coherent: np.ndarray,
+    bound: float,
     *,
     section: _ProjectionSection,
-    use_sparse: bool,
 ) -> None:
-    coherent = matrix.matvec(reconciled[: matrix.n_bottom])
-    bound = _support_error_bound(matrix, reconciled, use_sparse=use_sparse)
     if not np.allclose(reconciled, coherent, rtol=0.0, atol=bound):
         raise ReconciliationError(
             f"{section.description} failed the derived summing-matrix coherence check"
         )
 
 
-def _support_error_bound(
+def _coherent_projection_bound(
     matrix: DenseSummingMatrix | SparseSummingMatrix,
     reconciled: np.ndarray,
     *,
     use_sparse: bool,
-) -> float:
+) -> tuple[np.ndarray, float]:
     coherent = matrix.matvec(reconciled[: matrix.n_bottom])
     magnitude = float(np.max(np.abs(np.concatenate((reconciled, coherent)))))
-    return coherence_tolerance(
+    bound = coherence_tolerance(
         reduction_width=matrix.reduction_width,
         vector_magnitude=magnitude,
         solver_tolerance=SPARSE_SOLVER_TOLERANCE if use_sparse else None,
     )
+    return coherent, bound
 
 
 def _layout_vector(values: np.ndarray, *, expected: int) -> np.ndarray:
