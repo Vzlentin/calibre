@@ -48,7 +48,7 @@ from newcalibre.reconcile import (
     preflight_projection,
 )
 from newcalibre.reconcile.apply import ReconciledValues
-from newcalibre.reconcile.nixtla import SPARSE_SOLVER_TOLERANCE
+from newcalibre.reconcile.nixtla import SPARSE_SOLVER_TOLERANCE, _support_canonicalization_bound
 
 _BASE_FORECAST = np.array(
     [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 48.0, 75.0, 95.0, 55.0, 160.0, 200.0]
@@ -315,6 +315,13 @@ def test_projection_support_validator_canonicalizes_dense_roundoff(
     )
 
     assert result.loc[result[SERIES_KEY] == hierarchy.node_labels[0], POINT_FORECAST].iat[0] == 0.0
+
+
+def test_projection_sparse_support_bound_excludes_solver_tolerance() -> None:
+    values = _BASE_FORECAST.copy()
+    values[0] = -(SPARSE_SOLVER_TOLERANCE / 2.0)
+
+    assert _support_canonicalization_bound(values) < abs(values[0])
 
 
 def test_projection_support_validator_rejects_material_negative(

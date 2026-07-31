@@ -15,7 +15,8 @@ satisfy. It uses chapter 02 vocabulary verbatim: series key, panel, forecast
 frame, origin, horizon step, model name, hierarchy facts, hierarchy node
 (bottom / aggregate / total), aggregation lattice, fitted values, and the
 invariants `[HIE-1..3]`, `[INV-COHERENCE]`, `[FRA-2]`, `[FRA-5]`. Normative
-statements carry `[REC-n]` tags so tests can cite them.
+statements carry `[REC-n]` tags so tests can cite them. ADR 0002 records
+why target support is a domain fact enforced at this seam.
 
 Scope boundary: this chapter specifies **point-forecast** reconciliation.
 The stage's contract does not extend beyond points, and the pipeline demands

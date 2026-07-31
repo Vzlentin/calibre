@@ -236,6 +236,18 @@ def test_no_hierarchy_and_empty_frame_are_exact_identities(strategy_name: str) -
     assert strategy(empty, _hierarchy(), context) is empty
 
 
+@pytest.mark.parametrize("strategy_name", available_strategies())
+def test_no_hierarchy_nonnegative_support_still_rejects_negative_points(
+    strategy_name: str,
+) -> None:
+    strategy = resolve_strategy(strategy_name)
+    frame = _frame({"a": -5.1e-2})
+    context = ReconciliationContext(target_support=TargetSupport.NONNEGATIVE)
+
+    with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*series='a'"):
+        strategy(frame, None, context)
+
+
 def test_none_is_a_strict_point_frame_identity() -> None:
     frame = _frame({"a": 1.0, "b": 2.0, "c": 3.0})
 
@@ -250,8 +262,10 @@ def test_support_validator_canonicalizes_admissible_nonnegative_residue() -> Non
     context = ReconciliationContext(target_support=TargetSupport.NONNEGATIVE)
 
     result = resolve_strategy(NONE)(frame, _hierarchy(), context)
+    value = result.loc[result[SERIES_KEY] == "a", POINT_FORECAST].iat[0]
 
-    assert result.loc[result[SERIES_KEY] == "a", POINT_FORECAST].iat[0] == 0.0
+    assert value == 0.0
+    assert not np.signbit(value)
 
 
 def test_support_validator_rejects_material_negative_with_identity() -> None:
