@@ -15,7 +15,8 @@ satisfy. It uses chapter 02 vocabulary verbatim: series key, panel, forecast
 frame, origin, horizon step, model name, hierarchy facts, hierarchy node
 (bottom / aggregate / total), aggregation lattice, fitted values, and the
 invariants `[HIE-1..3]`, `[INV-COHERENCE]`, `[FRA-2]`, `[FRA-5]`. Normative
-statements carry `[REC-n]` tags so tests can cite them.
+statements carry `[REC-n]` tags so tests can cite them. ADR 0002 records
+why target support is a domain fact enforced at this seam.
 
 Scope boundary: this chapter specifies **point-forecast** reconciliation.
 The stage's contract does not extend beyond points, and the pipeline demands
@@ -56,8 +57,9 @@ bound sections at the end of this chapter.
 - `[REC-5]` Strategies that need in-sample residuals receive **fitted
   values** through an explicit per-origin reconciliation context, keyed by
   `(series key, timestamp, model name)` per `[FRA-5]` — never through
-  forecast rows. Callers pass the context unconditionally, even to strategies
-  that ignore it; a residual-requiring strategy given no fitted values fails
+  forecast rows. The same context carries the panel target support `[PAN-5]`.
+  Callers pass the context unconditionally, even to strategies that ignore
+  fitted values; a residual-requiring strategy given no fitted values fails
   loudly before reconciling anything.
 
 ## Define the reconciler protocol
@@ -68,9 +70,13 @@ bound sections at the end of this chapter.
   hierarchy facts (bottom series keys, attribute columns, node labels,
   per-node expected member counts) built exactly once by run preparation and
   threaded to every consumer — no reconciler re-derives it `[HIE-1]`.
-- `[REC-7]` A `None` hierarchy index or an empty frame is a no-op
-  pass-through: the reconciler returns its input unchanged. Non-hierarchical
-  runs pay nothing for the stage's existence.
+- `[REC-7]` An empty frame is a no-op pass-through. A `None` hierarchy index
+  disables reconciliation math, but the stage still validates finite point
+  values and enforces the context target support `[REC-25]`. A no-hierarchy
+  `NONNEGATIVE` frame must be point-only because enforcement may rewrite its
+  points; orchestration retains any native distributional columns outside the
+  reconciliation seam and restores them only after the point rows return with
+  identical keys.
 - `[REC-8]` Every reconciler declares, as inspectable metadata (not
   behavior discovered by failure): (a) whether it requires fitted values;
   (b) its **input family** — *synthesis* (consumes bottom-node rows only and
@@ -80,7 +86,8 @@ bound sections at the end of this chapter.
   dense-only). Run preparation reads these declarations to decide whether
   aggregate-node forecast tasks must be built, whether the fitted-values
   sidecar must be produced, and how to size the memory preflight — all before
-  execution starts.
+  execution starts. Every reconciler output must also satisfy the target
+  support carried in the reconciliation context.
 
 ## Define the strategy registry
 
@@ -189,9 +196,9 @@ Per cross-section (every origin):
   all-members-present rule. Concretely: a synthesis strategy synthesizes an
   aggregate only when every member is present in the cross-section (a partial
   member sum resolved against a complete-member actual silently undercounts
-  the forecast — suppression, never partial sums); and a missing/NaN bottom
-  forecast poisons every aggregate containing it rather than being dropped
-  from the sum.
+  the forecast — suppression, never partial sums). A present row with a
+  non-finite point is rejected by the common frame validator rather than
+  dropped from a sum or propagated downstream.
 
 ## Guarantee numerical honesty and idempotence
 
@@ -208,6 +215,17 @@ Per cross-section (every origin):
   `[REC-12]` returns the same point values within the derived tolerance. For
   synthesis strategies this reads as: re-deriving aggregate values from the
   (unchanged) bottom block reproduces the synthesized values.
+- `[REC-25]` **Target-support postcondition.** After each cross-section is
+  reconciled, the common application layer enforces the context target
+  support `[PAN-5]` before calibration sees the points. For `REAL`, finite
+  point values pass unchanged. For `NONNEGATIVE`, an adapter supplies the
+  absolute numerical-error bound for its output; values in `[-bound, 0)` are
+  canonicalized to exactly `0.0`, and values below `-bound` are rejected with
+  the model name, origin, horizon step, and series key. Projection
+  canonicalization corrects the bottom block and re-synthesizes every node so
+  the returned vector still satisfies `[REC-12]`; the common coherence check
+  runs again on that returned vector. Native strategies use the same validator
+  rather than private clipping logic.
 
 ## Treat strategy choice as an experimental knob
 
@@ -267,8 +285,8 @@ A conforming implementation must demonstrate, by test:
 7. Reconciling an already-coherent frame is a fixed point for every
    registered strategy `[REC-22]`.
 8. A partial cross-section yields suppressed (absent) aggregates for a
-   synthesis strategy — never partial sums — and a NaN bottom forecast
-   propagates to every containing aggregate `[REC-20]`.
+   synthesis strategy — never partial sums — and any present non-finite point
+   fails the common frame validator `[REC-20]`.
 9. The memory preflight blocks a run whose estimated peak exceeds detected
    memory and its report itemizes the summing-matrix term of the selected
    representation `[REC-16]`.

@@ -21,6 +21,7 @@ from newcalibre.domain import (
     Panel,
     SessionIdentity,
     StockoutRule,
+    TargetSupport,
 )
 from newcalibre.engine import (
     Engine,
@@ -220,6 +221,7 @@ def _panel(series_keys: Sequence[str]) -> Panel:
             }
         ),
         calendar=CALENDAR,
+        target_support=TargetSupport.REAL,
     )
 
 

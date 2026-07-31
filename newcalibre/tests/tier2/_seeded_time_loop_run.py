@@ -31,6 +31,7 @@ from newcalibre.domain import (
     Scope,
     SessionIdentity,
     StockoutRule,
+    TargetSupport,
     target_timestamp,
 )
 from newcalibre.engine import (
@@ -170,7 +171,7 @@ def _panel() -> Panel:
     frame = pd.DataFrame.from_records(rows)
     frame[SERIES_KEY] = frame[SERIES_KEY].astype("string")
     frame[OBSERVED_VALUE] = frame[OBSERVED_VALUE].astype("float64")
-    return Panel.from_frame(frame, calendar=_CALENDAR)
+    return Panel.from_frame(frame, calendar=_CALENDAR, target_support=TargetSupport.REAL)
 
 
 def _session(seed: int) -> SessionIdentity:

@@ -36,8 +36,10 @@ from newcalibre.domain import (
     EmissionScope,
     GuaranteeClaim,
     ScoredSeries,
+    TargetSupport,
     interval_columns,
 )
+from newcalibre.reconcile import ReconciliationContext, resolve_strategy
 
 pytestmark = pytest.mark.tier1
 _ORIGIN = pd.Timestamp("2026-01-05")
@@ -649,6 +651,28 @@ def test_clamps_record_binding_per_finite_row_and_void_only_changed_claims() -> 
         issued.effective_descriptor.type.claim is GuaranteeClaim.ONE_SIDED_COVERAGE
         for issued in nonbinding.issuances.values()
     )
+
+
+def test_support_canonicalization_preserves_an_unclamped_one_sided_claim() -> None:
+    runtime, _label, states = _states(
+        "split-per-step",
+        [1.0, 2.0],
+        configuration={"coverage": 0.5},
+    )
+    reconciled = resolve_strategy("none")(
+        _frame((-0.0,)),
+        None,
+        ReconciliationContext(target_support=TargetSupport.NONNEGATIVE),
+    )
+
+    result = runtime.apply(reconciled, states)
+    point = result.forecasts.loc[0, POINT_FORECAST]
+    issued = next(iter(result.issuances.values()))
+
+    assert point == 0.0
+    assert math.copysign(1.0, point) == 1.0
+    assert issued.bindings == ()
+    assert issued.effective_descriptor.type.claim is GuaranteeClaim.ONE_SIDED_COVERAGE
 
 
 def test_warmup_never_falls_through_a_configured_clamp() -> None:

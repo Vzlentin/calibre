@@ -35,7 +35,7 @@ BOTTOM_UP_DECLARATION: Final = ReconcilerDeclaration(
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class NoReconciliation:
-    """Validate active reconciliation input while preserving point rows exactly."""
+    """Validate point rows and enforce support without reconciliation math."""
 
     @property
     def declaration(self) -> ReconcilerDeclaration:
@@ -48,7 +48,7 @@ class NoReconciliation:
         hierarchy: HierarchyIndex | None,
         context: ReconciliationContext,
     ) -> pd.DataFrame:
-        """Return the strict input identity after active-hierarchy validation."""
+        """Return support-valid points without applying reconciliation math."""
         return apply_none(frame, hierarchy, context, declaration=self.declaration)
 
 

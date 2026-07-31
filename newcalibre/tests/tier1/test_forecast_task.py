@@ -28,6 +28,7 @@ from newcalibre.domain import (
     Panel,
     PanelError,
     Scope,
+    TargetSupport,
 )
 
 pytestmark = pytest.mark.tier1
@@ -65,7 +66,11 @@ def _panel_frame(*, resolution: str = "us") -> pd.DataFrame:
 
 
 def _panel(*, resolution: str = "us") -> Panel:
-    return Panel.from_frame(_panel_frame(resolution=resolution), calendar=Calendar("W-MON"))
+    return Panel.from_frame(
+        _panel_frame(resolution=resolution),
+        calendar=Calendar("W-MON"),
+        target_support=TargetSupport.REAL,
+    )
 
 
 def _tasks(
@@ -126,10 +131,11 @@ def test_panel_canonicalizes_rows_columns_and_numeric_values_without_fabricating
 
 def test_valid_interleavings_produce_the_same_canonical_snapshot() -> None:
     frame = _panel_frame()
-    first = Panel.from_frame(frame, calendar=Calendar("W-MON"))
+    first = Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
     second = Panel.from_frame(
         frame.iloc[[0, 2, 1, 3, 5, 4]][list(reversed(frame.columns))],
         calendar=Calendar("W-MON"),
+        target_support=TargetSupport.REAL,
     )
 
     pd.testing.assert_frame_equal(first.frame, second.frame)
@@ -158,7 +164,7 @@ def test_panel_rejects_unique_out_of_order_timestamps_within_a_series() -> None:
     )
 
     with pytest.raises(PanelError, match="strictly increasing"):
-        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+        Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
 
 
 def test_panel_accepts_an_increasing_series_with_a_calendar_gap() -> None:
@@ -170,7 +176,7 @@ def test_panel_accepts_an_increasing_series_with_a_calendar_gap() -> None:
         }
     )
 
-    panel = Panel.from_frame(frame, calendar=Calendar("W-MON"))
+    panel = Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
 
     pd.testing.assert_frame_equal(panel.frame, frame)
 
@@ -199,7 +205,9 @@ def test_panel_rejects_invalid_schema_and_rows(
     mutation: Callable[[pd.DataFrame], pd.DataFrame], pattern: str
 ) -> None:
     with pytest.raises(PanelError, match=pattern):
-        Panel.from_frame(mutation(_panel_frame()), calendar=Calendar("W-MON"))
+        Panel.from_frame(
+            mutation(_panel_frame()), calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+        )
 
 
 @pytest.mark.parametrize("key", ["", None])
@@ -207,7 +215,7 @@ def test_panel_rejects_empty_or_missing_opaque_series_keys(key: object) -> None:
     frame = _panel_frame()
     frame.loc[0, SERIES_KEY] = cast(str, key)
     with pytest.raises(PanelError, match="series keys"):
-        Panel.from_frame(frame, calendar=Calendar("W-MON"))
+        Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
 
 
 def test_panel_uses_utf8_byte_order_for_exact_opaque_keys() -> None:
@@ -218,17 +226,21 @@ def test_panel_uses_utf8_byte_order_for_exact_opaque_keys() -> None:
             OBSERVED_VALUE: [1.0, 2.0],
         }
     )
-    assert Panel.from_frame(frame, calendar=Calendar("W-MON")).series_keys == ("z", "é")
+    assert Panel.from_frame(
+        frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+    ).series_keys == ("z", "é")
 
 
 def test_panel_preserves_optional_censor_surface_and_records_undeclared_facts() -> None:
     no_facts = Panel.from_frame(
         _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND]),
         calendar=Calendar("W-MON"),
+        target_support=TargetSupport.REAL,
     )
     bound_only = Panel.from_frame(
         _panel_frame().drop(columns=CENSOR_STATUS),
         calendar=Calendar("W-MON"),
+        target_support=TargetSupport.REAL,
     )
 
     assert not no_facts.has_censoring_facts
@@ -239,7 +251,9 @@ def test_panel_preserves_optional_censor_surface_and_records_undeclared_facts() 
         CensoringAssertion.CENSORED,
         CensoringAssertion.UNCENSORED,
     }
-    reingested = Panel.from_frame(bound_only.frame, calendar=bound_only.calendar)
+    reingested = Panel.from_frame(
+        bound_only.frame, calendar=bound_only.calendar, target_support=TargetSupport.REAL
+    )
     pd.testing.assert_frame_equal(reingested.frame, bound_only.frame)
 
 
@@ -420,7 +434,9 @@ def test_task_round_trip_is_exact_and_preserves_datetime_resolution() -> None:
 
 def test_task_bytes_ignore_valid_interleaving_column_and_config_mapping_order() -> None:
     frame = _panel_frame()
-    first = Panel.from_frame(frame, calendar=Calendar("W-MON")).forecast_tasks(
+    first = Panel.from_frame(
+        frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
+    ).forecast_tasks(
         origin=pd.Timestamp("2026-01-19"),
         horizon=2,
         scope=Scope.GLOBAL,
@@ -429,6 +445,7 @@ def test_task_bytes_ignore_valid_interleaving_column_and_config_mapping_order() 
     second = Panel.from_frame(
         frame.iloc[[0, 2, 1, 3, 5, 4]][list(reversed(frame.columns))],
         calendar=Calendar("W-MON"),
+        target_support=TargetSupport.REAL,
     ).forecast_tasks(
         origin=pd.Timestamp("2026-01-19"),
         horizon=2,
@@ -441,14 +458,19 @@ def test_task_bytes_ignore_valid_interleaving_column_and_config_mapping_order() 
 def test_task_bytes_and_enumeration_are_deterministic_across_fresh_processes() -> None:
     script = """
 import pandas as pd
-from newcalibre.domain import Calendar, Panel, Scope
+from newcalibre.domain import Calendar, Panel, Scope, TargetSupport
 keys = list({'é', 'a', 'z'})
 frame = pd.DataFrame({
     'series_key': pd.Series(keys, dtype='string'),
     'timestamp': pd.to_datetime(['2026-01-05'] * 3),
     'value': [{'a': 1.0, 'z': 2.0, 'é': 3.0}[key] for key in keys],
 })
-task = Panel.from_frame(frame, calendar=Calendar('W-MON')).forecast_tasks(
+panel = Panel.from_frame(
+    frame,
+    calendar=Calendar('W-MON'),
+    target_support=TargetSupport.REAL,
+)
+task = panel.forecast_tasks(
     origin=pd.Timestamp('2026-01-12'), horizon=2, scope=Scope.GLOBAL,
     model_config={'m': 1, 'backend': 'seasonal-naive'},
 )[0]

@@ -30,6 +30,7 @@ from newcalibre.domain import (
     Scope,
     SessionIdentity,
     StockoutRule,
+    TargetSupport,
     target_timestamp,
 )
 from newcalibre.engine import (
@@ -93,6 +94,7 @@ def _panel(
             }
         ),
         calendar=CALENDAR,
+        target_support=TargetSupport.REAL,
     )
 
 
@@ -858,7 +860,9 @@ def test_explicit_surrogate_semantics_labels_settlement_without_changing_arithme
         ["censored"] * len(censored_frame),
         dtype="string",
     )
-    censored_panel = Panel.from_frame(censored_frame, calendar=CALENDAR)
+    censored_panel = Panel.from_frame(
+        censored_frame, calendar=CALENDAR, target_support=TargetSupport.REAL
+    )
     demand = _runtime(
         session=session,
         forecast_panel=forecast_panel,

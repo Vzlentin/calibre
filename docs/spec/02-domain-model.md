@@ -43,6 +43,12 @@ value, plus optional per-row metadata.
   owned by the consuming chapter.
 - `[PAN-4]` Columns beyond the key, timestamp, value, and declared metadata
   are **exogenous regressors** and must be numeric.
+- `[PAN-5]` A panel declares its **target support** as a canonical fact with
+  exactly two values: `REAL` for unrestricted real-valued targets and
+  `NONNEGATIVE` for targets whose valid point forecasts must be zero or
+  positive. Support is never inferred from dtype, observed sample values, or
+  minima; protocol compilers declare it from the protocol contract. ADR 0002
+  binds this fact to reconciliation enforcement.
 
 ### Forecast frame
 

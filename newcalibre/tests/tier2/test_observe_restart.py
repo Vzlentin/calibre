@@ -28,6 +28,7 @@ from newcalibre.domain import (
     Scope,
     SessionIdentity,
     StockoutRule,
+    TargetSupport,
     target_timestamp,
 )
 from newcalibre.engine import (
@@ -155,6 +156,7 @@ def _panel() -> Panel:
             }
         ),
         calendar=_CALENDAR,
+        target_support=TargetSupport.REAL,
     )
 
 

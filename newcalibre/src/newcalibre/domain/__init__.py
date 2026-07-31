@@ -75,6 +75,7 @@ from newcalibre.domain.panel import (
     Panel,
     PanelError,
     Scope,
+    TargetSupport,
 )
 from newcalibre.domain.session import SessionIdentity, SessionIdentityError
 
@@ -121,6 +122,7 @@ __all__ = [
     "SERIES_KEY",
     "TARGET_TIMESTAMP",
     "TIMESTAMP",
+    "TargetSupport",
     "TOTAL_NODE_LABEL",
     "UNDECLARED_CENSORING",
     "Calendar",

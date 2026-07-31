@@ -31,6 +31,7 @@ from newcalibre.domain import (
     HORIZON_STEP,
     MODEL_NAME,
     ORIGIN,
+    POINT_FORECAST,
     SERIES_KEY,
     ActualsSemantics,
     Calendar,
@@ -614,13 +615,38 @@ class Engine:
         if not isinstance(forecasts, ForecastBatch):
             raise TypeError("reconcile requires a ForecastBatch")
         self._require_forecast_batch(forecasts)
+        reconciliation_input = forecasts.frame
+        preserved_distributional: pd.DataFrame | None = None
+        if self._reconciliation_hierarchy is None:
+            bound_columns = tuple(
+                column
+                for group in forecast_bound_groups(reconciliation_input.columns)
+                for column in group
+            )
+            if bound_columns:
+                # The reconciliation seam owns points only; no-hierarchy runs
+                # retain native distributional outputs outside that seam.
+                preserved_distributional = reconciliation_input
+                reconciliation_input = reconciliation_input.drop(columns=list(bound_columns))
         result = self._reconciler(
-            forecasts.frame,
+            reconciliation_input,
             self._reconciliation_hierarchy,
-            ReconciliationContext(),
+            ReconciliationContext(target_support=self._panel.target_support),
         )
         if not isinstance(result, pd.DataFrame):
             raise _EngineError("reconciliation strategy must return a pandas DataFrame")
+        if preserved_distributional is not None:
+            point_result = validate_forecast_frame(
+                pd.DataFrame(result, copy=True),
+                calendar=forecasts.calendar,
+            )
+            if _forecast_keys(point_result) != _forecast_keys(reconciliation_input):
+                raise _EngineError(
+                    "no-hierarchy reconciliation changed forecast rows before bound restoration"
+                )
+            restored = preserved_distributional.copy(deep=True)
+            restored[POINT_FORECAST] = point_result[POINT_FORECAST].to_numpy(copy=True)
+            result = restored
         normalized = validate_forecast_frame(
             pd.DataFrame(result, copy=True),
             calendar=forecasts.calendar,

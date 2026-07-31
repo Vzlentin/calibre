@@ -195,7 +195,11 @@ def _all_node_panel(panel: Panel, *, hierarchy: HierarchyIndex) -> Panel:
             OBSERVED_VALUE: [value for label in node_labels for value in node_values[label]],
         }
     )
-    return Panel.from_frame(all_nodes, calendar=panel.calendar)
+    return Panel.from_frame(
+        all_nodes,
+        calendar=panel.calendar,
+        target_support=panel.target_support,
+    )
 
 
 __all__ = ["M5RunResult", "run_m5"]
