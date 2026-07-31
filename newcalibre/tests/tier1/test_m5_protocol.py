@@ -109,16 +109,6 @@ def _inventory_entry(path: Path) -> dict[str, object]:
     }
 
 
-def _with_id_column(frame: pd.DataFrame) -> pd.DataFrame:
-    mutated = frame.copy(deep=True)
-    mutated.insert(
-        0,
-        "id",
-        [f"{row.item_id}_{row.store_id}_evaluation" for row in frame.itertuples()],
-    )
-    return mutated
-
-
 def _config(tmp_path: Path, *, population: dict[str, object] | None = None):
     payload = yaml.safe_load(_GATE_C.read_text(encoding="utf-8"))
     payload["dataset"]["data_dir"] = "data"
@@ -186,8 +176,18 @@ def test_loader_rehashes_each_selected_input_before_parsing(
 @pytest.mark.parametrize(
     ("sales_mutation", "match"),
     [
-        (_with_id_column, "metadata"),
-        (lambda frame: frame[[*frame.columns[:5], "d_2", "d_1", *frame.columns[7:]]], "day"),
+        (lambda frame: frame.assign(id="unexpected").loc[:, ["id", *frame.columns]], "metadata"),
+        (
+            lambda frame: frame[
+                [
+                    *_SOURCE_FACTS,
+                    "d_2",
+                    "d_1",
+                    *frame.columns[len(_SOURCE_FACTS) + 2 :],
+                ]
+            ],
+            "day",
+        ),
         (lambda frame: frame.rename(columns={"d_2": "d_2000"}), "day"),
         (lambda frame: frame.drop(columns="d_1941"), "day"),
         (lambda frame: frame.assign(dept_id=None), "hierarchy"),
