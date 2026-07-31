@@ -23,6 +23,7 @@ from newcalibre.reconcile.apply import (
     ReconciledValues,
     ReconciliationError,
     _ProjectionSection,
+    _verify_coherence,
     apply_projection,
 )
 from newcalibre.reconcile.preflight import (
@@ -397,13 +398,13 @@ class ProjectionReconciler:
             y_hat_insample=fitted,
         )
         reconciled = layout.to_project_vector(np.asarray(result["mean"])[:, 0])
-        coherent, coherence_bound, support_bound = _coherent_projection_bound(
+        coherent, numerical_error_bound = _coherent_projection_bound(
             matrix,
             reconciled,
             use_sparse=use_sparse,
         )
-        _verify_coherence(reconciled, coherent, coherence_bound, section=section)
-        return ReconciledValues(reconciled, support_bound)
+        _verify_coherence(reconciled, coherent, numerical_error_bound, section=section)
+        return ReconciledValues(reconciled, numerical_error_bound)
 
 
 def _preflight_section(
@@ -584,39 +585,21 @@ def _aligned_fitted_matrices(
     return actual, fitted
 
 
-def _verify_coherence(
-    reconciled: np.ndarray,
-    coherent: np.ndarray,
-    bound: float,
-    *,
-    section: _ProjectionSection,
-) -> None:
-    if not np.allclose(reconciled, coherent, rtol=0.0, atol=bound):
-        raise ReconciliationError(
-            f"{section.description} failed the derived summing-matrix coherence check"
-        )
-
-
 def _coherent_projection_bound(
     matrix: DenseSummingMatrix | SparseSummingMatrix,
     reconciled: np.ndarray,
     *,
     use_sparse: bool,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, float]:
     coherent = matrix.matvec(reconciled[: matrix.n_bottom])
     reconciled_magnitude = float(np.max(np.abs(reconciled))) if reconciled.size else 0.0
     coherent_magnitude = float(np.max(np.abs(coherent))) if coherent.size else 0.0
-    coherence_bound = coherence_tolerance(
+    numerical_error_bound = coherence_tolerance(
         reduction_width=matrix.reduction_width,
         vector_magnitude=max(reconciled_magnitude, coherent_magnitude),
         solver_tolerance=SPARSE_SOLVER_TOLERANCE if use_sparse else None,
     )
-    support_bound = _support_canonicalization_bound(reconciled_magnitude)
-    return coherent, coherence_bound, support_bound
-
-
-def _support_canonicalization_bound(magnitude: float) -> float:
-    return float(8.0 * np.finfo(np.float64).eps * max(magnitude, 1.0))
+    return coherent, numerical_error_bound
 
 
 def _layout_vector(values: np.ndarray, *, expected: int) -> np.ndarray:

@@ -47,12 +47,12 @@ class ReconcilerDeclaration:
             raise TypeError("matrix capability must be a MatrixCapability")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReconciliationContext:
     """Carry optional per-origin sidecars outside the forecast frame."""
 
     fitted_values: FittedValues | None = None
-    target_support: TargetSupport = TargetSupport.REAL
+    target_support: TargetSupport
 
     def __post_init__(self) -> None:
         if self.fitted_values is not None and not isinstance(self.fitted_values, FittedValues):

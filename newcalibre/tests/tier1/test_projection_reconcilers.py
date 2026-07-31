@@ -48,7 +48,7 @@ from newcalibre.reconcile import (
     preflight_projection,
 )
 from newcalibre.reconcile.apply import ReconciledValues
-from newcalibre.reconcile.nixtla import SPARSE_SOLVER_TOLERANCE, _support_canonicalization_bound
+from newcalibre.reconcile.nixtla import SPARSE_SOLVER_TOLERANCE
 
 _BASE_FORECAST = np.array(
     [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 48.0, 75.0, 95.0, 55.0, 160.0, 200.0]
@@ -173,7 +173,10 @@ def _context(
     frame: pd.DataFrame | None = None,
 ) -> ReconciliationContext:
     values = _fitted_frame(hierarchy) if frame is None else frame
-    return ReconciliationContext(fitted_values=FittedValues.from_frame(values))
+    return ReconciliationContext(
+        fitted_values=FittedValues.from_frame(values),
+        target_support=TargetSupport.REAL,
+    )
 
 
 def _canonical_points(result: pd.DataFrame, hierarchy: HierarchyIndex) -> np.ndarray:
@@ -256,7 +259,11 @@ def test_wls_struct_dense_and_sparse_paths_match_independent_reference(
     matrix = build_dense_summing_matrix(hierarchy).to_dense()
     reference = diagonal_projection(matrix, _BASE_FORECAST, structural_weights(matrix))
 
-    dense_result = build_wls_struct()(frame, hierarchy, ReconciliationContext())
+    dense_result = build_wls_struct()(
+        frame,
+        hierarchy,
+        ReconciliationContext(target_support=TargetSupport.REAL),
+    )
 
     import newcalibre.reconcile.nixtla as nixtla
 
@@ -267,7 +274,7 @@ def test_wls_struct_dense_and_sparse_paths_match_independent_reference(
     sparse_result = build_wls_struct(dense_workspace_ceiling_bytes=0)(
         frame,
         hierarchy,
-        ReconciliationContext(),
+        ReconciliationContext(target_support=TargetSupport.REAL),
     )
 
     _assert_reference_agreement(
@@ -295,6 +302,7 @@ def test_projection_support_validator_canonicalizes_dense_roundoff(
     hierarchy = _hierarchy()
     frame = _frame(hierarchy)
     residue = -6.661338147750939e-16
+    matrix = build_dense_summing_matrix(hierarchy)
 
     def reconciled(
         self: ProjectionReconciler,
@@ -302,8 +310,9 @@ def test_projection_support_validator_canonicalizes_dense_roundoff(
         **kwargs: object,
     ) -> ReconciledValues:
         del self, args, kwargs
-        values = _BASE_FORECAST.copy()
-        values[0] = residue
+        bottom = _BASE_FORECAST[: matrix.n_bottom].copy()
+        bottom[0] = residue
+        values = matrix.matvec(bottom)
         return ReconciledValues(values, abs(residue))
 
     monkeypatch.setattr(ProjectionReconciler, "_reconcile_section", reconciled)
@@ -314,14 +323,76 @@ def test_projection_support_validator_canonicalizes_dense_roundoff(
         ReconciliationContext(target_support=TargetSupport.NONNEGATIVE),
     )
 
-    assert result.loc[result[SERIES_KEY] == hierarchy.node_labels[0], POINT_FORECAST].iat[0] == 0.0
+    points = _canonical_points(result, hierarchy)
+    expected_bottom = _BASE_FORECAST[: matrix.n_bottom].copy()
+    expected_bottom[0] = 0.0
+
+    assert np.array_equal(points, matrix.matvec(expected_bottom))
+    assert points[0] == 0.0
+    assert not np.signbit(points[0])
 
 
-def test_projection_sparse_support_bound_excludes_solver_tolerance() -> None:
-    values = _BASE_FORECAST.copy()
-    values[0] = -(SPARSE_SOLVER_TOLERANCE / 2.0)
+def test_sparse_projection_support_uses_shared_matrix_solver_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = _hierarchy()
+    matrix = build_sparse_summing_matrix(hierarchy)
+    layout = NixtlaLayout.from_matrix(matrix)
+    bottom = np.ones(matrix.n_bottom, dtype=np.float64)
+    bound = coherence_tolerance(
+        reduction_width=matrix.reduction_width,
+        vector_magnitude=float(matrix.n_bottom),
+        solver_tolerance=SPARSE_SOLVER_TOLERANCE,
+    )
+    bottom[0] = -(bound / 2.0)
+    reconciled = matrix.matvec(bottom)
+    nixtla_values = layout.to_nixtla_vector(reconciled)
 
-    assert _support_canonicalization_bound(float(np.max(np.abs(values)))) < abs(values[0])
+    def sparse_result(*args: object, **kwargs: object) -> dict[str, np.ndarray]:
+        del args, kwargs
+        return {"mean": nixtla_values[:, None]}
+
+    monkeypatch.setattr(
+        "newcalibre.reconcile.nixtla._CheckedMinTraceSparse.fit_predict",
+        sparse_result,
+    )
+
+    result = build_wls_struct(dense_workspace_ceiling_bytes=0)(
+        _frame(hierarchy),
+        hierarchy,
+        ReconciliationContext(target_support=TargetSupport.NONNEGATIVE),
+    )
+    expected_bottom = bottom.copy()
+    expected_bottom[0] = 0.0
+
+    assert np.array_equal(_canonical_points(result, hierarchy), matrix.matvec(expected_bottom))
+
+
+def test_sparse_projection_support_rejects_material_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = _hierarchy()
+    matrix = build_sparse_summing_matrix(hierarchy)
+    layout = NixtlaLayout.from_matrix(matrix)
+    bottom = np.ones(matrix.n_bottom, dtype=np.float64)
+    bottom[0] = -0.1
+    nixtla_values = layout.to_nixtla_vector(matrix.matvec(bottom))
+
+    def sparse_result(*args: object, **kwargs: object) -> dict[str, np.ndarray]:
+        del args, kwargs
+        return {"mean": nixtla_values[:, None]}
+
+    monkeypatch.setattr(
+        "newcalibre.reconcile.nixtla._CheckedMinTraceSparse.fit_predict",
+        sparse_result,
+    )
+
+    with pytest.raises(ReconciliationError, match=r"model-a.*series='s1'"):
+        build_wls_struct(dense_workspace_ceiling_bytes=0)(
+            _frame(hierarchy),
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.NONNEGATIVE),
+        )
 
 
 def test_projection_support_validator_rejects_material_negative(
@@ -329,6 +400,7 @@ def test_projection_support_validator_rejects_material_negative(
 ) -> None:
     hierarchy = _hierarchy()
     frame = _frame(hierarchy)
+    matrix = build_dense_summing_matrix(hierarchy)
 
     def reconciled(
         self: ProjectionReconciler,
@@ -336,8 +408,9 @@ def test_projection_support_validator_rejects_material_negative(
         **kwargs: object,
     ) -> ReconciledValues:
         del self, args, kwargs
-        values = _BASE_FORECAST.copy()
-        values[0] = -5.1e-2
+        bottom = _BASE_FORECAST[: matrix.n_bottom].copy()
+        bottom[0] = -5.1e-2
+        values = matrix.matvec(bottom)
         return ReconciledValues(values, 1e-12)
 
     monkeypatch.setattr(ProjectionReconciler, "_reconcile_section", reconciled)
@@ -368,7 +441,11 @@ def test_projection_support_validator_preserves_real_negative(
 
     monkeypatch.setattr(ProjectionReconciler, "_reconcile_section", reconciled)
 
-    result = build_wls_struct()(frame, hierarchy, ReconciliationContext())
+    result = build_wls_struct()(
+        frame,
+        hierarchy,
+        ReconciliationContext(target_support=TargetSupport.REAL),
+    )
 
     assert (
         result.loc[result[SERIES_KEY] == hierarchy.node_labels[0], POINT_FORECAST].iat[0] == -5.1e-2
@@ -382,12 +459,20 @@ def test_projection_requires_exactly_the_nodes_for_the_present_bottom_subset() -
     frame = _frame(hierarchy, labels=applicable)
     strategy = build_wls_struct()
 
-    result = strategy(frame, hierarchy, ReconciliationContext())
+    result = strategy(
+        frame,
+        hierarchy,
+        ReconciliationContext(target_support=TargetSupport.REAL),
+    )
 
     assert tuple(result[SERIES_KEY]) == applicable
     missing = frame.loc[frame[SERIES_KEY] != applicable[-1]].reset_index(drop=True)
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*missing node rows"):
-        strategy(missing, hierarchy, ReconciliationContext())
+        strategy(
+            missing,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
     outside_label = next(
         label
@@ -399,11 +484,19 @@ def test_projection_requires_exactly_the_nodes_for_the_present_bottom_subset() -
         ignore_index=True,
     )
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*outside"):
-        strategy(outside, hierarchy, ReconciliationContext())
+        strategy(
+            outside,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
     duplicate = pd.concat([frame, frame.iloc[[0]]], ignore_index=True)
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*duplicate"):
-        strategy(duplicate, hierarchy, ReconciliationContext())
+        strategy(
+            duplicate,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
 
 def test_projection_rejects_a_section_without_bottom_rows() -> None:
@@ -416,7 +509,7 @@ def test_projection_rejects_a_section_without_bottom_rows() -> None:
         build_wls_struct()(
             _frame(hierarchy, labels=aggregate_labels),
             hierarchy,
-            ReconciliationContext(),
+            ReconciliationContext(target_support=TargetSupport.REAL),
         )
 
 
@@ -428,7 +521,11 @@ def test_projection_rejects_distributional_columns() -> None:
     frame[upper] = frame[POINT_FORECAST] + 1.0
 
     with pytest.raises(ReconciliationError, match="point forecasts only"):
-        build_wls_struct()(frame, hierarchy, ReconciliationContext())
+        build_wls_struct()(
+            frame,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
 
 @pytest.mark.parametrize(
@@ -445,7 +542,11 @@ def test_projection_strategies_are_coherent_fixed_points(
 ) -> None:
     hierarchy = _hierarchy()
     frame = _frame(hierarchy)
-    context = _context(hierarchy) if needs_context else ReconciliationContext()
+    context = (
+        _context(hierarchy)
+        if needs_context
+        else ReconciliationContext(target_support=TargetSupport.REAL)
+    )
     strategy = builder()
 
     first = strategy(frame, hierarchy, context)
@@ -518,7 +619,7 @@ def test_one_membership_corruption_bites_the_reference_gate(
         build_wls_struct(dense_workspace_ceiling_bytes=0)(
             _frame(hierarchy),
             hierarchy,
-            ReconciliationContext(),
+            ReconciliationContext(target_support=TargetSupport.REAL),
         ),
         hierarchy,
     )
@@ -541,7 +642,11 @@ def test_starved_bicgstab_raises_with_cross_section_identity() -> None:
         build_wls_struct(
             dense_workspace_ceiling_bytes=0,
             bicgstab_maxiter=1,
-        )(_frame(hierarchy), hierarchy, ReconciliationContext())
+        )(
+            _frame(hierarchy),
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
 
 def test_wls_var_requires_context_model_nodes_periods_and_timestamp_alignment() -> None:
@@ -550,7 +655,11 @@ def test_wls_var_requires_context_model_nodes_periods_and_timestamp_alignment() 
     frame = _frame(hierarchy)
 
     with pytest.raises(ReconciliationError, match="requires fitted values"):
-        strategy(frame, hierarchy, ReconciliationContext())
+        strategy(
+            frame,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
     wrong_model = _fitted_frame(hierarchy, model_name="other-model")
     with pytest.raises(ReconciliationError, match=r"model-a.*no fitted values"):

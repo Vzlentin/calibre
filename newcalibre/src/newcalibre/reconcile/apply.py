@@ -96,15 +96,12 @@ def apply_none(
     *,
     declaration: ReconcilerDeclaration,
 ) -> pd.DataFrame:
-    """Validate an active point frame and return its strict identity."""
+    """Validate points and enforce support without changing reconciliation."""
     active = _active_inputs(frame, hierarchy, context, declaration=declaration)
     if active is None:
         return _apply_inactive_target_support(frame, context)
     sections = _validated_sections(frame, active)
-    if context.target_support is TargetSupport.REAL:
-        return frame
-    result = frame.copy(deep=True)
-    return _apply_target_support(result, sections=sections, context=context)
+    return _apply_target_support(frame, sections=sections, context=context)
 
 
 def apply_bottom_up(
@@ -176,8 +173,6 @@ def apply_bottom_up(
         if not aggregate_rows
         else pd.concat([bottom_rows, *aggregate_rows], ignore_index=True)
     )
-    if context.target_support is TargetSupport.REAL:
-        return result
     result_sections = _validated_sections(result, active, allow_aggregate_rows=True)
     return _apply_target_support(result, sections=result_sections, context=context)
 
@@ -198,6 +193,7 @@ def apply_projection(
     projection_sections = tuple(_projection_section(frame, active, section) for section in sections)
     result = frame.copy(deep=True)
     result_points = result[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
+    support_matrices: dict[tuple[str, ...], SparseSummingMatrix] = {}
 
     for section in projection_sections:
         source = frame.iloc[list(section.positions)]
@@ -222,15 +218,24 @@ def apply_projection(
             dtype=np.float64,
         )
         result_points[list(section.positions)] = restored
-        if context.target_support is not TargetSupport.REAL:
-            _enforce_target_support(
-                result_points,
-                section_positions=section.positions,
-                section_labels=tuple(source[SERIES_KEY]),
-                section=section,
-                context=context,
-                numerical_error_bound=projection.numerical_error_bound,
-            )
+        support_matrix: SparseSummingMatrix | None = None
+        if context.target_support is TargetSupport.NONNEGATIVE:
+            support_matrix = support_matrices.get(section.bottom_ids)
+            if support_matrix is None:
+                support_matrix = build_sparse_summing_matrix(
+                    active,
+                    bottom_ids=section.bottom_ids,
+                )
+                support_matrices[section.bottom_ids] = support_matrix
+        _enforce_target_support(
+            result_points,
+            section_positions=section.positions,
+            section_labels=tuple(source[SERIES_KEY]),
+            section=section,
+            context=context,
+            numerical_error_bound=projection.numerical_error_bound,
+            matrix=support_matrix,
+        )
     result[POINT_FORECAST] = result_points
     return result
 
@@ -239,30 +244,33 @@ def _apply_inactive_target_support(
     frame: pd.DataFrame,
     context: ReconciliationContext,
 ) -> pd.DataFrame:
-    """Enforce target support when reconciliation has no hierarchy to operate on."""
-    if frame.empty or context.target_support is TargetSupport.REAL:
+    """Validate points and enforce support without an active hierarchy."""
+    if frame.empty:
         return frame
-    sections = _inactive_sections(frame)
-    result = frame.copy(deep=True)
-    return _apply_target_support(result, sections=sections, context=context)
+    sections = _validated_frame_sections(frame)
+    return _apply_target_support(frame, sections=sections, context=context)
 
 
 def _apply_target_support(
-    result: pd.DataFrame,
+    frame: pd.DataFrame,
     *,
     sections: tuple[_CrossSection, ...],
     context: ReconciliationContext,
 ) -> pd.DataFrame:
-    points = result[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
+    points = frame[POINT_FORECAST].to_numpy(dtype=np.float64, copy=True)
     for section in sections:
         _enforce_target_support(
             points,
             section_positions=section.positions,
-            section_labels=tuple(result.iloc[list(section.positions)][SERIES_KEY]),
+            section_labels=tuple(frame.iloc[list(section.positions)][SERIES_KEY]),
             section=section,
             context=context,
             numerical_error_bound=0.0,
         )
+    current = frame[POINT_FORECAST].to_numpy(dtype=np.float64, copy=False)
+    if np.array_equal(points, current) and np.array_equal(np.signbit(points), np.signbit(current)):
+        return frame
+    result = frame.copy(deep=True)
     result[POINT_FORECAST] = points
     return result
 
@@ -275,30 +283,55 @@ def _enforce_target_support(
     section: _CrossSection | _ProjectionSection,
     context: ReconciliationContext,
     numerical_error_bound: float,
+    matrix: SparseSummingMatrix | None = None,
 ) -> None:
+    bound = float(numerical_error_bound)
+    values = points[list(section_positions)]
+    if not np.all(np.isfinite(values)):
+        raise ReconciliationError(
+            f"{section.description} point forecasts must be finite real values"
+        )
     if context.target_support is TargetSupport.REAL:
         return
     if context.target_support is not TargetSupport.NONNEGATIVE:
         raise ReconciliationError("unknown reconciliation target support")
-    bound = float(numerical_error_bound)
-    values = points[list(section_positions)]
+    changed = False
     for offset, value in enumerate(values):
         if value > 0.0:
             continue
         if value == 0.0:
             points[section_positions[offset]] = 0.0
+            changed = changed or bool(np.signbit(value))
             continue
         label = section_labels[offset]
         if value >= -bound:
             points[section_positions[offset]] = 0.0
+            changed = True
             continue
         raise ReconciliationError(
             f"{section.description}, series={label!r} violates non-negative target support: "
             f"point={value} below numerical_error_bound={bound}"
         )
+    if matrix is None:
+        return
+    if changed:
+        by_label = dict(zip(section_labels, points[list(section_positions)], strict=True))
+        bottom = np.asarray([by_label[label] for label in matrix.bottom_ids], dtype=np.float64)
+        coherent = matrix.matvec(bottom)
+        coherent_by_label = dict(zip(matrix.node_labels, coherent, strict=True))
+        for position, label in zip(section_positions, section_labels, strict=True):
+            points[position] = coherent_by_label[label]
+    _verify_support_coherence(
+        points,
+        section_positions=section_positions,
+        section_labels=section_labels,
+        section=section,
+        matrix=matrix,
+        numerical_error_bound=bound,
+    )
 
 
-def _inactive_sections(frame: pd.DataFrame) -> tuple[_CrossSection, ...]:
+def _validated_frame_sections(frame: pd.DataFrame) -> tuple[_CrossSection, ...]:
     if frame.columns.has_duplicates:
         raise ReconciliationError("reconciliation frame cannot have duplicate column labels")
     missing = [column for column in REQUIRED_FRAME_COLUMNS if column not in frame.columns]
@@ -306,15 +339,34 @@ def _inactive_sections(frame: pd.DataFrame) -> tuple[_CrossSection, ...]:
         raise ReconciliationError(
             "reconciliation frame is missing required columns: " + ", ".join(missing)
         )
+    try:
+        bound_groups = forecast_bound_groups(frame.columns)
+    except ForecastFrameError as error:
+        raise ReconciliationError(str(error)) from error
+    if bound_groups:
+        names = [column for group in bound_groups for column in group]
+        raise ReconciliationError(
+            f"reconciliation accepts point forecasts only; distributional columns={names}"
+        )
     if frame[list(_CROSS_SECTION_COLUMNS)].isna().any(axis=None):
         raise ReconciliationError("reconciliation cross-section identity cannot be missing")
     sections = _cross_sections(frame)
     for section in sections:
-        labels = tuple(frame.iloc[list(section.positions)][SERIES_KEY])
+        source = frame.iloc[list(section.positions)]
+        labels = tuple(source[SERIES_KEY])
         if any(not isinstance(label, str) or not label for label in labels):
             raise ReconciliationError(
                 f"{section.description} contains a missing or invalid series key"
             )
+        duplicate = sorted(
+            source.loc[source[SERIES_KEY].duplicated(), SERIES_KEY].unique(),
+            key=str.encode,
+        )
+        if duplicate:
+            raise ReconciliationError(
+                f"{section.description} contains duplicate node rows: {duplicate}"
+            )
+        _finite_points(source, section=section)
     return sections
 
 
@@ -388,7 +440,11 @@ def _projection_section(
     )
 
 
-def _finite_points(source: pd.DataFrame, *, section: _ProjectionSection) -> np.ndarray:
+def _finite_points(
+    source: pd.DataFrame,
+    *,
+    section: _CrossSection | _ProjectionSection,
+) -> np.ndarray:
     try:
         points = source[POINT_FORECAST].to_numpy(dtype=np.float64, na_value=np.nan)
     except (TypeError, ValueError, OverflowError) as error:
@@ -432,43 +488,13 @@ def _validated_sections(
     *,
     allow_aggregate_rows: bool = False,
 ) -> tuple[_CrossSection, ...]:
-    if frame.columns.has_duplicates:
-        raise ReconciliationError("reconciliation frame cannot have duplicate column labels")
-    missing = [column for column in REQUIRED_FRAME_COLUMNS if column not in frame.columns]
-    if missing:
-        raise ReconciliationError(
-            "reconciliation frame is missing required columns: " + ", ".join(missing)
-        )
-    try:
-        bound_groups = forecast_bound_groups(frame.columns)
-    except ForecastFrameError as error:
-        raise ReconciliationError(str(error)) from error
-    if bound_groups:
-        names = [column for group in bound_groups for column in group]
-        raise ReconciliationError(
-            f"reconciliation accepts point forecasts only; distributional columns={names}"
-        )
-    if frame[list(_CROSS_SECTION_COLUMNS)].isna().any(axis=None):
-        raise ReconciliationError("reconciliation cross-section identity cannot be missing")
-    sections = _cross_sections(frame)
+    sections = _validated_frame_sections(frame)
 
     known = set(hierarchy.node_labels)
     bottoms = set(hierarchy.bottom_series)
     for section in sections:
         source = frame.iloc[list(section.positions)]
         labels = tuple(source[SERIES_KEY])
-        if any(not isinstance(label, str) or not label for label in labels):
-            raise ReconciliationError(
-                f"{section.description} contains a missing or invalid series key"
-            )
-        duplicate = sorted(
-            source.loc[source[SERIES_KEY].duplicated(), SERIES_KEY].unique(),
-            key=str.encode,
-        )
-        if duplicate:
-            raise ReconciliationError(
-                f"{section.description} contains duplicate node rows: {duplicate}"
-            )
         uncovered = sorted(set(labels) - known, key=str.encode)
         if uncovered:
             raise ReconciliationError(
@@ -480,6 +506,42 @@ def _validated_sections(
                 f"{section.description} requires bottom-node rows only: {non_bottom}"
             )
     return sections
+
+
+def _verify_support_coherence(
+    points: np.ndarray,
+    *,
+    section_positions: tuple[int, ...],
+    section_labels: tuple[str, ...],
+    section: _CrossSection | _ProjectionSection,
+    matrix: SparseSummingMatrix,
+    numerical_error_bound: float,
+) -> None:
+    by_label = dict(zip(section_labels, points[list(section_positions)], strict=True))
+    reconciled = np.asarray([by_label[label] for label in matrix.node_labels], dtype=np.float64)
+    coherent = matrix.matvec(reconciled[: matrix.n_bottom])
+    magnitude = float(np.max(np.abs(np.concatenate((reconciled, coherent)))))
+    bound = max(
+        numerical_error_bound,
+        coherence_tolerance(
+            reduction_width=matrix.reduction_width,
+            vector_magnitude=magnitude,
+        ),
+    )
+    _verify_coherence(reconciled, coherent, bound, section=section)
+
+
+def _verify_coherence(
+    reconciled: np.ndarray,
+    coherent: np.ndarray,
+    bound: float,
+    *,
+    section: _CrossSection | _ProjectionSection,
+) -> None:
+    if not np.allclose(reconciled, coherent, rtol=0.0, atol=bound):
+        raise ReconciliationError(
+            f"{section.description} failed the derived summing-matrix coherence check"
+        )
 
 
 def _validate_existing_aggregates(

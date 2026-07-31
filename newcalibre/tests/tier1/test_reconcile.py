@@ -41,6 +41,7 @@ from newcalibre.reconcile import (
     WLS_VAR,
     WLS_VAR_DECLARATION,
     MatrixCapability,
+    ProjectionReconciler,
     Reconciler,
     ReconcilerRegistry,
     ReconciliationContext,
@@ -53,6 +54,7 @@ from newcalibre.reconcile import (
     resolve_strategy,
     strategy_declaration,
 )
+from newcalibre.reconcile.apply import ReconciledValues
 
 
 def _hierarchy() -> HierarchyIndex:
@@ -126,14 +128,17 @@ def _fitted_context(hierarchy: HierarchyIndex) -> ReconciliationContext:
     frame[MODEL_NAME] = frame[MODEL_NAME].astype("string")
     frame[ACTUAL_VALUE] = frame[ACTUAL_VALUE].astype("float64")
     frame[FITTED_VALUE] = frame[FITTED_VALUE].astype("float64")
-    return ReconciliationContext(fitted_values=FittedValues.from_frame(frame))
+    return ReconciliationContext(
+        fitted_values=FittedValues.from_frame(frame),
+        target_support=TargetSupport.REAL,
+    )
 
 
 def _context_for(strategy_name: str, hierarchy: HierarchyIndex) -> ReconciliationContext:
     return (
         _fitted_context(hierarchy)
         if strategy_declaration(strategy_name).requires_fitted_values
-        else ReconciliationContext()
+        else ReconciliationContext(target_support=TargetSupport.REAL)
     )
 
 
@@ -190,6 +195,11 @@ def test_registry_unknown_name_lists_available_strategies() -> None:
         resolve_strategy("projection")
 
 
+def test_reconciliation_context_requires_explicit_target_support() -> None:
+    with pytest.raises(TypeError, match="target_support"):
+        ReconciliationContext()  # type: ignore[call-arg]
+
+
 def test_registry_rejects_mint_cov_before_method_or_matrix_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,7 +240,7 @@ def test_no_hierarchy_and_empty_frame_are_exact_identities(strategy_name: str) -
     strategy = resolve_strategy(strategy_name)
     frame = _frame({"a": 1.0})
     empty = frame.iloc[0:0]
-    context = ReconciliationContext()
+    context = ReconciliationContext(target_support=TargetSupport.REAL)
 
     assert strategy(frame, None, context) is frame
     assert strategy(empty, _hierarchy(), context) is empty
@@ -248,10 +258,74 @@ def test_no_hierarchy_nonnegative_support_still_rejects_negative_points(
         strategy(frame, None, context)
 
 
+@pytest.mark.parametrize("strategy_name", available_strategies())
+def test_active_registered_strategy_enforces_nonnegative_support(
+    strategy_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = _hierarchy()
+    bottom = _frame({"a": -0.0, "b": 2.0, "c": 3.0})
+    declaration = strategy_declaration(strategy_name)
+    if declaration.input_family is ReconciliationInputFamily.PROJECTION:
+        frame = resolve_strategy(BOTTOM_UP)(
+            bottom,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
+
+        def reconciled(
+            self: ProjectionReconciler,
+            section: object,
+            active: object,
+            base_forecast: np.ndarray,
+            **kwargs: object,
+        ) -> ReconciledValues:
+            del self, section, active, kwargs
+            return ReconciledValues(base_forecast, 0.0)
+
+        monkeypatch.setattr(ProjectionReconciler, "_reconcile_section", reconciled)
+    else:
+        frame = bottom
+    base_context = _context_for(strategy_name, hierarchy)
+    context = ReconciliationContext(
+        fitted_values=base_context.fitted_values,
+        target_support=TargetSupport.NONNEGATIVE,
+    )
+
+    result = resolve_strategy(strategy_name)(frame, hierarchy, context)
+    point = result.loc[result[SERIES_KEY] == "a", POINT_FORECAST].iat[0]
+
+    assert point == 0.0
+    assert not np.signbit(point)
+
+
+@pytest.mark.parametrize("strategy_name", available_strategies())
+def test_inactive_support_reuses_point_frame_validation(strategy_name: str) -> None:
+    strategy = resolve_strategy(strategy_name)
+    context = ReconciliationContext(target_support=TargetSupport.NONNEGATIVE)
+    distributional = _frame({"a": 1.0})
+    lower, upper = interval_columns(0.9)
+    distributional[lower] = 0.0
+    distributional[upper] = 2.0
+    duplicate = pd.concat(
+        [_frame({"a": 1.0}), _frame({"a": 2.0})],
+        ignore_index=True,
+    )
+
+    with pytest.raises(ReconciliationError, match="point forecasts only"):
+        strategy(distributional, None, context)
+    with pytest.raises(ReconciliationError, match="duplicate"):
+        strategy(duplicate, None, context)
+
+
 def test_none_is_a_strict_point_frame_identity() -> None:
     frame = _frame({"a": 1.0, "b": 2.0, "c": 3.0})
 
-    result = resolve_strategy(NONE)(frame, _hierarchy(), ReconciliationContext())
+    result = resolve_strategy(NONE)(
+        frame,
+        _hierarchy(),
+        ReconciliationContext(target_support=TargetSupport.REAL),
+    )
 
     assert result is frame
 
@@ -279,7 +353,11 @@ def test_support_validator_rejects_material_negative_with_identity() -> None:
 def test_real_target_support_preserves_negative_points() -> None:
     frame = _frame({"a": -5.1e-2, "b": 2.0, "c": 3.0})
 
-    result = resolve_strategy(NONE)(frame, _hierarchy(), ReconciliationContext())
+    result = resolve_strategy(NONE)(
+        frame,
+        _hierarchy(),
+        ReconciliationContext(target_support=TargetSupport.REAL),
+    )
 
     assert result is frame
     assert result.loc[result[SERIES_KEY] == "a", POINT_FORECAST].iat[0] == -5.1e-2
@@ -327,14 +405,22 @@ def test_none_rejects_aggregate_rows() -> None:
     aggregate.loc[aggregate.index[0], SERIES_KEY] = hierarchy.node_labels[-1]
 
     with pytest.raises(ReconciliationError, match=r"model-a.*2026-01-05.*1.*bottom-node rows"):
-        resolve_strategy(NONE)(aggregate, hierarchy, ReconciliationContext())
+        resolve_strategy(NONE)(
+            aggregate,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
 
 def test_bottom_up_suppresses_partial_aggregates_instead_of_summing_them() -> None:
     hierarchy = _hierarchy()
     frame = _frame({"b": 2.0, "a": 1.0}, row_order=("b", "a"))
 
-    result = resolve_strategy(BOTTOM_UP)(frame, hierarchy, ReconciliationContext())
+    result = resolve_strategy(BOTTOM_UP)(
+        frame,
+        hierarchy,
+        ReconciliationContext(target_support=TargetSupport.REAL),
+    )
 
     emitted = dict(zip(result[SERIES_KEY], result[POINT_FORECAST], strict=True))
     inner = _node_for_members(hierarchy, ("a", "b"))
@@ -347,25 +433,25 @@ def test_bottom_up_suppresses_partial_aggregates_instead_of_summing_them() -> No
     assert hierarchy.node_labels[-1] not in emitted
 
 
-def test_bottom_up_present_nan_poisons_exactly_containing_aggregates() -> None:
+@pytest.mark.parametrize("value", [np.inf, -np.inf, np.nan])
+@pytest.mark.parametrize(
+    "strategy_name,active_hierarchy",
+    [(WLS_STRUCT, False), (NONE, True), (BOTTOM_UP, True)],
+)
+def test_common_validator_rejects_non_finite_points(
+    strategy_name: str,
+    active_hierarchy: bool,
+    value: float,
+) -> None:
     hierarchy = _hierarchy()
-    frame = _frame({"a": np.nan, "b": 2.0, "c": 3.0})
+    frame = _frame({"a": value, "b": 2.0, "c": 3.0})
 
-    result = resolve_strategy(BOTTOM_UP)(frame, hierarchy, ReconciliationContext())
-    emitted = result.set_index(SERIES_KEY)[POINT_FORECAST]
-
-    poisoned = {
-        node.label
-        for node in hierarchy.nodes
-        if node.kind is not HierarchyNodeKind.BOTTOM and "a" in node.members
-    }
-    finite = {
-        node.label: sum({"b": 2.0, "c": 3.0}[member] for member in node.members)
-        for node in hierarchy.nodes
-        if node.kind is not HierarchyNodeKind.BOTTOM and "a" not in node.members
-    }
-    assert emitted.loc[list(poisoned)].isna().all()
-    assert emitted.loc[list(finite)].to_dict() == finite
+    with pytest.raises(ReconciliationError, match="finite real values"):
+        resolve_strategy(strategy_name)(
+            frame,
+            hierarchy if active_hierarchy else None,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
 
 
 def test_bottom_up_isolated_cross_sections_and_appends_in_canonical_order() -> None:
@@ -389,7 +475,11 @@ def test_bottom_up_isolated_cross_sections_and_appends_in_canonical_order() -> N
     frame = pd.concat(sections, ignore_index=True)
     before = frame.copy(deep=True)
 
-    result = resolve_strategy(BOTTOM_UP)(frame, hierarchy, ReconciliationContext())
+    result = resolve_strategy(BOTTOM_UP)(
+        frame,
+        hierarchy,
+        ReconciliationContext(target_support=TargetSupport.REAL),
+    )
 
     pd.testing.assert_frame_equal(frame, before)
     pd.testing.assert_frame_equal(result.iloc[: len(frame)].reset_index(drop=True), before)
@@ -420,7 +510,11 @@ def test_registered_strategy_is_coherent_and_idempotent_on_applicable_input(
     hierarchy = _hierarchy()
     bottom = _frame({"a": 1.0, "b": 2.0, "c": 3.0})
     if strategy_declaration(strategy_name).input_family is ReconciliationInputFamily.PROJECTION:
-        frame = resolve_strategy(BOTTOM_UP)(bottom, hierarchy, ReconciliationContext())
+        frame = resolve_strategy(BOTTOM_UP)(
+            bottom,
+            hierarchy,
+            ReconciliationContext(target_support=TargetSupport.REAL),
+        )
     else:
         frame = bottom
     strategy = resolve_strategy(strategy_name)

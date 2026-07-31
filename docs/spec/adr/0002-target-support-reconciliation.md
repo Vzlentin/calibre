@@ -36,7 +36,9 @@ reconciliation, before conformal calibration.
   facts when a sparse solver is used.
 - For `NONNEGATIVE`, values in `[-bound, 0)` canonicalize to exactly `0.0`.
   Values below `-bound` fail with an error naming the model, origin, horizon
-  step, and series key. For `REAL`, finite values are preserved unchanged.
+  step, and series key. Projection canonicalization corrects the bottom block,
+  re-synthesizes aggregate nodes, and rechecks coherence. For `REAL`, finite
+  values are preserved unchanged.
 - Conformal calibration consumes only support-valid reconciled points. Any
   one-sided claim remains a claim of the conformal method; reconciliation does
   not add a conformal clamp binding.
