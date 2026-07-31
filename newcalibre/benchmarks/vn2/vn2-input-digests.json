@@ -64,7 +64,5 @@
   ],
   "minted_run_id": "29055948219",
   "minted_sha": "f85e534b70774a233ad6d8e50f0e9cab983a3adf",
-  "schema": 1,
-  "source_manifest": "benchmarks/vn2/vn2_file_links.json",
-  "source_manifest_sha256": "b654bc5af4174f47799dd0474181c90cb868df0637d1c015088173781b32ef07"
+  "schema": 1
 }

@@ -55,15 +55,6 @@ def _run(
         decision["round_count"] = round_count
         decision["origins"] = decision["origins"][:round_count]
         files["sales_reveals"] = files["sales_reveals"][: round_count + 3]
-        configured_names = (
-            files["master"],
-            files["in_stock"],
-            files["initial_state"],
-            *files["sales_reveals"],
-        )
-        for path in data.glob("*.csv"):
-            if path.name not in configured_names:
-                path.unlink()
         in_stock_path = data / files["in_stock"]
         in_stock = pd.read_csv(in_stock_path)
         visible_columns = 2 + len(BASE_WEEKS) + round_count + 2
@@ -72,7 +63,7 @@ def _run(
             index=False,
             lineterminator="\n",
         )
-        refresh_inventory(data, inventory, names=configured_names)
+        refresh_inventory(data, inventory)
     write_config(config_path, payload)
     config = load_vn2_config(config_path)
     lock = root / "uv.lock"

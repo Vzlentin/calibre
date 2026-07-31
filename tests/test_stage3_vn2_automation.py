@@ -54,11 +54,24 @@ def test_regression_workflow_has_only_pr_main_and_regression_lanes() -> None:
 def test_regression_uses_one_inventory_and_successor_verifier() -> None:
     """Key acquisition and verification directly on the canonical inventory."""
     text = REGRESSION.read_text(encoding="utf-8")
-    runs = _runs(_workflow(REGRESSION))
+    workflow = _workflow(REGRESSION)
+    runs = _runs(workflow)
+    acquisition = next(
+        step
+        for step in workflow["jobs"]["vn2-regression"]["steps"]
+        if step.get("name") == "Acquire and verify VN2 inputs with successor tooling"
+    )
 
     assert "hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json')" in text
-    assert "newcalibre/scripts/vn2_data.py download" in runs
+    assert acquisition["env"] == {"OVENTI_DATASET_BASE_URL": "${{ vars.OVENTI_DATASET_BASE_URL }}"}
+    assert "steps.vn2-cache.outputs.cache-hit" in acquisition["run"]
+    assert "jq -r '.files[].name'" in acquisition["run"]
+    assert '"${OVENTI_DATASET_BASE_URL%/}/vn2/$name"' in acquisition["run"]
+    assert "curl --fail --location --retry 3" in acquisition["run"]
     assert "newcalibre/scripts/vn2_data.py verify" in runs
+    assert "newcalibre/scripts/vn2_data.py download" not in runs
+    assert "benchmarks/vn2/vn2_file_links.json" not in text
+    assert "restore-keys:" not in text
     assert "stage3/evidence/" + "vn2-input-digests.json" not in text
     assert ".github/scripts/stage3_" + "vn2_data.py" not in text
 

@@ -157,12 +157,9 @@ def load_vn2_dataset(
         raise VN2DataError(str(error)) from error
     inventory_names = frozenset(inventory.by_name)
     configured_names = config.files.all_names
-    if inventory_names != configured_names:
+    if not configured_names <= inventory_names:
         missing = sorted(configured_names - inventory_names)
-        extra = sorted(inventory_names - configured_names)
-        raise VN2DataError(
-            f"configured files do not match approved inventory: missing={missing} extra={extra}"
-        )
+        raise VN2DataError(f"configured files are absent from the approved inventory: {missing}")
 
     previous: pd.DataFrame | None = None
     expected_base_dates = tuple(

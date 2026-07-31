@@ -1,4 +1,4 @@
-"""Exercise the successor-owned VN2 inventory and acquisition boundary.
+"""Exercise the successor-owned VN2 inventory and verification boundary.
 
 Inventory/schema/refusal assertions are exact tolerance-class-1 facts. The
 approved file digests are byte-identity class-4 assertions.
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -24,7 +23,6 @@ from newcalibre.protocols import vn2 as vn2_module
 from newcalibre.protocols.vn2 import (
     EXPECTED_INPUT_COUNT,
     VN2InputError,
-    download_vn2_inputs,
     load_vn2_inventory,
     verify_vn2_inputs,
 )
@@ -34,7 +32,7 @@ pytestmark = pytest.mark.tier1
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 APPROVED_INVENTORY = PROJECT_ROOT / "benchmarks" / "vn2" / "vn2-input-digests.json"
-APPROVED_LF_SHA256 = "54f8556a811eac81c9597c0fb0d2ef16dca5a6d84936188b7322fcdb8f15ed97"
+APPROVED_LF_SHA256 = "12143fa694dd8e2ecfb295106a861f9905b7f1351610d86bd65ee0faaf52fd3e"
 VN2_DATA_SCRIPT = PROJECT_ROOT / "scripts" / "vn2_data.py"
 
 
@@ -133,12 +131,14 @@ def test_verifier_refuses_symlinked_approved_destination(tmp_path: Path) -> None
     [
         (lambda payload: payload.update(schema=2), "schema"),
         (lambda payload: payload.update(dataset="other"), "dataset"),
-        (lambda payload: payload.update(files=[]), "non-empty"),
+        (lambda payload: payload.update(files=[]), "exactly 12"),
         (lambda payload: payload["files"][1].update(name=payload["files"][0]["name"]), "unique"),
         (lambda payload: payload["files"][0].update(name="../escape.csv"), "basename"),
         (lambda payload: payload["files"][0].update(bytes=-1), "positive"),
         (lambda payload: payload["files"][0].update(sha256="not-a-digest"), "sha256"),
         (lambda payload: payload.update(extra="field"), "exact keys"),
+        (lambda payload: payload.update(source_manifest="removed.json"), "exact keys"),
+        (lambda payload: payload.update(source_manifest_sha256="0" * 64), "exact keys"),
     ],
     ids=[
         "schema",
@@ -149,6 +149,8 @@ def test_verifier_refuses_symlinked_approved_destination(tmp_path: Path) -> None
         "negative-size",
         "bad-digest",
         "extra-field",
+        "removed-source-manifest",
+        "removed-source-manifest-digest",
     ],
 )
 def test_inventory_schema_refuses_malformed_or_unsafe_facts(
@@ -166,7 +168,7 @@ def test_inventory_schema_refuses_malformed_or_unsafe_facts(
         load_vn2_inventory(inventory_path)
 
 
-def test_generic_inventory_accepts_an_arbitrary_nonempty_compatible_file_list(
+def test_inventory_refuses_a_reduced_compatible_file_list(
     tmp_path: Path,
 ) -> None:
     _data, inventory_path, _config = write_dataset(tmp_path)
@@ -174,9 +176,8 @@ def test_generic_inventory_accepts_an_arbitrary_nonempty_compatible_file_list(
     payload["files"] = [payload["files"][0]]
     inventory_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    inventory = load_vn2_inventory(inventory_path)
-
-    assert tuple(entry.name for entry in inventory.files) == (EXPECTED_FILES[0],)
+    with pytest.raises(VN2InputError, match="exactly 12"):
+        load_vn2_inventory(inventory_path)
 
 
 @pytest.mark.parametrize(
@@ -201,287 +202,6 @@ def test_inventory_refuses_duplicate_json_keys_at_every_depth(
 
     with pytest.raises(VN2InputError, match=rf"duplicate JSON key '{key}'"):
         load_vn2_inventory(inventory_path)
-
-
-def test_downloader_validates_source_names_and_consumed_bytes(tmp_path: Path) -> None:
-    source_data, inventory_path, _config = write_dataset(tmp_path / "source")
-    target = tmp_path / "target"
-    sources = {name: f"memory://{name}" for name in EXPECTED_FILES}
-    fetched: list[str] = []
-
-    def fetch(url: str) -> bytes:
-        fetched.append(url)
-        return (source_data / url.removeprefix("memory://")).read_bytes()
-
-    download_vn2_inputs(
-        target,
-        sources,
-        inventory_path,
-        fetcher=fetch,
-    )
-
-    assert fetched == [sources[name] for name in EXPECTED_FILES]
-    verify_vn2_inputs(target, inventory_path)
-
-    with pytest.raises(VN2InputError, match=r"source names.*missing=.*week_8_sales\.csv"):
-        download_vn2_inputs(
-            tmp_path / "wrong-names",
-            {name: url for name, url in sources.items() if name != "week_8_sales.csv"},
-            inventory_path,
-            fetcher=fetch,
-        )
-
-
-def test_default_downloader_bounds_urllib_read_to_approved_bytes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_data, inventory_path, _config = write_dataset(tmp_path / "source")
-    source_payload = (source_data / EXPECTED_FILES[0]).read_bytes()
-    inventory_payload = json.loads(inventory_path.read_text(encoding="utf-8"))
-    inventory_payload["files"] = [inventory_payload["files"][0]]
-    inventory_path.write_text(json.dumps(inventory_payload), encoding="utf-8")
-    read_limits: list[int] = []
-    opened: list[tuple[str, int]] = []
-
-    class Response:
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def read(self, limit: int) -> bytes:
-            read_limits.append(limit)
-            return source_payload
-
-    def open_url(url: str, *, timeout: int) -> Response:
-        opened.append((url, timeout))
-        return Response()
-
-    monkeypatch.setattr(inventory_module.urllib.request, "urlopen", open_url)
-    target = tmp_path / "target"
-
-    download_vn2_inputs(
-        target,
-        {EXPECTED_FILES[0]: "https://approved.example/input.csv"},
-        inventory_path,
-    )
-
-    assert opened == [("https://approved.example/input.csv", 120)]
-    assert read_limits == [len(source_payload) + 1]
-    assert (target / EXPECTED_FILES[0]).read_bytes() == source_payload
-
-
-def test_default_downloader_refuses_oversized_response_after_bounded_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_data, inventory_path, _config = write_dataset(tmp_path / "source")
-    source_payload = (source_data / EXPECTED_FILES[0]).read_bytes()
-    inventory_payload = json.loads(inventory_path.read_text(encoding="utf-8"))
-    inventory_payload["files"] = [inventory_payload["files"][0]]
-    inventory_path.write_text(json.dumps(inventory_payload), encoding="utf-8")
-    read_limits: list[int] = []
-
-    class OversizedResponse:
-        def __enter__(self) -> OversizedResponse:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def read(self, limit: int) -> bytes:
-            read_limits.append(limit)
-            return source_payload + b"x"
-
-    monkeypatch.setattr(
-        inventory_module.urllib.request,
-        "urlopen",
-        lambda _url, *, timeout: OversizedResponse(),
-    )
-    target = tmp_path / "target"
-
-    with pytest.raises(VN2InputError, match=rf"{EXPECTED_FILES[0]}.*size"):
-        download_vn2_inputs(
-            target,
-            {EXPECTED_FILES[0]: "https://approved.example/input.csv"},
-            inventory_path,
-        )
-
-    assert read_limits == [len(source_payload) + 1]
-    assert list(target.iterdir()) == []
-
-
-@pytest.mark.parametrize(
-    ("fault", "pattern"),
-    [
-        ("exception", r"download failed for week_0_master\.csv.*offline"),
-        ("non-bytes", r"download for week_0_master\.csv did not return bytes"),
-        ("wrong-digest", r"week_0_master\.csv.*sha256"),
-    ],
-)
-def test_downloader_refuses_failed_or_invalid_fetch_without_touching_destination(
-    tmp_path: Path,
-    fault: str,
-    pattern: str,
-) -> None:
-    data, inventory_path, _config = write_dataset(tmp_path)
-    victim = data / EXPECTED_FILES[0]
-    original = victim.read_bytes()
-    corrupted = bytearray(original)
-    corrupted[-2] ^= 1
-
-    def fetch(_url: str) -> bytes:
-        if fault == "exception":
-            raise RuntimeError("offline")
-        if fault == "non-bytes":
-            payload: Any = "not bytes"
-            return payload
-        return bytes(corrupted)
-
-    with pytest.raises(VN2InputError, match=pattern):
-        download_vn2_inputs(
-            data,
-            {name: f"memory://{name}" for name in EXPECTED_FILES},
-            inventory_path,
-            fetcher=fetch,
-        )
-
-    assert victim.read_bytes() == original
-    assert not list(data.glob(".*.part"))
-
-
-def test_downloader_atomic_install_failure_preserves_destination_and_cleans_temp(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    data, inventory_path, _config = write_dataset(tmp_path)
-    victim = data / EXPECTED_FILES[0]
-    original = victim.read_bytes()
-    temporaries: list[Path] = []
-
-    def fail_install(source: Path, target: Path) -> None:
-        temporary = Path(source)
-        temporaries.append(temporary)
-        assert temporary.parent == data
-        assert temporary.name.startswith(f".{victim.name}.")
-        assert temporary.name.endswith(".part")
-        assert temporary.is_file()
-        assert Path(target) == victim
-        raise OSError("disk full")
-
-    monkeypatch.setattr(os, "replace", fail_install)
-
-    for _attempt in range(2):
-        with pytest.raises(
-            VN2InputError,
-            match=r"cannot install downloaded input week_0_master\.csv",
-        ):
-            download_vn2_inputs(
-                data,
-                {name: f"memory://{name}" for name in EXPECTED_FILES},
-                inventory_path,
-                fetcher=lambda _url: original,
-            )
-
-    assert victim.read_bytes() == original
-    assert len({temporary.name for temporary in temporaries}) == 2
-    assert not any(temporary.exists() for temporary in temporaries)
-
-
-def test_downloader_reports_install_and_cleanup_failures_without_masking(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    data, inventory_path, _config = write_dataset(tmp_path)
-    victim = data / EXPECTED_FILES[0]
-    original = victim.read_bytes()
-    temporaries: list[Path] = []
-
-    def fail_install(source: Path, _target: Path) -> None:
-        temporaries.append(Path(source))
-        raise OSError("disk full")
-
-    original_unlink = Path.unlink
-
-    def fail_cleanup(self: Path, *, missing_ok: bool = False) -> None:
-        if temporaries and self == temporaries[-1]:
-            raise OSError("permission denied")
-        original_unlink(self, missing_ok=missing_ok)
-
-    monkeypatch.setattr(os, "replace", fail_install)
-    monkeypatch.setattr(Path, "unlink", fail_cleanup)
-
-    with pytest.raises(VN2InputError) as raised:
-        download_vn2_inputs(
-            data,
-            {name: f"memory://{name}" for name in EXPECTED_FILES},
-            inventory_path,
-            fetcher=lambda _url: original,
-        )
-
-    message = str(raised.value)
-    assert "cannot install downloaded input week_0_master.csv: disk full" in message
-    assert "cleanup failed" in message
-    assert "temporary file: permission denied" in message
-    assert victim.read_bytes() == original
-    assert len(temporaries) == 1
-    os.unlink(temporaries[0])
-
-
-@pytest.mark.parametrize(
-    ("payload", "pattern"),
-    [
-        ({}, "exactly one 'files' list"),
-        ({"files": {}}, "exactly one 'files' list"),
-        ({"files": [{"name": "a.csv", "url": "memory://a", "extra": True}]}, "exact"),
-        ({"files": [{"name": 1, "url": "memory://a"}]}, "must be a string"),
-        (
-            {
-                "files": [
-                    {"name": "a.csv", "url": "memory://a"},
-                    {"name": "a.csv", "url": "memory://other"},
-                ]
-            },
-            "duplicate name",
-        ),
-    ],
-    ids=["missing-files", "files-not-list", "entry-shape", "non-string", "duplicate"],
-)
-def test_source_mapping_refuses_malformed_or_duplicate_entries(
-    tmp_path: Path,
-    payload: object,
-    pattern: str,
-) -> None:
-    source_path = tmp_path / "sources.json"
-    source_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(VN2InputError, match=pattern):
-        vn2_data._sources(source_path)
-
-
-@pytest.mark.parametrize(
-    ("text", "key"),
-    [
-        ('{"files": [], "files": []}', "files"),
-        (
-            '{"files": [{"name": "a.csv", "name": "a.csv", "url": "memory://a"}]}',
-            "name",
-        ),
-    ],
-    ids=["top-level", "nested"],
-)
-def test_source_mapping_refuses_duplicate_json_keys_at_every_depth(
-    tmp_path: Path,
-    text: str,
-    key: str,
-) -> None:
-    source_path = tmp_path / "sources.json"
-    source_path.write_text(text, encoding="utf-8")
-
-    with pytest.raises(VN2InputError, match=rf"duplicate JSON key '{key}'"):
-        vn2_data._sources(source_path)
 
 
 def _run_verify(data: Path, inventory_path: Path) -> subprocess.CompletedProcess[str]:
@@ -526,31 +246,8 @@ def test_verify_script_reports_corrupt_input_attributably(tmp_path: Path) -> Non
     assert "week_4_sales.csv: sha256" in result.stderr
 
 
-def test_if_missing_never_allows_cache_poison_to_bypass_verification(tmp_path: Path) -> None:
-    data, inventory_path, _config = write_dataset(tmp_path)
-    victim = data / "week_2_sales.csv"
-    victim.write_bytes(b"cache poison")
-    fetch_calls = 0
-
-    def should_not_fetch(_url: str) -> bytes:
-        nonlocal fetch_calls
-        fetch_calls += 1
-        raise AssertionError("if_missing must retain present cache entries until verification")
-
-    with pytest.raises(VN2InputError, match=r"week_2_sales\.csv.*size"):
-        download_vn2_inputs(
-            data,
-            {name: f"memory://{name}" for name in EXPECTED_FILES},
-            inventory_path,
-            if_missing=True,
-            fetcher=should_not_fetch,
-        )
-
-    assert fetch_calls == 0
-
-
-def test_inventory_has_no_successor_digest_mint_operation() -> None:
-    expected_operations = {"download_vn2_inputs", "verify_vn2_inputs"}
+def test_inventory_and_cli_are_verification_only() -> None:
+    expected_operations = {"verify_vn2_inputs"}
     module_operations = {
         name
         for name, value in vars(inventory_module).items()
@@ -562,8 +259,10 @@ def test_inventory_has_no_successor_digest_mint_operation() -> None:
 
     assert module_operations == expected_operations
     assert package_operations == expected_operations
+    assert not hasattr(inventory_module, "ByteFetcher")
+    assert not hasattr(vn2_module, "download_vn2_inputs")
     assert not any(
         name.startswith("mint") and callable(value)
         for name, value in vars(inventory_module).items()
     )
-    assert set(command_action.choices or ()) == {"download", "verify"}
+    assert set(command_action.choices or ()) == {"verify"}

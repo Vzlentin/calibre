@@ -16,8 +16,6 @@ from tests.vn2_fixtures import (
     INITIAL_STATE_COLUMNS,
     MASTER_ATTRIBUTES,
     REVEAL_WEEKS,
-    SALES_FILES,
-    STATIC_FILES,
     refresh_inventory,
     synthetic_config_payload,
     write_config,
@@ -172,8 +170,6 @@ def test_alternate_review_cadence_drives_reveals_round_visibility_and_actuals(
 ) -> None:
     data, inventory, config_path = write_dataset(tmp_path)
     sales_names = tuple(f"week_{reveal}_sales.csv" for reveal in range(7))
-    for name in set(SALES_FILES) - set(sales_names):
-        (data / name).unlink()
     in_stock = pd.read_csv(data / "week_0_in_stock.csv")
     in_stock = in_stock[["Store", "Product", *BASE_WEEKS]]
     in_stock.to_csv(data / "week_0_in_stock.csv", index=False, lineterminator="\n")
@@ -194,7 +190,7 @@ def test_alternate_review_cadence_drives_reveals_round_visibility_and_actuals(
     payload["columns"]["initial_state_columns"].remove("In Transit W+2")
     payload["columns"]["initial_pipeline"] = ["In Transit W+1"]
     write_config(config_path, payload)
-    refresh_inventory(data, inventory, names=(*STATIC_FILES, *sales_names))
+    refresh_inventory(data, inventory)
 
     dataset = load_vn2_dataset(data, inventory, load_vn2_config(config_path))
     round_one = dataset.round_input(1)

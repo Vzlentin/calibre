@@ -29,7 +29,6 @@ from newcalibre.protocols.vn2.inventory import (
     VN2InputError,
     VN2InputFile,
     VN2InputInventory,
-    download_vn2_inputs,
     load_vn2_inventory,
     verify_vn2_inputs,
 )
@@ -79,7 +78,6 @@ __all__ = [
     "available_vn2_backends",
     "build_tracking_record",
     "compare_tracking_records",
-    "download_vn2_inputs",
     "emit_result_bundle",
     "load_result_bundle",
     "load_tracking_history",
