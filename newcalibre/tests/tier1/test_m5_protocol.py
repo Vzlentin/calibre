@@ -49,9 +49,7 @@ def _row(index: int) -> dict[str, object]:
 
 
 def _sales_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
-    values: dict[str, object] = {
-        name: [row[name] for row in rows] for name in _SOURCE_FACTS
-    }
+    values: dict[str, object] = {name: [row[name] for row in rows] for name in _SOURCE_FACTS}
     for day in range(1, _DAY_COUNT + 1):
         values[f"d_{day}"] = [(index + day) % 11 for index in range(len(rows))]
     return pd.DataFrame(values)
