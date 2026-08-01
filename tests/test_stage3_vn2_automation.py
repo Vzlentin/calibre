@@ -290,15 +290,18 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
     m5_monitor = M5_MONITOR.read_text(encoding="utf-8")
     pytest_commands = "\n".join(line for line in runs.splitlines() if "pytest " in line)
 
-    assert "pytest newcalibre/tests/tier3" in vn2_runs
+    assert "pytest newcalibre/tests/tier3/vn2" in vn2_runs
     assert "pytest newcalibre/tests/tier4/vn2" in vn2_runs
+    assert "pytest newcalibre/tests/tier3/m5" in m5_runs
     assert "pytest newcalibre/tests/tier4/m5" in m5_runs
     assert "pytest newcalibre/tests/tier4/reference" in reference_runs
+    assert "pytest newcalibre/tests/tier3\n" not in runs
     assert "pytest newcalibre/tests/tier4\n" not in runs
     assert "-m tier4" not in runs
     assert "test_vn2_acceptance.py" not in pytest_commands
     assert "test_vn2_gate_b_advisory.py" not in pytest_commands
     assert "test_m5_reduced_acceptance.py" not in pytest_commands
+    assert "test_m5_frozen_scorer_parity.py" not in pytest_commands
     assert "actions/cache" not in str(reference)
     assert "OVENTI_DATASET_BASE_URL" not in str(reference)
     assert "curl " not in reference_runs
@@ -318,6 +321,50 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
     assert "gh pr" not in runs
     assert "git push" not in runs
     assert "vn2-regression:" not in text
+
+
+def test_protocol_jobs_keep_tier3_prerequisites_and_frozen_oracle_scoped() -> None:
+    """Bind each Tier-3 directory to its protocol prerequisites and exact oracle."""
+    workflow = _workflow(REGRESSION)
+    vn2 = workflow["jobs"]["vn2-acceptance"]
+    m5 = workflow["jobs"]["m5-acceptance"]
+    vn2_runs = _job_runs(vn2)
+    m5_runs = _job_runs(m5)
+    vn2_precondition = next(
+        step
+        for step in vn2["steps"]
+        if step.get("name") == "Require canonical VN2 evidence and harnesses"
+    )["run"]
+    m5_precondition = next(
+        step
+        for step in m5["steps"]
+        if step.get("name") == "Require canonical M5 inputs, config, and harnesses"
+    )["run"]
+    preparation = next(
+        step for step in m5["steps"] if step.get("name") == "Prepare exact frozen M5 scorer"
+    )["run"]
+    cleanup = next(step for step in m5["steps"] if step.get("name") == "Remove frozen M5 scorer")
+
+    assert "newcalibre/tests/tier3/vn2/oracle_inventory.json" in vn2_precondition
+    assert "newcalibre/tests/tier3/vn2/test_conditional_replay.py" in vn2_precondition
+    assert "newcalibre/tests/tier3/m5/oracle_inventory.json" in m5_precondition
+    assert "newcalibre/tests/tier3/m5/m5_frozen_export.py" in m5_precondition
+    assert "newcalibre/tests/tier3/m5/test_m5_frozen_scorer_parity.py" in m5_precondition
+    assert "newcalibre/tests/tier4/m5/test_m5_reduced_acceptance.py" in m5_precondition
+    assert "newcalibre/data/m5" not in vn2_runs
+    assert "newcalibre/scripts/m5_data.py" not in vn2_runs
+    assert "newcalibre/data/vn2" not in m5_runs
+    assert "newcalibre/scripts/vn2_data.py" not in m5_runs
+    assert "CALIBRE_FROZEN_ORACLE_WORKTREE" not in vn2_runs
+    assert "oracle-freeze-2026-07-06" in preparation
+    assert "686a1b284a4f4879123b4095d306f07b88d2ddc3" in preparation
+    assert "git worktree add --detach" in preparation
+    assert 'cd "$oracle_worktree"' in preparation
+    assert "uv sync --locked" in preparation
+    assert "CALIBRE_FROZEN_ORACLE_WORKTREE" in preparation
+    assert cleanup["if"] == "always()"
+    assert "git worktree remove --force" in cleanup["run"]
+    assert not any(step.get("uses") == "actions/upload-artifact@v4" for step in m5["steps"])
 
 
 def test_m5_monitor_executes_child_and_sizing_exit_contracts(tmp_path: Path) -> None:

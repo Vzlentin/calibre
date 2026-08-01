@@ -1,0 +1,14 @@
+{
+  "named": {
+    "gate": {
+      "id": "m5-frozen-scorer-parity",
+      "node": "tests.tier3.m5.test_m5_frozen_scorer_parity::test_successor_and_frozen_m5_scorers_have_exact_count_parity"
+    },
+    "witness": {
+      "id": "m5-frozen-scorer-parity",
+      "node": "tests.tier3.m5.test_m5_frozen_scorer_parity::test_one_finite_upper_bound_drift_names_the_changed_level_count"
+    }
+  },
+  "schema": 1,
+  "tier": "tier3"
+}

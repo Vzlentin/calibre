@@ -118,7 +118,8 @@ jobs:
           test -f newcalibre/benchmarks/vn2/protocol.yaml
           test -f newcalibre/benchmarks/vn2/gate-b-split-window-sum.yaml
           test -f stage3/evidence/captures/vn2/manifest.json
-          test -f newcalibre/tests/tier3/test_conditional_replay.py
+          test -f newcalibre/tests/tier3/vn2/oracle_inventory.json
+          test -f newcalibre/tests/tier3/vn2/test_conditional_replay.py
           test -f newcalibre/tests/tier4/vn2/test_vn2_acceptance.py
           test -f newcalibre/tests/tier4/vn2/test_vn2_gate_b_advisory.py
       - name: Restore canonical VN2 inputs
@@ -150,7 +151,7 @@ jobs:
             --target "$target" \
             --inventory "$inventory"
       - name: Run conditional replay and biting witness
-        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier3
+        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier3/vn2
       - name: Run generic-engine VN2 acceptance and R1-R4 emission
         run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4/vn2
       - name: Build proposed compact tracking line
@@ -195,12 +196,15 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
       - uses: astral-sh/setup-uv@v4
-      - name: Require canonical M5 inputs, config, and harness
+      - name: Require canonical M5 inputs, config, and harnesses
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$M5_CANDIDATE_SHA"
           test -f newcalibre/benchmarks/m5/m5-inputs.json
           test -f newcalibre/tests/fixtures/m5/reduced-real.yaml
+          test -f newcalibre/tests/tier3/m5/oracle_inventory.json
+          test -f newcalibre/tests/tier3/m5/m5_frozen_export.py
+          test -f newcalibre/tests/tier3/m5/test_m5_frozen_scorer_parity.py
           test -f newcalibre/tests/tier4/m5/test_m5_reduced_acceptance.py
       - name: Restore canonical M5 inputs
         id: m5-cache
@@ -230,10 +234,37 @@ jobs:
           uv run --project newcalibre --locked --no-sync python newcalibre/scripts/m5_data.py verify \
             --target "$target" \
             --inventory "$inventory"
+      - name: Prepare exact frozen M5 scorer
+        run: |
+          set -euo pipefail
+          oracle_tag=oracle-freeze-2026-07-06
+          oracle_commit=686a1b284a4f4879123b4095d306f07b88d2ddc3
+          oracle_worktree="${RUNNER_TEMP}/calibre-oracle"
+          test ! -e "$oracle_worktree"
+          git fetch --force --no-tags origin \
+            "refs/tags/${oracle_tag}:refs/tags/${oracle_tag}"
+          test "$(git rev-parse "${oracle_tag}^{commit}")" = "$oracle_commit"
+          git worktree add --detach "$oracle_worktree" "$oracle_commit"
+          (
+            cd "$oracle_worktree"
+            uv sync --locked
+          )
+          echo "CALIBRE_FROZEN_ORACLE_WORKTREE=$oracle_worktree" >> "$GITHUB_ENV"
+      - name: Run frozen M5 scorer parity and biting witness
+        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier3/m5
       - name: Run reduced real-M5 acceptance and measure runner headroom
         run: |
           bash .github/scripts/run-m5-acceptance.sh \
             uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4/m5
+      - name: Remove frozen M5 scorer
+        if: always()
+        run: |
+          set -euo pipefail
+          oracle_worktree="${RUNNER_TEMP}/calibre-oracle"
+          if [[ -e "$oracle_worktree" ]]; then
+            git worktree remove --force "$oracle_worktree"
+          fi
+          git worktree prune
 
   reference-gates:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
