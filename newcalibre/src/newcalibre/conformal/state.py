@@ -8,6 +8,7 @@ from enum import StrEnum
 from numbers import Integral
 from typing import Final
 
+from newcalibre.conformal.batch import ConformalStateBatch
 from newcalibre.conformal.types import (
     METHOD_SCOPE_LABEL,
     RuntimeContractError,
@@ -155,6 +156,24 @@ def validate_state_blob(
             f"{expected_label!r}"
         )
     return address
+
+
+def validate_state_batch(
+    state: ConformalStateBatch,
+    *,
+    method_name: str,
+    schema_version: int,
+) -> None:
+    """Validate every opaque row in one complete semantic state batch."""
+    if not isinstance(state, ConformalStateBatch):
+        raise StateCodecError("conformal state batch must be a ConformalStateBatch")
+    for label, value in state.items():
+        validate_state_blob(
+            value,
+            method_name=method_name,
+            schema_version=schema_version,
+            expected_label=label,
+        )
 
 
 def _decode_envelope(state: object) -> dict[str, object]:

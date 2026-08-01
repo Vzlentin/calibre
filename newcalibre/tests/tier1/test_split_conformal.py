@@ -8,14 +8,16 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 import newcalibre.conformal.methods.split as split_method
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     SPLIT_PER_STEP_MANIFEST,
     CalibrationResult,
+    CalibrationSeedBatch,
     ConformalRegistryError,
-    Delivery,
+    ConformalStateBatch,
     EmissionForm,
     ForecastKey,
     ResolvedObservation,
@@ -99,7 +101,7 @@ def _states(
         series_key=series_key,
         partition_by=str(payload.get("partition_by", "global")),
     )
-    states = runtime.calibrate({label: scores})
+    states = runtime.calibrate(CalibrationSeedBatch({label: scores}))
     return runtime, label, states
 
 
@@ -149,7 +151,7 @@ def test_rank_readiness_uses_the_strict_boundary_and_conservative_order_statisti
     assert not facts.calibration_ready
     assert facts.bounds_null_reason == "warm-up"
 
-    ten = runtime.calibrate({label: list(range(1, 11))})
+    ten = runtime.calibrate(CalibrationSeedBatch({label: list(range(1, 11))}))
     ready = runtime.apply(_frame(), ten)
     assert ready.forecasts.loc[0, lower] == 0.0
     assert ready.forecasts.loc[0, upper] == 14.0
@@ -174,8 +176,8 @@ def test_calibration_is_deterministic_bounded_and_rejects_nonfinite_scores() -> 
         [],
         configuration={"coverage": 0.5, "calibration_window": 2},
     )
-    first = runtime.calibrate({label: [1.0, 2.0, 3.0]})
-    second = runtime.calibrate({label: [1.0, 2.0, 3.0]})
+    first = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0, 3.0]}))
+    second = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0, 3.0]}))
     payload = _payload("split-per-step", first[label], label=label)
 
     assert first == second
@@ -190,7 +192,7 @@ def test_calibration_is_deterministic_bounded_and_rejects_nonfinite_scores() -> 
 
     for score in (math.nan, math.inf, -1.0):
         with pytest.raises(RuntimeContractError, match="scores"):
-            runtime.calibrate({label: [score]})
+            runtime.calibrate(CalibrationSeedBatch({label: [score]}))
 
 
 def test_series_partitioning_uses_independent_score_states() -> None:
@@ -203,7 +205,7 @@ def test_series_partitioning_uses_independent_score_states() -> None:
     )
     a_label = _partition(EmissionScope.PER_STEP, series_key="a", partition_by="series")
     b_label = _partition(EmissionScope.PER_STEP, series_key="b", partition_by="series")
-    states = runtime.calibrate({a_label: [1.0, 2.0], b_label: [10.0, 20.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({a_label: [1.0, 2.0], b_label: [10.0, 20.0]}))
     forecasts = pd.concat(
         [_frame(series_key="a"), _frame(series_key="b")],
         ignore_index=True,
@@ -237,7 +239,9 @@ def test_series_horizon_partitioning_isolates_state_and_readiness_per_step() -> 
         horizon_step=2,
     )
     assert first_label != second_label
-    states = runtime.calibrate({first_label: [1.0, 2.0], second_label: [10.0]})
+    states = runtime.calibrate(
+        CalibrationSeedBatch({first_label: [1.0, 2.0], second_label: [10.0]})
+    )
 
     result = runtime.apply(_frame((4.0, 4.0)), states)
     lower, upper = interval_columns(0.5)
@@ -270,7 +274,9 @@ def test_series_horizon_delivery_updates_only_its_declared_step() -> None:
         partition_by="series-horizon",
         horizon_step=2,
     )
-    states = runtime.calibrate({first_label: [1.0, 2.0], second_label: [10.0, 20.0]})
+    states = runtime.calibrate(
+        CalibrationSeedBatch({first_label: [1.0, 2.0], second_label: [10.0, 20.0]})
+    )
     issued = runtime.apply(_frame((4.0, 4.0)), states)
     observations = _observations(
         issued,
@@ -278,12 +284,12 @@ def test_series_horizon_delivery_updates_only_its_declared_step() -> None:
         (CensoringAssertion.UNCENSORED, CensoringAssertion.UNCENSORED),
     )
 
-    effect = runtime.observe(Delivery(first_label, (observations[0],)), states)
+    effect = runtime.observe(delivery_batch(first_label, (observations[0],)), states)
 
-    assert set(effect.state_updates) == {first_label}
-    assert second_label not in effect.state_updates
+    assert set(effect.dirty_labels) == {first_label}
+    assert second_label not in effect.dirty_labels
     with pytest.raises(RuntimeContractError, match="issued partition"):
-        Delivery(first_label, (observations[1],))
+        delivery_batch(first_label, (observations[1],))
 
 
 def test_series_horizon_labels_cannot_collide_with_series_values() -> None:
@@ -311,11 +317,11 @@ def test_apply_ignores_poisoned_actuals_and_advances_only_method_issue_state() -
     result = runtime.apply(_frame(actuals=(Poison(),)), states)
 
     assert result.forecasts.loc[0, interval_columns(0.9)[1]] == 14.0
-    assert set(result.state_updates) == {METHOD_SCOPE_LABEL}
-    assert label not in result.state_updates
+    assert set(result.dirty_labels) == {METHOD_SCOPE_LABEL}
+    assert label not in result.dirty_labels
     assert _payload(
         "split-per-step",
-        result.state_updates[METHOD_SCOPE_LABEL],
+        result.dirty_state[METHOD_SCOPE_LABEL],
         label=METHOD_SCOPE_LABEL,
     ) == {"issue_counter": 1}
 
@@ -360,7 +366,7 @@ def test_window_apply_rejects_a_large_incomplete_period_before_range_allocation(
     monkeypatch.setattr(split_method, "range", fail_on_range, raising=False)
 
     with pytest.raises(RuntimeContractError, match="leading protection-window"):
-        runtime.apply(terminal_only, {})
+        runtime.apply(terminal_only, ConformalStateBatch())
 
 
 def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series() -> None:
@@ -370,7 +376,7 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
         configuration={"coverage": 0.5, "calibration_window": 3},
     )
     issued = runtime.apply(_frame((4.0, 5.0, 6.0)), states)
-    delivery = Delivery(
+    delivery = delivery_batch(
         label,
         _observations(
             issued,
@@ -379,7 +385,7 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
         ),
     )
     effect = runtime.observe(delivery, states)
-    payload = _payload("split-per-step", effect.state_updates[label], label=label)
+    payload = _payload("split-per-step", effect.dirty_state[label], label=label)
 
     assert [annotation.score for annotation in effect.annotations] == [3.0, None, 2.0]
     assert effect.annotations[1].exclusion_cause == "declared-censored"
@@ -392,7 +398,7 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
     assert payload["delivered_score_count"] == 4
     assert payload["scored_series"] == "recorded-sales"
 
-    later = runtime.apply(_frame(), {**states, label: effect.state_updates[label]})
+    later = runtime.apply(_frame(), effect.state)
     later_facts = next(iter(later.issuances.values()))
     assert later_facts.effective_descriptor.scored_series is ScoredSeries.RECORDED_SALES
     before_reference = next(iter(issued.issuances.values())).state_reference
@@ -443,7 +449,7 @@ def test_observe_rejects_tampered_issuance_identity_before_state_advancement(
 
     with pytest.raises(RuntimeContractError, match=message):
         runtime.observe(
-            Delivery(label, (replace(observation, issued=tampered),)),
+            delivery_batch(label, (replace(observation, issued=tampered),)),
             states,
         )
 
@@ -458,7 +464,7 @@ def test_declared_censoring_without_an_undeclared_score_stays_demand_honest() ->
     )
     issued = runtime.apply(_frame((4.0, 5.0)), states)
     effect = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -468,7 +474,7 @@ def test_declared_censoring_without_an_undeclared_score_stays_demand_honest() ->
         ),
         states,
     )
-    payload = _payload("split-per-step", effect.state_updates[label], label=label)
+    payload = _payload("split-per-step", effect.dirty_state[label], label=label)
 
     assert payload["delivered_score_count"] == 3
     assert payload["scored_series"] == "demand-honest"
@@ -486,8 +492,8 @@ def test_window_observe_scores_once_on_terminal_and_preserves_canonical_annotati
         (4.0, 4.0, 7.0),
         (CensoringAssertion.UNCENSORED,) * 3,
     )
-    effect = runtime.observe(Delivery(label, observations), states)
-    payload = _payload("split-window-sum", effect.state_updates[label], label=label)
+    effect = runtime.observe(delivery_batch(label, observations), states)
+    payload = _payload("split-window-sum", effect.dirty_state[label], label=label)
 
     assert [annotation.forecast_key.horizon_step for annotation in effect.annotations] == [
         1,
@@ -526,16 +532,16 @@ def test_window_observe_batches_canonical_windows_like_consecutive_calls() -> No
         for observation in first
     )
 
-    batched = runtime.observe(Delivery(label, (*first, *second)), states)
-    first_effect = runtime.observe(Delivery(label, first), states)
+    batched = runtime.observe(delivery_batch(label, (*first, *second)), states)
+    first_effect = runtime.observe(delivery_batch(label, first), states)
     consecutive = runtime.observe(
-        Delivery(label, second),
-        {**states, **first_effect.state_updates},
+        delivery_batch(label, second),
+        first_effect.state,
     )
 
-    assert batched.state_updates == consecutive.state_updates
+    assert batched.dirty_state == consecutive.dirty_state
     assert batched.annotations == (*first_effect.annotations, *consecutive.annotations)
-    payload = _payload("split-window-sum", batched.state_updates[label], label=label)
+    payload = _payload("split-window-sum", batched.dirty_state[label], label=label)
     assert payload["delivered_score_count"] == 4
 
 
@@ -547,7 +553,7 @@ def test_window_censoring_excludes_the_composite_without_state_advancement() -> 
     )
     issued = runtime.apply(_frame((2.0, 3.0, 4.0)), states)
     effect = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -562,7 +568,8 @@ def test_window_censoring_excludes_the_composite_without_state_advancement() -> 
         states,
     )
 
-    assert effect.state_updates[label] == states[label]
+    assert effect.state[label] == states[label]
+    assert label not in effect.dirty_labels
     assert all(annotation.score is None for annotation in effect.annotations)
     assert all(
         annotation.exclusion_cause == "declared-censored-window"
@@ -584,12 +591,12 @@ def test_window_observe_refuses_partial_foreign_out_of_range_and_noncanonical_me
     )
 
     with pytest.raises(RuntimeContractError, match="complete protection window"):
-        runtime.observe(Delivery(label, observations[:2]), states)
+        runtime.observe(delivery_batch(label, observations[:2]), states)
     with pytest.raises(RuntimeContractError, match="duplicate forecast key"):
-        Delivery(label, (observations[0], observations[0], observations[2]))
+        delivery_batch(label, (observations[0], observations[0], observations[2]))
     with pytest.raises(RuntimeContractError, match="canonical horizon steps"):
         runtime.observe(
-            Delivery(label, (observations[1], observations[0], observations[2])), states
+            delivery_batch(label, (observations[1], observations[0], observations[2])), states
         )
 
     foreign = replace(
@@ -600,14 +607,16 @@ def test_window_observe_refuses_partial_foreign_out_of_range_and_noncanonical_me
         RuntimeContractError,
         match="declared partition|share series|complete protection window",
     ):
-        runtime.observe(Delivery(label, (observations[0], foreign, observations[2])), states)
+        runtime.observe(delivery_batch(label, (observations[0], foreign, observations[2])), states)
 
     out_of_range = replace(
         observations[2],
         forecast_key=replace(observations[2].forecast_key, horizon_step=4),
     )
     with pytest.raises(RuntimeContractError, match="canonical horizon steps"):
-        runtime.observe(Delivery(label, (observations[0], observations[1], out_of_range)), states)
+        runtime.observe(
+            delivery_batch(label, (observations[0], observations[1], out_of_range)), states
+        )
 
 
 def test_clamps_record_binding_per_finite_row_and_void_only_changed_claims() -> None:

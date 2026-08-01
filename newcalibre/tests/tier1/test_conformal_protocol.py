@@ -7,11 +7,12 @@ import math
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     CalibrationResult,
+    CalibrationSeedBatch,
     ConformalRuntime,
-    Delivery,
     ForecastKey,
     ResolvedObservation,
     available_methods,
@@ -120,9 +121,9 @@ def test_builtin_protocol_covers_below_and_at_readiness_with_complete_descriptor
         "global",
         runtime.manifest.emission_scope,
     )
-    below_states = runtime.calibrate({label: list(range(1, 10))})
+    below_states = runtime.calibrate(CalibrationSeedBatch({label: list(range(1, 10))}))
     below = runtime.apply(_frame(), below_states)
-    ready_states = runtime.calibrate({label: list(range(1, 11))})
+    ready_states = runtime.calibrate(CalibrationSeedBatch({label: list(range(1, 11))}))
     ready = runtime.apply(_frame(), ready_states)
     lower, upper = interval_columns(0.9)
     below_facts = next(iter(below.issuances.values()))
@@ -157,9 +158,9 @@ def test_builtin_observe_replay_and_factory_restoration_are_exact(method: str) -
         "global",
         original.manifest.emission_scope,
     )
-    states = original.calibrate({label: list(range(1, 11))})
+    states = original.calibrate(CalibrationSeedBatch({label: list(range(1, 11))}))
     issued = original.apply(_frame(), states)
-    delivery = Delivery(label, (_observation(issued),))
+    delivery = delivery_batch(label, (_observation(issued),))
 
     first = original.observe(delivery, states)
     restored = resolve_method({"method": method}, states=states)
@@ -167,7 +168,5 @@ def test_builtin_observe_replay_and_factory_restoration_are_exact(method: str) -
 
     assert restored is not original
     assert first.annotations == second.annotations
-    assert first.state_updates == second.state_updates
-    assert (
-        resolve_method({"method": method}, states=first.state_updates).manifest == original.manifest
-    )
+    assert first.dirty_state == second.dirty_state
+    assert resolve_method({"method": method}, states=first.state).manifest == original.manifest

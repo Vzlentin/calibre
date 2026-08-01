@@ -13,8 +13,23 @@ from typing import Any, cast
 
 import pandas as pd
 import pytest
+from pydantic import BaseModel
 
-from newcalibre.conformal import SPLIT_PER_STEP, derive_partition_label, resolve_method
+from newcalibre.conformal import (
+    METHOD_SCOPE_LABEL,
+    SPLIT_PER_STEP,
+    CalibrationContext,
+    CalibrationSeedBatch,
+    ConformalRuntime,
+    ConformalStateBatch,
+    DeliveryBatch,
+    ObserveEffect,
+    derive_partition_label,
+    resolve_method,
+)
+from newcalibre.conformal import (
+    CalibrationResult as RuntimeCalibrationResult,
+)
 from newcalibre.domain import (
     ACTUAL_VALUE,
     HORIZON_STEP,
@@ -321,6 +336,44 @@ class RecordingPanelSource(InMemoryPanelSource):
     def load(self) -> Panel:
         self.loads += 1
         return super().load()
+
+
+class _ApplyCountingRuntime:
+    """Record complete engine apply batches while delegating method behavior."""
+
+    def __init__(self, delegate: ConformalRuntime) -> None:
+        self.delegate = delegate
+        self.apply_calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+    @property
+    def manifest(self):  # type: ignore[no-untyped-def]
+        return self.delegate.manifest
+
+    @property
+    def config(self) -> BaseModel:
+        return self.delegate.config
+
+    def calibrate(self, seeds: CalibrationSeedBatch) -> ConformalStateBatch:
+        return self.delegate.calibrate(seeds)
+
+    def apply(
+        self,
+        forecasts: pd.DataFrame,
+        state: ConformalStateBatch,
+        *,
+        context: CalibrationContext | None = None,
+    ) -> RuntimeCalibrationResult:
+        self.apply_calls.append((tuple(forecasts[SERIES_KEY]), state.labels))
+        return self.delegate.apply(forecasts, state, context=context)
+
+    def observe(
+        self,
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
+        *,
+        context: CalibrationContext | None = None,
+    ) -> ObserveEffect:
+        return self.delegate.observe(deliveries, state, context=context)
 
 
 def _engine_with_default_resolver(
@@ -1461,7 +1514,9 @@ def test_real_conformal_apply_consumes_bottom_up_reconciled_points() -> None:
     )
     state_store = InMemoryCalibrationStateStore()
     partition = derive_partition_label("fixture", "global", EmissionScope.PER_STEP)
-    seeded = resolve_method(conformal_config).calibrate({partition: [2.0, 2.0, 2.0]})
+    seeded = resolve_method(conformal_config).calibrate(
+        CalibrationSeedBatch({partition: [2.0, 2.0, 2.0]})
+    )
     for label, value in seeded.items():
         state_store.save(
             session,
@@ -1494,6 +1549,61 @@ def test_real_conformal_apply_consumes_bottom_up_reconciled_points() -> None:
     assert aggregate[POINT_FORECAST].tolist() == [8.0, 8.0]
     assert aggregate[lower].tolist() == [0.0, 0.0]
     assert aggregate[upper].tolist() == [10.0, 10.0]
+
+
+def test_engine_calls_apply_once_with_the_complete_multi_partition_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    series_keys = ("b", "a")
+    panel = _panel(series_keys=series_keys)
+    conformal_config = {
+        "method": SPLIT_PER_STEP,
+        "coverage": 0.5,
+        "partition_by": "series",
+    }
+    session = _session(series_keys=series_keys, conformal_config=conformal_config)
+    labels = tuple(
+        derive_partition_label("fixture", series, EmissionScope.PER_STEP) for series in series_keys
+    )
+    seeded = resolve_method(conformal_config).calibrate(
+        CalibrationSeedBatch({label: [1.0, 2.0] for label in labels})
+    )
+    state_store = InMemoryCalibrationStateStore()
+    for label, state in seeded.items():
+        state_store.save(session, label, state, sequence=0)
+
+    runtimes: list[_ApplyCountingRuntime] = []
+
+    def counting_resolver(
+        configuration: Mapping[str, object],
+        *,
+        states: Mapping[str, bytes] | None = None,
+    ) -> ConformalRuntime:
+        runtime = _ApplyCountingRuntime(resolve_method(configuration, states=states))
+        runtimes.append(runtime)
+        return runtime
+
+    monkeypatch.setattr("newcalibre.engine.spine.resolve_method", counting_resolver)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=state_store,
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    request = OriginRequest(session=session, origin=origin, scope=Scope.LOCAL)
+    observation = engine.observe(origin, session=session)
+    forecasts = engine.reconcile(engine.predict(engine.fit(request)))
+
+    engine.calibrate(forecasts, session=session, observation=observation)
+
+    assert len(runtimes) == 1
+    assert len(runtimes[0].apply_calls) == 1
+    applied_series, applied_labels = runtimes[0].apply_calls[0]
+    assert set(applied_series) == set(series_keys)
+    assert applied_labels == tuple(sorted((*labels, METHOD_SCOPE_LABEL), key=str.encode))
 
 
 def test_session_owned_decision_scope_excludes_a_panel_aggregate_only_from_ordering() -> None:

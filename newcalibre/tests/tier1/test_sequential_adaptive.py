@@ -8,15 +8,17 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     SEQUENTIAL_ADAPTIVE_PER_STEP_MANIFEST,
     AssumptionClass,
     CalibrationResult,
+    CalibrationSeedBatch,
     CensoringPolicy,
     ConformalRegistryError,
-    Delivery,
+    ConformalStateBatch,
     EmissionForm,
     ForecastKey,
     PostWarmupNonFinite,
@@ -88,7 +90,7 @@ def _states(
         series_key=series_key,
         partition_by=str(payload.get("partition_by", "global")),
     )
-    return runtime, label, runtime.calibrate({label: scores})
+    return runtime, label, runtime.calibrate(CalibrationSeedBatch({label: scores}))
 
 
 def _observations(
@@ -212,8 +214,8 @@ def test_calibration_is_deterministic_bounded_and_holds_raw_alpha_at_target() ->
         configuration={"coverage": 0.5, "calibration_window": 3},
     )
 
-    first = runtime.calibrate({label: [8.0, 9.0, 1.0, 2.0]})
-    second = runtime.calibrate({label: [8.0, 9.0, 1.0, 2.0]})
+    first = runtime.calibrate(CalibrationSeedBatch({label: [8.0, 9.0, 1.0, 2.0]}))
+    second = runtime.calibrate(CalibrationSeedBatch({label: [8.0, 9.0, 1.0, 2.0]}))
 
     assert first == second
     assert _payload(first[label], label=label) == {
@@ -226,7 +228,7 @@ def test_calibration_is_deterministic_bounded_and_holds_raw_alpha_at_target() ->
     assert _payload(first[METHOD_SCOPE_LABEL], label=METHOD_SCOPE_LABEL) == {"issue_counter": 0}
     for score in (math.nan, math.inf, -1.0):
         with pytest.raises(RuntimeContractError, match="scores"):
-            runtime.calibrate({label: [score]})
+            runtime.calibrate(CalibrationSeedBatch({label: [score]}))
 
 
 def test_first_ready_issuance_uses_target_alpha_and_numpy_higher_quantile() -> None:
@@ -261,7 +263,7 @@ def test_series_partitions_are_independent_and_apply_ignores_poisoned_actuals() 
     )
     a_label = _partition(series_key="a", partition_by="series")
     b_label = _partition(series_key="b", partition_by="series")
-    states = runtime.calibrate({a_label: [1.0, 2.0], b_label: [10.0, 20.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({a_label: [1.0, 2.0], b_label: [10.0, 20.0]}))
     forecasts = pd.concat(
         [
             _frame(series_key="a", actuals=(Poison(),)),
@@ -277,7 +279,7 @@ def test_series_partitions_are_independent_and_apply_ignores_poisoned_actuals() 
         a_label,
         b_label,
     ]
-    assert set(result.state_updates) == {METHOD_SCOPE_LABEL}
+    assert set(result.dirty_labels) == {METHOD_SCOPE_LABEL}
 
 
 def test_warmup_scores_advance_without_feedback_then_first_ready_issue_stays_at_target() -> None:
@@ -288,7 +290,7 @@ def test_warmup_scores_advance_without_feedback_then_first_ready_issue_stays_at_
     warm = runtime.apply(_frame(), states)
     warm_facts = next(iter(warm.issuances.values()))
     observed = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 warm,
@@ -298,10 +300,10 @@ def test_warmup_scores_advance_without_feedback_then_first_ready_issue_stays_at_
         ),
         states,
     )
-    payload = _payload(observed.state_updates[label], label=label)
+    payload = _payload(observed.dirty_state[label], label=label)
     ready = runtime.apply(
         _frame(),
-        {**states, **warm.state_updates, **observed.state_updates},
+        observed.state,
     )
     ready_facts = next(iter(ready.issuances.values()))
 
@@ -321,7 +323,7 @@ def test_closed_boundary_hits_and_misses_follow_the_hand_derived_recurrence() ->
     )
     first = runtime.apply(_frame(), states)
     first_observe = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 first,
@@ -331,11 +333,11 @@ def test_closed_boundary_hits_and_misses_follow_the_hand_derived_recurrence() ->
         ),
         states,
     )
-    after_hit = _payload(first_observe.state_updates[label], label=label)
-    second_states = {**states, **first.state_updates, **first_observe.state_updates}
+    after_hit = _payload(first_observe.dirty_state[label], label=label)
+    second_states = first_observe.state
     second = runtime.apply(_frame(), second_states)
     second_observe = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 second,
@@ -345,7 +347,7 @@ def test_closed_boundary_hits_and_misses_follow_the_hand_derived_recurrence() ->
         ),
         second_states,
     )
-    after_miss = _payload(second_observe.state_updates[label], label=label)
+    after_miss = _payload(second_observe.dirty_state[label], label=label)
 
     assert first.forecasts.loc[0, interval_columns(0.5)[1]] == 7.0
     assert first_observe.annotations[0].score == 3.0
@@ -362,7 +364,7 @@ def test_raw_alpha_excursions_are_unclipped_but_only_quantile_input_is_clipped()
     )
     issued = runtime.apply(_frame(), states)
     miss = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -372,11 +374,11 @@ def test_raw_alpha_excursions_are_unclipped_but_only_quantile_input_is_clipped()
         ),
         states,
     )
-    below_payload = _payload(miss.state_updates[label], label=label)
-    below_states = {**states, **issued.state_updates, **miss.state_updates}
+    below_payload = _payload(miss.dirty_state[label], label=label)
+    below_states = miss.state
     unresolvable = runtime.apply(_frame(), below_states)
     returned = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 unresolvable,
@@ -393,7 +395,7 @@ def test_raw_alpha_excursions_are_unclipped_but_only_quantile_input_is_clipped()
     )
     cover_issue = cover_runtime.apply(_frame(), cover_states)
     cover = cover_runtime.observe(
-        Delivery(
+        delivery_batch(
             cover_label,
             _observations(
                 cover_issue,
@@ -403,16 +405,16 @@ def test_raw_alpha_excursions_are_unclipped_but_only_quantile_input_is_clipped()
         ),
         cover_states,
     )
-    above_states = {**cover_states, **cover_issue.state_updates, **cover.state_updates}
+    above_states = cover.state
     clipped = cover_runtime.apply(_frame(), above_states)
-    above_payload = _payload(cover.state_updates[cover_label], label=cover_label)
+    above_payload = _payload(cover.dirty_state[cover_label], label=cover_label)
     clipped_facts = next(iter(clipped.issuances.values()))
 
     assert below_payload["raw_alpha"] == -0.5
     assert next(iter(unresolvable.issuances.values())).bounds_null_reason == (
         "unresolvable-working-level"
     )
-    assert _payload(returned.state_updates[label], label=label)["raw_alpha"] == 0.5
+    assert _payload(returned.dirty_state[label], label=label)["raw_alpha"] == 0.5
     assert above_payload["raw_alpha"] == 1.5
     assert clipped_facts.working_level == 1.5
     assert clipped.forecasts.loc[0, interval_columns(0.5)[1]] == 5.0
@@ -435,12 +437,12 @@ def test_exact_active_window_trigger_attributes_nonfinite_and_trivial_cover_retu
         raw_alpha=1.0 / 3.0,
         feedback_count=1,
     )
-    states = {label: state}
+    states = ConformalStateBatch({label: state})
 
     issued = runtime.apply(_frame(), states)
     facts = next(iter(issued.issuances.values()))
     observed = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -450,10 +452,10 @@ def test_exact_active_window_trigger_attributes_nonfinite_and_trivial_cover_retu
         ),
         states,
     )
-    payload = _payload(observed.state_updates[label], label=label)
+    payload = _payload(observed.dirty_state[label], label=label)
     later = runtime.apply(
         _frame(),
-        {**states, **issued.state_updates, **observed.state_updates},
+        observed.state,
     )
 
     assert facts.calibration_ready
@@ -475,7 +477,7 @@ def test_declared_censoring_is_excluded_and_recorded_sales_label_is_sticky() -> 
     )
     issued = runtime.apply(_frame((4.0, 4.0)), states)
     effect = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -485,8 +487,8 @@ def test_declared_censoring_is_excluded_and_recorded_sales_label_is_sticky() -> 
         ),
         states,
     )
-    payload = _payload(effect.state_updates[label], label=label)
-    later = runtime.apply(_frame(), {**states, **effect.state_updates})
+    payload = _payload(effect.dirty_state[label], label=label)
+    later = runtime.apply(_frame(), effect.state)
     later_facts = next(iter(later.issuances.values()))
 
     assert effect.annotations[0].exclusion_cause == "declared-censored"
@@ -506,15 +508,15 @@ def test_issue_counter_reference_progresses_without_mutating_partition_state() -
     )
 
     first = runtime.apply(_frame(), states)
-    second = runtime.apply(_frame(), {**states, **first.state_updates})
+    second = runtime.apply(_frame(), first.state)
     first_reference = next(iter(first.issuances.values())).state_reference
     second_reference = next(iter(second.issuances.values())).state_reference
 
     assert first_reference.startswith(f"{_METHOD}:0:sha256:")
     assert second_reference.startswith(f"{_METHOD}:1:sha256:")
     assert first_reference != second_reference
-    assert label not in first.state_updates
-    assert label not in second.state_updates
+    assert label not in first.dirty_labels
+    assert label not in second.dirty_labels
 
 
 def test_observe_rejects_tampered_identity_before_state_advancement() -> None:
@@ -541,7 +543,7 @@ def test_observe_rejects_tampered_identity_before_state_advancement() -> None:
         before = dict(states)
         with pytest.raises(RuntimeContractError, match=message):
             runtime.observe(
-                Delivery(label, (replace(observation, issued=tampered),)),
+                delivery_batch(label, (replace(observation, issued=tampered),)),
                 states,
             )
         assert states == before
@@ -568,9 +570,9 @@ def test_factory_restoration_replays_apply_and_observe_exactly() -> None:
         check_exact=True,
     )
     assert original_apply.issuances == restored_apply.issuances
-    assert original_apply.state_updates == restored_apply.state_updates
+    assert original_apply.dirty_state == restored_apply.dirty_state
 
-    delivery = Delivery(
+    delivery = delivery_batch(
         label,
         _observations(
             original_apply,

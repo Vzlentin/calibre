@@ -15,7 +15,8 @@ import pytest
 
 from newcalibre.conformal import (
     CalibrationResult,
-    Delivery,
+    CalibrationSeedBatch,
+    DeliveryBatch,
     ForecastKey,
     ResolvedObservation,
     derive_partition_label,
@@ -384,12 +385,12 @@ def _replay_successor_branches_through(
         }
     )
     label = derive_partition_label(_MODEL, "global", EmissionScope.PER_STEP)
-    states: dict[str, bytes] = dict(runtime.calibrate({label: ()}))
+    states = runtime.calibrate(CalibrationSeedBatch({label: ()}))
     branches: list[str] = []
 
     for step in range(stop + 1):
         result = runtime.apply(_frame(step), states)
-        states.update(result.state_updates)
+        states = result.state
         facts = next(iter(result.issuances.values()))
         if facts.bounds_null_reason is None:
             branches.append("adaptive-higher")
@@ -399,10 +400,10 @@ def _replay_successor_branches_through(
             branches.append("warm-up")
         if step < stop:
             effect = runtime.observe(
-                Delivery(label, (_observation(result, score=scores[step]),)),
+                DeliveryBatch({label: (_observation(result, score=scores[step]),)}),
                 states,
             )
-            states.update(effect.state_updates)
+            states = effect.state
 
     return tuple(branches)
 
@@ -476,7 +477,7 @@ def _assert_case_matches(
         }
     )
     label = derive_partition_label(_MODEL, "global", EmissionScope.PER_STEP)
-    states: dict[str, bytes] = dict(runtime.calibrate({label: scores[:first_step]}))
+    states = runtime.calibrate(CalibrationSeedBatch({label: scores[:first_step]}))
     codec = JsonStateCodec(_METHOD, 1)
 
     for row in adaptive_rows:
@@ -527,7 +528,7 @@ def _assert_case_matches(
         )
 
         result = runtime.apply(_frame(step), states)
-        states.update(result.state_updates)
+        states = result.state
         facts = next(iter(result.issuances.values()))
         if facts.bounds_null_reason is None:
             branch = "adaptive-higher"
@@ -539,8 +540,8 @@ def _assert_case_matches(
             threshold = math.inf
             rank = None
         observation = _observation(result, score=scores[step])
-        effect = runtime.observe(Delivery(label, (observation,)), states)
-        states.update(effect.state_updates)
+        effect = runtime.observe(DeliveryBatch({label: (observation,)}), states)
+        states = effect.state
         after = cast(dict[str, object], codec.decode(states[label], expected_label=label))
         covered = int(threshold >= scores[step])
         error = 1 - covered

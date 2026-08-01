@@ -17,8 +17,10 @@ from typing import overload
 import pandas as pd
 
 from newcalibre.conformal import (
+    METHOD_SCOPE_LABEL,
     CalibrationContext,
     ConformalRuntime,
+    ConformalStateBatch,
     EmissionForm,
     IssuedBoundFacts,
     resolve_method,
@@ -804,8 +806,8 @@ class Engine:
         self._require_cycle(forecasts.token)
 
         observed_updates = dict(observation.cycle.state_updates)
-        states = dict(observation.prior_states)
-        states.update(observed_updates)
+        prior_state = ConformalStateBatch(observation.prior_states)
+        observed_state = prior_state.with_rows(observed_updates)
         if self._runtime is None:
             return _bind_calibration_result(
                 forecasts,
@@ -821,7 +823,7 @@ class Engine:
         try:
             runtime_result = self._runtime.apply(
                 forecasts.frame,
-                MappingProxyType(states),
+                observed_state,
                 context=context,
             )
         except ValueError as error:
@@ -849,18 +851,22 @@ class Engine:
         if _forecast_batch_origin(calibrated) != origin:
             raise _EngineError("conformal apply changed the forecast origin")
 
-        apply_updates = _validated_state_updates(runtime_result.state_updates)
-        conflicts = {
-            label
-            for label in observed_updates.keys() & apply_updates.keys()
-            if observed_updates[label] != apply_updates[label]
-        }
-        if conflicts:
+        foreign_dirty = set(runtime_result.dirty_labels).difference({METHOD_SCOPE_LABEL})
+        if foreign_dirty:
             raise _EngineError(
-                f"observe and apply emitted conflicting states: {sorted(conflicts)!r}"
+                f"conformal apply dirtied foreign partition state: {sorted(foreign_dirty)!r}"
             )
-        merged_updates = dict(observed_updates)
-        merged_updates.update(apply_updates)
+        final_state = runtime_result.state
+        dirty_candidates = {
+            *observation.cycle.state_updates,
+            *runtime_result.dirty_labels,
+        }
+        final_dirty = tuple(
+            label
+            for label in dirty_candidates
+            if label not in prior_state or prior_state[label] != final_state[label]
+        )
+        merged_updates = dict(final_state.project(final_dirty))
         return _bind_calibration_result(
             calibrated,
             merged_updates,

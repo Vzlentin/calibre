@@ -11,10 +11,10 @@ from typing import Any, cast
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 import newcalibre.engine as engine_exports
 from newcalibre.conformal import (
-    Delivery,
     EmissionForm,
     IssuedBoundFacts,
     ObserveAnnotation,
@@ -233,7 +233,7 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
     )
     delivered = next(pending for key, pending in pending_by_key.items() if key[3] == "z-model")
     assert delivered.issued is not None
-    delivery = Delivery(
+    delivery = delivery_batch(
         delivered.issued.partition_label,
         (
             ResolvedObservation(
@@ -259,7 +259,7 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
                 pending_retentions=tuple(
                     value for key, value in pending_by_key.items() if key not in actuals
                 ),
-                deliveries=(delivery,),
+                deliveries=delivery,
                 annotations=(
                     ObserveAnnotation(
                         delivered.forecast_key,

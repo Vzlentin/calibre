@@ -6,9 +6,8 @@ import base64
 import json
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from numbers import Integral, Real
-from types import MappingProxyType
 from typing import Final, cast
 
 import pandas as pd
@@ -320,30 +319,6 @@ class ResolvedObservation:
 
 
 @dataclass(frozen=True, slots=True)
-class Delivery:
-    """Deliver one partition's observations in caller-supplied order."""
-
-    partition_label: str
-    observations: tuple[ResolvedObservation, ...]
-
-    def __post_init__(self) -> None:
-        scope, _ = _decode_label(self.partition_label)
-        if scope != "partition":
-            raise RuntimeContractError("delivery partition label must be data-derived")
-        observations = _snapshot_iterable(self.observations, name="delivery observations")
-        if not observations:
-            raise RuntimeContractError("delivery observations must not be empty")
-        if any(not isinstance(value, ResolvedObservation) for value in observations):
-            raise RuntimeContractError("every delivery observation must be a ResolvedObservation")
-        if any(value.issued.partition_label != self.partition_label for value in observations):
-            raise RuntimeContractError("every issued partition must match the delivery partition")
-        keys = tuple(value.forecast_key for value in observations)
-        if len(set(keys)) != len(keys):
-            raise RuntimeContractError("delivery contains a duplicate forecast key")
-        object.__setattr__(self, "observations", observations)
-
-
-@dataclass(frozen=True, slots=True)
 class CalibrationContext:
     """Expose only row-aligned immutable facts from the declared hierarchy."""
 
@@ -408,57 +383,6 @@ class ObserveAnnotation:
             raise RuntimeContractError("delivered-score advancement must be a boolean")
         if self.advanced_delivered_score and not has_score:
             raise RuntimeContractError("only a scored observation may advance delivered score")
-
-
-@dataclass(frozen=True, slots=True)
-class ObserveEffect:
-    """Return opaque state updates and row-aligned observe annotations."""
-
-    state_updates: Mapping[str, bytes]
-    annotations: tuple[ObserveAnnotation, ...]
-
-    def __post_init__(self) -> None:
-        updates = _snapshot_state_updates(self.state_updates)
-        annotations = _snapshot_iterable(self.annotations, name="observe annotations")
-        if any(not isinstance(value, ObserveAnnotation) for value in annotations):
-            raise RuntimeContractError("every observe annotation must be an ObserveAnnotation")
-        keys = tuple(value.forecast_key for value in annotations)
-        if len(set(keys)) != len(keys):
-            raise RuntimeContractError("observe annotations contain a duplicate forecast key")
-        object.__setattr__(self, "state_updates", MappingProxyType(updates))
-        object.__setattr__(self, "annotations", annotations)
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class CalibrationResult:
-    """Return calibrated forecasts, row-keyed issuance, and opaque state updates."""
-
-    _forecasts: pd.DataFrame = field(repr=False)
-    state_updates: Mapping[str, bytes]
-    issuances: Mapping[ForecastKey, IssuedBoundFacts]
-
-    def __init__(
-        self,
-        forecasts: pd.DataFrame,
-        state_updates: Mapping[str, bytes],
-        issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
-    ) -> None:
-        if not isinstance(forecasts, pd.DataFrame):
-            raise RuntimeContractError("calibrated forecasts must be a pandas DataFrame")
-        if forecasts.columns.has_duplicates:
-            raise RuntimeContractError("calibrated forecasts cannot have duplicate columns")
-        snapshot = forecasts.copy(deep=True)
-        snapshot.attrs = {}
-        updates = _snapshot_state_updates(state_updates)
-        frozen_issuances = _snapshot_issuances(snapshot, issuances)
-        object.__setattr__(self, "_forecasts", snapshot)
-        object.__setattr__(self, "state_updates", MappingProxyType(updates))
-        object.__setattr__(self, "issuances", MappingProxyType(frozen_issuances))
-
-    @property
-    def forecasts(self) -> pd.DataFrame:
-        """Return an isolated copy of the calibrated forecasts."""
-        return self._forecasts.copy(deep=True)
 
 
 def _snapshot_issuances(
@@ -552,17 +476,6 @@ def _snapshot_bindings(values: object) -> tuple[AppliedBinding, ...]:
     return tuple(
         AppliedBinding(name=value.name, value=value.value, bound=value.bound) for value in bindings
     )
-
-
-def _snapshot_state_updates(values: object) -> dict[str, bytes]:
-    if not isinstance(values, Mapping):
-        raise RuntimeContractError("state updates must be a mapping")
-    snapshot = dict(values)
-    for label, state in snapshot.items():
-        _decode_label(label)
-        if not isinstance(state, bytes):
-            raise RuntimeContractError("state updates must contain immutable bytes")
-    return snapshot
 
 
 def _snapshot_iterable(values: object, *, name: str) -> tuple:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from newcalibre.conformal import derive_partition_label, resolve_method
+from newcalibre.conformal import CalibrationSeedBatch, derive_partition_label, resolve_method
 from newcalibre.domain import (
     ACTUAL_VALUE,
     HORIZON_STEP,
@@ -220,7 +220,9 @@ def _seed_foreign_state(
     session: SessionIdentity,
 ) -> tuple[str, bytes]:
     label = derive_partition_label(_MODEL, "foreign", EmissionScope.WINDOW_SUM)
-    value = resolve_method(_CONFIGURATION).calibrate({label: [1.0, 2.0]})[label]
+    value = resolve_method(_CONFIGURATION).calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))[
+        label
+    ]
     states.save(
         session,
         label,

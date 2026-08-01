@@ -17,9 +17,11 @@ from newcalibre.conformal import (
     AssumptionClass,
     CalibrationContext,
     CalibrationResult,
+    CalibrationSeedBatch,
     CensoringPolicy,
     ConformalRuntime,
-    Delivery,
+    ConformalStateBatch,
+    DeliveryBatch,
     EmissionForm,
     FixedCountRequirement,
     ForecastKey,
@@ -164,40 +166,42 @@ class _Runtime:
     def config(self) -> BaseModel:
         return self._config
 
-    def calibrate(self, scores: dict[str, list[float]]) -> dict[str, bytes]:
-        return {
-            label: self._codec.encode(label, {"scores": list(values)})
-            for label, values in scores.items()
-        }
+    def calibrate(self, seeds: CalibrationSeedBatch) -> ConformalStateBatch:
+        return ConformalStateBatch(
+            {
+                label: self._codec.encode(label, {"scores": list(values)})
+                for label, values in seeds.items()
+            }
+        )
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: dict[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
-        del states
+        del state
         require_calibration_context(
             self.manifest,
             context,
             series_keys=tuple(forecasts["series_key"]),
         )
-        return CalibrationResult(forecasts, {})
+        return CalibrationResult(forecasts, ConformalStateBatch())
 
     def observe(
         self,
-        delivery: Delivery,
-        states: dict[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
-        del states
+        del state
         require_calibration_context(
             self.manifest,
             context,
             series_keys=tuple(
-                observation.forecast_key.series_key for observation in delivery.observations
+                observation.forecast_key.series_key for observation in deliveries.observations
             ),
         )
         annotations = tuple(
@@ -207,9 +211,9 @@ class _Runtime:
                 exclusion_cause=None,
                 advanced_delivered_score=True,
             )
-            for observation in delivery.observations
+            for observation in deliveries.observations
         )
-        return ObserveEffect(state_updates={}, annotations=annotations)
+        return ObserveEffect(ConformalStateBatch(), annotations=annotations)
 
 
 def test_partition_labels_are_injective_across_delimiters_unicode_and_types() -> None:
@@ -272,33 +276,44 @@ def test_partition_label_rejects_malformed_inputs(
         )
 
 
-def test_delivery_preserves_caller_order_and_defensively_snapshots_observations() -> None:
+def test_delivery_preserves_partition_row_order_and_snapshots_observations() -> None:
     label = _partition()
     first = _observation("z-series", partition_label=label, horizon_step=2)
     second = _observation("a-series", partition_label=label, horizon_step=1)
     supplied = [first, second]
 
-    delivery = Delivery(partition_label=label, observations=cast(Any, supplied))
+    delivery = DeliveryBatch({label: cast(Any, supplied)})
     supplied.reverse()
 
-    assert delivery.observations == (first, second)
+    assert delivery.observations_for(label) == (first, second)
+    assert delivery.observations == (second, first)
     assert [item.forecast_key.series_key for item in delivery.observations] == [
-        "z-series",
         "a-series",
+        "z-series",
     ]
     with pytest.raises(FrozenInstanceError):
-        cast(Any, delivery).partition_label = "changed"
+        cast(Any, delivery)._labels = ("changed",)
 
 
 def test_delivery_validates_complete_keys_values_censoring_and_issued_facts() -> None:
     label = _partition()
     observation = _observation("series", partition_label=label)
-    assert Delivery(label, (observation,)).observations == (observation,)
+    assert DeliveryBatch({label: (observation,)}).observations == (observation,)
 
     with pytest.raises(RuntimeContractError, match="partition"):
-        Delivery(_partition("other"), (observation,))
+        DeliveryBatch({_partition("other"): (observation,)})
     with pytest.raises(RuntimeContractError, match="duplicate forecast key"):
-        Delivery(label, (observation, observation))
+        DeliveryBatch({label: (observation, observation)})
+
+    other_label = _partition("other")
+    duplicated_key = _observation("series", partition_label=other_label)
+    with pytest.raises(RuntimeContractError, match="duplicate forecast key"):
+        DeliveryBatch(
+            {
+                label: (observation,),
+                other_label: (duplicated_key,),
+            }
+        )
 
     for field, value, message in (
         ("series_key", "", "series key"),
@@ -520,19 +535,21 @@ def test_effect_and_calibration_result_snapshot_values_and_require_bytes() -> No
     key = _key("series")
     annotations = [ObserveAnnotation(key, 1.0, None, True)]
     updates = {_partition(): b"state"}
-    effect = ObserveEffect(updates, cast(Any, annotations))
+    effect = ObserveEffect(ConformalStateBatch(updates), updates, cast(Any, annotations))
     annotations.clear()
     updates.clear()
 
     assert len(effect.annotations) == 1
-    assert list(effect.state_updates.values()) == [b"state"]
+    assert list(effect.dirty_state.values()) == [b"state"]
     with pytest.raises(TypeError):
-        cast(Any, effect.state_updates)["new"] = b"state"
+        cast(Any, effect.dirty_state)["new"] = b"state"
     with pytest.raises(RuntimeContractError, match="bytes"):
-        ObserveEffect({_partition(): bytearray(b"state")}, ())  # type: ignore[dict-item]
+        ObserveEffect(  # type: ignore[dict-item]
+            ConformalStateBatch({_partition(): bytearray(b"state")}), ()
+        )
 
     frame = pd.DataFrame({"series_key": ["a"], "point_forecast": [1.0]})
-    result = CalibrationResult(frame, {_partition(): b"state"})
+    result = CalibrationResult(frame, ConformalStateBatch({_partition(): b"state"}))
     frame.loc[0, "point_forecast"] = 99.0
     returned = result.forecasts
     returned.loc[0, "point_forecast"] = 88.0
@@ -566,18 +583,18 @@ def test_calibration_result_requires_exact_row_keyed_issuance_for_owned_bounds()
         bounds_null_reason=None,
         effective_descriptor=_descriptor(),
     )
-    result = CalibrationResult(frame, {}, {key: raw_alpha_facts})
+    result = CalibrationResult(frame, ConformalStateBatch(), issuances={key: raw_alpha_facts})
     assert result.issuances[key].upper_bound == 8.0
     assert result.issuances[key].working_level == -0.25
     with pytest.raises(RuntimeContractError, match="exactly cover"):
-        CalibrationResult(frame, {})
+        CalibrationResult(frame, ConformalStateBatch())
     with pytest.raises(RuntimeContractError, match="exactly cover"):
-        CalibrationResult(frame, {}, {})
+        CalibrationResult(frame, ConformalStateBatch(), issuances={})
     with pytest.raises(RuntimeContractError, match="bounds must equal"):
         CalibrationResult(
             frame,
-            {},
-            {
+            ConformalStateBatch(),
+            issuances={
                 key: _issued(label).__class__(
                     method_name="fixture",
                     emission_form=EmissionForm.ONE_SIDED_UPPER,
@@ -689,14 +706,14 @@ def test_runtime_protocol_is_conforming_and_has_no_mutating_load_path() -> None:
     assert "load_state" not in inspect.getsource(ConformalRuntime)
 
     label = _partition()
-    states = runtime.calibrate({label: [1.0, 2.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))
     assert JsonStateCodec("fixture", 1).decode(states[label])["scores"] == [1.0, 2.0]  # type: ignore[index]
 
     frame = pd.DataFrame({"series_key": ["series"], "point_forecast": [4.0]})
-    result = runtime.apply(frame, {label: states[label]})
+    result = runtime.apply(frame, ConformalStateBatch({label: states[label]}))
     effect = runtime.observe(
-        Delivery(label, (_observation("series", partition_label=label),)),
-        {label: states[label]},
+        DeliveryBatch({label: (_observation("series", partition_label=label),)}),
+        ConformalStateBatch({label: states[label]}),
     )
     assert result.forecasts.equals(frame)
     assert effect.annotations[0].advanced_delivered_score

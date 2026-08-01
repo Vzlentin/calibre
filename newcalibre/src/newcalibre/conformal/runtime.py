@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 import pandas as pd
 from pydantic import BaseModel
 
+from newcalibre.conformal.batch import (
+    CalibrationResult,
+    CalibrationSeedBatch,
+    ConformalStateBatch,
+    DeliveryBatch,
+    ObserveEffect,
+)
 from newcalibre.conformal.manifest import MethodManifest
 from newcalibre.conformal.types import (
     CalibrationContext,
-    CalibrationResult,
-    Delivery,
-    ObserveEffect,
     RuntimeContractError,
 )
 
@@ -34,15 +38,15 @@ class ConformalRuntime(Protocol):
 
     def calibrate(
         self,
-        scores: Mapping[str, Sequence[float]],
-    ) -> Mapping[str, bytes]:
+        seeds: CalibrationSeedBatch,
+    ) -> ConformalStateBatch:
         """Deterministically seed independently addressable state rows."""
         ...
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: Mapping[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
@@ -51,12 +55,12 @@ class ConformalRuntime(Protocol):
 
     def observe(
         self,
-        delivery: Delivery,
-        states: Mapping[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
-        """Consume one partition delivery in its supplied order."""
+        """Consume all partition deliveries in canonical batch order."""
         ...
 
 

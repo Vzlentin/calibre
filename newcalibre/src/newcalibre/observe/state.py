@@ -9,7 +9,7 @@ from types import MappingProxyType
 import pandas as pd
 
 from newcalibre.conformal import (
-    Delivery,
+    DeliveryBatch,
     ForecastKey,
     IssuedBoundFacts,
     ObserveAnnotation,
@@ -164,7 +164,7 @@ class ObserveCycle:
     resolutions: tuple[ObservationResolution, ...]
     pending_removals: tuple[ForecastKey, ...]
     pending_retentions: tuple[PendingObservation, ...]
-    deliveries: tuple[Delivery, ...]
+    deliveries: DeliveryBatch
     annotations: tuple[ObserveAnnotation, ...]
     state_updates: Mapping[str, bytes]
 
@@ -175,7 +175,7 @@ class ObserveCycle:
         resolutions: Iterable[ObservationResolution] = (),
         pending_removals: Iterable[ForecastKey] = (),
         pending_retentions: Iterable[PendingObservation] = (),
-        deliveries: Iterable[Delivery] = (),
+        deliveries: DeliveryBatch | None = None,
         annotations: Iterable[ObserveAnnotation] = (),
         state_updates: Mapping[str, bytes] | None = None,
     ) -> None:
@@ -199,7 +199,9 @@ class ObserveCycle:
             value_type=PendingObservation,
             name="cycle pending retentions",
         )
-        routed = _typed_tuple(deliveries, value_type=Delivery, name="cycle deliveries")
+        routed = DeliveryBatch() if deliveries is None else deliveries
+        if not isinstance(routed, DeliveryBatch):
+            raise ObserveError("cycle deliveries must be a DeliveryBatch")
         annotated = _typed_tuple(
             annotations,
             value_type=ObserveAnnotation,

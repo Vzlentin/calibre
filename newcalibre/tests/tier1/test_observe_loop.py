@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -14,8 +13,10 @@ from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     CalibrationContext,
     CalibrationResult,
+    CalibrationSeedBatch,
     ConformalRuntime,
-    Delivery,
+    ConformalStateBatch,
+    DeliveryBatch,
     ForecastKey,
     ObserveEffect,
     derive_partition_label,
@@ -58,8 +59,8 @@ class _CountingRuntime:
     ) -> None:
         self.delegate = delegate
         self.update_method_state = update_method_state
-        self.calls: list[str] = []
-        self.states: list[dict[str, bytes | None]] = []
+        self.calls: list[tuple[str, ...]] = []
+        self.states: list[dict[str, bytes]] = []
 
     @property
     def manifest(self):  # type: ignore[no-untyped-def]
@@ -69,40 +70,40 @@ class _CountingRuntime:
     def config(self) -> BaseModel:
         return self.delegate.config
 
-    def calibrate(self, scores: Mapping[str, Sequence[float]]) -> Mapping[str, bytes]:
-        return self.delegate.calibrate(scores)
+    def calibrate(self, seeds: CalibrationSeedBatch) -> ConformalStateBatch:
+        return self.delegate.calibrate(seeds)
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: Mapping[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
-        return self.delegate.apply(forecasts, states, context=context)
+        return self.delegate.apply(forecasts, state, context=context)
 
     def observe(
         self,
-        delivery: Delivery,
-        states: Mapping[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
-        self.calls.append(delivery.partition_label)
-        self.states.append(dict(states))
-        delegate_states = states
+        self.calls.append(deliveries.labels)
+        self.states.append(dict(state))
+        delegate_state = state
         if self.update_method_state:
-            delegate_states = {
-                label: value for label, value in states.items() if label != METHOD_SCOPE_LABEL
-            }
-        effect = self.delegate.observe(delivery, delegate_states, context=context)
+            delegate_state = ConformalStateBatch(
+                {label: value for label, value in state.items() if label != METHOD_SCOPE_LABEL}
+            )
+        effect = self.delegate.observe(deliveries, delegate_state, context=context)
         if not self.update_method_state:
             return effect
+        method_state = b"method-update-1"
+        post_state = effect.state.with_rows({METHOD_SCOPE_LABEL: method_state})
         return ObserveEffect(
-            {
-                **effect.state_updates,
-                METHOD_SCOPE_LABEL: f"method-update-{len(self.calls)}".encode(),
-            },
+            post_state,
+            (*effect.dirty_labels, METHOD_SCOPE_LABEL),
             effect.annotations,
         )
 
@@ -138,7 +139,7 @@ def _frame(
 def _issued_pending(
     runtime: ConformalRuntime,
     rows: tuple[tuple[str, pd.Timestamp, int, pd.Timestamp, float, str], ...],
-    states: Mapping[str, bytes],
+    states: ConformalStateBatch,
 ) -> tuple[PendingObservation, ...]:
     result = runtime.apply(_frame(rows), states)
     pending: list[PendingObservation] = []
@@ -226,7 +227,7 @@ def test_runtime_free_cycle_resolves_due_bottom_and_complete_aggregate_rows() ->
     assert resolution.censoring_assertion is CensoringAssertion.CENSORED
     assert resolution.availability_bound is None
     assert complete.pending_retentions == ()
-    assert complete.deliveries == ()
+    assert len(complete.deliveries) == 0
     assert complete.state_updates == {}
 
 
@@ -239,7 +240,9 @@ def test_canonical_delivery_calls_each_partition_once_without_cross_partition_st
     labels = {
         series: _label(series, EmissionScope.PER_STEP) for series in ("sku-a", "sku-b", "sku-c")
     }
-    states = runtime.calibrate({label: [1.0, 2.0] for label in labels.values()})
+    states = runtime.calibrate(
+        CalibrationSeedBatch({label: [1.0, 2.0] for label in labels.values()})
+    )
     rows = (
         ("sku-b", _ISSUE_ORIGIN, 2, _TARGET, 5.0, _MODEL),
         ("sku-a", _ISSUE_ORIGIN, 2, _TARGET, 4.0, _MODEL),
@@ -257,29 +260,20 @@ def test_canonical_delivery_calls_each_partition_once_without_cross_partition_st
 
     cycle = loop.cycle(_CYCLE_ORIGIN)
 
-    assert runtime.calls == sorted((labels["sku-a"], labels["sku-b"]), key=str.encode)
-    assert runtime.states == [
-        {
-            METHOD_SCOPE_LABEL: states[METHOD_SCOPE_LABEL],
-            labels["sku-a"]: states[labels["sku-a"]],
-        },
-        {
-            METHOD_SCOPE_LABEL: b"method-update-1",
-            labels["sku-b"]: states[labels["sku-b"]],
-        },
-    ]
-    assert tuple(value.partition_label for value in cycle.deliveries) == tuple(runtime.calls)
+    expected_labels = tuple(sorted((labels["sku-a"], labels["sku-b"]), key=str.encode))
+    assert runtime.calls == [expected_labels]
+    assert runtime.states == [dict(states)]
+    assert cycle.deliveries.labels == expected_labels
     assert [
         (observation.forecast_key.series_key, observation.forecast_key.horizon_step)
-        for delivery in cycle.deliveries
-        for observation in delivery.observations
-    ] == [("sku-a", 1), ("sku-a", 2), ("sku-b", 1), ("sku-b", 2)]
+        for observation in cycle.deliveries.observations
+    ] == [("sku-a", 1), ("sku-b", 1), ("sku-a", 2), ("sku-b", 2)]
     assert set(cycle.state_updates) == {
         METHOD_SCOPE_LABEL,
         labels["sku-a"],
         labels["sku-b"],
     }
-    assert cycle.state_updates[METHOD_SCOPE_LABEL] == b"method-update-2"
+    assert cycle.state_updates[METHOD_SCOPE_LABEL] == b"method-update-1"
     assert labels["sku-c"] not in cycle.state_updates
     assert states[labels["sku-c"]] == loop.conformal_states[labels["sku-c"]]
     assert len(cycle.annotations) == 4
@@ -296,7 +290,7 @@ def test_partial_window_retains_resolved_members_then_delivers_exactly_once() ->
         }
     )
     label = _label("sku-a", EmissionScope.WINDOW_SUM)
-    states = runtime.calibrate({label: [1.0, 2.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))
     rows = (
         ("sku-a", _ISSUE_ORIGIN, 2, pd.Timestamp("2026-01-03"), 5.0, _MODEL),
         ("sku-a", _ISSUE_ORIGIN, 1, _TARGET, 4.0, _MODEL),
@@ -312,7 +306,7 @@ def test_partial_window_retains_resolved_members_then_delivers_exactly_once() ->
 
     partial = first.cycle(pd.Timestamp("2026-01-04"))
 
-    assert partial.deliveries == ()
+    assert len(partial.deliveries) == 0
     assert partial.resolutions == ()
     by_step = {value.forecast_key.horizon_step: value for value in partial.pending_retentions}
     assert by_step[1].resolution is not None
@@ -329,7 +323,9 @@ def test_partial_window_retains_resolved_members_then_delivers_exactly_once() ->
     completed = second.cycle(pd.Timestamp("2026-01-04"))
 
     assert len(completed.deliveries) == 1
-    assert [value.forecast_key.horizon_step for value in completed.deliveries[0].observations] == [
+    assert [
+        value.forecast_key.horizon_step for value in completed.deliveries.observations_for(label)
+    ] == [
         1,
         2,
     ]
@@ -340,10 +336,10 @@ def test_partial_window_retains_resolved_members_then_delivers_exactly_once() ->
         hierarchy=hierarchy,
         observed_history=(*partial.history_appends, *completed.history_appends),
         pending_observations=completed.pending_retentions,
-        conformal_states={**states, **completed.state_updates},
+        conformal_states=states.with_rows(completed.state_updates),
         runtime=runtime,
     ).cycle(pd.Timestamp("2026-01-05"))
-    assert drained.deliveries == ()
+    assert len(drained.deliveries) == 0
     assert drained.resolutions == ()
 
 
@@ -359,7 +355,7 @@ def test_global_window_delivery_groups_interleaved_canonical_rows_by_window() ->
     )
     runtime = _CountingRuntime(delegate)
     label = _label("global", EmissionScope.WINDOW_SUM)
-    states = runtime.calibrate({label: [1.0, 2.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))
     second_target = pd.Timestamp("2026-01-03")
     rows = (
         ("sku-b", _ISSUE_ORIGIN, 2, second_target, 20.0, _MODEL),
@@ -386,11 +382,10 @@ def test_global_window_delivery_groups_interleaved_canonical_rows_by_window() ->
 
     cycle = loop.cycle(pd.Timestamp("2026-01-04"))
 
-    assert runtime.calls == [label]
-    delivery = cycle.deliveries[0]
+    assert runtime.calls == [(label,)]
+    delivery = cycle.deliveries.observations_for(label)
     assert [
-        (value.forecast_key.series_key, value.forecast_key.horizon_step)
-        for value in delivery.observations
+        (value.forecast_key.series_key, value.forecast_key.horizon_step) for value in delivery
     ] == [("sku-a", 1), ("sku-b", 1), ("sku-a", 2), ("sku-b", 2)]
     assert [annotation.score for annotation in cycle.annotations] == [None, None, 6.0, 7.0]
     assert [annotation.advanced_delivered_score for annotation in cycle.annotations] == [
@@ -413,7 +408,7 @@ def test_one_partition_call_can_carry_multiple_complete_windows() -> None:
     )
     runtime = _CountingRuntime(delegate)
     label = _label("sku-a", EmissionScope.WINDOW_SUM)
-    states = runtime.calibrate({label: [1.0, 2.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))
     second_origin = pd.Timestamp("2026-01-02")
     rows = (
         ("sku-a", second_origin, 2, pd.Timestamp("2026-01-04"), 6.0, _MODEL),
@@ -439,11 +434,11 @@ def test_one_partition_call_can_carry_multiple_complete_windows() -> None:
 
     cycle = loop.cycle(pd.Timestamp("2026-01-05"))
 
-    assert runtime.calls == [label]
+    assert runtime.calls == [(label,)]
     assert len(cycle.deliveries) == 1
     assert [
         (value.forecast_key.origin, value.forecast_key.horizon_step)
-        for value in cycle.deliveries[0].observations
+        for value in cycle.deliveries.observations_for(label)
     ] == [
         (_ISSUE_ORIGIN, 1),
         (_ISSUE_ORIGIN, 2),
@@ -462,7 +457,7 @@ def test_sequence_preserving_cycle_chunking_has_identical_partition_state() -> N
     }
     runtime = resolve_method(configuration)
     label = _label("sku-a", EmissionScope.PER_STEP)
-    states = runtime.calibrate({label: [1.0, 2.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))
     rows = (
         ("sku-a", _ISSUE_ORIGIN, 1, _TARGET, 3.0, _MODEL),
         ("sku-a", _ISSUE_ORIGIN, 2, pd.Timestamp("2026-01-03"), 5.0, _MODEL),
@@ -492,7 +487,7 @@ def test_sequence_preserving_cycle_chunking_has_identical_partition_state() -> N
     )
     first.accept(ActualsSubmission((_actual("sku-a", 7),)))
     first_cycle = first.cycle(pd.Timestamp("2026-01-03"))
-    second_states = {**states, **first_cycle.state_updates}
+    second_states = states.with_rows(first_cycle.state_updates)
     second = ObserveLoop(
         hierarchy=hierarchy,
         observed_history=first_cycle.history_appends,
@@ -510,7 +505,7 @@ def test_cold_start_nan_issuance_still_delivers_and_advances_state() -> None:
     hierarchy = _hierarchy()
     runtime = resolve_method({"method": "split-per-step", "partition_by": "series"})
     row = (("sku-a", _ISSUE_ORIGIN, 1, _TARGET, 3.0, _MODEL),)
-    pending = _issued_pending(runtime, row, {})
+    pending = _issued_pending(runtime, row, ConformalStateBatch())
     assert pending[0].issued is not None
     assert math.isnan(pending[0].issued.upper_bound)
     loop = ObserveLoop(
@@ -557,7 +552,11 @@ def test_runtime_backed_cycle_refuses_missing_or_conflicting_issuance_facts() ->
             "protection_period": 1,
         }
     )
-    conflicting = _issued_pending(other, (("sku-a", _ISSUE_ORIGIN, 1, _TARGET, 3.0, _MODEL),), {})
+    conflicting = _issued_pending(
+        other,
+        (("sku-a", _ISSUE_ORIGIN, 1, _TARGET, 3.0, _MODEL),),
+        ConformalStateBatch(),
+    )
     wrong = ObserveLoop(
         hierarchy=hierarchy,
         pending_observations=conflicting,
@@ -577,7 +576,7 @@ def test_recent_score_perturbation_changes_only_the_later_perturbed_bound() -> N
     }
     base_runtime = resolve_method(configuration)
     label = _label("sku-a", EmissionScope.PER_STEP)
-    seed = base_runtime.calibrate({label: [1.0]})
+    seed = base_runtime.calibrate(CalibrationSeedBatch({label: [1.0]}))
     issued_row = (("sku-a", _ISSUE_ORIGIN, 1, _TARGET, 5.0, _MODEL),)
     pending = _issued_pending(base_runtime, issued_row, seed)
 
@@ -591,7 +590,7 @@ def test_recent_score_perturbation_changes_only_the_later_perturbed_bound() -> N
         )
         loop.accept(ActualsSubmission((_actual("sku-a", actual),)))
         observed = loop.cycle(_CYCLE_ORIGIN)
-        updated = {**seed, **observed.state_updates}
+        updated = seed.with_rows(observed.state_updates)
         later = runtime.apply(
             _frame(
                 (("sku-a", pd.Timestamp("2026-01-03"), 1, pd.Timestamp("2026-01-04"), 5.0, _MODEL),)

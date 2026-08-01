@@ -6,9 +6,10 @@ import inspect
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
-    Delivery,
+    ConformalStateBatch,
     ObserveAnnotation,
     ResolvedObservation,
     resolve_method,
@@ -322,8 +323,8 @@ def test_commit_digest_is_sensitive_to_every_observe_materialization_family() ->
     runtime = resolve_method(
         {"method": "split-per-step", "coverage": 0.5, "partition_by": "global"}
     )
-    issued = runtime.apply(_forecast_frame(), {}).issuances[key]
-    delivery = Delivery(
+    issued = runtime.apply(_forecast_frame(), ConformalStateBatch()).issuances[key]
+    delivery = delivery_batch(
         issued.partition_label,
         (
             ResolvedObservation(
@@ -345,7 +346,7 @@ def test_commit_digest_is_sensitive_to_every_observe_materialization_family() ->
     with_delivery = ObserveCycle(
         resolutions=(resolution,),
         pending_removals=(key,),
-        deliveries=(delivery,),
+        deliveries=delivery,
         annotations=(annotation,),
     )
     variants = (
