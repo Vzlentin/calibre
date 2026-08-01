@@ -321,14 +321,11 @@ def _canonicalize_panel_frame(
 
     columns = [*REQUIRED_PANEL_COLUMNS, *metadata_columns, *exogenous]
     normalized = normalized.loc[:, columns]
-    order = sorted(
-        range(len(normalized)),
-        key=lambda index: (
-            str(normalized.iloc[index][SERIES_KEY]).encode(),
-            pd.Timestamp(normalized.iloc[index][TIMESTAMP]),
-        ),
+    normalized = normalized.sort_values(
+        [SERIES_KEY, TIMESTAMP],
+        kind="mergesort",
+        ignore_index=True,
     )
-    normalized = normalized.iloc[order].reset_index(drop=True)
     normalized = _clear_pandas_metadata(normalized)
     return normalized, effective_calendar
 
