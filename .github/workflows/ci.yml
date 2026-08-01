@@ -105,11 +105,33 @@ jobs:
         id: vn2-cache
         with:
           path: data/vn2
-          key: vn2-data-${{ hashFiles('benchmarks/vn2/vn2_file_links.json') }}
-          restore-keys: vn2-data-
-      - name: Download VN2 data (cache miss only)
-        if: steps.gate.outputs.run_frozen == 'true' && steps.vn2-cache.outputs.cache-hit != 'true'
-        run: uv run python benchmarks/vn2/download_vn2_data.py
+          key: vn2-${{ hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json') }}
+      - name: Acquire and verify VN2 inputs with successor tooling
+        if: steps.gate.outputs.run_frozen == 'true'
+        env:
+          OVENTI_DATASET_BASE_URL: ${{ vars.OVENTI_DATASET_BASE_URL }}
+        run: |
+          set -euo pipefail
+          inventory=newcalibre/benchmarks/vn2/vn2-input-digests.json
+          target=data/vn2
+          if [[ "${{ steps.vn2-cache.outputs.cache-hit }}" != "true" ]]; then
+            : "${OVENTI_DATASET_BASE_URL:?OVENTI_DATASET_BASE_URL must be configured}"
+            mkdir -p "$target"
+            while IFS=$'\t' read -r name expected_bytes; do
+              [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] \
+                || { echo "inventory contains an unsafe basename: $name"; exit 1; }
+              curl --fail --location --retry 3 \
+                --max-time 60 \
+                --max-filesize "$expected_bytes" \
+                --remove-on-error \
+                --output "$target/$name" \
+                "${OVENTI_DATASET_BASE_URL%/}/vn2/$name"
+            done < <(jq -r '.files[] | [.name, .bytes] | @tsv' "$inventory")
+          fi
+          uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify \
+            --target "$target" \
+            --inventory "$inventory"
       - run: uv run pytest
         if: steps.gate.outputs.run_frozen == 'true'
       - name: Report lane result
@@ -200,6 +222,41 @@ jobs:
       - name: Gate frozen work
         id: gate
         run: echo "run_frozen=${{ github.event_name != 'pull_request' || steps.scope.outputs.only_changed != 'true' }}" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v4
+        if: steps.gate.outputs.run_frozen == 'true'
+      - name: Cache VN2 data
+        if: steps.gate.outputs.run_frozen == 'true'
+        uses: actions/cache@v4
+        id: vn2-cache
+        with:
+          path: data/vn2
+          key: vn2-${{ hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json') }}
+      - name: Acquire and verify VN2 inputs with successor tooling
+        if: steps.gate.outputs.run_frozen == 'true'
+        env:
+          OVENTI_DATASET_BASE_URL: ${{ vars.OVENTI_DATASET_BASE_URL }}
+        run: |
+          set -euo pipefail
+          inventory=newcalibre/benchmarks/vn2/vn2-input-digests.json
+          target=data/vn2
+          if [[ "${{ steps.vn2-cache.outputs.cache-hit }}" != "true" ]]; then
+            : "${OVENTI_DATASET_BASE_URL:?OVENTI_DATASET_BASE_URL must be configured}"
+            mkdir -p "$target"
+            while IFS=$'\t' read -r name expected_bytes; do
+              [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] \
+                || { echo "inventory contains an unsafe basename: $name"; exit 1; }
+              curl --fail --location --retry 3 \
+                --max-time 60 \
+                --max-filesize "$expected_bytes" \
+                --remove-on-error \
+                --output "$target/$name" \
+                "${OVENTI_DATASET_BASE_URL%/}/vn2/$name"
+            done < <(jq -r '.files[] | [.name, .bytes] | @tsv' "$inventory")
+          fi
+          uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify \
+            --target "$target" \
+            --inventory "$inventory"
       - name: Free disk space
         if: steps.gate.outputs.run_frozen == 'true'
         run: |
@@ -223,15 +280,6 @@ jobs:
       - name: Smoke test full image
         if: steps.gate.outputs.run_frozen == 'true'
         run: docker run --rm calibre:full run --config /app/benchmarks/vn2/config/smoke.yaml
-      - name: Download VN2 data with full image
-        if: steps.gate.outputs.run_frozen == 'true'
-        run: |
-          mkdir -p data
-          docker run --rm --user root \
-            -v "$PWD/data:/app/data" \
-            --entrypoint python \
-            calibre:full \
-            /app/benchmarks/vn2/download_vn2_data.py --target /app/data/vn2
       - name: Smoke test full VN2 benchmark
         if: steps.gate.outputs.run_frozen == 'true'
         run: |

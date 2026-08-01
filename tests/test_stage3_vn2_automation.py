@@ -11,11 +11,13 @@ import yaml
 
 ROOT = Path(__file__).parents[1]
 REGRESSION = ROOT / ".github" / "workflows" / "newcalibre.yml"
+FROZEN_CI = ROOT / ".github" / "workflows" / "ci.yml"
 APPEND_CHECK = ROOT / ".github" / "workflows" / "vn2-evidence.yml"
 ATTRIBUTES = ROOT / ".gitattributes"
 CAPTURE = ROOT / "stage3" / "evidence" / "captures" / "vn2"
 M5_RUNBOOK = ROOT / "benchmarks" / "m5" / "README.md"
 M5_MONITOR = ROOT / ".github" / "scripts" / "run-m5-acceptance.sh"
+README = ROOT / "README.md"
 
 
 def _workflow(path: Path) -> dict:
@@ -152,12 +154,123 @@ def test_protocol_jobs_use_exact_inventories_and_successor_verifiers() -> None:
     assert "newcalibre/scripts/m5_data.py verify" in runs
     assert "newcalibre/scripts/vn2_data.py download" not in runs
     assert "newcalibre/scripts/m5_data.py download" not in runs
-    assert "benchmarks/vn2/vn2_file_links.json" not in text
-    assert "restore-keys" not in protocol_text
+    assert "benchmarks/vn2/vn2_file_" + "links.json" not in text
+    assert "restore-" + "keys" not in protocol_text
     assert "stage3/evidence/" + "vn2-input-digests.json" not in protocol_text
     assert ".github/scripts/stage3_" + "vn2_data.py" not in protocol_text
     assert "secrets." not in protocol_text
-    assert "id-token" not in protocol_text
+    assert "id-" + "token" not in protocol_text
+
+
+def test_frozen_jobs_use_one_exact_inventory_cache_and_verifier() -> None:
+    """Acquire frozen VN2 inputs by safe inventory basename and always verify."""
+    workflow = _workflow(FROZEN_CI)
+    exact_cache = {
+        "path": "data/vn2",
+        "key": "vn2-${{ hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json') }}",
+    }
+
+    for job_name in ("test", "docker-build"):
+        job = workflow["jobs"][job_name]
+        scope = next(step for step in job["steps"] if step.get("id") == "scope")
+        gate = next(step for step in job["steps"] if step.get("id") == "gate")
+        cache = next(step for step in job["steps"] if step.get("id") == "vn2-cache")
+        acquisition = next(
+            step
+            for step in job["steps"]
+            if step.get("name") == "Acquire and verify VN2 inputs with successor tooling"
+        )
+
+        assert cache["with"] == exact_cache
+        assert scope["uses"] == "tj-actions/changed-files@v45"
+        assert "steps.scope.outputs.only_changed != 'true'" in gate["run"]
+        assert cache["if"] == "steps.gate.outputs.run_frozen == 'true'"
+        assert acquisition["if"] == "steps.gate.outputs.run_frozen == 'true'"
+        assert acquisition["env"] == {
+            "OVENTI_DATASET_BASE_URL": "${{ vars.OVENTI_DATASET_BASE_URL }}"
+        }
+        assert "set -euo pipefail" in acquisition["run"]
+        assert "inventory=newcalibre/benchmarks/vn2/vn2-input-digests.json" in acquisition["run"]
+        assert "target=data/vn2" in acquisition["run"]
+        assert '[[ "${{ steps.vn2-cache.outputs.cache-hit }}" != "true" ]]' in acquisition["run"]
+        assert "jq -r '.files[] | [.name, .bytes] | @tsv'" in acquisition["run"]
+        assert "while IFS=$'\\t' read -r name expected_bytes; do" in acquisition["run"]
+        basename_guard = '[[ "$name" != */* && "$name" != "." && "$name" != ".." ]]'
+        assert basename_guard in acquisition["run"]
+        assert '"${OVENTI_DATASET_BASE_URL%/}/vn2/$name"' in acquisition["run"]
+        assert "curl --fail --location --retry 3" in acquisition["run"]
+        assert "--max-time 60" in acquisition["run"]
+        assert '--max-filesize "$expected_bytes"' in acquisition["run"]
+        assert "--remove-on-error" in acquisition["run"]
+        assert "newcalibre/scripts/vn2_data.py verify" in acquisition["run"]
+        verify = acquisition["run"].index("newcalibre/scripts/vn2_data.py verify")
+        cache_miss = acquisition["run"].index("cache-hit")
+        cache_miss_end = acquisition["run"].index("\nfi\n", cache_miss)
+        guard = acquisition["run"].index(basename_guard)
+        curl = acquisition["run"].index("curl --fail --location --retry 3")
+        assert cache_miss < guard < curl < cache_miss_end < verify
+
+
+def test_frozen_ci_retains_lanes_commands_and_verified_docker_mount() -> None:
+    """Preserve frozen CI surfaces while moving acquisition onto the runner."""
+    workflow = _workflow(FROZEN_CI)
+    text = FROZEN_CI.read_text(encoding="utf-8")
+    test_runs = _job_runs(workflow["jobs"]["test"])
+    docker_runs = _job_runs(workflow["jobs"]["docker-build"])
+
+    assert workflow[True] == {
+        "push": {"branches": ["main"]},
+        "pull_request": {"branches": ["main"]},
+        "schedule": [{"cron": "0 2 * * *"}],
+    }
+    assert set(workflow["jobs"]) == {
+        "lint-and-type-check",
+        "test",
+        "s3-ingestion",
+        "m5-coverage-neutrality",
+        "docker-build",
+    }
+    assert "uv run pytest\n" in test_runs
+    assert "docker build -t calibre:full ." in docker_runs
+    assert 'docker run --rm -v "$PWD/data/vn2:/app/data/vn2:ro"' in docker_runs
+    assert "-m benchmarks.vn2 --config /app/benchmarks/vn2/config/winning.yaml" in docker_runs
+    assert "docker build -f Dockerfile.slim -t calibre:slim ." in docker_runs
+    push_commands = {
+        line.strip() for line in docker_runs.splitlines() if line.strip().startswith("docker push ")
+    }
+    assert push_commands == {
+        'docker push "$image_repo:${tag_prefix}-full"',
+        'docker push "$image_repo:${tag_prefix}-slim"',
+        'docker push "$image_repo:${sha_tag}-full"',
+        'docker push "$image_repo:${sha_tag}-slim"',
+    }
+    assert "docker run --rm --user root" not in docker_runs
+    forbidden = (
+        "restore-" + "keys",
+        "azure" + "/login",
+        "id-" + "token",
+        "download_" + "vn2_data",
+        "vn2_file_" + "links",
+    )
+    assert all(term not in text for term in forbidden)
+
+
+def test_predecessor_vn2_acquisition_is_deleted_and_undocumented() -> None:
+    """Leave the generic verified origin as the only VN2 acquisition contract."""
+    obsolete = (
+        ROOT / "benchmarks" / "vn2" / ("download_" + "vn2_data.py"),
+        ROOT / "benchmarks" / "vn2" / ("vn2_file_" + "links.json"),
+    )
+    text = README.read_text(encoding="utf-8")
+
+    assert all(not path.exists() for path in obsolete)
+    assert "OVENTI_DATASET_BASE_URL" in text
+    assert "newcalibre/benchmarks/vn2/vn2-input-digests.json" in text
+    assert "newcalibre/scripts/vn2_data.py verify" in text
+    assert "download_" + "vn2_data" not in text
+    assert "vn2_file_" + "links" not in text
+    assert "git" + "hub.io" not in text
+    assert "calibre-protocol-data-" + "temp" not in text
 
 
 def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
@@ -259,8 +372,8 @@ def test_m5_runbook_documents_only_the_generic_verified_origin_contract() -> Non
     assert "OVENTI_DATASET_BASE_URL" in text
     assert "newcalibre/scripts/m5_data.py verify" in text
     assert "newcalibre/benchmarks/m5/m5-inputs.json" in text
-    assert "github.io" not in text
-    assert "calibre-protocol-data-temp" not in text
+    assert "git" + "hub.io" not in text
+    assert "calibre-protocol-data-" + "temp" not in text
 
 
 def test_append_check_executes_only_trusted_base_code() -> None:
