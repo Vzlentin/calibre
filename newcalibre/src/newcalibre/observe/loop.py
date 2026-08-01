@@ -327,10 +327,9 @@ class ObserveLoop:
         annotations = []
         for delivery in deliveries:
             context = self._calibration_context(delivery)
+            addressed_labels = (METHOD_SCOPE_LABEL, delivery.partition_label)
             addressed_states = {
-                label: evolving[label]
-                for label in (METHOD_SCOPE_LABEL, delivery.partition_label)
-                if label in evolving
+                label: evolving[label] for label in addressed_labels if label in evolving
             }
             try:
                 effect = self._runtime.observe(
@@ -353,7 +352,7 @@ class ObserveLoop:
             emitted = dict(effect.state_updates)
             if delivery.partition_label not in emitted:
                 raise ObserveError("conformal observe omitted the touched partition state update")
-            foreign = set(emitted) - {delivery.partition_label, METHOD_SCOPE_LABEL}
+            foreign = set(emitted).difference(addressed_labels)
             if foreign:
                 raise ObserveError(
                     f"conformal observe emitted foreign state updates: {sorted(foreign)}"

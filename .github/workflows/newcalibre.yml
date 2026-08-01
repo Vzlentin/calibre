@@ -285,9 +285,10 @@ jobs:
           echo "M5 minimum free disk KiB: $min_free_disk_kib"
 
           sizing_status=0
-          (( min_memory_headroom_kib >= 4 * 1024 * 1024 )) \
+          minimum_headroom_kib=$(( 4 * 1024 * 1024 ))
+          (( min_memory_headroom_kib >= minimum_headroom_kib )) \
             || { echo "M5 acceptance requires at least 4 GiB memory headroom"; sizing_status=1; }
-          (( min_free_disk_kib >= 4 * 1024 * 1024 )) \
+          (( min_free_disk_kib >= minimum_headroom_kib )) \
             || { echo "M5 acceptance requires at least 4 GiB free disk"; sizing_status=1; }
           (( elapsed_seconds <= 20 * 60 )) \
             || { echo "M5 acceptance must complete within 20 minutes"; sizing_status=1; }

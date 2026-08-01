@@ -22,11 +22,11 @@ def _workflow(path: Path) -> dict:
 
 
 def _runs(workflow: dict) -> str:
-    return "\n".join(
-        str(step.get("run", ""))
-        for job in workflow["jobs"].values()
-        for step in job.get("steps", [])
-    )
+    return "\n".join(_job_runs(job) for job in workflow["jobs"].values())
+
+
+def _job_runs(job: dict) -> str:
+    return "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
 
 
 def test_workflow_has_pr_main_and_protocol_scoped_lanes() -> None:
@@ -129,10 +129,10 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
     workflow = _workflow(REGRESSION)
     text = REGRESSION.read_text(encoding="utf-8")
     runs = _runs(workflow)
-    vn2_runs = _runs({"jobs": {"vn2": workflow["jobs"]["vn2-acceptance"]}})
-    m5_runs = _runs({"jobs": {"m5": workflow["jobs"]["m5-acceptance"]}})
+    vn2_runs = _job_runs(workflow["jobs"]["vn2-acceptance"])
+    m5_runs = _job_runs(workflow["jobs"]["m5-acceptance"])
     reference = workflow["jobs"]["reference-gates"]
-    reference_runs = _runs({"jobs": {"reference": reference}})
+    reference_runs = _job_runs(reference)
     pytest_commands = "\n".join(line for line in runs.splitlines() if "pytest " in line)
 
     assert "pytest newcalibre/tests/tier3" in vn2_runs
@@ -151,7 +151,7 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
     assert "M5 aggregate peak job memory (process RSS) KiB:" in m5_runs
     assert "M5 minimum memory headroom KiB:" in m5_runs
     assert "M5 minimum free disk KiB:" in m5_runs
-    assert "4 * 1024 * 1024" in m5_runs
+    assert "minimum_headroom_kib=$(( 4 * 1024 * 1024 ))" in m5_runs
     assert "20 * 60" in m5_runs
     assert "vn2_tracking.py build" in vn2_runs
     assert "actions/upload-artifact@v4" in text
