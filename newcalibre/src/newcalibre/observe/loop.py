@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from collections import ChainMap
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import Iterable, Mapping
 from numbers import Integral
 from types import MappingProxyType
-from typing import cast
 
 import pandas as pd
 
@@ -324,16 +323,16 @@ class ObserveLoop:
         if self._runtime is None:
             return (), {}
         updates: dict[str, bytes] = {}
-        evolving = ChainMap(
-            cast(MutableMapping[str, bytes | None], updates), self._conformal_states
-        )
         annotations = []
         for delivery in deliveries:
             context = self._calibration_context(delivery)
             addressed_labels = (METHOD_SCOPE_LABEL, delivery.partition_label)
-            addressed_states = {
-                label: evolving[label] for label in addressed_labels if label in evolving
-            }
+            addressed_states: dict[str, bytes | None] = {}
+            for label in addressed_labels:
+                if label in updates:
+                    addressed_states[label] = updates[label]
+                elif label in self._conformal_states:
+                    addressed_states[label] = self._conformal_states[label]
             try:
                 effect = self._runtime.observe(
                     delivery,
