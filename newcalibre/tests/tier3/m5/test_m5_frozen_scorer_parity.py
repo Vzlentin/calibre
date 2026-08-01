@@ -81,7 +81,8 @@ class _Row:
 
 class _Reader:
     def __init__(self, rows: tuple[_Row, ...]) -> None:
-        self.metadata = LedgerSessionMetadata(_session(), _session().series_keys)
+        session = _session()
+        self.metadata = LedgerSessionMetadata(session, session.series_keys)
         self.rows = rows
         self.selections: list[LedgerSelection] = []
 
@@ -227,6 +228,7 @@ def test_disposable_export_rejects_non_0p9_scoring_intent(tmp_path: Path) -> Non
     config = load_m5_config(CONFIG)
     changed = config.conformal_config
     changed["coverage"] = 0.8
+    # Bypass the stricter loader to witness the exporter's independent boundary.
     object.__setattr__(
         config,
         "_conformal_config_json",

@@ -11,6 +11,7 @@ import pytest
 
 import newcalibre.protocols.m5.runner as runner
 from newcalibre.engine import LedgerReader
+from newcalibre.oracle import ORACLE_COMMIT, ORACLE_TAG
 from newcalibre.protocols.m5 import M5Diagnostics
 from newcalibre.protocols.m5.inventory import (
     M5InputError,
@@ -24,8 +25,6 @@ CONFIG = PROJECT_ROOT / "tests" / "fixtures" / "m5" / "reduced-real.yaml"
 DATA = PROJECT_ROOT / "data" / "m5"
 INVENTORY = PROJECT_ROOT / "benchmarks" / "m5" / "m5-inputs.json"
 FROZEN_WORKTREE_ENV = "CALIBRE_FROZEN_ORACLE_WORKTREE"
-FROZEN_TAG = "oracle-freeze-2026-07-06"
-FROZEN_COMMIT = "686a1b284a4f4879123b4095d306f07b88d2ddc3"
 
 
 @pytest.fixture(scope="session")
@@ -72,11 +71,11 @@ def frozen_oracle_worktree() -> Path:
     if worktree.is_symlink() or not worktree.is_dir():
         pytest.fail(f"{FROZEN_WORKTREE_ENV} must name a real directory")
     head = _git(worktree, "rev-parse", "HEAD")
-    if head != FROZEN_COMMIT:
-        pytest.fail(f"frozen M5 worktree must be {FROZEN_TAG} at {FROZEN_COMMIT}, found {head}")
-    tag_commit = _git(worktree, "rev-parse", f"{FROZEN_TAG}^{{commit}}")
-    if tag_commit != FROZEN_COMMIT:
-        pytest.fail(f"frozen M5 worktree cannot verify exact tag {FROZEN_TAG}")
+    if head != ORACLE_COMMIT:
+        pytest.fail(f"frozen M5 worktree must be {ORACLE_TAG} at {ORACLE_COMMIT}, found {head}")
+    tag_commit = _git(worktree, "rev-parse", f"{ORACLE_TAG}^{{commit}}")
+    if tag_commit != ORACLE_COMMIT:
+        pytest.fail(f"frozen M5 worktree cannot verify exact tag {ORACLE_TAG}")
     symbolic = subprocess.run(
         ("git", "-C", str(worktree), "symbolic-ref", "-q", "HEAD"),
         check=False,
@@ -100,7 +99,6 @@ def m5_parity_run(
 ) -> tuple[M5Diagnostics, LedgerReader]:
     """Run reduced real M5 once and retain its closed reader only in this process."""
     captured: list[LedgerReader] = []
-    original_root = runner._PROJECT_ROOT
     original_score = runner.score_m5
 
     def retaining_score(config, ledger, *, output_dir: Path) -> M5Diagnostics:
@@ -109,13 +107,10 @@ def m5_parity_run(
         captured.append(ledger)
         return original_score(config, ledger, output_dir=output_dir)
 
-    runner._PROJECT_ROOT = exact_m5_project_root
-    runner.score_m5 = retaining_score
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(runner, "_PROJECT_ROOT", exact_m5_project_root)
+        monkeypatch.setattr(runner, "score_m5", retaining_score)
         result = runner.run_m5(CONFIG)
-    finally:
-        runner.score_m5 = original_score
-        runner._PROJECT_ROOT = original_root
     if len(captured) != 1:
         pytest.fail("tier 3 M5 parity did not retain exactly one closed ledger reader")
     return result.diagnostics, captured[0]

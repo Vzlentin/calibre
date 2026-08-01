@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
 from urllib.parse import unquote
 
 import pandas as pd
@@ -34,6 +33,7 @@ from newcalibre.protocols.m5.config import M5ProtocolConfig
 _COVERAGE = 0.9
 _BATCH_SIZE = 4096
 _FROZEN_COLUMNS = ("unique_id", "h", "model_name", "y", "lo_0p9", "hi_0p9")
+_FROZEN_UPPER = interval_columns(_COVERAGE)[1]
 _FROZEN_LEVELS = {
     "item": "item_id",
     "department": "dept_id",
@@ -88,20 +88,19 @@ def export_frozen_m5_ledger(
         batch_size,
     )
     seen: set[LedgerForecastKey] = set()
-    row_count = 0
+    series_keys = frozenset(metadata.series_keys)
     try:
         with pq.ParquetWriter(partial, _SCHEMA) as writer:
             for batch in ledger.scan(selection):
-                table, keys = _export_batch(
+                table = _export_batch(
                     batch,
                     metadata=metadata,
                     model_name=model_name,
+                    series_keys=series_keys,
                     seen=seen,
                 )
                 writer.write_table(table)
-                seen.update(keys)
-                row_count += table.num_rows
-        if row_count == 0:
+        if not seen:
             raise FrozenM5ExportError("frozen M5 export ledger must not be empty")
         partial.replace(output)
     except FrozenM5ExportError:
@@ -133,8 +132,9 @@ def _export_batch(
     *,
     metadata: LedgerSessionMetadata,
     model_name: str,
+    series_keys: frozenset[str],
     seen: set[LedgerForecastKey],
-) -> tuple[pa.Table, tuple[LedgerForecastKey, ...]]:
+) -> pa.Table:
     if not isinstance(batch, LedgerBatch):
         raise FrozenM5ExportError("frozen M5 export reader yielded a non-LedgerBatch value")
     if batch.session != metadata.session:
@@ -143,7 +143,6 @@ def _export_batch(
         raise FrozenM5ExportError("frozen M5 export batch has the wrong projection")
 
     values: dict[str, list[object]] = {column: [] for column in _FROZEN_COLUMNS}
-    batch_seen: set[LedgerForecastKey] = set()
     issuances = batch.columns[LedgerColumn.ISSUANCES.value]
     resolutions = batch.columns[LedgerColumn.RESOLUTION.value]
     for key, raw_issuances, raw_resolution in zip(
@@ -152,12 +151,12 @@ def _export_batch(
         resolutions,
         strict=True,
     ):
-        if key in seen or key in batch_seen:
+        if key in seen:
             raise FrozenM5ExportError(f"frozen M5 export contains duplicate row {key!r}")
-        _validate_key(key, metadata=metadata, model_name=model_name)
+        _validate_key(key, series_keys=series_keys, model_name=model_name)
         issuance = _validate_issuance(raw_issuances, key=key)
         resolution = _validate_resolution(raw_resolution, key=key)
-        upper = cast(float | None, issuance.bound_values[0])
+        upper = issuance.bound_values[0]
         actual = None if resolution is None else resolution.actual_value
         lower = actual if actual is not None and upper is not None else None
         values["unique_id"].append(_frozen_label(key.series_key))
@@ -166,17 +165,17 @@ def _export_batch(
         values["y"].append(actual)
         values["lo_0p9"].append(lower)
         values["hi_0p9"].append(upper)
-        batch_seen.add(key)
-    return pa.Table.from_pydict(values, schema=_SCHEMA), tuple(batch.keys)
+        seen.add(key)
+    return pa.Table.from_pydict(values, schema=_SCHEMA)
 
 
 def _validate_key(
     key: LedgerForecastKey,
     *,
-    metadata: LedgerSessionMetadata,
+    series_keys: frozenset[str],
     model_name: str,
 ) -> None:
-    if key.series_key not in metadata.series_keys:
+    if key.series_key not in series_keys:
         raise FrozenM5ExportError(f"frozen M5 export contains unexpected node {key.series_key!r}")
     if key.model_name != model_name:
         raise FrozenM5ExportError(f"frozen M5 export contains unexpected model {key.model_name!r}")
@@ -197,7 +196,6 @@ def _validate_issuance(
     if not isinstance(issuance, LedgerBoundIssuance):
         raise FrozenM5ExportError(f"frozen M5 export row {key!r} has a malformed issuance")
     descriptor = issuance.descriptor
-    expected_upper = interval_columns(_COVERAGE)[1]
     if (
         descriptor.level != _COVERAGE
         or descriptor.type.claim is not GuaranteeClaim.ONE_SIDED_COVERAGE
@@ -206,7 +204,7 @@ def _validate_issuance(
         or descriptor.scope.kind is not DecisionScopeKind.PER_DECISION_NODE
         or descriptor.scope.class_system_name is not None
         or issuance.guaranteed_side != "upper"
-        or issuance.bound_key != (expected_upper,)
+        or issuance.bound_key != (_FROZEN_UPPER,)
         or len(issuance.bound_values) != 1
         or issuance.calibration_ready != issuance.bounds_finite
     ):
