@@ -62,6 +62,13 @@ from newcalibre.domain.hierarchy import (
     HierarchyNode,
     HierarchyNodeKind,
 )
+from newcalibre.domain.history import (
+    CycleToken,
+    HistoryCursor,
+    HistoryDelta,
+    HistoryError,
+    HistoryView,
+)
 from newcalibre.domain.panel import (
     AVAILABILITY_BOUND,
     CENSOR_STATUS,
@@ -88,6 +95,7 @@ __all__ = [
     "CENSOR_STATUS",
     "CostStructure",
     "CostStructureError",
+    "CycleToken",
     "DecisionError",
     "DecisionEvidence",
     "DecisionEvidenceError",
@@ -109,6 +117,10 @@ __all__ = [
     "HierarchyNode",
     "HierarchyNodeKind",
     "HORIZON_STEP",
+    "HistoryCursor",
+    "HistoryDelta",
+    "HistoryError",
+    "HistoryView",
     "KNOWN_AT",
     "InventoryPosition",
     "MODEL_NAME",

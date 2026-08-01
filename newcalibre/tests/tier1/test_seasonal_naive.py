@@ -30,6 +30,7 @@ from newcalibre.domain import (
     TargetSupport,
     validate_forecast_frame,
 )
+from newcalibre.engine import IndexedPanel
 from newcalibre.forecasting import (
     AdapterCapability,
     AdapterCapabilityError,
@@ -82,9 +83,8 @@ def _task(
     config: Mapping[str, object] | None = None,
 ) -> ForecastTask:
     model_config = dict(config or _config())
-    return Panel.from_frame(
-        history, calendar=Calendar("D"), target_support=TargetSupport.REAL
-    ).forecast_tasks(
+    panel = Panel.from_frame(history, calendar=Calendar("D"), target_support=TargetSupport.REAL)
+    return IndexedPanel.from_panel(panel).tasks(
         horizon=horizon,
         origin=ORIGIN_TIMESTAMP,
         scope=Scope.GLOBAL,
@@ -253,7 +253,7 @@ def test_predict_rejects_history_that_differs_from_the_fitted_season(
     adapter = _adapter(config)
     adapter.fit(fit_task)
 
-    with pytest.raises(AdapterDataError, match="retained season must match"):
+    with pytest.raises(AdapterDataError, match="history cursor"):
         adapter.predict(predict_task)
 
 
@@ -383,9 +383,8 @@ def test_weekly_anchored_calendar_uses_the_same_phase_lookup() -> None:
             "value": pd.Series(range(1, 9), dtype="float64"),
         }
     )
-    task = Panel.from_frame(
-        history, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
-    ).forecast_tasks(
+    panel = Panel.from_frame(history, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
+    task = IndexedPanel.from_panel(panel).tasks(
         horizon=3,
         origin=pd.Timestamp("2026-03-02"),
         scope=Scope.GLOBAL,
@@ -404,26 +403,52 @@ def test_weekly_anchored_calendar_uses_the_same_phase_lookup() -> None:
     ]
 
 
-def test_every_undeclared_operation_fails_with_a_capability_error() -> None:
+def test_fitted_values_remains_capability_gated() -> None:
     task = _task(_history({"sku-a": [float(value) for value in range(1, 15)]}))
     adapter = _adapter()
     adapter.fit(task)
 
     with pytest.raises(AdapterCapabilityError, match="fitted_values"):
-        adapter.fitted_values(task)
-    with pytest.raises(AdapterCapabilityError, match="artifact_persistence"):
-        adapter.dump_state()
-    with pytest.raises(AdapterCapabilityError, match="artifact_persistence"):
-        adapter.load_state(b"unused")
-    with pytest.raises(AdapterCapabilityError, match="incremental_update"):
-        adapter.update(task)
+        adapter.fitted_values()
 
 
-def test_collecting_fitted_values_fails_at_fit_instead_of_degrading() -> None:
+def test_native_state_round_trip_preserves_prediction_bytes() -> None:
     task = _task(_history({"sku-a": [float(value) for value in range(1, 15)]}))
+    first = _adapter()
+    first.fit(task)
+    state = first.dump_state()
+    second = _adapter()
+    second.load_state(state)
 
-    with pytest.raises(AdapterCapabilityError, match="fitted_values"):
-        _adapter().fit(task, collect_fitted_values=True)
+    assert second.dump_state() == state
+    pd.testing.assert_frame_equal(first.predict(task), second.predict(task))
+
+
+def test_incremental_update_consumes_only_the_new_delta() -> None:
+    history = _history({"sku-a": [float(value) for value in range(1, 16)]})
+    panel = IndexedPanel.from_panel(
+        Panel.from_frame(history, calendar=Calendar("D"), target_support=TargetSupport.REAL)
+    )
+    first = panel.tasks(
+        origin=pd.Timestamp("2026-01-15"),
+        horizon=4,
+        scope=Scope.GLOBAL,
+        model_config=_config(),
+    )[0]
+    second = panel.tasks(
+        origin=pd.Timestamp("2026-01-16"),
+        horizon=4,
+        scope=Scope.GLOBAL,
+        model_config=_config(),
+        previous_cursors={first.series_keys: first.cursor},
+    )[0]
+    adapter = _adapter()
+    adapter.fit(first)
+
+    adapter.update(second.delta)
+
+    assert second.delta.materialize()[HISTORY_TIMESTAMP].tolist() == [pd.Timestamp("2026-01-15")]
+    assert adapter.predict(second)[POINT_FORECAST].tolist() == [9.0, 10.0, 11.0, 12.0]
 
 
 @pytest.mark.parametrize(

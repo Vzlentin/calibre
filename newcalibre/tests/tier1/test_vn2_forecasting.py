@@ -27,6 +27,7 @@ from newcalibre.domain import (
     quantile_column,
     validate_forecast_frame,
 )
+from newcalibre.engine import IndexedPanel
 from newcalibre.forecasting import (
     AdapterCapability,
     AdapterCapabilityError,
@@ -78,9 +79,8 @@ def _task(config: Mapping[str, object] | None = None) -> ForecastTask:
             "value": pd.Series(np.arange(1, 53), dtype="float64"),
         }
     )
-    return Panel.from_frame(
-        history, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
-    ).forecast_tasks(
+    panel = Panel.from_frame(history, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
+    return IndexedPanel.from_panel(panel).tasks(
         horizon=3,
         origin=ORIGIN,
         scope=Scope.GLOBAL,
@@ -102,7 +102,13 @@ def test_vn2_registry_is_local_and_global_brick_remains_capability_free() -> Non
     adapter = resolve_vn2_adapter(_config())
     assert isinstance(adapter, ForecastAdapter)
     assert isinstance(adapter, VN2SeasonalNaiveQuantileAdapter)
-    assert adapter.capabilities == frozenset({AdapterCapability.NATIVE_QUANTILES})
+    assert adapter.capabilities == frozenset(
+        {
+            AdapterCapability.ARTIFACT_PERSISTENCE,
+            AdapterCapability.INCREMENTAL_UPDATE,
+            AdapterCapability.NATIVE_QUANTILES,
+        }
+    )
     assert adapter.requested_capabilities == frozenset({AdapterCapability.NATIVE_QUANTILES})
 
 
@@ -213,7 +219,7 @@ def test_vn2_registry_rejects_unsupported_capabilities_before_fit() -> None:
         resolve_vn2_adapter(_config(censoring_aware=True))
 
 
-def test_vn2_variant_keeps_non_quantile_capabilities_loud() -> None:
+def test_vn2_variant_keeps_fitted_values_capability_loud() -> None:
     config = _config()
     task = _task(config)
     adapter = resolve_vn2_adapter(config)
@@ -221,15 +227,7 @@ def test_vn2_variant_keeps_non_quantile_capabilities_loud() -> None:
     with pytest.raises(AdapterLifecycleError, match="successful fit"):
         adapter.predict(task)
     with pytest.raises(AdapterCapabilityError, match="fitted_values"):
-        adapter.fit(task, collect_fitted_values=True)
-    with pytest.raises(AdapterCapabilityError, match="fitted_values"):
-        adapter.fitted_values(task)
-    with pytest.raises(AdapterCapabilityError, match="artifact_persistence"):
-        adapter.dump_state()
-    with pytest.raises(AdapterCapabilityError, match="artifact_persistence"):
-        adapter.load_state(b"state")
-    with pytest.raises(AdapterCapabilityError, match="incremental_update"):
-        adapter.update(task)
+        adapter.fitted_values()
 
 
 def test_vn2_variant_rejects_task_configuration_drift() -> None:

@@ -34,6 +34,7 @@ from newcalibre.domain import (
     GuaranteeDescriptor,
     GuaranteeType,
     HierarchyIndex,
+    HistoryDelta,
     InventoryPosition,
     Panel,
     Scope,
@@ -157,35 +158,41 @@ class DeterministicArtifactAdapter:
         if dict(model_config) != dict(MODEL_CONFIG):
             raise ValueError("driver-equivalence adapter configuration is invalid")
         self._points: dict[str, float] | None = None
-        self._origin: pd.Timestamp | None = None
+        self._latest: dict[str, float] | None = None
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
         """Declare deterministic artifact persistence."""
-        return frozenset({AdapterCapability.ARTIFACT_PERSISTENCE})
+        return frozenset(
+            {
+                AdapterCapability.ARTIFACT_PERSISTENCE,
+                AdapterCapability.INCREMENTAL_UPDATE,
+            }
+        )
 
     @property
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         """Return no caller-requested optional outputs."""
         return frozenset()
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+    def fit(self, task: ForecastTask) -> None:
         """Retain one deterministic point per series from strict history."""
-        if collect_fitted_values:
-            raise AdapterCapabilityError("driver-equivalence adapter has no fitted values")
+        task_history = task.history.materialize()
         points: dict[str, float] = {}
+        latest_values: dict[str, float] = {}
         for index, series_key in enumerate(task.series_keys):
-            history = task.history[task.history[SERIES_KEY] == series_key]
+            history = task_history[task_history[SERIES_KEY] == series_key]
             latest = float(history[OBSERVED_VALUE].iloc[-1])
             prior = float(history[OBSERVED_VALUE].iloc[-2])
             points[series_key] = (latest + prior) / 2.0 + 0.25 * (index + 1)
+            latest_values[series_key] = latest
         self._points = points
-        self._origin = task.origin
+        self._latest = latest_values
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         """Emit a canonical multi-series frame from restored retained state."""
-        if self._points is None or self._origin != task.origin:
-            raise RuntimeError("driver-equivalence predict requires matching fitted state")
+        if self._points is None:
+            raise RuntimeError("driver-equivalence predict requires fitted state")
         rows = [
             {
                 SERIES_KEY: series_key,
@@ -216,10 +223,10 @@ class DeterministicArtifactAdapter:
 
     def dump_state(self) -> bytes:
         """Serialize fitted values with canonical JSON spelling."""
-        if self._points is None or self._origin is None:
+        if self._points is None or self._latest is None:
             raise RuntimeError("driver-equivalence dump requires fit")
         payload = {
-            "origin": {"unit": self._origin.unit, "value": self._origin.isoformat()},
+            "latest": [[key, value.hex()] for key, value in sorted(self._latest.items())],
             "points": [[key, value.hex()] for key, value in sorted(self._points.items())],
             "schema": "newcalibre.driver-equivalence-adapter/v1",
         }
@@ -230,21 +237,31 @@ class DeterministicArtifactAdapter:
         payload = json.loads(state)
         if payload.get("schema") != "newcalibre.driver-equivalence-adapter/v1":
             raise ValueError("driver-equivalence artifact schema is invalid")
-        origin = payload["origin"]
-        self._origin = pd.Timestamp(origin["value"]).as_unit(origin["unit"])
+        self._latest = {
+            str(series_key): float.fromhex(value) for series_key, value in payload["latest"]
+        }
         self._points = {
             str(series_key): float.fromhex(value) for series_key, value in payload["points"]
         }
 
-    def fitted_values(self, task: ForecastTask) -> FittedValues:
+    def fitted_values(self) -> FittedValues:
         """Reject unsupported fitted-value collection."""
-        del task
         raise AdapterCapabilityError("driver-equivalence adapter has no fitted values")
 
-    def update(self, task: ForecastTask) -> None:
-        """Reject unsupported incremental updates."""
-        del task
-        raise AdapterCapabilityError("driver-equivalence adapter has no incremental update")
+    def update(self, delta: HistoryDelta) -> None:
+        """Advance retained rolling points from newly admissible observations only."""
+        if self._points is None or self._latest is None:
+            raise RuntimeError("driver-equivalence update requires fitted state")
+        history = delta.materialize()
+        series_order = sorted(self._points, key=str.encode)
+        for index, series_key in enumerate(series_order):
+            values = history.loc[history[SERIES_KEY] == series_key, OBSERVED_VALUE]
+            for raw_value in values:
+                latest = float(raw_value)
+                self._points[series_key] = (latest + self._latest[series_key]) / 2.0 + 0.25 * (
+                    index + 1
+                )
+                self._latest[series_key] = latest
 
 
 def make_panel() -> Panel:

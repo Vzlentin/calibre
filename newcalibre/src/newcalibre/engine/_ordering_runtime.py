@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from numbers import Real
 
 import pandas as pd
 
-from newcalibre.domain import Calendar, DecisionEvidence, InventoryPosition, SessionIdentity
+from newcalibre.domain import (
+    Calendar,
+    CycleToken,
+    DecisionEvidence,
+    InventoryPosition,
+    SessionIdentity,
+)
 from newcalibre.engine.errors import EngineError
 from newcalibre.ledger import BoundKey, ForecastIssuance, ForecastKey, OrderRow
 from newcalibre.ordering import OrderingConfiguration, PolicyRequest, dispatch_policy
@@ -77,16 +83,13 @@ class ConfiguredPolicyOrderer:
 class DecisionBatch:
     """Carry one atomically validated policy result into Commit."""
 
-    session: SessionIdentity
-    origin: pd.Timestamp
+    token: CycleToken
     requested: tuple[DecisionKey, ...]
     proposals: tuple[OrderProposal, ...]
-    _engine_token: object | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.session, SessionIdentity):
-            raise TypeError("decision batch session must be a SessionIdentity")
-        _require_timestamp(self.origin, name="decision batch origin")
+        if not isinstance(self.token, CycleToken):
+            raise TypeError("decision batch token must be a CycleToken")
         requested = tuple(self.requested)
         for key in requested:
             _validate_decision_key(key)
@@ -122,6 +125,16 @@ class DecisionBatch:
             )
         object.__setattr__(self, "requested", requested)
         object.__setattr__(self, "proposals", proposals)
+
+    @property
+    def session(self) -> SessionIdentity:
+        """Return the cycle-bound session."""
+        return self.token.session
+
+    @property
+    def origin(self) -> pd.Timestamp:
+        """Return the cycle-bound origin."""
+        return self.token.origin
 
 
 def materialize_decisions(

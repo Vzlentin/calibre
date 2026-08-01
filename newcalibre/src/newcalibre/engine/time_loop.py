@@ -354,6 +354,7 @@ class TimeLoop:
                         inventory_positions=positions,
                         orders=(),
                         actuals_semantics=self._request.actuals_semantics,
+                        token=observation.token,
                     )
                 )
                 receipt = self._engine.commit(

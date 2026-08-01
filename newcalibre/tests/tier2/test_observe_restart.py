@@ -23,6 +23,7 @@ from newcalibre.domain import (
     EmissionScope,
     ForecastTask,
     HierarchyIndex,
+    HistoryDelta,
     InventoryPosition,
     Panel,
     Scope,
@@ -77,11 +78,9 @@ class _Adapter:
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset()
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
-        if collect_fitted_values:
-            raise AdapterCapabilityError("restart fixture has no fitted values")
+    def fit(self, task: ForecastTask) -> None:
         self._fitted_origins.append(task.origin)
-        self._point = float(task.history[OBSERVED_VALUE].iloc[-1])
+        self._point = float(task.history.materialize()[OBSERVED_VALUE].iloc[-1])
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         assert self._point is not None
@@ -109,7 +108,7 @@ class _Adapter:
             }
         )
 
-    def fitted_values(self, task: ForecastTask):
+    def fitted_values(self):
         raise AdapterCapabilityError("restart fixture has no fitted values")
 
     def dump_state(self) -> bytes:
@@ -118,7 +117,8 @@ class _Adapter:
     def load_state(self, state: bytes) -> None:
         raise AdapterCapabilityError("restart fixture has no persistence")
 
-    def update(self, task: ForecastTask) -> None:
+    def update(self, delta: HistoryDelta) -> None:
+        del delta
         raise AdapterCapabilityError("restart fixture has no incremental update")
 
 
@@ -303,7 +303,7 @@ def test_window_restart_matches_uninterrupted_domain_state(
             request=_request(session),
         ).run()
 
-    assert interrupted_fitted == [origin for origin in _ORIGINS[:2] for _ in range(2)]
+    assert interrupted_fitted == list(_ORIGINS[:2])
     if fail_after_journal:
         assert len(sink.forecasts) == 4
         assert len(sink.orders) == 2
@@ -335,7 +335,7 @@ def test_window_restart_matches_uninterrupted_domain_state(
     ).run()
 
     expected_resume_origins = [_ORIGINS[2]] if fail_after_journal else list(_ORIGINS[1:])
-    assert resumed_fitted == [origin for origin in expected_resume_origins for _ in range(2)]
+    assert resumed_fitted == expected_resume_origins
     assert result.inventory_positions == expected_result.inventory_positions
     assert _durable_state(sink, states) == _durable_state(expected_sink, expected_states)
     assert sink.pending_observations == ()

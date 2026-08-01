@@ -109,10 +109,9 @@ class _Adapter:
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset()
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
-        assert not collect_fitted_values
+    def fit(self, task: ForecastTask) -> None:
         self._effects.append("fit")
-        self._point = float(task.history[OBSERVED_VALUE].iloc[-1])
+        self._point = float(task.history.materialize()[OBSERVED_VALUE].iloc[-1])
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         assert self._point is not None
@@ -146,7 +145,7 @@ class _Adapter:
             }
         )
 
-    def fitted_values(self, task: ForecastTask):
+    def fitted_values(self):
         raise AdapterCapabilityError("event fixture has no fitted values")
 
     def dump_state(self) -> bytes:
@@ -155,7 +154,8 @@ class _Adapter:
     def load_state(self, state: bytes) -> None:
         raise AdapterCapabilityError("event fixture has no persistence")
 
-    def update(self, task: ForecastTask) -> None:
+    def update(self, delta) -> None:
+        del delta
         raise AdapterCapabilityError("event fixture has no incremental update")
 
 

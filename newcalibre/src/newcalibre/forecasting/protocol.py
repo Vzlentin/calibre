@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
-from newcalibre.domain import FittedValues, ForecastTask
+from newcalibre.domain import FittedValues, ForecastTask, HistoryDelta
 
 
 class AdapterCapability(StrEnum):
@@ -61,7 +61,7 @@ class ForecastAdapter(Protocol):
         """Return capabilities requested by the construction configuration."""
         ...
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
+    def fit(self, task: ForecastTask) -> None:
         """Fit and retain only the adapter's documented minimal predictive state."""
         ...
 
@@ -69,7 +69,7 @@ class ForecastAdapter(Protocol):
         """Emit a validated forecast frame for one forecast task."""
         ...
 
-    def fitted_values(self, task: ForecastTask) -> FittedValues:
+    def fitted_values(self) -> FittedValues:
         """Emit the optional fitted-values side channel."""
         ...
 
@@ -81,6 +81,6 @@ class ForecastAdapter(Protocol):
         """Restore fitted predictive state through a native artifact API."""
         ...
 
-    def update(self, task: ForecastTask) -> None:
-        """Extend fitted state by one period when incremental update is supported."""
+    def update(self, delta: HistoryDelta) -> None:
+        """Extend fitted state from only newly admissible history."""
         ...

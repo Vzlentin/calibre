@@ -12,6 +12,7 @@ import pandas as pd
 
 from newcalibre.domain import (
     ActualsSemantics,
+    CycleToken,
     DecisionTiming,
     InventoryPosition,
     SessionIdentity,
@@ -49,6 +50,7 @@ class SettlementRequest:
     inventory_positions: Mapping[str, InventoryPosition]
     orders: tuple[OrderRow, ...]
     actuals_semantics: ActualsSemantics
+    token: CycleToken | None
     costs_by_series: SessionCosts = field(init=False)
     _series_keys: tuple[str, ...] = field(repr=False)
 
@@ -61,6 +63,7 @@ class SettlementRequest:
         inventory_positions: Mapping[str, InventoryPosition],
         orders: Sequence[OrderRow] = (),
         actuals_semantics: ActualsSemantics,
+        token: CycleToken | None = None,
     ) -> None:
         if not isinstance(session, SessionIdentity):
             raise TypeError("settlement session must be a SessionIdentity")
@@ -70,6 +73,10 @@ class SettlementRequest:
             raise SettlementError("settlement session must match its snapshot")
         if not isinstance(actuals_semantics, ActualsSemantics):
             raise TypeError("settlement actuals semantics must be ActualsSemantics")
+        if token is not None and not isinstance(token, CycleToken):
+            raise TypeError("settlement token must be a CycleToken or None")
+        if token is not None and token.session != session:
+            raise SettlementError("settlement token must match its session")
 
         definition = session_definition(session)
         _session_series, frequency = session_series_and_frequency(definition)
@@ -118,6 +125,7 @@ class SettlementRequest:
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
         object.__setattr__(self, "orders", staged_orders)
         object.__setattr__(self, "actuals_semantics", actuals_semantics)
+        object.__setattr__(self, "token", token)
         object.__setattr__(self, "costs_by_series", costs_by_series)
         object.__setattr__(self, "_series_keys", series_keys)
 
@@ -128,12 +136,15 @@ class SettlementResult:
 
     records: tuple[SettlementRecord, ...]
     inventory_positions: Mapping[str, InventoryPosition]
+    token: CycleToken | None = None
 
     def __post_init__(self) -> None:
         records = tuple(self.records)
         if any(not isinstance(record, SettlementRecord) for record in records):
             raise TypeError("settlement result records must contain SettlementRecord values")
         positions = _validated_positions(self.inventory_positions)
+        if self.token is not None and not isinstance(self.token, CycleToken):
+            raise TypeError("settlement result token must be a CycleToken or None")
         object.__setattr__(self, "records", records)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
 
@@ -216,7 +227,11 @@ def settle(request: SettlementRequest) -> SettlementResult:
                 )
             )
 
-    return SettlementResult(records=tuple(records), inventory_positions=positions)
+    return SettlementResult(
+        records=tuple(records),
+        inventory_positions=positions,
+        token=request.token,
+    )
 
 
 def validate_snapshot_state(

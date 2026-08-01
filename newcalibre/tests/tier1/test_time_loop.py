@@ -55,7 +55,7 @@ from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
 from newcalibre.observe import ActualRecord, ActualsSubmission
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
-MODEL_CONFIG = {"backend": "fixture", "name": "fixture"}
+MODEL_CONFIG = {"backend": "fixture", "name": "fixture", "refit_cadence": 1}
 COST_STRUCTURE = CostStructure(1.0, 1.0, 1.0, 1.0)
 ORDERING_POLICY = {"name": "newsvendor"}
 TIMING = DecisionTiming(lead_time=2, review_period=2)
@@ -141,10 +141,10 @@ class DeterministicFixtureAdapter:
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset()
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
-        assert not collect_fitted_values
-        timestamps = tuple(pd.Timestamp(value) for value in task.history[TIMESTAMP])
-        values = tuple(float(value) for value in task.history[OBSERVED_VALUE])
+    def fit(self, task: ForecastTask) -> None:
+        history = task.history.materialize()
+        timestamps = tuple(pd.Timestamp(value) for value in history[TIMESTAMP])
+        values = tuple(float(value) for value in history[OBSERVED_VALUE])
         self._fit_histories.append((task.origin, timestamps, values))
         self._point = values[-1]
 
@@ -184,10 +184,11 @@ class DeterministicFixtureAdapter:
     def load_state(self, state: bytes) -> None:
         self._point = float.fromhex(state.decode())
 
-    def fitted_values(self, task: ForecastTask):
+    def fitted_values(self):
         raise AdapterCapabilityError("fixture has no fitted-values capability")
 
-    def update(self, task: ForecastTask) -> None:
+    def update(self, delta) -> None:
+        del delta
         raise AdapterCapabilityError("fixture has no incremental-update capability")
 
 

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import numpy as np
 import pandas as pd
@@ -13,9 +12,6 @@ import pyarrow as pa
 
 from newcalibre.domain.calendar import Calendar, CalendarError
 from newcalibre.domain.forecast_frame import SERIES_KEY
-
-if TYPE_CHECKING:
-    from newcalibre.domain.forecast_task import ForecastTask
 
 TIMESTAMP: Final = "timestamp"
 OBSERVED_VALUE: Final = "value"
@@ -161,74 +157,6 @@ class Panel:
     def has_censoring_facts(self) -> bool:
         """Return whether the source declared either censoring metadata field."""
         return CENSOR_STATUS in self._frame.columns
-
-    def forecast_tasks(
-        self,
-        *,
-        origin: pd.Timestamp,
-        horizon: int,
-        scope: Scope,
-        model_config: Mapping[str, object],
-        future_exogenous: pd.DataFrame | None = None,
-    ) -> tuple[ForecastTask, ...]:
-        """Resolve scope once and construct immutable pre-origin tasks.
-
-        Local scope returns one one-series task per panel key. Global scope
-        returns one task carrying the whole panel. Adapters need not inspect
-        or branch on scope.
-        """
-        from newcalibre.domain.forecast_task import ForecastTask
-
-        if not isinstance(scope, Scope):
-            raise PanelError("scope must be Scope.LOCAL or Scope.GLOBAL")
-        try:
-            self._calendar.require_member(origin, name="origin")
-        except CalendarError as error:
-            raise PanelError(str(error)) from error
-        ForecastTask._require_horizon(horizon)
-
-        history = self._frame[self._frame[TIMESTAMP] < origin].reset_index(drop=True)
-        future = _canonicalize_future_exogenous(
-            future_exogenous,
-            calendar=self._calendar,
-            origin=origin,
-            horizon=int(horizon),
-            series_keys=self._series_keys,
-        )
-
-        if scope is Scope.GLOBAL:
-            return (
-                ForecastTask._from_components(
-                    history=history,
-                    future_exogenous=future,
-                    horizon=int(horizon),
-                    origin=origin,
-                    calendar=self._calendar,
-                    model_config=model_config,
-                    scope=scope,
-                    series_keys=self._series_keys,
-                ),
-            )
-
-        tasks: list[ForecastTask] = []
-        for series_key in self._series_keys:
-            local_history = history[history[SERIES_KEY] == series_key].reset_index(drop=True)
-            local_future = None
-            if future is not None:
-                local_future = future[future[SERIES_KEY] == series_key].reset_index(drop=True)
-            tasks.append(
-                ForecastTask._from_components(
-                    history=local_history,
-                    future_exogenous=local_future,
-                    horizon=int(horizon),
-                    origin=origin,
-                    calendar=self._calendar,
-                    model_config=model_config,
-                    scope=scope,
-                    series_keys=(series_key,),
-                )
-            )
-        return tuple(tasks)
 
 
 def _canonicalize_panel_frame(

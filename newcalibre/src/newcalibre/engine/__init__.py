@@ -10,6 +10,8 @@ from newcalibre.engine.event_driver import (
     OriginEvent,
     OriginOutcome,
 )
+from newcalibre.engine.forecast_lifecycle import ForecastLifecycle, ForecastLifecycleError
+from newcalibre.engine.indexed_panel import IndexedPanel, IndexedPanelError
 from newcalibre.engine.ports import (
     ActualKey,
     ActualsCommitKey,
@@ -104,6 +106,8 @@ __all__ = [
     "EventDriverError",
     "FittedTask",
     "ForecastBatch",
+    "ForecastLifecycle",
+    "ForecastLifecycleError",
     "ForecastWrite",
     "InMemoryActualsSource",
     "InMemoryArtifactStore",
@@ -112,6 +116,8 @@ __all__ = [
     "InMemoryLedgerSink",
     "InMemoryPanelSource",
     "InProcessDispatch",
+    "IndexedPanel",
+    "IndexedPanelError",
     "LedgerBatch",
     "LedgerBoundIssuance",
     "LedgerBoundScore",

@@ -28,6 +28,7 @@ from newcalibre.domain import (
     ActualsSemantics,
     Calendar,
     CostStructure,
+    CycleToken,
     DecisionScope,
     DecisionScopeKind,
     DecisionTiming,
@@ -171,16 +172,20 @@ class PersistentFixtureAdapter:
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
-        return frozenset({AdapterCapability.ARTIFACT_PERSISTENCE})
+        return frozenset(
+            {
+                AdapterCapability.ARTIFACT_PERSISTENCE,
+                AdapterCapability.INCREMENTAL_UPDATE,
+            }
+        )
 
     @property
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset()
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
-        assert not collect_fitted_values
+    def fit(self, task: ForecastTask) -> None:
         self._events.append("fit")
-        self._point = float(task.history[OBSERVED_VALUE].iloc[-1])
+        self._point = float(task.history.materialize()[OBSERVED_VALUE].iloc[-1])
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         self._events.append("predict")
@@ -218,11 +223,14 @@ class PersistentFixtureAdapter:
         self._events.append("load")
         self._point = float(state.decode())
 
-    def fitted_values(self, task: ForecastTask):
+    def fitted_values(self):
         raise AdapterCapabilityError("fixture has no fitted-values capability")
 
-    def update(self, task: ForecastTask) -> None:
-        raise AdapterCapabilityError("fixture has no incremental-update capability")
+    def update(self, delta) -> None:
+        self._events.append("update")
+        materialized = delta.materialize()
+        if not materialized.empty:
+            self._point = float(materialized[OBSERVED_VALUE].iloc[-1])
 
 
 class OmitsSeriesFixtureAdapter(PersistentFixtureAdapter):
@@ -593,11 +601,10 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     assert panel_source.loads == 1
     assert events == [
         "fit",
-        "load",
         "predict",
         "order",
-        "fit",
         "load",
+        "update",
         "predict",
         "order",
     ]
@@ -966,8 +973,9 @@ def test_forecast_batch_provenance_can_only_be_bound_by_an_engine() -> None:
     assert unbound.session is None
     with pytest.raises(TypeError, match="unexpected keyword argument 'session'"):
         ForecastBatch(malformed_frame, calendar=CALENDAR, session=session)  # type: ignore[call-arg]
+    assert forecasts.token is not None
     with pytest.raises(EngineError, match="forecasts must match its session"):
-        CalibrationResult(unbound, session=session, origin=origin)
+        CalibrationResult(unbound, token=forecasts.token)
 
 
 @pytest.mark.parametrize(
@@ -1077,22 +1085,23 @@ def test_public_verb_results_reach_commit_without_private_order_math() -> None:
         CommitRequest(
             session=session,
             origin=origin,
+            token=observation.token,
             observation=observation,
             calibration=foreign_calibration,
             inventory_positions=positions,
             decisions=decisions,
         )
-    with pytest.raises(EngineError, match="decisions were not produced by this engine"):
+    with pytest.raises(EngineError, match="cycle token"):
         engine.commit(
             CommitRequest(
                 session=session,
                 origin=origin,
+                token=observation.token,
                 observation=observation,
                 calibration=calibration,
                 inventory_positions=positions,
                 decisions=DecisionBatch(
-                    session=session,
-                    origin=origin,
+                    token=CycleToken(session, origin, observation.token.revision + 1),
                     requested=(),
                     proposals=(),
                 ),
@@ -1104,6 +1113,7 @@ def test_public_verb_results_reach_commit_without_private_order_math() -> None:
         CommitRequest(
             session=session,
             origin=origin,
+            token=observation.token,
             observation=observation,
             calibration=calibration,
             inventory_positions=positions,
@@ -1156,6 +1166,7 @@ def test_commit_request_retry_replays_settlement_without_duplicate_rows() -> Non
     request = CommitRequest(
         session=session,
         origin=origin,
+        token=observation.token,
         observation=observation,
         calibration=calibration,
         inventory_positions=positions,
@@ -1164,6 +1175,7 @@ def test_commit_request_retry_replays_settlement_without_duplicate_rows() -> Non
             snapshot=sink.settlement_snapshot((origin,)),
             actuals={("a", origin): 0.0},
             actuals_semantics=ActualsSemantics.DEMAND,
+            token=observation.token,
         ),
     )
 
@@ -1502,17 +1514,18 @@ def test_ordering_refuses_a_missing_configured_decision_series_before_policy() -
 
     observation = engine.observe(origin, session=session)
     calibration = engine.calibrate(reduced, session=session, observation=observation)
+    assert calibration.token is not None
     forged_reduced_decisions = DecisionBatch(
-        session=session,
-        origin=origin,
+        token=CycleToken(session, origin, calibration.token.revision + 1),
         requested=(("a", "fixture"),),
         proposals=(),
     )
-    with pytest.raises(EngineError, match="decisions were not produced by this engine"):
+    with pytest.raises(EngineError, match="cycle token"):
         engine.commit(
             CommitRequest(
                 session=session,
                 origin=origin,
+                token=observation.token,
                 observation=observation,
                 calibration=calibration,
                 inventory_positions={"a": InventoryPosition(0.0, 0.0, 0.0)},
@@ -1761,8 +1774,7 @@ def test_decision_batch_snapshots_proposal_subclasses_before_validation() -> Non
 
     session = _session(with_decision=True)
     result = DecisionBatch(
-        session=session,
-        origin=pd.Timestamp("2026-01-05"),
+        token=CycleToken(session, pd.Timestamp("2026-01-05"), 1),
         requested=(("a", "fixture"),),
         proposals=(FlippingProposal("a", "fixture", 1.0),),
     )
@@ -2080,9 +2092,14 @@ def test_fit_result_is_process_safe_and_artifacts_are_session_scoped() -> None:
         sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
         dispatch=RecordingDispatch(),
     )
-    predicted = fresh_engine.predict(transported)
+    with pytest.raises(EngineError, match="stale or foreign"):
+        fresh_engine.predict(transported)
+
+    first_engine.predict(fitted)
+    fresh_fitted = fresh_engine.fit(request)
+    predicted = fresh_engine.predict(fresh_fitted)
     assert len(predicted.frame) == 1
-    assert fit_events == ["fit"]
+    assert fit_events == ["fit", "predict"]
     assert predict_events == ["load", "predict"]
 
     other_session = _session(tenant="tenant-b")
@@ -2095,14 +2112,15 @@ def test_fit_result_is_process_safe_and_artifacts_are_session_scoped() -> None:
         sink=InMemoryLedgerSink(session=other_session, calendar=CALENDAR),
         dispatch=RecordingDispatch(),
     )
-    other_engine.fit(
+    other_fitted = other_engine.fit(
         OriginRequest(
             session=other_session,
             origin=request.origin,
             scope=Scope.LOCAL,
         )
     )
-    assert other_events == ["fit"]
+    other_engine.predict(other_fitted)
+    assert other_events == ["fit", "predict"]
     assert len(shared_artifacts.artifacts) == 2
 
 
