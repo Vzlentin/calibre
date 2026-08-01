@@ -354,9 +354,7 @@ def test_future_exogenous_uses_utf8_series_then_timestamp_order() -> None:
         pd.DataFrame(
             {
                 SERIES_KEY: pd.Series(["é", "z", "é", "z"], dtype="string"),
-                TIMESTAMP: pd.to_datetime(
-                    ["2026-01-05", "2026-01-05", "2026-01-12", "2026-01-12"]
-                ),
+                TIMESTAMP: pd.to_datetime(["2026-01-05", "2026-01-05", "2026-01-12", "2026-01-12"]),
                 OBSERVED_VALUE: [1.0, 2.0, 3.0, 4.0],
             }
         ),
@@ -366,9 +364,7 @@ def test_future_exogenous_uses_utf8_series_then_timestamp_order() -> None:
     future = pd.DataFrame(
         {
             SERIES_KEY: pd.Series(["é", "z", "é", "z"], dtype="string"),
-            TIMESTAMP: pd.to_datetime(
-                ["2026-01-19", "2026-01-19", "2026-01-12", "2026-01-12"]
-            ),
+            TIMESTAMP: pd.to_datetime(["2026-01-19", "2026-01-19", "2026-01-12", "2026-01-12"]),
             KNOWN_AT: pd.to_datetime(["2026-01-12"] * 4),
             "promotion": pd.Series([1, 2, 3, 4], dtype="int64"),
         }
