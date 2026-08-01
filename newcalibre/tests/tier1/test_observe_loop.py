@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from newcalibre.conformal import (
+    METHOD_SCOPE_LABEL,
     CalibrationContext,
     CalibrationResult,
     ConformalRuntime,
@@ -52,6 +53,7 @@ class _CountingRuntime:
     def __init__(self, delegate: ConformalRuntime) -> None:
         self.delegate = delegate
         self.calls: list[str] = []
+        self.state_keys: list[frozenset[str]] = []
 
     @property
     def manifest(self):  # type: ignore[no-untyped-def]
@@ -81,6 +83,7 @@ class _CountingRuntime:
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
         self.calls.append(delivery.partition_label)
+        self.state_keys.append(frozenset(states))
         return self.delegate.observe(delivery, states, context=context)
 
 
@@ -235,6 +238,7 @@ def test_canonical_delivery_calls_each_partition_once_without_cross_partition_st
     cycle = loop.cycle(_CYCLE_ORIGIN)
 
     assert runtime.calls == sorted((labels["sku-a"], labels["sku-b"]), key=str.encode)
+    assert runtime.state_keys == [frozenset({METHOD_SCOPE_LABEL, label}) for label in runtime.calls]
     assert tuple(value.partition_label for value in cycle.deliveries) == tuple(runtime.calls)
     assert [
         (observation.forecast_key.series_key, observation.forecast_key.horizon_step)

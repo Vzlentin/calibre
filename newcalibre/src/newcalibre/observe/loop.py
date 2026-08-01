@@ -327,10 +327,15 @@ class ObserveLoop:
         annotations = []
         for delivery in deliveries:
             context = self._calibration_context(delivery)
+            addressed_states = {
+                label: evolving[label]
+                for label in (METHOD_SCOPE_LABEL, delivery.partition_label)
+                if label in evolving
+            }
             try:
                 effect = self._runtime.observe(
                     delivery,
-                    MappingProxyType(dict(evolving)),
+                    MappingProxyType(addressed_states),
                     context=context,
                 )
             except ValueError as error:
