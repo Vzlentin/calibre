@@ -111,6 +111,26 @@ def _checkpoint_index(checkpoint_key: str) -> bytes:
     ).encode()
 
 
+def _durable_families(store: InMemoryIndexedRunStore) -> tuple[object, ...]:
+    """Snapshot every externally visible durable store family."""
+    return (
+        store.revision,
+        store.observed_history,
+        store.pending_observations,
+        store.forecasts,
+        store.orders,
+        store.settlements,
+        store.observation_resolutions,
+        store.observe_annotations,
+        dict(store.states),
+        dict(store.checkpoints),
+        dict(store.checkpoint_indexes),
+        store.resume_marker,
+        dict(store.receipts),
+        dict(store.settlement_receipts),
+    )
+
+
 def test_store_opens_revision_bound_delta_and_commits_atomically() -> None:
     session = _session()
     store = InMemoryIndexedRunStore(
@@ -336,6 +356,36 @@ def test_failed_commit_exposes_no_durable_family_or_cursor_advance() -> None:
     ) == before
     reopened = store.open(OriginIntent(session, snapshot.origin))
     assert reopened.actuals.records == snapshot.actuals.records
+
+
+def test_unknown_hierarchy_membership_fails_before_any_publication() -> None:
+    """Validate staged pending memberships before publishing ledger rows."""
+    session = _session()
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals=_panel(),
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
+    snapshot = store.open(OriginIntent(session, pd.Timestamp("2026-01-03")))
+    before = _durable_families(store)
+
+    with pytest.raises(LedgerError, match="unknown hierarchy node"):
+        store.commit(
+            OriginCommit(
+                session=session,
+                origin=snapshot.origin,
+                expected_revision=snapshot.revision,
+                observe_cycle=_observe(snapshot),
+                forecasts=(_forecast_write(snapshot.origin, series_keys=("unknown",)),),
+                state_updates={"partition": b"staged"},
+                checkpoint_updates={"staged": b"bytes"},
+                checkpoint_indexes={"index": _checkpoint_index("staged")},
+                resume_marker=snapshot.origin,
+            )
+        )
+
+    assert _durable_families(store) == before
 
 
 def test_sixty_four_origin_work_is_delta_proportional_and_reader_equivalent() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import uuid
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -612,6 +613,7 @@ class Engine:
         self._reconciler = reconciler
         self._orderer = orderer
         self._active_cycles: dict[tuple[SessionIdentity, pd.Timestamp], CycleToken] = {}
+        self._controller_nonce = uuid.uuid4().hex
         self._next_cycle_attempt = 1
         self._snapshots: dict[CycleToken, OriginSnapshot | ActualsSnapshot] = {}
         self._forecast_results: dict[tuple[CycleToken, str], ForecastLifecycleResult] = {}
@@ -1117,7 +1119,13 @@ class Engine:
         active = self._active_cycles.get((session, origin))
         if active is not None:
             self._retire_cycle(active)
-        token = CycleToken(session, origin, snapshot.revision, self._next_cycle_attempt)
+        token = CycleToken(
+            session,
+            origin,
+            snapshot.revision,
+            self._next_cycle_attempt,
+            self._controller_nonce,
+        )
         self._next_cycle_attempt += 1
         self._active_cycles[(session, origin)] = token
         self._snapshots[token] = snapshot

@@ -731,6 +731,30 @@ def test_reopening_the_same_revision_retires_prior_attempt_values() -> None:
         engine.predict(fitted)
 
 
+def test_reconstructed_engine_rejects_equal_revision_attempt_values() -> None:
+    """Keep cycle provenance unique across reconstructed controllers."""
+    panel = _panel()
+    session = _session()
+    store = _store(session, panel)
+    origin = pd.Timestamp("2026-01-05")
+    first_engine = _engine(session=session, panel=panel, store=store)
+    first_forecasts = _predict(first_engine, store, session, origin)
+    second_engine = _engine(session=session, panel=panel, store=store)
+    second_observation = second_engine.observe(
+        origin,
+        session=session,
+        snapshot=_snapshot(store, session, origin),
+    )
+
+    assert first_forecasts.token is not None
+    assert second_observation.token is not None
+    assert first_forecasts.token.revision == second_observation.token.revision
+    assert first_forecasts.token.attempt == second_observation.token.attempt
+    assert first_forecasts.token.controller_nonce != second_observation.token.controller_nonce
+    with pytest.raises(EngineError, match="stale|foreign"):
+        second_engine.reconcile(first_forecasts)
+
+
 def test_prediction_failure_publishes_no_checkpoint_or_ledger_state() -> None:
     """Abort a failed phase without exposing any staged lifecycle effect."""
     panel = _panel()

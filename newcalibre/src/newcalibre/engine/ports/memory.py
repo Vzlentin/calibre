@@ -329,6 +329,9 @@ class _IndexedLedgerDataPlane:
             sorted(staged_forecasts, key=lambda item: _forecast_segment_key(item[0]))
         )
         canonical_forecast_keys = tuple(key for key, _row in canonical_forecasts)
+        pending_memberships = self._validated_pending_memberships(
+            (*write.observe_cycle.pending_retentions, *staged.pending_observations)
+        )
         for label, value in write.observe_cycle.state_updates.items():
             if write.state_updates.get(label) != value:
                 raise LedgerError(
@@ -369,12 +372,16 @@ class _IndexedLedgerDataPlane:
         # owned-container updates remain before the receipt becomes observable.
         self._ledger.apply_observe_cycle(write.observe_cycle, origin=write.origin)
         self._ledger._publish_staged_rows(staged)
-        self._apply_observe_indexes(write.observe_cycle)
+        self._apply_observe_indexes(
+            write.observe_cycle,
+            pending_memberships=pending_memberships,
+        )
         self._forecast_rows.update(canonical_forecasts)
         if canonical_forecast_keys:
             self._forecast_scan_segments.append((write.origin, canonical_forecast_keys))
             for key in canonical_forecast_keys:
-                self._index_pending(self._ledger._pending_forecasts[key])
+                pending = self._ledger._pending_forecasts[key]
+                self._index_pending(pending, members=pending_memberships[key])
         self._order_keys.update(row.key for row in orders)
         self._settlement_keys.update(row.key for row in write.settlements)
         if initial_positions is not None:
@@ -395,28 +402,50 @@ class _IndexedLedgerDataPlane:
             len(self._known_due_targets) - due_target_count,
         )
 
-    def _apply_observe_indexes(self, cycle: ObserveCycle) -> None:
+    def _apply_observe_indexes(
+        self,
+        cycle: ObserveCycle,
+        *,
+        pending_memberships: Mapping[ForecastKey, tuple[str, ...]],
+    ) -> None:
         """Apply one already validated observe delta to the lookup indexes."""
         for value in cycle.history_appends:
             self._history_by_timestamp.setdefault(value.timestamp, {})[value.key] = value
         for forecast_key in cycle.pending_removals:
             self._remove_pending(_ledger_forecast_key(forecast_key))
         for retained in cycle.pending_retentions:
-            self._index_pending(retained)
+            key = _ledger_forecast_key(retained.forecast_key)
+            self._index_pending(retained, members=pending_memberships[key])
 
-    def _index_pending(self, pending: PendingObservation) -> None:
+    def _validated_pending_memberships(
+        self,
+        pending_rows: Iterable[PendingObservation],
+    ) -> dict[ForecastKey, tuple[str, ...]]:
+        """Bind every pending row to known bottom members before publication."""
+        memberships: dict[ForecastKey, tuple[str, ...]] = {}
+        for pending in pending_rows:
+            key = _ledger_forecast_key(pending.forecast_key)
+            try:
+                memberships[key] = self._members_by_node[pending.forecast_key.series_key]
+            except KeyError as error:
+                raise LedgerError(
+                    "pending forecast names unknown hierarchy node "
+                    f"{pending.forecast_key.series_key!r}"
+                ) from error
+        return memberships
+
+    def _index_pending(
+        self,
+        pending: PendingObservation,
+        *,
+        members: tuple[str, ...],
+    ) -> None:
         """Insert or replace one pending row in its target and lineage indexes."""
         key = _ledger_forecast_key(pending.forecast_key)
         target = pending.target_timestamp
         self._pending_rows[key] = pending
         self._pending_by_target.setdefault(target, {})[key] = pending
         self._pending_by_group.setdefault(_pending_group(pending), {})[key] = pending
-        try:
-            members = self._members_by_node[pending.forecast_key.series_key]
-        except KeyError as error:
-            raise LedgerError(
-                f"pending forecast names unknown hierarchy node {pending.forecast_key.series_key!r}"
-            ) from error
         for member in members:
             self._pending_by_actual.setdefault((member, target), {})[key] = pending
         if target not in self._known_due_targets:
