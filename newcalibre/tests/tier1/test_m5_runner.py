@@ -1,4 +1,4 @@
-"""Run tiny strict M5 releases through the ordinary generic engine path."""
+"""Run tiny strict M5 releases through deterministic Ray placement."""
 
 from __future__ import annotations
 
@@ -292,4 +292,5 @@ def test_runner_source_keeps_one_generic_composition_and_no_extra_surface() -> N
     assert all(term not in source for term in forbidden)
     assert "newcalibre.ledger" not in source
     assert ".forecasts" not in source
-    assert "ray" not in source.lower()
+    assert "RayDispatch" in source
+    assert "InProcessDispatch" not in source
