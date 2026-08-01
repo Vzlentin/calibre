@@ -427,6 +427,14 @@ class ArtifactStore(Protocol):
         """Atomically replace one non-authoritative artifact index."""
         ...
 
+    def publish(
+        self,
+        artifacts: Mapping[str, bytes],
+        indexes: Mapping[str, bytes],
+    ) -> None:
+        """Atomically publish one accepted batch of artifacts and indexes."""
+        ...
+
 
 @runtime_checkable
 class CalibrationStateStore(Protocol):

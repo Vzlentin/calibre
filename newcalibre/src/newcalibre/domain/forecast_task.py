@@ -205,7 +205,17 @@ def _require_series_keys(series_keys: tuple[str, ...]) -> None:
 def _task_identity(task: ForecastTask) -> str:
     future_digest = None
     if task._future_exogenous is not None:
-        future_digest = hashlib.sha256(
+        digest = hashlib.sha256()
+        digest.update(
+            canonical_json_bytes(
+                [
+                    {"dtype": str(task._future_exogenous[column].dtype), "name": column}
+                    for column in task._future_exogenous.columns
+                ],
+                path="forecast task future-exogenous schema",
+            )
+        )
+        digest.update(
             pd.util.hash_pandas_object(
                 task._future_exogenous,
                 index=False,
@@ -213,7 +223,8 @@ def _task_identity(task: ForecastTask) -> str:
             )
             .to_numpy(copy=False)
             .tobytes()
-        ).hexdigest()
+        )
+        future_digest = digest.hexdigest()
     payload = canonical_json_bytes(
         {
             "calendar_frequency": task._calendar.frequency,

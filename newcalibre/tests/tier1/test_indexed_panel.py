@@ -103,15 +103,16 @@ def test_local_chunks_are_canonical_and_identity_ignores_source_row_order() -> N
     first_panel = _indexed()
     second_panel = _indexed(_frame().iloc[[1, 0, 3, 2, 4]].reset_index(drop=True))
 
-    first = _tasks(first_panel, "2026-01-04", scope=Scope.LOCAL, chunk_size=2)
+    first = _tasks(first_panel, "2026-01-04", scope=Scope.LOCAL, chunk_size=1)
     second = _tasks(second_panel, "2026-01-04", scope=Scope.LOCAL, chunk_size=2)
 
-    assert [task.series_keys for task in first] == [("sku-a", "sku-b")]
+    assert [task.series_keys for task in first] == [("sku-a",), ("sku-b",)]
     assert [task.identity for task in first] == [task.identity for task in second]
-    pd.testing.assert_frame_equal(
-        first[0].history.materialize(),
-        second[0].history.materialize(),
-    )
+    for first_task, second_task in zip(first, second, strict=True):
+        pd.testing.assert_frame_equal(
+            first_task.history.materialize(),
+            second_task.history.materialize(),
+        )
 
 
 def test_identity_changes_with_cursor_config_and_scope() -> None:

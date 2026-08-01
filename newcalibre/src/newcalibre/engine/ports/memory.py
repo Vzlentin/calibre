@@ -166,6 +166,25 @@ class InMemoryArtifactStore:
             raise TypeError("artifact index value must be bytes")
         self._artifact_indexes[key] = value
 
+    def publish(
+        self,
+        artifacts: Mapping[str, bytes],
+        indexes: Mapping[str, bytes],
+    ) -> None:
+        """Atomically publish one validated artifact batch in memory."""
+        staged_artifacts = dict(artifacts)
+        staged_indexes = dict(indexes)
+        for key, value in (*staged_artifacts.items(), *staged_indexes.items()):
+            _require_key(key, name="artifact publication key")
+            if not isinstance(value, bytes):
+                raise TypeError("artifact publication values must be bytes")
+        for key, value in staged_artifacts.items():
+            existing = self._artifacts.get(key)
+            if existing is not None and existing != value:
+                raise ValueError(f"artifact key {key!r} already holds different bytes")
+        self._artifacts.update(staged_artifacts)
+        self._artifact_indexes.update(staged_indexes)
+
     @property
     def artifacts(self) -> Mapping[str, bytes]:
         """Return an immutable snapshot for diagnostics."""

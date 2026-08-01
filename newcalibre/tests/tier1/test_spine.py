@@ -256,6 +256,25 @@ class MalformedHorizonFixtureAdapter(PersistentFixtureAdapter):
         return frame
 
 
+class MalformedLocalBatchFixtureAdapter(PersistentFixtureAdapter):
+    """Corrupt one local result so whole-batch validation rejects it."""
+
+    def predict(self, task: ForecastTask) -> pd.DataFrame:
+        frame = super().predict(task)
+        if task.series_keys == ("b",):
+            frame.loc[:, SERIES_KEY] = "a"
+        return frame
+
+
+class FailingLocalBatchFixtureAdapter(PersistentFixtureAdapter):
+    """Fail one local prediction after an earlier dispatch item completed."""
+
+    def predict(self, task: ForecastTask) -> pd.DataFrame:
+        if task.series_keys == ("b",):
+            raise RuntimeError("second local prediction failed")
+        return super().predict(task)
+
+
 class ForeignSeriesFixtureAdapter(PersistentFixtureAdapter):
     """Emit a series outside the canonical hierarchy to fail Reconcile."""
 
@@ -406,6 +425,16 @@ class FailOnceArtifactStore(InMemoryArtifactStore):
             self._fail = False
             raise RuntimeError("artifact store unavailable")
         super().save(key, value)
+
+    def publish(
+        self,
+        artifacts: Mapping[str, bytes],
+        indexes: Mapping[str, bytes],
+    ) -> None:
+        if self._fail:
+            self._fail = False
+            raise RuntimeError("artifact store unavailable")
+        super().publish(artifacts, indexes)
 
 
 class FailOnceStateStore(InMemoryCalibrationStateStore):
@@ -597,7 +626,7 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     ] * 2
     assert [event.phase for event in phase_events] == expected_phases
     assert all(event.error is None and event.duration_seconds >= 0.0 for event in phase_events)
-    assert dispatch.batch_sizes == [1, 1, 1, 1]
+    assert dispatch.batch_sizes == [1, 1]
     assert panel_source.loads == 1
     assert events == [
         "fit",
@@ -615,6 +644,50 @@ def test_spine_runs_fixed_phases_and_uses_every_port(
     assert sink.forecasts[0].actual_value == 5.0
     assert all(row.actual_value is None for row in sink.forecasts[1:])
     assert len(sink.orders) == 2
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "fails_during_fit"),
+    [
+        (FailingLocalBatchFixtureAdapter, True),
+        (MalformedLocalBatchFixtureAdapter, False),
+    ],
+)
+def test_forecast_batch_failure_publishes_no_partial_checkpoint_or_cycle_state(
+    adapter_type: type[PersistentFixtureAdapter],
+    fails_during_fit: bool,
+) -> None:
+    series_keys = ("a", "b")
+    panel = _panel(series_keys=series_keys)
+    session = _session(series_keys=series_keys)
+    artifacts = InMemoryArtifactStore()
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=artifacts,
+        states=InMemoryCalibrationStateStore(),
+        sink=InMemoryLedgerSink(session=session, calendar=CALENDAR),
+        dispatch=RecordingDispatch(),
+        adapter_resolver=lambda _config: adapter_type([]),
+    )
+    request = OriginRequest(
+        session=session,
+        origin=pd.Timestamp("2026-01-05"),
+        scope=Scope.LOCAL,
+    )
+
+    if fails_during_fit:
+        with pytest.raises(RuntimeError, match="second local prediction failed"):
+            engine.fit(request)
+    else:
+        fitted = engine.fit(request)
+        with pytest.raises(ForecastFrameError):
+            engine.predict(fitted)
+
+    assert artifacts.artifacts == {}
+    assert artifacts.artifact_indexes == {}
+    assert engine._forecast_results == {}
+    assert engine._active_cycles == {}
 
 
 def test_predict_collapses_dataframe_subclasses_before_phase_validation() -> None:
@@ -1180,9 +1253,23 @@ def test_commit_request_retry_replays_settlement_without_duplicate_rows() -> Non
     )
 
     first = engine.commit(request)
-    second = engine.commit(request)
+    with pytest.raises(EngineError, match="stale or foreign"):
+        engine.commit(request)
+    with pytest.raises(EngineError, match="stale or foreign"):
+        engine.reconcile(forecasts)
+    with pytest.raises(EngineError, match="stale or foreign"):
+        engine.calibrate(forecasts, session=session, observation=observation)
+    with pytest.raises(EngineError, match="stale or foreign"):
+        engine.order(
+            OrderRequest(
+                session=session,
+                origin=origin,
+                forecasts=calibration.forecasts,
+                inventory_positions=positions,
+            )
+        )
 
-    assert second == first
+    assert first.receipt == sink.receipt(origin)
     assert len(sink.orders) == 1
     assert len(sink.settlements) == 1
 
@@ -1761,6 +1848,57 @@ def test_order_returns_a_canonical_immutable_decision_batch() -> None:
         cast(Any, result).proposals = ()
     with pytest.raises(FrozenInstanceError):
         cast(Any, proposal).quantity = 2.0
+
+
+def test_commit_rejects_a_publicly_forged_equal_decision_batch() -> None:
+    panel = _panel()
+    session = _session(with_decision=True)
+    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    engine = _engine(
+        panel=panel,
+        events=[],
+        artifacts=InMemoryArtifactStore(),
+        states=InMemoryCalibrationStateStore(),
+        sink=sink,
+        dispatch=RecordingDispatch(),
+        orderer=lambda _request: (OrderProposal("a", "fixture", 1.25),),
+    )
+    origin = pd.Timestamp("2026-01-05")
+    positions = {"a": InventoryPosition(0.0, 0.0, 0.0)}
+    forecasts = engine.reconcile(
+        engine.predict(engine.fit(OriginRequest(session=session, origin=origin, scope=Scope.LOCAL)))
+    )
+    observation = engine.observe(origin, session=session)
+    calibration = engine.calibrate(forecasts, session=session, observation=observation)
+    issued = engine.order(
+        OrderRequest(
+            session=session,
+            origin=origin,
+            forecasts=calibration.forecasts,
+            inventory_positions=positions,
+        )
+    )
+    assert issued is not None
+    forged = DecisionBatch(
+        token=issued.token,
+        requested=issued.requested,
+        proposals=issued.proposals,
+    )
+
+    with pytest.raises(EngineError, match="not issued by this engine"):
+        engine.commit(
+            CommitRequest(
+                session=session,
+                origin=origin,
+                token=issued.token,
+                observation=observation,
+                calibration=calibration,
+                inventory_positions=positions,
+                decisions=forged,
+            )
+        )
+
+    assert sink.forecasts == sink.orders == ()
 
 
 def test_decision_batch_snapshots_proposal_subclasses_before_validation() -> None:

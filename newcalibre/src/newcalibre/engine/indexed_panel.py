@@ -185,6 +185,7 @@ class IndexedPanel:
             raise IndexedPanelError(str(error)) from error
         prior = {} if previous_cursors is None else dict(previous_cursors)
         partitions = self._partitions(scope=scope, series_chunk_size=series_chunk_size)
+        future_bounds = _series_row_bounds(future) if future is not None else {}
         expected_keys = {keys for _start, _stop, keys in partitions}
         unknown = set(prior) - expected_keys
         if unknown:
@@ -209,7 +210,11 @@ class IndexedPanel:
                 raise IndexedPanelError(str(error)) from error
             local_future = None
             if future is not None:
-                local_future = future[future[SERIES_KEY].isin(series_keys)].reset_index(drop=True)
+                if scope is Scope.GLOBAL:
+                    local_future = future
+                else:
+                    row_start, row_stop = future_bounds.get(series_keys[0], (0, 0))
+                    local_future = future.iloc[row_start:row_stop].reset_index(drop=True)
             tasks.append(
                 ForecastTask._from_components(
                     history=view,
@@ -234,15 +239,28 @@ class IndexedPanel:
     ) -> tuple[tuple[int, int, tuple[str, ...]], ...]:
         if scope is Scope.GLOBAL:
             return ((0, len(self.series_keys), self.series_keys),)
-        chunk_size = 1 if series_chunk_size is None else int(series_chunk_size)
         return tuple(
-            (
-                start,
-                min(start + chunk_size, len(self.series_keys)),
-                self.series_keys[start : start + chunk_size],
-            )
-            for start in range(0, len(self.series_keys), chunk_size)
+            (ordinal, ordinal + 1, (series_key,))
+            for ordinal, series_key in enumerate(self.series_keys)
         )
+
+
+def _series_row_bounds(frame: pd.DataFrame) -> dict[str, tuple[int, int]]:
+    """Index contiguous canonical future rows by series without copying them."""
+    bounds: dict[str, tuple[int, int]] = {}
+    active: str | None = None
+    start = 0
+    for stop, raw_key in enumerate(frame[SERIES_KEY], start=1):
+        key = str(raw_key)
+        if active is None:
+            active = key
+        elif key != active:
+            bounds[active] = (start, stop - 1)
+            active = key
+            start = stop - 1
+    if active is not None:
+        bounds[active] = (start, len(frame))
+    return bounds
 
 
 def _panel_identity(

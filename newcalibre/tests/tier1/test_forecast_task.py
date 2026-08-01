@@ -136,6 +136,13 @@ def test_future_exogenous_is_canonical_and_defensively_owned() -> None:
     assert restored["promotion"].tolist() == [1, 0]
 
 
+def test_task_identity_binds_future_exogenous_schema_not_only_values() -> None:
+    promotion = _tasks(future=_future())[0]
+    price = _tasks(future=_future().rename(columns={"promotion": "price"}))[0]
+
+    assert promotion.identity != price.identity
+
+
 @pytest.mark.parametrize(
     ("future", "pattern"),
     [
@@ -172,6 +179,45 @@ def test_model_configuration_is_canonical_and_scope_remains_engine_owned() -> No
     assert task.model_config == {"backend": "seasonal-naive", "m": 2}
     with pytest.raises(ForecastTaskError, match="scope is engine configuration"):
         _tasks(config={"backend": "seasonal-naive", "m": 2, "scope": "global"})
+
+
+@pytest.mark.parametrize("horizon", [0, -1, True, 1.5])
+def test_task_factory_rejects_invalid_horizons(horizon: object) -> None:
+    with pytest.raises(ForecastTaskError, match="positive integer"):
+        _panel().tasks(
+            origin=pd.Timestamp("2026-01-19"),
+            horizon=horizon,  # type: ignore[arg-type]
+            scope=Scope.GLOBAL,
+            model_config={"backend": "seasonal-naive", "m": 2},
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"backend": "seasonal-naive", "value": float("nan")},
+        {"backend": "seasonal-naive", "value": float("inf")},
+        {"backend": "seasonal-naive", "value": {1, 2}},
+        {"backend": "seasonal-naive", "value": "\ud800"},
+    ],
+)
+def test_task_factory_rejects_noncanonical_model_configuration(
+    invalid: dict[str, object],
+) -> None:
+    with pytest.raises(ForecastTaskError, match="finite JSON values"):
+        _tasks(config=invalid)
+
+
+def test_task_factory_rejects_cyclic_and_excessively_nested_configuration() -> None:
+    cyclic: dict[str, object] = {"backend": "seasonal-naive"}
+    cyclic["cycle"] = cyclic
+    nested: object = None
+    for _ in range(1_100):
+        nested = [nested]
+
+    for invalid in (cyclic, {"backend": "seasonal-naive", "nested": nested}):
+        with pytest.raises(ForecastTaskError, match="finite JSON values"):
+            _tasks(config=invalid)
 
 
 def test_old_copied_history_transport_surface_is_absent() -> None:

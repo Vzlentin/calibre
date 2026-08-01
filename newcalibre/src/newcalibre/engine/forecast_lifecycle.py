@@ -53,6 +53,22 @@ class _Prepared:
     fit_time_bound: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingCheckpoint:
+    key: str
+    value: bytes
+    index_key: str
+    index_value: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastLifecycleResult:
+    """Stage one adapter prediction and its unpublished checkpoint effect."""
+
+    frame: pd.DataFrame
+    checkpoint: _PendingCheckpoint | None
+
+
 class ForecastLifecycle:
     """Own one same-instance adapter lifecycle and checkpoint publication seam."""
 
@@ -68,17 +84,13 @@ class ForecastLifecycle:
             raise TypeError("forecast lifecycle adapter resolver must be callable")
         self._artifact_store = artifact_store
         self._adapter_resolver = adapter_resolver
-        self._prepared: dict[tuple[CycleToken, str], _Prepared] = {}
 
-    def prepare(
+    def _prepare_adapter(
         self,
         *,
         session: SessionIdentity,
         task: ForecastTask,
-        token: CycleToken,
-    ) -> None:
-        """Resolve and fit, load, update, or explicitly refit one adapter."""
-        _require_cycle(session=session, task=task, token=token)
+    ) -> _Prepared:
         adapter = self._adapter_resolver(task.model_config)
         capabilities = _capability_names(adapter)
         lineage = _lineage_identity(task)
@@ -138,7 +150,11 @@ class ForecastLifecycle:
                     adapter.load_state(checkpoint.native_state)
                     fit_time_bound = checkpoint.fit_time_bound
                     if AdapterCapability.INCREMENTAL_UPDATE in adapter.capabilities:
-                        adapter.update(task.history.delta_since(checkpoint.cursor))
+                        if task.delta.start_cursor != checkpoint.cursor:
+                            raise ForecastLifecycleError(
+                                "forecast task delta does not start at its loaded checkpoint"
+                            )
+                        adapter.update(task.delta)
                     else:
                         cadence = _refit_cadence(task.model_config)
                         if cadence is None:
@@ -158,10 +174,7 @@ class ForecastLifecycle:
             raise ForecastLifecycleError(
                 "refit_cadence is only valid for adapters without incremental update"
             )
-        prepared_key = (token, task.identity)
-        if prepared_key in self._prepared:
-            raise ForecastLifecycleError("forecast task is already prepared for this cycle")
-        self._prepared[prepared_key] = _Prepared(
+        return _Prepared(
             adapter=adapter,
             key=key,
             index_key=index_key,
@@ -170,26 +183,22 @@ class ForecastLifecycle:
             fit_time_bound=fit_time_bound,
         )
 
-    def prepare_item(self, item: ForecastLifecycleItem) -> ForecastLifecycleItem:
-        """Prepare one deterministic dispatch item and return its opaque address."""
+    def run_item(self, item: ForecastLifecycleItem) -> ForecastLifecycleResult:
+        """Run one adapter lifecycle atomically in its dispatched placement."""
         session, task, token = item
-        self.prepare(session=session, task=task, token=token)
-        return item
+        _require_cycle(session=session, task=task, token=token)
+        prepared = self._prepare_adapter(session=session, task=task)
+        return self._predict_result(session=session, task=task, prepared=prepared)
 
-    def predict(
+    def _predict_result(
         self,
         *,
         session: SessionIdentity,
         task: ForecastTask,
-        token: CycleToken,
-    ) -> pd.DataFrame:
-        """Predict with the prepared adapter and publish its checkpoint on success."""
-        _require_cycle(session=session, task=task, token=token)
-        prepared_key = (token, task.identity)
-        prepared = self._prepared.pop(prepared_key, None)
-        if prepared is None:
-            raise ForecastLifecycleError("predict requires a prepared adapter in this cycle")
+        prepared: _Prepared,
+    ) -> ForecastLifecycleResult:
         frame = prepared.adapter.predict(task)
+        pending = None
         if prepared.key is not None:
             checkpoint = _Checkpoint(
                 session_value=session.value,
@@ -201,18 +210,68 @@ class ForecastLifecycle:
                 fit_time_bound=prepared.fit_time_bound,
                 native_state=prepared.adapter.dump_state(),
             )
-            self._artifact_store.save(prepared.key, _encode_checkpoint(checkpoint))
             assert prepared.index_key is not None
-            self._artifact_store.save_index(
-                prepared.index_key,
-                _encode_checkpoint_index(cursor=task.cursor, checkpoint_key=prepared.key),
+            pending = _PendingCheckpoint(
+                key=prepared.key,
+                value=_encode_checkpoint(checkpoint),
+                index_key=prepared.index_key,
+                index_value=_encode_checkpoint_index(
+                    cursor=task.cursor,
+                    checkpoint_key=prepared.key,
+                ),
             )
-        return frame
+        return ForecastLifecycleResult(frame=frame, checkpoint=pending)
 
-    def predict_item(self, item: ForecastLifecycleItem) -> pd.DataFrame:
-        """Predict one previously prepared deterministic dispatch item."""
-        session, task, token = item
-        return self.predict(session=session, task=task, token=token)
+    def publish(self, results: tuple[ForecastLifecycleResult, ...]) -> None:
+        """Publish a fully accepted forecast batch's staged checkpoints."""
+        checkpoints = tuple(
+            result.checkpoint for result in results if result.checkpoint is not None
+        )
+        self._artifact_store.publish(
+            {checkpoint.key: checkpoint.value for checkpoint in checkpoints},
+            {checkpoint.index_key: checkpoint.index_value for checkpoint in checkpoints},
+        )
+
+    def previous_cursors(
+        self,
+        *,
+        session: SessionIdentity,
+        tasks: tuple[ForecastTask, ...],
+    ) -> dict[tuple[str, ...], HistoryCursor]:
+        """Restore indexed predecessor cursors before final task construction."""
+        restored: dict[tuple[str, ...], HistoryCursor] = {}
+        for task in tasks:
+            adapter = self._adapter_resolver(task.model_config)
+            if AdapterCapability.ARTIFACT_PERSISTENCE not in adapter.capabilities:
+                continue
+            lineage = _lineage_identity(task)
+            config_digest = _config_digest(task.model_config)
+            index_key = _checkpoint_index_key(
+                session=session,
+                lineage_identity=lineage,
+                config_digest=config_digest,
+            )
+            encoded = self._artifact_store.load_index(index_key)
+            if encoded is None:
+                continue
+            cursor, checkpoint_key = _decode_checkpoint_index(encoded)
+            if (
+                cursor.panel_identity != task.cursor.panel_identity
+                or cursor.series_start != task.cursor.series_start
+                or cursor.series_stop != task.cursor.series_stop
+                or cursor.time_bound > task.cursor.time_bound
+            ):
+                raise ForecastLifecycleError("forecast checkpoint index is stale or foreign")
+            expected_key = _checkpoint_key(
+                session=session,
+                lineage_identity=lineage,
+                config_digest=config_digest,
+                cursor=cursor,
+            )
+            if checkpoint_key != expected_key:
+                raise ForecastLifecycleError("forecast checkpoint index names an invalid artifact")
+            restored[task.series_keys] = cursor
+        return restored
 
     def _latest_checkpoint(
         self,
@@ -513,4 +572,9 @@ def _require_digest(value: object) -> str:
     return value
 
 
-__all__ = ["ForecastLifecycle", "ForecastLifecycleError", "ForecastLifecycleItem"]
+__all__ = [
+    "ForecastLifecycle",
+    "ForecastLifecycleError",
+    "ForecastLifecycleItem",
+    "ForecastLifecycleResult",
+]
