@@ -29,13 +29,12 @@ from newcalibre.ledger import (
     SettlementRecord,
 )
 from newcalibre.observe import (
+    ActualKey,
     ActualsSubmission,
     ObserveCycle,
     ObservedActual,
     PendingObservation,
 )
-
-type ActualKey = tuple[str, pd.Timestamp]
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -378,11 +377,6 @@ class CommitReceipt:
         object.__setattr__(self, "input_fingerprint", fingerprint)
         object.__setattr__(self, "orders", orders)
         object.__setattr__(self, "inventory_positions", MappingProxyType(positions))
-
-    @property
-    def sequence(self) -> int:
-        """Return the committed revision under the former journal vocabulary."""
-        return self.revision
 
     @property
     def commit_key(self) -> CommitKey:

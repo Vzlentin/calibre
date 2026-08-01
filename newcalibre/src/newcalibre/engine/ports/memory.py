@@ -12,7 +12,6 @@ from typing import TypeVar, cast
 
 import pandas as pd
 
-from newcalibre.conformal import ForecastKey as ConformalForecastKey
 from newcalibre.domain import (
     AVAILABILITY_BOUND,
     CENSOR_STATUS,
@@ -69,6 +68,7 @@ from newcalibre.ledger import (
     OrderRow,
     PredicateRegistry,
     SettlementRecord,
+    _ledger_forecast_key,
     _resolved_window_sum,
     _score_bound,
 )
@@ -100,6 +100,9 @@ class RunStoreAudit:
     history_rows_appended: int
     forecast_rows_appended: int
     resolution_rows_applied: int
+    staged_rows_validated: int
+    due_targets_indexed: int
+    checkpoint_indexes_decoded: int
 
 
 class InMemoryPanelSource:
@@ -146,7 +149,6 @@ class _IndexedLedgerDataPlane:
         self._settlement_keys: set[object] = set()
         self._commits: dict[CommitKey, CommitReceipt] = {}
         self._settlement_receipts: dict[pd.Timestamp, CommitReceipt | None] = {}
-        self._next_sequence = 1
         self._earliest_origin: pd.Timestamp | None = None
         self._latest_origin: pd.Timestamp | None = None
         self._forecast_origin_count = 0
@@ -290,7 +292,7 @@ class _IndexedLedgerDataPlane:
                 raise LedgerError(f"settlement period {period} has multiple journal receipts")
             return receipt
 
-    def _apply(self, write: OriginCommit | ActualsCommit) -> None:
+    def _apply(self, write: OriginCommit | ActualsCommit) -> tuple[int, int]:
         """Validate and apply one unpublished ledger delta."""
         if not isinstance(write, (OriginCommit, ActualsCommit)):
             raise TypeError("run-store data plane requires a transaction value")
@@ -345,18 +347,12 @@ class _IndexedLedgerDataPlane:
         if expected_count is not None and expected_count != self._forecast_origin_count:
             raise LedgerError("forecast origin count changed during admission")
 
+        due_target_count = len(self._known_due_targets)
         # The observe cycle validates and publishes first. Every later family
         # was prevalidated against scratch/indexed state, so only infallible
         # owned-container updates remain before the receipt becomes observable.
         self._ledger.apply_observe_cycle(write.observe_cycle, origin=write.origin)
-        for forecast in forecasts:
-            self._ledger.append_forecasts(
-                forecast.frame,
-                issuances=forecast.issuances,
-                observation_issuances=forecast.observation_issuances,
-            )
-        self._ledger.append_orders(orders)
-        self._ledger.append_settlements(write.settlements)
+        self._ledger._publish_staged_rows(staged)
         self._apply_observe_indexes(write.observe_cycle)
         self._forecast_rows.update(canonical_forecasts)
         if canonical_forecast_keys:
@@ -378,25 +374,29 @@ class _IndexedLedgerDataPlane:
                 self._earliest_origin = write.origin
             if self._latest_origin is None or write.origin > self._latest_origin:
                 self._latest_origin = write.origin
+        return (
+            len(staged.forecasts) + len(staged.orders) + len(staged.settlements),
+            len(self._known_due_targets) - due_target_count,
+        )
 
     def _apply_observe_indexes(self, cycle: ObserveCycle) -> None:
         """Apply one already validated observe delta to the lookup indexes."""
         for value in cycle.history_appends:
             self._history_by_timestamp.setdefault(value.timestamp, {})[value.key] = value
         for forecast_key in cycle.pending_removals:
-            self._remove_pending(_ledger_pending_key(forecast_key))
+            self._remove_pending(_ledger_forecast_key(forecast_key))
         for retained in cycle.pending_retentions:
             self._index_pending(retained)
 
     def _index_pending(self, pending: PendingObservation) -> None:
         """Insert or replace one pending row in its target and lineage indexes."""
-        key = _ledger_pending_key(pending.forecast_key)
+        key = _ledger_forecast_key(pending.forecast_key)
         target = pending.target_timestamp
         self._pending_rows[key] = pending
         self._pending_by_target.setdefault(target, {})[key] = pending
         self._pending_by_group.setdefault(_pending_group(pending), {})[key] = pending
         if target not in self._known_due_targets:
-            insort(self._due_targets, target)
+            insort(self._due_targets, target, lo=self._due_target_cursor)
             self._known_due_targets.add(target)
 
     def _remove_pending(self, key: ForecastKey) -> None:
@@ -500,6 +500,7 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
         self._states: dict[str, bytes] = {}
         self._checkpoints: dict[str, bytes] = {}
         self._checkpoint_indexes: dict[str, bytes] = {}
+        self._checkpoint_keys_by_index: dict[str, str | None] = {}
         self._resume_marker: pd.Timestamp | None = None
         self._audit_counts = {
             "origin_opens": 0,
@@ -512,6 +513,9 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
             "history_rows_appended": 0,
             "forecast_rows_appended": 0,
             "resolution_rows_applied": 0,
+            "staged_rows_validated": 0,
+            "due_targets_indexed": 0,
+            "checkpoint_indexes_decoded": 0,
         }
 
     def open(self, intent: OriginIntent | ActualsIntent) -> OriginSnapshot | ActualsSnapshot:
@@ -686,12 +690,18 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
                 if existing is not None and existing != value:
                     raise LedgerError(f"checkpoint key {key!r} already holds different bytes")
 
-            super()._apply(write)
+            staged_rows_validated, due_targets_indexed = super()._apply(write)
             revision = self._revision + 1
             receipt = CommitReceipt.from_commit(write, revision=revision)
             self._states.update(write.state_updates)
             self._checkpoints.update(checkpoint_updates)
             self._checkpoint_indexes.update(checkpoint_indexes)
+            self._checkpoint_keys_by_index.update(
+                {
+                    key: _checkpoint_key_from_index(value)
+                    for key, value in checkpoint_indexes.items()
+                }
+            )
             self._resume_marker = write.resume_marker
             self._revision = revision
             self._commits[write.commit_key] = receipt
@@ -711,6 +721,11 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
                     write.origin,
                     lo=self._due_target_cursor,
                 )
+                if self._due_target_cursor:
+                    crossed = self._due_targets[: self._due_target_cursor]
+                    del self._due_targets[: self._due_target_cursor]
+                    self._known_due_targets.difference_update(crossed)
+                    self._due_target_cursor = 0
             self._record_audit(
                 commits=1,
                 source_rows_examined=source_rows_examined,
@@ -721,6 +736,9 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
                     else sum(len(value._frame) for value in write.forecasts)
                 ),
                 resolution_rows_applied=len(write.observe_cycle.resolutions),
+                staged_rows_validated=staged_rows_validated,
+                due_targets_indexed=due_targets_indexed,
+                checkpoint_indexes_decoded=len(checkpoint_indexes),
             )
             return receipt
 
@@ -803,14 +821,7 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
 
     def _active_checkpoints(self) -> Mapping[str, bytes]:
         """Project only checkpoint blobs named by the compact lineage indexes."""
-        keys: set[str] = set()
-        for encoded in self._checkpoint_indexes.values():
-            try:
-                payload = json.loads(encoded)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if isinstance(payload, dict) and isinstance(payload.get("checkpoint_key"), str):
-                keys.add(payload["checkpoint_key"])
+        keys = {key for key in self._checkpoint_keys_by_index.values() if key is not None}
         return {key: self._checkpoints[key] for key in keys if key in self._checkpoints}
 
     def _record_audit(self, **deltas: int) -> None:
@@ -851,7 +862,7 @@ class InMemoryLedgerReader:
 
     @property
     def metadata(self) -> LedgerSessionMetadata:
-        """Return immutable identity for the closed sink session."""
+        """Return immutable identity for the closed store session."""
         return self._metadata
 
     def scan(self, selection: LedgerSelection) -> Iterator[LedgerBatch]:
@@ -1025,14 +1036,16 @@ class InMemoryLedgerReader:
             )
             else None
         )
+        resolution = self._store._ledger._resolutions.get(forecast_key)
+        row_actual = None if resolution is None else resolution.actual
+        annotation = self._store._ledger._annotations.get(forecast_key)
         for bound_key, issuance in row.issuances.items():
             target = CoverageTarget(
                 descriptor=issuance.descriptor,
                 guaranteed_side=issuance.guaranteed_side,
                 bound_key=bound_key,
             )
-            resolution = self._store._ledger._resolutions.get(forecast_key)
-            actual_value = None if resolution is None else resolution.actual
+            actual_value = row_actual
             if issuance.bounds_finite and target.descriptor.window is EmissionScope.WINDOW_SUM:
                 actual_value = window_sum_actual
             outcome = _score_bound(
@@ -1041,7 +1054,7 @@ class InMemoryLedgerReader:
                 actual_value=actual_value,
                 target=target,
                 issuance=issuance,
-                annotation=self._store._ledger._annotations.get(forecast_key),
+                annotation=annotation,
                 registry=self._registry,
             )
             outcomes.append(
@@ -1127,15 +1140,20 @@ def _actual_record_buckets(
     )
 
 
-def _ledger_pending_key(value: ConformalForecastKey) -> ForecastKey:
-    """Project a conformal forecast key into the ledger tuple key."""
-    return value.series_key, value.origin, value.horizon_step, value.model_name
-
-
 def _pending_group(value: PendingObservation) -> _PendingGroup:
     """Return the bounded forecast lineage needed for window-sum readiness."""
     key = value.forecast_key
     return key.series_key, key.origin, key.model_name
+
+
+def _checkpoint_key_from_index(encoded: bytes) -> str | None:
+    """Project one opaque checkpoint index into its active checkpoint key."""
+    try:
+        payload = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    key = payload.get("checkpoint_key") if isinstance(payload, dict) else None
+    return key if isinstance(key, str) else None
 
 
 def _stage_new_rows(

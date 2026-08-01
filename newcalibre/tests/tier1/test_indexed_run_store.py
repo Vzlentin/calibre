@@ -45,10 +45,10 @@ from newcalibre.observe import (
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 
 
-def _session() -> SessionIdentity:
+def _session(series_keys: tuple[str, ...] = ("a",)) -> SessionIdentity:
     return SessionIdentity.derive(
         tenant="tenant-a",
-        series_keys=("a",),
+        series_keys=series_keys,
         calendar=CALENDAR,
         horizon=1,
         model_config={"backend": "fixture", "name": "fixture"},
@@ -87,7 +87,7 @@ def _forecast_write(origin: pd.Timestamp, *, point: float = 7.0) -> ForecastWrit
 
 def _observe(snapshot) -> ObserveCycle:
     loop = ObserveLoop(
-        hierarchy=HierarchyIndex.flat(("a",)),
+        hierarchy=HierarchyIndex.flat(snapshot.session.series_keys),
         observed_history=snapshot.observed_history,
         pending_observations=snapshot.pending_observations,
     )
@@ -249,15 +249,21 @@ def test_failed_commit_exposes_no_durable_family_or_cursor_advance() -> None:
 
 def test_sixty_four_origin_work_is_delta_proportional_and_reader_equivalent() -> None:
     """Keep equal append/resolve deltas flat while accumulated history grows."""
-    session = _session()
+    session = _session(("a", "b"))
     timestamps = pd.date_range("2026-01-01", periods=64, freq="D")
+    series_keys = tuple(
+        series_key for _timestamp in timestamps for series_key in session.series_keys
+    )
+    repeated_timestamps = tuple(
+        timestamp for timestamp in timestamps for _series_key in session.series_keys
+    )
     panel = Panel.from_frame(
         pd.DataFrame(
             {
-                SERIES_KEY: pd.Series(["a"] * len(timestamps), dtype="string"),
-                TIMESTAMP: timestamps,
+                SERIES_KEY: pd.Series(series_keys, dtype="string"),
+                TIMESTAMP: pd.to_datetime(repeated_timestamps),
                 OBSERVED_VALUE: pd.Series(
-                    range(1, len(timestamps) + 1),
+                    range(1, len(repeated_timestamps) + 1),
                     dtype="float64",
                 ),
             }
@@ -284,8 +290,21 @@ def test_sixty_four_origin_work_is_delta_proportional_and_reader_equivalent() ->
                 expected_revision=snapshot.revision,
                 observe_cycle=_observe(snapshot),
                 forecasts=(_forecast_write(origin, point=float(index + 1)),),
+                checkpoint_updates=(
+                    {"checkpoint-a": b"a", "checkpoint-b": b"b"} if index == 0 else {}
+                ),
+                checkpoint_indexes=(
+                    {
+                        "index-a": b'{"checkpoint_key":"checkpoint-a"}',
+                        "index-b": b'{"checkpoint_key":"checkpoint-b"}',
+                    }
+                    if index == 0
+                    else {}
+                ),
             )
         )
+        if index:
+            assert set(snapshot.checkpoints) == {"checkpoint-a", "checkpoint-b"}
         after = store.audit()
         delta = tuple(
             getattr(after, name) - getattr(before, name)
@@ -299,16 +318,20 @@ def test_sixty_four_origin_work_is_delta_proportional_and_reader_equivalent() ->
                 "history_rows_appended",
                 "forecast_rows_appended",
                 "resolution_rows_applied",
+                "staged_rows_validated",
+                "due_targets_indexed",
+                "checkpoint_indexes_decoded",
             )
         )
         if index:
             equal_delta_work.append(delta)
 
     assert len(equal_delta_work) == 63
-    assert set(equal_delta_work) == {(1, 2, 1, 1, 0, 1, 1, 1, 1)}
+    assert set(equal_delta_work) == {(1, 4, 1, 1, 0, 1, 2, 1, 1, 1, 1, 0)}
     assert len(store.forecasts) == 64
     assert len(store.observation_resolutions) == 63
-    assert len(store.observed_history) == 64
+    assert len(store.observed_history) == 128
+    assert store.audit().checkpoint_indexes_decoded == 2
 
     reader = InMemoryLedgerReader(store)
 

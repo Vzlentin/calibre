@@ -987,6 +987,17 @@ class Ledger:
             staged_rows[key] = row
         self._settlements.update(staged_rows)
 
+    def _publish_staged_rows(self, staged: Ledger) -> None:
+        """Publish rows already validated by an isolated sibling ledger."""
+        if not isinstance(staged, Ledger):
+            raise TypeError("staged ledger rows require a Ledger")
+        if staged.session != self._session or staged.calendar != self._calendar:
+            raise LedgerError("staged ledger rows do not match the owned ledger")
+        self._forecasts.update(staged._forecasts)
+        self._pending_forecasts.update(staged._pending_forecasts)
+        self._orders.update(staged._orders)
+        self._settlements.update(staged._settlements)
+
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
         """Return a fresh append-ordered snapshot of pending rows due before origin."""
         self._require_calendar_origin(origin)
@@ -1143,27 +1154,38 @@ class Ledger:
 
         outcomes: list[ScoreOutcome] = []
         for forecast_key, row in self._forecasts.items():
+            resolution = self._resolutions.get(forecast_key)
+            row_actual = None if resolution is None else resolution.actual
+            window_sum_actual = (
+                _resolved_window_sum(
+                    self._forecasts,
+                    forecast_key=forecast_key,
+                    resolutions=self._resolutions,
+                )
+                if any(
+                    issuance.bounds_finite
+                    and issuance.descriptor.window is EmissionScope.WINDOW_SUM
+                    for issuance in row.issuances.values()
+                )
+                else None
+            )
+            annotation = self._annotations.get(forecast_key)
             for bound_key, issuance in row.issuances.items():
                 target = CoverageTarget(
                     descriptor=issuance.descriptor,
                     guaranteed_side=issuance.guaranteed_side,
                     bound_key=bound_key,
                 )
-                resolution = self._resolutions.get(forecast_key)
-                actual_value = None if resolution is None else resolution.actual
+                actual_value = row_actual
                 if issuance.bounds_finite and target.descriptor.window is EmissionScope.WINDOW_SUM:
-                    actual_value = _resolved_window_sum(
-                        self._forecasts,
-                        forecast_key=forecast_key,
-                        resolutions=self._resolutions,
-                    )
+                    actual_value = window_sum_actual
                 outcome = _score_bound(
                     forecast_key=forecast_key,
                     row=row,
                     actual_value=actual_value,
                     target=target,
                     issuance=issuance,
-                    annotation=self._annotations.get(forecast_key),
+                    annotation=annotation,
                     registry=registry,
                 )
                 outcomes.append(outcome)
@@ -1230,7 +1252,7 @@ def _resolved_window_sum(
     forecasts: Mapping[ForecastKey, ForecastRow],
     *,
     forecast_key: ForecastKey,
-    resolutions: Mapping[ForecastKey, ObservationResolution] | None = None,
+    resolutions: Mapping[ForecastKey, ObservationResolution],
 ) -> float | None:
     series_key, origin, terminal_step, model_name = forecast_key
     members: list[ForecastRow] = []
@@ -1243,9 +1265,7 @@ def _resolved_window_sum(
                 "window-sum coverage requires every leading protection-window member"
             ) from error
     actuals = tuple(
-        member.actual_value
-        if resolutions is None or (resolution := resolutions.get(member.key)) is None
-        else resolution.actual
+        None if (resolution := resolutions.get(member.key)) is None else resolution.actual
         for member in members
     )
     if any(actual is None for actual in actuals):

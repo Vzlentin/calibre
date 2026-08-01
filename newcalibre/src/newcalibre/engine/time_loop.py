@@ -322,7 +322,7 @@ class TimeLoop:
             )
             actuals = self._settlement_actuals(period)
             if period in self._forecast_origins:
-                self._spine.run_origin(
+                result = self._spine.run_origin(
                     OriginRequest(
                         session=self._request.session,
                         origin=period,
@@ -337,9 +337,7 @@ class TimeLoop:
                         actuals_semantics=self._request.actuals_semantics,
                     ),
                 )
-                receipt = self._open_origin(period).receipt
-                if receipt is None:
-                    raise TimeLoopError(f"time loop did not commit origin {period}")
+                receipt = result.receipt
             else:
                 observation = self._engine.observe(
                     period,
@@ -376,9 +374,8 @@ class TimeLoop:
 
         next_period = self._calendar.advance(self._settlement_periods[-1], 1)
         close_snapshot = self._open_origin(next_period)
-        final_observe_receipt = close_snapshot.receipt
-        if final_observe_receipt is None:
-            final_observe_receipt = self._commit_observation(close_snapshot)
+        if close_snapshot.receipt is None:
+            self._commit_observation(close_snapshot)
         final_opened = self._open_origin(next_period, settlement_periods=(next_period,))
         final_snapshot = final_opened.settlement
         if final_snapshot is None:

@@ -261,8 +261,9 @@ class EventDriver:
         calendar = self._calendar
         for record in event.submission.records:
             calendar.require_member(record.timestamp, name="actuals event timestamp")
-        key = ActualsCommitKey(tuple(record.key for record in event.submission.records))
-        snapshot = self._run_store.open(ActualsIntent(event.session, event.submission))
+        intent = ActualsIntent(event.session, event.submission)
+        key = intent.commit_key
+        snapshot = self._run_store.open(intent)
         if not isinstance(snapshot, ActualsSnapshot):
             raise EventDriverError("event store returned an origin snapshot for actuals")
         if snapshot.actuals_semantics is not self._actuals_semantics:

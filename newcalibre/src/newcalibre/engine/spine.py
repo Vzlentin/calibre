@@ -101,7 +101,7 @@ from newcalibre.ledger import (
     GuaranteedSide,
     OrderRow,
 )
-from newcalibre.observe import ActualsSubmission, ObserveCycle, ObserveLoop
+from newcalibre.observe import ObserveCycle, ObserveLoop
 from newcalibre.ordering import OrderingInputError
 from newcalibre.reconcile import ReconciliationContext, resolve_strategy
 
@@ -927,7 +927,6 @@ class Engine:
         *,
         session: SessionIdentity,
         snapshot: OriginSnapshot | ActualsSnapshot | None = None,
-        submission: ActualsSubmission | None = None,
     ) -> ObservationResult:
         """Stage one observe cycle from the active revision snapshot."""
         self._require_session(session)
@@ -937,8 +936,6 @@ class Engine:
             self._begin_cycle(snapshot)
         token = self._cycle_for(session=session, origin=origin)
         snapshot = self._snapshots[token]
-        if submission is not None and not isinstance(submission, ActualsSubmission):
-            raise TypeError("observe submission must be an ActualsSubmission or None")
         prior_states = dict(snapshot.conformal_states)
         loop = ObserveLoop(
             hierarchy=self._hierarchy,
@@ -947,8 +944,7 @@ class Engine:
             conformal_states=prior_states,
             runtime=self._runtime,
         )
-        accepted = snapshot.actuals if submission is None else submission
-        loop.accept(accepted)
+        loop.accept(snapshot.actuals)
         cycle = loop.cycle(origin)
         return _bind_observation_result(
             cycle,
@@ -991,7 +987,9 @@ class Engine:
         if not isinstance(request, (OriginCommit, ActualsCommit)):
             raise TypeError("commit requires a CommitRequest, OriginCommit, or ActualsCommit")
         self._require_session(request.session)
-        receipt = _snapshot_commit_receipt(self._run_store.commit(request))
+        receipt = self._run_store.commit(request)
+        if not isinstance(receipt, CommitReceipt):
+            raise _EngineError("run store must return a CommitReceipt")
         expected = CommitReceipt.from_commit(
             request,
             revision=request.expected_revision + 1,
@@ -1348,28 +1346,6 @@ def _bind_forecast_batch(
     )
     object.__setattr__(bound, "_token", token)
     return bound
-
-
-def _snapshot_commit_receipt(receipt: object) -> CommitReceipt:
-    """Collapse a store callback result into one stable, exact receipt."""
-    if not isinstance(receipt, CommitReceipt):
-        raise _EngineError("run store must return a CommitReceipt")
-    return CommitReceipt(
-        session=receipt.session,
-        origin=receipt.origin,
-        digest=receipt.digest,
-        expected_revision=receipt.expected_revision,
-        revision=receipt.revision,
-        state_updates=dict(receipt.state_updates),
-        has_forecasts=receipt.has_forecasts,
-        observe_cycle=receipt.observe_cycle,
-        settlement_periods=tuple(receipt.settlement_periods),
-        actual_keys=tuple(receipt.actual_keys),
-        input_fingerprint=receipt.input_fingerprint,
-        orders=tuple(receipt.orders),
-        inventory_positions=dict(receipt.inventory_positions),
-        resume_marker=receipt.resume_marker,
-    )
 
 
 def _bind_observation_result(
