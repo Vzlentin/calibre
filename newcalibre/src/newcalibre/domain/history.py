@@ -194,11 +194,12 @@ class HistoryDelta:
 
 @dataclass(frozen=True, slots=True)
 class CycleToken:
-    """Bind an intermediate engine value to one session/origin/revision cycle."""
+    """Bind an intermediate engine value to one unique opened store cycle."""
 
     session: SessionIdentity
     origin: pd.Timestamp
     revision: int
+    attempt: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.session, SessionIdentity):
@@ -213,7 +214,14 @@ class CycleToken:
             or self.revision < 1
         ):
             raise HistoryError("cycle token revision must be a positive integer")
+        if (
+            not isinstance(self.attempt, Integral)
+            or isinstance(self.attempt, bool)
+            or self.attempt < 1
+        ):
+            raise HistoryError("cycle token attempt must be a positive integer")
         object.__setattr__(self, "revision", int(self.revision))
+        object.__setattr__(self, "attempt", int(self.attempt))
 
 
 def _require_storage_cursor(storage: _HistoryStorage, cursor: HistoryCursor) -> None:

@@ -709,6 +709,28 @@ def test_cycle_token_uses_store_revision_and_rejects_stale_fitted_work() -> None
         engine.predict(fitted)
 
 
+def test_reopening_the_same_revision_retires_prior_attempt_values() -> None:
+    """Reject values staged by an aborted attempt even without a store commit."""
+    panel = _panel()
+    session = _session()
+    store = _store(session, panel)
+    engine = _engine(session=session, panel=panel, store=store)
+    origin = pd.Timestamp("2026-01-05")
+    request = OriginRequest(session=session, origin=origin, scope=Scope.LOCAL)
+    snapshot = _snapshot(store, session, origin)
+    first = engine.observe(origin, session=session, snapshot=snapshot)
+    fitted = engine.fit(request)
+
+    second = engine.observe(origin, session=session, snapshot=snapshot)
+
+    assert first.token is not None
+    assert second.token is not None
+    assert first.token.revision == second.token.revision
+    assert first.token.attempt != second.token.attempt
+    with pytest.raises(EngineError, match="stale"):
+        engine.predict(fitted)
+
+
 def test_prediction_failure_publishes_no_checkpoint_or_ledger_state() -> None:
     """Abort a failed phase without exposing any staged lifecycle effect."""
     panel = _panel()

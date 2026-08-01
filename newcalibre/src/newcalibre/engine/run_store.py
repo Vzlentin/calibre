@@ -552,13 +552,10 @@ def _forecast_write_digest(write: ForecastWrite) -> str:
     digest = hashlib.sha256()
     schema = tuple((str(column), str(write._frame[column].dtype)) for column in write._frame)
     _update_digest(digest, b"schema", repr(schema).encode())
-    _update_digest(
-        digest,
-        b"rows",
-        pd.util.hash_pandas_object(write._frame, index=False, categorize=True)
-        .to_numpy(dtype="uint64")
-        .tobytes(),
-    )
+    for column in write._frame:
+        _update_digest(
+            digest, str(column).encode(), _canonical_value_bytes(write._frame[column].tolist())
+        )
     _update_digest(digest, b"issuances", _canonical_value_bytes(write.issuances))
     _update_digest(
         digest,

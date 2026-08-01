@@ -542,9 +542,21 @@ def test_closed_scan_is_canonical_and_independent_of_chunk_append_order() -> Non
 
     assert forward == reversed_chunks
     assert [
-        (key.origin, key.series_key, key.model_name, key.horizon_step) for key, _columns in forward
+        (
+            key.origin,
+            columns[LedgerColumn.TARGET_TIMESTAMP.value],
+            key.series_key,
+            key.model_name,
+        )
+        for key, columns in forward
     ] == sorted(
-        (key.origin, key.series_key, key.model_name, key.horizon_step) for key, _columns in forward
+        (
+            key.origin,
+            columns[LedgerColumn.TARGET_TIMESTAMP.value],
+            key.series_key,
+            key.model_name,
+        )
+        for key, columns in forward
     )
 
 

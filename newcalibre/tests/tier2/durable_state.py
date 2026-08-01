@@ -16,6 +16,7 @@ import pandas as pd
 from newcalibre.conformal import ObserveAnnotation
 from newcalibre.domain import Calendar, SessionIdentity
 from newcalibre.engine import SettlementSnapshot
+from newcalibre.engine.run_store import CommitKey, CommitReceipt
 from newcalibre.ledger import ForecastRow, OrderRow, SettlementRecord
 from newcalibre.observe import ObservationResolution, ObservedActual, PendingObservation
 
@@ -66,6 +67,18 @@ class _DurableRunStore(Protocol):
     @property
     def checkpoint_indexes(self) -> Mapping[str, bytes]: ...
 
+    @property
+    def revision(self) -> int: ...
+
+    @property
+    def resume_marker(self) -> pd.Timestamp | None: ...
+
+    @property
+    def receipts(self) -> Mapping[CommitKey, CommitReceipt]: ...
+
+    @property
+    def settlement_receipts(self) -> Mapping[pd.Timestamp, CommitReceipt | None]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class DurableState:
@@ -82,13 +95,21 @@ class DurableState:
     conformal_states: tuple[_Normalized, ...]
     checkpoints: tuple[_Normalized, ...]
     checkpoint_indexes: tuple[_Normalized, ...]
+    revision: int
+    receipts: tuple[_Normalized, ...]
+    settlement_receipts: tuple[_Normalized, ...]
+    resume_marker: _Normalized
     inventory_positions: tuple[_Normalized, ...]
     open_orders: tuple[_Normalized, ...]
     booked_costs: tuple[_Normalized, ...]
 
 
-def project_durable_state(store: _DurableRunStore) -> DurableState:
-    """Return a key-sorted typed projection without journal or timing facts."""
+def project_durable_state(
+    store: _DurableRunStore,
+    *,
+    include_journal: bool = True,
+) -> DurableState:
+    """Return a key-sorted typed projection without timing or audit counters."""
     forecasts = tuple(
         _forecast(row)
         for row in sorted(
@@ -173,6 +194,25 @@ def project_durable_state(store: _DurableRunStore) -> DurableState:
             key=lambda item: item[0].encode(),
         )
     )
+    receipt_rows = (
+        tuple(
+            (_normalize(key), _normalize(receipt))
+            for key, receipt in sorted(
+                store.receipts.items(),
+                key=lambda item: repr(_normalize(item[0])),
+            )
+        )
+        if include_journal
+        else ()
+    )
+    settlement_receipt_rows = (
+        tuple(
+            (_normalize(period), _normalize(receipt))
+            for period, receipt in sorted(store.settlement_receipts.items())
+        )
+        if include_journal
+        else ()
+    )
     positions, open_orders = _inventory_state(store)
     holding = math.fsum(row.holding.amount for row in store.settlements)
     shortage = math.fsum(row.shortage.amount for row in store.settlements)
@@ -189,6 +229,10 @@ def project_durable_state(store: _DurableRunStore) -> DurableState:
         conformal_states=state_rows,
         checkpoints=checkpoint_rows,
         checkpoint_indexes=checkpoint_index_rows,
+        revision=store.revision if include_journal else 0,
+        receipts=receipt_rows,
+        settlement_receipts=settlement_receipt_rows,
+        resume_marker=_normalize(store.resume_marker if include_journal else None),
         inventory_positions=positions,
         open_orders=open_orders,
         booked_costs=(

@@ -122,6 +122,7 @@ def run_m5(config_path: Path) -> M5RunResult:
         calendar=forecast_panel.calendar,
         actuals=compiled.panel,
         actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+        hierarchy=compiled.hierarchy,
     )
     engine = Engine(
         session=session,

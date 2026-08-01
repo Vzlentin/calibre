@@ -23,11 +23,14 @@ from newcalibre.domain import (
     Calendar,
     CensoringAssertion,
     EmissionScope,
+    HierarchyIndex,
+    HistoryCursor,
     InventoryPosition,
     Panel,
     SessionIdentity,
     StockoutRule,
 )
+from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.engine._session import (
     session_decision_inputs,
     session_definition,
@@ -85,6 +88,8 @@ _Output = TypeVar("_Output")
 type _ForecastScanSegment = tuple[pd.Timestamp, tuple[ForecastKey, ...]]
 type _PendingGroup = tuple[str, pd.Timestamp, str]
 
+_CHECKPOINT_INDEX_SCHEMA = "newcalibre.forecast-checkpoint-index/v1"
+
 
 @dataclass(frozen=True, slots=True)
 class RunStoreAudit:
@@ -126,6 +131,7 @@ class _IndexedLedgerDataPlane:
         *,
         session: SessionIdentity,
         calendar: Calendar,
+        hierarchy: HierarchyIndex,
         initial_arrivals: Mapping[ActualKey, float] | None = None,
     ) -> None:
         self._lock = RLock()
@@ -137,6 +143,10 @@ class _IndexedLedgerDataPlane:
             dict[ForecastKey, PendingObservation],
         ] = {}
         self._pending_by_group: dict[_PendingGroup, dict[ForecastKey, PendingObservation]] = {}
+        self._pending_by_actual: dict[
+            ActualKey,
+            dict[ForecastKey, PendingObservation],
+        ] = {}
         self._pending_rows: dict[ForecastKey, PendingObservation] = {}
         self._due_targets: list[pd.Timestamp] = []
         self._known_due_targets: set[pd.Timestamp] = set()
@@ -159,6 +169,12 @@ class _IndexedLedgerDataPlane:
             if initial_arrivals:
                 raise LedgerError("initial arrivals require a session decision configuration")
         session_series, _frequency = session_series_and_frequency(session_definition(session))
+        if not isinstance(hierarchy, HierarchyIndex):
+            raise TypeError("in-memory run store hierarchy must be a HierarchyIndex")
+        if not set(session_series) <= set(hierarchy.node_labels):
+            raise LedgerError("run-store session series are outside its hierarchy")
+        self._hierarchy = hierarchy
+        self._members_by_node = {node.label: node.members for node in hierarchy.nodes}
         self._series_keys = session_series if self._decision is None else self._decision.series_keys
         self._settlement_index = (
             None
@@ -310,7 +326,7 @@ class _IndexedLedgerDataPlane:
         _require_origin_rows(write, staged=staged)
         staged_forecasts = tuple((row.key, row) for row in staged.forecasts)
         canonical_forecasts = tuple(
-            sorted(staged_forecasts, key=lambda item: _forecast_scan_key(item[0]))
+            sorted(staged_forecasts, key=lambda item: _forecast_segment_key(item[0]))
         )
         canonical_forecast_keys = tuple(key for key, _row in canonical_forecasts)
         for label, value in write.observe_cycle.state_updates.items():
@@ -395,6 +411,14 @@ class _IndexedLedgerDataPlane:
         self._pending_rows[key] = pending
         self._pending_by_target.setdefault(target, {})[key] = pending
         self._pending_by_group.setdefault(_pending_group(pending), {})[key] = pending
+        try:
+            members = self._members_by_node[pending.forecast_key.series_key]
+        except KeyError as error:
+            raise LedgerError(
+                f"pending forecast names unknown hierarchy node {pending.forecast_key.series_key!r}"
+            ) from error
+        for member in members:
+            self._pending_by_actual.setdefault((member, target), {})[key] = pending
         if target not in self._known_due_targets:
             insort(self._due_targets, target, lo=self._due_target_cursor)
             self._known_due_targets.add(target)
@@ -411,6 +435,11 @@ class _IndexedLedgerDataPlane:
         group_rows.pop(key)
         if not group_rows:
             self._pending_by_group.pop(group)
+        for member in self._members_by_node[pending.forecast_key.series_key]:
+            actual_rows = self._pending_by_actual[(member, pending.target_timestamp)]
+            actual_rows.pop(key)
+            if not actual_rows:
+                self._pending_by_actual.pop((member, pending.target_timestamp))
 
     def _validated_settlement_delta(
         self,
@@ -479,13 +508,16 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
         calendar: Calendar,
         actuals: Panel | None = None,
         actuals_semantics: ActualsSemantics,
+        hierarchy: HierarchyIndex | None = None,
         initial_arrivals: Mapping[ActualKey, float] | None = None,
     ) -> None:
         if not isinstance(actuals_semantics, ActualsSemantics):
             raise TypeError("in-memory run-store semantics must be ActualsSemantics")
+        session_series, _frequency = session_series_and_frequency(session_definition(session))
         super().__init__(
             session=session,
             calendar=calendar,
+            hierarchy=hierarchy or HierarchyIndex.flat(session_series),
             initial_arrivals=initial_arrivals,
         )
         source_records = (
@@ -538,7 +570,8 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
                     ]
                 )
                 pending, target_buckets_examined, pending_rows_examined = self._pending_snapshot(
-                    {*due_targets, *(record.timestamp for record in actuals.records)}
+                    due_targets=due_targets,
+                    actual_keys=(record.key for record in actuals.records),
                 )
                 settlement = (
                     None
@@ -595,7 +628,8 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
             origin = self.calendar.advance(admission_frontier, 1)
             settlement = self._actuals_settlement_snapshot(intent)
             pending, target_buckets_examined, pending_rows_examined = self._pending_snapshot(
-                record.timestamp for record in intent.submission.records
+                due_targets=(),
+                actual_keys=(record.key for record in intent.submission.records),
             )
             history_periods = {
                 *(value.target_timestamp for value in pending),
@@ -690,18 +724,24 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
                 if existing is not None and existing != value:
                     raise LedgerError(f"checkpoint key {key!r} already holds different bytes")
 
-            staged_rows_validated, due_targets_indexed = super()._apply(write)
+            decoded_indexes = {
+                key: _checkpoint_key_from_index(value) for key, value in checkpoint_indexes.items()
+            }
+            available_checkpoints = set(self._checkpoints) | set(checkpoint_updates)
+            for index_key, checkpoint_key in decoded_indexes.items():
+                if checkpoint_key not in available_checkpoints:
+                    raise LedgerError(
+                        f"checkpoint index {index_key!r} names missing checkpoint "
+                        f"{checkpoint_key!r}"
+                    )
             revision = self._revision + 1
             receipt = CommitReceipt.from_commit(write, revision=revision)
+
+            staged_rows_validated, due_targets_indexed = super()._apply(write)
             self._states.update(write.state_updates)
             self._checkpoints.update(checkpoint_updates)
             self._checkpoint_indexes.update(checkpoint_indexes)
-            self._checkpoint_keys_by_index.update(
-                {
-                    key: _checkpoint_key_from_index(value)
-                    for key, value in checkpoint_indexes.items()
-                }
-            )
+            self._checkpoint_keys_by_index.update(decoded_indexes)
             self._resume_marker = write.resume_marker
             self._revision = revision
             self._commits[write.commit_key] = receipt
@@ -784,23 +824,37 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
 
     def _pending_snapshot(
         self,
-        targets: Iterable[pd.Timestamp],
+        *,
+        due_targets: Iterable[pd.Timestamp],
+        actual_keys: Iterable[ActualKey],
     ) -> tuple[tuple[PendingObservation, ...], int, int]:
-        """Read addressed target buckets and any bounded window-sum lineages."""
-        canonical_targets = tuple(sorted(set(targets)))
+        """Read crossed targets, affected memberships, and bounded lineages."""
+        canonical_targets = tuple(sorted(set(due_targets)))
+        canonical_actuals = tuple(
+            sorted(set(actual_keys), key=lambda key: (key[1], key[0].encode()))
+        )
         rows: dict[ForecastKey, PendingObservation] = {}
         for target in canonical_targets:
             rows.update(self._pending_by_target.get(target, {}))
+        for actual_key in canonical_actuals:
+            rows.update(self._pending_by_actual.get(actual_key, {}))
         for group in {_pending_group(value) for value in rows.values()}:
             rows.update(self._pending_by_group[group])
         pending = tuple(
             value
             for _key, value in sorted(
                 rows.items(),
-                key=lambda item: _forecast_scan_key(item[0]),
+                key=lambda item: (
+                    item[1].target_timestamp,
+                    item[0][0].encode(),
+                    item[0][3].encode(),
+                    item[0][1],
+                    item[0][2],
+                ),
             )
         )
-        return pending, len(canonical_targets), len(pending)
+        addressed_targets = set(canonical_targets) | {key[1] for key in canonical_actuals}
+        return pending, len(addressed_targets), len(pending)
 
     def _history_snapshot(
         self,
@@ -833,6 +887,21 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
     def revision(self) -> int:
         """Return the current monotonic revision for diagnostics."""
         return self._revision
+
+    @property
+    def resume_marker(self) -> pd.Timestamp | None:
+        """Return the latest durable resume marker for diagnostics."""
+        return self._resume_marker
+
+    @property
+    def receipts(self) -> Mapping[CommitKey, CommitReceipt]:
+        """Return the immutable natural-key journal for diagnostics."""
+        return MappingProxyType(dict(self._commits))
+
+    @property
+    def settlement_receipts(self) -> Mapping[pd.Timestamp, CommitReceipt | None]:
+        """Return immutable settlement-to-receipt journal links for diagnostics."""
+        return MappingProxyType(dict(self._settlement_receipts))
 
     @property
     def states(self) -> Mapping[str, bytes]:
@@ -1088,9 +1157,9 @@ class InProcessDispatch:
         return tuple(function(item) for item in items)
 
 
-def _forecast_scan_key(key: ForecastKey) -> tuple[pd.Timestamp, str, str, int]:
-    series_key, origin, horizon_step, model_name = key
-    return origin, series_key, model_name, horizon_step
+def _forecast_segment_key(key: ForecastKey) -> tuple[int, bytes, bytes]:
+    series_key, _origin, horizon_step, model_name = key
+    return horizon_step, series_key.encode(), model_name.encode()
 
 
 def _panel_actual_records(
@@ -1146,14 +1215,48 @@ def _pending_group(value: PendingObservation) -> _PendingGroup:
     return key.series_key, key.origin, key.model_name
 
 
-def _checkpoint_key_from_index(encoded: bytes) -> str | None:
-    """Project one opaque checkpoint index into its active checkpoint key."""
+def _checkpoint_key_from_index(encoded: bytes) -> str:
+    """Validate one canonical checkpoint index and return its checkpoint key."""
     try:
         payload = json.loads(encoded)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    key = payload.get("checkpoint_key") if isinstance(payload, dict) else None
-    return key if isinstance(key, str) else None
+        if not isinstance(payload, dict) or set(payload) != {
+            "checkpoint_key",
+            "cursor",
+            "schema",
+        }:
+            raise ValueError("exact object fields")
+        if canonical_json_bytes(payload, path="forecast checkpoint index") != encoded:
+            raise ValueError("canonical encoding")
+        if payload["schema"] != _CHECKPOINT_INDEX_SCHEMA:
+            raise ValueError("supported schema")
+        key = payload["checkpoint_key"]
+        if not isinstance(key, str) or not key:
+            raise ValueError("checkpoint key")
+        cursor = payload["cursor"]
+        if not isinstance(cursor, dict) or set(cursor) != {
+            "panel_identity",
+            "series_start",
+            "series_stop",
+            "time_bound",
+        }:
+            raise ValueError("cursor")
+        HistoryCursor(
+            cursor["panel_identity"],
+            cursor["series_start"],
+            cursor["series_stop"],
+            cursor["time_bound"],
+        )
+    except (
+        CanonicalJsonError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as error:
+        raise LedgerError(f"checkpoint index is malformed: {error}") from error
+    return key
 
 
 def _stage_new_rows(

@@ -169,7 +169,7 @@ def test_history_cursor_and_cycle_token_reject_invalid_identity() -> None:
         horizon=2,
         model_config={"backend": "seasonal-naive", "m": 2},
     )
-    token = CycleToken(session, pd.Timestamp("2026-01-03"), 1)
+    token = CycleToken(session, pd.Timestamp("2026-01-03"), 1, 1)
     assert token.revision == 1
     with pytest.raises(HistoryError, match="positive"):
-        CycleToken(session, pd.Timestamp("2026-01-03"), 0)
+        CycleToken(session, pd.Timestamp("2026-01-03"), 0, 1)

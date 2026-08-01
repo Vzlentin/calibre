@@ -32,7 +32,10 @@ def test_time_loop_and_event_frontier_publish_identical_domain_state(
     time_world = run_time_world(runtime_name)
     event_world = run_event_world(runtime_name)
 
-    assert project_durable_state(event_world.store) == project_durable_state(time_world.store)
+    assert project_durable_state(
+        event_world.store,
+        include_journal=False,
+    ) == project_durable_state(time_world.store, include_journal=False)
     assert len(time_world.store.forecasts) == 48
     assert len(time_world.store.orders) == 8
     assert len(time_world.store.settlements) == 16
@@ -50,8 +53,14 @@ def test_event_actual_order_and_matching_rechunk_schedules_are_deterministic(
     rechunked = run_event_world(runtime_name, rechunk=True)
     repeated_rechunk = run_event_world(runtime_name, rechunk=True, reverse=True)
 
-    assert project_durable_state(reversed_batch.store) == project_durable_state(canonical.store)
-    assert project_durable_state(repeated_rechunk.store) == project_durable_state(rechunked.store)
+    assert project_durable_state(
+        reversed_batch.store,
+        include_journal=False,
+    ) == project_durable_state(canonical.store, include_journal=False)
+    assert project_durable_state(
+        repeated_rechunk.store,
+        include_journal=False,
+    ) == project_durable_state(rechunked.store, include_journal=False)
     assert rechunked.store.revision > canonical.store.revision
 
 

@@ -88,7 +88,7 @@ def test_first_fit_exact_load_and_incremental_resume_stage_deterministic_checkpo
         lifecycle,
         session=session,
         task=first,
-        token=CycleToken(session, first.origin, 1),
+        token=CycleToken(session, first.origin, 1, 1),
         checkpoints=checkpoints,
         indexes=indexes,
     )
@@ -98,7 +98,7 @@ def test_first_fit_exact_load_and_incremental_resume_stage_deterministic_checkpo
         ForecastLifecycle(adapter_resolver=resolve_adapter),
         session=session,
         task=first,
-        token=CycleToken(session, first.origin, 2),
+        token=CycleToken(session, first.origin, 2, 1),
         checkpoints=checkpoints,
         indexes=indexes,
     )
@@ -107,7 +107,7 @@ def test_first_fit_exact_load_and_incremental_resume_stage_deterministic_checkpo
         ForecastLifecycle(adapter_resolver=resolve_adapter),
         session=session,
         task=second,
-        token=CycleToken(session, second.origin, 3),
+        token=CycleToken(session, second.origin, 3, 1),
         checkpoints=checkpoints,
         indexes=indexes,
     )
@@ -124,7 +124,7 @@ def test_staged_updates_remain_unpublished_until_the_caller_commits() -> None:
     panel, config, session = _world()
     task = _task(panel, config, "2026-01-15")
     lifecycle = ForecastLifecycle(adapter_resolver=resolve_adapter)
-    result = lifecycle.run_item((session, task, CycleToken(session, task.origin, 1), {}, {}))
+    result = lifecycle.run_item((session, task, CycleToken(session, task.origin, 1, 1), {}, {}))
 
     checkpoints, indexes = lifecycle.staged_updates((result,))
 
@@ -144,7 +144,7 @@ def test_malformed_exact_checkpoint_fails_closed() -> None:
         lifecycle,
         session=session,
         task=task,
-        token=CycleToken(session, task.origin, 1),
+        token=CycleToken(session, task.origin, 1, 1),
         checkpoints=checkpoints,
         indexes=indexes,
     )
@@ -152,7 +152,7 @@ def test_malformed_exact_checkpoint_fails_closed() -> None:
 
     with pytest.raises(ForecastLifecycleError, match="malformed"):
         ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
-            (session, task, CycleToken(session, task.origin, 2), checkpoints, indexes)
+            (session, task, CycleToken(session, task.origin, 2, 1), checkpoints, indexes)
         )
 
 
@@ -165,7 +165,7 @@ def test_run_requires_the_exact_task_cycle() -> None:
             (
                 session,
                 task,
-                CycleToken(session, task.calendar.advance(task.origin, 1), 1),
+                CycleToken(session, task.calendar.advance(task.origin, 1), 1, 1),
                 {},
                 {},
             )
@@ -204,7 +204,7 @@ def test_well_formed_foreign_checkpoint_bindings_fail_closed(
         ForecastLifecycle(adapter_resolver=resolve_adapter),
         session=session,
         task=task,
-        token=CycleToken(session, task.origin, 1),
+        token=CycleToken(session, task.origin, 1, 1),
         checkpoints=checkpoints,
         indexes=indexes,
     )
@@ -215,7 +215,7 @@ def test_well_formed_foreign_checkpoint_bindings_fail_closed(
 
     with pytest.raises(ForecastLifecycleError):
         ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
-            (session, task, CycleToken(session, task.origin, 2), checkpoints, indexes)
+            (session, task, CycleToken(session, task.origin, 2, 1), checkpoints, indexes)
         )
 
 
@@ -229,7 +229,7 @@ def test_well_formed_foreign_checkpoint_index_target_fails_closed() -> None:
         ForecastLifecycle(adapter_resolver=resolve_adapter),
         session=session,
         task=first,
-        token=CycleToken(session, first.origin, 1),
+        token=CycleToken(session, first.origin, 1, 1),
         checkpoints=checkpoints,
         indexes=indexes,
     )
@@ -241,7 +241,7 @@ def test_well_formed_foreign_checkpoint_index_target_fails_closed() -> None:
 
     with pytest.raises(ForecastLifecycleError, match="invalid artifact"):
         ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
-            (session, later, CycleToken(session, later.origin, 2), checkpoints, indexes)
+            (session, later, CycleToken(session, later.origin, 2, 1), checkpoints, indexes)
         )
 
 
@@ -269,7 +269,7 @@ def test_declared_update_failure_leaves_snapshot_mappings_unchanged() -> None:
         lifecycle,
         session=session,
         task=first,
-        token=CycleToken(session, first.origin, 1),
+        token=CycleToken(session, first.origin, 1, 1),
         checkpoints=checkpoints,
         indexes=indexes,
     )
@@ -279,7 +279,7 @@ def test_declared_update_failure_leaves_snapshot_mappings_unchanged() -> None:
 
     with pytest.raises(RuntimeError, match="declared update failed"):
         lifecycle.run_item(
-            (session, later, CycleToken(session, later.origin, 2), checkpoints, indexes)
+            (session, later, CycleToken(session, later.origin, 2, 1), checkpoints, indexes)
         )
 
     assert calls == ["update"]

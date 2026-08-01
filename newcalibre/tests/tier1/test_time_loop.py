@@ -369,16 +369,17 @@ def test_surrogate_semantics_labels_rows_without_changing_arithmetic() -> None:
     }
 
 
-def test_loop_refuses_semantics_that_do_not_match_the_store() -> None:
+@pytest.mark.parametrize("with_decision", [False, True])
+def test_loop_refuses_semantics_that_do_not_match_the_store(with_decision: bool) -> None:
     """Prevent a fresh session from relabeling store-owned observations."""
-    session = _session()
+    session = _session(with_decision=with_decision)
     runtime = _runtime(
         session=session,
         forecast_panel=_panel(range(1, 13)),
         actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
     )
     with pytest.raises(TimeLoopError, match="semantics"):
-        _loop(runtime, _request(session))
+        _loop(runtime, _request(session, positions={} if not with_decision else None))
     _assert_no_effects(runtime)
 
 

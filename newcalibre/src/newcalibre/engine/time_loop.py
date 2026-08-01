@@ -186,6 +186,9 @@ class TimeLoop:
                 raise TimeLoopError(
                     "decision-free time loops require empty initial inventory positions"
                 )
+            opened = run_store.open(OriginIntent(request.session, request.origins[0]))
+            if opened.actuals_semantics is not request.actuals_semantics:
+                raise TimeLoopError("time-loop actuals semantics do not match the run store")
             self._engine = engine
             self._run_store = run_store
             self._request = request
