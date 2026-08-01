@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import multiprocessing
 import queue
 import sys
@@ -30,7 +31,12 @@ from newcalibre.benchmarking import (  # noqa: E402
     capture_environment,
     publish_profile_artifacts,
 )
-from newcalibre.engine import Phase, PhaseEvent, PhaseStatus  # noqa: E402
+from newcalibre.engine import (  # noqa: E402
+    RAY_WORKER_THREAD_POLICY,
+    Phase,
+    PhaseEvent,
+    PhaseStatus,
+)
 from newcalibre.protocols.m5 import load_m5_config, run_m5  # noqa: E402
 from newcalibre.protocols.m5.runner import run_m5_fit_predict  # noqa: E402
 
@@ -38,15 +44,6 @@ DEFAULT_CONFIG = PROJECT_ROOT / "benchmarks" / "m5" / "gate-c.yaml"
 DEFAULT_LOCK = PROJECT_ROOT / "uv.lock"
 _POPULATIONS = (1000, 10000, 30490)
 _PROFILE_SALT = "calibre-gate-c-profile-v1"
-_THREAD_POLICY = {
-    "BLIS_NUM_THREADS": "1",
-    "MKL_NUM_THREADS": "1",
-    "NUMEXPR_NUM_THREADS": "1",
-    "OMP_NUM_THREADS": "1",
-    "OPENBLAS_NUM_THREADS": "1",
-    "RAYON_NUM_THREADS": "1",
-    "VECLIB_MAXIMUM_THREADS": "1",
-}
 
 
 class _Monitor(Protocol):
@@ -103,7 +100,7 @@ def build_scaling_configs(config_path: Path, directory: Path) -> tuple[tuple[int
         raise ProfileError("full-M5 configuration must be a mapping")
     generated: list[tuple[int, Path]] = []
     for count in _POPULATIONS[:-1]:
-        payload = yaml.safe_load(yaml.safe_dump(raw, sort_keys=False))
+        payload = copy.deepcopy(raw)
         payload["protocol"]["population"] = {
             "kind": "digest_rank",
             "bottom_count": count,
@@ -272,7 +269,7 @@ def run_standard_profile(
         execution={
             "logical_shards": 16,
             "numeric_threads_per_worker": 1,
-            "thread_policy": dict(_THREAD_POLICY),
+            "thread_policy": dict(RAY_WORKER_THREAD_POLICY),
             "workers": 16,
         },
         sampling_interval_seconds=sampling_interval_seconds,
@@ -305,7 +302,7 @@ def main() -> int:
             lock_path=args.lock,
             sampling_interval_seconds=args.sampling_interval,
         )
-    except (OSError, ProfileError, ValueError) as error:
+    except (OSError, ValueError) as error:
         raise SystemExit(str(error)) from error
     return 0
 

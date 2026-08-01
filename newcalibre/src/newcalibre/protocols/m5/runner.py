@@ -22,6 +22,7 @@ from newcalibre.domain import (
     SessionIdentity,
 )
 from newcalibre.engine import (
+    DispatchBackend,
     Engine,
     InMemoryIndexedRunStore,
     InMemoryLedgerReader,
@@ -35,9 +36,9 @@ from newcalibre.engine import (
     TimeLoopRequest,
 )
 from newcalibre.forecasting import resolve_adapter
-from newcalibre.protocols.m5.compiler import compile_m5_protocol
-from newcalibre.protocols.m5.config import load_m5_config
-from newcalibre.protocols.m5.loader import load_m5_dataset
+from newcalibre.protocols.m5.compiler import _CompiledM5Protocol, compile_m5_protocol
+from newcalibre.protocols.m5.config import M5ProtocolConfig, load_m5_config
+from newcalibre.protocols.m5.loader import M5Dataset, load_m5_dataset
 from newcalibre.protocols.m5.scorer import M5Diagnostics, score_m5
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -126,31 +127,28 @@ class M5FitPredictResult:
             raise ValueError("M5 Fit/Predict profile must dispatch all 16 logical shards")
 
 
+@dataclass(frozen=True, slots=True)
+class _M5Composition:
+    """Retain the shared prepared M5 runtime graph."""
+
+    config: M5ProtocolConfig
+    dataset: M5Dataset
+    compiled: _CompiledM5Protocol
+    forecast_panel: Panel
+    session: SessionIdentity
+    store: InMemoryIndexedRunStore
+
+
 def run_m5(
     config_path: Path,
     *,
     reporter: Callable[[PhaseEvent], None] | None = None,
 ) -> M5RunResult:
     """Run one strict M5 configuration through the generic time-loop engine."""
-    config = load_m5_config(config_path)
-    dataset = load_m5_dataset(_PROJECT_ROOT, config)
-    compiled = compile_m5_protocol(dataset, config)
-    forecast_panel = _all_node_panel(compiled.panel, hierarchy=compiled.hierarchy)
-    session = SessionIdentity.derive(
-        tenant=config.dataset,
-        series_keys=compiled.hierarchy.node_labels,
-        calendar=forecast_panel.calendar,
-        horizon=config.horizon,
-        model_config=compiled.model_config,
-        conformal_config=compiled.conformal_config,
-    )
-    store = InMemoryIndexedRunStore(
-        session=session,
-        calendar=forecast_panel.calendar,
-        actuals=compiled.panel,
-        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
-        hierarchy=compiled.hierarchy,
-    )
+    runtime = _prepare_m5(config_path)
+    config = runtime.config
+    compiled = runtime.compiled
+    store = runtime.store
     dispatch = RayDispatch(
         logical_shards=compiled.execution.logical_shards,
         workers=compiled.execution.workers,
@@ -158,21 +156,12 @@ def run_m5(
         retries=compiled.execution.retries,
     )
     try:
-        engine = Engine(
-            session=session,
-            panel_source=InMemoryPanelSource(forecast_panel),
-            run_store=store,
-            dispatch_backend=dispatch,
-            hierarchy=compiled.hierarchy,
-            adapter_resolver=resolve_adapter,
-            reconciliation_strategy=compiled.reconciliation_strategy,
-            orderer=None,
-        )
+        engine = _engine(runtime, dispatch=dispatch)
         time_loop = TimeLoop(
             engine=engine,
             run_store=store,
             request=TimeLoopRequest(
-                session=session,
+                session=runtime.session,
                 origins=compiled.origins,
                 settlement_end=compiled.origins[-1],
                 scope=Scope(config.model_scope),
@@ -191,8 +180,8 @@ def run_m5(
     )
     pending_count = store.pending_observation_count
     return M5RunResult(
-        session=session,
-        input_inventory_sha256=dataset.input_inventory_sha256,
+        session=runtime.session,
+        input_inventory_sha256=runtime.dataset.input_inventory_sha256,
         forecast_origin_count=store.forecast_origin_count,
         commit_count=len(time_loop.receipts),
         node_count=len(compiled.hierarchy.node_labels),
@@ -209,9 +198,48 @@ def run_m5_fit_predict(config_path: Path, *, concurrency: int) -> M5FitPredictRe
     """Measure one 1,000-series origin through Fit/Predict only."""
     if concurrency not in (1, 16):
         raise ValueError("M5 Fit/Predict concurrency must equal one or 16")
-    config = load_m5_config(config_path)
+    runtime = _prepare_m5(config_path)
+    config = runtime.config
     if config.population.kind != "digest_rank" or config.population.bottom_count != 1000:
         raise ValueError("M5 Fit/Predict profiling requires the 1,000-series population")
+    compiled = runtime.compiled
+    dispatch = (
+        InProcessDispatch(logical_shards=compiled.execution.logical_shards)
+        if concurrency == 1
+        else RayDispatch(
+            logical_shards=compiled.execution.logical_shards,
+            workers=compiled.execution.workers,
+            numeric_threads_per_worker=compiled.execution.numeric_threads_per_worker,
+            retries=compiled.execution.retries,
+        )
+    )
+    try:
+        engine = _engine(runtime, dispatch=dispatch)
+        origin = compiled.origins[0]
+        snapshot = runtime.store.open(OriginIntent(runtime.session, origin))
+        engine.observe(origin, session=runtime.session, snapshot=snapshot)
+        request = OriginRequest(
+            session=runtime.session,
+            origin=origin,
+            scope=Scope(config.model_scope),
+        )
+        started = time.perf_counter()
+        fitted = engine.fit(request)
+        engine.predict(fitted)
+        wall_seconds = time.perf_counter() - started
+    finally:
+        if isinstance(dispatch, RayDispatch):
+            dispatch.shutdown()
+    return M5FitPredictResult(
+        concurrency=concurrency,
+        wall_seconds=wall_seconds,
+        dispatch_count=compiled.execution.logical_shards,
+    )
+
+
+def _prepare_m5(config_path: Path) -> _M5Composition:
+    """Prepare the canonical shared M5 runtime graph."""
+    config = load_m5_config(config_path)
     dataset = load_m5_dataset(_PROJECT_ROOT, config)
     compiled = compile_m5_protocol(dataset, config)
     forecast_panel = _all_node_panel(compiled.panel, hierarchy=compiled.hierarchy)
@@ -230,43 +258,20 @@ def run_m5_fit_predict(config_path: Path, *, concurrency: int) -> M5FitPredictRe
         actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
         hierarchy=compiled.hierarchy,
     )
-    dispatch = (
-        InProcessDispatch(logical_shards=compiled.execution.logical_shards)
-        if concurrency == 1
-        else RayDispatch(
-            logical_shards=compiled.execution.logical_shards,
-            workers=compiled.execution.workers,
-            numeric_threads_per_worker=compiled.execution.numeric_threads_per_worker,
-            retries=compiled.execution.retries,
-        )
-    )
-    try:
-        engine = Engine(
-            session=session,
-            panel_source=InMemoryPanelSource(forecast_panel),
-            run_store=store,
-            dispatch_backend=dispatch,
-            hierarchy=compiled.hierarchy,
-            adapter_resolver=resolve_adapter,
-            reconciliation_strategy=compiled.reconciliation_strategy,
-            orderer=None,
-        )
-        origin = compiled.origins[0]
-        snapshot = store.open(OriginIntent(session, origin))
-        engine.observe(origin, session=session, snapshot=snapshot)
-        request = OriginRequest(session=session, origin=origin, scope=Scope(config.model_scope))
-        started = time.perf_counter()
-        fitted = engine.fit(request)
-        engine.predict(fitted)
-        wall_seconds = time.perf_counter() - started
-    finally:
-        shutdown = getattr(dispatch, "shutdown", None)
-        if shutdown is not None:
-            shutdown()
-    return M5FitPredictResult(
-        concurrency=concurrency,
-        wall_seconds=wall_seconds,
-        dispatch_count=compiled.execution.logical_shards,
+    return _M5Composition(config, dataset, compiled, forecast_panel, session, store)
+
+
+def _engine(runtime: _M5Composition, *, dispatch: DispatchBackend) -> Engine:
+    """Compose one engine over the shared prepared M5 runtime graph."""
+    return Engine(
+        session=runtime.session,
+        panel_source=InMemoryPanelSource(runtime.forecast_panel),
+        run_store=runtime.store,
+        dispatch_backend=dispatch,
+        hierarchy=runtime.compiled.hierarchy,
+        adapter_resolver=resolve_adapter,
+        reconciliation_strategy=runtime.compiled.reconciliation_strategy,
+        orderer=None,
     )
 
 

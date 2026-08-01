@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol, cast, runtime_checkable
 
+from newcalibre.engine.ray import RAY_WORKER_THREAD_POLICY
+
 REQUIRED_PROCESS_ROLES: Final = frozenset({"driver", "ray-control", "object-store", "worker"})
-_PROCESS_ROLES: Final = REQUIRED_PROCESS_ROLES
 _SHA256: Final = re.compile(r"[0-9a-f]{64}")
 
 
@@ -33,7 +34,7 @@ class ProcessResidentSample:
     def __post_init__(self) -> None:
         if not isinstance(self.pid, int) or isinstance(self.pid, bool) or self.pid < 1:
             raise EnvironmentError("process sample pid must be positive")
-        if self.role not in _PROCESS_ROLES:
+        if self.role not in REQUIRED_PROCESS_ROLES:
             raise EnvironmentError("process sample role is unknown")
         if (
             not isinstance(self.resident_bytes, int)
@@ -193,12 +194,16 @@ class LinuxMemoryReader:
             pid = int(entry.name)
             try:
                 command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8")
-                resident = _resident_bytes(entry / "status")
             except (FileNotFoundError, ProcessLookupError):
                 continue
             role = _process_role(pid, command=command, driver_pid=self._driver_pid)
-            if role is not None:
-                processes.append(ProcessResidentSample(pid, role, resident))
+            if role is None:
+                continue
+            try:
+                resident = _resident_bytes(entry / "status")
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            processes.append(ProcessResidentSample(pid, role, resident))
         return MemorySample(
             tuple(sorted(processes, key=lambda value: (value.role.encode(), value.pid))),
             peak_job_memory_bytes=peak,
@@ -336,16 +341,7 @@ def validate_environment(value: object) -> dict[str, object]:
     ):
         raise EnvironmentError("environment requires one numeric thread per worker")
     thread_policy = execution["thread_policy"]
-    required_thread_keys = {
-        "BLIS_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-        "OMP_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "RAYON_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",
-    }
-    if not isinstance(thread_policy, dict) or set(thread_policy) != required_thread_keys:
+    if not isinstance(thread_policy, dict) or set(thread_policy) != set(RAY_WORKER_THREAD_POLICY):
         raise EnvironmentError("environment thread policy is incomplete")
     if set(thread_policy.values()) != {"1"}:
         raise EnvironmentError("environment thread policy must cap every pool at one")

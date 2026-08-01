@@ -272,10 +272,10 @@ def test_ray_options_pin_resources_threads_and_zero_retries() -> None:
         "max_task_retries": 0,
         "num_cpus": 1,
         "num_gpus": 0,
-        "runtime_env": {"env_vars": ray_backend._WORKER_ENV},
+        "runtime_env": {"env_vars": ray_backend.RAY_WORKER_THREAD_POLICY},
     }
-    assert set(ray_backend._WORKER_ENV) == _THREAD_VARIABLES
-    assert set(ray_backend._WORKER_ENV.values()) == {"1"}
+    assert set(ray_backend.RAY_WORKER_THREAD_POLICY) == _THREAD_VARIABLES
+    assert set(ray_backend.RAY_WORKER_THREAD_POLICY.values()) == {"1"}
     source = inspect.getsource(ray_backend)
     assert 'address="local"' in source
     assert "_node_ip_address=_LOOPBACK_ADDRESS" in source

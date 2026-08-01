@@ -24,7 +24,7 @@ from newcalibre.engine.ports.memory import (
     InMemoryLedgerReader,
     InMemoryPanelSource,
 )
-from newcalibre.engine.ray import RAY_BACKEND, RayDispatch
+from newcalibre.engine.ray import RAY_BACKEND, RAY_WORKER_THREAD_POLICY, RayDispatch
 from newcalibre.engine.reporting import (
     LedgerBatch,
     LedgerBoundIssuance,
@@ -144,6 +144,7 @@ __all__ = [
     "OriginRequest",
     "OriginResult",
     "RAY_BACKEND",
+    "RAY_WORKER_THREAD_POLICY",
     "RayDispatch",
     "PanelSource",
     "Phase",

@@ -34,10 +34,7 @@ from newcalibre.engine.dispatch import (
 from newcalibre.forecasting import AdapterExecutionMode
 
 RAY_BACKEND: Final = "ray"
-_RAY_LOGICAL_SHARDS: Final = 16
-# This spelling resolves to 127.0.0.1 without triggering Ray's exact-string rewrite.
-_LOOPBACK_ADDRESS: Final = "127.0.0.01"
-_WORKER_ENV: Final = {
+RAY_WORKER_THREAD_POLICY: Final = {
     "BLIS_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
     "NUMEXPR_NUM_THREADS": "1",
@@ -46,12 +43,15 @@ _WORKER_ENV: Final = {
     "RAYON_NUM_THREADS": "1",
     "VECLIB_MAXIMUM_THREADS": "1",
 }
+_RAY_LOGICAL_SHARDS: Final = 16
+# This spelling resolves to 127.0.0.1 without triggering Ray's exact-string rewrite.
+_LOOPBACK_ADDRESS: Final = "127.0.0.01"
 _ACTOR_OPTIONS: Final = {
     "max_restarts": 0,
     "max_task_retries": 0,
     "num_cpus": 1,
     "num_gpus": 0,
-    "runtime_env": {"env_vars": dict(_WORKER_ENV)},
+    "runtime_env": {"env_vars": dict(RAY_WORKER_THREAD_POLICY)},
 }
 
 
@@ -372,7 +372,7 @@ class RayDispatch:
             _node_ip_address=_LOOPBACK_ADDRESS,
             include_dashboard=False,
             num_cpus=self._budget.concurrency,
-            runtime_env={"env_vars": dict(_WORKER_ENV)},
+            runtime_env={"env_vars": dict(RAY_WORKER_THREAD_POLICY)},
         )
         self._owns_runtime = True
         try:
@@ -422,4 +422,4 @@ class RayDispatch:
                 ray.kill(worker, no_restart=True)
 
 
-__all__ = ["RAY_BACKEND", "RayDispatch"]
+__all__ = ["RAY_BACKEND", "RAY_WORKER_THREAD_POLICY", "RayDispatch"]

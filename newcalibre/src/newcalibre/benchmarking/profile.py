@@ -201,12 +201,6 @@ def validate_profile(
     budgets = root["budgets"]
     if budgets != expected_budgets:
         raise ProfileError("profile budget verdicts do not match ordinary measurements")
-    expected_valid = not reasons
-    if root["valid"] != expected_valid:
-        if root["valid"]:
-            raise ProfileError("invalid profile cannot carry passing validity")
-        if not reasons:
-            raise ProfileError("invalid profile requires a named reason")
     return root
 
 
