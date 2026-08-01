@@ -50,10 +50,16 @@ _CYCLE_ORIGIN = pd.Timestamp("2026-01-03")
 
 
 class _CountingRuntime:
-    def __init__(self, delegate: ConformalRuntime) -> None:
+    def __init__(
+        self,
+        delegate: ConformalRuntime,
+        *,
+        update_method_state: bool = False,
+    ) -> None:
         self.delegate = delegate
+        self.update_method_state = update_method_state
         self.calls: list[str] = []
-        self.state_keys: list[frozenset[str]] = []
+        self.states: list[dict[str, bytes | None]] = []
 
     @property
     def manifest(self):  # type: ignore[no-untyped-def]
@@ -83,8 +89,22 @@ class _CountingRuntime:
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
         self.calls.append(delivery.partition_label)
-        self.state_keys.append(frozenset(states))
-        return self.delegate.observe(delivery, states, context=context)
+        self.states.append(dict(states))
+        delegate_states = states
+        if self.update_method_state:
+            delegate_states = {
+                label: value for label, value in states.items() if label != METHOD_SCOPE_LABEL
+            }
+        effect = self.delegate.observe(delivery, delegate_states, context=context)
+        if not self.update_method_state:
+            return effect
+        return ObserveEffect(
+            {
+                **effect.state_updates,
+                METHOD_SCOPE_LABEL: f"method-update-{len(self.calls)}".encode(),
+            },
+            effect.annotations,
+        )
 
 
 def _hierarchy() -> HierarchyIndex:
@@ -215,7 +235,7 @@ def test_canonical_delivery_calls_each_partition_once_without_cross_partition_st
     delegate = resolve_method(
         {"method": "split-per-step", "coverage": 0.5, "partition_by": "series"}
     )
-    runtime = _CountingRuntime(delegate)
+    runtime = _CountingRuntime(delegate, update_method_state=True)
     labels = {
         series: _label(series, EmissionScope.PER_STEP) for series in ("sku-a", "sku-b", "sku-c")
     }
@@ -238,14 +258,28 @@ def test_canonical_delivery_calls_each_partition_once_without_cross_partition_st
     cycle = loop.cycle(_CYCLE_ORIGIN)
 
     assert runtime.calls == sorted((labels["sku-a"], labels["sku-b"]), key=str.encode)
-    assert runtime.state_keys == [frozenset({METHOD_SCOPE_LABEL, label}) for label in runtime.calls]
+    assert runtime.states == [
+        {
+            METHOD_SCOPE_LABEL: states[METHOD_SCOPE_LABEL],
+            labels["sku-a"]: states[labels["sku-a"]],
+        },
+        {
+            METHOD_SCOPE_LABEL: b"method-update-1",
+            labels["sku-b"]: states[labels["sku-b"]],
+        },
+    ]
     assert tuple(value.partition_label for value in cycle.deliveries) == tuple(runtime.calls)
     assert [
         (observation.forecast_key.series_key, observation.forecast_key.horizon_step)
         for delivery in cycle.deliveries
         for observation in delivery.observations
     ] == [("sku-a", 1), ("sku-a", 2), ("sku-b", 1), ("sku-b", 2)]
-    assert set(cycle.state_updates) == {labels["sku-a"], labels["sku-b"]}
+    assert set(cycle.state_updates) == {
+        METHOD_SCOPE_LABEL,
+        labels["sku-a"],
+        labels["sku-b"],
+    }
+    assert cycle.state_updates[METHOD_SCOPE_LABEL] == b"method-update-2"
     assert labels["sku-c"] not in cycle.state_updates
     assert states[labels["sku-c"]] == loop.conformal_states[labels["sku-c"]]
     assert len(cycle.annotations) == 4

@@ -232,67 +232,8 @@ jobs:
             --inventory "$inventory"
       - name: Run reduced real-M5 acceptance and measure runner headroom
         run: |
-          set -euo pipefail
-
-          aggregate_rss_kib() {
-            ps -e -o pid=,ppid=,rss= | awk -v root="$1" '
-              { parent[$1] = $2; rss[$1] = $3 }
-              END {
-                included[root] = 1
-                changed = 1
-                while (changed) {
-                  changed = 0
-                  for (pid in parent) {
-                    if (!included[pid] && included[parent[pid]]) {
-                      included[pid] = 1
-                      changed = 1
-                    }
-                  }
-                }
-                for (pid in included) total += rss[pid]
-                print total + 0
-              }
-            '
-          }
-
-          started_at=$(date +%s)
-          min_memory_headroom_kib=$(awk '/MemAvailable:/ { print $2 }' /proc/meminfo)
-          min_free_disk_kib=$(df -Pk newcalibre | awk 'NR == 2 { print $4 }')
-          peak_process_rss_kib=0
-
-          uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4/m5 &
-          test_pid=$!
-          while kill -0 "$test_pid" 2>/dev/null; do
-            process_rss_kib=$(aggregate_rss_kib "$test_pid")
-            memory_headroom_kib=$(awk '/MemAvailable:/ { print $2 }' /proc/meminfo)
-            free_disk_kib=$(df -Pk newcalibre | awk 'NR == 2 { print $4 }')
-            (( process_rss_kib > peak_process_rss_kib )) \
-              && peak_process_rss_kib=$process_rss_kib
-            (( memory_headroom_kib < min_memory_headroom_kib )) \
-              && min_memory_headroom_kib=$memory_headroom_kib
-            (( free_disk_kib < min_free_disk_kib )) \
-              && min_free_disk_kib=$free_disk_kib
-            sleep 1
-          done
-
-          test_status=0
-          wait "$test_pid" || test_status=$?
-          elapsed_seconds=$(( $(date +%s) - started_at ))
-
-          echo "M5 acceptance elapsed seconds: $elapsed_seconds"
-          echo "M5 aggregate peak job memory (process RSS) KiB: $peak_process_rss_kib"
-          echo "M5 minimum memory headroom KiB: $min_memory_headroom_kib"
-          echo "M5 minimum free disk KiB: $min_free_disk_kib"
-
-          sizing_status=0
-          minimum_headroom_kib=$(( 4 * 1024 * 1024 ))
-          (( min_memory_headroom_kib >= minimum_headroom_kib )) \
-            || { echo "M5 acceptance requires at least 4 GiB memory headroom"; sizing_status=1; }
-          (( min_free_disk_kib >= minimum_headroom_kib )) \
-            || { echo "M5 acceptance requires at least 4 GiB free disk"; sizing_status=1; }
-          (( elapsed_seconds <= 20 * 60 )) \
-            || { echo "M5 acceptance must complete within 20 minutes"; sizing_status=1; }
-          (( test_status == 0 && sizing_status == 0 ))
+          bash .github/scripts/run-m5-acceptance.sh \
+            uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4/m5
 
   reference-gates:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

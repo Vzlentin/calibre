@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -13,6 +15,7 @@ APPEND_CHECK = ROOT / ".github" / "workflows" / "vn2-evidence.yml"
 ATTRIBUTES = ROOT / ".gitattributes"
 CAPTURE = ROOT / "stage3" / "evidence" / "captures" / "vn2"
 M5_RUNBOOK = ROOT / "benchmarks" / "m5" / "README.md"
+M5_MONITOR = ROOT / ".github" / "scripts" / "run-m5-acceptance.sh"
 
 
 def _workflow(path: Path) -> dict:
@@ -171,6 +174,7 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
         for step in workflow["jobs"]["m5-acceptance"]["steps"]
         if step.get("name") == "Run reduced real-M5 acceptance and measure runner headroom"
     )["run"]
+    m5_monitor = M5_MONITOR.read_text(encoding="utf-8")
     pytest_commands = "\n".join(line for line in runs.splitlines() if "pytest " in line)
 
     assert "pytest newcalibre/tests/tier3" in vn2_runs
@@ -185,25 +189,67 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
     assert "actions/cache" not in str(reference)
     assert "OVENTI_DATASET_BASE_URL" not in str(reference)
     assert "curl " not in reference_runs
-    assert "M5 acceptance elapsed seconds:" in m5_runs
-    assert "M5 aggregate peak job memory (process RSS) KiB:" in m5_runs
-    assert "M5 minimum memory headroom KiB:" in m5_runs
-    assert "M5 minimum free disk KiB:" in m5_runs
-    assert "minimum_headroom_kib=$(( 4 * 1024 * 1024 ))" in m5_runs
-    assert "20 * 60" in m5_runs
-    assert "pytest newcalibre/tests/tier4/m5 &" in m5_sizing
-    assert "test_pid=$!" in m5_sizing
-    assert 'wait "$test_pid" || test_status=$?' in m5_sizing
-    assert "(( test_status == 0 && sizing_status == 0 ))" in m5_sizing
-    assert m5_sizing.index("test_pid=$!") < m5_sizing.index('wait "$test_pid"')
-    assert m5_sizing.index('wait "$test_pid"') < m5_sizing.index(
-        "(( test_status == 0 && sizing_status == 0 ))"
-    )
+    assert "bash .github/scripts/run-m5-acceptance.sh" in m5_sizing
+    assert "pytest newcalibre/tests/tier4/m5" in m5_sizing
+    assert "M5 acceptance elapsed seconds:" in m5_monitor
+    assert "M5 aggregate peak job memory (process RSS) KiB:" in m5_monitor
+    assert "M5 minimum memory headroom KiB:" in m5_monitor
+    assert "M5 minimum free disk KiB:" in m5_monitor
+    assert "minimum_headroom_kib=$(( 4 * 1024 * 1024 ))" in m5_monitor
+    assert "maximum_elapsed_seconds=$(( 20 * 60 ))" in m5_monitor
+    assert 'wait "$test_pid" || test_status=$?' in m5_monitor
+    assert 'exit "$test_status"' in m5_monitor
+    assert 'exit "$sizing_status"' in m5_monitor
     assert "vn2_tracking.py build" in vn2_runs
     assert "actions/upload-artifact@v4" in text
     assert "gh pr" not in runs
     assert "git push" not in runs
     assert "vn2-regression:" not in text
+
+
+def test_m5_monitor_executes_child_and_sizing_exit_contracts(tmp_path: Path) -> None:
+    """Propagate child and sizing failures while allowing a complete success."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_df = fake_bin / "df"
+    fake_df.write_text(
+        "#!/bin/sh\n"
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf 'fake 6291456 1 6291455 1%% /\\n'\n",
+        encoding="utf-8",
+    )
+    fake_df.chmod(0o755)
+
+    def run(*, child_status: int, memory_headroom_kib: int) -> subprocess.CompletedProcess[str]:
+        meminfo = tmp_path / f"meminfo-{child_status}-{memory_headroom_kib}"
+        meminfo.write_text(f"MemAvailable: {memory_headroom_kib} kB\n", encoding="utf-8")
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "M5_MEMINFO_PATH": str(meminfo),
+            "M5_DISK_PATH": str(tmp_path),
+            "M5_MONITOR_INTERVAL_SECONDS": "0",
+        }
+        return subprocess.run(
+            ["bash", str(M5_MONITOR), "bash", "-c", f"exit {child_status}"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    child_failure = run(child_status=7, memory_headroom_kib=5 * 1024 * 1024)
+    sizing_failure = run(child_status=0, memory_headroom_kib=1)
+    success = run(child_status=0, memory_headroom_kib=5 * 1024 * 1024)
+
+    assert child_failure.returncode == 7
+    assert "M5 acceptance child status: 7" in child_failure.stdout
+    assert sizing_failure.returncode == 1
+    assert "M5 acceptance sizing status: 1" in sizing_failure.stdout
+    assert success.returncode == 0
+    assert "M5 acceptance child status: 0" in success.stdout
+    assert "M5 acceptance sizing status: 0" in success.stdout
 
 
 def test_m5_runbook_documents_only_the_generic_verified_origin_contract() -> None:
