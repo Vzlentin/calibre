@@ -9,6 +9,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.tier2.test_dispatch_invariance import run_dispatch_world
+
+from newcalibre.engine import InProcessDispatch, RayDispatch
 
 pytestmark = pytest.mark.tier2
 
@@ -90,12 +93,12 @@ def test_resumed_runs_match_uninterrupted_run(tmp_path: Path) -> None:
     _artifact_path(tmp_path, "resumed-ledger.bin").write_bytes(resumed_after_commit)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Pending U16: distribution invariance needs the dispatch substrate.",
-)
 def test_distributed_run_matches_sequential_run() -> None:
-    pytest.fail("U16 must replace this placeholder with a biting distribution contract.")
+    """Keep the chapter-50 distribution contract bound to real Ray placement."""
+    serial = run_dispatch_world(lambda: InProcessDispatch(logical_shards=16), reconstruct=False)
+    distributed = run_dispatch_world(RayDispatch, reconstruct=False)
+
+    assert distributed == serial
 
 
 @pytest.mark.xfail(

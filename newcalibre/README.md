@@ -63,19 +63,26 @@ no pandas metadata; materialization reproduces the public task frames exactly.
 The adapter protocol exposes `fit`, `predict`, `fitted_values`, `dump_state`,
 `load_state`, and `update`, with fitted values, native quantiles,
 censoring-aware fit, incremental update, and artifact persistence represented
-as explicit capabilities. The seasonal-naive backend declares none of those
-optional capabilities and rejects every request loudly. Backend selection is
-always the explicit `backend` field; the registry has no default and reports
-its available identifiers on a missing or unknown selection. For this brick,
-non-empty `quantile_levels` and `censoring_aware: true` are capability requests
-and are rejected before prediction.
+as explicit capabilities. Every adapter also declares either
+`series-separable` or `monolithic` execution; there is no implicit mode. The
+seasonal-naive backend declares incremental update and artifact persistence,
+while unsupported output or fit capabilities still fail loudly. Backend
+selection is always the explicit `backend` field; the registry has no default
+and reports its available identifiers on a missing or unknown selection.
 
 The seasonal-naive retention rule is deliberately narrow: `fit` keeps
 only the non-missing observations in the final `m` pre-origin calendar periods
 for each series. It retains no earlier history, whole task, fitted-value
 sidecar, or forecast rows. `predict` therefore fails loudly when that retained
 season is short or has a missing phase, and otherwise repeats the phase lookup
-deterministically for every horizon step.
+deterministically through the pinned StatsForecast `SeasonalNaive` model.
+
+Forecast dispatch accepts typed semantic work rather than arbitrary callables.
+The M5 runner maps its one global semantic task onto 16 stable contiguous
+series shards and 16 one-CPU, one-thread Ray workers with zero retries. The
+serial reference uses the same shard planner and combines the same native
+checkpoint envelope; validated results are staged only after every logical
+ordinal completes, and commit remains the sole publication point.
 
 The settlement core is one pure, typed implementation shared by every engine
 driver. It advances explicit contiguous calendar periods, credits orders only
@@ -106,6 +113,5 @@ uv run --locked pytest tests/tier1
 | 3 | conditional replay against promoted captures | scheduled or manual |
 | 4 | protocol acceptance at scale | scheduled or manual |
 
-Tier 2 keeps the four chapter-50 class-4 contracts visible. U5c instantiates
-the Gate-A subset (same seed and resume); serialization and distribution
-invariance stay explicitly pending for U10 and U16.
+Tier 2 keeps the chapter-50 class-4 contracts visible, including deterministic
+driver, restart, serialization, and serial/Ray dispatch invariance.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import pickle
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, cast
 
 import pandas as pd
@@ -51,6 +51,7 @@ from newcalibre.engine import (
     ForecastBatch,
     InMemoryIndexedRunStore,
     InMemoryPanelSource,
+    InProcessDispatch,
     OrderProposal,
     OrderRequest,
     OriginCommit,
@@ -64,7 +65,11 @@ from newcalibre.engine import (
     SettlementWindow,
     Spine,
 )
-from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
+from newcalibre.forecasting import (
+    AdapterCapability,
+    AdapterCapabilityError,
+    AdapterExecutionMode,
+)
 from newcalibre.ledger import ForecastIssuance
 from newcalibre.ordering import OrderingConfigError
 from newcalibre.reconcile import ReconciliationRegistryError
@@ -130,6 +135,10 @@ class PersistentFixtureAdapter:
         self._events = events
         self._fail_prediction = fail_prediction
         self._point: float | None = None
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        return AdapterExecutionMode.MONOLITHIC
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
@@ -209,19 +218,16 @@ class DataFrameSubclassFixtureAdapter(PersistentFixtureAdapter):
         return CallbackFrame(super().predict(task))
 
 
-class RecordingDispatch:
+class RecordingDispatch(InProcessDispatch):
     """Record each deterministic dispatch batch size."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.batch_sizes: list[int] = []
 
-    def map(
-        self,
-        function: Callable[[object], object],
-        items: Sequence[object],
-    ) -> tuple[object, ...]:
-        self.batch_sizes.append(len(items))
-        return tuple(function(item) for item in items)
+    def dispatch(self, work, executor):
+        self.batch_sizes.append(len(work.shards))
+        return super().dispatch(work, executor)
 
 
 class RecordingPanelSource(InMemoryPanelSource):

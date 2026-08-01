@@ -1,4 +1,4 @@
-"""Exercise the source-closed seasonal-naive first brick.
+"""Exercise the pinned StatsForecast seasonal-naive adapter.
 
 Structural, schema, and rejection assertions are tolerance class 1. The
 ``m = 7`` lookup is hand-derived fixture arithmetic (class 2). Deterministic
@@ -7,12 +7,14 @@ serialized output is same-engine byte identity (class 4).
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping
 from typing import cast
 
 import numpy as np
 import pandas as pd
 import pytest
+from statsforecast.models import SeasonalNaive as StatsForecastSeasonalNaive
 
 from newcalibre.domain import (
     ACTUAL_VALUE,
@@ -143,6 +145,38 @@ def test_horizons_longer_than_one_season_repeat_the_same_phase_lookup() -> None:
     frame = adapter.predict(task)
 
     assert frame[POINT_FORECAST].tolist() == [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 8.0, 9.0]
+
+
+def test_multi_series_points_match_the_direct_pinned_statsforecast_model() -> None:
+    """Use Nixtla's model arithmetic on each retained complete season."""
+    values = {
+        "sku-a": [float(value) for value in range(1, 15)],
+        "sku-b": [float(value * 3) for value in range(1, 15)],
+    }
+    task = _task(_history(values), horizon=9)
+    adapter = _adapter()
+    adapter.fit(task)
+
+    actual = adapter.predict(task)[POINT_FORECAST].to_numpy()
+    expected = np.concatenate(
+        [
+            StatsForecastSeasonalNaive(season_length=7)
+            .fit(np.asarray(series[-7:], dtype=np.float64))
+            .predict(9)["mean"]
+            for series in values.values()
+        ]
+    )
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_adapter_source_has_no_fugue_unlimited_jobs_or_hand_coded_prediction() -> None:
+    """Keep model arithmetic at the pinned StatsForecast seam."""
+    source = inspect.getsource(SeasonalNaiveAdapter)
+    assert "StatsForecastSeasonalNaive" in source
+    assert "fugue" not in source.lower()
+    assert "n_jobs" not in source
+    assert "(horizon_step - 1) %" not in source
 
 
 def test_predict_requires_a_successful_fit() -> None:

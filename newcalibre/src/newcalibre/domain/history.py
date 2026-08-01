@@ -126,6 +126,18 @@ class HistoryView:
             end_cursor=self._cursor,
         )
 
+    def _series_slice(self, start: int, stop: int) -> HistoryView:
+        """Project one dispatch-private relative contiguous series range."""
+        if start < 0 or stop <= start or stop > len(self._series_keys):
+            raise HistoryError("history projection range is invalid")
+        cursor = HistoryCursor(
+            self._cursor.panel_identity,
+            self._cursor.series_start + start,
+            self._cursor.series_start + stop,
+            self._cursor.time_bound,
+        )
+        return HistoryView._from_storage(self._storage, cursor=cursor)
+
 
 @dataclass(frozen=True, slots=True, eq=False, init=False)
 class HistoryDelta:
@@ -189,6 +201,28 @@ class HistoryDelta:
             series_stop=self._end_cursor.series_stop,
             time_start=self._start_cursor.time_bound,
             time_stop=self._end_cursor.time_bound,
+        )
+
+    def _series_slice(self, start: int, stop: int) -> HistoryDelta:
+        """Project one dispatch-private relative contiguous series range."""
+        if start < 0 or stop <= start or stop > len(self.series_keys):
+            raise HistoryError("history delta projection range is invalid")
+        absolute_start = self._end_cursor.series_start + start
+        absolute_stop = self._end_cursor.series_start + stop
+        return HistoryDelta._from_storage(
+            self._storage,
+            start_cursor=HistoryCursor(
+                self._start_cursor.panel_identity,
+                absolute_start,
+                absolute_stop,
+                self._start_cursor.time_bound,
+            ),
+            end_cursor=HistoryCursor(
+                self._end_cursor.panel_identity,
+                absolute_start,
+                absolute_stop,
+                self._end_cursor.time_bound,
+            ),
         )
 
 

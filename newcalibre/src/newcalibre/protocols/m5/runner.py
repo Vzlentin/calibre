@@ -24,7 +24,7 @@ from newcalibre.engine import (
     InMemoryIndexedRunStore,
     InMemoryLedgerReader,
     InMemoryPanelSource,
-    InProcessDispatch,
+    RayDispatch,
     TimeLoop,
     TimeLoopRequest,
 )
@@ -124,28 +124,37 @@ def run_m5(config_path: Path) -> M5RunResult:
         actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
         hierarchy=compiled.hierarchy,
     )
-    engine = Engine(
-        session=session,
-        panel_source=InMemoryPanelSource(forecast_panel),
-        run_store=store,
-        dispatch_backend=InProcessDispatch(),
-        hierarchy=compiled.hierarchy,
-        adapter_resolver=resolve_adapter,
-        reconciliation_strategy=compiled.reconciliation_strategy,
-        orderer=None,
+    dispatch = RayDispatch(
+        logical_shards=compiled.execution.logical_shards,
+        workers=compiled.execution.workers,
+        numeric_threads_per_worker=compiled.execution.numeric_threads_per_worker,
+        retries=compiled.execution.retries,
     )
-    time_loop = TimeLoop(
-        engine=engine,
-        run_store=store,
-        request=TimeLoopRequest(
+    try:
+        engine = Engine(
             session=session,
-            origins=compiled.origins,
-            settlement_end=compiled.origins[-1],
-            scope=Scope(config.model_scope),
-            initial_inventory_positions={},
-            actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
-        ),
-    ).run()
+            panel_source=InMemoryPanelSource(forecast_panel),
+            run_store=store,
+            dispatch_backend=dispatch,
+            hierarchy=compiled.hierarchy,
+            adapter_resolver=resolve_adapter,
+            reconciliation_strategy=compiled.reconciliation_strategy,
+            orderer=None,
+        )
+        time_loop = TimeLoop(
+            engine=engine,
+            run_store=store,
+            request=TimeLoopRequest(
+                session=session,
+                origins=compiled.origins,
+                settlement_end=compiled.origins[-1],
+                scope=Scope(config.model_scope),
+                initial_inventory_positions={},
+                actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+            ),
+        ).run()
+    finally:
+        dispatch.shutdown()
     reader = InMemoryLedgerReader(store)
     diagnostics = score_m5(
         config,
