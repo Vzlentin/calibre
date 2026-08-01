@@ -97,8 +97,7 @@ def test_protocol_jobs_pin_manual_candidates_end_to_end() -> None:
 
         assert job["env"][env_name] == candidate
         assert validation["if"] == "github.event_name == 'workflow_dispatch'"
-        assert "${{ inputs.candidate_sha }}" in validation["run"]
-        assert "grep -Eq '^[0-9a-f]{40}$'" in validation["run"]
+        assert f'[[ "${env_name}" =~ ^[0-9a-f]{{40}}$ ]]' in validation["run"]
         assert checkout["with"]["ref"] == candidate
         assert f'test "$(git rev-parse HEAD)" = "${env_name}"' in runs
 

@@ -322,7 +322,7 @@ def _canonicalize_panel_frame(
     columns = [*REQUIRED_PANEL_COLUMNS, *metadata_columns, *exogenous]
     normalized = normalized.loc[:, columns]
     normalized = normalized.sort_values(
-        [SERIES_KEY, TIMESTAMP],
+        list(PANEL_KEY_COLUMNS),
         kind="mergesort",
         ignore_index=True,
     )

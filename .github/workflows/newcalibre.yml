@@ -104,7 +104,7 @@ jobs:
       - name: Validate manual candidate
         if: github.event_name == 'workflow_dispatch'
         run: |
-          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+          [[ "$VN2_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
             || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
       - uses: actions/checkout@v4
         with:
@@ -189,7 +189,7 @@ jobs:
       - name: Validate manual candidate
         if: github.event_name == 'workflow_dispatch'
         run: |
-          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+          [[ "$M5_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
             || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
       - uses: actions/checkout@v4
         with:
@@ -303,7 +303,7 @@ jobs:
       - name: Validate manual candidate
         if: github.event_name == 'workflow_dispatch'
         run: |
-          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+          [[ "$REFERENCE_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
             || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
       - uses: actions/checkout@v4
         with:
