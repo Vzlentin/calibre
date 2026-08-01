@@ -126,10 +126,14 @@ memory. Native point `bottom_up` needs no summing matrix at all.
 
 ### Benchmarks
 
-```bash
-# Download VN2 data
-uv run python benchmarks/vn2/download_vn2_data.py
+CI acquires VN2 inputs from the public dataset origin configured by the
+`OVENTI_DATASET_BASE_URL` repository variable. Workflow-owned shell acquisition
+enumerates only the basenames in
+`newcalibre/benchmarks/vn2/vn2-input-digests.json`, then runs
+`newcalibre/scripts/vn2_data.py verify` before either frozen lane consumes the
+files. Local benchmark runs require those verified inputs under `data/vn2/`.
 
+```bash
 # Run VN2 benchmark
 uv run python benchmarks/vn2/run_benchmark.py
 
