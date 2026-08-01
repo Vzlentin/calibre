@@ -68,6 +68,7 @@ def run_dispatch_world(
     dispatch_factory: Callable[[], InProcessDispatch | RayDispatch],
     *,
     reconstruct: bool,
+    transport_modes: list[tuple[int, str]] | None = None,
 ) -> tuple[object, ...]:
     """Return committed state under one dispatch and reconstruction schedule."""
     panel = _panel()
@@ -104,6 +105,8 @@ def run_dispatch_world(
             receipts.append(result.receipt)
     finally:
         if isinstance(dispatch, RayDispatch):
+            if transport_modes is not None:
+                transport_modes.extend(dispatch._transport_modes)
             dispatch.shutdown()
     return (
         store.forecasts,
@@ -128,3 +131,19 @@ def test_serial_and_ray_are_byte_identical_across_restart() -> None:
     assert serial_restarted == serial
     assert ray == serial
     assert ray_restarted == serial
+
+
+def test_ray_workers_receive_only_deltas_after_staging() -> None:
+    """Reuse stable ordinal caches across committed origins."""
+    transport_modes: list[tuple[int, str]] = []
+
+    run_dispatch_world(
+        RayDispatch,
+        reconstruct=False,
+        transport_modes=transport_modes,
+    )
+
+    assert transport_modes == [
+        *((ordinal, "stage") for ordinal in range(16)),
+        *((ordinal, "delta") for ordinal in range(16)),
+    ]

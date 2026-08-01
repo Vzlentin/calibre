@@ -10,6 +10,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
+import newcalibre.engine as engine_facade
 from newcalibre.domain import (
     OBSERVED_VALUE,
     SERIES_KEY,
@@ -184,6 +185,13 @@ def test_dispatch_port_has_no_arbitrary_callable_map_surface() -> None:
     assert "TypeVar" not in source
     assert "def map" not in source
     assert "ForecastWork" in source
+
+
+def test_engine_facade_hides_dispatch_physical_identity() -> None:
+    """Keep shard work and envelope types inside the dispatch subsystem."""
+    assert not hasattr(engine_facade, "ForecastShard")
+    assert not hasattr(engine_facade, "ForecastWork")
+    assert not hasattr(engine_facade, "ForecastResultEnvelope")
 
 
 def test_combined_checkpoint_contains_no_dispatch_identity() -> None:
