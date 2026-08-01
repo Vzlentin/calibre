@@ -1,4 +1,4 @@
-"""Run the fixed chapter-03 engine spine over six abstract ports."""
+"""Run the fixed chapter-03 engine spine over three abstract ports."""
 
 from __future__ import annotations
 

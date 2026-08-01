@@ -138,6 +138,15 @@ def test_engine_port_namespace_contains_only_io_and_dispatch_seams() -> None:
     assert set(IndexedRunStore.__dict__) & {"open", "commit"} == {"open", "commit"}
 
 
+def test_spine_module_declares_the_three_port_architecture() -> None:
+    """Keep shipped spine prose aligned with the clean three-port cutover."""
+    module = inspect.getmodule(Engine)
+
+    assert module is not None
+    assert module.__doc__ == "Run the fixed chapter-03 engine spine over three abstract ports."
+    assert "six abstract ports" not in inspect.getsource(module)
+
+
 def test_reporting_adapter_is_absent_from_every_write_path() -> None:
     """Keep reporting read-only and outside engine/driver/store composition."""
     write_path_modules = {
