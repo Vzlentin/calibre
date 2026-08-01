@@ -21,7 +21,7 @@ from newcalibre.domain import (
     StockoutRule,
 )
 from newcalibre.engine import (
-    InMemoryLedgerSink,
+    InMemoryIndexedRunStore,
     SettlementRequest,
     SettlementResult,
     settle,
@@ -205,7 +205,11 @@ def test_successor_demand_and_reference_sales_have_separately_proven_results() -
         decision_timing=timing,
         stockout_rule=StockoutRule.LOST_SALES,
     )
-    sink = InMemoryLedgerSink(session=session, calendar=calendar)
+    sink = InMemoryIndexedRunStore(
+        session=session,
+        calendar=calendar,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     demand_scored = settle(
         SettlementRequest(
             session=session,

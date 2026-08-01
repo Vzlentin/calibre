@@ -22,7 +22,7 @@ from newcalibre.domain import (
     StockoutRule,
 )
 from newcalibre.engine._session import SessionCosts
-from newcalibre.engine.ports import ActualKey, SettlementSnapshot
+from newcalibre.engine.run_store import ActualKey, SettlementSnapshot
 from newcalibre.ledger import (
     LedgerError,
     OrderKey,

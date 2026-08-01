@@ -139,15 +139,13 @@ def test_full_and_digest_rank_fixture_configs_use_the_same_composition(
 
     def capture_engine(**kwargs: object) -> None:
         hierarchy = cast(Any, kwargs["hierarchy"])
-        sink = cast(Any, kwargs["ledger_sink"])
+        store = cast(Any, kwargs["run_store"])
         compositions.append(
             (
                 len(hierarchy.node_labels),
-                sink.session.series_keys,
+                store.session.series_keys,
                 type(kwargs["panel_source"]),
-                type(kwargs["actuals_source"]),
-                type(kwargs["artifact_store"]),
-                type(kwargs["calibration_state_store"]),
+                type(store),
                 type(kwargs["dispatch_backend"]),
                 kwargs["adapter_resolver"] is resolve_adapter,
                 kwargs["reconciliation_strategy"],

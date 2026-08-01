@@ -22,12 +22,16 @@ from newcalibre.domain import (
 )
 from newcalibre.engine._session import session_decision_inputs
 from newcalibre.engine.errors import EngineError
-from newcalibre.engine.ports import (
+from newcalibre.engine.run_store import (
     ActualKey,
+    ActualsCommit,
     ActualsCommitKey,
+    ActualsIntent,
+    ActualsSnapshot,
     CommitReceipt,
-    LedgerSink,
-    OriginCommit,
+    IndexedRunStore,
+    OriginIntent,
+    OriginSnapshot,
 )
 from newcalibre.engine.settlement import (
     SettlementRequest,
@@ -190,18 +194,20 @@ class EventDriver:
         self,
         *,
         engine: Engine,
-        ledger_sink: LedgerSink,
+        run_store: IndexedRunStore,
         actuals_semantics: ActualsSemantics,
     ) -> None:
         if not isinstance(engine, Engine):
             raise TypeError("event driver requires an Engine")
-        if not isinstance(ledger_sink, LedgerSink):
-            raise TypeError("event driver ledger sink does not satisfy its port")
+        if not isinstance(run_store, IndexedRunStore):
+            raise TypeError("event driver run store does not satisfy its port")
         if not isinstance(actuals_semantics, ActualsSemantics):
             raise TypeError("event driver actuals semantics must be ActualsSemantics")
-        engine._require_event_driver_port(ledger_sink=ledger_sink)
+        engine._require_driver_store(run_store)
         self._engine = engine
-        self._ledger_sink = ledger_sink
+        self._run_store = run_store
+        self._session = engine._session
+        self._calendar = engine._calendar
         self._actuals_semantics = actuals_semantics
         self._spine = Spine(engine)
 
@@ -215,18 +221,21 @@ class EventDriver:
 
     def _handle_origin(self, event: OriginEvent) -> OriginOutcome:
         self._require_session(event.session)
-        self._ledger_sink.calendar.require_member(event.origin, name="origin event origin")
-        existing = self._ledger_sink.receipt(event.origin)
+        self._calendar.require_member(event.origin, name="origin event origin")
+        settlement_periods = (
+            () if session_decision_inputs(event.session) is None else (event.origin,)
+        )
+        snapshot = self._open_origin(event, settlement_periods=settlement_periods)
+        existing = snapshot.receipt
         if existing is not None:
             self._require_fingerprint(existing, event.fingerprint)
-            repaired = self._engine.commit(existing)
-            return OriginOutcome(repaired, repaired.orders)
+            return OriginOutcome(existing, existing.orders)
 
-        latest = self._ledger_sink.latest_origin
+        latest = snapshot.latest_origin
         if latest is not None and event.origin <= latest:
             raise EventDriverError("origin events must advance strictly monotonically")
-        forecast_origin_count = self._ledger_sink.forecast_origin_count
-        positions, settlement = self._origin_context(event)
+        forecast_origin_count = snapshot.forecast_origin_count
+        positions, settlement = self._origin_context(event, snapshot=snapshot)
         request = OriginRequest(
             session=event.session,
             origin=event.origin,
@@ -236,12 +245,12 @@ class EventDriver:
         )
         result = self._spine.run_origin(
             request,
+            snapshot=snapshot,
             decision_origin=self._is_decision_origin(
                 event.session,
                 forecast_origin_count=forecast_origin_count,
             ),
             settlement=settlement,
-            submission=ActualsSubmission(()),
             input_fingerprint=event.fingerprint,
             expected_forecast_origin_count=forecast_origin_count,
         )
@@ -249,41 +258,42 @@ class EventDriver:
 
     def _handle_actuals(self, event: ActualsEvent) -> ActualsOutcome:
         self._require_session(event.session)
-        calendar = self._ledger_sink.calendar
+        calendar = self._calendar
         for record in event.submission.records:
             calendar.require_member(record.timestamp, name="actuals event timestamp")
         key = ActualsCommitKey(tuple(record.key for record in event.submission.records))
-        existing = self._ledger_sink.receipt(key)
+        snapshot = self._run_store.open(ActualsIntent(event.session, event.submission))
+        if not isinstance(snapshot, ActualsSnapshot):
+            raise EventDriverError("event store returned an origin snapshot for actuals")
+        if snapshot.actuals_semantics is not self._actuals_semantics:
+            raise EventDriverError("event actuals semantics do not match the run store")
+        existing = snapshot.receipt
         if existing is not None:
             self._require_fingerprint(existing, event.fingerprint)
-            repaired = self._engine.commit(existing)
-            return ActualsOutcome(repaired, key.keys, repaired.settlement_periods)
+            return ActualsOutcome(existing, key.keys, existing.settlement_periods)
 
-        latest = self._ledger_sink.latest_origin
-        admission_frontier = max(record.timestamp for record in event.submission.records)
-        if latest is not None:
-            admission_frontier = max(admission_frontier, latest)
-        admission_before = calendar.advance(admission_frontier, 1)
-        resolution_origin = admission_before if latest is None else calendar.advance(latest, 1)
         observation = self._engine.observe(
-            resolution_origin,
+            snapshot.origin,
             session=event.session,
-            submission=event.submission,
+            snapshot=snapshot,
         )
         assert observation.token is not None
         settlement = self._eligible_settlement(
             observation.cycle.history_appends,
+            snapshot=snapshot,
             token=observation.token,
         )
         receipt = self._engine.commit(
-            OriginCommit(
+            ActualsCommit(
                 session=event.session,
-                origin=admission_before,
+                origin=snapshot.origin,
+                expected_revision=snapshot.revision,
+                actual_keys=key.keys,
                 observe_cycle=observation.cycle,
                 settlements=() if settlement is None else settlement.records,
                 state_updates=observation.cycle.state_updates,
-                actual_keys=key.keys,
                 input_fingerprint=event.fingerprint,
+                resume_marker=snapshot.origin,
             )
         )
         return ActualsOutcome(receipt, key.keys, receipt.settlement_periods)
@@ -291,6 +301,8 @@ class EventDriver:
     def _origin_context(
         self,
         event: OriginEvent,
+        *,
+        snapshot: OriginSnapshot,
     ) -> tuple[Mapping[str, InventoryPosition], SettlementWindow | None]:
         decision = session_decision_inputs(event.session)
         supplied = event.initial_inventory_positions
@@ -301,19 +313,21 @@ class EventDriver:
                 )
             return MappingProxyType({}), None
 
-        snapshot = self._ledger_sink.settlement_snapshot((event.origin,))
-        earliest = self._ledger_sink.earliest_origin
-        if snapshot.frontier is not None:
+        settlement_snapshot = snapshot.settlement
+        if settlement_snapshot is None:
+            raise EventDriverError("origin store omitted its settlement projection")
+        earliest = snapshot.earliest_origin
+        if settlement_snapshot.frontier is not None:
             if supplied:
                 raise EventDriverError(
                     "initial inventory is rejected after durable settlement begins"
                 )
-            positions = snapshot.current_positions
+            positions = settlement_snapshot.current_positions
         elif earliest is None:
             if not supplied:
                 raise EventDriverError("the first origin requires initial inventory")
             validate_snapshot_state(
-                snapshot=snapshot,
+                snapshot=settlement_snapshot,
                 positions=supplied,
                 series_keys=decision.series_keys,
                 actuals_semantics=self._actuals_semantics,
@@ -322,19 +336,19 @@ class EventDriver:
         else:
             if supplied:
                 raise EventDriverError("initial inventory may seed the session only once")
-            if not snapshot.current_positions:
+            if not settlement_snapshot.current_positions:
                 raise EventDriverError("durable initial inventory is unavailable")
-            positions = snapshot.current_positions
+            positions = settlement_snapshot.current_positions
 
-        history = {value.key: value for value in self._ledger_sink.observed_history}
+        history = {value.key: value for value in snapshot.observed_history}
         can_settle = all(
             (series_key, event.origin) in history for series_key in decision.series_keys
         )
-        if snapshot.frontier is None:
+        if settlement_snapshot.frontier is None:
             can_settle = can_settle and earliest is None
         else:
-            can_settle = can_settle and event.origin == snapshot.calendar.advance(
-                snapshot.frontier,
+            can_settle = can_settle and event.origin == settlement_snapshot.calendar.advance(
+                settlement_snapshot.frontier,
                 1,
             )
         if not can_settle:
@@ -344,7 +358,7 @@ class EventDriver:
             for series_key in decision.series_keys
         }
         return positions, SettlementWindow(
-            snapshot=snapshot,
+            snapshot=settlement_snapshot,
             actuals=actuals,
             actuals_semantics=self._actuals_semantics,
         )
@@ -353,15 +367,18 @@ class EventDriver:
         self,
         history_appends: Iterable[ObservedActual],
         *,
+        snapshot: ActualsSnapshot,
         token: CycleToken,
     ) -> SettlementResult | None:
-        decision = session_decision_inputs(self._ledger_sink.session)
-        latest = self._ledger_sink.latest_origin
-        earliest = self._ledger_sink.earliest_origin
+        decision = session_decision_inputs(self._session)
+        latest = snapshot.latest_origin
+        earliest = snapshot.earliest_origin
         if decision is None or latest is None or earliest is None:
             return None
 
-        probe = self._ledger_sink.settlement_snapshot((latest,))
+        probe = snapshot.settlement
+        if probe is None:
+            return None
         if (
             probe.actuals_semantics is not None
             and probe.actuals_semantics is not self._actuals_semantics
@@ -371,7 +388,7 @@ class EventDriver:
         if start > latest:
             return None
 
-        history = {value.key: value for value in self._ledger_sink.observed_history}
+        history = {value.key: value for value in snapshot.observed_history}
         history.update((value.key, value) for value in history_appends)
         periods: list[pd.Timestamp] = []
         period = start
@@ -383,8 +400,9 @@ class EventDriver:
         if not periods:
             return None
 
-        snapshot = self._ledger_sink.settlement_snapshot(tuple(periods))
-        positions = snapshot.window_opening_positions
+        if probe.periods != tuple(periods):
+            raise EventDriverError("actuals snapshot settlement window is inconsistent")
+        positions = probe.window_opening_positions
         if not positions:
             raise EventDriverError("durable settlement opening inventory is unavailable")
         actuals = {
@@ -394,8 +412,8 @@ class EventDriver:
         }
         return self._engine.settle(
             SettlementRequest(
-                session=self._ledger_sink.session,
-                snapshot=snapshot,
+                session=self._session,
+                snapshot=probe,
                 actuals=actuals,
                 inventory_positions=positions,
                 orders=(),
@@ -416,8 +434,24 @@ class EventDriver:
         return forecast_origin_count % decision.timing.review_period == 0
 
     def _require_session(self, session: SessionIdentity) -> None:
-        if session != self._ledger_sink.session:
+        if session != self._session:
             raise EventDriverError("event session does not match the driver session")
+
+    def _open_origin(
+        self,
+        event: OriginEvent,
+        *,
+        settlement_periods: tuple[pd.Timestamp, ...],
+    ) -> OriginSnapshot:
+        """Open and type-check one event-origin snapshot."""
+        snapshot = self._run_store.open(
+            OriginIntent(event.session, event.origin, settlement_periods)
+        )
+        if not isinstance(snapshot, OriginSnapshot):
+            raise EventDriverError("event store returned an actuals snapshot for an origin")
+        if snapshot.actuals_semantics is not self._actuals_semantics:
+            raise EventDriverError("event actuals semantics do not match the run store")
+        return snapshot
 
     @staticmethod
     def _require_fingerprint(receipt: CommitReceipt, fingerprint: str) -> None:

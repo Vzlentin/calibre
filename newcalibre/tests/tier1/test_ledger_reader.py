@@ -32,6 +32,7 @@ from newcalibre.domain import (
     POINT_FORECAST,
     SERIES_KEY,
     TARGET_TIMESTAMP,
+    ActualsSemantics,
     Calendar,
     CensoringAssertion,
     DecisionScope,
@@ -60,7 +61,7 @@ from newcalibre.engine import (
     OriginCommit,
     reporting,
 )
-from newcalibre.engine.ports.memory import InMemoryLedgerSink
+from newcalibre.engine.ports.memory import InMemoryIndexedRunStore
 from newcalibre.ledger import (
     BoundKey,
     ForecastIssuance,
@@ -175,9 +176,13 @@ def _row_write(
     )
 
 
-def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
+def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryIndexedRunStore:
     session = _session()
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     logical_rows = (
         ("b", pd.Timestamp("2026-01-02"), 2, "z-model"),
         ("a", pd.Timestamp("2026-01-02"), 1, "y-model"),
@@ -198,12 +203,13 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
         ]
         if reverse_chunks:
             writes.reverse()
-        sink.commit(
+        store.commit(
             OriginCommit(
                 session=session,
                 origin=origin,
+                expected_revision=store.revision,
                 observe_cycle=ObserveCycle(
-                    pending_retentions=sink.pending_observations,
+                    pending_retentions=store.pending_observations,
                 ),
                 forecasts=tuple(writes),
             )
@@ -216,7 +222,7 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
             value.forecast_key.horizon_step,
             value.forecast_key.model_name,
         ): value
-        for value in sink.pending_observations
+        for value in store.pending_observations
     }
     actuals = {
         key: 12.0 if key[3] == "z-model" else 7.0 for key in pending_by_key if key[3] != "pending"
@@ -247,10 +253,11 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
             ),
         ),
     )
-    sink.commit(
+    store.commit(
         OriginCommit(
             session=session,
             origin=pd.Timestamp("2026-01-05"),
+            expected_revision=store.revision,
             observe_cycle=ObserveCycle(
                 resolutions=resolution_rows,
                 pending_removals=tuple(
@@ -271,17 +278,22 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
             ),
         )
     )
-    return sink
+    return store
 
 
-def _window_sum_sink() -> InMemoryLedgerSink:
+def _window_sum_sink() -> InMemoryIndexedRunStore:
     session = _session()
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     models = ("complete-window", "partial-window")
-    sink.commit(
+    store.commit(
         OriginCommit(
             session=session,
             origin=ORIGIN_DATE,
+            expected_revision=store.revision,
             forecasts=tuple(
                 _row_write(
                     series_key="a",
@@ -303,17 +315,18 @@ def _window_sum_sink() -> InMemoryLedgerSink:
             value.forecast_key.horizon_step,
             value.forecast_key.model_name,
         ): value
-        for value in sink.pending_observations
+        for value in store.pending_observations
     }
     actuals = {
         ("a", ORIGIN_DATE, 1, "complete-window"): 4.0,
         ("a", ORIGIN_DATE, 2, "complete-window"): 7.0,
         ("a", ORIGIN_DATE, 1, "partial-window"): 6.0,
     }
-    sink.commit(
+    store.commit(
         OriginCommit(
             session=session,
             origin=pd.Timestamp("2026-01-04"),
+            expected_revision=store.revision,
             observe_cycle=ObserveCycle(
                 resolutions=tuple(
                     ObservationResolution(
@@ -332,7 +345,7 @@ def _window_sum_sink() -> InMemoryLedgerSink:
             ),
         )
     )
-    return sink
+    return store
 
 
 def _scan_rows(
@@ -554,14 +567,15 @@ def test_closed_scan_is_batch_invariant_and_origin_bounds_are_inclusive(
 
 
 def test_suspended_scan_releases_the_sink_lock_and_keeps_its_row_cutoff() -> None:
-    sink = _closed_sink()
-    reader = InMemoryLedgerReader(sink)
+    store = _closed_sink()
+    reader = InMemoryLedgerReader(store)
     iterator = reader.scan(LedgerSelection(_session(), ("series_key",), 1))
     first = next(iterator)
     write = OriginCommit(
         session=_session(),
         origin=pd.Timestamp("2026-01-04"),
-        observe_cycle=ObserveCycle(pending_retentions=sink.pending_observations),
+        expected_revision=store.revision,
+        observe_cycle=ObserveCycle(pending_retentions=store.pending_observations),
         forecasts=(
             _row_write(
                 series_key="a",
@@ -575,7 +589,7 @@ def test_suspended_scan_releases_the_sink_lock_and_keeps_its_row_cutoff() -> Non
 
     def commit_later_forecast() -> None:
         try:
-            sink.commit(write)
+            store.commit(write)
         except BaseException as error:  # pragma: no cover - asserted below
             errors.append(error)
 
@@ -596,9 +610,9 @@ def test_suspended_scan_releases_the_sink_lock_and_keeps_its_row_cutoff() -> Non
 
 
 def test_scan_matches_owned_issuance_resolution_and_registered_scores() -> None:
-    sink = _closed_sink()
-    rows = dict(_scan_rows(InMemoryLedgerReader(sink), batch_size=2))
-    stored_rows = {row.key: row for row in sink.forecasts}
+    store = _closed_sink()
+    rows = dict(_scan_rows(InMemoryLedgerReader(store), batch_size=2))
+    stored_rows = {row.key: row for row in store.forecasts}
     resolutions = {
         (
             value.forecast_key.series_key,
@@ -606,7 +620,7 @@ def test_scan_matches_owned_issuance_resolution_and_registered_scores() -> None:
             value.forecast_key.horizon_step,
             value.forecast_key.model_name,
         ): value
-        for value in sink.observation_resolutions
+        for value in store.observation_resolutions
     }
     annotations = {
         (
@@ -615,11 +629,11 @@ def test_scan_matches_owned_issuance_resolution_and_registered_scores() -> None:
             value.forecast_key.horizon_step,
             value.forecast_key.model_name,
         ): value
-        for value in sink.observe_annotations
+        for value in store.observe_annotations
     }
     outcomes = {
         (outcome.forecast_key, outcome.bound_key): outcome
-        for outcome in sink.coverage_report().outcomes
+        for outcome in store.coverage_report().outcomes
     }
 
     for reported_key, columns in rows.items():
@@ -691,11 +705,11 @@ def test_scan_matches_owned_issuance_resolution_and_registered_scores() -> None:
 
 
 def test_window_sum_scan_matches_complete_and_partial_coverage_outcomes() -> None:
-    sink = _window_sum_sink()
-    rows = dict(_scan_rows(InMemoryLedgerReader(sink), batch_size=1))
+    store = _window_sum_sink()
+    rows = dict(_scan_rows(InMemoryLedgerReader(store), batch_size=1))
     outcomes = {
         (outcome.forecast_key, outcome.bound_key): outcome
-        for outcome in sink.coverage_report().outcomes
+        for outcome in store.coverage_report().outcomes
     }
 
     for reported_key, columns in rows.items():
@@ -728,8 +742,8 @@ def test_window_sum_scan_matches_complete_and_partial_coverage_outcomes() -> Non
 
 
 def test_consumer_mutation_cannot_change_stored_or_fresh_scan_facts() -> None:
-    sink = _closed_sink()
-    reader = InMemoryLedgerReader(sink)
+    store = _closed_sink()
+    reader = InMemoryLedgerReader(store)
     selection = LedgerSelection(_session(), ("issuances",), 2)
     batch = next(reader.scan(selection))
     issuances = cast(tuple[LedgerBoundIssuance, ...], batch.columns["issuances"][0])
@@ -750,7 +764,7 @@ def test_consumer_mutation_cannot_change_stored_or_fresh_scan_facts() -> None:
 def test_reader_never_calls_full_ledger_projections(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    sink = _closed_sink()
+    store = _closed_sink()
 
     def forbidden_projection(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("reader called a forbidden full-ledger projection")
@@ -758,12 +772,16 @@ def test_reader_never_calls_full_ledger_projections(
     monkeypatch.setattr(Ledger, "forecasts", property(forbidden_projection))
     monkeypatch.setattr(Ledger, "coverage_report", forbidden_projection)
 
-    assert len(_scan_rows(InMemoryLedgerReader(sink), batch_size=2)) == 5
+    assert len(_scan_rows(InMemoryLedgerReader(store), batch_size=2)) == 5
 
 
-def _many_row_sink(row_count: int) -> InMemoryLedgerSink:
+def _many_row_sink(row_count: int) -> InMemoryIndexedRunStore:
     session = _session()
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     origin = pd.Timestamp("2026-01-02")
     lower, upper = interval_columns(0.9)
     models = [f"model-{index:04d}" for index in range(row_count)]
@@ -798,19 +816,20 @@ def _many_row_sink(row_count: int) -> InMemoryLedgerSink:
         ),
     }
     by_key = {("a", origin, 1, model): issuance for model in models}
-    sink.commit(
+    store.commit(
         OriginCommit(
             session=session,
             origin=origin,
+            expected_revision=store.revision,
             forecasts=(ForecastWrite(frame, by_key),),
         )
     )
-    return sink
+    return store
 
 
 def test_scan_reads_each_stored_row_once_across_many_batches() -> None:
-    sink = _many_row_sink(21)
-    stored = sink._ledger._forecasts
+    store = _many_row_sink(21)
+    stored = store._ledger._forecasts
     reads = 0
 
     class CountingForecasts(dict[ForecastKey, object]):
@@ -819,14 +838,14 @@ def test_scan_reads_each_stored_row_once_across_many_batches() -> None:
             reads += 1
             return super().__getitem__(key)
 
-    sink._ledger._forecasts = cast(Any, CountingForecasts(stored))
+    store._ledger._forecasts = cast(Any, CountingForecasts(stored))
 
-    assert len(_scan_rows(InMemoryLedgerReader(sink), batch_size=3)) == 21
+    assert len(_scan_rows(InMemoryLedgerReader(store), batch_size=3)) == 21
     assert reads == 21
 
 
-def _scan_peak_bytes(sink: InMemoryLedgerSink) -> int:
-    reader = InMemoryLedgerReader(sink)
+def _scan_peak_bytes(store: InMemoryIndexedRunStore) -> int:
+    reader = InMemoryLedgerReader(store)
     selection = LedgerSelection(_session(), ("series_key",), 3)
     gc.collect()
     tracemalloc.start()

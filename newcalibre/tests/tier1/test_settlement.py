@@ -26,13 +26,12 @@ from newcalibre.domain import (
 from newcalibre.engine import (
     Engine,
     EngineError,
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
-    InMemoryLedgerSink,
+    InMemoryIndexedRunStore,
     InMemoryPanelSource,
     InProcessDispatch,
     OriginCommit,
+    OriginIntent,
+    OriginSnapshot,
     SettlementError,
     SettlementRequest,
     SettlementSnapshot,
@@ -169,6 +168,15 @@ def _request(
 
 
 def _engine_settle(engine: Engine, request: SettlementRequest):
+    snapshot = engine._run_store.open(
+        OriginIntent(
+            request.session,
+            request.snapshot.periods[-1],
+            request.snapshot.periods,
+        )
+    )
+    assert isinstance(snapshot, OriginSnapshot)
+    engine._begin_cycle(snapshot)
     observation = engine.observe(request.snapshot.periods[-1], session=request.session)
     assert observation.token is not None
     return engine.settle(
@@ -245,19 +253,19 @@ def _engine(
     session: SessionIdentity,
     *,
     series_keys: Sequence[str] = ("sku-a",),
-) -> tuple[Engine, InMemoryLedgerSink]:
+) -> tuple[Engine, InMemoryIndexedRunStore]:
     panel = _panel(series_keys)
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    sink = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals=panel,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     return (
         Engine(
+            session=session,
             panel_source=InMemoryPanelSource(panel),
-            actuals_source=InMemoryActualsSource(
-                panel,
-                actuals_semantics=ActualsSemantics.DEMAND,
-            ),
-            artifact_store=InMemoryArtifactStore(),
-            calibration_state_store=InMemoryCalibrationStateStore(),
-            ledger_sink=sink,
+            run_store=sink,
             dispatch_backend=InProcessDispatch(),
             hierarchy=HierarchyIndex.flat(panel.series_keys),
         ),
@@ -320,7 +328,11 @@ def test_per_series_costs_price_each_record_and_survive_index_rebuild() -> None:
         "sku-b": CostStructure(2.0, 2.0, 7.0, 5.0),
     }
     session = _session(series_keys=("sku-a", "sku-b"), cost=costs)
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    sink = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     positions = {
         "sku-a": InventoryPosition(4.0, 0.0, 0.0),
         "sku-b": InventoryPosition(1.0, 0.0, 0.0),
@@ -348,6 +360,7 @@ def test_per_series_costs_price_each_record_and_survive_index_rebuild() -> None:
         OriginCommit(
             session=session,
             origin=PERIODS[0],
+            expected_revision=sink.revision,
             settlements=result.records,
         )
     )
@@ -361,7 +374,11 @@ def test_settlement_and_rebuild_use_only_the_session_decision_series() -> None:
         decision_series_keys=("bottom",),
         cost={"bottom": bottom_cost},
     )
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+    sink = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
     position = InventoryPosition(4.0, 0.0, 0.0)
     result = settle(
         _request(
@@ -379,6 +396,7 @@ def test_settlement_and_rebuild_use_only_the_session_decision_series() -> None:
         OriginCommit(
             session=session,
             origin=PERIODS[0],
+            expected_revision=sink.revision,
             settlements=result.records,
         )
     )
@@ -417,9 +435,10 @@ def test_initial_arrivals_seed_pipeline_without_order_rows_and_survive_rebuild()
         ("sku-a", PERIODS[0]): 5.0,
         ("sku-a", PERIODS[1]): 7.0,
     }
-    sink = InMemoryLedgerSink(
+    sink = InMemoryIndexedRunStore(
         session=session,
         calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
         initial_arrivals=initial_arrivals,
     )
     positions = {"sku-a": InventoryPosition(1.0, 12.0, 0.0)}
@@ -440,6 +459,7 @@ def test_initial_arrivals_seed_pipeline_without_order_rows_and_survive_rebuild()
         OriginCommit(
             session=session,
             origin=PERIODS[0],
+            expected_revision=sink.revision,
             settlements=first.records,
         )
     )
@@ -466,6 +486,7 @@ def test_initial_arrivals_seed_pipeline_without_order_rows_and_survive_rebuild()
         OriginCommit(
             session=session,
             origin=PERIODS[1],
+            expected_revision=sink.revision,
             settlements=second.records,
         )
     )
@@ -498,9 +519,10 @@ def test_initial_arrivals_refuse_invalid_pipeline_facts(
     match: str,
 ) -> None:
     with pytest.raises(LedgerError, match=match):
-        InMemoryLedgerSink(
+        InMemoryIndexedRunStore(
             session=_session(),
             calendar=CALENDAR,
+            actuals_semantics=ActualsSemantics.DEMAND,
             initial_arrivals=initial_arrivals,
         )
 
@@ -1121,6 +1143,7 @@ def test_engine_uses_the_same_settlement_core_and_commit_is_exactly_once() -> No
     missing_order = OriginCommit(
         session=session,
         origin=PERIODS[0],
+        expected_revision=sink.revision,
         settlements=through_engine.records,
     )
     with pytest.raises(LedgerError, match="on_order.*durable open orders"):
@@ -1129,6 +1152,7 @@ def test_engine_uses_the_same_settlement_core_and_commit_is_exactly_once() -> No
     write = OriginCommit(
         session=session,
         origin=PERIODS[0],
+        expected_revision=sink.revision,
         orders=(order,),
         settlements=through_engine.records,
     )
@@ -1167,6 +1191,7 @@ def test_sink_reconciles_orders_across_same_write_and_later_settlement_windows()
         OriginCommit(
             session=session,
             origin=PERIODS[0],
+            expected_revision=same_write_sink.revision,
             orders=(order,),
             settlements=same_write.records,
         )
@@ -1174,7 +1199,14 @@ def test_sink_reconciles_orders_across_same_write_and_later_settlement_windows()
     assert [record.arrivals for record in same_write_sink.settlements] == [0.0, 0.0, 3.0]
 
     later_engine, later_sink = _engine(session)
-    later_engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(order,)))
+    later_engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            expected_revision=later_sink.revision,
+            orders=(order,),
+        )
+    )
     later = _engine_settle(
         later_engine,
         _request(
@@ -1189,6 +1221,7 @@ def test_sink_reconciles_orders_across_same_write_and_later_settlement_windows()
         OriginCommit(
             session=session,
             origin=PERIODS[2],
+            expected_revision=later_sink.revision,
             settlements=later.records,
         )
     )
@@ -1205,7 +1238,14 @@ def test_sink_refuses_forged_timing_and_orders_for_already_settled_arrivals() ->
         arrival_period=PERIODS[1],
     )
     with pytest.raises(LedgerError, match="calendar.advance"):
-        engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(forged,)))
+        engine.commit(
+            OriginCommit(
+                session=session,
+                origin=PERIODS[0],
+                expected_revision=sink.revision,
+                orders=(forged,),
+            )
+        )
     unknown_series = _order(
         session,
         origin=PERIODS[0],
@@ -1217,6 +1257,7 @@ def test_sink_refuses_forged_timing_and_orders_for_already_settled_arrivals() ->
             OriginCommit(
                 session=session,
                 origin=PERIODS[0],
+                expected_revision=sink.revision,
                 orders=(unknown_series,),
             )
         )
@@ -1236,6 +1277,7 @@ def test_sink_refuses_forged_timing_and_orders_for_already_settled_arrivals() ->
         OriginCommit(
             session=session,
             origin=PERIODS[2],
+            expected_revision=sink.revision,
             settlements=settled.records,
         )
     )
@@ -1246,6 +1288,7 @@ def test_sink_refuses_forged_timing_and_orders_for_already_settled_arrivals() ->
             OriginCommit(
                 session=session,
                 origin=PERIODS[0],
+                expected_revision=sink.revision,
                 orders=(late_repair,),
             )
         )
@@ -1258,7 +1301,12 @@ def test_sink_refuses_orders_without_supported_session_timing() -> None:
     order = _order(no_decision, origin=PERIODS[0], quantity=1.0)
     with pytest.raises(LedgerError, match="decision configuration"):
         no_decision_engine.commit(
-            OriginCommit(session=no_decision, origin=PERIODS[0], orders=(order,))
+            OriginCommit(
+                session=no_decision,
+                origin=PERIODS[0],
+                expected_revision=no_decision_sink.revision,
+                orders=(order,),
+            )
         )
     assert no_decision_sink.orders == ()
 
@@ -1275,6 +1323,7 @@ def test_sink_refuses_orders_without_supported_session_timing() -> None:
             OriginCommit(
                 session=zero_lead,
                 origin=PERIODS[0],
+                expected_revision=zero_lead_sink.revision,
                 orders=(zero_lead_order,),
             )
         )
@@ -1288,6 +1337,7 @@ def test_sink_refuses_orders_without_supported_session_timing() -> None:
             OriginCommit(
                 session=backorder,
                 origin=PERIODS[0],
+                expected_revision=backorder_sink.revision,
                 orders=(backorder_order,),
             )
         )
@@ -1311,6 +1361,7 @@ def test_sink_refuses_an_order_whose_origin_is_already_settled() -> None:
         OriginCommit(
             session=session,
             origin=PERIODS[1],
+            expected_revision=sink.revision,
             settlements=settled.records,
         )
     )
@@ -1321,6 +1372,7 @@ def test_sink_refuses_an_order_whose_origin_is_already_settled() -> None:
             OriginCommit(
                 session=session,
                 origin=PERIODS[0],
+                expected_revision=sink.revision,
                 orders=(late_order,),
             )
         )
@@ -1341,6 +1393,7 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
             OriginCommit(
                 session=session,
                 origin=PERIODS[0],
+                expected_revision=sink.revision,
                 orders=(due,),
                 settlements=(disappearing_arrival,),
             )
@@ -1368,6 +1421,7 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
             OriginCommit(
                 session=session,
                 origin=PERIODS[0],
+                expected_revision=sink.revision,
                 settlements=(wrong_rule,),
             )
         )
@@ -1385,6 +1439,7 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
             OriginCommit(
                 session=session,
                 origin=PERIODS[0],
+                expected_revision=sink.revision,
                 settlements=(wrong_rate,),
             )
         )
@@ -1394,6 +1449,7 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
         OriginCommit(
             session=session,
             origin=PERIODS[0],
+            expected_revision=sink.revision,
             settlements=first.records,
         )
     )
@@ -1416,6 +1472,7 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
             OriginCommit(
                 session=session,
                 origin=PERIODS[1],
+                expected_revision=sink.revision,
                 settlements=(changed_semantics,),
             )
         )
@@ -1430,6 +1487,7 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
             OriginCommit(
                 session=session,
                 origin=PERIODS[1],
+                expected_revision=sink.revision,
                 settlements=(forged_transition,),
             )
         )
@@ -1456,6 +1514,7 @@ def test_sink_requires_complete_decision_series_for_every_settlement_period() ->
             OriginCommit(
                 session=session,
                 origin=PERIODS[0],
+                expected_revision=sink.revision,
                 settlements=(result.records[0],),
             )
         )
@@ -1467,8 +1526,22 @@ def test_failed_multi_period_accounting_does_not_consume_open_orders() -> None:
     engine, sink = _engine(session)
     first_order = _order(session, origin=PERIODS[0], quantity=3.0)
     second_order = _order(session, origin=PERIODS[1], quantity=4.0)
-    engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(first_order,)))
-    engine.commit(OriginCommit(session=session, origin=PERIODS[1], orders=(second_order,)))
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[0],
+            expected_revision=sink.revision,
+            orders=(first_order,),
+        )
+    )
+    engine.commit(
+        OriginCommit(
+            session=session,
+            origin=PERIODS[1],
+            expected_revision=sink.revision,
+            orders=(second_order,),
+        )
+    )
     result = _engine_settle(
         engine,
         _request(
@@ -1489,6 +1562,7 @@ def test_failed_multi_period_accounting_does_not_consume_open_orders() -> None:
     bad_write = OriginCommit(
         session=session,
         origin=PERIODS[3],
+        expected_revision=sink.revision,
         settlements=(result.records[0], bad_final),
     )
 
@@ -1500,6 +1574,7 @@ def test_failed_multi_period_accounting_does_not_consume_open_orders() -> None:
         OriginCommit(
             session=session,
             origin=PERIODS[3],
+            expected_revision=sink.revision,
             settlements=result.records,
         )
     )
@@ -1544,6 +1619,7 @@ def test_engine_refuses_forged_facts_on_the_owned_calendar_grid() -> None:
         OriginCommit(
             session=session,
             origin=PERIODS[0],
+            expected_revision=sink.revision,
             settlements=first.records,
         )
     )
@@ -1597,7 +1673,11 @@ def test_compact_index_work_stays_flat_across_64_growing_origins_and_rebuild() -
             return getattr(self._ledger, name)
 
     def run(*, rebuild_after_32: bool):
-        sink = InMemoryLedgerSink(session=session, calendar=calendar)
+        sink = InMemoryIndexedRunStore(
+            session=session,
+            calendar=calendar,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
         positions = {"sku-a": InventoryPosition(0.0, 0.0, 0.0)}
         steady_work: list[tuple[int, ...]] = []
         durable_ledger = None
@@ -1625,6 +1705,7 @@ def test_compact_index_work_stays_flat_across_64_growing_origins_and_rebuild() -
                 OriginCommit(
                     session=session,
                     origin=period,
+                    expected_revision=sink.revision,
                     orders=(order,),
                     settlements=result.records,
                 )

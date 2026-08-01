@@ -35,17 +35,16 @@ from newcalibre.domain import (
 )
 from newcalibre.engine import (
     ENGINE_VERBS,
+    ActualsCommit,
     ActualsEvent,
     Engine,
     EventDriver,
     EventDriverError,
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
-    InMemoryLedgerSink,
+    InMemoryIndexedRunStore,
     InMemoryPanelSource,
     InProcessDispatch,
     OrderProposal,
+    OriginCommit,
     OriginEvent,
     PhaseError,
 )
@@ -197,7 +196,7 @@ def _driver(
     *,
     panel: Panel,
     session: SessionIdentity,
-    sink: InMemoryLedgerSink,
+    store: InMemoryIndexedRunStore,
     effects: list[str],
     order_origins: list[pd.Timestamp],
 ) -> EventDriver:
@@ -205,13 +204,10 @@ def _driver(
         order_origins.append(request.origin)
         return (OrderProposal("a", "fixture", 1.0),)
 
-    actuals = InMemoryActualsSource(panel, actuals_semantics=ActualsSemantics.DEMAND)
     engine = Engine(
+        session=session,
         panel_source=InMemoryPanelSource(panel),
-        actuals_source=actuals,
-        artifact_store=InMemoryArtifactStore(),
-        calibration_state_store=InMemoryCalibrationStateStore(),
-        ledger_sink=sink,
+        run_store=store,
         dispatch_backend=InProcessDispatch(),
         hierarchy=HierarchyIndex.flat(panel.series_keys),
         adapter_resolver=lambda _configuration: _Adapter(effects),
@@ -219,35 +215,39 @@ def _driver(
     )
     return EventDriver(
         engine=engine,
-        ledger_sink=sink,
+        run_store=store,
         actuals_semantics=ActualsSemantics.DEMAND,
     )
 
 
 def _runtime(
     *,
-    sink_factory: Callable[
+    store_factory: Callable[
         [SessionIdentity, Calendar],
-        InMemoryLedgerSink,
-    ] = lambda session, calendar: InMemoryLedgerSink(session=session, calendar=calendar),
+        InMemoryIndexedRunStore,
+    ] = lambda session, calendar: InMemoryIndexedRunStore(
+        session=session,
+        calendar=calendar,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    ),
     review_period: int = 1,
 ) -> tuple[
     EventDriver,
     SessionIdentity,
-    InMemoryLedgerSink,
+    InMemoryIndexedRunStore,
     list[str],
     list[pd.Timestamp],
 ]:
     calendar = Calendar("D", phase=pd.Timestamp("2026-01-01"))
     panel = _panel(calendar)
     session = _decision_session(panel.calendar, review_period=review_period)
-    sink = sink_factory(session, panel.calendar)
+    sink = store_factory(session, panel.calendar)
     effects: list[str] = []
     order_origins: list[pd.Timestamp] = []
     driver = _driver(
         panel=panel,
         session=session,
-        sink=sink,
+        store=sink,
         effects=effects,
         order_origins=order_origins,
     )
@@ -276,7 +276,7 @@ def _actuals(session: SessionIdentity, value: str, demand: float) -> ActualsEven
     )
 
 
-class _InterleavingLedgerSink(InMemoryLedgerSink):
+class _InterleavingRunStore(InMemoryIndexedRunStore):
     """Hold both origin writes at commit and publish one selected origin first."""
 
     def __init__(
@@ -286,14 +286,23 @@ class _InterleavingLedgerSink(InMemoryLedgerSink):
         calendar: Calendar,
         first_origin: pd.Timestamp,
     ) -> None:
-        super().__init__(session=session, calendar=calendar)
+        super().__init__(
+            session=session,
+            calendar=calendar,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
         self._first_origin = first_origin
         self._origin_writes_ready = Barrier(2)
         self._first_origin_published = Barrier(2)
         self._race_complete = False
 
     def commit(self, write):
-        if not write.forecasts or self._race_complete:
+        if (
+            isinstance(write, ActualsCommit)
+            or not isinstance(write, OriginCommit)
+            or not write.forecasts
+            or self._race_complete
+        ):
             return super().commit(write)
         self._origin_writes_ready.wait(timeout=5)
         if write.origin == self._first_origin:
@@ -309,18 +318,14 @@ class _InterleavingLedgerSink(InMemoryLedgerSink):
 
 
 @pytest.mark.parametrize(
-    ("first_origin", "failure"),
-    [
-        (pd.Timestamp("2026-01-05"), "strictly monotonically"),
-        (pd.Timestamp("2026-01-04"), "durable inventory state"),
-    ],
+    "first_origin",
+    [pd.Timestamp("2026-01-05"), pd.Timestamp("2026-01-04")],
 )
 def test_concurrent_origin_admission_and_inventory_validation_are_atomic(
     first_origin: pd.Timestamp,
-    failure: str,
 ) -> None:
     driver, session, sink, _effects, _order_origins = _runtime(
-        sink_factory=lambda session, calendar: _InterleavingLedgerSink(
+        store_factory=lambda session, calendar: _InterleavingRunStore(
             session=session,
             calendar=calendar,
             first_origin=first_origin,
@@ -345,7 +350,7 @@ def test_concurrent_origin_admission_and_inventory_validation_are_atomic(
             origin: executor.submit(driver.handle, event) for origin, event in origins.items()
         }
         winner = futures[first_origin].result(timeout=10)
-        with pytest.raises(PhaseError, match=failure):
+        with pytest.raises(PhaseError, match="revision is stale"):
             futures[losing_origin].result(timeout=10)
 
     assert winner.receipt == sink.receipt(first_origin)
@@ -360,7 +365,7 @@ def test_concurrent_origin_admission_and_inventory_validation_are_atomic(
 def test_concurrent_drivers_admit_decision_cadence_at_the_journal_boundary() -> None:
     first_origin = pd.Timestamp("2026-01-04")
     first_driver, session, sink, effects, order_origins = _runtime(
-        sink_factory=lambda session, calendar: _InterleavingLedgerSink(
+        store_factory=lambda session, calendar: _InterleavingRunStore(
             session=session,
             calendar=calendar,
             first_origin=first_origin,
@@ -370,7 +375,7 @@ def test_concurrent_drivers_admit_decision_cadence_at_the_journal_boundary() -> 
     second_driver = _driver(
         panel=_panel(sink.calendar),
         session=session,
-        sink=sink,
+        store=sink,
         effects=effects,
         order_origins=order_origins,
     )
@@ -386,7 +391,7 @@ def test_concurrent_drivers_admit_decision_cadence_at_the_journal_boundary() -> 
             _origin(session, "2026-01-05", positions=initial),
         )
         first.result(timeout=10)
-        with pytest.raises(PhaseError, match="origin count changed during admission"):
+        with pytest.raises(PhaseError, match="revision is stale"):
             second.result(timeout=10)
 
     assert {row.origin for row in sink.orders} == {first_origin}

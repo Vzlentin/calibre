@@ -1,4 +1,4 @@
-"""Exercise the engine-owned checkpointed forecasting lifecycle."""
+"""Exercise the engine-owned revision-snapshot forecasting lifecycle."""
 
 from __future__ import annotations
 
@@ -19,12 +19,7 @@ from newcalibre.domain import (
     TargetSupport,
 )
 from newcalibre.domain._canonical_json import canonical_json_bytes
-from newcalibre.engine import (
-    ForecastLifecycle,
-    ForecastLifecycleError,
-    IndexedPanel,
-    InMemoryArtifactStore,
-)
+from newcalibre.engine import ForecastLifecycle, ForecastLifecycleError, IndexedPanel
 from newcalibre.forecasting import SeasonalNaiveAdapter, resolve_adapter
 
 pytestmark = pytest.mark.tier1
@@ -56,13 +51,7 @@ def _world():
     return panel, config, session
 
 
-def _task(
-    panel: IndexedPanel,
-    config: dict[str, object],
-    origin: str,
-    *,
-    previous=None,
-):
+def _task(panel: IndexedPanel, config: dict[str, object], origin: str, *, previous=None):
     return panel.tasks(
         origin=pd.Timestamp(origin),
         horizon=2,
@@ -78,105 +67,108 @@ def _run(
     session: SessionIdentity,
     task,
     token: CycleToken,
+    checkpoints: dict[str, bytes],
+    indexes: dict[str, bytes],
 ) -> pd.DataFrame:
-    result = lifecycle.run_item((session, task, token))
-    lifecycle.publish((result,))
+    result = lifecycle.run_item((session, task, token, checkpoints, indexes))
+    staged_checkpoints, staged_indexes = lifecycle.staged_updates((result,))
+    checkpoints.update(staged_checkpoints)
+    indexes.update(staged_indexes)
     return result.frame
 
 
-def test_first_fit_exact_load_and_incremental_resume_publish_deterministic_checkpoints() -> None:
+def test_first_fit_exact_load_and_incremental_resume_stage_deterministic_checkpoints() -> None:
+    """Restore exact and predecessor state from one revision-bound mapping pair."""
     panel, config, session = _world()
-    store = InMemoryArtifactStore()
+    checkpoints: dict[str, bytes] = {}
+    indexes: dict[str, bytes] = {}
     first = _task(panel, config, "2026-01-15")
-    first_token = CycleToken(session, first.origin, 1)
-    lifecycle = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
-    first_frame = _run(lifecycle, session=session, task=first, token=first_token)
-    first_artifacts = dict(store.artifacts)
+    lifecycle = ForecastLifecycle(adapter_resolver=resolve_adapter)
+    first_frame = _run(
+        lifecycle,
+        session=session,
+        task=first,
+        token=CycleToken(session, first.origin, 1),
+        checkpoints=checkpoints,
+        indexes=indexes,
+    )
+    first_checkpoints = dict(checkpoints)
 
-    exact = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
     exact_frame = _run(
-        exact,
+        ForecastLifecycle(adapter_resolver=resolve_adapter),
         session=session,
         task=first,
         token=CycleToken(session, first.origin, 2),
+        checkpoints=checkpoints,
+        indexes=indexes,
+    )
+    second = _task(panel, config, "2026-01-16", previous={first.series_keys: first.cursor})
+    second_frame = _run(
+        ForecastLifecycle(adapter_resolver=resolve_adapter),
+        session=session,
+        task=second,
+        token=CycleToken(session, second.origin, 3),
+        checkpoints=checkpoints,
+        indexes=indexes,
     )
 
-    second = _task(panel, config, "2026-01-16", previous={first.series_keys: first.cursor})
-    resumed = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
-    second_token = CycleToken(session, second.origin, 3)
-    second_frame = _run(resumed, session=session, task=second, token=second_token)
-
     pd.testing.assert_frame_equal(first_frame, exact_frame)
-    assert dict(store.artifacts).items() >= first_artifacts.items()
-    assert len(store.artifacts) == 2
-    assert len(store.artifact_indexes) == 1
+    assert checkpoints.items() >= first_checkpoints.items()
+    assert len(checkpoints) == 2
+    assert len(indexes) == 1
     assert second_frame["point_forecast"].tolist() == [9.0, 10.0]
 
 
-def test_incremental_resume_loads_one_index_and_one_prior_checkpoint() -> None:
-    class CountingStore(InMemoryArtifactStore):
-        def __init__(self) -> None:
-            super().__init__()
-            self.artifact_loads = 0
-            self.index_loads = 0
-
-        def load(self, key: str) -> bytes | None:
-            self.artifact_loads += 1
-            return super().load(key)
-
-        def load_index(self, key: str) -> bytes | None:
-            self.index_loads += 1
-            return super().load_index(key)
-
+def test_staged_updates_remain_unpublished_until_the_caller_commits() -> None:
+    """Return checkpoint effects without mutating snapshot mappings."""
     panel, config, session = _world()
-    store = CountingStore()
-    first = _task(panel, config, "2026-01-08")
-    first_token = CycleToken(session, first.origin, 1)
-    lifecycle = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
-    _run(lifecycle, session=session, task=first, token=first_token)
+    task = _task(panel, config, "2026-01-15")
+    lifecycle = ForecastLifecycle(adapter_resolver=resolve_adapter)
+    result = lifecycle.run_item((session, task, CycleToken(session, task.origin, 1), {}, {}))
 
-    store.artifact_loads = 0
-    store.index_loads = 0
-    later = _task(panel, config, "2026-01-16", previous={first.series_keys: first.cursor})
-    later_token = CycleToken(session, later.origin, 2)
-    resumed = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
-    resumed.run_item((session, later, later_token))
+    checkpoints, indexes = lifecycle.staged_updates((result,))
 
-    assert store.index_loads == 1
-    assert store.artifact_loads == 2  # exact miss plus the indexed predecessor
+    assert checkpoints
+    assert indexes
+    assert not hasattr(lifecycle, "publish")
 
 
 def test_malformed_exact_checkpoint_fails_closed() -> None:
+    """Reject malformed opaque state before adapter prediction."""
     panel, config, session = _world()
-    store = InMemoryArtifactStore()
+    checkpoints: dict[str, bytes] = {}
+    indexes: dict[str, bytes] = {}
     task = _task(panel, config, "2026-01-15")
-    token = CycleToken(session, task.origin, 1)
-    lifecycle = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
-    _run(lifecycle, session=session, task=task, token=token)
-    key = next(iter(store._artifacts))
-    store._artifacts[key] = b"malformed"
+    lifecycle = ForecastLifecycle(adapter_resolver=resolve_adapter)
+    _run(
+        lifecycle,
+        session=session,
+        task=task,
+        token=CycleToken(session, task.origin, 1),
+        checkpoints=checkpoints,
+        indexes=indexes,
+    )
+    checkpoints[next(iter(checkpoints))] = b"malformed"
 
-    retry = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
     with pytest.raises(ForecastLifecycleError, match="malformed"):
-        retry.run_item(
-            (session, task, CycleToken(session, task.origin, 2)),
+        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
+            (session, task, CycleToken(session, task.origin, 2), checkpoints, indexes)
         )
 
 
 def test_run_requires_the_exact_task_cycle() -> None:
+    """Bind dispatched work to its opened store revision token."""
     panel, config, session = _world()
     task = _task(panel, config, "2026-01-15")
-    lifecycle = ForecastLifecycle(
-        artifact_store=InMemoryArtifactStore(),
-        adapter_resolver=resolve_adapter,
-    )
     with pytest.raises(ForecastLifecycleError, match="does not match"):
-        lifecycle.run_item(
+        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
             (
                 session,
                 task,
                 CycleToken(session, task.calendar.advance(task.origin, 1), 1),
-            ),
+                {},
+                {},
+            )
         )
 
 
@@ -203,50 +195,58 @@ def test_well_formed_foreign_checkpoint_bindings_fail_closed(
     field: str,
     foreign: object,
 ) -> None:
+    """Reject checkpoint bytes bound to different task or lineage facts."""
     panel, config, session = _world()
-    store = InMemoryArtifactStore()
+    checkpoints: dict[str, bytes] = {}
+    indexes: dict[str, bytes] = {}
     task = _task(panel, config, "2026-01-15")
-    token = CycleToken(session, task.origin, 1)
-    lifecycle = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
-    _run(lifecycle, session=session, task=task, token=token)
-    key = next(iter(store._artifacts))
-    payload = json.loads(store._artifacts[key])
+    _run(
+        ForecastLifecycle(adapter_resolver=resolve_adapter),
+        session=session,
+        task=task,
+        token=CycleToken(session, task.origin, 1),
+        checkpoints=checkpoints,
+        indexes=indexes,
+    )
+    key = next(iter(checkpoints))
+    payload = json.loads(checkpoints[key])
     payload[field] = foreign
-    store._artifacts[key] = canonical_json_bytes(payload, path="foreign checkpoint")
+    checkpoints[key] = canonical_json_bytes(payload, path="foreign checkpoint")
 
-    retry = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
     with pytest.raises(ForecastLifecycleError):
-        retry.run_item(
-            (session, task, CycleToken(session, task.origin, 2)),
+        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
+            (session, task, CycleToken(session, task.origin, 2), checkpoints, indexes)
         )
 
 
 def test_well_formed_foreign_checkpoint_index_target_fails_closed() -> None:
+    """Reject an index that points outside its derived checkpoint lineage."""
     panel, config, session = _world()
-    store = InMemoryArtifactStore()
+    checkpoints: dict[str, bytes] = {}
+    indexes: dict[str, bytes] = {}
     first = _task(panel, config, "2026-01-08")
-    lifecycle = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
-    token = CycleToken(session, first.origin, 1)
-    _run(lifecycle, session=session, task=first, token=token)
-    index_key = next(iter(store._artifact_indexes))
-    index = json.loads(store._artifact_indexes[index_key])
-    index["checkpoint_key"] = "foreign"
-    store._artifact_indexes[index_key] = canonical_json_bytes(
-        index,
-        path="foreign checkpoint index",
+    _run(
+        ForecastLifecycle(adapter_resolver=resolve_adapter),
+        session=session,
+        task=first,
+        token=CycleToken(session, first.origin, 1),
+        checkpoints=checkpoints,
+        indexes=indexes,
     )
+    index_key = next(iter(indexes))
+    index = json.loads(indexes[index_key])
+    index["checkpoint_key"] = "foreign"
+    indexes[index_key] = canonical_json_bytes(index, path="foreign checkpoint index")
     later = _task(panel, config, "2026-01-16", previous={first.series_keys: first.cursor})
 
     with pytest.raises(ForecastLifecycleError, match="invalid artifact"):
-        ForecastLifecycle(
-            artifact_store=store,
-            adapter_resolver=resolve_adapter,
-        ).run_item(
-            (session, later, CycleToken(session, later.origin, 2)),
+        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
+            (session, later, CycleToken(session, later.origin, 2), checkpoints, indexes)
         )
 
 
-def test_declared_update_failure_propagates_without_fit_or_publication() -> None:
+def test_declared_update_failure_leaves_snapshot_mappings_unchanged() -> None:
+    """Propagate adapter failures without publishing staged checkpoint effects."""
     calls: list[str] = []
 
     class FailingUpdateAdapter(SeasonalNaiveAdapter):
@@ -259,21 +259,28 @@ def test_declared_update_failure_propagates_without_fit_or_publication() -> None
             raise RuntimeError("declared update failed")
 
     panel, config, session = _world()
-    store = InMemoryArtifactStore()
+    checkpoints: dict[str, bytes] = {}
+    indexes: dict[str, bytes] = {}
     first = _task(panel, config, "2026-01-08")
     lifecycle = ForecastLifecycle(
-        artifact_store=store,
-        adapter_resolver=lambda model_config: FailingUpdateAdapter(model_config),
+        adapter_resolver=lambda model_config: FailingUpdateAdapter(model_config)
     )
-    first_result = lifecycle.run_item((session, first, CycleToken(session, first.origin, 1)))
-    lifecycle.publish((first_result,))
-    published = (dict(store.artifacts), dict(store.artifact_indexes))
+    _run(
+        lifecycle,
+        session=session,
+        task=first,
+        token=CycleToken(session, first.origin, 1),
+        checkpoints=checkpoints,
+        indexes=indexes,
+    )
+    published = (dict(checkpoints), dict(indexes))
     calls.clear()
     later = _task(panel, config, "2026-01-16", previous={first.series_keys: first.cursor})
 
     with pytest.raises(RuntimeError, match="declared update failed"):
-        lifecycle.run_item((session, later, CycleToken(session, later.origin, 2)))
+        lifecycle.run_item(
+            (session, later, CycleToken(session, later.origin, 2), checkpoints, indexes)
+        )
 
     assert calls == ["update"]
-    assert (dict(store.artifacts), dict(store.artifact_indexes)) == published
-    assert not hasattr(lifecycle, "_prepared")
+    assert (checkpoints, indexes) == published

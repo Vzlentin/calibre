@@ -25,12 +25,13 @@ from newcalibre.engine._session import (
     session_series_and_frequency,
 )
 from newcalibre.engine.errors import EngineError
-from newcalibre.engine.ports import (
+from newcalibre.engine.run_store import (
     ActualKey,
-    ActualsSource,
     CommitReceipt,
-    LedgerSink,
+    IndexedRunStore,
     OriginCommit,
+    OriginIntent,
+    OriginSnapshot,
 )
 from newcalibre.engine.settlement import (
     SettlementError,
@@ -151,31 +152,21 @@ class TimeLoop:
         self,
         *,
         engine: Engine,
-        actuals_source: ActualsSource,
-        ledger_sink: LedgerSink,
+        run_store: IndexedRunStore,
         request: TimeLoopRequest,
         reporter: Callable[[PhaseEvent], None] | None = None,
     ) -> None:
         if not isinstance(engine, Engine):
             raise TypeError("time loop requires an Engine")
-        if not isinstance(actuals_source, ActualsSource):
-            raise TypeError("time loop actuals source does not satisfy its port")
-        if not isinstance(ledger_sink, LedgerSink):
-            raise TypeError("time loop ledger sink does not satisfy its port")
+        if not isinstance(run_store, IndexedRunStore):
+            raise TypeError("time loop run store does not satisfy its port")
         if not isinstance(request, TimeLoopRequest):
             raise TypeError("time loop requires a TimeLoopRequest")
         if reporter is not None and not callable(reporter):
             raise TypeError("time loop reporter must be callable")
-        if actuals_source.actuals_semantics is not request.actuals_semantics:
-            raise TimeLoopError("time-loop actuals semantics do not match the actuals source")
-        engine._require_time_loop_ports(
-            actuals_source=actuals_source,
-            ledger_sink=ledger_sink,
-        )
-        if ledger_sink.session != request.session:
-            raise TimeLoopError("time-loop session does not match the ledger sink")
+        engine._require_driver_store(run_store)
 
-        calendar = ledger_sink.calendar
+        calendar = engine._calendar
         for origin in request.origins:
             try:
                 calendar.require_member(origin, name="time-loop origin")
@@ -196,8 +187,7 @@ class TimeLoop:
                     "decision-free time loops require empty initial inventory positions"
                 )
             self._engine = engine
-            self._actuals_source = actuals_source
-            self._ledger_sink = ledger_sink
+            self._run_store = run_store
             self._request = request
             self._calendar = calendar
             self._series_keys = ()
@@ -237,7 +227,14 @@ class TimeLoop:
                 "time-loop settlement end must be at or after the final decision plus lead time"
             )
         final_period = request.settlement_end
-        initial_snapshot = ledger_sink.settlement_snapshot((request.origins[0],))
+        opened = run_store.open(
+            OriginIntent(request.session, request.origins[0], (request.origins[0],))
+        )
+        if not isinstance(opened, OriginSnapshot) or opened.settlement is None:
+            raise TimeLoopError("time-loop store did not prepare its settlement snapshot")
+        if opened.actuals_semantics is not request.actuals_semantics:
+            raise TimeLoopError("time-loop actuals semantics do not match the run store")
+        initial_snapshot = opened.settlement
         if (
             initial_snapshot.frontier is not None
             and initial_snapshot.actuals_semantics is not request.actuals_semantics
@@ -265,15 +262,14 @@ class TimeLoop:
             first_period = calendar.advance(initial_snapshot.frontier, 1)
         if (
             initial_snapshot.frontier is not None
-            and ledger_sink.settlement_receipt(initial_snapshot.frontier) is None
+            and initial_snapshot.frontier not in opened.settlement_receipts
         ):
             raise TimeLoopError(
                 f"settlement frontier {initial_snapshot.frontier} has no journal receipt"
             )
 
         self._engine = engine
-        self._actuals_source = actuals_source
-        self._ledger_sink = ledger_sink
+        self._run_store = run_store
         self._request = request
         self._calendar = calendar
         self._series_keys = series_keys
@@ -295,7 +291,7 @@ class TimeLoop:
         window_due_arrivals = (
             {}
             if not uncommitted_periods
-            else ledger_sink.settlement_snapshot(uncommitted_periods).due_arrivals
+            else self._required_settlement_snapshot(uncommitted_periods).due_arrivals
         )
         _require_open_orders_inside_window(
             open_quantities=initial_snapshot.open_order_quantities,
@@ -314,9 +310,11 @@ class TimeLoop:
         for period in self._settlement_periods:
             receipt = receipts.get(period)
             if receipt is not None:
-                self._engine.commit(receipt)
                 continue
-            snapshot = self._ledger_sink.settlement_snapshot((period,))
+            opened = self._open_origin(period, settlement_periods=(period,))
+            snapshot = opened.settlement
+            if snapshot is None:
+                raise TimeLoopError("time-loop store omitted its settlement snapshot")
             positions = (
                 self._request.initial_inventory_positions
                 if snapshot.frontier is None
@@ -331,6 +329,7 @@ class TimeLoop:
                         scope=self._request.scope,
                         inventory_positions=positions,
                     ),
+                    snapshot=opened,
                     decision_origin=period in self._decision_origin_set,
                     settlement=SettlementWindow(
                         snapshot=snapshot,
@@ -338,13 +337,14 @@ class TimeLoop:
                         actuals_semantics=self._request.actuals_semantics,
                     ),
                 )
-                receipt = self._ledger_sink.receipt(period)
+                receipt = self._open_origin(period).receipt
                 if receipt is None:
-                    raise TimeLoopError(f"time loop did not commit settlement period {period}")
+                    raise TimeLoopError(f"time loop did not commit origin {period}")
             else:
                 observation = self._engine.observe(
                     period,
                     session=self._request.session,
+                    snapshot=opened,
                 )
                 settled = self._engine.settle(
                     SettlementRequest(
@@ -361,9 +361,11 @@ class TimeLoop:
                     OriginCommit(
                         session=self._request.session,
                         origin=period,
+                        expected_revision=opened.revision,
                         observe_cycle=observation.cycle,
                         settlements=settled.records,
                         state_updates=observation.cycle.state_updates,
+                        resume_marker=period,
                     )
                 )
             if receipt.settlement_periods != (period,):
@@ -373,12 +375,14 @@ class TimeLoop:
             receipts[period] = receipt
 
         next_period = self._calendar.advance(self._settlement_periods[-1], 1)
-        final_observe_receipt = self._ledger_sink.receipt(next_period)
+        close_snapshot = self._open_origin(next_period)
+        final_observe_receipt = close_snapshot.receipt
         if final_observe_receipt is None:
-            final_observe_receipt = self._commit_observation(next_period)
-        else:
-            self._engine.commit(final_observe_receipt)
-        final_snapshot = self._ledger_sink.settlement_snapshot((next_period,))
+            final_observe_receipt = self._commit_observation(close_snapshot)
+        final_opened = self._open_origin(next_period, settlement_periods=(next_period,))
+        final_snapshot = final_opened.settlement
+        if final_snapshot is None:
+            raise TimeLoopError("time-loop store omitted its final settlement snapshot")
         if any(quantity != 0.0 for quantity in final_snapshot.open_order_quantities.values()):
             raise TimeLoopError("time-loop drain ended with open orders")
         return TimeLoopResult(
@@ -392,24 +396,25 @@ class TimeLoop:
         """Run forecast and observation commits without inventory settlement."""
         receipts: list[CommitReceipt] = []
         for period in self._decision_free_periods:
-            receipt = self._ledger_sink.receipt(period)
+            opened = self._open_origin(period)
+            receipt = opened.receipt
             if receipt is not None:
                 if period in self._forecast_origins and not receipt.has_forecasts:
                     raise TimeLoopError(
                         f"commit receipt at forecast origin {period} contains no forecasts"
                     )
-                receipt = self._engine.commit(receipt)
             elif period in self._forecast_origins:
                 result = self._spine.run_origin(
                     OriginRequest(
                         session=self._request.session,
                         origin=period,
                         scope=self._request.scope,
-                    )
+                    ),
+                    snapshot=opened,
                 )
                 receipt = result.receipt
             else:
-                receipt = self._commit_observation(period)
+                receipt = self._commit_observation(opened)
             if receipt.settlement_periods:
                 raise TimeLoopError(
                     f"decision-free commit receipt at {period} contains settlement periods"
@@ -417,11 +422,10 @@ class TimeLoop:
             receipts.append(receipt)
 
         close_origin = self._calendar.advance(self._decision_free_periods[-1], 1)
-        close_receipt = self._ledger_sink.receipt(close_origin)
+        close_snapshot = self._open_origin(close_origin)
+        close_receipt = close_snapshot.receipt
         if close_receipt is None:
-            close_receipt = self._commit_observation(close_origin)
-        else:
-            close_receipt = self._engine.commit(close_receipt)
+            close_receipt = self._commit_observation(close_snapshot)
         if close_receipt.settlement_periods:
             raise TimeLoopError("decision-free close commit contains settlement periods")
         receipts.append(close_receipt)
@@ -432,14 +436,20 @@ class TimeLoop:
             inventory_positions={},
         )
 
-    def _commit_observation(self, origin: pd.Timestamp) -> CommitReceipt:
-        observation = self._engine.observe(origin, session=self._request.session)
+    def _commit_observation(self, snapshot: OriginSnapshot) -> CommitReceipt:
+        observation = self._engine.observe(
+            snapshot.origin,
+            session=self._request.session,
+            snapshot=snapshot,
+        )
         return self._engine.commit(
             OriginCommit(
                 session=self._request.session,
-                origin=origin,
+                origin=snapshot.origin,
+                expected_revision=snapshot.revision,
                 observe_cycle=observation.cycle,
                 state_updates=observation.cycle.state_updates,
+                resume_marker=snapshot.origin,
             )
         )
 
@@ -452,13 +462,13 @@ class TimeLoop:
         keys = tuple((series_key, period) for period in periods for series_key in self._series_keys)
         before = self._calendar.advance(periods[-1], 1)
         try:
-            submission = self._actuals_source.reveal(before=before)
+            snapshot = self._open_origin(before)
         except ObserveError as error:
-            raise TimeLoopError(f"settlement actuals source is invalid: {error}") from error
+            raise TimeLoopError(f"settlement actuals snapshot is invalid: {error}") from error
         requested = set(keys)
         supplied = {
             record.key: float(record.recorded_value)
-            for record in submission.records
+            for record in (*snapshot.observed_history, *snapshot.actuals.records)
             if record.key in requested
         }
         try:
@@ -478,11 +488,15 @@ class TimeLoop:
 
     def _receipt_prefix(self) -> dict[pd.Timestamp, CommitReceipt]:
         receipts: dict[pd.Timestamp, CommitReceipt] = {}
+        opened = self._open_origin(
+            self._settlement_periods[0],
+            settlement_periods=self._settlement_periods,
+        )
         first_missing: pd.Timestamp | None = None
         for period in self._settlement_periods:
-            receipt = self._ledger_sink.settlement_receipt(period)
+            receipt = opened.settlement_receipts.get(period)
             if receipt is None:
-                origin_receipt = self._ledger_sink.receipt(period)
+                origin_receipt = self._open_origin(period).receipt
                 if origin_receipt is not None:
                     raise TimeLoopError(
                         f"commit receipt at {period} does not contain exactly that "
@@ -497,6 +511,30 @@ class TimeLoop:
                 )
             receipts[period] = receipt
         return receipts
+
+    def _open_origin(
+        self,
+        origin: pd.Timestamp,
+        *,
+        settlement_periods: Sequence[pd.Timestamp] = (),
+    ) -> OriginSnapshot:
+        """Open and type-check one current origin snapshot."""
+        snapshot = self._run_store.open(
+            OriginIntent(self._request.session, origin, settlement_periods)
+        )
+        if not isinstance(snapshot, OriginSnapshot):
+            raise TimeLoopError("time-loop store returned an actuals snapshot")
+        return snapshot
+
+    def _required_settlement_snapshot(
+        self,
+        periods: Sequence[pd.Timestamp],
+    ):
+        """Return the store-owned settlement projection for a non-empty window."""
+        snapshot = self._open_origin(periods[0], settlement_periods=periods).settlement
+        if snapshot is None:
+            raise TimeLoopError("time-loop store omitted its settlement projection")
+        return snapshot
 
 
 def _calendar_window(

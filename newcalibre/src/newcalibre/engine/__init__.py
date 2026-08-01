@@ -1,4 +1,4 @@
-"""Expose the chapter-03 engine spine, settlement core, and six ports."""
+"""Expose the engine spine, transactional store, and remaining ports."""
 
 from newcalibre.engine.errors import EngineError
 from newcalibre.engine.event_driver import (
@@ -12,21 +12,10 @@ from newcalibre.engine.event_driver import (
 )
 from newcalibre.engine.forecast_lifecycle import ForecastLifecycle, ForecastLifecycleError
 from newcalibre.engine.indexed_panel import IndexedPanel, IndexedPanelError
-from newcalibre.engine.ports import (
-    ActualsSource,
-    ArtifactStore,
-    CalibrationStateStore,
-    DispatchBackend,
-    LedgerSink,
-    PanelSource,
-)
+from newcalibre.engine.ports import DispatchBackend, PanelSource
 from newcalibre.engine.ports.memory import (
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
     InMemoryIndexedRunStore,
     InMemoryLedgerReader,
-    InMemoryLedgerSink,
     InMemoryPanelSource,
     InProcessDispatch,
 )
@@ -100,10 +89,7 @@ __all__ = [
     "ActualsSnapshot",
     "ActualsEvent",
     "ActualsOutcome",
-    "ActualsSource",
-    "ArtifactStore",
     "CalibrationResult",
-    "CalibrationStateStore",
     "CommitReceipt",
     "CommitRequest",
     "CommitResult",
@@ -121,12 +107,8 @@ __all__ = [
     "ForecastLifecycle",
     "ForecastLifecycleError",
     "ForecastWrite",
-    "InMemoryActualsSource",
-    "InMemoryArtifactStore",
-    "InMemoryCalibrationStateStore",
     "InMemoryIndexedRunStore",
     "InMemoryLedgerReader",
-    "InMemoryLedgerSink",
     "InMemoryPanelSource",
     "InProcessDispatch",
     "IndexedPanel",
@@ -142,7 +124,6 @@ __all__ = [
     "LedgerResolution",
     "LedgerSelection",
     "LedgerSessionMetadata",
-    "LedgerSink",
     "ObservationResult",
     "OrderProposal",
     "OrderRequest",

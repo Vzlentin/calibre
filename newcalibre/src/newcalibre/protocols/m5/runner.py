@@ -21,11 +21,8 @@ from newcalibre.domain import (
 )
 from newcalibre.engine import (
     Engine,
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
+    InMemoryIndexedRunStore,
     InMemoryLedgerReader,
-    InMemoryLedgerSink,
     InMemoryPanelSource,
     InProcessDispatch,
     TimeLoop,
@@ -120,17 +117,16 @@ def run_m5(config_path: Path) -> M5RunResult:
         model_config=compiled.model_config,
         conformal_config=compiled.conformal_config,
     )
-    actuals = InMemoryActualsSource(
-        compiled.panel,
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=forecast_panel.calendar,
+        actuals=compiled.panel,
         actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
     )
-    sink = InMemoryLedgerSink(session=session, calendar=forecast_panel.calendar)
     engine = Engine(
+        session=session,
         panel_source=InMemoryPanelSource(forecast_panel),
-        actuals_source=actuals,
-        artifact_store=InMemoryArtifactStore(),
-        calibration_state_store=InMemoryCalibrationStateStore(),
-        ledger_sink=sink,
+        run_store=store,
         dispatch_backend=InProcessDispatch(),
         hierarchy=compiled.hierarchy,
         adapter_resolver=resolve_adapter,
@@ -139,8 +135,7 @@ def run_m5(config_path: Path) -> M5RunResult:
     )
     time_loop = TimeLoop(
         engine=engine,
-        actuals_source=actuals,
-        ledger_sink=sink,
+        run_store=store,
         request=TimeLoopRequest(
             session=session,
             origins=compiled.origins,
@@ -150,17 +145,17 @@ def run_m5(config_path: Path) -> M5RunResult:
             actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
         ),
     ).run()
-    reader = InMemoryLedgerReader(sink)
+    reader = InMemoryLedgerReader(store)
     diagnostics = score_m5(
         config,
         reader,
         output_dir=_PROJECT_ROOT / compiled.output_dir,
     )
-    pending_count = sink.pending_observation_count
+    pending_count = store.pending_observation_count
     return M5RunResult(
         session=session,
         input_inventory_sha256=dataset.input_inventory_sha256,
-        forecast_origin_count=sink.forecast_origin_count,
+        forecast_origin_count=store.forecast_origin_count,
         commit_count=len(time_loop.receipts),
         node_count=len(compiled.hierarchy.node_labels),
         expected_row_count=diagnostics.context.expected_row_count,

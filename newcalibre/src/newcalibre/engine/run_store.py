@@ -397,6 +397,7 @@ class OriginSnapshot:
     session: SessionIdentity
     origin: pd.Timestamp
     revision: int
+    actuals_semantics: ActualsSemantics
     actuals: ActualsSubmission
     observed_history: tuple[ObservedActual, ...]
     pending_observations: tuple[PendingObservation, ...]
@@ -422,6 +423,7 @@ class ActualsSnapshot:
     session: SessionIdentity
     origin: pd.Timestamp
     revision: int
+    actuals_semantics: ActualsSemantics
     actuals: ActualsSubmission
     observed_history: tuple[ObservedActual, ...]
     pending_observations: tuple[PendingObservation, ...]
@@ -508,6 +510,8 @@ def _validate_snapshot(snapshot: OriginSnapshot | ActualsSnapshot) -> None:
     _require_session(snapshot.session, name="run snapshot session")
     _require_timestamp(snapshot.origin, name="run snapshot origin")
     _require_revision(snapshot.revision, name="run snapshot revision")
+    if not isinstance(snapshot.actuals_semantics, ActualsSemantics):
+        raise TypeError("run snapshot actuals semantics must be ActualsSemantics")
     if not isinstance(snapshot.actuals, ActualsSubmission):
         raise TypeError("run snapshot actuals must be an ActualsSubmission")
     history = tuple(snapshot.observed_history)

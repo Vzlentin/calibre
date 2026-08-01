@@ -17,14 +17,19 @@ from newcalibre.domain._canonical_json import (
     CanonicalJsonError,
     canonical_json_bytes,
 )
-from newcalibre.engine.ports import ArtifactStore
 from newcalibre.forecasting import AdapterCapability, ForecastAdapter
 
 _CHECKPOINT_SCHEMA: Final = "newcalibre.forecast-checkpoint/v1"
 _CHECKPOINT_INDEX_SCHEMA: Final = "newcalibre.forecast-checkpoint-index/v1"
 
 type AdapterResolver = Callable[[Mapping[str, object]], ForecastAdapter]
-type ForecastLifecycleItem = tuple[SessionIdentity, ForecastTask, CycleToken]
+type ForecastLifecycleItem = tuple[
+    SessionIdentity,
+    ForecastTask,
+    CycleToken,
+    Mapping[str, bytes],
+    Mapping[str, bytes],
+]
 
 
 class ForecastLifecycleError(RuntimeError):
@@ -75,14 +80,10 @@ class ForecastLifecycle:
     def __init__(
         self,
         *,
-        artifact_store: ArtifactStore,
         adapter_resolver: AdapterResolver,
     ) -> None:
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("forecast lifecycle artifact store must satisfy ArtifactStore")
         if not callable(adapter_resolver):
             raise TypeError("forecast lifecycle adapter resolver must be callable")
-        self._artifact_store = artifact_store
         self._adapter_resolver = adapter_resolver
 
     def _prepare_adapter(
@@ -90,6 +91,8 @@ class ForecastLifecycle:
         *,
         session: SessionIdentity,
         task: ForecastTask,
+        checkpoints: Mapping[str, bytes],
+        checkpoint_indexes: Mapping[str, bytes],
     ) -> _Prepared:
         adapter = self._adapter_resolver(task.model_config)
         capabilities = _capability_names(adapter)
@@ -119,7 +122,7 @@ class ForecastLifecycle:
 
         if persistent:
             assert key is not None
-            exact = self._artifact_store.load(key)
+            exact = checkpoints.get(key)
             if exact is not None:
                 checkpoint = _decode_checkpoint(exact)
                 _require_checkpoint(
@@ -142,6 +145,8 @@ class ForecastLifecycle:
                     lineage_identity=lineage,
                     config_digest=config_digest,
                     capabilities=capabilities,
+                    checkpoints=checkpoints,
+                    checkpoint_indexes=checkpoint_indexes,
                 )
                 if prior is None:
                     adapter.fit(task)
@@ -185,9 +190,14 @@ class ForecastLifecycle:
 
     def run_item(self, item: ForecastLifecycleItem) -> ForecastLifecycleResult:
         """Run one adapter lifecycle atomically in its dispatched placement."""
-        session, task, token = item
+        session, task, token, checkpoints, checkpoint_indexes = item
         _require_cycle(session=session, task=task, token=token)
-        prepared = self._prepare_adapter(session=session, task=task)
+        prepared = self._prepare_adapter(
+            session=session,
+            task=task,
+            checkpoints=checkpoints,
+            checkpoint_indexes=checkpoint_indexes,
+        )
         return self._predict_result(session=session, task=task, prepared=prepared)
 
     def _predict_result(
@@ -222,12 +232,15 @@ class ForecastLifecycle:
             )
         return ForecastLifecycleResult(frame=frame, checkpoint=pending)
 
-    def publish(self, results: tuple[ForecastLifecycleResult, ...]) -> None:
-        """Publish a fully accepted forecast batch's staged checkpoints."""
+    def staged_updates(
+        self,
+        results: tuple[ForecastLifecycleResult, ...],
+    ) -> tuple[Mapping[str, bytes], Mapping[str, bytes]]:
+        """Collect unpublished checkpoint deltas for the enclosing commit."""
         checkpoints = tuple(
             result.checkpoint for result in results if result.checkpoint is not None
         )
-        self._artifact_store.publish(
+        return (
             {checkpoint.key: checkpoint.value for checkpoint in checkpoints},
             {checkpoint.index_key: checkpoint.index_value for checkpoint in checkpoints},
         )
@@ -237,6 +250,7 @@ class ForecastLifecycle:
         *,
         session: SessionIdentity,
         tasks: tuple[ForecastTask, ...],
+        checkpoint_indexes: Mapping[str, bytes],
     ) -> dict[tuple[str, ...], HistoryCursor]:
         """Restore indexed predecessor cursors before final task construction."""
         restored: dict[tuple[str, ...], HistoryCursor] = {}
@@ -251,7 +265,7 @@ class ForecastLifecycle:
                 lineage_identity=lineage,
                 config_digest=config_digest,
             )
-            encoded = self._artifact_store.load_index(index_key)
+            encoded = checkpoint_indexes.get(index_key)
             if encoded is None:
                 continue
             cursor, checkpoint_key = _decode_checkpoint_index(encoded)
@@ -282,9 +296,11 @@ class ForecastLifecycle:
         lineage_identity: str,
         config_digest: str,
         capabilities: tuple[str, ...],
+        checkpoints: Mapping[str, bytes],
+        checkpoint_indexes: Mapping[str, bytes],
     ) -> _Checkpoint | None:
         assert index_key is not None
-        encoded_index = self._artifact_store.load_index(index_key)
+        encoded_index = checkpoint_indexes.get(index_key)
         if encoded_index is None:
             return None
         cursor, checkpoint_key = _decode_checkpoint_index(encoded_index)
@@ -303,7 +319,7 @@ class ForecastLifecycle:
         )
         if checkpoint_key != expected_key:
             raise ForecastLifecycleError("forecast checkpoint index names an invalid artifact")
-        encoded = self._artifact_store.load(checkpoint_key)
+        encoded = checkpoints.get(checkpoint_key)
         if encoded is None:
             raise ForecastLifecycleError("forecast checkpoint index names a missing artifact")
         checkpoint = _decode_checkpoint(encoded)

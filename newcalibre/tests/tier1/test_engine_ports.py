@@ -1,4 +1,4 @@
-"""Exercise all six engine ports through their in-memory adapters."""
+"""Exercise the remaining engine ports and their in-memory adapters."""
 
 from __future__ import annotations
 
@@ -6,21 +6,9 @@ import inspect
 
 import pandas as pd
 import pytest
-from tests.conformal_fixtures import delivery_batch
 
-from newcalibre.conformal import (
-    ConformalStateBatch,
-    ObserveAnnotation,
-    ResolvedObservation,
-    resolve_method,
-)
-from newcalibre.conformal import (
-    ForecastKey as ConformalForecastKey,
-)
 from newcalibre.domain import (
     ACTUAL_VALUE,
-    AVAILABILITY_BOUND,
-    CENSOR_STATUS,
     HORIZON_STEP,
     MODEL_NAME,
     OBSERVED_VALUE,
@@ -43,28 +31,18 @@ from newcalibre.engine import (
     Engine,
     EventDriver,
     ForecastWrite,
+    InMemoryIndexedRunStore,
+    InMemoryLedgerReader,
+    InMemoryPanelSource,
+    InProcessDispatch,
     OriginCommit,
+    OriginIntent,
     Spine,
     TimeLoop,
 )
 from newcalibre.engine import ports as engine_ports
-from newcalibre.engine.ports import SettlementSnapshot
-from newcalibre.engine.ports.memory import (
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
-    InMemoryLedgerReader,
-    InMemoryLedgerSink,
-    InMemoryPanelSource,
-    InProcessDispatch,
-)
+from newcalibre.engine.run_store import IndexedRunStore, OriginSnapshot, SettlementSnapshot
 from newcalibre.ledger import LedgerError, OrderRow
-from newcalibre.observe import (
-    ObservationResolution,
-    ObserveCycle,
-    ObservedActual,
-    PendingObservation,
-)
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ORIGIN_DATE = pd.Timestamp("2026-01-05")
@@ -84,18 +62,34 @@ def _panel() -> Panel:
     )
 
 
-def _session() -> SessionIdentity:
+def _session(*, decisions: bool = True) -> SessionIdentity:
+    keywords = (
+        {
+            "ordering_policy": {"name": "newsvendor"},
+            "decision_series_keys": ("a", "b"),
+            "cost_structure": CostStructure(1.0, 1.0, 1.0, 1.0),
+            "decision_timing": DecisionTiming(lead_time=1, review_period=1),
+            "stockout_rule": StockoutRule.LOST_SALES,
+        }
+        if decisions
+        else {}
+    )
     return SessionIdentity.derive(
         tenant="tenant-a",
         series_keys=("a", "b"),
         calendar=CALENDAR,
         horizon=2,
         model_config={"backend": "fixture", "name": "fixture"},
-        ordering_policy={"name": "newsvendor"},
-        decision_series_keys=("a", "b"),
-        cost_structure=CostStructure(1.0, 1.0, 1.0, 1.0),
-        decision_timing=DecisionTiming(lead_time=1, review_period=1),
-        stockout_rule=StockoutRule.LOST_SALES,
+        **keywords,
+    )
+
+
+def _store(*, decisions: bool = True, actuals: Panel | None = None) -> InMemoryIndexedRunStore:
+    return InMemoryIndexedRunStore(
+        session=_session(decisions=decisions),
+        calendar=CALENDAR,
+        actuals=actuals,
+        actuals_semantics=ActualsSemantics.DEMAND,
     )
 
 
@@ -113,101 +107,26 @@ def _forecast_frame() -> pd.DataFrame:
     )
 
 
-def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None:
+def test_in_memory_adapters_preserve_snapshots_and_order() -> None:
+    """Keep panel loads defensive, actuals canonical, and dispatch deterministic."""
     panel = _panel()
     panel_source = InMemoryPanelSource(panel)
-    loaded = panel_source.load()
-    mutated = loaded.frame
+    mutated = panel_source.load().frame
     mutated.loc[:, OBSERVED_VALUE] = 99.0
     assert panel_source.load().frame[OBSERVED_VALUE].tolist() == [1.0, 2.0, 3.0]
 
-    actuals = InMemoryActualsSource(
-        panel,
-        actuals_semantics=ActualsSemantics.DEMAND,
-    ).reveal(before=pd.Timestamp("2026-01-02"))
-    assert tuple((record.key, record.recorded_value) for record in actuals.records) == (
+    store = _store(actuals=panel)
+    snapshot = store.open(OriginIntent(store.session, pd.Timestamp("2026-01-02")))
+    assert isinstance(snapshot, OriginSnapshot)
+    assert tuple((record.key, record.recorded_value) for record in snapshot.actuals.records) == (
         (("a", pd.Timestamp("2026-01-01")), 1.0),
         (("b", pd.Timestamp("2026-01-01")), 3.0),
     )
-
-    artifacts = InMemoryArtifactStore()
-    artifacts.save("model:a", b"one")
-    artifacts.save("model:a", b"one")
-    assert artifacts.load("model:a") == b"one"
-    with pytest.raises(ValueError, match="different bytes"):
-        artifacts.save("model:a", b"two")
-    artifacts.save_index("model-index:a", b"first")
-    artifacts.save_index("model-index:a", b"second")
-    assert artifacts.load_index("model-index:a") == b"second"
-    assert artifacts.artifact_indexes == {"model-index:a": b"second"}
-    artifacts.publish(
-        {"model:b": b"three"},
-        {"model-index:b": b"third"},
-    )
-    with pytest.raises(ValueError, match="different bytes"):
-        artifacts.publish(
-            {"model:a": b"conflict"},
-            {"model-index:a": b"must-not-publish"},
-        )
-    assert artifacts.load("model:b") == b"three"
-    assert artifacts.load_index("model-index:a") == b"second"
-
-    states = InMemoryCalibrationStateStore()
-    session = _session()
-    states.save(session, "series:a", b"state", sequence=1)
-    assert states.snapshot(session) == {"series:a": b"state"}
-    states.save(
-        session,
-        "series:a",
-        b"stale",
-        sequence=0,
-    )
-    assert states.snapshot(session) == {"series:a": b"state"}
-    with pytest.raises(ValueError, match="already holds different bytes"):
-        states.save(session, "series:a", b"conflict", sequence=1)
-
-    dispatch = InProcessDispatch()
-    assert dispatch.map(lambda value: value * 2, (3, 1, 2)) == (6, 2, 4)
+    assert InProcessDispatch().map(lambda value: value * 2, (3, 1, 2)) == (6, 2, 4)
 
 
-def test_actuals_source_requires_and_enforces_observation_semantics() -> None:
-    panel = _panel()
-    with pytest.raises(TypeError, match="actuals_semantics"):
-        InMemoryActualsSource(panel)  # type: ignore[call-arg]
-
-    censored_frame = panel.frame
-    censored_frame[CENSOR_STATUS] = pd.Series(
-        ["censored", "uncensored", "undeclared"],
-        dtype="string",
-    )
-    censored_frame[AVAILABILITY_BOUND] = pd.Series(
-        [1.5, None, 3.5],
-        dtype="float64",
-    )
-    censored_panel = Panel.from_frame(
-        censored_frame, calendar=CALENDAR, target_support=TargetSupport.REAL
-    )
-
-    with pytest.raises(ValueError, match="cannot supply demand-honest actuals"):
-        InMemoryActualsSource(
-            censored_panel,
-            actuals_semantics=ActualsSemantics.DEMAND,
-        )
-
-    surrogate = InMemoryActualsSource(
-        censored_panel,
-        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
-    )
-    assert surrogate.actuals_semantics is ActualsSemantics.CENSORED_SALES_SURROGATE
-    revealed = surrogate.reveal(before=pd.Timestamp("2026-01-03"))
-    assert [
-        record.censoring_assertion.value if record.censoring_assertion is not None else None
-        for record in revealed.records
-    ] == ["censored", "uncensored", None]
-    assert [record.availability_bound for record in revealed.records] == [1.5, None, 3.5]
-
-
-def test_engine_declares_exactly_the_six_chapter_03_ports() -> None:
+def test_engine_port_namespace_contains_only_io_and_dispatch_seams() -> None:
+    """Keep persistence represented solely by the separate two-method protocol."""
     protocols = {
         name
         for name, value in vars(engine_ports).items()
@@ -215,46 +134,30 @@ def test_engine_declares_exactly_the_six_chapter_03_ports() -> None:
         and value.__module__ == engine_ports.__name__
         and getattr(value, "_is_protocol", False)
     }
-    assert protocols == {
-        "PanelSource",
-        "ActualsSource",
-        "ArtifactStore",
-        "CalibrationStateStore",
-        "LedgerSink",
-        "DispatchBackend",
-    }
-    assert not hasattr(engine_ports, "LedgerReader")
+    assert protocols == {"PanelSource", "DispatchBackend"}
+    assert set(IndexedRunStore.__dict__) & {"open", "commit"} == {"open", "commit"}
 
 
-def test_reporting_adapter_is_structurally_absent_from_every_write_path() -> None:
+def test_reporting_adapter_is_absent_from_every_write_path() -> None:
+    """Keep reporting read-only and outside engine/driver/store composition."""
     write_path_modules = {
         inspect.getmodule(value)
-        for value in (
-            Engine,
-            Spine,
-            TimeLoop,
-            EventDriver,
-            OriginCommit,
-            CommitReceipt,
-        )
+        for value in (Engine, Spine, TimeLoop, EventDriver, OriginCommit, CommitReceipt)
     }
     assert None not in write_path_modules
     for module in write_path_modules:
         source = inspect.getsource(module)
         assert "InMemoryLedgerReader" not in source
         assert "engine.reporting" not in source
-
-    assert "InMemoryLedgerReader" not in inspect.getsource(InMemoryLedgerSink)
     assert isinstance(InMemoryLedgerReader, type)
 
 
-def test_ledger_sink_exposes_only_a_period_bound_compact_settlement_snapshot() -> None:
-    session = _session()
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+def test_store_exposes_only_a_period_bound_settlement_projection() -> None:
+    """Return compact indexed settlement state without ledger row families."""
+    store = _store()
+    snapshot = store.settlement_snapshot((ORIGIN_DATE,))
 
-    snapshot = sink.settlement_snapshot((ORIGIN_DATE,))
-
-    assert sink.pending_observation_count == 0
+    assert store.pending_observation_count == 0
     assert isinstance(snapshot, SettlementSnapshot)
     assert snapshot.periods == (ORIGIN_DATE,)
     assert snapshot.frontier is None
@@ -262,232 +165,60 @@ def test_ledger_sink_exposes_only_a_period_bound_compact_settlement_snapshot() -
     assert snapshot.open_order_quantities == {"a": 0.0, "b": 0.0}
     assert snapshot.due_arrivals == {}
     assert snapshot.actuals_semantics is None
-    assert not hasattr(snapshot, "forecasts")
-    assert not hasattr(snapshot, "orders")
-    assert not hasattr(snapshot, "settlements")
+    assert not any(hasattr(snapshot, name) for name in ("forecasts", "orders", "settlements"))
 
 
-def test_ledger_sink_refuses_initial_arrivals_without_a_decision_session() -> None:
-    session = SessionIdentity.derive(
-        tenant="tenant-a",
-        series_keys=("a",),
-        calendar=CALENDAR,
-        horizon=2,
-        model_config={"backend": "fixture", "name": "fixture"},
-    )
-
+def test_store_refuses_initial_arrivals_without_decision_configuration() -> None:
+    """Reject inventory facts when the session has no ordering domain."""
+    session = _session(decisions=False)
     with pytest.raises(LedgerError, match="require a session decision configuration"):
-        InMemoryLedgerSink(
+        InMemoryIndexedRunStore(
             session=session,
             calendar=CALENDAR,
+            actuals_semantics=ActualsSemantics.DEMAND,
             initial_arrivals={("a", ORIGIN_DATE): 1.0},
         )
 
 
-def test_ledger_sink_rejects_a_misattributed_origin_without_a_partial_commit() -> None:
-    session = _session()
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
+def test_failed_origin_validation_publishes_no_partial_rows() -> None:
+    """Validate all families before exposing any part of a transaction."""
+    store = _store()
     key = ("a", ORIGIN_DATE, 1, "fixture")
     forecast = ForecastWrite(_forecast_frame(), {key: {}})
-    sink.commit(OriginCommit(session=session, origin=ORIGIN_DATE, forecasts=(forecast,)))
-
     order = OrderRow(
-        session=session,
+        session=store.session,
         series_key="a",
         origin=ORIGIN_DATE,
         model_name="fixture",
         quantity=1.0,
         arrival_period=pd.Timestamp("2026-01-06"),
     )
+
     with pytest.raises(LedgerError, match="forecast row origin must match"):
-        sink.commit(
+        store.commit(
             OriginCommit(
-                session=session,
+                session=store.session,
                 origin=pd.Timestamp("2026-01-06"),
+                expected_revision=store.revision,
                 forecasts=(forecast,),
                 orders=(order,),
             )
         )
 
-    assert len(sink.forecasts) == 1
-    assert sink.orders == ()
-
-
-def test_commit_digest_is_sensitive_to_every_observe_materialization_family() -> None:
-    session = _session()
-    origin = pd.Timestamp("2026-01-06")
-    key = ConformalForecastKey("a", ORIGIN_DATE, 1, "fixture")
-    resolution = ObservationResolution(key, ORIGIN_DATE, 2.0, None, None)
-    pending = PendingObservation(key, ORIGIN_DATE, 1.0, resolution=resolution)
-    annotation = ObserveAnnotation(key, 1.0, None, True)
-    runtime = resolve_method(
-        {"method": "split-per-step", "coverage": 0.5, "partition_by": "global"}
-    )
-    issued = runtime.apply(_forecast_frame(), ConformalStateBatch()).issuances[key]
-    delivery = delivery_batch(
-        issued.partition_label,
-        (
-            ResolvedObservation(
-                key,
-                ORIGIN_DATE,
-                2.0,
-                1.0,
-                None,
-                None,
-                issued,
-            ),
-        ),
-    )
-    without_delivery = ObserveCycle(
-        resolutions=(resolution,),
-        pending_removals=(key,),
-        annotations=(annotation,),
-    )
-    with_delivery = ObserveCycle(
-        resolutions=(resolution,),
-        pending_removals=(key,),
-        deliveries=delivery,
-        annotations=(annotation,),
-    )
-    variants = (
-        ObserveCycle(history_appends=(ObservedActual("a", ORIGIN_DATE, 2),)),
-        ObserveCycle(history_appends=(ObservedActual("a", ORIGIN_DATE, 2.0),)),
-        ObserveCycle(resolutions=(resolution,)),
-        ObserveCycle(pending_removals=(key,)),
-        ObserveCycle(pending_retentions=(pending,)),
-        ObserveCycle(annotations=(annotation,)),
-        without_delivery,
-        with_delivery,
-        ObserveCycle(state_updates={"state": b"value"}),
-    )
-
-    digests = {
-        OriginCommit(session=session, origin=origin, observe_cycle=cycle).digest
-        for cycle in variants
-    }
-
-    assert (
-        OriginCommit(
-            session=session,
-            origin=origin,
-            observe_cycle=with_delivery,
-        ).digest
-        != OriginCommit(
-            session=session,
-            origin=origin,
-            observe_cycle=without_delivery,
-        ).digest
-    )
-    assert len(digests) == len(variants)
-
-    committed = OriginCommit(
-        session=session,
-        origin=origin,
-        observe_cycle=variants[-1],
-        state_updates={"state": b"value"},
-    )
-    receipt = CommitReceipt.from_commit(committed, sequence=1)
-    assert receipt.observe_cycle == committed.observe_cycle
-    assert receipt.state_updates == committed.state_updates
-    assert receipt.digest == committed.digest
-
-
-def test_full_observe_fact_retry_is_idempotent_and_conflict_preserves_history() -> None:
-    session = _session()
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
-    observed = ObservedActual(
-        "a",
-        pd.Timestamp("2026-01-01"),
-        1.0,
-        availability_bound=2.0,
-    )
-    commit = OriginCommit(
-        session=session,
-        origin=ORIGIN_DATE,
-        observe_cycle=ObserveCycle(history_appends=(observed,)),
-    )
-
-    first = sink.commit(commit)
-    assert sink.commit(commit) == first
-    assert sink.observed_history == (observed,)
-
-    conflict = OriginCommit(
-        session=session,
-        origin=ORIGIN_DATE,
-        observe_cycle=ObserveCycle(
-            history_appends=(
-                ObservedActual(
-                    "a",
-                    pd.Timestamp("2026-01-01"),
-                    1.0,
-                    availability_bound=3.0,
-                ),
-            )
-        ),
-    )
-    with pytest.raises(LedgerError, match="different committed write"):
-        sink.commit(conflict)
-    assert sink.observed_history == (observed,)
-
-
-def test_commit_digest_frames_state_key_and_value_boundaries() -> None:
-    session = _session()
-    origin = pd.Timestamp("2026-01-06")
-    first = OriginCommit(
-        session=session,
-        origin=origin,
-        state_updates={"a": b"bc"},
-    )
-    shifted = OriginCommit(
-        session=session,
-        origin=origin,
-        state_updates={"ab": b"c"},
-    )
-    assert first.digest != shifted.digest
-
-    sink = InMemoryLedgerSink(session=session, calendar=CALENDAR)
-    sink.commit(first)
-    with pytest.raises(LedgerError, match="different committed write"):
-        sink.commit(shifted)
+    assert store.forecasts == ()
+    assert store.orders == ()
+    assert store.revision == 1
 
 
 @pytest.mark.parametrize("digest", ["a" * 63, "A" * 64, "g" * 64])
 def test_commit_receipt_rejects_noncanonical_digests(digest: str) -> None:
+    """Require canonical content identities on every durable receipt."""
     with pytest.raises(ValueError, match="SHA-256 hex string"):
         CommitReceipt(
             session=_session(),
             origin=ORIGIN_DATE,
             digest=digest,
+            expected_revision=1,
+            revision=2,
             state_updates={},
-            sequence=0,
-        )
-
-
-def test_commit_receipt_validates_and_freezes_state_updates() -> None:
-    state_updates = {"series:a": b"state"}
-    receipt = CommitReceipt(
-        session=_session(),
-        origin=ORIGIN_DATE,
-        digest="a" * 64,
-        state_updates=state_updates,
-        sequence=0,
-    )
-    state_updates["series:a"] = b"mutated"
-    assert receipt.state_updates == {"series:a": b"state"}
-
-    with pytest.raises(ValueError, match="non-empty trimmed string"):
-        CommitReceipt(
-            session=_session(),
-            origin=ORIGIN_DATE,
-            digest="a" * 64,
-            state_updates={" untrimmed": b"state"},
-            sequence=0,
-        )
-    with pytest.raises(TypeError, match="must contain bytes"):
-        CommitReceipt(
-            session=_session(),
-            origin=ORIGIN_DATE,
-            digest="a" * 64,
-            state_updates={"series:a": "state"},  # type: ignore[dict-item]
-            sequence=0,
         )

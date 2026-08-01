@@ -15,19 +15,15 @@ import pandas as pd
 
 from newcalibre.conformal import ObserveAnnotation
 from newcalibre.domain import Calendar, SessionIdentity
-from newcalibre.engine import (
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
-    SettlementSnapshot,
-)
+from newcalibre.engine import SettlementSnapshot
 from newcalibre.ledger import ForecastRow, OrderRow, SettlementRecord
 from newcalibre.observe import ObservationResolution, ObservedActual, PendingObservation
 
 _Normalized = object
 
 
-class _DurableStateSink(Protocol):
-    """Expose only the durable sink facts consumed by the projection."""
+class _DurableRunStore(Protocol):
+    """Expose only the durable store facts consumed by the projection."""
 
     @property
     def session(self) -> SessionIdentity: ...
@@ -61,6 +57,15 @@ class _DurableStateSink(Protocol):
 
     def settlement_snapshot(self, periods: Sequence[pd.Timestamp]) -> SettlementSnapshot: ...
 
+    @property
+    def states(self) -> Mapping[str, bytes]: ...
+
+    @property
+    def checkpoints(self) -> Mapping[str, bytes]: ...
+
+    @property
+    def checkpoint_indexes(self) -> Mapping[str, bytes]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class DurableState:
@@ -75,22 +80,19 @@ class DurableState:
     observation_resolutions: tuple[_Normalized, ...]
     observe_annotations: tuple[_Normalized, ...]
     conformal_states: tuple[_Normalized, ...]
-    artifacts: tuple[_Normalized, ...]
+    checkpoints: tuple[_Normalized, ...]
+    checkpoint_indexes: tuple[_Normalized, ...]
     inventory_positions: tuple[_Normalized, ...]
     open_orders: tuple[_Normalized, ...]
     booked_costs: tuple[_Normalized, ...]
 
 
-def project_durable_state(
-    sink: _DurableStateSink,
-    states: InMemoryCalibrationStateStore,
-    artifacts: InMemoryArtifactStore,
-) -> DurableState:
+def project_durable_state(store: _DurableRunStore) -> DurableState:
     """Return a key-sorted typed projection without journal or timing facts."""
     forecasts = tuple(
         _forecast(row)
         for row in sorted(
-            sink.forecasts,
+            store.forecasts,
             key=lambda row: (
                 row.series_key.encode(),
                 _timestamp_key(row.origin),
@@ -102,7 +104,7 @@ def project_durable_state(
     orders = tuple(
         _order(row)
         for row in sorted(
-            sink.orders,
+            store.orders,
             key=lambda row: (
                 row.session.value,
                 row.series_key.encode(),
@@ -114,7 +116,7 @@ def project_durable_state(
     settlements = tuple(
         _settlement(row)
         for row in sorted(
-            sink.settlements,
+            store.settlements,
             key=lambda row: (
                 row.session.value,
                 row.series_key.encode(),
@@ -125,51 +127,58 @@ def project_durable_state(
     observed = tuple(
         _normalize(value)
         for value in sorted(
-            sink.observed_history,
+            store.observed_history,
             key=lambda value: (value.series_key.encode(), _timestamp_key(value.timestamp)),
         )
     )
     pending = tuple(
         _normalize(value)
         for value in sorted(
-            sink.pending_observations,
+            store.pending_observations,
             key=lambda value: _forecast_key(value.forecast_key),
         )
     )
     resolutions = tuple(
         _normalize(value)
         for value in sorted(
-            sink.observation_resolutions,
+            store.observation_resolutions,
             key=lambda value: _forecast_key(value.forecast_key),
         )
     )
     annotations = tuple(
         _normalize(value)
         for value in sorted(
-            sink.observe_annotations,
+            store.observe_annotations,
             key=lambda value: _forecast_key(value.forecast_key),
         )
     )
     state_rows = tuple(
         (label, _normalize(value))
         for label, value in sorted(
-            states.snapshot(sink.session).items(),
+            store.states.items(),
             key=lambda item: item[0].encode(),
         )
     )
-    artifact_rows = tuple(
+    checkpoint_rows = tuple(
         (key, _normalize(value))
         for key, value in sorted(
-            artifacts.artifacts.items(),
+            store.checkpoints.items(),
             key=lambda item: item[0].encode(),
         )
     )
-    positions, open_orders = _inventory_state(sink)
-    holding = math.fsum(row.holding.amount for row in sink.settlements)
-    shortage = math.fsum(row.shortage.amount for row in sink.settlements)
+    checkpoint_index_rows = tuple(
+        (key, _normalize(value))
+        for key, value in sorted(
+            store.checkpoint_indexes.items(),
+            key=lambda item: item[0].encode(),
+        )
+    )
+    positions, open_orders = _inventory_state(store)
+    holding = math.fsum(row.holding.amount for row in store.settlements)
+    shortage = math.fsum(row.shortage.amount for row in store.settlements)
     total = math.fsum((holding, shortage))
     return DurableState(
-        session=sink.session.value,
+        session=store.session.value,
         forecasts=forecasts,
         orders=orders,
         settlements=settlements,
@@ -178,7 +187,8 @@ def project_durable_state(
         observation_resolutions=resolutions,
         observe_annotations=annotations,
         conformal_states=state_rows,
-        artifacts=artifact_rows,
+        checkpoints=checkpoint_rows,
+        checkpoint_indexes=checkpoint_index_rows,
         inventory_positions=positions,
         open_orders=open_orders,
         booked_costs=(
@@ -239,16 +249,16 @@ def _settlement(row: SettlementRecord) -> _Normalized:
 
 
 def _inventory_state(
-    sink: _DurableStateSink,
+    store: _DurableRunStore,
 ) -> tuple[tuple[_Normalized, ...], tuple[_Normalized, ...]]:
-    if sink.settlements:
-        frontier = max(row.period for row in sink.settlements)
-        probe = sink.calendar.advance(frontier, 1)
-    elif sink.latest_origin is not None:
-        probe = sink.latest_origin
+    if store.settlements:
+        frontier = max(row.period for row in store.settlements)
+        probe = store.calendar.advance(frontier, 1)
+    elif store.latest_origin is not None:
+        probe = store.latest_origin
     else:
         return (), ()
-    snapshot = sink.settlement_snapshot((probe,))
+    snapshot = store.settlement_snapshot((probe,))
     positions = tuple(
         (series_key, _normalize(position))
         for series_key, position in sorted(
