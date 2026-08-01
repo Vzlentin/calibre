@@ -117,13 +117,16 @@ jobs:
           if [[ "${{ steps.vn2-cache.outputs.cache-hit }}" != "true" ]]; then
             : "${OVENTI_DATASET_BASE_URL:?OVENTI_DATASET_BASE_URL must be configured}"
             mkdir -p "$target"
-            while IFS= read -r name; do
+            while IFS=$'\t' read -r name expected_bytes; do
               [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] \
                 || { echo "inventory contains an unsafe basename: $name"; exit 1; }
               curl --fail --location --retry 3 \
+                --max-time 60 \
+                --max-filesize "$expected_bytes" \
+                --remove-on-error \
                 --output "$target/$name" \
                 "${OVENTI_DATASET_BASE_URL%/}/vn2/$name"
-            done < <(jq -r '.files[].name' "$inventory")
+            done < <(jq -r '.files[] | [.name, .bytes] | @tsv' "$inventory")
           fi
           uv sync --project newcalibre --locked --group dev
           uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify \
@@ -239,13 +242,16 @@ jobs:
           if [[ "${{ steps.vn2-cache.outputs.cache-hit }}" != "true" ]]; then
             : "${OVENTI_DATASET_BASE_URL:?OVENTI_DATASET_BASE_URL must be configured}"
             mkdir -p "$target"
-            while IFS= read -r name; do
+            while IFS=$'\t' read -r name expected_bytes; do
               [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] \
                 || { echo "inventory contains an unsafe basename: $name"; exit 1; }
               curl --fail --location --retry 3 \
+                --max-time 60 \
+                --max-filesize "$expected_bytes" \
+                --remove-on-error \
                 --output "$target/$name" \
                 "${OVENTI_DATASET_BASE_URL%/}/vn2/$name"
-            done < <(jq -r '.files[].name' "$inventory")
+            done < <(jq -r '.files[] | [.name, .bytes] | @tsv' "$inventory")
           fi
           uv sync --project newcalibre --locked --group dev
           uv run --project newcalibre --locked --no-sync python newcalibre/scripts/vn2_data.py verify \

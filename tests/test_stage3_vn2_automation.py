@@ -193,15 +193,22 @@ def test_frozen_jobs_use_one_exact_inventory_cache_and_verifier() -> None:
         assert "inventory=newcalibre/benchmarks/vn2/vn2-input-digests.json" in acquisition["run"]
         assert "target=data/vn2" in acquisition["run"]
         assert '[[ "${{ steps.vn2-cache.outputs.cache-hit }}" != "true" ]]' in acquisition["run"]
-        assert "jq -r '.files[].name'" in acquisition["run"]
-        assert '[[ "$name" != */* && "$name" != "." && "$name" != ".." ]]' in acquisition["run"]
+        assert "jq -r '.files[] | [.name, .bytes] | @tsv'" in acquisition["run"]
+        assert "while IFS=$'\\t' read -r name expected_bytes; do" in acquisition["run"]
+        basename_guard = '[[ "$name" != */* && "$name" != "." && "$name" != ".." ]]'
+        assert basename_guard in acquisition["run"]
         assert '"${OVENTI_DATASET_BASE_URL%/}/vn2/$name"' in acquisition["run"]
         assert "curl --fail --location --retry 3" in acquisition["run"]
+        assert "--max-time 60" in acquisition["run"]
+        assert '--max-filesize "$expected_bytes"' in acquisition["run"]
+        assert "--remove-on-error" in acquisition["run"]
         assert "newcalibre/scripts/vn2_data.py verify" in acquisition["run"]
         verify = acquisition["run"].index("newcalibre/scripts/vn2_data.py verify")
         cache_miss = acquisition["run"].index("cache-hit")
         cache_miss_end = acquisition["run"].index("\nfi\n", cache_miss)
-        assert verify > cache_miss_end
+        guard = acquisition["run"].index(basename_guard)
+        curl = acquisition["run"].index("curl --fail --location --retry 3")
+        assert cache_miss < guard < curl < cache_miss_end < verify
 
 
 def test_frozen_ci_retains_lanes_commands_and_verified_docker_mount() -> None:
@@ -228,7 +235,15 @@ def test_frozen_ci_retains_lanes_commands_and_verified_docker_mount() -> None:
     assert 'docker run --rm -v "$PWD/data/vn2:/app/data/vn2:ro"' in docker_runs
     assert "-m benchmarks.vn2 --config /app/benchmarks/vn2/config/winning.yaml" in docker_runs
     assert "docker build -f Dockerfile.slim -t calibre:slim ." in docker_runs
-    assert "docker push" in docker_runs
+    push_commands = {
+        line.strip() for line in docker_runs.splitlines() if line.strip().startswith("docker push ")
+    }
+    assert push_commands == {
+        'docker push "$image_repo:${tag_prefix}-full"',
+        'docker push "$image_repo:${tag_prefix}-slim"',
+        'docker push "$image_repo:${sha_tag}-full"',
+        'docker push "$image_repo:${sha_tag}-slim"',
+    }
     assert "docker run --rm --user root" not in docker_runs
     forbidden = (
         "restore-" + "keys",
