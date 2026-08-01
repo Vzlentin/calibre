@@ -18,8 +18,6 @@ from newcalibre.benchmarking import (
     validate_profile,
 )
 
-_PERFORMANCE_SPEC = Path(__file__).parents[3] / "docs" / "spec" / "30-performance.md"
-
 
 def _environment() -> dict[str, object]:
     return {
@@ -302,15 +300,3 @@ def test_linux_memory_reader_rejects_unreadable_cgroup_peak(tmp_path: Path) -> N
 
     with pytest.raises(EnvironmentError, match="malformed"):
         LinuxMemoryReader(proc_root=proc, cgroup_root=tmp_path / "cgroup").sample()
-
-
-def test_performance_spec_uses_consistent_resident_memory_contract() -> None:
-    """Pin public resident-memory, cgroup-v2, and bounded scaling terminology."""
-    source = _PERFORMANCE_SPEC.read_text(encoding="utf-8")
-
-    assert "RSS" not in source
-    assert source.count("peak_process_resident_bytes") >= 2
-    assert source.count("peak_job_memory_bytes") >= 3
-    assert "cgroup-v2 charged job peak" in source
-    assert "full-M5 serial path" in source
-    assert "exactly `profile.json` and `environment.json`" in source

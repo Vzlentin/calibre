@@ -22,6 +22,7 @@ CAPTURE = ROOT / "stage3" / "evidence" / "captures" / "vn2"
 M5_RUNBOOK = ROOT / "benchmarks" / "m5" / "README.md"
 M5_MONITOR = ROOT / ".github" / "scripts" / "run-m5-acceptance.sh"
 README = ROOT / "README.md"
+PERFORMANCE_SPEC = ROOT / "docs" / "spec" / "30-performance.md"
 
 
 def _workflow(path: Path) -> dict:
@@ -43,6 +44,18 @@ def _protocol_jobs(workflow: dict) -> dict:
         name: workflow["jobs"][name]
         for name in ("vn2-acceptance", "m5-acceptance", "reference-gates")
     }
+
+
+def test_performance_spec_uses_consistent_resident_memory_contract() -> None:
+    """Pin public resident-memory, cgroup-v2, and bounded scaling terminology."""
+    source = PERFORMANCE_SPEC.read_text(encoding="utf-8")
+
+    assert "RSS" not in source
+    assert source.count("peak_process_resident_bytes") >= 2
+    assert source.count("peak_job_memory_bytes") >= 3
+    assert "cgroup-v2 charged job peak" in source
+    assert "full-M5 serial path" in source
+    assert "exactly `profile.json` and `environment.json`" in source
 
 
 def test_workflow_has_pr_main_and_protocol_scoped_lanes() -> None:
