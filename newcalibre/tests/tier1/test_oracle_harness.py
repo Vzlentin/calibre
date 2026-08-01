@@ -385,6 +385,22 @@ def test_deleting_numeric_gate_witness_fails_collection_contract() -> None:
         m5_without_pair.stdout + m5_without_pair.stderr
     )
 
+    broad_without_vn2 = _collect_only(
+        project_root,
+        "tests/tier3",
+        "--ignore=tests/tier3/vn2/test_conditional_replay.py",
+    )
+    assert broad_without_vn2.returncode != 0
+    assert "vn2-conditional-replay" in broad_without_vn2.stdout + broad_without_vn2.stderr
+
+    broad_without_m5 = _collect_only(
+        project_root,
+        "tests/tier3",
+        "--ignore=tests/tier3/m5/test_m5_frozen_scorer_parity.py",
+    )
+    assert broad_without_m5.returncode != 0
+    assert "m5-frozen-scorer-parity" in broad_without_m5.stdout + broad_without_m5.stderr
+
     paired = _collect_only(project_root, "tests/meta/paired_gate.py")
     assert paired.returncode == 0, paired.stdout + paired.stderr
 

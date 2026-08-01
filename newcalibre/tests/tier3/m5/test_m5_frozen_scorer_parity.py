@@ -36,6 +36,7 @@ from newcalibre.engine import (
     LedgerSessionMetadata,
 )
 from newcalibre.protocols.m5 import M5Diagnostics, load_m5_config
+from tests.import_inspection import imported_modules
 from tests.tier3.m5.m5_frozen_export import FrozenM5ExportError, export_frozen_m5_ledger
 
 pytestmark = pytest.mark.tier3
@@ -224,6 +225,26 @@ def test_disposable_export_rejects_malformed_rows(
     assert not output.exists()
 
 
+def test_disposable_export_removes_partial_after_late_batch_failure(tmp_path: Path) -> None:
+    rows = list(_rows())
+    rows[-1] = replace(
+        rows[-1],
+        key=replace(rows[-1].key, model_name="unexpected-model"),
+    )
+    output = tmp_path / "rejected.parquet"
+
+    with pytest.raises(FrozenM5ExportError):
+        export_frozen_m5_ledger(
+            load_m5_config(CONFIG),
+            _Reader(tuple(rows)),
+            output,
+            batch_size=1,
+        )
+
+    assert not output.exists()
+    assert not output.with_suffix(f"{output.suffix}.partial").exists()
+
+
 def test_disposable_export_rejects_non_0p9_scoring_intent(tmp_path: Path) -> None:
     config = load_m5_config(CONFIG)
     changed = config.conformal_config
@@ -294,15 +315,22 @@ def test_frozen_translation_and_runtime_references_remain_tier3_only() -> None:
     exporter = PROJECT_ROOT / "tests" / "tier3" / "m5" / "m5_frozen_export.py"
     production = PROJECT_ROOT / "src" / "newcalibre"
     exporter_text = exporter.read_text(encoding="utf-8")
-    production_text = "\n".join(
-        path.read_text(encoding="utf-8") for path in production.rglob("*.py")
-    )
+    production_sources = tuple(sorted(production.rglob("*.py")))
+    production_text = "\n".join(path.read_text(encoding="utf-8") for path in production_sources)
+    frozen_imports = [
+        (path.relative_to(production), line, module)
+        for path in production_sources
+        for line, module in imported_modules(
+            path.read_text(encoding="utf-8"),
+            package=".".join(("newcalibre", *path.relative_to(production).parent.parts)),
+        )
+        if module == "calibre" or module.startswith("calibre.")
+    ]
 
     assert '"department": "dept_id"' in exporter_text
     assert '"category": "cat_id"' in exporter_text
     assert "score-m5-coverage" not in production_text
-    assert "from calibre" not in production_text
-    assert "import calibre" not in production_text
+    assert frozen_imports == []
     assert "dept_id=" not in production_text
     assert "cat_id=" not in production_text
 
