@@ -29,6 +29,13 @@ def _job_runs(job: dict) -> str:
     return "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
 
 
+def _protocol_jobs(workflow: dict) -> dict:
+    return {
+        name: workflow["jobs"][name]
+        for name in ("vn2-acceptance", "m5-acceptance", "reference-gates")
+    }
+
+
 def test_workflow_has_pr_main_and_protocol_scoped_lanes() -> None:
     """Keep existing lanes and split scheduled acceptance by evidence surface."""
     workflow = _workflow(REGRESSION)
@@ -54,14 +61,12 @@ def test_workflow_has_pr_main_and_protocol_scoped_lanes() -> None:
     assert workflow["jobs"]["newcalibre-lint"]["if"] == "github.event_name == 'pull_request'"
     assert workflow["jobs"]["newcalibre-unit"]["if"] == "github.event_name == 'pull_request'"
     assert workflow["jobs"]["newcalibre-consistency"]["if"] == "github.event_name == 'push'"
+    protocol_jobs = _protocol_jobs(workflow)
     protocol_condition = (
         "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
     )
-    assert all(
-        workflow["jobs"][name]["if"] == protocol_condition
-        for name in ("vn2-acceptance", "m5-acceptance", "reference-gates")
-    )
-    assert all("environment" not in job for job in workflow["jobs"].values())
+    assert all(job["if"] == protocol_condition for job in protocol_jobs.values())
+    assert all("environment" not in job for job in protocol_jobs.values())
     type_step = next(
         step
         for step in workflow["jobs"]["newcalibre-lint"]["steps"]
@@ -71,11 +76,40 @@ def test_workflow_has_pr_main_and_protocol_scoped_lanes() -> None:
     assert type_step["run"] == "uv run --locked --no-sync ty check src/newcalibre/"
 
 
+def test_protocol_jobs_pin_manual_candidates_end_to_end() -> None:
+    """Bind each manual protocol run to one validated full candidate SHA."""
+    workflow = _workflow(REGRESSION)
+    candidate = (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
+    )
+
+    for name, env_name in (
+        ("vn2-acceptance", "VN2_CANDIDATE_SHA"),
+        ("m5-acceptance", "M5_CANDIDATE_SHA"),
+        ("reference-gates", "REFERENCE_CANDIDATE_SHA"),
+    ):
+        job = workflow["jobs"][name]
+        validation = next(
+            step for step in job["steps"] if step.get("name") == "Validate manual candidate"
+        )
+        checkout = next(step for step in job["steps"] if step.get("uses") == "actions/checkout@v4")
+        runs = _job_runs(job)
+
+        assert job["env"][env_name] == candidate
+        assert validation["if"] == "github.event_name == 'workflow_dispatch'"
+        assert "${{ inputs.candidate_sha }}" in validation["run"]
+        assert "grep -Eq '^[0-9a-f]{40}$'" in validation["run"]
+        assert checkout["with"]["ref"] == candidate
+        assert f'test "$(git rev-parse HEAD)" = "${env_name}"' in runs
+
+
 def test_protocol_jobs_use_exact_inventories_and_successor_verifiers() -> None:
     """Acquire only inventory-owned basenames and verify every restored dataset."""
     text = REGRESSION.read_text(encoding="utf-8")
     workflow = _workflow(REGRESSION)
-    runs = _runs(workflow)
+    protocol_jobs = _protocol_jobs(workflow)
+    protocol_text = str(protocol_jobs)
+    runs = "\n".join(_job_runs(job) for job in protocol_jobs.values())
     vn2 = workflow["jobs"]["vn2-acceptance"]
     m5 = workflow["jobs"]["m5-acceptance"]
     vn2_cache = next(step for step in vn2["steps"] if step.get("id") == "vn2-cache")
@@ -117,11 +151,11 @@ def test_protocol_jobs_use_exact_inventories_and_successor_verifiers() -> None:
     assert "newcalibre/scripts/vn2_data.py download" not in runs
     assert "newcalibre/scripts/m5_data.py download" not in runs
     assert "benchmarks/vn2/vn2_file_links.json" not in text
-    assert "restore-keys:" not in text
-    assert "stage3/evidence/" + "vn2-input-digests.json" not in text
-    assert ".github/scripts/stage3_" + "vn2_data.py" not in text
-    assert "secrets." not in text
-    assert "id-token" not in text
+    assert "restore-keys" not in protocol_text
+    assert "stage3/evidence/" + "vn2-input-digests.json" not in protocol_text
+    assert ".github/scripts/stage3_" + "vn2_data.py" not in protocol_text
+    assert "secrets." not in protocol_text
+    assert "id-token" not in protocol_text
 
 
 def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
@@ -133,6 +167,11 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
     m5_runs = _job_runs(workflow["jobs"]["m5-acceptance"])
     reference = workflow["jobs"]["reference-gates"]
     reference_runs = _job_runs(reference)
+    m5_sizing = next(
+        step
+        for step in workflow["jobs"]["m5-acceptance"]["steps"]
+        if step.get("name") == "Run reduced real-M5 acceptance and measure runner headroom"
+    )["run"]
     pytest_commands = "\n".join(line for line in runs.splitlines() if "pytest " in line)
 
     assert "pytest newcalibre/tests/tier3" in vn2_runs
@@ -153,6 +192,14 @@ def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
     assert "M5 minimum free disk KiB:" in m5_runs
     assert "minimum_headroom_kib=$(( 4 * 1024 * 1024 ))" in m5_runs
     assert "20 * 60" in m5_runs
+    assert "pytest newcalibre/tests/tier4/m5 &" in m5_sizing
+    assert "test_pid=$!" in m5_sizing
+    assert 'wait "$test_pid" || test_status=$?' in m5_sizing
+    assert "(( test_status == 0 && sizing_status == 0 ))" in m5_sizing
+    assert m5_sizing.index("test_pid=$!") < m5_sizing.index('wait "$test_pid"')
+    assert m5_sizing.index('wait "$test_pid"') < m5_sizing.index(
+        "(( test_status == 0 && sizing_status == 0 ))"
+    )
     assert "vn2_tracking.py build" in vn2_runs
     assert "actions/upload-artifact@v4" in text
     assert "gh pr" not in runs

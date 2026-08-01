@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections import ChainMap
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from numbers import Integral
 from types import MappingProxyType
+from typing import cast
 
 import pandas as pd
 
@@ -322,8 +323,10 @@ class ObserveLoop:
     ) -> tuple[tuple, dict[str, bytes]]:
         if self._runtime is None:
             return (), {}
-        evolving = dict(self._conformal_states)
         updates: dict[str, bytes] = {}
+        evolving = ChainMap(
+            cast(MutableMapping[str, bytes | None], updates), self._conformal_states
+        )
         annotations = []
         for delivery in deliveries:
             context = self._calibration_context(delivery)
@@ -360,7 +363,6 @@ class ObserveLoop:
             for label, value in emitted.items():
                 if label != METHOD_SCOPE_LABEL and label in updates and updates[label] != value:
                     raise ObserveError(f"conformal observe emitted conflicting state for {label!r}")
-                evolving[label] = value
                 updates[label] = value
             annotations.extend(effect.annotations)
         return tuple(annotations), updates
