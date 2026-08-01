@@ -27,7 +27,7 @@ pytestmark = [
     ),
 ]
 
-PROJECT_ROOT = Path(__file__).parents[2]
+PROJECT_ROOT = Path(__file__).parents[3]
 CONFIG = PROJECT_ROOT / "benchmarks" / "vn2" / "gate-b-split-window-sum.yaml"
 INVENTORY = PROJECT_ROOT / "benchmarks" / "vn2" / "vn2-input-digests.json"
 LOCK = PROJECT_ROOT / "uv.lock"

@@ -321,14 +321,7 @@ def _canonicalize_panel_frame(
 
     columns = [*REQUIRED_PANEL_COLUMNS, *metadata_columns, *exogenous]
     normalized = normalized.loc[:, columns]
-    order = sorted(
-        range(len(normalized)),
-        key=lambda index: (
-            str(normalized.iloc[index][SERIES_KEY]).encode(),
-            pd.Timestamp(normalized.iloc[index][TIMESTAMP]),
-        ),
-    )
-    normalized = normalized.iloc[order].reset_index(drop=True)
+    normalized = _sort_by_panel_key(normalized)
     normalized = _clear_pandas_metadata(normalized)
     return normalized, effective_calendar
 
@@ -389,16 +382,17 @@ def _canonicalize_future_exogenous(
         raise PanelError("future exogenous timestamps must lie within the task horizon")
 
     normalized = normalized.loc[:, [*required, *regressors]]
-    order = sorted(
-        range(len(normalized)),
-        key=lambda index: (
-            str(normalized.iloc[index][SERIES_KEY]).encode(),
-            pd.Timestamp(normalized.iloc[index][TIMESTAMP]),
-        ),
-    )
-    normalized = normalized.iloc[order].reset_index(drop=True)
+    normalized = _sort_by_panel_key(normalized)
     normalized = _clear_pandas_metadata(normalized)
     return normalized
+
+
+def _sort_by_panel_key(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.sort_values(
+        list(PANEL_KEY_COLUMNS),
+        kind="mergesort",
+        ignore_index=True,
+    )
 
 
 def _require_string(frame: pd.DataFrame, column: str, *, surface: str) -> None:

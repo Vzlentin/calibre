@@ -322,15 +322,21 @@ class ObserveLoop:
     ) -> tuple[tuple, dict[str, bytes]]:
         if self._runtime is None:
             return (), {}
-        evolving = dict(self._conformal_states)
         updates: dict[str, bytes] = {}
         annotations = []
         for delivery in deliveries:
             context = self._calibration_context(delivery)
+            addressed_labels = (METHOD_SCOPE_LABEL, delivery.partition_label)
+            addressed_states: dict[str, bytes | None] = {}
+            for label in addressed_labels:
+                if label in updates:
+                    addressed_states[label] = updates[label]
+                elif label in self._conformal_states:
+                    addressed_states[label] = self._conformal_states[label]
             try:
                 effect = self._runtime.observe(
                     delivery,
-                    MappingProxyType(dict(evolving)),
+                    MappingProxyType(addressed_states),
                     context=context,
                 )
             except ValueError as error:
@@ -348,7 +354,7 @@ class ObserveLoop:
             emitted = dict(effect.state_updates)
             if delivery.partition_label not in emitted:
                 raise ObserveError("conformal observe omitted the touched partition state update")
-            foreign = set(emitted) - {delivery.partition_label, METHOD_SCOPE_LABEL}
+            foreign = set(emitted).difference(addressed_labels)
             if foreign:
                 raise ObserveError(
                     f"conformal observe emitted foreign state updates: {sorted(foreign)}"
@@ -356,7 +362,6 @@ class ObserveLoop:
             for label, value in emitted.items():
                 if label != METHOD_SCOPE_LABEL and label in updates and updates[label] != value:
                     raise ObserveError(f"conformal observe emitted conflicting state for {label!r}")
-                evolving[label] = value
                 updates[label] = value
             annotations.extend(effect.annotations)
         return tuple(annotations), updates

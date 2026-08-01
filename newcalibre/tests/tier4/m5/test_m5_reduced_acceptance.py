@@ -12,7 +12,7 @@ from newcalibre.protocols.m5 import load_m5_config, run_m5
 
 pytestmark = pytest.mark.tier4
 
-PROJECT_ROOT = Path(__file__).parents[2]
+PROJECT_ROOT = Path(__file__).parents[3]
 CONFIG = PROJECT_ROOT / "tests" / "fixtures" / "m5" / "reduced-real.yaml"
 DATA = PROJECT_ROOT / "data" / "m5"
 INVENTORY = PROJECT_ROOT / "benchmarks" / "m5" / "m5-inputs.json"

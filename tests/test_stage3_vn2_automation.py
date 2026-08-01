@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -12,6 +14,8 @@ REGRESSION = ROOT / ".github" / "workflows" / "newcalibre.yml"
 APPEND_CHECK = ROOT / ".github" / "workflows" / "vn2-evidence.yml"
 ATTRIBUTES = ROOT / ".gitattributes"
 CAPTURE = ROOT / "stage3" / "evidence" / "captures" / "vn2"
+M5_RUNBOOK = ROOT / "benchmarks" / "m5" / "README.md"
+M5_MONITOR = ROOT / ".github" / "scripts" / "run-m5-acceptance.sh"
 
 
 def _workflow(path: Path) -> dict:
@@ -21,27 +25,51 @@ def _workflow(path: Path) -> dict:
 
 
 def _runs(workflow: dict) -> str:
-    return "\n".join(
-        str(step.get("run", ""))
-        for job in workflow["jobs"].values()
-        for step in job.get("steps", [])
-    )
+    return "\n".join(_job_runs(job) for job in workflow["jobs"].values())
 
 
-def test_regression_workflow_has_only_pr_main_and_regression_lanes() -> None:
-    """Keep Tier 0/1 on PR, Tier 2 on main, and one VN2 regression job."""
+def _job_runs(job: dict) -> str:
+    return "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
+
+
+def _protocol_jobs(workflow: dict) -> dict:
+    return {
+        name: workflow["jobs"][name]
+        for name in ("vn2-acceptance", "m5-acceptance", "reference-gates")
+    }
+
+
+def test_workflow_has_pr_main_and_protocol_scoped_lanes() -> None:
+    """Keep existing lanes and split scheduled acceptance by evidence surface."""
     workflow = _workflow(REGRESSION)
 
+    assert set(workflow[True]) == {
+        "push",
+        "pull_request",
+        "schedule",
+        "workflow_dispatch",
+    }
+    assert workflow[True]["push"] == {"branches": ["main"]}
+    assert workflow[True]["pull_request"] == {"branches": ["main"]}
+    assert workflow[True]["schedule"] == [{"cron": "0 5 * * *"}]
     assert set(workflow["jobs"]) == {
         "newcalibre-lint",
         "newcalibre-unit",
         "newcalibre-consistency",
-        "vn2-regression",
+        "vn2-acceptance",
+        "m5-acceptance",
+        "reference-gates",
     }
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["jobs"]["newcalibre-lint"]["if"] == "github.event_name == 'pull_request'"
     assert workflow["jobs"]["newcalibre-unit"]["if"] == "github.event_name == 'pull_request'"
     assert workflow["jobs"]["newcalibre-consistency"]["if"] == "github.event_name == 'push'"
+    protocol_jobs = _protocol_jobs(workflow)
+    protocol_condition = (
+        "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    )
+    assert all(job["if"] == protocol_condition for job in protocol_jobs.values())
+    assert all("environment" not in job for job in protocol_jobs.values())
     type_step = next(
         step
         for step in workflow["jobs"]["newcalibre-lint"]["steps"]
@@ -51,41 +79,188 @@ def test_regression_workflow_has_only_pr_main_and_regression_lanes() -> None:
     assert type_step["run"] == "uv run --locked --no-sync ty check src/newcalibre/"
 
 
-def test_regression_uses_one_inventory_and_successor_verifier() -> None:
-    """Key acquisition and verification directly on the canonical inventory."""
-    text = REGRESSION.read_text(encoding="utf-8")
+def test_protocol_jobs_pin_manual_candidates_end_to_end() -> None:
+    """Bind each manual protocol run to one validated full candidate SHA."""
     workflow = _workflow(REGRESSION)
-    runs = _runs(workflow)
-    acquisition = next(
-        step
-        for step in workflow["jobs"]["vn2-regression"]["steps"]
-        if step.get("name") == "Acquire and verify VN2 inputs with successor tooling"
+    candidate = (
+        "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}"
     )
 
-    assert "hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json')" in text
-    assert acquisition["env"] == {"OVENTI_DATASET_BASE_URL": "${{ vars.OVENTI_DATASET_BASE_URL }}"}
-    assert "steps.vn2-cache.outputs.cache-hit" in acquisition["run"]
-    assert "jq -r '.files[].name'" in acquisition["run"]
-    assert '"${OVENTI_DATASET_BASE_URL%/}/vn2/$name"' in acquisition["run"]
-    assert "curl --fail --location --retry 3" in acquisition["run"]
+    for name, env_name in (
+        ("vn2-acceptance", "VN2_CANDIDATE_SHA"),
+        ("m5-acceptance", "M5_CANDIDATE_SHA"),
+        ("reference-gates", "REFERENCE_CANDIDATE_SHA"),
+    ):
+        job = workflow["jobs"][name]
+        validation = next(
+            step for step in job["steps"] if step.get("name") == "Validate manual candidate"
+        )
+        checkout = next(step for step in job["steps"] if step.get("uses") == "actions/checkout@v4")
+        runs = _job_runs(job)
+
+        assert job["env"][env_name] == candidate
+        assert validation["if"] == "github.event_name == 'workflow_dispatch'"
+        assert f'[[ "${env_name}" =~ ^[0-9a-f]{{40}}$ ]]' in validation["run"]
+        assert checkout["with"]["ref"] == candidate
+        assert f'test "$(git rev-parse HEAD)" = "${env_name}"' in runs
+
+
+def test_protocol_jobs_use_exact_inventories_and_successor_verifiers() -> None:
+    """Acquire only inventory-owned basenames and verify every restored dataset."""
+    text = REGRESSION.read_text(encoding="utf-8")
+    workflow = _workflow(REGRESSION)
+    protocol_jobs = _protocol_jobs(workflow)
+    protocol_text = str(protocol_jobs)
+    runs = "\n".join(_job_runs(job) for job in protocol_jobs.values())
+    vn2 = workflow["jobs"]["vn2-acceptance"]
+    m5 = workflow["jobs"]["m5-acceptance"]
+    vn2_cache = next(step for step in vn2["steps"] if step.get("id") == "vn2-cache")
+    m5_cache = next(step for step in m5["steps"] if step.get("id") == "m5-cache")
+    vn2_acquisition = next(
+        step
+        for step in vn2["steps"]
+        if step.get("name") == "Acquire and verify VN2 inputs with successor tooling"
+    )
+    m5_acquisition = next(
+        step
+        for step in m5["steps"]
+        if step.get("name") == "Acquire and verify M5 inputs with successor tooling"
+    )
+
+    assert vn2_cache["with"] == {
+        "path": "newcalibre/data/vn2",
+        "key": "vn2-${{ hashFiles('newcalibre/benchmarks/vn2/vn2-input-digests.json') }}",
+    }
+    assert m5_cache["with"] == {
+        "path": "newcalibre/data/m5",
+        "key": "m5-${{ hashFiles('newcalibre/benchmarks/m5/m5-inputs.json') }}",
+    }
+    for protocol, cache_id, acquisition in (
+        ("vn2", "vn2-cache", vn2_acquisition),
+        ("m5", "m5-cache", m5_acquisition),
+    ):
+        assert acquisition["env"] == {
+            "OVENTI_DATASET_BASE_URL": "${{ vars.OVENTI_DATASET_BASE_URL }}"
+        }
+        assert "if" not in acquisition
+        assert f"steps.{cache_id}.outputs.cache-hit" in acquisition["run"]
+        assert "jq -r '.files[].name'" in acquisition["run"]
+        assert '[[ "$name" != */* && "$name" != "." && "$name" != ".." ]]' in acquisition["run"]
+        assert f'"${{OVENTI_DATASET_BASE_URL%/}}/{protocol}/$name"' in acquisition["run"]
+        assert "curl --fail --location --retry 3" in acquisition["run"]
     assert "newcalibre/scripts/vn2_data.py verify" in runs
+    assert "newcalibre/scripts/m5_data.py verify" in runs
     assert "newcalibre/scripts/vn2_data.py download" not in runs
+    assert "newcalibre/scripts/m5_data.py download" not in runs
     assert "benchmarks/vn2/vn2_file_links.json" not in text
-    assert "restore-keys:" not in text
-    assert "stage3/evidence/" + "vn2-input-digests.json" not in text
-    assert ".github/scripts/stage3_" + "vn2_data.py" not in text
+    assert "restore-keys" not in protocol_text
+    assert "stage3/evidence/" + "vn2-input-digests.json" not in protocol_text
+    assert ".github/scripts/stage3_" + "vn2_data.py" not in protocol_text
+    assert "secrets." not in protocol_text
+    assert "id-token" not in protocol_text
 
 
-def test_regression_runs_replay_witness_and_generic_acceptance() -> None:
-    """Retain independent Tier 3 and generic-engine Tier 4 behavior."""
-    runs = _runs(_workflow(REGRESSION))
+def test_protocol_jobs_select_directories_and_report_m5_sizing() -> None:
+    """Run exact protocol directories and expose standard-runner headroom."""
+    workflow = _workflow(REGRESSION)
+    text = REGRESSION.read_text(encoding="utf-8")
+    runs = _runs(workflow)
+    vn2_runs = _job_runs(workflow["jobs"]["vn2-acceptance"])
+    m5_runs = _job_runs(workflow["jobs"]["m5-acceptance"])
+    reference = workflow["jobs"]["reference-gates"]
+    reference_runs = _job_runs(reference)
+    m5_sizing = next(
+        step
+        for step in workflow["jobs"]["m5-acceptance"]["steps"]
+        if step.get("name") == "Run reduced real-M5 acceptance and measure runner headroom"
+    )["run"]
+    m5_monitor = M5_MONITOR.read_text(encoding="utf-8")
+    pytest_commands = "\n".join(line for line in runs.splitlines() if "pytest " in line)
 
-    assert "pytest newcalibre/tests/tier3" in runs
-    assert "pytest newcalibre/tests/tier4" in runs
-    assert "vn2_tracking.py build" in runs
-    assert "actions/upload-artifact@v4" in REGRESSION.read_text(encoding="utf-8")
+    assert "pytest newcalibre/tests/tier3" in vn2_runs
+    assert "pytest newcalibre/tests/tier4/vn2" in vn2_runs
+    assert "pytest newcalibre/tests/tier4/m5" in m5_runs
+    assert "pytest newcalibre/tests/tier4/reference" in reference_runs
+    assert "pytest newcalibre/tests/tier4\n" not in runs
+    assert "-m tier4" not in runs
+    assert "test_vn2_acceptance.py" not in pytest_commands
+    assert "test_vn2_gate_b_advisory.py" not in pytest_commands
+    assert "test_m5_reduced_acceptance.py" not in pytest_commands
+    assert "actions/cache" not in str(reference)
+    assert "OVENTI_DATASET_BASE_URL" not in str(reference)
+    assert "curl " not in reference_runs
+    assert "bash .github/scripts/run-m5-acceptance.sh" in m5_sizing
+    assert "pytest newcalibre/tests/tier4/m5" in m5_sizing
+    assert "M5 acceptance elapsed seconds:" in m5_monitor
+    assert "M5 aggregate peak job memory (process RSS) KiB:" in m5_monitor
+    assert "M5 minimum memory headroom KiB:" in m5_monitor
+    assert "M5 minimum free disk KiB:" in m5_monitor
+    assert "minimum_headroom_kib=$(( 4 * 1024 * 1024 ))" in m5_monitor
+    assert "maximum_elapsed_seconds=$(( 20 * 60 ))" in m5_monitor
+    assert 'wait "$test_pid" || test_status=$?' in m5_monitor
+    assert 'exit "$test_status"' in m5_monitor
+    assert 'exit "$sizing_status"' in m5_monitor
+    assert "vn2_tracking.py build" in vn2_runs
+    assert "actions/upload-artifact@v4" in text
     assert "gh pr" not in runs
     assert "git push" not in runs
+    assert "vn2-regression:" not in text
+
+
+def test_m5_monitor_executes_child_and_sizing_exit_contracts(tmp_path: Path) -> None:
+    """Propagate child and sizing failures while allowing a complete success."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_df = fake_bin / "df"
+    fake_df.write_text(
+        "#!/bin/sh\n"
+        "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\n"
+        "printf 'fake 6291456 1 6291455 1%% /\\n'\n",
+        encoding="utf-8",
+    )
+    fake_df.chmod(0o755)
+
+    def run(*, child_status: int, memory_headroom_kib: int) -> subprocess.CompletedProcess[str]:
+        meminfo = tmp_path / f"meminfo-{child_status}-{memory_headroom_kib}"
+        meminfo.write_text(f"MemAvailable: {memory_headroom_kib} kB\n", encoding="utf-8")
+        env = {
+            **os.environ,
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "M5_MEMINFO_PATH": str(meminfo),
+            "M5_DISK_PATH": str(tmp_path),
+            "M5_MONITOR_INTERVAL_SECONDS": "0",
+        }
+        return subprocess.run(
+            ["bash", str(M5_MONITOR), "bash", "-c", f"exit {child_status}"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    child_failure = run(child_status=7, memory_headroom_kib=5 * 1024 * 1024)
+    sizing_failure = run(child_status=0, memory_headroom_kib=1)
+    success = run(child_status=0, memory_headroom_kib=5 * 1024 * 1024)
+
+    assert child_failure.returncode == 7
+    assert "M5 acceptance child status: 7" in child_failure.stdout
+    assert sizing_failure.returncode == 1
+    assert "M5 acceptance sizing status: 1" in sizing_failure.stdout
+    assert success.returncode == 0
+    assert "M5 acceptance child status: 0" in success.stdout
+    assert "M5 acceptance sizing status: 0" in success.stdout
+
+
+def test_m5_runbook_documents_only_the_generic_verified_origin_contract() -> None:
+    """Describe generic public acquisition without making staging a fallback."""
+    text = M5_RUNBOOK.read_text(encoding="utf-8")
+
+    assert "OVENTI_DATASET_BASE_URL" in text
+    assert "newcalibre/scripts/m5_data.py verify" in text
+    assert "newcalibre/benchmarks/m5/m5-inputs.json" in text
+    assert "github.io" not in text
+    assert "calibre-protocol-data-temp" not in text
 
 
 def test_append_check_executes_only_trusted_base_code() -> None:

@@ -30,7 +30,7 @@ pytestmark = [
     ),
 ]
 
-PROJECT_ROOT = Path(__file__).parents[2]
+PROJECT_ROOT = Path(__file__).parents[3]
 REPOSITORY_ROOT = PROJECT_ROOT.parent
 CONFIG = PROJECT_ROOT / "benchmarks" / "vn2" / "protocol.yaml"
 INVENTORY = PROJECT_ROOT / "benchmarks" / "vn2" / "vn2-input-digests.json"

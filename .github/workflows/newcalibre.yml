@@ -90,7 +90,7 @@ jobs:
             uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier2
           diff -r "${RUNNER_TEMP}/tier2-a" "${RUNNER_TEMP}/tier2-b"
 
-  vn2-regression:
+  vn2-acceptance:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     env:
@@ -104,7 +104,7 @@ jobs:
       - name: Validate manual candidate
         if: github.event_name == 'workflow_dispatch'
         run: |
-          echo "${{ inputs.candidate_sha }}" | grep -Eq '^[0-9a-f]{40}$' \
+          [[ "$VN2_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
             || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
       - uses: actions/checkout@v4
         with:
@@ -115,9 +115,12 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$VN2_CANDIDATE_SHA"
           test -f newcalibre/benchmarks/vn2/vn2-input-digests.json
+          test -f newcalibre/benchmarks/vn2/protocol.yaml
+          test -f newcalibre/benchmarks/vn2/gate-b-split-window-sum.yaml
           test -f stage3/evidence/captures/vn2/manifest.json
           test -f newcalibre/tests/tier3/test_conditional_replay.py
-          test -f newcalibre/tests/tier4/test_vn2_acceptance.py
+          test -f newcalibre/tests/tier4/vn2/test_vn2_acceptance.py
+          test -f newcalibre/tests/tier4/vn2/test_vn2_gate_b_advisory.py
       - name: Restore canonical VN2 inputs
         id: vn2-cache
         uses: actions/cache@v4
@@ -135,6 +138,8 @@ jobs:
             : "${OVENTI_DATASET_BASE_URL:?OVENTI_DATASET_BASE_URL must be configured}"
             mkdir -p "$target"
             while IFS= read -r name; do
+              [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] \
+                || { echo "inventory contains an unsafe basename: $name"; exit 1; }
               curl --fail --location --retry 3 \
                 --output "$target/$name" \
                 "${OVENTI_DATASET_BASE_URL%/}/vn2/$name"
@@ -147,7 +152,7 @@ jobs:
       - name: Run conditional replay and biting witness
         run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier3
       - name: Run generic-engine VN2 acceptance and R1-R4 emission
-        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4
+        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4/vn2
       - name: Build proposed compact tracking line
         if: github.event_name == 'workflow_dispatch' && inputs.mint
         run: |
@@ -169,3 +174,88 @@ jobs:
             newcalibre/artifacts/vn2/
             newcalibre/artifacts/vn2-tracking/proposed-record.jsonl
           if-no-files-found: error
+
+  m5-acceptance:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    env:
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1"
+      M5_CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+    steps:
+      - name: Validate manual candidate
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          [[ "$M5_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      - uses: astral-sh/setup-uv@v4
+      - name: Require canonical M5 inputs, config, and harness
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$M5_CANDIDATE_SHA"
+          test -f newcalibre/benchmarks/m5/m5-inputs.json
+          test -f newcalibre/tests/fixtures/m5/reduced-real.yaml
+          test -f newcalibre/tests/tier4/m5/test_m5_reduced_acceptance.py
+      - name: Restore canonical M5 inputs
+        id: m5-cache
+        uses: actions/cache@v4
+        with:
+          path: newcalibre/data/m5
+          key: m5-${{ hashFiles('newcalibre/benchmarks/m5/m5-inputs.json') }}
+      - name: Acquire and verify M5 inputs with successor tooling
+        env:
+          OVENTI_DATASET_BASE_URL: ${{ vars.OVENTI_DATASET_BASE_URL }}
+        run: |
+          set -euo pipefail
+          inventory=newcalibre/benchmarks/m5/m5-inputs.json
+          target=newcalibre/data/m5
+          if [[ "${{ steps.m5-cache.outputs.cache-hit }}" != "true" ]]; then
+            : "${OVENTI_DATASET_BASE_URL:?OVENTI_DATASET_BASE_URL must be configured}"
+            mkdir -p "$target"
+            while IFS= read -r name; do
+              [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] \
+                || { echo "inventory contains an unsafe basename: $name"; exit 1; }
+              curl --fail --location --retry 3 \
+                --output "$target/$name" \
+                "${OVENTI_DATASET_BASE_URL%/}/m5/$name"
+            done < <(jq -r '.files[].name' "$inventory")
+          fi
+          uv sync --project newcalibre --locked --group dev
+          uv run --project newcalibre --locked --no-sync python newcalibre/scripts/m5_data.py verify \
+            --target "$target" \
+            --inventory "$inventory"
+      - name: Run reduced real-M5 acceptance and measure runner headroom
+        run: |
+          bash .github/scripts/run-m5-acceptance.sh \
+            uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4/m5
+
+  reference-gates:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    env:
+      REFERENCE_CANDIDATE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+    steps:
+      - name: Validate manual candidate
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          [[ "$REFERENCE_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "candidate_sha must be a full 40-hex SHA"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
+      - uses: astral-sh/setup-uv@v4
+      - name: Require reference harness
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REFERENCE_CANDIDATE_SHA"
+          test -f newcalibre/tests/tier4/reference/aci/test_aci_reference.py
+          test -f newcalibre/tests/tier4/reference/aci/test_aci_reference_witness.py
+      - run: uv sync --project newcalibre --locked --group dev
+      - name: Run hermetic reference gates
+        run: uv run --project newcalibre --locked --no-sync pytest newcalibre/tests/tier4/reference
