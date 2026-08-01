@@ -12,8 +12,10 @@ from typing import Any, cast
 import pytest
 
 import newcalibre.protocols.m5.runner as runner
+from newcalibre.engine import RAY_WORKER_THREAD_POLICY, PhaseEvent
 from newcalibre.forecasting import resolve_adapter
 from newcalibre.protocols.m5 import M5RunResult, run_m5
+from newcalibre.protocols.m5.runner import run_m5_fit_predict
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "m5" / "tiny"
 _LEVELS = frozenset({"bottom", "item", "department", "category", "store", "state", "total"})
@@ -39,6 +41,7 @@ def test_tiny_strict_release_runs_end_to_end_and_returns_only_compact_facts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
+    lifecycle: list[PhaseEvent] = []
     original_config = runner.load_m5_config
     original_load = runner.load_m5_dataset
     original_compile = runner.compile_m5_protocol
@@ -83,7 +86,7 @@ def test_tiny_strict_release_runs_end_to_end_and_returns_only_compact_facts(
     monkeypatch.setattr(runner, "InMemoryLedgerReader", record_reader)
     monkeypatch.setattr(runner, "score_m5", record_score)
 
-    result = run_m5(_isolated_config(tmp_path, monkeypatch))
+    result = run_m5(_isolated_config(tmp_path, monkeypatch), reporter=lifecycle.append)
 
     assert events == [
         "config",
@@ -95,6 +98,7 @@ def test_tiny_strict_release_runs_end_to_end_and_returns_only_compact_facts(
         "score",
     ]
     assert isinstance(result, M5RunResult)
+    assert len(lifecycle) == 14 * result.forecast_origin_count
     assert result.forecast_origin_count == 64
     assert result.commit_count == 65
     assert result.node_count == 7
@@ -269,6 +273,7 @@ def test_failure_at_each_owning_seam_stops_later_work_and_emits_no_diagnostics(
 
 def test_runner_source_keeps_one_generic_composition_and_no_extra_surface() -> None:
     source = inspect.getsource(runner)
+    ordinary_source = inspect.getsource(run_m5)
     tree = ast.parse(source)
     engine_runs = [
         node
@@ -289,8 +294,82 @@ def test_runner_source_keeps_one_generic_composition_and_no_extra_surface() -> N
     )
 
     assert len(engine_runs) == 1
-    assert all(term not in source for term in forbidden)
-    assert "newcalibre.ledger" not in source
-    assert ".forecasts" not in source
-    assert "RayDispatch" in source
-    assert "InProcessDispatch" not in source
+    assert all(term not in ordinary_source for term in forbidden)
+    assert "newcalibre.ledger" not in ordinary_source
+    assert ".forecasts" not in ordinary_source
+    assert "RayDispatch" in ordinary_source
+    assert "InProcessDispatch" not in ordinary_source
+
+
+def test_profile_seam_executes_one_origin_fit_then_predict_on_selected_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Execute only Fit/Predict and return observed backend dispatch facts."""
+    config = _isolated_config(tmp_path, monkeypatch, digest_rank=True)
+    runtimes = [runner._prepare_m5(config), runner._prepare_m5(config)]
+    for runtime in runtimes:
+        object.__setattr__(runtime.config.population, "bottom_count", 1000)
+    monkeypatch.setattr(runner, "_prepare_m5", lambda _path: runtimes.pop(0))
+    for name, value in RAY_WORKER_THREAD_POLICY.items():
+        monkeypatch.setenv(name, value)
+    events: list[str] = []
+
+    class RecordingDispatch:
+        def __init__(self, backend: str) -> None:
+            self.backend = backend
+            events.append(f"dispatch:{backend}")
+
+        def shutdown(self) -> None:
+            events.append(f"shutdown:{self.backend}")
+
+    monkeypatch.setattr(
+        runner,
+        "InProcessDispatch",
+        lambda **_kwargs: RecordingDispatch("in-process"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "RayDispatch",
+        lambda **_kwargs: RecordingDispatch("ray"),
+    )
+
+    class RecordingEngine:
+        def observe(self, *_args: object, **_kwargs: object) -> None:
+            events.append("observe")
+
+        def fit(self, _request: object) -> tuple[str, ...]:
+            events.append("fit")
+            return ("fitted",)
+
+        def predict(self, fitted: object) -> None:
+            assert fitted == ("fitted",)
+            events.append("predict")
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"unexpected downstream phase: {name}")
+
+    def recording_engine(_runtime: object, *, dispatch: RecordingDispatch) -> RecordingEngine:
+        assert isinstance(dispatch, RecordingDispatch)
+        return RecordingEngine()
+
+    monkeypatch.setattr(runner, "_engine", recording_engine)
+
+    serial = run_m5_fit_predict(config, concurrency=1)
+    parallel = run_m5_fit_predict(config, concurrency=16)
+
+    assert events == [
+        "dispatch:in-process",
+        "observe",
+        "fit",
+        "predict",
+        "dispatch:ray",
+        "observe",
+        "fit",
+        "predict",
+        "shutdown:ray",
+    ]
+    assert serial.dispatch_count == parallel.dispatch_count == 16
+    assert (
+        dict(serial.thread_policy) == dict(parallel.thread_policy) == dict(RAY_WORKER_THREAD_POLICY)
+    )

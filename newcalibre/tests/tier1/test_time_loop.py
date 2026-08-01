@@ -305,7 +305,7 @@ def test_decision_free_loop_runs_origins_and_closes_observations() -> None:
     assert len(runtime.store.observation_resolutions) == len(ORIGINS)
     assert runtime.store.pending_observations == ()
     assert runtime.store.orders == runtime.store.settlements == ()
-    assert len(events) == 6 * len(ORIGINS)
+    assert len(events) == 14 * len(ORIGINS)
 
 
 def test_gapped_origins_use_sequence_cadence_and_settle_through_drain() -> None:
