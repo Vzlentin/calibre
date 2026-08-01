@@ -12,7 +12,9 @@ dependencies = [
     "pyarrow>=17.0",
     "pydantic>=2.8",
     "pyyaml>=6.0",
+    "ray==2.54.1",
     "scipy>=1.14",
+    "statsforecast==2.0.3",
 ]
 
 [dependency-groups]

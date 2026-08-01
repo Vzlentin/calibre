@@ -47,7 +47,11 @@ from newcalibre.engine import (
     PhaseError,
 )
 from newcalibre.engine.time_loop import TimeLoop, TimeLoopRequest, TimeLoopResult
-from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
+from newcalibre.forecasting import (
+    AdapterCapability,
+    AdapterCapabilityError,
+    AdapterExecutionMode,
+)
 from newcalibre.ledger import ForecastRow, OrderRow, SettlementRecord
 
 _CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
@@ -71,6 +75,10 @@ class SeededFixtureAdapter:
             raise ValueError("tier-2 fixture seed must be an integer")
         self._seed = raw_seed
         self._points: dict[str, float] | None = None
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        return AdapterExecutionMode.MONOLITHIC
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:

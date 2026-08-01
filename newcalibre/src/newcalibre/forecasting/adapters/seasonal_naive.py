@@ -12,6 +12,7 @@ from typing import Final, Never
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
+from statsforecast.models import SeasonalNaive as StatsForecastSeasonalNaive
 
 from newcalibre.domain import (
     ACTUAL_VALUE,
@@ -36,6 +37,7 @@ from newcalibre.forecasting.protocol import (
     AdapterCapabilityError,
     AdapterConfigurationError,
     AdapterDataError,
+    AdapterExecutionMode,
     AdapterLifecycleError,
 )
 
@@ -66,6 +68,11 @@ class SeasonalNaiveAdapter:
         self._cursor: HistoryCursor | None = None
         self._series_keys: tuple[str, ...] | None = None
         self._season_by_series: dict[str, _RetainedSeason] | None = None
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        """Declare that series may execute independently."""
+        return AdapterExecutionMode.SERIES_SEPARABLE
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
@@ -134,7 +141,7 @@ class SeasonalNaiveAdapter:
             raise AdapterDataError("predict task calendar must match the fitted task")
 
         seasonal_timestamps = self._seasonal_timestamps(task)
-        values_by_series: dict[str, dict[pd.Timestamp, float]] = {}
+        points_by_series: dict[str, np.ndarray] = {}
         for series_key in task.series_keys:
             values = dict(retained[series_key])
             missing = [timestamp for timestamp in seasonal_timestamps if timestamp not in values]
@@ -144,7 +151,18 @@ class SeasonalNaiveAdapter:
                     f"series {series_key!r} requires one complete season of "
                     f"{self._season_length} observations; missing: {missing_text}"
                 )
-            values_by_series[series_key] = values
+            season = np.asarray(
+                [values[timestamp] for timestamp in seasonal_timestamps],
+                dtype=np.float64,
+            )
+            model = StatsForecastSeasonalNaive(
+                season_length=self._season_length,
+                alias=self._model_name,
+            ).fit(season)
+            points_by_series[series_key] = np.asarray(
+                model.predict(task.horizon)["mean"],
+                dtype=np.float64,
+            )
 
         output_series: list[str] = []
         output_targets: list[pd.Timestamp] = []
@@ -152,12 +170,11 @@ class SeasonalNaiveAdapter:
         output_steps: list[int] = []
         for series_key in task.series_keys:
             for horizon_step in range(1, task.horizon + 1):
-                phase = (horizon_step - 1) % self._season_length
                 output_series.append(series_key)
                 output_targets.append(
                     target_timestamp(task.origin, horizon_step, calendar=task.calendar)
                 )
-                output_points.append(values_by_series[series_key][seasonal_timestamps[phase]])
+                output_points.append(float(points_by_series[series_key][horizon_step - 1]))
                 output_steps.append(horizon_step)
 
         row_count = len(output_series)

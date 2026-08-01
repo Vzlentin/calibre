@@ -48,7 +48,11 @@ from newcalibre.engine import (
     OriginEvent,
     PhaseError,
 )
-from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
+from newcalibre.forecasting import (
+    AdapterCapability,
+    AdapterCapabilityError,
+    AdapterExecutionMode,
+)
 from newcalibre.observe import ActualRecord, ActualsSubmission
 
 
@@ -99,6 +103,10 @@ class _Adapter:
     def __init__(self, effects: list[str]) -> None:
         self._effects = effects
         self._point: float | None = None
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        return AdapterExecutionMode.MONOLITHIC
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:

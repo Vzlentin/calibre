@@ -17,6 +17,7 @@ from newcalibre.forecasting import (
     AdapterCapability,
     AdapterCapabilityError,
     AdapterConfigurationError,
+    AdapterExecutionMode,
     AdapterRegistry,
     AdapterRegistryError,
     ForecastAdapter,
@@ -47,6 +48,10 @@ class _CapabilitySpyAdapter:
         self._requested_capabilities = frozenset(requested)
         self._declared_capabilities = declared
         self.fit_calls = 0
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        return AdapterExecutionMode.MONOLITHIC
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
@@ -83,6 +88,7 @@ def test_seasonal_naive_exposes_the_full_protocol_and_declares_stateful_capabili
     adapter = resolve_adapter(_config())
 
     assert isinstance(adapter, ForecastAdapter)
+    assert adapter.execution_mode is AdapterExecutionMode.SERIES_SEPARABLE
     assert adapter.capabilities == frozenset(
         {
             AdapterCapability.ARTIFACT_PERSISTENCE,
@@ -102,6 +108,15 @@ def test_seasonal_naive_exposes_the_full_protocol_and_declares_stateful_capabili
 def test_builtin_registry_contains_the_explicit_seasonal_naive_backend() -> None:
     assert "seasonal-naive" in available_backends()
     assert isinstance(resolve_adapter(_config()), SeasonalNaiveAdapter)
+
+
+def test_registry_rejects_an_adapter_without_an_execution_declaration() -> None:
+    """Require separability to be explicit rather than implicit or defaulted."""
+    registry = AdapterRegistry()
+    registry.register("invalid", lambda config: object())
+
+    with pytest.raises(AdapterRegistryError, match="must declare one valid"):
+        registry.resolve({"backend": "invalid"})
 
 
 def test_registry_has_no_default_backend_even_with_one_available() -> None:

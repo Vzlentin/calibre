@@ -9,6 +9,7 @@ from newcalibre.forecasting.protocol import (
     AdapterConfigurationError,
     AdapterDataError,
     AdapterError,
+    AdapterExecutionMode,
     AdapterLifecycleError,
     ForecastAdapter,
 )
@@ -31,6 +32,7 @@ def resolve_adapter(model_config: Mapping[str, object]) -> ForecastAdapter:
 __all__ = [
     "SEASONAL_NAIVE_BACKEND",
     "AdapterCapability",
+    "AdapterExecutionMode",
     "AdapterCapabilityError",
     "AdapterConfigurationError",
     "AdapterDataError",

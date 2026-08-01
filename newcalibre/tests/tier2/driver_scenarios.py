@@ -60,7 +60,11 @@ from newcalibre.engine import (
     TimeLoop,
     TimeLoopRequest,
 )
-from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
+from newcalibre.forecasting import (
+    AdapterCapability,
+    AdapterCapabilityError,
+    AdapterExecutionMode,
+)
 from newcalibre.observe import ActualRecord, ActualsSubmission
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
@@ -154,6 +158,10 @@ class DeterministicArtifactAdapter:
             raise ValueError("driver-equivalence adapter configuration is invalid")
         self._points: dict[str, float] | None = None
         self._latest: dict[str, float] | None = None
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        return AdapterExecutionMode.MONOLITHIC
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:

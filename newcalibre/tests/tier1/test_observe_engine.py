@@ -51,7 +51,11 @@ from newcalibre.engine import (
     OriginSnapshot,
     Spine,
 )
-from newcalibre.forecasting import AdapterCapability, AdapterCapabilityError
+from newcalibre.forecasting import (
+    AdapterCapability,
+    AdapterCapabilityError,
+    AdapterExecutionMode,
+)
 
 _CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 _MODEL_CONFIG = {"backend": "observe-fixture"}
@@ -62,6 +66,10 @@ class _LastValueAdapter:
 
     def __init__(self) -> None:
         self._points: dict[str, float] = {}
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        return AdapterExecutionMode.MONOLITHIC
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:

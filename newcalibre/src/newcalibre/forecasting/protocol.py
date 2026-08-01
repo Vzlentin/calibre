@@ -20,6 +20,13 @@ class AdapterCapability(StrEnum):
     ARTIFACT_PERSISTENCE = "artifact_persistence"
 
 
+class AdapterExecutionMode(StrEnum):
+    """Declare whether one semantic task may be split across series."""
+
+    SERIES_SEPARABLE = "series-separable"
+    MONOLITHIC = "monolithic"
+
+
 class AdapterError(Exception):
     """Report a forecasting-adapter contract failure."""
 
@@ -50,6 +57,11 @@ class ForecastAdapter(Protocol):
     state may be panel-level. Whole tasks, unused history, fitted values, and
     forecast rows are not retained merely for convenience.
     """
+
+    @property
+    def execution_mode(self) -> AdapterExecutionMode:
+        """Return the required physical execution declaration."""
+        ...
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:

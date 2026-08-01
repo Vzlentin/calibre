@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from newcalibre.forecasting.protocol import AdapterCapabilityError, ForecastAdapter
+from newcalibre.forecasting.protocol import (
+    AdapterCapabilityError,
+    AdapterExecutionMode,
+    ForecastAdapter,
+)
 
 AdapterFactory = Callable[[Mapping[str, object]], ForecastAdapter]
 
@@ -58,6 +62,10 @@ class AdapterRegistry:
                 f"unknown backend {backend!r}; available backends: {available}"
             ) from error
         adapter = factory(model_config)
+        if not isinstance(getattr(adapter, "execution_mode", None), AdapterExecutionMode):
+            raise AdapterRegistryError(
+                f"backend {backend!r} must declare one valid adapter execution mode"
+            )
         unsupported = adapter.requested_capabilities - adapter.capabilities
         if unsupported:
             capability_text = ", ".join(sorted(capability.value for capability in unsupported))
