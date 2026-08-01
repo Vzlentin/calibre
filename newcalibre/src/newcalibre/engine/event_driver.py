@@ -15,6 +15,7 @@ import pandas as pd
 
 from newcalibre.domain import (
     ActualsSemantics,
+    CycleToken,
     InventoryPosition,
     Scope,
     SessionIdentity,
@@ -269,7 +270,11 @@ class EventDriver:
             session=event.session,
             submission=event.submission,
         )
-        settlement = self._eligible_settlement(observation.cycle.history_appends)
+        assert observation.token is not None
+        settlement = self._eligible_settlement(
+            observation.cycle.history_appends,
+            token=observation.token,
+        )
         receipt = self._engine.commit(
             OriginCommit(
                 session=event.session,
@@ -347,6 +352,8 @@ class EventDriver:
     def _eligible_settlement(
         self,
         history_appends: Iterable[ObservedActual],
+        *,
+        token: CycleToken,
     ) -> SettlementResult | None:
         decision = session_decision_inputs(self._ledger_sink.session)
         latest = self._ledger_sink.latest_origin
@@ -393,6 +400,7 @@ class EventDriver:
                 inventory_positions=positions,
                 orders=(),
                 actuals_semantics=self._actuals_semantics,
+                token=token,
             )
         )
 

@@ -56,16 +56,15 @@ class _CapabilitySpyAdapter:
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         return self._requested_capabilities
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
-        del task, collect_fitted_values
+    def fit(self, task: ForecastTask) -> None:
+        del task
         self.fit_calls += 1
 
     def predict(self, task: ForecastTask) -> pd.DataFrame:
         del task
         raise AssertionError("prediction is outside this registry test")
 
-    def fitted_values(self, task: ForecastTask) -> FittedValues:
-        del task
+    def fitted_values(self) -> FittedValues:
         raise AssertionError("fitted values are outside this registry test")
 
     def dump_state(self) -> bytes:
@@ -75,16 +74,21 @@ class _CapabilitySpyAdapter:
         del state
         raise AssertionError("state persistence is outside this registry test")
 
-    def update(self, task: ForecastTask) -> None:
-        del task
+    def update(self, delta) -> None:
+        del delta
         raise AssertionError("incremental update is outside this registry test")
 
 
-def test_seasonal_naive_exposes_the_full_protocol_and_declares_no_optional_capability() -> None:
+def test_seasonal_naive_exposes_the_full_protocol_and_declares_stateful_capabilities() -> None:
     adapter = resolve_adapter(_config())
 
     assert isinstance(adapter, ForecastAdapter)
-    assert adapter.capabilities == frozenset()
+    assert adapter.capabilities == frozenset(
+        {
+            AdapterCapability.ARTIFACT_PERSISTENCE,
+            AdapterCapability.INCREMENTAL_UPDATE,
+        }
+    )
     assert adapter.requested_capabilities == frozenset()
     assert set(AdapterCapability) == {
         AdapterCapability.FITTED_VALUES,

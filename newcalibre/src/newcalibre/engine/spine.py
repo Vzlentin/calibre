@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import time
@@ -10,7 +9,8 @@ import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from itertools import islice
+from itertools import count, islice
+from threading import Lock
 from types import MappingProxyType
 from typing import overload
 
@@ -35,6 +35,7 @@ from newcalibre.domain import (
     SERIES_KEY,
     ActualsSemantics,
     Calendar,
+    CycleToken,
     DecisionTiming,
     ForecastTask,
     GuaranteeClaim,
@@ -74,6 +75,8 @@ from newcalibre.engine._session import (
     session_origin_inputs as _session_origin_inputs,
 )
 from newcalibre.engine.errors import EngineError as _EngineError
+from newcalibre.engine.forecast_lifecycle import ForecastLifecycle, ForecastLifecycleResult
+from newcalibre.engine.indexed_panel import IndexedPanel
 from newcalibre.engine.ports import (
     ActualKey,
     ActualsSource,
@@ -90,7 +93,7 @@ from newcalibre.engine.ports import (
 from newcalibre.engine.settlement import SettlementRequest as _SettlementRequest
 from newcalibre.engine.settlement import SettlementResult as _SettlementResult
 from newcalibre.engine.settlement import settle as _settle
-from newcalibre.forecasting import AdapterCapability, ForecastAdapter, resolve_adapter
+from newcalibre.forecasting import ForecastAdapter, resolve_adapter
 from newcalibre.ledger import (
     BoundKey,
     ForecastIssuance,
@@ -112,6 +115,9 @@ ENGINE_VERBS = (
     "settle",
     "commit",
 )
+
+_CYCLE_REVISIONS = count(1)
+_CYCLE_REVISION_LOCK = Lock()
 
 
 class Phase(StrEnum):
@@ -151,8 +157,7 @@ class ForecastBatch:
 
     _frame: pd.DataFrame = field(repr=False)
     _calendar: Calendar = field(repr=False)
-    _session: SessionIdentity | None = field(repr=False)
-    _engine_token: object | None = field(repr=False, compare=False)
+    _token: CycleToken | None = field(repr=False)
     issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]]
     observation_issuances: Mapping[ForecastKey, IssuedBoundFacts]
 
@@ -202,8 +207,7 @@ class ForecastBatch:
                 )
         object.__setattr__(self, "_frame", validated)
         object.__setattr__(self, "_calendar", calendar)
-        object.__setattr__(self, "_session", None)
-        object.__setattr__(self, "_engine_token", None)
+        object.__setattr__(self, "_token", None)
         object.__setattr__(self, "issuances", MappingProxyType(frozen))
         object.__setattr__(
             self,
@@ -224,22 +228,34 @@ class ForecastBatch:
     @property
     def session(self) -> SessionIdentity | None:
         """Return immutable engine provenance, if this batch has been bound."""
-        return self._session
+        return None if self._token is None else self._token.session
+
+    @property
+    def token(self) -> CycleToken | None:
+        """Return immutable cycle provenance, if this batch has been bound."""
+        return self._token
 
 
 @dataclass(frozen=True, slots=True)
 class FittedTask:
     """Address fitted state without carrying model objects, bytes, or locations."""
 
-    session: SessionIdentity
+    token: CycleToken
     task: ForecastTask
 
     def __post_init__(self) -> None:
-        if not isinstance(self.session, SessionIdentity):
-            raise TypeError("fitted task session must be a SessionIdentity")
+        if not isinstance(self.token, CycleToken):
+            raise TypeError("fitted task token must be a CycleToken")
         if not isinstance(self.task, ForecastTask):
             raise TypeError("fitted task task must be a ForecastTask")
-        _require_task_session_binding(self.task, session=self.session)
+        if self.task.origin != self.token.origin:
+            raise _EngineError("fitted task origin must match its cycle token")
+        _require_task_session_binding(self.task, session=self.token.session)
+
+    @property
+    def session(self) -> SessionIdentity:
+        """Return the cycle-bound session."""
+        return self.token.session
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,20 +264,25 @@ class ObservationResult:
 
     cycle: ObserveCycle
     prior_states: Mapping[str, bytes] = field(default_factory=dict)
-    session: SessionIdentity | None = None
-    origin: pd.Timestamp | None = None
-    _engine_token: object | None = field(default=None, init=False, repr=False, compare=False)
+    token: CycleToken | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.cycle, ObserveCycle):
             raise TypeError("observation result cycle must be an ObserveCycle")
         prior_states = _validated_state_snapshot(self.prior_states)
         object.__setattr__(self, "prior_states", MappingProxyType(prior_states))
-        _validate_optional_provenance(
-            self.session,
-            self.origin,
-            name="observation result",
-        )
+        if self.token is not None and not isinstance(self.token, CycleToken):
+            raise TypeError("observation result token must be a CycleToken")
+
+    @property
+    def session(self) -> SessionIdentity | None:
+        """Return the cycle-bound session, if present."""
+        return None if self.token is None else self.token.session
+
+    @property
+    def origin(self) -> pd.Timestamp | None:
+        """Return the cycle-bound origin, if present."""
+        return None if self.token is None else self.token.origin
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,26 +291,31 @@ class CalibrationResult:
 
     forecasts: ForecastBatch
     state_updates: Mapping[str, bytes] = field(default_factory=dict)
-    session: SessionIdentity | None = None
-    origin: pd.Timestamp | None = None
-    _engine_token: object | None = field(default=None, init=False, repr=False, compare=False)
+    token: CycleToken | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.forecasts, ForecastBatch):
             raise TypeError("calibration result forecasts must be a ForecastBatch")
         updates = _validated_state_updates(self.state_updates)
         object.__setattr__(self, "state_updates", MappingProxyType(updates))
-        _validate_optional_provenance(
-            self.session,
-            self.origin,
-            name="calibration result",
-        )
+        if self.token is not None and not isinstance(self.token, CycleToken):
+            raise TypeError("calibration result token must be a CycleToken")
         if self.session is not None:
             if self.forecasts.session != self.session:
                 raise _EngineError("calibration result forecasts must match its session")
             assert self.origin is not None
             if any(key[1] != self.origin for key in self.forecasts.issuances):
                 raise _EngineError("calibration result forecasts must match its origin")
+
+    @property
+    def session(self) -> SessionIdentity | None:
+        """Return the cycle-bound session, if present."""
+        return None if self.token is None else self.token.session
+
+    @property
+    def origin(self) -> pd.Timestamp | None:
+        """Return the cycle-bound origin, if present."""
+        return None if self.token is None else self.token.origin
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +432,7 @@ class SettlementWindow:
     snapshot: SettlementSnapshot
     actuals: Mapping[ActualKey, float]
     actuals_semantics: ActualsSemantics
+    token: CycleToken | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.snapshot, SettlementSnapshot):
@@ -414,6 +441,10 @@ class SettlementWindow:
             raise TypeError("settlement window actuals must be a mapping")
         if not isinstance(self.actuals_semantics, ActualsSemantics):
             raise TypeError("settlement window semantics must be ActualsSemantics")
+        if self.token is not None and not isinstance(self.token, CycleToken):
+            raise TypeError("settlement window token must be a CycleToken or None")
+        if self.token is not None and self.token.session != self.snapshot.session:
+            raise _EngineError("settlement window token must match its session")
         object.__setattr__(self, "actuals", MappingProxyType(dict(self.actuals)))
 
 
@@ -423,6 +454,7 @@ class CommitRequest:
 
     session: SessionIdentity
     origin: pd.Timestamp
+    token: CycleToken
     observation: ObservationResult
     calibration: CalibrationResult
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
@@ -435,14 +467,22 @@ class CommitRequest:
         if not isinstance(self.session, SessionIdentity):
             raise TypeError("commit request session must be a SessionIdentity")
         _require_timestamp(self.origin, name="commit request origin")
+        if not isinstance(self.token, CycleToken):
+            raise TypeError("commit request token must be a CycleToken")
+        if self.token.session != self.session or self.token.origin != self.origin:
+            raise _EngineError("commit request token must match its session and origin")
         if not isinstance(self.observation, ObservationResult):
             raise TypeError("commit request observation must be an ObservationResult")
         if not isinstance(self.calibration, CalibrationResult):
             raise TypeError("commit request calibration must be a CalibrationResult")
         if self.observation.session != self.session or self.observation.origin != self.origin:
             raise _EngineError("commit request observation must match its session and origin")
+        if self.observation.token != self.token:
+            raise _EngineError("commit request observation must match its cycle token")
         if self.calibration.session != self.session or self.calibration.origin != self.origin:
             raise _EngineError("commit request calibration must match its session and origin")
+        if self.calibration.token != self.token:
+            raise _EngineError("commit request calibration must match its cycle token")
         if any(key[1] != self.origin for key in self.calibration.forecasts.issuances):
             raise _EngineError("commit request forecasts must all match its origin")
         if self.decisions is not None:
@@ -450,6 +490,8 @@ class CommitRequest:
                 raise TypeError("commit request decisions must be a DecisionBatch or None")
             if self.decisions.session != self.session or self.decisions.origin != self.origin:
                 raise _EngineError("commit request decisions must match its session and origin")
+            if self.decisions.token != self.token:
+                raise _EngineError("commit request decisions must match its cycle token")
         if self.settlement is not None:
             if not isinstance(self.settlement, SettlementWindow):
                 raise TypeError("commit request settlement must be a SettlementWindow or None")
@@ -457,6 +499,8 @@ class CommitRequest:
                 raise _EngineError("commit request settlement must match its session")
             if self.settlement.snapshot.periods != (self.origin,):
                 raise _EngineError("commit request settlement must contain exactly its origin")
+            if self.settlement.token != self.token:
+                raise _EngineError("commit request settlement must match its cycle token")
         if self.input_fingerprint is not None and (
             not isinstance(self.input_fingerprint, str)
             or len(self.input_fingerprint) != 64
@@ -479,18 +523,25 @@ class CommitRequest:
 class CommitResult:
     """Return the durable receipt and the exact rows materialized by Commit."""
 
+    token: CycleToken
     receipt: CommitReceipt
     orders: tuple[OrderRow, ...]
     settlement: _SettlementResult | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.token, CycleToken):
+            raise TypeError("commit result token must be a CycleToken")
         if not isinstance(self.receipt, CommitReceipt):
             raise TypeError("commit result receipt must be a CommitReceipt")
+        if self.receipt.session != self.token.session or self.receipt.origin != self.token.origin:
+            raise _EngineError("commit result receipt must match its cycle token")
         orders = tuple(self.orders)
         if any(not isinstance(order, OrderRow) for order in orders):
             raise TypeError("commit result orders must contain OrderRow values")
         if self.settlement is not None and not isinstance(self.settlement, _SettlementResult):
             raise TypeError("commit result settlement must be a SettlementResult or None")
+        if self.settlement is not None and self.settlement.token != self.token:
+            raise _EngineError("commit result settlement must match its cycle token")
         object.__setattr__(self, "orders", orders)
 
 
@@ -550,22 +601,27 @@ class Engine:
         self._ordering_configuration = ordering_configuration
         self._runtime: ConformalRuntime | None = runtime
         self._reconciliation_hierarchy = hierarchy
-        self._panel = panel_source.load()
+        loaded_panel = panel_source.load()
+        _require_panel_session_binding(
+            loaded_panel,
+            session=ledger_sink.session,
+            ledger_calendar=ledger_sink.calendar,
+        )
+        self._panel = IndexedPanel.from_panel(loaded_panel)
         self._hierarchy = hierarchy or HierarchyIndex.flat(self._panel.series_keys)
         self._actuals_source = actuals_source
-        self._artifact_store = artifact_store
         self._calibration_state_store = calibration_state_store
         self._ledger_sink = ledger_sink
         self._dispatch_backend = dispatch_backend
-        self._adapter_resolver = adapter_resolver
+        self._forecast_lifecycle = ForecastLifecycle(
+            artifact_store=artifact_store,
+            adapter_resolver=adapter_resolver,
+        )
         self._reconciler = reconciler
         self._orderer = orderer
-        self._phase_token = object()
-        _require_panel_session_binding(
-            self._panel,
-            session=self._ledger_sink.session,
-            ledger_calendar=self._ledger_sink.calendar,
-        )
+        self._active_cycles: dict[tuple[SessionIdentity, pd.Timestamp], CycleToken] = {}
+        self._forecast_results: dict[tuple[CycleToken, str], ForecastLifecycleResult] = {}
+        self._issued_decisions: dict[CycleToken, DecisionBatch] = {}
         hierarchy_node_series = tuple(sorted(self._hierarchy.node_labels, key=str.encode))
         if self._panel.series_keys not in (
             self._hierarchy.bottom_series,
@@ -580,15 +636,41 @@ class Engine:
         if not isinstance(request, OriginRequest):
             raise TypeError("fit requires an OriginRequest")
         self._require_session(request.session)
-        tasks = self._panel.forecast_tasks(
-            origin=request.origin,
-            horizon=request.horizon,
-            scope=request.scope,
-            model_config=request.model_config,
-            future_exogenous=request.future_exogenous,
-        )
-        fitted_tasks = tuple(FittedTask(session=request.session, task=task) for task in tasks)
-        return self._dispatch_backend.map(self._fit_one, fitted_tasks)
+        token = self._cycle_for(session=request.session, origin=request.origin)
+        try:
+            provisional = self._panel.tasks(
+                origin=request.origin,
+                horizon=request.horizon,
+                scope=request.scope,
+                model_config=request.model_config,
+                future_exogenous=request.future_exogenous,
+            )
+            previous_cursors = self._forecast_lifecycle.previous_cursors(
+                session=request.session,
+                tasks=provisional,
+            )
+            tasks = (
+                provisional
+                if not previous_cursors
+                else self._panel.tasks(
+                    origin=request.origin,
+                    horizon=request.horizon,
+                    scope=request.scope,
+                    model_config=request.model_config,
+                    future_exogenous=request.future_exogenous,
+                    previous_cursors=previous_cursors,
+                )
+            )
+            items = tuple((request.session, task, token) for task in tasks)
+            results = self._dispatch_backend.map(self._forecast_lifecycle.run_item, items)
+            staged = {
+                (token, task.identity): result for task, result in zip(tasks, results, strict=True)
+            }
+        except Exception:
+            self._retire_cycle(token)
+            raise
+        self._forecast_results.update(staged)
+        return tuple(FittedTask(token=token, task=task) for task in tasks)
 
     def predict(self, fitted_tasks: Sequence[FittedTask]) -> ForecastBatch:
         """Predict fitted tasks in deterministic dispatch order."""
@@ -599,16 +681,32 @@ class Engine:
             if not isinstance(fitted, FittedTask):
                 raise TypeError("predict requires FittedTask values")
             self._require_session(fitted.session)
-        frames = self._dispatch_backend.map(self._predict_one, tasks)
-        combined = pd.concat(frames, ignore_index=True)
-        return _bind_forecast_batch(
-            ForecastBatch(
-                combined,
-                calendar=self._ledger_sink.calendar,
-            ),
-            session=tasks[0].session,
-            engine_token=self._phase_token,
-        )
+            self._require_cycle(fitted.token)
+        token = tasks[0].token
+        if any(fitted.token != token for fitted in tasks):
+            raise _EngineError("predict fitted tasks must share one cycle token")
+        result_keys = tuple((token, fitted.task.identity) for fitted in tasks)
+        if len(set(result_keys)) != len(result_keys) or any(
+            key not in self._forecast_results for key in result_keys
+        ):
+            raise _EngineError("predict requires engine-issued fitted tasks exactly once")
+        results = tuple(self._forecast_results[key] for key in result_keys)
+        try:
+            combined = pd.concat((result.frame for result in results), ignore_index=True)
+            batch = _bind_forecast_batch(
+                ForecastBatch(
+                    combined,
+                    calendar=self._ledger_sink.calendar,
+                ),
+                token=token,
+            )
+            self._forecast_lifecycle.publish(results)
+        except Exception:
+            self._retire_cycle(token)
+            raise
+        for key in result_keys:
+            del self._forecast_results[key]
+        return batch
 
     def reconcile(self, forecasts: ForecastBatch) -> ForecastBatch:
         """Apply the configured registered point-reconciliation strategy."""
@@ -675,10 +773,10 @@ class Engine:
             observation_issuances=observation_issuances,
         )
         assert forecasts.session is not None
+        assert forecasts.token is not None
         return _bind_forecast_batch(
             reconciled,
-            session=forecasts.session,
-            engine_token=self._phase_token,
+            token=forecasts.token,
         )
 
     def calibrate(
@@ -700,8 +798,10 @@ class Engine:
         origin = _forecast_batch_origin(forecasts)
         if observation.session != session or observation.origin != origin:
             raise _EngineError("calibration observation does not match its session and origin")
-        if observation._engine_token is not self._phase_token:
-            raise _EngineError("calibration observation was not produced by this engine")
+        if observation.token != forecasts.token:
+            raise _EngineError("calibration inputs must share one cycle token")
+        assert forecasts.token is not None
+        self._require_cycle(forecasts.token)
 
         observed_updates = dict(observation.cycle.state_updates)
         states = dict(observation.prior_states)
@@ -710,9 +810,7 @@ class Engine:
             return _bind_calibration_result(
                 forecasts,
                 observed_updates,
-                session=session,
-                origin=origin,
-                engine_token=self._phase_token,
+                token=forecasts.token,
             )
 
         context = _calibration_context(
@@ -746,8 +844,7 @@ class Engine:
             raise _EngineError("conformal apply changed forecast row keys")
         calibrated = _bind_forecast_batch(
             calibrated_value,
-            session=session,
-            engine_token=self._phase_token,
+            token=forecasts.token,
         )
         if _forecast_batch_origin(calibrated) != origin:
             raise _EngineError("conformal apply changed the forecast origin")
@@ -767,9 +864,7 @@ class Engine:
         return _bind_calibration_result(
             calibrated,
             merged_updates,
-            session=session,
-            origin=origin,
-            engine_token=self._phase_token,
+            token=forecasts.token,
         )
 
     def order(self, request: OrderRequest) -> DecisionBatch | None:
@@ -786,7 +881,7 @@ class Engine:
         decision_request = _bottom_node_order_request(
             request,
             series_keys=configuration.series_keys,
-            engine_token=self._phase_token,
+            token=request.forecasts.token,
         )
         task_horizon, _model_config = _session_origin_inputs(request.session)
         _require_decision_series_coverage(
@@ -807,12 +902,11 @@ class Engine:
             produced = self._orderer(decision_request)
         proposals = tuple(islice(produced, len(requested) + 1))
         decisions = DecisionBatch(
-            session=request.session,
-            origin=request.origin,
+            token=self._required_batch_token(request.forecasts),
             requested=requested,
             proposals=proposals,
         )
-        object.__setattr__(decisions, "_engine_token", self._phase_token)
+        self._issued_decisions[decisions.token] = decisions
         return decisions
 
     def observe(
@@ -824,6 +918,7 @@ class Engine:
     ) -> ObservationResult:
         """Stage one complete durable-snapshot observe cycle without persistence."""
         self._require_session(session)
+        token = self._cycle_for(session=session, origin=origin)
         if submission is not None and not isinstance(submission, ActualsSubmission):
             raise TypeError("observe submission must be an ActualsSubmission or None")
         prior_states = dict(self._calibration_state_store.snapshot(session))
@@ -840,9 +935,7 @@ class Engine:
         return _bind_observation_result(
             cycle,
             prior_states,
-            session=session,
-            origin=origin,
-            engine_token=self._phase_token,
+            token=token,
         )
 
     def settle(self, request: _SettlementRequest) -> _SettlementResult:
@@ -850,6 +943,9 @@ class Engine:
         if not isinstance(request, _SettlementRequest):
             raise TypeError("settle requires a SettlementRequest")
         self._require_session(request.session)
+        if request.token is None:
+            raise _EngineError("engine settlement requires a cycle token")
+        self._require_cycle(request.token)
         if request.snapshot.calendar != self._ledger_sink.calendar:
             raise _EngineError("settlement snapshot calendar does not match the engine ledger")
         owned_snapshot = self._ledger_sink.settlement_snapshot(request.snapshot.periods)
@@ -869,7 +965,11 @@ class Engine:
     ) -> CommitResult | CommitReceipt:
         """Persist an origin's ledger and monotone calibration-state mutations."""
         if isinstance(request, CommitRequest):
-            return self._commit_request(request)
+            try:
+                return self._commit_request(request)
+            except Exception:
+                self._retire_cycle(request.token)
+                raise
         if not isinstance(request, (OriginCommit, CommitReceipt)):
             raise TypeError("commit requires a CommitRequest, OriginCommit, or CommitReceipt")
         self._require_session(request.session)
@@ -896,15 +996,7 @@ class Engine:
 
     def _commit_request(self, request: CommitRequest) -> CommitResult:
         self._require_session(request.session)
-        if request.observation._engine_token is not self._phase_token:
-            raise _EngineError("commit observation was not produced by this engine")
-        if request.calibration._engine_token is not self._phase_token:
-            raise _EngineError("commit calibration was not produced by this engine")
-        if (
-            request.decisions is not None
-            and request.decisions._engine_token is not self._phase_token
-        ):
-            raise _EngineError("commit decisions were not produced by this engine")
+        self._require_cycle(request.token)
         self._require_forecast_batch(request.calibration.forecasts)
         configuration = self._ordering_configuration
         if request.decisions is not None:
@@ -918,7 +1010,7 @@ class Engine:
                     inventory_positions=request.inventory_positions,
                 ),
                 series_keys=configuration.series_keys,
-                engine_token=self._phase_token,
+                token=request.token,
             )
             task_horizon, _model_config = _session_origin_inputs(request.session)
             _require_decision_series_coverage(
@@ -930,6 +1022,8 @@ class Engine:
             _require_inventory_coverage(decision_request.inventory_positions, requested=expected)
             if request.decisions.requested != expected:
                 raise _EngineError("commit decisions do not match calibrated decision groups")
+            if self._issued_decisions.get(request.token) is not request.decisions:
+                raise _EngineError("commit decisions were not issued by this engine")
         orders = _materialize_decisions(
             request.decisions,
             configuration=configuration,
@@ -944,6 +1038,7 @@ class Engine:
                 inventory_positions=request.inventory_positions,
                 orders=orders,
                 actuals_semantics=request.settlement.actuals_semantics,
+                token=request.token,
             )
             settlement_result = (
                 self.settle(settlement_request)
@@ -970,18 +1065,71 @@ class Engine:
                 inventory_positions=request.inventory_positions,
             )
         )
-        return CommitResult(receipt=receipt, orders=orders, settlement=settlement_result)
+        result = CommitResult(
+            token=request.token,
+            receipt=receipt,
+            orders=orders,
+            settlement=settlement_result,
+        )
+        self._retire_cycle(request.token)
+        return result
 
     def _require_session(self, session: SessionIdentity) -> None:
         if session != self._ledger_sink.session:
             raise _EngineError("engine session does not match its ledger sink")
 
     def _require_forecast_batch(self, forecasts: ForecastBatch) -> None:
-        if forecasts._engine_token is not self._phase_token or forecasts.session is None:
+        if forecasts.token is None or forecasts.session is None:
             raise _EngineError("forecast batch was not produced by this engine")
+        self._require_cycle(forecasts.token)
         self._require_session(forecasts.session)
         if forecasts.calendar != self._ledger_sink.calendar:
             raise _EngineError("forecast batch calendar does not match the engine ledger")
+
+    def _required_batch_token(self, forecasts: ForecastBatch) -> CycleToken:
+        self._require_forecast_batch(forecasts)
+        assert forecasts.token is not None
+        return forecasts.token
+
+    def _cycle_for(self, *, session: SessionIdentity, origin: pd.Timestamp) -> CycleToken:
+        key = (session, origin)
+        active = self._active_cycles.get(key)
+        if active is not None:
+            return active
+        return self._begin_cycle(session=session, origin=origin)
+
+    def _begin_cycle(self, *, session: SessionIdentity, origin: pd.Timestamp) -> CycleToken:
+        self._require_session(session)
+        active = self._active_cycles.get((session, origin))
+        if active is not None:
+            self._retire_cycle(active)
+        with _CYCLE_REVISION_LOCK:
+            revision = next(_CYCLE_REVISIONS)
+        token = CycleToken(session, origin, revision)
+        self._active_cycles[(session, origin)] = token
+        return token
+
+    def _require_cycle(self, token: CycleToken) -> None:
+        if not isinstance(token, CycleToken):
+            raise TypeError("engine cycle token must be a CycleToken")
+        if token != self._active_cycles.get((token.session, token.origin)):
+            raise _EngineError("value belongs to a stale or foreign engine cycle")
+
+    def _retire_cycle(self, token: CycleToken) -> None:
+        """Invalidate every controller-owned value staged for one cycle."""
+        key = (token.session, token.origin)
+        if self._active_cycles.get(key) == token:
+            del self._active_cycles[key]
+        self._issued_decisions.pop(token, None)
+        stale_results = [key for key in self._forecast_results if key[0] == token]
+        for result_key in stale_results:
+            del self._forecast_results[result_key]
+
+    def _abort_origin(self, origin: pd.Timestamp) -> None:
+        """Invalidate the active cycle at a failed spine phase boundary."""
+        token = self._active_cycles.get((self._ledger_sink.session, origin))
+        if token is not None:
+            self._retire_cycle(token)
 
     def _require_event_driver_port(self, *, ledger_sink: LedgerSink) -> None:
         """Reject a driver wired to a different ledger than this engine."""
@@ -999,34 +1147,6 @@ class Engine:
             raise _EngineError("time loop actuals source does not belong to the engine")
         if ledger_sink is not self._ledger_sink:
             raise _EngineError("time loop ledger sink does not belong to the engine")
-
-    def _fit_one(self, fitted: FittedTask) -> FittedTask:
-        adapter = self._adapter_resolver(fitted.task.model_config)
-        if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
-            artifact_key = _artifact_key(fitted.session, fitted.task)
-            stored = self._artifact_store.load(artifact_key)
-            if stored is None:
-                adapter.fit(fitted.task)
-                self._artifact_store.save(artifact_key, adapter.dump_state())
-            else:
-                adapter.load_state(stored)
-        else:
-            adapter.fit(fitted.task)
-        return fitted
-
-    def _predict_one(self, fitted: FittedTask) -> pd.DataFrame:
-        if not isinstance(fitted, FittedTask):
-            raise TypeError("dispatch prediction item must be a FittedTask")
-        adapter = self._adapter_resolver(fitted.task.model_config)
-        if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
-            artifact_key = _artifact_key(fitted.session, fitted.task)
-            stored = self._artifact_store.load(artifact_key)
-            if stored is None:
-                raise _EngineError("fitted model artifact is missing")
-            adapter.load_state(stored)
-        else:
-            adapter.fit(fitted.task)
-        return adapter.predict(fitted.task)
 
 
 class Spine:
@@ -1057,6 +1177,8 @@ class Spine:
             raise TypeError("settlement must be a SettlementWindow or None")
         if settlement is not None and settlement.snapshot.periods != (request.origin,):
             raise ValueError("spine settlement window must contain exactly its origin")
+        if settlement is not None and settlement.token is not None:
+            raise _EngineError("spine settlement token is engine-owned")
         if submission is not None and not isinstance(submission, ActualsSubmission):
             raise TypeError("spine submission must be an ActualsSubmission or None")
         if expected_forecast_origin_count is not None and (
@@ -1065,15 +1187,29 @@ class Spine:
             or expected_forecast_origin_count < 0
         ):
             raise ValueError("expected forecast origin count must be a non-negative integer")
-        observation = self._phase(
-            Phase.RESOLVE,
-            request.origin,
-            lambda: self._engine.observe(
+
+        def resolve_phase() -> ObservationResult:
+            self._engine._begin_cycle(session=request.session, origin=request.origin)
+            return self._engine.observe(
                 request.origin,
                 session=request.session,
                 submission=submission,
-            ),
+            )
+
+        observation = self._phase(
+            Phase.RESOLVE,
+            request.origin,
+            resolve_phase,
         )
+        assert observation.token is not None
+        token = observation.token
+        if settlement is not None:
+            settlement = SettlementWindow(
+                snapshot=settlement.snapshot,
+                actuals=settlement.actuals,
+                actuals_semantics=settlement.actuals_semantics,
+                token=token,
+            )
 
         def predict_phase() -> ForecastBatch:
             fitted = self._engine.fit(request)
@@ -1112,6 +1248,7 @@ class Spine:
                 CommitRequest(
                     session=request.session,
                     origin=request.origin,
+                    token=token,
                     observation=observation,
                     calibration=calibrated,
                     inventory_positions=request.inventory_positions,
@@ -1145,6 +1282,7 @@ class Spine:
         try:
             result = action()
         except Exception as error:
+            self._engine._abort_origin(origin)
             self._report(phase, origin, started, error)
             if isinstance(error, unwrapped):
                 raise
@@ -1184,14 +1322,11 @@ class Spine:
 def _bind_forecast_batch(
     forecasts: ForecastBatch,
     *,
-    session: SessionIdentity,
-    engine_token: object,
+    token: CycleToken,
 ) -> ForecastBatch:
-    if forecasts._engine_token is not None and forecasts._engine_token is not engine_token:
-        raise _EngineError("forecast batch was produced by another engine")
-    if forecasts.session is not None and forecasts.session != session:
-        raise _EngineError("forecast batch belongs to another engine session")
-    if forecasts.session == session and forecasts._engine_token is engine_token:
+    if forecasts.token is not None and forecasts.token != token:
+        raise _EngineError("forecast batch belongs to another cycle")
+    if forecasts.token == token:
         return forecasts
     bound = ForecastBatch(
         forecasts.frame,
@@ -1199,8 +1334,7 @@ def _bind_forecast_batch(
         issuances=forecasts.issuances,
         observation_issuances=forecasts.observation_issuances,
     )
-    object.__setattr__(bound, "_session", session)
-    object.__setattr__(bound, "_engine_token", engine_token)
+    object.__setattr__(bound, "_token", token)
     return bound
 
 
@@ -1228,36 +1362,18 @@ def _bind_observation_result(
     cycle: ObserveCycle,
     prior_states: Mapping[str, bytes],
     *,
-    session: SessionIdentity,
-    origin: pd.Timestamp,
-    engine_token: object,
+    token: CycleToken,
 ) -> ObservationResult:
-    result = ObservationResult(
-        cycle,
-        prior_states,
-        session=session,
-        origin=origin,
-    )
-    object.__setattr__(result, "_engine_token", engine_token)
-    return result
+    return ObservationResult(cycle, prior_states, token=token)
 
 
 def _bind_calibration_result(
     forecasts: ForecastBatch,
     state_updates: Mapping[str, bytes],
     *,
-    session: SessionIdentity,
-    origin: pd.Timestamp,
-    engine_token: object,
+    token: CycleToken,
 ) -> CalibrationResult:
-    result = CalibrationResult(
-        forecasts,
-        state_updates,
-        session=session,
-        origin=origin,
-    )
-    object.__setattr__(result, "_engine_token", engine_token)
-    return result
+    return CalibrationResult(forecasts, state_updates, token=token)
 
 
 def _forecast_batch_origin(forecasts: ForecastBatch) -> pd.Timestamp:
@@ -1265,31 +1381,6 @@ def _forecast_batch_origin(forecasts: ForecastBatch) -> pd.Timestamp:
     if len(origins) != 1:
         raise _EngineError("forecast batch must contain exactly one origin")
     return next(iter(origins))
-
-
-def _validate_optional_provenance(
-    session: SessionIdentity | None,
-    origin: pd.Timestamp | None,
-    *,
-    name: str,
-) -> None:
-    if session is None and origin is None:
-        return
-    if not isinstance(session, SessionIdentity):
-        raise TypeError(f"{name} session must be a SessionIdentity")
-    _require_timestamp(origin, name=f"{name} origin")
-
-
-def _artifact_key(session: SessionIdentity, task: ForecastTask) -> str:
-    digest = hashlib.sha256()
-    for payload in (
-        b"newcalibre.forecast-model/v1",
-        session.value.encode(),
-        task.to_bytes(),
-    ):
-        digest.update(len(payload).to_bytes(8, "big"))
-        digest.update(payload)
-    return f"forecast-model:{digest.hexdigest()}"
 
 
 def _forecast_keys(frame: pd.DataFrame) -> tuple[ForecastKey, ...]:
@@ -1381,8 +1472,10 @@ def _bottom_node_order_request(
     request: OrderRequest,
     *,
     series_keys: tuple[str, ...],
-    engine_token: object,
+    token: CycleToken | None,
 ) -> OrderRequest:
+    if token is None:
+        raise _EngineError("order request forecasts must carry a cycle token")
     allowed = frozenset(series_keys)
     foreign_positions = set(request.inventory_positions) - allowed
     if foreign_positions:
@@ -1409,8 +1502,7 @@ def _bottom_node_order_request(
             issuances=issuances,
             observation_issuances=observation_issuances,
         ),
-        session=request.session,
-        engine_token=engine_token,
+        token=token,
     )
     return OrderRequest(
         session=request.session,

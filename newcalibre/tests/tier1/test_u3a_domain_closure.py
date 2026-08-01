@@ -1,4 +1,4 @@
-"""Exercise the closed U3a panel, calendar, and task transport contract."""
+"""Exercise the closed panel, calendar, and indexed-task contract."""
 
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ from newcalibre.domain import (
     TargetSupport,
     validate_forecast_frame,
 )
+from newcalibre.engine import IndexedPanel, IndexedPanelError
 
 pytestmark = pytest.mark.tier1
 FRAME_CALENDAR = Calendar("W-MON").bind(pd.Timestamp("2026-01-19"))
@@ -107,7 +108,7 @@ def _task(
         calendar=calendar or Calendar("W-MON"),
         target_support=TargetSupport.REAL,
     )
-    return panel.forecast_tasks(
+    return IndexedPanel.from_panel(panel).tasks(
         origin=origin or pd.Timestamp(np.datetime64("2026-01-19", "ms")),
         horizon=2,
         scope=scope,
@@ -133,16 +134,15 @@ def test_multiplied_weekly_calendar_binds_panel_phase_and_round_trips_it() -> No
     assert panel.calendar.contains(pd.Timestamp("2026-01-19"))
     assert not panel.calendar.contains(pd.Timestamp("2026-01-12"))
 
-    task = panel.forecast_tasks(
+    task = IndexedPanel.from_panel(panel).tasks(
         origin=pd.Timestamp(np.datetime64("2026-01-19", "ms")),
         horizon=2,
         scope=Scope.GLOBAL,
         model_config={"backend": "seasonal-naive", "m": 1},
     )[0]
-    restored = ForecastTask.from_bytes(task.to_bytes())
-    assert restored.calendar == task.calendar
-    assert restored.calendar.phase is not None
-    assert restored.calendar.phase.unit == "ms"
+    assert task.calendar == panel.calendar
+    assert task.calendar.phase is not None
+    assert task.calendar.phase.unit == "ms"
 
 
 @pytest.mark.parametrize(
@@ -181,8 +181,8 @@ def test_multiplied_calendar_rejects_observation_and_origin_off_bound_phase(
         Panel.from_frame(
             bad_observation, calendar=Calendar(frequency), target_support=TargetSupport.REAL
         )
-    with pytest.raises(PanelError, match="does not lie on calendar"):
-        panel.forecast_tasks(
+    with pytest.raises(IndexedPanelError, match="does not lie on calendar"):
+        IndexedPanel.from_panel(panel).tasks(
             origin=pd.Timestamp(invalid),
             horizon=1,
             scope=Scope.GLOBAL,
@@ -263,8 +263,8 @@ def test_every_calendar_frequency_enforces_observation_and_origin_clock_phase(
         Panel.from_frame(
             bad_observation, calendar=Calendar(frequency), target_support=TargetSupport.REAL
         )
-    with pytest.raises(PanelError, match="does not lie on calendar"):
-        panel.forecast_tasks(
+    with pytest.raises(IndexedPanelError, match="does not lie on calendar"):
+        IndexedPanel.from_panel(panel).tasks(
             origin=pd.Timestamp(invalid_origin),
             horizon=1,
             scope=Scope.GLOBAL,
@@ -347,22 +347,20 @@ def test_censor_null_and_explicit_undeclared_share_one_transport_sentinel() -> N
     pd.testing.assert_frame_equal(reingested.frame, panel.frame)
 
 
-def test_absent_censor_fields_remain_absent_through_task_transport() -> None:
+def test_absent_censor_fields_remain_absent_through_indexed_history() -> None:
     frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     panel = Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
-    task = panel.forecast_tasks(
+    task = IndexedPanel.from_panel(panel).tasks(
         origin=pd.Timestamp(np.datetime64("2026-01-19", "ms")),
         horizon=1,
         scope=Scope.GLOBAL,
         model_config={},
     )[0]
-    restored = ForecastTask.from_bytes(task.to_bytes())
+    history = task.history.materialize()
 
     assert not panel.has_censoring_facts
     assert CENSOR_STATUS not in panel.frame.columns
-    assert CENSOR_STATUS not in task.history.columns
-    assert CENSOR_STATUS not in restored.history.columns
-    pd.testing.assert_frame_equal(restored.history, task.history)
+    assert CENSOR_STATUS not in history.columns
 
 
 @pytest.mark.parametrize("column", REQUIRED_PANEL_COLUMNS)
@@ -429,7 +427,7 @@ def test_panel_rejects_invalid_status_bound_and_exogenous_values(
         )
 
 
-def test_sparse_numeric_values_densify_losslessly_to_the_same_task_bytes() -> None:
+def test_sparse_numeric_values_densify_losslessly_to_the_same_task_identity() -> None:
     dense = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     dense[OBSERVED_VALUE] = pd.Series([3, 0, 1, 2, 0, 3], dtype="float32")
     sparse = dense.copy(deep=True)
@@ -440,8 +438,8 @@ def test_sparse_numeric_values_densify_losslessly_to_the_same_task_bytes() -> No
     sparse_task = _task(frame=sparse)
     dense_task = _task(frame=dense)
 
-    assert sparse_task.history[OBSERVED_VALUE].dtype == np.dtype("float32")
-    assert sparse_task.to_bytes() == dense_task.to_bytes()
+    assert sparse_task.history.materialize()[OBSERVED_VALUE].dtype == np.dtype("float32")
+    assert sparse_task.identity == dense_task.identity
 
 
 @pytest.mark.parametrize(
@@ -460,14 +458,13 @@ def test_sparse_numeric_values_densify_losslessly_to_the_same_task_bytes() -> No
         "float64",
     ],
 )
-def test_every_accepted_numeric_primitive_round_trips_exactly(dtype: str) -> None:
+def test_every_accepted_numeric_primitive_materializes_exactly(dtype: str) -> None:
     frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     frame[OBSERVED_VALUE] = pd.Series([3, 1, 1, 2, 2, 3], dtype=dtype)
     task = _task(frame=frame)
-    restored = ForecastTask.from_bytes(task.to_bytes())
+    history = task.history.materialize()
 
-    assert restored.history[OBSERVED_VALUE].dtype == np.dtype(dtype)
-    pd.testing.assert_frame_equal(restored.history, task.history)
+    assert history[OBSERVED_VALUE].dtype == np.dtype(dtype)
 
 
 @pytest.mark.parametrize(
@@ -485,14 +482,13 @@ def test_every_accepted_numeric_primitive_round_trips_exactly(dtype: str) -> Non
         "Float64",
     ],
 )
-def test_nullable_numeric_dtypes_round_trip_with_missing_values(dtype: str) -> None:
+def test_nullable_numeric_dtypes_materialize_with_missing_values(dtype: str) -> None:
     frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     frame[OBSERVED_VALUE] = pd.Series([3, pd.NA, 1, 2, 2, 3], dtype=dtype)
     task = _task(frame=frame)
-    restored = ForecastTask.from_bytes(task.to_bytes())
+    history = task.history.materialize()
 
-    assert str(restored.history[OBSERVED_VALUE].dtype) == dtype
-    pd.testing.assert_frame_equal(restored.history, task.history)
+    assert str(history[OBSERVED_VALUE].dtype) == dtype
 
 
 @pytest.mark.parametrize(
@@ -500,7 +496,7 @@ def test_nullable_numeric_dtypes_round_trip_with_missing_values(dtype: str) -> N
     [pa.int64(), pa.uint64(), pa.float16(), pa.float32(), pa.float64()],
     ids=str,
 )
-def test_arrow_backed_numeric_dtypes_round_trip_with_missing_values(
+def test_arrow_backed_numeric_dtypes_materialize_with_missing_values(
     arrow_type: pa.DataType,
 ) -> None:
     frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
@@ -510,13 +506,12 @@ def test_arrow_backed_numeric_dtypes_round_trip_with_missing_values(
     frame[OBSERVED_VALUE] = pd.Series(values, dtype=pd.ArrowDtype(arrow_type))
     task = _task(frame=frame)
 
-    restored = ForecastTask.from_bytes(task.to_bytes())
+    history = task.history.materialize()
 
-    assert restored.history[OBSERVED_VALUE].dtype == pd.ArrowDtype(arrow_type)
-    pd.testing.assert_frame_equal(restored.history, task.history)
+    assert history[OBSERVED_VALUE].dtype == pd.ArrowDtype(arrow_type)
 
 
-def test_nullable_mask_payloads_canonicalize_to_identical_task_bytes() -> None:
+def test_nullable_mask_payloads_canonicalize_to_identical_task_identity() -> None:
     first = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     second = first.copy(deep=True)
     mask = np.array([False, True, False, False, False, False])
@@ -527,10 +522,10 @@ def test_nullable_mask_payloads_canonicalize_to_identical_task_bytes() -> None:
         pd.arrays.IntegerArray(np.array([3, 0, 1, 2, 2, 3], dtype="int16"), mask)
     )
 
-    assert _task(frame=first).to_bytes() == _task(frame=second).to_bytes()
+    assert _task(frame=first).identity == _task(frame=second).identity
 
 
-def test_nullable_uint64_round_trip_preserves_values_above_float_precision() -> None:
+def test_nullable_uint64_materialization_preserves_values_above_float_precision() -> None:
     frame = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     frame[OBSERVED_VALUE] = pd.Series(
         [2**64 - 1, 2**63 + 1, 2**63, 2, pd.NA, 3],
@@ -538,11 +533,10 @@ def test_nullable_uint64_round_trip_preserves_values_above_float_precision() -> 
     )
     task = _task(frame=frame)
 
-    restored = ForecastTask.from_bytes(task.to_bytes())
+    history = task.history.materialize()
 
-    pd.testing.assert_frame_equal(restored.history, task.history)
-    assert 2**64 - 1 in restored.history[OBSERVED_VALUE].tolist()
-    assert 2**63 + 1 in restored.history[OBSERVED_VALUE].tolist()
+    assert 2**64 - 1 in history[OBSERVED_VALUE].tolist()
+    assert 2**63 + 1 in history[OBSERVED_VALUE].tolist()
 
 
 def test_nullable_float_canonicalizes_valid_nan_to_the_missing_representation() -> None:
@@ -555,28 +549,23 @@ def test_nullable_float_canonicalizes_valid_nan_to_the_missing_representation() 
 
     valid_nan_task = _task(frame=valid_nan)
     missing_task = _task(frame=missing)
-    restored = ForecastTask.from_bytes(valid_nan_task.to_bytes())
-
-    assert valid_nan_task.to_bytes() == missing_task.to_bytes()
-    pd.testing.assert_frame_equal(restored.history, valid_nan_task.history)
+    assert valid_nan_task.identity == missing_task.identity
 
 
-def test_python_string_storage_canonicalizes_to_arrow_and_round_trips() -> None:
+def test_python_string_storage_canonicalizes_to_arrow_on_materialization() -> None:
     task = _task(
         frame=_panel_frame(string_storage="python"),
         future=_future(string_storage="python"),
     )
-    restored = ForecastTask.from_bytes(task.to_bytes())
+    history = task.history.materialize()
 
-    assert task.history[SERIES_KEY].dtype.storage == "pyarrow"
-    assert task.history[CENSOR_STATUS].dtype.storage == "pyarrow"
+    assert history[SERIES_KEY].dtype.storage == "pyarrow"
+    assert history[CENSOR_STATUS].dtype.storage == "pyarrow"
     assert task.future_exogenous is not None
     assert task.future_exogenous[SERIES_KEY].dtype.storage == "pyarrow"
-    pd.testing.assert_frame_equal(restored.history, task.history)
-    pd.testing.assert_frame_equal(restored.future_exogenous, task.future_exogenous)
 
 
-def test_task_bytes_discard_pandas_metadata_and_depend_only_on_declared_inputs() -> None:
+def test_task_identity_discards_pandas_metadata_and_depends_only_on_declared_inputs() -> None:
     marked = _panel_frame()
     marked.attrs["transport-secret-marker"] = "must-not-ship"
     marked.flags.allows_duplicate_labels = False
@@ -590,25 +579,19 @@ def test_task_bytes_discard_pandas_metadata_and_depend_only_on_declared_inputs()
 
     marked_task = _task(frame=marked, future=marked_future)
     clean_task = _task(frame=_panel_frame(), future=_future())
-    payload = marked_task.to_bytes()
+    history = marked_task.history.materialize()
 
-    assert marked_task.history.attrs == {}
-    assert marked_task.history.flags.allows_duplicate_labels
-    assert marked_task.history.index.name is None
-    assert marked_task.history.columns.name is None
+    assert history.attrs == {}
+    assert history.flags.allows_duplicate_labels
+    assert history.index.name is None
+    assert history.columns.name is None
     assert marked_task.future_exogenous is not None
     assert marked_task.future_exogenous.attrs == {}
     assert marked_task.future_exogenous.flags.allows_duplicate_labels
-    assert b"transport-secret" not in payload
-    assert b"pandas" not in payload
-    assert payload == clean_task.to_bytes()
-
-    restored = ForecastTask.from_bytes(payload)
-    pd.testing.assert_frame_equal(restored.history, marked_task.history)
-    pd.testing.assert_frame_equal(restored.future_exogenous, marked_task.future_exogenous)
+    assert marked_task.identity == clean_task.identity
 
 
-def test_task_bytes_ignore_arrow_string_chunking_and_slice_offsets() -> None:
+def test_task_identity_ignores_arrow_string_chunking_and_slice_offsets() -> None:
     direct = _panel_frame()
     chunked = _panel_frame()
     chunked[SERIES_KEY] = pd.concat(
@@ -622,12 +605,12 @@ def test_task_bytes_ignore_arrow_string_chunking_and_slice_offsets() -> None:
     )
     sliced[SERIES_KEY] = padded.iloc[1:].reset_index(drop=True)
 
-    assert _task(frame=chunked).to_bytes() == _task(frame=direct).to_bytes()
-    assert _task(frame=sliced).to_bytes() == _task(frame=direct).to_bytes()
+    assert _task(frame=chunked).identity == _task(frame=direct).identity
+    assert _task(frame=sliced).identity == _task(frame=direct).identity
 
 
 @pytest.mark.parametrize("dtype", ["float16", "float32", "float64"])
-def test_task_bytes_normalize_equivalent_nan_payloads(dtype: str) -> None:
+def test_task_identity_normalizes_equivalent_nan_payloads(dtype: str) -> None:
     standard = _panel_frame().drop(columns=[CENSOR_STATUS, AVAILABILITY_BOUND])
     custom = standard.copy(deep=True)
     standard_values = np.array([3, np.nan, 1, 2, 2, 3], dtype=dtype)
@@ -656,7 +639,7 @@ def test_task_bytes_normalize_equivalent_nan_payloads(dtype: str) -> None:
     standard[OBSERVED_VALUE] = standard_values
     custom[OBSERVED_VALUE] = custom_values
 
-    assert _task(frame=custom).to_bytes() == _task(frame=standard).to_bytes()
+    assert _task(frame=custom).identity == _task(frame=standard).identity
 
 
 @pytest.mark.parametrize("dtype", ["longdouble"])
@@ -709,7 +692,7 @@ def test_task_rejects_configuration_and_column_labels_that_are_not_utf8_transpor
 def test_future_exogenous_rejects_before_origin_off_grid_duplicate_and_unknown_known_at(
     mutation: Callable[[pd.DataFrame], pd.DataFrame], pattern: str
 ) -> None:
-    with pytest.raises(PanelError, match=pattern):
+    with pytest.raises(IndexedPanelError, match=pattern):
         _task(future=mutation(_future()))
 
 
@@ -760,7 +743,7 @@ class _HistorySpy:
         self.seen: list[tuple[ForecastTask, pd.DataFrame]] = []
 
     def fit(self, task: ForecastTask) -> None:
-        self.seen.append((task, task.history))
+        self.seen.append((task, task.history.materialize()))
 
 
 @given(frame=_valid_multiseries_panels(), scope=st.sampled_from(list(Scope)))
@@ -768,7 +751,7 @@ class _HistorySpy:
 def test_no_at_or_after_origin_history_reaches_adapter(frame: pd.DataFrame, scope: Scope) -> None:
     origin = pd.Timestamp("2026-01-19")
     panel = Panel.from_frame(frame, calendar=Calendar("W-MON"), target_support=TargetSupport.REAL)
-    tasks = panel.forecast_tasks(
+    tasks = IndexedPanel.from_panel(panel).tasks(
         origin=origin,
         horizon=2,
         scope=scope,
@@ -909,8 +892,8 @@ def test_invalid_scope_objects_still_fail_before_adapter_configuration() -> None
     panel = Panel.from_frame(
         _panel_frame(), calendar=Calendar("W-MON"), target_support=TargetSupport.REAL
     )
-    with pytest.raises(PanelError, match="scope"):
-        panel.forecast_tasks(
+    with pytest.raises(IndexedPanelError, match="scope"):
+        IndexedPanel.from_panel(panel).tasks(
             origin=pd.Timestamp("2026-01-19"),
             horizon=1,
             scope=cast(Scope, "global"),

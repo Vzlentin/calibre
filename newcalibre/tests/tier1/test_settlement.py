@@ -168,6 +168,22 @@ def _request(
     )
 
 
+def _engine_settle(engine: Engine, request: SettlementRequest):
+    observation = engine.observe(request.snapshot.periods[-1], session=request.session)
+    assert observation.token is not None
+    return engine.settle(
+        SettlementRequest(
+            session=request.session,
+            snapshot=request.snapshot,
+            actuals=request.actuals,
+            inventory_positions=request.inventory_positions,
+            orders=request.orders,
+            actuals_semantics=request.actuals_semantics,
+            token=observation.token,
+        )
+    )
+
+
 def _zero_actuals(
     series_keys: Sequence[str],
     periods: Sequence[pd.Timestamp],
@@ -1097,8 +1113,10 @@ def test_engine_uses_the_same_settlement_core_and_commit_is_exactly_once() -> No
     )
 
     direct = settle(request)
-    through_engine = engine.settle(request)
-    assert through_engine == direct
+    through_engine = _engine_settle(engine, request)
+    assert through_engine.records == direct.records
+    assert through_engine.inventory_positions == direct.inventory_positions
+    assert through_engine.token is not None
 
     missing_order = OriginCommit(
         session=session,
@@ -1134,7 +1152,8 @@ def test_sink_reconciles_orders_across_same_write_and_later_settlement_windows()
     order = _order(session, origin=PERIODS[0], quantity=3.0)
 
     same_write_engine, same_write_sink = _engine(session)
-    same_write = same_write_engine.settle(
+    same_write = _engine_settle(
+        same_write_engine,
         _request(
             session,
             periods=PERIODS[0:3],
@@ -1142,7 +1161,7 @@ def test_sink_reconciles_orders_across_same_write_and_later_settlement_windows()
             orders=(order,),
             actuals=_zero_actuals(("sku-a",), PERIODS[0:3]),
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
-        )
+        ),
     )
     same_write_engine.commit(
         OriginCommit(
@@ -1156,14 +1175,15 @@ def test_sink_reconciles_orders_across_same_write_and_later_settlement_windows()
 
     later_engine, later_sink = _engine(session)
     later_engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(order,)))
-    later = later_engine.settle(
+    later = _engine_settle(
+        later_engine,
         _request(
             session,
             periods=PERIODS[1:3],
             snapshot=later_sink.settlement_snapshot(PERIODS[1:3]),
             actuals=_zero_actuals(("sku-a",), PERIODS[1:3]),
             positions={"sku-a": InventoryPosition(0.0, 3.0, 0.0)},
-        )
+        ),
     )
     later_engine.commit(
         OriginCommit(
@@ -1202,14 +1222,15 @@ def test_sink_refuses_forged_timing_and_orders_for_already_settled_arrivals() ->
         )
     assert sink.orders == ()
 
-    settled = engine.settle(
+    settled = _engine_settle(
+        engine,
         _request(
             session,
             periods=(PERIODS[2],),
             snapshot=sink.settlement_snapshot((PERIODS[2],)),
             actuals={("sku-a", PERIODS[2]): 0.0},
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
-        )
+        ),
     )
     engine.commit(
         OriginCommit(
@@ -1276,14 +1297,15 @@ def test_sink_refuses_orders_without_supported_session_timing() -> None:
 def test_sink_refuses_an_order_whose_origin_is_already_settled() -> None:
     session = _session()
     engine, sink = _engine(session)
-    settled = engine.settle(
+    settled = _engine_settle(
+        engine,
         _request(
             session,
             periods=(PERIODS[0],),
             snapshot=sink.settlement_snapshot((PERIODS[0],)),
             actuals={("sku-a", PERIODS[0]): 0.0},
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
-        )
+        ),
     )
     engine.commit(
         OriginCommit(
@@ -1326,14 +1348,15 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
     assert sink.orders == ()
     assert sink.settlements == ()
 
-    first = engine.settle(
+    first = _engine_settle(
+        engine,
         _request(
             session,
             periods=(PERIODS[0],),
             snapshot=sink.settlement_snapshot((PERIODS[0],)),
             actuals={("sku-a", PERIODS[0]): 0.0},
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
-        )
+        ),
     )
     record = first.records[0]
     wrong_rule = replace(
@@ -1374,14 +1397,15 @@ def test_sink_refuses_settlement_metadata_and_transition_poisoning() -> None:
             settlements=first.records,
         )
     )
-    second = engine.settle(
+    second = _engine_settle(
+        engine,
         _request(
             session,
             periods=(PERIODS[1],),
             snapshot=sink.settlement_snapshot((PERIODS[1],)),
             actuals={("sku-a", PERIODS[1]): 0.0},
             positions=first.inventory_positions,
-        )
+        ),
     )
     changed_semantics = replace(
         second.records[0],
@@ -1416,14 +1440,15 @@ def test_sink_requires_complete_decision_series_for_every_settlement_period() ->
     series_keys = ("sku-a", "sku-b")
     session = _session(series_keys=series_keys)
     engine, sink = _engine(session, series_keys=series_keys)
-    result = engine.settle(
+    result = _engine_settle(
+        engine,
         _request(
             session,
             periods=(PERIODS[0],),
             snapshot=sink.settlement_snapshot((PERIODS[0],)),
             actuals=_zero_actuals(series_keys, (PERIODS[0],)),
             positions={series_key: InventoryPosition(0.0, 0.0, 0.0) for series_key in series_keys},
-        )
+        ),
     )
 
     with pytest.raises(LedgerError, match="complete decision series"):
@@ -1444,14 +1469,15 @@ def test_failed_multi_period_accounting_does_not_consume_open_orders() -> None:
     second_order = _order(session, origin=PERIODS[1], quantity=4.0)
     engine.commit(OriginCommit(session=session, origin=PERIODS[0], orders=(first_order,)))
     engine.commit(OriginCommit(session=session, origin=PERIODS[1], orders=(second_order,)))
-    result = engine.settle(
+    result = _engine_settle(
+        engine,
         _request(
             session,
             periods=PERIODS[2:4],
             snapshot=sink.settlement_snapshot(PERIODS[2:4]),
             actuals=_zero_actuals(("sku-a",), PERIODS[2:4]),
             positions={"sku-a": InventoryPosition(0.0, 7.0, 0.0)},
-        )
+        ),
     )
     bad_final = replace(
         result.records[-1],
@@ -1498,20 +1524,21 @@ def test_engine_refuses_a_settlement_snapshot_from_another_calendar_grid() -> No
     )
 
     with pytest.raises(EngineError, match="calendar"):
-        engine.settle(request)
+        _engine_settle(engine, request)
 
 
 def test_engine_refuses_forged_facts_on_the_owned_calendar_grid() -> None:
     session = _session()
     engine, sink = _engine(session)
-    first = engine.settle(
+    first = _engine_settle(
+        engine,
         _request(
             session,
             periods=(PERIODS[0],),
             snapshot=sink.settlement_snapshot((PERIODS[0],)),
             actuals={("sku-a", PERIODS[0]): 0.0},
             positions={"sku-a": InventoryPosition(0.0, 0.0, 0.0)},
-        )
+        ),
     )
     engine.commit(
         OriginCommit(
@@ -1538,7 +1565,7 @@ def test_engine_refuses_forged_facts_on_the_owned_calendar_grid() -> None:
     )
 
     with pytest.raises(EngineError, match="snapshot"):
-        engine.settle(forged_request)
+        _engine_settle(engine, forged_request)
 
 
 def test_compact_index_work_stays_flat_across_64_growing_origins_and_rebuild() -> None:

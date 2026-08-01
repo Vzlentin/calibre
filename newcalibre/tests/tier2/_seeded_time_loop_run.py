@@ -26,6 +26,7 @@ from newcalibre.domain import (
     FittedValues,
     ForecastTask,
     HierarchyIndex,
+    HistoryDelta,
     InventoryPosition,
     Panel,
     Scope,
@@ -82,10 +83,8 @@ class SeededFixtureAdapter:
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset()
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
-        if collect_fitted_values:
-            raise AdapterCapabilityError("tier-2 fixture has no fitted-values capability")
-        history = task.history
+    def fit(self, task: ForecastTask) -> None:
+        history = task.history.materialize()
         points: dict[str, float] = {}
         for series_key in task.series_keys:
             series_history = history[history[SERIES_KEY] == series_key]
@@ -118,7 +117,7 @@ class SeededFixtureAdapter:
         frame[HORIZON_STEP] = frame[HORIZON_STEP].astype("int64")
         return frame
 
-    def fitted_values(self, task: ForecastTask) -> FittedValues:
+    def fitted_values(self) -> FittedValues:
         raise AdapterCapabilityError("tier-2 fixture has no fitted-values capability")
 
     def dump_state(self) -> bytes:
@@ -127,7 +126,8 @@ class SeededFixtureAdapter:
     def load_state(self, state: bytes) -> None:
         raise AdapterCapabilityError("tier-2 fixture has no persistence capability")
 
-    def update(self, task: ForecastTask) -> None:
+    def update(self, delta: HistoryDelta) -> None:
+        del delta
         raise AdapterCapabilityError("tier-2 fixture has no incremental-update capability")
 
 

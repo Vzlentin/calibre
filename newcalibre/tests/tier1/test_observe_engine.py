@@ -71,13 +71,12 @@ class _LastValueAdapter:
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
         return frozenset()
 
-    def fit(self, task: ForecastTask, *, collect_fitted_values: bool = False) -> None:
-        if collect_fitted_values:
-            raise AdapterCapabilityError("fixture has no fitted values")
+    def fit(self, task: ForecastTask) -> None:
+        history = task.history.materialize()
         self._points = {
             series_key: float(
-                task.history.loc[
-                    task.history[SERIES_KEY] == series_key,
+                history.loc[
+                    history[SERIES_KEY] == series_key,
                     OBSERVED_VALUE,
                 ].iloc[-1]
             )
@@ -110,7 +109,7 @@ class _LastValueAdapter:
             }
         )
 
-    def fitted_values(self, task: ForecastTask):
+    def fitted_values(self):
         raise AdapterCapabilityError("fixture has no fitted values")
 
     def dump_state(self) -> bytes:
@@ -119,7 +118,8 @@ class _LastValueAdapter:
     def load_state(self, state: bytes) -> None:
         raise AdapterCapabilityError("fixture has no persistence")
 
-    def update(self, task: ForecastTask) -> None:
+    def update(self, delta) -> None:
+        del delta
         raise AdapterCapabilityError("fixture has no incremental update")
 
 
@@ -454,7 +454,7 @@ def test_cross_engine_staged_observation_is_rejected() -> None:
     request = OriginRequest(session=session, origin=origin, scope=Scope.GLOBAL)
     forecasts = second.predict(second.fit(request))
 
-    with pytest.raises(EngineError, match="not produced by this engine"):
+    with pytest.raises(EngineError, match="cycle token"):
         second.calibrate(forecasts, session=session, observation=staged)
 
 

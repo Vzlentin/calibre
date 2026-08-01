@@ -52,8 +52,8 @@ class VN2SeasonalNaiveQuantileAdapter(SeasonalNaiveAdapter):
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:
-        """Declare exactly the native-quantile capability."""
-        return frozenset({AdapterCapability.NATIVE_QUANTILES})
+        """Add native quantiles to the base incremental lifecycle."""
+        return super().capabilities | {AdapterCapability.NATIVE_QUANTILES}
 
     @property
     def requested_capabilities(self) -> frozenset[AdapterCapability]:
