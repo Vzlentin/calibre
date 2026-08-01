@@ -16,7 +16,6 @@ from newcalibre.forecasting import (
     AdapterCapability,
     AdapterCapabilityError,
     AdapterConfigurationError,
-    AdapterExecutionMode,
     AdapterRegistry,
     ForecastAdapter,
     SeasonalNaiveAdapter,
@@ -50,11 +49,6 @@ class VN2SeasonalNaiveQuantileAdapter(SeasonalNaiveAdapter):
                 "model_name": self._vn2_config.model_name,
             }
         )
-
-    @property
-    def execution_mode(self) -> AdapterExecutionMode:
-        """Declare that VN2 seasonal series may execute independently."""
-        return AdapterExecutionMode.SERIES_SEPARABLE
 
     @property
     def capabilities(self) -> frozenset[AdapterCapability]:

@@ -128,14 +128,14 @@ def test_in_memory_adapters_preserve_snapshots_and_order() -> None:
     assert dispatch.budget.concurrency == 1
 
 
-def test_engine_port_namespace_contains_only_io_and_dispatch_seams() -> None:
+def test_engine_port_namespace_contains_only_io_seams() -> None:
     """Keep persistence represented solely by the separate two-method protocol."""
     protocols = {
         name
         for name, value in vars(engine_ports).items()
         if name != "Protocol" and inspect.isclass(value) and getattr(value, "_is_protocol", False)
     }
-    assert protocols == {"PanelSource", "DispatchBackend"}
+    assert protocols == {"PanelSource"}
     assert set(IndexedRunStore.__dict__) & {"open", "commit"} == {"open", "commit"}
 
 

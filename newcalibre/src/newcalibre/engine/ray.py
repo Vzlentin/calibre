@@ -14,9 +14,11 @@ from newcalibre.engine.dispatch import (
     ForecastShard,
     ForecastShardExecutor,
     ForecastWork,
+    _require_backend_work,
 )
 
 RAY_BACKEND: Final = "ray"
+_RAY_LOGICAL_SHARDS: Final = 16
 _WORKER_ENV: Final = {
     "BLIS_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
@@ -50,8 +52,8 @@ class RayDispatch:
     def __init__(
         self,
         *,
-        logical_shards: int = 16,
-        workers: int = 16,
+        logical_shards: int = _RAY_LOGICAL_SHARDS,
+        workers: int = _RAY_LOGICAL_SHARDS,
         numeric_threads_per_worker: int = 1,
         retries: int = 0,
     ) -> None:
@@ -61,7 +63,10 @@ class RayDispatch:
             numeric_threads_per_worker=numeric_threads_per_worker,
             retries=retries,
         )
-        if self._budget.logical_shards != 16 or self._budget.concurrency != 16:
+        if (
+            self._budget.logical_shards != _RAY_LOGICAL_SHARDS
+            or self._budget.concurrency != _RAY_LOGICAL_SHARDS
+        ):
             raise ForecastDispatchError("M5 Ray dispatch requires exactly 16 shards and workers")
         self._owns_runtime = False
 
@@ -81,21 +86,21 @@ class RayDispatch:
         executor: ForecastShardExecutor,
     ) -> tuple[ForecastResultEnvelope, ...]:
         """Collect every outcome before selecting the lowest failed ordinal."""
-        if work.backend != self.backend or work.budget != self.budget:
-            raise ForecastDispatchError("forecast work does not match Ray dispatch")
-        if len(work.shards) != 16:
+        _require_backend_work(self, work)
+        if len(work.shards) != _RAY_LOGICAL_SHARDS:
             raise ForecastDispatchError("Ray forecast work requires exactly 16 logical shards")
         self._ensure_runtime()
         reference_to_shard = {
             _REMOTE_EXECUTE.options(**_REMOTE_OPTIONS).remote(executor, shard): shard
             for shard in work.shards
         }
-        pending = list(reference_to_shard)
         successes: list[ForecastResultEnvelope] = []
         failures: list[tuple[ForecastShard, BaseException]] = []
-        while pending:
-            ready, pending = ray.wait(pending, num_returns=1)
-            reference = ready[0]
+        ready, _pending = ray.wait(
+            list(reference_to_shard),
+            num_returns=len(reference_to_shard),
+        )
+        for reference in ready:
             shard = reference_to_shard[reference]
             try:
                 successes.append(ray.get(reference))

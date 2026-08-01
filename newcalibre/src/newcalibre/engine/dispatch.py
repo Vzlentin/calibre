@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral
 from typing import Protocol, runtime_checkable
@@ -202,7 +203,6 @@ def build_forecast_work(
     token: CycleToken,
     task: ForecastTask,
     execution_mode: AdapterExecutionMode,
-    prior_states: dict[str, tuple[bytes, int, int]] | None = None,
 ) -> ForecastWork:
     """Derive typed logical shards from one semantic forecast task."""
     if not isinstance(backend, str) or not backend:
@@ -217,20 +217,20 @@ def build_forecast_work(
         shard_count=shard_count,
     )
     work_key = _work_key(backend=backend, session=session, token=token, task=task)
+    model_config = dict(task.model_config)
     shards: list[ForecastShard] = []
-    states = prior_states or {}
     for ordinal, (start, stop) in enumerate(ranges):
         empty = start == stop
         shard_task = task if empty else task._series_slice(start, stop)
         series_keys = task.series_keys[start:stop]
         shard_key = _shard_key(
             task=task,
+            model_config=model_config,
             ordinal=ordinal,
             series_keys=series_keys,
             series_start=start,
             series_stop=stop,
         )
-        prior = states.get(shard_key)
         shards.append(
             ForecastShard(
                 key=shard_key,
@@ -243,13 +243,8 @@ def build_forecast_work(
                 task=shard_task,
                 series_keys=series_keys,
                 empty=empty,
-                prior_native_state=None if prior is None else prior[0],
-                prior_time_bound=None if prior is None else prior[1],
-                fit_time_bound=None if prior is None else prior[2],
             )
         )
-    if states and set(states) != {shard.key for shard in shards}:
-        raise ForecastDispatchError("committed shard states do not match canonical work")
     return ForecastWork(
         key=work_key,
         backend=backend,
@@ -288,13 +283,21 @@ def validate_forecast_envelopes(
         ):
             raise ForecastDispatchError("forecast result envelope does not match expected work")
         frame = validate_forecast_frame(envelope.frame, calendar=work.task.calendar)
-        expected_rows = tuple(
+        expected_count = len(shard.series_keys) * shard.task.horizon
+        expected_rows = (
             (series_key, step)
             for series_key in shard.series_keys
             for step in range(1, shard.task.horizon + 1)
         )
-        actual_rows = tuple(zip(frame[SERIES_KEY], frame[HORIZON_STEP], strict=True))
-        if actual_rows != expected_rows or not frame[ORIGIN].eq(work.task.origin).all():
+        actual_rows = zip(frame[SERIES_KEY], frame[HORIZON_STEP], strict=True)
+        if (
+            len(frame) != expected_count
+            or not all(
+                actual == expected
+                for actual, expected in zip(actual_rows, expected_rows, strict=True)
+            )
+            or not frame[ORIGIN].eq(work.task.origin).all()
+        ):
             raise ForecastDispatchError("forecast result rows do not canonically own their shard")
         by_ordinal[envelope.ordinal] = ForecastResultEnvelope(
             work_key=envelope.work_key,
@@ -347,6 +350,7 @@ def _work_key(
 def _shard_key(
     *,
     task: ForecastTask,
+    model_config: Mapping[str, object],
     ordinal: int,
     series_keys: tuple[str, ...],
     series_start: int,
@@ -354,7 +358,7 @@ def _shard_key(
 ) -> str:
     payload = canonical_json_bytes(
         {
-            "model_config": dict(task.model_config),
+            "model_config": model_config,
             "ordinal": ordinal,
             "panel_identity": task.cursor.panel_identity,
             "scope": task.scope.value,

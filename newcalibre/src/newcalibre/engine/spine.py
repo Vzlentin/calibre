@@ -664,24 +664,19 @@ class Engine:
                     previous_cursors=previous_cursors,
                 )
             )
-            results = tuple(
-                self._forecast_lifecycle.complete_work(
-                    work,
-                    self._dispatch_backend.dispatch(work, self._forecast_lifecycle),
+            results = []
+            for task in tasks:
+                work = self._forecast_lifecycle.prepare_work(
+                    session=request.session,
+                    task=task,
+                    token=token,
+                    checkpoints=snapshot.checkpoints,
+                    checkpoint_indexes=snapshot.checkpoint_indexes,
+                    backend=self._dispatch_backend.backend,
+                    budget=self._dispatch_backend.budget,
                 )
-                for task in tasks
-                for work in (
-                    self._forecast_lifecycle.prepare_work(
-                        session=request.session,
-                        task=task,
-                        token=token,
-                        checkpoints=snapshot.checkpoints,
-                        checkpoint_indexes=snapshot.checkpoint_indexes,
-                        backend=self._dispatch_backend.backend,
-                        budget=self._dispatch_backend.budget,
-                    ),
-                )
-            )
+                envelopes = self._dispatch_backend.dispatch(work, self._forecast_lifecycle)
+                results.append(self._forecast_lifecycle.complete_work(work, envelopes))
             staged = {
                 (token, task.identity): result for task, result in zip(tasks, results, strict=True)
             }

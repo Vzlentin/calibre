@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral
 from typing import Final, cast
 
@@ -107,7 +107,6 @@ class ForecastLifecycle:
         execution_mode = _execution_mode(adapter)
         capabilities = _capability_names(adapter)
         persistent = AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities
-        prior_states: dict[str, tuple[bytes, int, int]] | None = None
         checkpoint: _Checkpoint | None = None
         if persistent:
             lineage = _lineage_identity(task)
@@ -156,27 +155,27 @@ class ForecastLifecycle:
             task=task,
             execution_mode=execution_mode,
         )
-        if checkpoint is not None:
-            states = _decode_combined_state(
-                checkpoint.native_state,
-                expected_count=len(unbound.shards),
-            )
-            prior_states = {
-                shard.key: (native_state, checkpoint.cursor.time_bound, fit_time_bound)
+        if checkpoint is None:
+            return unbound
+        states = _decode_combined_state(
+            checkpoint.native_state,
+            expected_count=len(unbound.shards),
+        )
+        return replace(
+            unbound,
+            shards=tuple(
+                replace(
+                    shard,
+                    prior_native_state=native_state,
+                    prior_time_bound=checkpoint.cursor.time_bound,
+                    fit_time_bound=fit_time_bound,
+                )
                 for shard, (native_state, fit_time_bound) in zip(
                     unbound.shards,
                     states,
                     strict=True,
                 )
-            }
-        return build_forecast_work(
-            backend=backend,
-            budget=budget,
-            session=session,
-            token=token,
-            task=task,
-            execution_mode=execution_mode,
-            prior_states=prior_states,
+            ),
         )
 
     def run_shard(self, shard: ForecastShard) -> ForecastResultEnvelope:
@@ -263,8 +262,6 @@ class ForecastLifecycle:
         adapter = self._adapter_resolver(work.task.model_config)
         pending = None
         if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
-            if any(envelope.native_state is None for envelope in ordered):
-                raise ForecastLifecycleError("persistent forecast work omitted shard state")
             lineage = _lineage_identity(work.task)
             config_digest = _config_digest(work.task.model_config)
             key = _checkpoint_key(
@@ -474,18 +471,21 @@ def _empty_forecast_frame() -> pd.DataFrame:
 
 
 def _encode_combined_state(envelopes: tuple[ForecastResultEnvelope, ...]) -> bytes:
+    states: list[dict[str, int | str]] = []
+    for envelope in envelopes:
+        native_state = envelope.native_state
+        if native_state is None:
+            raise ForecastLifecycleError("persistent forecast work omitted shard state")
+        states.append(
+            {
+                "fit_time_bound": envelope.fit_time_bound,
+                "native_state": base64.b64encode(native_state).decode("ascii"),
+            }
+        )
     return canonical_json_bytes(
         {
             "schema": _COMBINED_STATE_SCHEMA,
-            "states": [
-                {
-                    "fit_time_bound": envelope.fit_time_bound,
-                    "native_state": base64.b64encode(cast(bytes, envelope.native_state)).decode(
-                        "ascii"
-                    ),
-                }
-                for envelope in envelopes
-            ],
+            "states": states,
         },
         path="combined forecast state",
     )

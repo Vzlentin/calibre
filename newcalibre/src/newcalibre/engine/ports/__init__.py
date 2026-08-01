@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from newcalibre.domain import Panel
-from newcalibre.engine.dispatch import DispatchBackend
 
 
 @runtime_checkable
@@ -17,4 +16,4 @@ class PanelSource(Protocol):
         ...
 
 
-__all__ = ["DispatchBackend", "PanelSource"]
+__all__ = ["PanelSource"]
