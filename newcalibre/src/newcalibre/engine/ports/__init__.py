@@ -419,6 +419,14 @@ class ArtifactStore(Protocol):
         """Atomically persist one idempotent opaque artifact."""
         ...
 
+    def load_index(self, key: str) -> bytes | None:
+        """Return one mutable artifact-index snapshot, or ``None`` when absent."""
+        ...
+
+    def save_index(self, key: str, value: bytes) -> None:
+        """Atomically replace one non-authoritative artifact index."""
+        ...
+
 
 @runtime_checkable
 class CalibrationStateStore(Protocol):

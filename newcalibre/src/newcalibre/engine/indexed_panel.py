@@ -36,6 +36,7 @@ class _StagedHistory:
 
     _frame: pd.DataFrame = field(repr=False, compare=False)
     _series_ordinals: np.ndarray = field(repr=False, compare=False)
+    _series_row_bounds: np.ndarray = field(repr=False, compare=False)
     _time_offsets: np.ndarray = field(repr=False, compare=False)
     identity: str
     series_keys: tuple[str, ...]
@@ -49,13 +50,21 @@ class _StagedHistory:
         time_stop: int,
     ) -> pd.DataFrame:
         """Build one isolated adapter frame from opaque bounds."""
-        selected = (
-            (self._series_ordinals >= series_start)
-            & (self._series_ordinals < series_stop)
-            & (self._time_offsets >= time_start)
-            & (self._time_offsets < time_stop)
-        )
-        return self._frame.loc[selected].reset_index(drop=True).copy(deep=True)
+        row_ranges: list[np.ndarray] = []
+        for series_ordinal in range(series_start, series_stop):
+            row_start = int(self._series_row_bounds[series_ordinal])
+            row_stop = int(self._series_row_bounds[series_ordinal + 1])
+            series_offsets = self._time_offsets[row_start:row_stop]
+            selected_start = row_start + int(np.searchsorted(series_offsets, time_start))
+            selected_stop = row_start + int(np.searchsorted(series_offsets, time_stop))
+            if selected_start < selected_stop:
+                row_ranges.append(np.arange(selected_start, selected_stop, dtype=np.int64))
+        if not row_ranges:
+            return self._frame.iloc[0:0].copy(deep=True).reset_index(drop=True)
+        selected_rows = row_ranges[0] if len(row_ranges) == 1 else np.concatenate(row_ranges)
+        materialized = self._frame.iloc[selected_rows].copy(deep=True)
+        materialized.reset_index(drop=True, inplace=True)
+        return materialized
 
 
 @dataclass(frozen=True, slots=True, eq=False, init=False)
@@ -78,14 +87,24 @@ class IndexedPanel:
             dtype=np.int64,
             count=len(frame),
         )
-        time_offsets_values: list[int] = []
-        for raw_timestamp in frame[TIMESTAMP]:
-            offset = panel.calendar._index_of(pd.Timestamp(raw_timestamp))
+        offset_by_timestamp: dict[pd.Timestamp, int] = {}
+        for raw_timestamp in frame[TIMESTAMP].unique():
+            timestamp = pd.Timestamp(raw_timestamp)
+            offset = panel.calendar._index_of(timestamp)
             if offset is None or offset < 0:
                 raise IndexedPanelError("panel timestamp has no non-negative calendar offset")
-            time_offsets_values.append(offset)
-        time_offsets = np.asarray(time_offsets_values, dtype=np.int64)
+            offset_by_timestamp[timestamp] = offset
+        time_offsets = np.fromiter(
+            (offset_by_timestamp[pd.Timestamp(value)] for value in frame[TIMESTAMP]),
+            dtype=np.int64,
+            count=len(frame),
+        )
+        series_row_bounds = np.searchsorted(
+            series_ordinals,
+            np.arange(len(panel.series_keys) + 1, dtype=np.int64),
+        )
         series_ordinals.flags.writeable = False
+        series_row_bounds.flags.writeable = False
         time_offsets.flags.writeable = False
         identity = _panel_identity(
             frame,
@@ -93,11 +112,12 @@ class IndexedPanel:
             target_support=panel.target_support,
         )
         storage = _StagedHistory(
-            frame,
-            series_ordinals,
-            time_offsets,
-            identity,
-            panel.series_keys,
+            _frame=frame,
+            _series_ordinals=series_ordinals,
+            _series_row_bounds=series_row_bounds,
+            _time_offsets=time_offsets,
+            identity=identity,
+            series_keys=panel.series_keys,
         )
         instance = object.__new__(cls)
         object.__setattr__(instance, "_storage", storage)

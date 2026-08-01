@@ -135,6 +135,10 @@ def test_in_memory_adapters_preserve_snapshots_and_deterministic_order() -> None
     assert artifacts.load("model:a") == b"one"
     with pytest.raises(ValueError, match="different bytes"):
         artifacts.save("model:a", b"two")
+    artifacts.save_index("model-index:a", b"first")
+    artifacts.save_index("model-index:a", b"second")
+    assert artifacts.load_index("model-index:a") == b"second"
+    assert artifacts.artifact_indexes == {"model-index:a": b"second"}
 
     states = InMemoryCalibrationStateStore()
     session = _session()

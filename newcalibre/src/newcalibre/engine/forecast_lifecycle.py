@@ -21,6 +21,7 @@ from newcalibre.engine.ports import ArtifactStore
 from newcalibre.forecasting import AdapterCapability, ForecastAdapter
 
 _CHECKPOINT_SCHEMA: Final = "newcalibre.forecast-checkpoint/v1"
+_CHECKPOINT_INDEX_SCHEMA: Final = "newcalibre.forecast-checkpoint-index/v1"
 
 type AdapterResolver = Callable[[Mapping[str, object]], ForecastAdapter]
 type ForecastLifecycleItem = tuple[SessionIdentity, ForecastTask, CycleToken]
@@ -45,9 +46,8 @@ class _Checkpoint:
 @dataclass(slots=True)
 class _Prepared:
     adapter: ForecastAdapter
-    task: ForecastTask
-    token: CycleToken
     key: str | None
+    index_key: str | None
     lineage_identity: str
     config_digest: str
     fit_time_bound: int
@@ -94,6 +94,15 @@ class ForecastLifecycle:
             if persistent
             else None
         )
+        index_key = (
+            _checkpoint_index_key(
+                session=session,
+                lineage_identity=lineage,
+                config_digest=config_digest,
+            )
+            if persistent
+            else None
+        )
         fit_time_bound = task.cursor.time_bound
 
         if persistent:
@@ -117,6 +126,7 @@ class ForecastLifecycle:
                 prior = self._latest_checkpoint(
                     session=session,
                     task=task,
+                    index_key=index_key,
                     lineage_identity=lineage,
                     config_digest=config_digest,
                     capabilities=capabilities,
@@ -124,7 +134,7 @@ class ForecastLifecycle:
                 if prior is None:
                     adapter.fit(task)
                 else:
-                    checkpoint, _prior_key = prior
+                    checkpoint = prior
                     adapter.load_state(checkpoint.native_state)
                     fit_time_bound = checkpoint.fit_time_bound
                     if AdapterCapability.INCREMENTAL_UPDATE in adapter.capabilities:
@@ -153,9 +163,8 @@ class ForecastLifecycle:
             raise ForecastLifecycleError("forecast task is already prepared for this cycle")
         self._prepared[prepared_key] = _Prepared(
             adapter=adapter,
-            task=task,
-            token=token,
             key=key,
+            index_key=index_key,
             lineage_identity=lineage,
             config_digest=config_digest,
             fit_time_bound=fit_time_bound,
@@ -193,6 +202,11 @@ class ForecastLifecycle:
                 native_state=prepared.adapter.dump_state(),
             )
             self._artifact_store.save(prepared.key, _encode_checkpoint(checkpoint))
+            assert prepared.index_key is not None
+            self._artifact_store.save_index(
+                prepared.index_key,
+                _encode_checkpoint_index(cursor=task.cursor, checkpoint_key=prepared.key),
+            )
         return frame
 
     def predict_item(self, item: ForecastLifecycleItem) -> pd.DataFrame:
@@ -205,39 +219,46 @@ class ForecastLifecycle:
         *,
         session: SessionIdentity,
         task: ForecastTask,
+        index_key: str | None,
         lineage_identity: str,
         config_digest: str,
         capabilities: tuple[str, ...],
-    ) -> tuple[_Checkpoint, str] | None:
-        for time_bound in range(task.cursor.time_bound - 1, -1, -1):
-            cursor = HistoryCursor(
-                task.cursor.panel_identity,
-                task.cursor.series_start,
-                task.cursor.series_stop,
-                time_bound,
-            )
-            key = _checkpoint_key(
-                session=session,
-                lineage_identity=lineage_identity,
-                config_digest=config_digest,
-                cursor=cursor,
-            )
-            encoded = self._artifact_store.load(key)
-            if encoded is None:
-                continue
-            checkpoint = _decode_checkpoint(encoded)
-            _require_checkpoint(
-                checkpoint,
-                session=session,
-                task=task,
-                expected_cursor=cursor,
-                expected_task_identity=None,
-                lineage_identity=lineage_identity,
-                config_digest=config_digest,
-                capabilities=capabilities,
-            )
-            return checkpoint, key
-        return None
+    ) -> _Checkpoint | None:
+        assert index_key is not None
+        encoded_index = self._artifact_store.load_index(index_key)
+        if encoded_index is None:
+            return None
+        cursor, checkpoint_key = _decode_checkpoint_index(encoded_index)
+        if (
+            cursor.panel_identity != task.cursor.panel_identity
+            or cursor.series_start != task.cursor.series_start
+            or cursor.series_stop != task.cursor.series_stop
+            or cursor.time_bound >= task.cursor.time_bound
+        ):
+            raise ForecastLifecycleError("forecast checkpoint index is stale or foreign")
+        expected_key = _checkpoint_key(
+            session=session,
+            lineage_identity=lineage_identity,
+            config_digest=config_digest,
+            cursor=cursor,
+        )
+        if checkpoint_key != expected_key:
+            raise ForecastLifecycleError("forecast checkpoint index names an invalid artifact")
+        encoded = self._artifact_store.load(checkpoint_key)
+        if encoded is None:
+            raise ForecastLifecycleError("forecast checkpoint index names a missing artifact")
+        checkpoint = _decode_checkpoint(encoded)
+        _require_checkpoint(
+            checkpoint,
+            session=session,
+            task=task,
+            expected_cursor=cursor,
+            expected_task_identity=None,
+            lineage_identity=lineage_identity,
+            config_digest=config_digest,
+            capabilities=capabilities,
+        )
+        return checkpoint
 
 
 def _require_cycle(
@@ -308,6 +329,23 @@ def _checkpoint_key(
     return f"forecast-checkpoint:{hashlib.sha256(payload).hexdigest()}"
 
 
+def _checkpoint_index_key(
+    *,
+    session: SessionIdentity,
+    lineage_identity: str,
+    config_digest: str,
+) -> str:
+    payload = canonical_json_bytes(
+        {
+            "config_digest": config_digest,
+            "lineage_identity": lineage_identity,
+            "session": session.value,
+        },
+        path="forecast checkpoint index key",
+    )
+    return f"forecast-checkpoint-index:{hashlib.sha256(payload).hexdigest()}"
+
+
 def _encode_checkpoint(checkpoint: _Checkpoint) -> bytes:
     return canonical_json_bytes(
         {
@@ -323,6 +361,43 @@ def _encode_checkpoint(checkpoint: _Checkpoint) -> bytes:
         },
         path="forecast checkpoint",
     )
+
+
+def _encode_checkpoint_index(*, cursor: HistoryCursor, checkpoint_key: str) -> bytes:
+    return canonical_json_bytes(
+        {
+            "checkpoint_key": checkpoint_key,
+            "cursor": _cursor_record(cursor),
+            "schema": _CHECKPOINT_INDEX_SCHEMA,
+        },
+        path="forecast checkpoint index",
+    )
+
+
+def _decode_checkpoint_index(encoded: bytes) -> tuple[HistoryCursor, str]:
+    if not isinstance(encoded, bytes):
+        raise TypeError("forecast checkpoint index must be bytes")
+    try:
+        payload = json.loads(encoded)
+        if not isinstance(payload, dict):
+            raise TypeError
+        if canonical_json_bytes(payload, path="forecast checkpoint index") != encoded:
+            raise ValueError("not canonical")
+        if payload.get("schema") != _CHECKPOINT_INDEX_SCHEMA:
+            raise ValueError("unsupported schema")
+        checkpoint_key = payload["checkpoint_key"]
+        if not isinstance(checkpoint_key, str) or not checkpoint_key:
+            raise TypeError("checkpoint key")
+        return _cursor_from_record(payload["cursor"]), checkpoint_key
+    except (
+        CanonicalJsonError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as error:
+        raise ForecastLifecycleError(f"forecast checkpoint index is malformed: {error}") from error
 
 
 def _decode_checkpoint(encoded: bytes) -> _Checkpoint:

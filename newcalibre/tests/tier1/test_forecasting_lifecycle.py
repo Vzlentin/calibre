@@ -89,7 +89,42 @@ def test_first_fit_exact_load_and_incremental_resume_publish_deterministic_check
     pd.testing.assert_frame_equal(first_frame, exact_frame)
     assert dict(store.artifacts).items() >= first_artifacts.items()
     assert len(store.artifacts) == 2
+    assert len(store.artifact_indexes) == 1
     assert second_frame["point_forecast"].tolist() == [9.0, 10.0]
+
+
+def test_incremental_resume_loads_one_index_and_one_prior_checkpoint() -> None:
+    class CountingStore(InMemoryArtifactStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.artifact_loads = 0
+            self.index_loads = 0
+
+        def load(self, key: str) -> bytes | None:
+            self.artifact_loads += 1
+            return super().load(key)
+
+        def load_index(self, key: str) -> bytes | None:
+            self.index_loads += 1
+            return super().load_index(key)
+
+    panel, config, session = _world()
+    store = CountingStore()
+    first = _task(panel, config, "2026-01-08")
+    first_token = CycleToken(session, first.origin, 1)
+    lifecycle = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
+    lifecycle.prepare(session=session, task=first, token=first_token)
+    lifecycle.predict(session=session, task=first, token=first_token)
+
+    store.artifact_loads = 0
+    store.index_loads = 0
+    later = _task(panel, config, "2026-01-16")
+    later_token = CycleToken(session, later.origin, 2)
+    resumed = ForecastLifecycle(artifact_store=store, adapter_resolver=resolve_adapter)
+    resumed.prepare(session=session, task=later, token=later_token)
+
+    assert store.index_loads == 1
+    assert store.artifact_loads == 2  # exact miss plus the indexed predecessor
 
 
 def test_malformed_exact_checkpoint_fails_closed() -> None:

@@ -137,6 +137,7 @@ class InMemoryArtifactStore:
 
     def __init__(self) -> None:
         self._artifacts: dict[str, bytes] = {}
+        self._artifact_indexes: dict[str, bytes] = {}
 
     def load(self, key: str) -> bytes | None:
         """Return one immutable artifact, or ``None``."""
@@ -153,10 +154,27 @@ class InMemoryArtifactStore:
             raise ValueError(f"artifact key {key!r} already holds different bytes")
         self._artifacts[key] = value
 
+    def load_index(self, key: str) -> bytes | None:
+        """Return one immutable artifact-index snapshot, or ``None``."""
+        _require_key(key, name="artifact index key")
+        return self._artifact_indexes.get(key)
+
+    def save_index(self, key: str, value: bytes) -> None:
+        """Atomically replace one non-authoritative artifact index."""
+        _require_key(key, name="artifact index key")
+        if not isinstance(value, bytes):
+            raise TypeError("artifact index value must be bytes")
+        self._artifact_indexes[key] = value
+
     @property
     def artifacts(self) -> Mapping[str, bytes]:
         """Return an immutable snapshot for diagnostics."""
         return MappingProxyType(dict(self._artifacts))
+
+    @property
+    def artifact_indexes(self) -> Mapping[str, bytes]:
+        """Return an immutable artifact-index snapshot for diagnostics."""
+        return MappingProxyType(dict(self._artifact_indexes))
 
 
 class InMemoryCalibrationStateStore:

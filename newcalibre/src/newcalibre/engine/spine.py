@@ -611,11 +611,9 @@ class Engine:
         self._panel = IndexedPanel.from_panel(loaded_panel)
         self._hierarchy = hierarchy or HierarchyIndex.flat(self._panel.series_keys)
         self._actuals_source = actuals_source
-        self._artifact_store = artifact_store
         self._calibration_state_store = calibration_state_store
         self._ledger_sink = ledger_sink
         self._dispatch_backend = dispatch_backend
-        self._adapter_resolver = adapter_resolver
         self._forecast_lifecycle = ForecastLifecycle(
             artifact_store=artifact_store,
             adapter_resolver=adapter_resolver,
@@ -639,29 +637,18 @@ class Engine:
             raise TypeError("fit requires an OriginRequest")
         self._require_session(request.session)
         token = self._cycle_for(session=request.session, origin=request.origin)
-        initial_tasks = self._panel.tasks(
+        previous_cursors = {
+            series_keys: cursor
+            for (scope, series_keys), cursor in self._history_cursors.items()
+            if scope is request.scope
+        }
+        tasks = self._panel.tasks(
             origin=request.origin,
             horizon=request.horizon,
             scope=request.scope,
             model_config=request.model_config,
             future_exogenous=request.future_exogenous,
-        )
-        previous_cursors = {
-            task.series_keys: cursor
-            for task in initial_tasks
-            if (cursor := self._history_cursors.get((request.scope, task.series_keys))) is not None
-        }
-        tasks = (
-            initial_tasks
-            if not previous_cursors
-            else self._panel.tasks(
-                origin=request.origin,
-                horizon=request.horizon,
-                scope=request.scope,
-                model_config=request.model_config,
-                future_exogenous=request.future_exogenous,
-                previous_cursors=previous_cursors,
-            )
+            previous_cursors=previous_cursors,
         )
         items = tuple((request.session, task, token) for task in tasks)
         prepared = self._dispatch_backend.map(self._forecast_lifecycle.prepare_item, items)
@@ -1072,11 +1059,7 @@ class Engine:
         active = self._active_cycles.get(key)
         if active is not None:
             return active
-        with _CYCLE_REVISION_LOCK:
-            revision = next(_CYCLE_REVISIONS)
-        token = CycleToken(session, origin, revision)
-        self._active_cycles[key] = token
-        return token
+        return self._begin_cycle(session=session, origin=origin)
 
     def _begin_cycle(self, *, session: SessionIdentity, origin: pd.Timestamp) -> CycleToken:
         self._require_session(session)

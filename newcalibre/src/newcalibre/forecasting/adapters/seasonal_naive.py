@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sized
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Final, Never, cast
+from typing import Final, Never
 
 import numpy as np
 import pandas as pd
@@ -237,34 +238,45 @@ class SeasonalNaiveAdapter:
                 raise ValueError("season length")
             if payload.get("model_name") != self._model_name:
                 raise ValueError("model name")
-            raw_calendar = cast(dict[str, object], payload["calendar"])
-            calendar = Calendar(cast(str, raw_calendar["frequency"])).bind(
-                _timestamp_from_record(raw_calendar["phase"])
+            raw_calendar = _record(
+                payload["calendar"],
+                keys={"frequency", "phase"},
+                name="calendar",
             )
-            raw_cursor = cast(dict[str, object], payload["cursor"])
+            frequency = raw_calendar["frequency"]
+            if not isinstance(frequency, str):
+                raise ValueError("calendar frequency")
+            calendar = Calendar(frequency).bind(_timestamp_from_record(raw_calendar["phase"]))
+            raw_cursor = _record(
+                payload["cursor"],
+                keys={"panel_identity", "series_start", "series_stop", "time_bound"},
+                name="cursor",
+            )
+            panel_identity = raw_cursor["panel_identity"]
+            if not isinstance(panel_identity, str):
+                raise ValueError("cursor panel identity")
+            cursor_bounds = tuple(
+                _integer(raw_cursor[name], name=f"cursor {name}")
+                for name in ("series_start", "series_stop", "time_bound")
+            )
             cursor = HistoryCursor(
-                cast(str, raw_cursor["panel_identity"]),
-                cast(int, raw_cursor["series_start"]),
-                cast(int, raw_cursor["series_stop"]),
-                cast(int, raw_cursor["time_bound"]),
+                panel_identity,
+                cursor_bounds[0],
+                cursor_bounds[1],
+                cursor_bounds[2],
             )
             raw_keys = payload["series_keys"]
             if not isinstance(raw_keys, list) or any(not isinstance(key, str) for key in raw_keys):
                 raise ValueError("series keys")
             series_keys = tuple(raw_keys)
-            raw_seasons = cast(dict[str, list[dict[str, object]]], payload["season_by_series"])
+            raw_seasons = _record(
+                payload["season_by_series"],
+                keys=set(series_keys),
+                name="season series",
+            )
             if set(raw_seasons) != set(series_keys):
                 raise ValueError("season series")
-            retained = {
-                key: tuple(
-                    (
-                        _timestamp_from_record(record["timestamp"]),
-                        float(cast(float, record["value"])),
-                    )
-                    for record in raw_seasons[key]
-                )
-                for key in series_keys
-            }
+            retained = {key: _retained_season(raw_seasons[key]) for key in series_keys}
         except (KeyError, TypeError, ValueError) as error:
             raise AdapterDataError(f"seasonal state metadata is invalid: {error}") from error
         if cursor.series_stop - cursor.series_start != len(series_keys):
@@ -341,18 +353,22 @@ class SeasonalNaiveAdapter:
         previous: dict[str, _RetainedSeason] | None,
     ) -> dict[str, _RetainedSeason]:
         season_start = self._calendar_for_retention().retreat(origin, self._season_length)
+        updates: dict[str, dict[pd.Timestamp, float]] = {key: {} for key in series_keys}
+        for raw_key, raw_timestamp, raw_value in zip(
+            frame[SERIES_KEY],
+            frame[HISTORY_TIMESTAMP],
+            frame[HISTORY_VALUE],
+            strict=True,
+        ):
+            if pd.isna(raw_value):
+                continue
+            timestamp = pd.Timestamp(raw_timestamp)
+            if season_start <= timestamp < origin:
+                updates[str(raw_key)][timestamp] = float(raw_value)
         retained: dict[str, _RetainedSeason] = {}
         for series_key in series_keys:
             values = {} if previous is None else dict(previous[series_key])
-            rows = frame[frame[SERIES_KEY] == series_key]
-            for timestamp, value in zip(
-                rows[HISTORY_TIMESTAMP],
-                rows[HISTORY_VALUE],
-                strict=True,
-            ):
-                if pd.isna(value):
-                    continue
-                values[pd.Timestamp(timestamp)] = float(value)
+            values.update(updates[series_key])
             retained[series_key] = tuple(
                 sorted(
                     (
@@ -416,14 +432,55 @@ def _timestamp_record(timestamp: pd.Timestamp) -> dict[str, object]:
 
 
 def _timestamp_from_record(value: object) -> pd.Timestamp:
-    if not isinstance(value, dict) or set(value) != {"unit", "value"}:
-        raise ValueError("timestamp")
-    record = cast(dict[str, object], value)
+    record = _record(value, keys={"unit", "value"}, name="timestamp")
     unit = record["unit"]
     raw = record["value"]
-    if unit not in {"s", "ms", "us", "ns"} or not isinstance(raw, int):
+    if (
+        not isinstance(unit, str)
+        or unit not in {"s", "ms", "us", "ns"}
+        or not isinstance(raw, int)
+        or isinstance(raw, bool)
+    ):
         raise ValueError("timestamp")
-    return pd.Timestamp(raw, unit=cast(str, unit))
+    return pd.Timestamp(raw, unit=unit)
+
+
+def _record(value: object, *, keys: set[str], name: str) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise ValueError(name)
+    record: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError(name)
+        record[key] = item
+    return record
+
+
+def _retained_season(value: object) -> _RetainedSeason:
+    if not isinstance(value, list):
+        raise ValueError("season rows")
+    retained: list[tuple[pd.Timestamp, float]] = []
+    for raw_record in value:
+        record = _record(
+            raw_record,
+            keys={"timestamp", "value"},
+            name="season row",
+        )
+        raw_value = record["value"]
+        if (
+            not isinstance(raw_value, (int, float))
+            or isinstance(raw_value, bool)
+            or not math.isfinite(raw_value)
+        ):
+            raise ValueError("season value")
+        retained.append((_timestamp_from_record(record["timestamp"]), float(raw_value)))
+    return tuple(retained)
+
+
+def _integer(value: object, *, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(name)
+    return value
 
 
 __all__ = ["HISTORY_VALUE", "SEASONAL_NAIVE_BACKEND", "SeasonalNaiveAdapter"]
