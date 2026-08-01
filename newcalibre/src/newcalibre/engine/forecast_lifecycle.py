@@ -12,24 +12,38 @@ from typing import Final, cast
 
 import pandas as pd
 
-from newcalibre.domain import CycleToken, ForecastTask, HistoryCursor, SessionIdentity
+from newcalibre.domain import (
+    ACTUAL_VALUE,
+    HORIZON_STEP,
+    MODEL_NAME,
+    ORIGIN,
+    POINT_FORECAST,
+    SERIES_KEY,
+    TARGET_TIMESTAMP,
+    CycleToken,
+    ForecastTask,
+    HistoryCursor,
+    SessionIdentity,
+)
 from newcalibre.domain._canonical_json import (
     CanonicalJsonError,
     canonical_json_bytes,
 )
-from newcalibre.forecasting import AdapterCapability, ForecastAdapter
+from newcalibre.engine.dispatch import (
+    ForecastExecutionBudget,
+    ForecastResultEnvelope,
+    ForecastShard,
+    ForecastWork,
+    build_forecast_work,
+    validate_forecast_envelopes,
+)
+from newcalibre.forecasting import AdapterCapability, AdapterExecutionMode, ForecastAdapter
 
 _CHECKPOINT_SCHEMA: Final = "newcalibre.forecast-checkpoint/v1"
 _CHECKPOINT_INDEX_SCHEMA: Final = "newcalibre.forecast-checkpoint-index/v1"
+_COMBINED_STATE_SCHEMA: Final = "newcalibre.combined-forecast-state/v1"
 
 type AdapterResolver = Callable[[Mapping[str, object]], ForecastAdapter]
-type ForecastLifecycleItem = tuple[
-    SessionIdentity,
-    ForecastTask,
-    CycleToken,
-    Mapping[str, bytes],
-    Mapping[str, bytes],
-]
 
 
 class ForecastLifecycleError(RuntimeError):
@@ -46,16 +60,6 @@ class _Checkpoint:
     capabilities: tuple[str, ...]
     fit_time_bound: int
     native_state: bytes
-
-
-@dataclass(slots=True)
-class _Prepared:
-    adapter: ForecastAdapter
-    key: str | None
-    index_key: str | None
-    lineage_identity: str
-    config_digest: str
-    fit_time_bound: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,42 +90,34 @@ class ForecastLifecycle:
             raise TypeError("forecast lifecycle adapter resolver must be callable")
         self._adapter_resolver = adapter_resolver
 
-    def _prepare_adapter(
+    def prepare_work(
         self,
         *,
         session: SessionIdentity,
         task: ForecastTask,
+        token: CycleToken,
         checkpoints: Mapping[str, bytes],
         checkpoint_indexes: Mapping[str, bytes],
-    ) -> _Prepared:
+        backend: str,
+        budget: ForecastExecutionBudget,
+    ) -> ForecastWork:
+        """Prepare typed logical work from committed semantic checkpoint state."""
+        _require_cycle(session=session, task=task, token=token)
         adapter = self._adapter_resolver(task.model_config)
+        execution_mode = _execution_mode(adapter)
         capabilities = _capability_names(adapter)
-        lineage = _lineage_identity(task)
-        config_digest = _config_digest(task.model_config)
         persistent = AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities
-        key = (
-            _checkpoint_key(
+        prior_states: dict[str, tuple[bytes, int, int]] | None = None
+        checkpoint: _Checkpoint | None = None
+        if persistent:
+            lineage = _lineage_identity(task)
+            config_digest = _config_digest(task.model_config)
+            key = _checkpoint_key(
                 session=session,
                 lineage_identity=lineage,
                 config_digest=config_digest,
                 cursor=task.cursor,
             )
-            if persistent
-            else None
-        )
-        index_key = (
-            _checkpoint_index_key(
-                session=session,
-                lineage_identity=lineage,
-                config_digest=config_digest,
-            )
-            if persistent
-            else None
-        )
-        fit_time_bound = task.cursor.time_bound
-
-        if persistent:
-            assert key is not None
             exact = checkpoints.get(key)
             if exact is not None:
                 checkpoint = _decode_checkpoint(exact)
@@ -135,10 +131,13 @@ class ForecastLifecycle:
                     config_digest=config_digest,
                     capabilities=capabilities,
                 )
-                adapter.load_state(checkpoint.native_state)
-                fit_time_bound = checkpoint.fit_time_bound
             else:
-                prior = self._latest_checkpoint(
+                index_key = _checkpoint_index_key(
+                    session=session,
+                    lineage_identity=lineage,
+                    config_digest=config_digest,
+                )
+                checkpoint = self._latest_checkpoint(
                     session=session,
                     task=task,
                     index_key=index_key,
@@ -148,86 +147,154 @@ class ForecastLifecycle:
                     checkpoints=checkpoints,
                     checkpoint_indexes=checkpoint_indexes,
                 )
-                if prior is None:
-                    adapter.fit(task)
-                else:
-                    checkpoint = prior
-                    adapter.load_state(checkpoint.native_state)
-                    fit_time_bound = checkpoint.fit_time_bound
-                    if AdapterCapability.INCREMENTAL_UPDATE in adapter.capabilities:
-                        if task.delta.start_cursor != checkpoint.cursor:
-                            raise ForecastLifecycleError(
-                                "forecast task delta does not start at its loaded checkpoint"
-                            )
-                        adapter.update(task.delta)
-                    else:
-                        cadence = _refit_cadence(task.model_config)
-                        if cadence is None:
-                            raise ForecastLifecycleError(
-                                "a non-updatable adapter requires explicit refit_cadence"
-                            )
-                        if task.cursor.time_bound - fit_time_bound >= cadence:
-                            adapter.fit(task)
-                            fit_time_bound = task.cursor.time_bound
-        else:
-            adapter.fit(task)
 
+        unbound = build_forecast_work(
+            backend=backend,
+            budget=budget,
+            session=session,
+            token=token,
+            task=task,
+            execution_mode=execution_mode,
+        )
+        if checkpoint is not None:
+            states = _decode_combined_state(
+                checkpoint.native_state,
+                expected_count=len(unbound.shards),
+            )
+            prior_states = {
+                shard.key: (native_state, checkpoint.cursor.time_bound, fit_time_bound)
+                for shard, (native_state, fit_time_bound) in zip(
+                    unbound.shards,
+                    states,
+                    strict=True,
+                )
+            }
+        return build_forecast_work(
+            backend=backend,
+            budget=budget,
+            session=session,
+            token=token,
+            task=task,
+            execution_mode=execution_mode,
+            prior_states=prior_states,
+        )
+
+    def run_shard(self, shard: ForecastShard) -> ForecastResultEnvelope:
+        """Execute one typed shard and retain all effects in its envelope."""
+        if not isinstance(shard, ForecastShard):
+            raise TypeError("forecast lifecycle requires a ForecastShard")
+        if shard.empty:
+            return ForecastResultEnvelope(
+                work_key=shard.work_key,
+                shard_key=shard.key,
+                backend=shard.backend,
+                ordinal=shard.ordinal,
+                session=shard.session,
+                token=shard.token,
+                semantic_task_identity=shard.semantic_task_identity,
+                series_keys=(),
+                frame=_empty_forecast_frame(),
+                native_state=b"",
+                fit_time_bound=shard.task.cursor.time_bound,
+            )
+        adapter = self._adapter_resolver(shard.task.model_config)
+        if _execution_mode(adapter) is AdapterExecutionMode.MONOLITHIC and shard.ordinal != 0:
+            raise ForecastLifecycleError("monolithic adapter received split forecast work")
+        fit_time_bound = shard.task.cursor.time_bound
+        if shard.prior_native_state is None:
+            adapter.fit(shard.task)
+        else:
+            if shard.prior_time_bound is None or shard.fit_time_bound is None:
+                raise ForecastLifecycleError("forecast shard prior state metadata is incomplete")
+            adapter.load_state(shard.prior_native_state)
+            fit_time_bound = shard.fit_time_bound
+            if shard.prior_time_bound < shard.task.cursor.time_bound:
+                if AdapterCapability.INCREMENTAL_UPDATE in adapter.capabilities:
+                    if shard.task.delta.start_cursor.time_bound != shard.prior_time_bound:
+                        raise ForecastLifecycleError(
+                            "forecast shard delta does not start at its committed checkpoint"
+                        )
+                    adapter.update(shard.task.delta)
+                else:
+                    cadence = _refit_cadence(shard.task.model_config)
+                    if cadence is None:
+                        raise ForecastLifecycleError(
+                            "a non-updatable adapter requires explicit refit_cadence"
+                        )
+                    if shard.task.cursor.time_bound - fit_time_bound >= cadence:
+                        adapter.fit(shard.task)
+                        fit_time_bound = shard.task.cursor.time_bound
+            elif shard.prior_time_bound != shard.task.cursor.time_bound:
+                raise ForecastLifecycleError("forecast shard checkpoint is newer than its task")
         if (
             AdapterCapability.INCREMENTAL_UPDATE in adapter.capabilities
-            and _refit_cadence(task.model_config) is not None
+            and _refit_cadence(shard.task.model_config) is not None
         ):
             raise ForecastLifecycleError(
                 "refit_cadence is only valid for adapters without incremental update"
             )
-        return _Prepared(
-            adapter=adapter,
-            key=key,
-            index_key=index_key,
-            lineage_identity=lineage,
-            config_digest=config_digest,
+        frame = adapter.predict(shard.task)
+        native_state = (
+            adapter.dump_state()
+            if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities
+            else None
+        )
+        return ForecastResultEnvelope(
+            work_key=shard.work_key,
+            shard_key=shard.key,
+            backend=shard.backend,
+            ordinal=shard.ordinal,
+            session=shard.session,
+            token=shard.token,
+            semantic_task_identity=shard.semantic_task_identity,
+            series_keys=shard.series_keys,
+            frame=frame,
+            native_state=native_state,
             fit_time_bound=fit_time_bound,
         )
 
-    def run_item(self, item: ForecastLifecycleItem) -> ForecastLifecycleResult:
-        """Run one adapter lifecycle atomically in its dispatched placement."""
-        session, task, token, checkpoints, checkpoint_indexes = item
-        _require_cycle(session=session, task=task, token=token)
-        prepared = self._prepare_adapter(
-            session=session,
-            task=task,
-            checkpoints=checkpoints,
-            checkpoint_indexes=checkpoint_indexes,
-        )
-        return self._predict_result(session=session, task=task, prepared=prepared)
-
-    def _predict_result(
+    def complete_work(
         self,
-        *,
-        session: SessionIdentity,
-        task: ForecastTask,
-        prepared: _Prepared,
+        work: ForecastWork,
+        envelopes: tuple[ForecastResultEnvelope, ...],
     ) -> ForecastLifecycleResult:
-        frame = prepared.adapter.predict(task)
+        """Validate the complete barrier and combine one semantic checkpoint."""
+        frame, ordered = validate_forecast_envelopes(work, envelopes)
+        adapter = self._adapter_resolver(work.task.model_config)
         pending = None
-        if prepared.key is not None:
-            checkpoint = _Checkpoint(
-                session_value=session.value,
-                task_identity=task.identity,
-                lineage_identity=prepared.lineage_identity,
-                config_digest=prepared.config_digest,
-                cursor=task.cursor,
-                capabilities=_capability_names(prepared.adapter),
-                fit_time_bound=prepared.fit_time_bound,
-                native_state=prepared.adapter.dump_state(),
+        if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
+            if any(envelope.native_state is None for envelope in ordered):
+                raise ForecastLifecycleError("persistent forecast work omitted shard state")
+            lineage = _lineage_identity(work.task)
+            config_digest = _config_digest(work.task.model_config)
+            key = _checkpoint_key(
+                session=work.session,
+                lineage_identity=lineage,
+                config_digest=config_digest,
+                cursor=work.task.cursor,
             )
-            assert prepared.index_key is not None
+            index_key = _checkpoint_index_key(
+                session=work.session,
+                lineage_identity=lineage,
+                config_digest=config_digest,
+            )
+            checkpoint = _Checkpoint(
+                session_value=work.session.value,
+                task_identity=work.task.identity,
+                lineage_identity=lineage,
+                config_digest=config_digest,
+                cursor=work.task.cursor,
+                capabilities=_capability_names(adapter),
+                fit_time_bound=min(envelope.fit_time_bound for envelope in ordered),
+                native_state=_encode_combined_state(ordered),
+            )
             pending = _PendingCheckpoint(
-                key=prepared.key,
+                key=key,
                 value=_encode_checkpoint(checkpoint),
-                index_key=prepared.index_key,
+                index_key=index_key,
                 index_value=_encode_checkpoint_index(
-                    cursor=task.cursor,
-                    checkpoint_key=prepared.key,
+                    cursor=work.task.cursor,
+                    checkpoint_key=key,
                 ),
             )
         return ForecastLifecycleResult(frame=frame, checkpoint=pending)
@@ -383,6 +450,86 @@ def _config_digest(model_config: Mapping[str, object]) -> str:
 
 def _capability_names(adapter: ForecastAdapter) -> tuple[str, ...]:
     return tuple(sorted((capability.value for capability in adapter.capabilities), key=str.encode))
+
+
+def _execution_mode(adapter: ForecastAdapter) -> AdapterExecutionMode:
+    mode = getattr(adapter, "execution_mode", None)
+    if not isinstance(mode, AdapterExecutionMode):
+        raise ForecastLifecycleError("forecast adapter must declare one valid execution mode")
+    return mode
+
+
+def _empty_forecast_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            SERIES_KEY: pd.Series(dtype="string"),
+            TARGET_TIMESTAMP: pd.Series(dtype="datetime64[ns]"),
+            ACTUAL_VALUE: pd.Series(dtype="float64"),
+            POINT_FORECAST: pd.Series(dtype="float64"),
+            HORIZON_STEP: pd.Series(dtype="int64"),
+            ORIGIN: pd.Series(dtype="datetime64[ns]"),
+            MODEL_NAME: pd.Series(dtype="string"),
+        }
+    )
+
+
+def _encode_combined_state(envelopes: tuple[ForecastResultEnvelope, ...]) -> bytes:
+    return canonical_json_bytes(
+        {
+            "schema": _COMBINED_STATE_SCHEMA,
+            "states": [
+                {
+                    "fit_time_bound": envelope.fit_time_bound,
+                    "native_state": base64.b64encode(cast(bytes, envelope.native_state)).decode(
+                        "ascii"
+                    ),
+                }
+                for envelope in envelopes
+            ],
+        },
+        path="combined forecast state",
+    )
+
+
+def _decode_combined_state(
+    encoded: bytes,
+    *,
+    expected_count: int,
+) -> tuple[tuple[bytes, int], ...]:
+    try:
+        payload = json.loads(encoded)
+        if not isinstance(payload, dict) or set(payload) != {"schema", "states"}:
+            raise TypeError("shape")
+        if canonical_json_bytes(payload, path="combined forecast state") != encoded:
+            raise ValueError("not canonical")
+        if payload["schema"] != _COMBINED_STATE_SCHEMA:
+            raise ValueError("unsupported schema")
+        raw_states = payload["states"]
+        if not isinstance(raw_states, list) or len(raw_states) != expected_count:
+            raise ValueError("state count")
+        states: list[tuple[bytes, int]] = []
+        for raw in raw_states:
+            if not isinstance(raw, dict) or set(raw) != {"fit_time_bound", "native_state"}:
+                raise TypeError("state shape")
+            fit_time_bound = raw["fit_time_bound"]
+            if (
+                not isinstance(fit_time_bound, int)
+                or isinstance(fit_time_bound, bool)
+                or fit_time_bound < 0
+            ):
+                raise ValueError("fit time bound")
+            native = base64.b64decode(raw["native_state"], validate=True)
+            states.append((native, fit_time_bound))
+        return tuple(states)
+    except (
+        CanonicalJsonError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as error:
+        raise ForecastLifecycleError(f"combined forecast state is malformed: {error}") from error
 
 
 def _checkpoint_key(
@@ -591,6 +738,5 @@ def _require_digest(value: object) -> str:
 __all__ = [
     "ForecastLifecycle",
     "ForecastLifecycleError",
-    "ForecastLifecycleItem",
     "ForecastLifecycleResult",
 ]

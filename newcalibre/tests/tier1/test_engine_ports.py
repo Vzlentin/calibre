@@ -122,7 +122,10 @@ def test_in_memory_adapters_preserve_snapshots_and_order() -> None:
         (("a", pd.Timestamp("2026-01-01")), 1.0),
         (("b", pd.Timestamp("2026-01-01")), 3.0),
     )
-    assert InProcessDispatch().map(lambda value: value * 2, (3, 1, 2)) == (6, 2, 4)
+    dispatch = InProcessDispatch()
+    assert dispatch.backend == "in-process"
+    assert dispatch.budget.logical_shards == 1
+    assert dispatch.budget.concurrency == 1
 
 
 def test_engine_port_namespace_contains_only_io_and_dispatch_seams() -> None:
@@ -130,9 +133,7 @@ def test_engine_port_namespace_contains_only_io_and_dispatch_seams() -> None:
     protocols = {
         name
         for name, value in vars(engine_ports).items()
-        if inspect.isclass(value)
-        and value.__module__ == engine_ports.__name__
-        and getattr(value, "_is_protocol", False)
+        if name != "Protocol" and inspect.isclass(value) and getattr(value, "_is_protocol", False)
     }
     assert protocols == {"PanelSource", "DispatchBackend"}
     assert set(IndexedRunStore.__dict__) & {"open", "commit"} == {"open", "commit"}

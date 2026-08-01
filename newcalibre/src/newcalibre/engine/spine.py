@@ -76,10 +76,11 @@ from newcalibre.engine._session import (
 from newcalibre.engine._session import (
     session_origin_inputs as _session_origin_inputs,
 )
+from newcalibre.engine.dispatch import DispatchBackend
 from newcalibre.engine.errors import EngineError as _EngineError
 from newcalibre.engine.forecast_lifecycle import ForecastLifecycle, ForecastLifecycleResult
 from newcalibre.engine.indexed_panel import IndexedPanel
-from newcalibre.engine.ports import DispatchBackend, PanelSource
+from newcalibre.engine.ports import PanelSource
 from newcalibre.engine.run_store import (
     ActualKey,
     ActualsCommit,
@@ -663,17 +664,24 @@ class Engine:
                     previous_cursors=previous_cursors,
                 )
             )
-            items = tuple(
-                (
-                    request.session,
-                    task,
-                    token,
-                    snapshot.checkpoints,
-                    snapshot.checkpoint_indexes,
+            results = tuple(
+                self._forecast_lifecycle.complete_work(
+                    work,
+                    self._dispatch_backend.dispatch(work, self._forecast_lifecycle),
                 )
                 for task in tasks
+                for work in (
+                    self._forecast_lifecycle.prepare_work(
+                        session=request.session,
+                        task=task,
+                        token=token,
+                        checkpoints=snapshot.checkpoints,
+                        checkpoint_indexes=snapshot.checkpoint_indexes,
+                        backend=self._dispatch_backend.backend,
+                        budget=self._dispatch_backend.budget,
+                    ),
+                )
             )
-            results = self._dispatch_backend.map(self._forecast_lifecycle.run_item, items)
             staged = {
                 (token, task.identity): result for task, result in zip(tasks, results, strict=True)
             }

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from bisect import bisect_left, insort
-from collections.abc import Callable, Container, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from threading import RLock
 from types import MappingProxyType
-from typing import TypeVar, cast
+from typing import cast
 
 import pandas as pd
 
@@ -83,8 +83,6 @@ from newcalibre.observe import (
     PendingObservation,
 )
 
-_Input = TypeVar("_Input")
-_Output = TypeVar("_Output")
 type _ForecastScanSegment = tuple[pd.Timestamp, tuple[ForecastKey, ...]]
 type _PendingGroup = tuple[str, pd.Timestamp, str]
 
@@ -1174,18 +1172,6 @@ class InMemoryLedgerReader:
         return tuple(outcomes)
 
 
-class InProcessDispatch:
-    """Execute work serially and preserve the supplied order."""
-
-    def map(
-        self,
-        function: Callable[[_Input], _Output],
-        items: Sequence[_Input],
-    ) -> tuple[_Output, ...]:
-        """Apply ``function`` once per item in deterministic order."""
-        return tuple(function(item) for item in items)
-
-
 def _forecast_segment_key(key: ForecastKey) -> tuple[int, bytes, bytes]:
     series_key, _origin, horizon_step, model_name = key
     return horizon_step, series_key.encode(), model_name.encode()
@@ -1328,6 +1314,5 @@ __all__ = [
     "InMemoryIndexedRunStore",
     "InMemoryLedgerReader",
     "InMemoryPanelSource",
-    "InProcessDispatch",
     "RunStoreAudit",
 ]

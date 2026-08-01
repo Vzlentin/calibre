@@ -1,5 +1,14 @@
 """Expose the engine spine, transactional store, and remaining ports."""
 
+from newcalibre.engine.dispatch import (
+    DispatchBackend,
+    ForecastDispatchError,
+    ForecastExecutionBudget,
+    ForecastResultEnvelope,
+    ForecastShard,
+    ForecastWork,
+    InProcessDispatch,
+)
 from newcalibre.engine.errors import EngineError
 from newcalibre.engine.event_driver import (
     ActualsEvent,
@@ -12,13 +21,13 @@ from newcalibre.engine.event_driver import (
 )
 from newcalibre.engine.forecast_lifecycle import ForecastLifecycle, ForecastLifecycleError
 from newcalibre.engine.indexed_panel import IndexedPanel, IndexedPanelError
-from newcalibre.engine.ports import DispatchBackend, PanelSource
+from newcalibre.engine.ports import PanelSource
 from newcalibre.engine.ports.memory import (
     InMemoryIndexedRunStore,
     InMemoryLedgerReader,
     InMemoryPanelSource,
-    InProcessDispatch,
 )
+from newcalibre.engine.ray import RAY_BACKEND, RayDispatch
 from newcalibre.engine.reporting import (
     LedgerBatch,
     LedgerBoundIssuance,
@@ -104,8 +113,13 @@ __all__ = [
     "EventDriverError",
     "FittedTask",
     "ForecastBatch",
+    "ForecastDispatchError",
+    "ForecastExecutionBudget",
     "ForecastLifecycle",
     "ForecastLifecycleError",
+    "ForecastResultEnvelope",
+    "ForecastShard",
+    "ForecastWork",
     "ForecastWrite",
     "InMemoryIndexedRunStore",
     "InMemoryLedgerReader",
@@ -134,6 +148,8 @@ __all__ = [
     "OriginOutcome",
     "OriginRequest",
     "OriginResult",
+    "RAY_BACKEND",
+    "RayDispatch",
     "PanelSource",
     "Phase",
     "PhaseError",

@@ -18,6 +18,7 @@ from newcalibre.domain._canonical_json import (
 from newcalibre.domain.calendar import Calendar, CalendarError
 from newcalibre.domain.history import HistoryCursor, HistoryDelta, HistoryView
 from newcalibre.domain.panel import (
+    SERIES_KEY,
     TIMESTAMP,
     Scope,
     _canonicalize_future_exogenous,
@@ -172,6 +173,29 @@ class ForecastTask:
     def series_keys(self) -> tuple[str, ...]:
         """Return the fixed canonical series enumeration."""
         return self._series_keys
+
+    def _series_slice(self, start: int, stop: int) -> ForecastTask:
+        """Project one dispatch-private relative contiguous series range."""
+        if start == 0 and stop == len(self._series_keys):
+            return self
+        series_keys = self._series_keys[start:stop]
+        future = self._future_exogenous
+        if future is not None and SERIES_KEY in future.columns:
+            future = future[future[SERIES_KEY].isin(series_keys)].reset_index(drop=True)
+        history = self._history._series_slice(start, stop)
+        delta = self._delta._series_slice(start, stop)
+        return ForecastTask._from_components(
+            history=history,
+            delta=delta,
+            cursor=history.cursor,
+            future_exogenous=future,
+            horizon=self._horizon,
+            origin=self._origin,
+            calendar=self._calendar,
+            model_config=self._model_config,
+            scope=self._scope,
+            series_keys=series_keys,
+        )
 
 
 def _canonical_model_config(model_config: Mapping[str, object]) -> dict[str, object]:

@@ -19,7 +19,12 @@ from newcalibre.domain import (
     TargetSupport,
 )
 from newcalibre.domain._canonical_json import canonical_json_bytes
-from newcalibre.engine import ForecastLifecycle, ForecastLifecycleError, IndexedPanel
+from newcalibre.engine import (
+    ForecastLifecycle,
+    ForecastLifecycleError,
+    IndexedPanel,
+    InProcessDispatch,
+)
 from newcalibre.forecasting import SeasonalNaiveAdapter, resolve_adapter
 
 pytestmark = pytest.mark.tier1
@@ -70,11 +75,40 @@ def _run(
     checkpoints: dict[str, bytes],
     indexes: dict[str, bytes],
 ) -> pd.DataFrame:
-    result = lifecycle.run_item((session, task, token, checkpoints, indexes))
+    result = _execute(
+        lifecycle,
+        session=session,
+        task=task,
+        token=token,
+        checkpoints=checkpoints,
+        indexes=indexes,
+    )
     staged_checkpoints, staged_indexes = lifecycle.staged_updates((result,))
     checkpoints.update(staged_checkpoints)
     indexes.update(staged_indexes)
     return result.frame
+
+
+def _execute(
+    lifecycle: ForecastLifecycle,
+    *,
+    session: SessionIdentity,
+    task,
+    token: CycleToken,
+    checkpoints: dict[str, bytes],
+    indexes: dict[str, bytes],
+):
+    dispatch = InProcessDispatch()
+    work = lifecycle.prepare_work(
+        session=session,
+        task=task,
+        token=token,
+        checkpoints=checkpoints,
+        checkpoint_indexes=indexes,
+        backend=dispatch.backend,
+        budget=dispatch.budget,
+    )
+    return lifecycle.complete_work(work, dispatch.dispatch(work, lifecycle))
 
 
 def test_first_fit_exact_load_and_incremental_resume_stage_deterministic_checkpoints() -> None:
@@ -124,8 +158,13 @@ def test_staged_updates_remain_unpublished_until_the_caller_commits() -> None:
     panel, config, session = _world()
     task = _task(panel, config, "2026-01-15")
     lifecycle = ForecastLifecycle(adapter_resolver=resolve_adapter)
-    result = lifecycle.run_item(
-        (session, task, CycleToken(session, task.origin, 1, 1, "0" * 32), {}, {})
+    result = _execute(
+        lifecycle,
+        session=session,
+        task=task,
+        token=CycleToken(session, task.origin, 1, 1, "0" * 32),
+        checkpoints={},
+        indexes={},
     )
 
     checkpoints, indexes = lifecycle.staged_updates((result,))
@@ -153,14 +192,13 @@ def test_malformed_exact_checkpoint_fails_closed() -> None:
     checkpoints[next(iter(checkpoints))] = b"malformed"
 
     with pytest.raises(ForecastLifecycleError, match="malformed"):
-        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
-            (
-                session,
-                task,
-                CycleToken(session, task.origin, 2, 1, "0" * 32),
-                checkpoints,
-                indexes,
-            )
+        _execute(
+            ForecastLifecycle(adapter_resolver=resolve_adapter),
+            session=session,
+            task=task,
+            token=CycleToken(session, task.origin, 2, 1, "0" * 32),
+            checkpoints=checkpoints,
+            indexes=indexes,
         )
 
 
@@ -169,20 +207,19 @@ def test_run_requires_the_exact_task_cycle() -> None:
     panel, config, session = _world()
     task = _task(panel, config, "2026-01-15")
     with pytest.raises(ForecastLifecycleError, match="does not match"):
-        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
-            (
+        _execute(
+            ForecastLifecycle(adapter_resolver=resolve_adapter),
+            session=session,
+            task=task,
+            token=CycleToken(
                 session,
-                task,
-                CycleToken(
-                    session,
-                    task.calendar.advance(task.origin, 1),
-                    1,
-                    1,
-                    "0" * 32,
-                ),
-                {},
-                {},
-            )
+                task.calendar.advance(task.origin, 1),
+                1,
+                1,
+                "0" * 32,
+            ),
+            checkpoints={},
+            indexes={},
         )
 
 
@@ -228,14 +265,13 @@ def test_well_formed_foreign_checkpoint_bindings_fail_closed(
     checkpoints[key] = canonical_json_bytes(payload, path="foreign checkpoint")
 
     with pytest.raises(ForecastLifecycleError):
-        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
-            (
-                session,
-                task,
-                CycleToken(session, task.origin, 2, 1, "0" * 32),
-                checkpoints,
-                indexes,
-            )
+        _execute(
+            ForecastLifecycle(adapter_resolver=resolve_adapter),
+            session=session,
+            task=task,
+            token=CycleToken(session, task.origin, 2, 1, "0" * 32),
+            checkpoints=checkpoints,
+            indexes=indexes,
         )
 
 
@@ -260,14 +296,13 @@ def test_well_formed_foreign_checkpoint_index_target_fails_closed() -> None:
     later = _task(panel, config, "2026-01-16", previous={first.series_keys: first.cursor})
 
     with pytest.raises(ForecastLifecycleError, match="invalid artifact"):
-        ForecastLifecycle(adapter_resolver=resolve_adapter).run_item(
-            (
-                session,
-                later,
-                CycleToken(session, later.origin, 2, 1, "0" * 32),
-                checkpoints,
-                indexes,
-            )
+        _execute(
+            ForecastLifecycle(adapter_resolver=resolve_adapter),
+            session=session,
+            task=later,
+            token=CycleToken(session, later.origin, 2, 1, "0" * 32),
+            checkpoints=checkpoints,
+            indexes=indexes,
         )
 
 
@@ -304,14 +339,13 @@ def test_declared_update_failure_leaves_snapshot_mappings_unchanged() -> None:
     later = _task(panel, config, "2026-01-16", previous={first.series_keys: first.cursor})
 
     with pytest.raises(RuntimeError, match="declared update failed"):
-        lifecycle.run_item(
-            (
-                session,
-                later,
-                CycleToken(session, later.origin, 2, 1, "0" * 32),
-                checkpoints,
-                indexes,
-            )
+        _execute(
+            lifecycle,
+            session=session,
+            task=later,
+            token=CycleToken(session, later.origin, 2, 1, "0" * 32),
+            checkpoints=checkpoints,
+            indexes=indexes,
         )
 
     assert calls == ["update"]
