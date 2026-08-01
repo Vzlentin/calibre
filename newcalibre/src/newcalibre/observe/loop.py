@@ -17,8 +17,9 @@ from newcalibre.conformal import (
     DeliveryBatch,
     ObserveEffect,
     ResolvedObservation,
+    RuntimeContractError,
 )
-from newcalibre.conformal.batch import state_delta
+from newcalibre.conformal.batch import validate_state_transition
 from newcalibre.domain import (
     CensoringAssertion,
     EmissionScope,
@@ -170,13 +171,10 @@ class ObserveLoop:
                 raise ObserveError(f"conformal observe failed: {error}") from error
             if not isinstance(effect, ObserveEffect):
                 raise ObserveError("conformal observe must return an ObserveEffect")
-            removed, changed = state_delta(prior_state, effect.state)
-            if removed:
-                raise ObserveError(f"conformal observe removed prior state rows: {list(removed)!r}")
-            if set(changed) != set(effect.dirty_labels):
-                raise ObserveError(
-                    "conformal observe dirty labels must exactly identify changed state rows"
-                )
+            try:
+                validate_state_transition(prior_state, effect.state, effect.dirty_labels)
+            except RuntimeContractError as error:
+                raise ObserveError(f"conformal observe {error}") from error
             expected = {value.forecast_key for value in deliveries.observations}
             actual = {value.forecast_key for value in effect.annotations}
             if actual != expected:

@@ -63,6 +63,11 @@ def _score(value: object) -> float:
     return 0.0 if normalized == 0.0 else normalized
 
 
+def _observation_order(observation: ResolvedObservation) -> tuple:
+    key = observation.forecast_key
+    return key.origin, key.horizon_step, key.series_key.encode(), key.model_name.encode()
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class CalibrationSeedBatch:
     """Carry canonical partition-addressed calibration score sequences."""
@@ -156,7 +161,7 @@ class DeliveryBatch:
         object.__setattr__(
             self,
             "_flat_observations",
-            tuple(value for row in rows for value in row),
+            tuple(sorted((value for row in rows for value in row), key=_observation_order)),
         )
         object.__setattr__(self, "_route_by_label", routes)
 
@@ -167,7 +172,7 @@ class DeliveryBatch:
 
     @property
     def observations(self) -> tuple[ResolvedObservation, ...]:
-        """Flatten observations in canonical partition and supplied row order."""
+        """Flatten observations in the normative total delivery order."""
         return self._flat_observations
 
     def observations_for(self, label: str) -> tuple[ResolvedObservation, ...]:
@@ -293,6 +298,20 @@ def state_delta(
         label for label in post.labels if label not in prior or prior[label] != post[label]
     )
     return removed, changed
+
+
+def validate_state_transition(
+    prior: ConformalStateBatch,
+    post: ConformalStateBatch,
+    dirty_labels: Iterable[str],
+) -> None:
+    """Require a complete non-removing post-state with an exact dirty set."""
+    removed, changed = state_delta(prior, post)
+    if removed:
+        raise RuntimeContractError(f"post-state removed rows: {list(removed)!r}")
+    dirty = _snapshot_dirty_labels(dirty_labels, state=post)
+    if changed != dirty:
+        raise RuntimeContractError("dirty labels must exactly identify changed post-state rows")
 
 
 def _snapshot_dirty_labels(

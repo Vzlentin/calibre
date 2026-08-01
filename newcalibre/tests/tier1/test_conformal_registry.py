@@ -128,7 +128,7 @@ class _FixtureRuntime:
     def __init__(
         self,
         config: _FixtureConfig,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> None:
         _FixtureRuntime.instances += 1
         self.instance_number = _FixtureRuntime.instances
@@ -251,7 +251,7 @@ class _InvalidStateOutputRuntime(_FixtureRuntime):
     def __init__(
         self,
         config: _FixtureConfig,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
         invalid_state: bytes,
     ) -> None:
         super().__init__(config, states)
@@ -403,9 +403,10 @@ def _observation(
 
 def _factory(
     config: BaseModel,
-    states: Mapping[str, bytes],
+    states: ConformalStateBatch,
 ) -> ConformalRuntime:
     assert isinstance(config, _FixtureConfig)
+    assert isinstance(states, ConformalStateBatch)
     return _FixtureRuntime(config, states)
 
 
@@ -461,7 +462,7 @@ def test_registration_rejects_runtime_and_exposed_schema_mismatch_atomically() -
 
     def mismatch_factory(
         config: BaseModel,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> ConformalRuntime:
         del config
         return _FixtureRuntime(
@@ -566,11 +567,11 @@ def test_restoration_validates_every_blob_before_calling_factory() -> None:
 
 def test_factory_must_return_a_fresh_runtime_instance() -> None:
     registry = ConformalRegistry()
-    singleton = _FixtureRuntime(_FixtureConfig(), {})
+    singleton = _FixtureRuntime(_FixtureConfig(), ConformalStateBatch())
 
     def singleton_factory(
         config: BaseModel,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> ConformalRuntime:
         del config, states
         return singleton
@@ -587,14 +588,14 @@ def test_factory_must_return_a_fresh_runtime_instance() -> None:
 def test_factory_cannot_alternate_between_previously_issued_instances() -> None:
     registry = ConformalRegistry()
     cached = (
-        _FixtureRuntime(_FixtureConfig(), {}),
-        _FixtureRuntime(_FixtureConfig(), {}),
+        _FixtureRuntime(_FixtureConfig(), ConformalStateBatch()),
+        _FixtureRuntime(_FixtureConfig(), ConformalStateBatch()),
     )
     call_count = 0
 
     def alternating_factory(
         config: BaseModel,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> ConformalRuntime:
         nonlocal call_count
         del config, states
@@ -633,7 +634,7 @@ def test_registry_rejects_invalid_state_emitted_by_every_runtime_verb(
 
     def invalid_output_factory(
         config: BaseModel,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> ConformalRuntime:
         assert isinstance(config, _FixtureConfig)
         return _InvalidStateOutputRuntime(config, states, invalid_state)
@@ -662,6 +663,117 @@ def test_registry_rejects_invalid_state_emitted_by_every_runtime_verb(
             runtime.apply(frame, valid_state)
         else:
             runtime.observe(delivery, ConformalStateBatch())
+
+
+@pytest.mark.parametrize("verb", ["apply", "observe"])
+@pytest.mark.parametrize("mismatch", ["removed", "unreported", "unchanged-dirty"])
+def test_registry_rejects_every_inexact_state_transition(
+    verb: str,
+    mismatch: str,
+) -> None:
+    partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
+    codec = _FixtureCodec()
+
+    class InexactTransitionRuntime(_FixtureRuntime):
+        def _transition(
+            self,
+            state: ConformalStateBatch,
+        ) -> tuple[ConformalStateBatch, tuple[str, ...]]:
+            if mismatch == "removed":
+                return (
+                    ConformalStateBatch(
+                        {label: value for label, value in state.items() if label != partition}
+                    ),
+                    (),
+                )
+            if mismatch == "unreported":
+                return (
+                    state.with_rows(
+                        {partition: codec.encode_partition(partition, count=99, total=99.0)}
+                    ),
+                    (),
+                )
+            return state, (partition,)
+
+        def apply(
+            self,
+            forecasts: pd.DataFrame,
+            state: ConformalStateBatch,
+            *,
+            context: CalibrationContext | None = None,
+        ) -> CalibrationResult:
+            result = super().apply(forecasts, state, context=context)
+            post, dirty = self._transition(state)
+            return CalibrationResult(result.forecasts, post, dirty, result.issuances)
+
+        def observe(
+            self,
+            deliveries: DeliveryBatch,
+            state: ConformalStateBatch,
+            *,
+            context: CalibrationContext | None = None,
+        ) -> ObserveEffect:
+            effect = super().observe(deliveries, state, context=context)
+            post, dirty = self._transition(state)
+            return ObserveEffect(post, dirty, effect.annotations)
+
+    def factory(config: BaseModel, states: ConformalStateBatch) -> ConformalRuntime:
+        assert isinstance(config, _FixtureConfig)
+        return InexactTransitionRuntime(config, states)
+
+    registry = ConformalRegistry()
+    registry.register("fixture", FIXTURE_MANIFEST, _FixtureConfig, factory)
+    runtime = registry.resolve({"method": "fixture"})
+    state = ConformalStateBatch(
+        {
+            partition: codec.encode_partition(partition, count=1, total=1.0),
+            METHOD_SCOPE_LABEL: codec.encode_method(issue_counter=0),
+        }
+    )
+    message = "removed rows" if mismatch == "removed" else "dirty labels"
+
+    with pytest.raises(RuntimeContractError, match=message):
+        if verb == "apply":
+            runtime.apply(_frame(), state)
+        else:
+            runtime.observe(
+                delivery_batch(
+                    partition,
+                    (_observation("sku", partition_label=partition, actual=7.0),),
+                ),
+                state,
+            )
+
+
+@pytest.mark.parametrize("mismatch", ["missing-seed", "missing-method", "extra"])
+def test_registry_requires_exact_calibration_state_label_coverage(mismatch: str) -> None:
+    first = derive_partition_label("fixture-model", "first", EmissionScope.PER_STEP)
+    second = derive_partition_label("fixture-model", "second", EmissionScope.PER_STEP)
+    extra = derive_partition_label("fixture-model", "extra", EmissionScope.PER_STEP)
+    codec = _FixtureCodec()
+
+    class InexactCalibrationRuntime(_FixtureRuntime):
+        def calibrate(self, seeds: CalibrationSeedBatch) -> ConformalStateBatch:
+            labels = list(seeds.labels)
+            if mismatch == "missing-seed":
+                labels.pop()
+            if mismatch == "extra":
+                labels.append(extra)
+            rows = {label: codec.encode_partition(label, count=1, total=1.0) for label in labels}
+            if mismatch != "missing-method":
+                rows[METHOD_SCOPE_LABEL] = codec.encode_method(issue_counter=0)
+            return ConformalStateBatch(rows)
+
+    def factory(config: BaseModel, states: ConformalStateBatch) -> ConformalRuntime:
+        assert isinstance(config, _FixtureConfig)
+        return InexactCalibrationRuntime(config, states)
+
+    registry = ConformalRegistry()
+    registry.register("fixture", FIXTURE_MANIFEST, _FixtureConfig, factory)
+    runtime = registry.resolve({"method": "fixture"})
+
+    with pytest.raises(RuntimeContractError, match="exactly cover"):
+        runtime.calibrate(CalibrationSeedBatch({first: [1.0], second: [2.0]}))
 
 
 @pytest.mark.parametrize("mismatch", ["missing", "extra"])
@@ -693,7 +805,7 @@ def test_registry_requires_observe_annotations_for_exactly_the_delivered_rows(
 
     def invalid_annotation_factory(
         config: BaseModel,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> ConformalRuntime:
         assert isinstance(config, _FixtureConfig)
         return InvalidAnnotationRuntime(config, states)
@@ -754,7 +866,7 @@ def test_registry_rejects_issuance_shapes_that_disagree_with_the_manifest(
                 issuances,
             )
 
-    def factory(config: BaseModel, states: Mapping[str, bytes]) -> ConformalRuntime:
+    def factory(config: BaseModel, states: ConformalStateBatch) -> ConformalRuntime:
         assert isinstance(config, _FixtureConfig)
         return InvalidIssuanceRuntime(config, states)
 
@@ -793,7 +905,7 @@ def test_registry_rejects_undeclared_post_readiness_nonfinite_bounds() -> None:
                 issuances,
             )
 
-    def factory(config: BaseModel, states: Mapping[str, bytes]) -> ConformalRuntime:
+    def factory(config: BaseModel, states: ConformalStateBatch) -> ConformalRuntime:
         assert isinstance(config, _FixtureConfig)
         return NonFiniteRuntime(config, states)
 

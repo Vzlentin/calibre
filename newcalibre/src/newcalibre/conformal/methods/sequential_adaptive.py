@@ -274,7 +274,7 @@ class SequentialAdaptiveConformalRuntime:
     def __init__(
         self,
         config: SequentialAdaptivePerStepConfig,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> None:
         if type(config) is not SequentialAdaptivePerStepConfig:
             raise RuntimeContractError(
@@ -282,7 +282,11 @@ class SequentialAdaptiveConformalRuntime:
             )
         self._config = config
         self._codec = _SequentialAdaptiveStateCodec()
-        self._validate_states(ConformalStateBatch(states))
+        if not isinstance(states, ConformalStateBatch):
+            raise RuntimeContractError(
+                "sequential-adaptive runtime state must be a ConformalStateBatch"
+            )
+        self._validate_states(states)
 
     @property
     def manifest(self) -> MethodManifest:
@@ -613,7 +617,7 @@ class _ApplyRow:
 
 def build_sequential_adaptive_per_step(
     config: BaseModel,
-    states: Mapping[str, bytes],
+    states: ConformalStateBatch,
 ) -> SequentialAdaptiveConformalRuntime:
     """Construct a fresh sequential-adaptive runtime through its factory."""
     if not isinstance(config, SequentialAdaptivePerStepConfig):

@@ -298,7 +298,7 @@ class SplitConformalRuntime:
     def __init__(
         self,
         config: SplitPerStepConfig | SplitWindowSumConfig,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
         *,
         manifest: MethodManifest,
     ) -> None:
@@ -314,7 +314,9 @@ class SplitConformalRuntime:
         self._config = config
         self._manifest = manifest
         self._codec = _SplitStateCodec(manifest)
-        self._validate_states(ConformalStateBatch(states))
+        if not isinstance(states, ConformalStateBatch):
+            raise RuntimeContractError("split runtime state must be a ConformalStateBatch")
+        self._validate_states(states)
 
     @property
     def manifest(self) -> MethodManifest:
@@ -768,7 +770,7 @@ class _ApplyRow:
 
 def build_split_per_step(
     config: BaseModel,
-    states: Mapping[str, bytes],
+    states: ConformalStateBatch,
 ) -> SplitConformalRuntime:
     """Construct a fresh per-step split runtime through its registered factory."""
     if not isinstance(config, SplitPerStepConfig):
@@ -778,7 +780,7 @@ def build_split_per_step(
 
 def build_split_window_sum(
     config: BaseModel,
-    states: Mapping[str, bytes],
+    states: ConformalStateBatch,
 ) -> SplitConformalRuntime:
     """Construct a fresh window-sum split runtime through its registered factory."""
     if not isinstance(config, SplitWindowSumConfig):

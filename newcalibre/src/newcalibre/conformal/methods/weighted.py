@@ -246,13 +246,15 @@ class WeightedConformalRuntime:
     def __init__(
         self,
         config: WeightedPerStepConfig,
-        states: Mapping[str, bytes],
+        states: ConformalStateBatch,
     ) -> None:
         if type(config) is not WeightedPerStepConfig:
             raise RuntimeContractError("weighted runtime configuration does not match its manifest")
         self._config = config
         self._codec = _WeightedStateCodec()
-        self._validate_states(ConformalStateBatch(states))
+        if not isinstance(states, ConformalStateBatch):
+            raise RuntimeContractError("weighted runtime state must be a ConformalStateBatch")
+        self._validate_states(states)
 
     @property
     def manifest(self) -> MethodManifest:
@@ -523,7 +525,7 @@ class _ApplyRow:
 
 def build_weighted_per_step(
     config: BaseModel,
-    states: Mapping[str, bytes],
+    states: ConformalStateBatch,
 ) -> WeightedConformalRuntime:
     """Construct a fresh weighted runtime through its registered factory."""
     if not isinstance(config, WeightedPerStepConfig):

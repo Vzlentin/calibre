@@ -267,7 +267,7 @@ def test_canonical_delivery_calls_each_partition_once_without_cross_partition_st
     assert [
         (observation.forecast_key.series_key, observation.forecast_key.horizon_step)
         for observation in cycle.deliveries.observations
-    ] == [("sku-a", 1), ("sku-a", 2), ("sku-b", 1), ("sku-b", 2)]
+    ] == [("sku-a", 1), ("sku-b", 1), ("sku-a", 2), ("sku-b", 2)]
     assert set(cycle.state_updates) == {
         METHOD_SCOPE_LABEL,
         labels["sku-a"],

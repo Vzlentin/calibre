@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
 
 import pandas as pd
 from pydantic import BaseModel, ValidationError
@@ -15,7 +14,7 @@ from newcalibre.conformal.batch import (
     ConformalStateBatch,
     DeliveryBatch,
     ObserveEffect,
-    state_delta,
+    validate_state_transition,
 )
 from newcalibre.conformal.manifest import (
     MethodManifest,
@@ -29,12 +28,13 @@ from newcalibre.conformal.state import (
     validate_state_blob,
 )
 from newcalibre.conformal.types import (
+    METHOD_SCOPE_LABEL,
     CalibrationContext,
     RuntimeContractError,
 )
 from newcalibre.domain import GuaranteeClaim
 
-RuntimeFactory = Callable[[BaseModel, Mapping[str, bytes]], ConformalRuntime]
+RuntimeFactory = Callable[[BaseModel, ConformalStateBatch], ConformalRuntime]
 
 
 class ConformalRegistryError(ValueError):
@@ -79,6 +79,11 @@ class _ResultValidatingRuntime:
             raise RuntimeContractError("calibrate seeds must be a CalibrationSeedBatch")
         state = self._runtime.calibrate(seeds)
         _validated_emitted_states(state, manifest=self.manifest, verb="calibrate")
+        expected_labels = {*seeds.labels, METHOD_SCOPE_LABEL}
+        if set(state.labels) != expected_labels:
+            raise RuntimeContractError(
+                "calibrate state labels must exactly cover seeded partitions and method state"
+            )
         return state
 
     def apply(
@@ -98,12 +103,10 @@ class _ResultValidatingRuntime:
             manifest=self.manifest,
             verb="apply",
         )
-        _validate_transition(
-            state,
-            result.state,
-            dirty_labels=result.dirty_labels,
-            verb="apply",
-        )
+        try:
+            validate_state_transition(state, result.state, result.dirty_labels)
+        except RuntimeContractError as error:
+            raise RuntimeContractError(f"apply {error}") from error
         for facts in result.issuances.values():
             if facts.method_name != self.manifest.name:
                 raise RuntimeContractError(
@@ -173,12 +176,10 @@ class _ResultValidatingRuntime:
             manifest=self.manifest,
             verb="observe",
         )
-        _validate_transition(
-            state,
-            effect.state,
-            dirty_labels=effect.dirty_labels,
-            verb="observe",
-        )
+        try:
+            validate_state_transition(state, effect.state, effect.dirty_labels)
+        except RuntimeContractError as error:
+            raise RuntimeContractError(f"observe {error}") from error
         return effect
 
 
@@ -231,7 +232,7 @@ class ConformalRegistry:
                 "default calibration requirement exceeds the declared state bound"
             )
 
-        empty_states: Mapping[str, bytes] = MappingProxyType({})
+        empty_states = ConformalStateBatch()
         first = _call_factory(
             factory,
             default_config,
@@ -310,7 +311,7 @@ class ConformalRegistry:
         runtime = _call_factory(
             registration.factory,
             config,
-            MappingProxyType(state_snapshot),
+            state_snapshot,
             method_name=method_name,
         )
         _validate_runtime(
@@ -354,7 +355,7 @@ def _validate_config_schema(config_schema: object) -> None:
 def _call_factory(
     factory: RuntimeFactory,
     config: BaseModel,
-    states: Mapping[str, bytes],
+    states: ConformalStateBatch,
     *,
     method_name: str,
 ) -> ConformalRuntime:
@@ -405,31 +406,13 @@ def _validated_emitted_states(
         raise RuntimeContractError(f"{verb} emitted invalid state: {error}") from error
 
 
-def _validate_transition(
-    prior: ConformalStateBatch,
-    post: ConformalStateBatch,
-    *,
-    dirty_labels: tuple[str, ...],
-    verb: str,
-) -> None:
-    if not isinstance(prior, ConformalStateBatch):
-        raise RuntimeContractError(f"{verb} input state must be a ConformalStateBatch")
-    removed, changed = state_delta(prior, post)
-    if removed:
-        raise RuntimeContractError(f"{verb} post-state removed rows: {list(removed)!r}")
-    if set(changed) != set(dirty_labels):
-        raise RuntimeContractError(
-            f"{verb} dirty labels must exactly identify changed post-state rows"
-        )
-
-
 def _validated_states(
     states: object,
     *,
     manifest: MethodManifest,
-) -> dict[str, bytes]:
+) -> ConformalStateBatch:
     if states is None:
-        return {}
+        return ConformalStateBatch()
     if not isinstance(states, Mapping):
         raise ConformalRegistryError("restored conformal states must be a mapping")
     snapshot = dict(states)
@@ -447,7 +430,7 @@ def _validated_states(
             )
         except StateCodecError as error:
             raise ConformalRegistryError(f"invalid state for label {label!r}: {error}") from error
-    return snapshot
+    return ConformalStateBatch(snapshot)
 
 
 def _require_method_name(value: object) -> None:

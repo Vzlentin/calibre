@@ -276,7 +276,7 @@ def test_partition_label_rejects_malformed_inputs(
         )
 
 
-def test_delivery_preserves_caller_order_and_defensively_snapshots_observations() -> None:
+def test_delivery_preserves_partition_row_order_and_snapshots_observations() -> None:
     label = _partition()
     first = _observation("z-series", partition_label=label, horizon_step=2)
     second = _observation("a-series", partition_label=label, horizon_step=1)
@@ -285,10 +285,11 @@ def test_delivery_preserves_caller_order_and_defensively_snapshots_observations(
     delivery = DeliveryBatch({label: cast(Any, supplied)})
     supplied.reverse()
 
-    assert delivery.observations == (first, second)
+    assert delivery.observations_for(label) == (first, second)
+    assert delivery.observations == (second, first)
     assert [item.forecast_key.series_key for item in delivery.observations] == [
-        "z-series",
         "a-series",
+        "z-series",
     ]
     with pytest.raises(FrozenInstanceError):
         cast(Any, delivery)._labels = ("changed",)
@@ -303,6 +304,16 @@ def test_delivery_validates_complete_keys_values_censoring_and_issued_facts() ->
         DeliveryBatch({_partition("other"): (observation,)})
     with pytest.raises(RuntimeContractError, match="duplicate forecast key"):
         DeliveryBatch({label: (observation, observation)})
+
+    other_label = _partition("other")
+    duplicated_key = _observation("series", partition_label=other_label)
+    with pytest.raises(RuntimeContractError, match="duplicate forecast key"):
+        DeliveryBatch(
+            {
+                label: (observation,),
+                other_label: (duplicated_key,),
+            }
+        )
 
     for field, value, message in (
         ("series_key", "", "series key"),
