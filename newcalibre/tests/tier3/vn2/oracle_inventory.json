@@ -1,0 +1,14 @@
+{
+  "named": {
+    "gate": {
+      "id": "vn2-conditional-replay",
+      "node": "tests.tier3.vn2.test_conditional_replay::test_promoted_orders_match_independent_conditional_replay"
+    },
+    "witness": {
+      "id": "vn2-conditional-replay",
+      "node": "tests.tier3.vn2.test_conditional_replay::test_conditional_replay_rejects_one_successor_order_unit"
+    }
+  },
+  "schema": 1,
+  "tier": "tier3"
+}

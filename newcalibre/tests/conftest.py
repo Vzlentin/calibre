@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,35 @@ from oracle.witnesses import (
 _TIERS = tuple(f"tier{number}" for number in range(5))
 _PROJECT_ROOT = Path(__file__).parent.parent
 _TIER3_ROOT = Path(__file__).parent / "tier3"
-_TIER3_INVENTORY = _TIER3_ROOT / "oracle_inventory.json"
-_REQUIRED_TIER3_ID = "vn2-conditional-replay"
+
+
+@dataclass(frozen=True, slots=True)
+class _Tier3Protocol:
+    """Bind one Tier-3 protocol directory to its exact oracle inventory."""
+
+    name: str
+    identifier: str
+
+    @property
+    def root(self) -> Path:
+        """Return the protocol-owned Tier-3 directory."""
+        return _TIER3_ROOT / self.name
+
+    @property
+    def inventory(self) -> Path:
+        """Return the protocol-owned exact oracle inventory."""
+        return self.root / "oracle_inventory.json"
+
+    @property
+    def node_prefix(self) -> str:
+        """Return the stable module prefix owned by this protocol."""
+        return f"tests.tier3.{self.name}."
+
+
+_TIER3_PROTOCOLS = (
+    _Tier3Protocol("vn2", "vn2-conditional-replay"),
+    _Tier3Protocol("m5", "m5-frozen-scorer-parity"),
+)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -27,11 +55,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     witnesses = _marker_declarations(items, "oracle_witness")
     try:
         require_exact_witnesses(gates, witnesses)
-        if _tier3_inventory_is_required(config, items):
-            required_gates, required_witnesses = _required_tier3_inventory()
+        for protocol in _required_tier3_protocols(config, items):
+            required_gates, required_witnesses = _required_tier3_inventory(protocol)
             require_exact_inventory(
-                (item for item in gates if item.tier == "tier3"),
-                (item for item in witnesses if item.tier == "tier3"),
+                (
+                    item
+                    for item in gates
+                    if item.tier == "tier3" and item.nodeid.startswith(protocol.node_prefix)
+                ),
+                (
+                    item
+                    for item in witnesses
+                    if item.tier == "tier3" and item.nodeid.startswith(protocol.node_prefix)
+                ),
                 required_gates=required_gates,
                 required_witnesses=required_witnesses,
             )
@@ -82,26 +118,37 @@ def _stable_nodeid(path: Path, nodeid: str) -> str:
     return f"{module}{separator}{remainder}"
 
 
-def _tier3_inventory_is_required(config: pytest.Config, items: list[pytest.Item]) -> bool:
-    tier3_root = _TIER3_ROOT.resolve()
-    if any(Path(item.path).resolve().is_relative_to(tier3_root) for item in items):
-        return True
+def _required_tier3_protocols(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> tuple[_Tier3Protocol, ...]:
+    required: list[_Tier3Protocol] = []
+    item_paths = tuple(Path(item.path).resolve() for item in items)
+    argument_paths: list[Path] = []
     for argument in config.args:
         target_text = str(argument).partition("::")[0]
         target = Path(target_text)
         if not target.is_absolute():
             target = Path(config.rootpath) / target
-        resolved = target.resolve()
-        if resolved == tier3_root:
-            return True
-        if resolved.is_relative_to(tier3_root) or tier3_root.is_relative_to(resolved):
-            return True
-    return False
+        argument_paths.append(target.resolve())
+    for protocol in _TIER3_PROTOCOLS:
+        protocol_root = protocol.root.resolve()
+        selected_by_item = any(path.is_relative_to(protocol_root) for path in item_paths)
+        selected_by_argument = any(
+            path == protocol_root
+            or path.is_relative_to(protocol_root)
+            or protocol_root.is_relative_to(path)
+            for path in argument_paths
+        )
+        if selected_by_item or selected_by_argument:
+            required.append(protocol)
+    return tuple(required)
 
 
 def _required_tier3_inventory(
-    path: Path = _TIER3_INVENTORY,
+    protocol: _Tier3Protocol,
 ) -> tuple[tuple[WitnessDeclaration, ...], tuple[WitnessDeclaration, ...]]:
+    path = protocol.inventory
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -125,17 +172,19 @@ def _required_tier3_inventory(
             )
         identifier = item["id"]
         nodeid = item["node"]
-        if identifier != _REQUIRED_TIER3_ID:
+        if identifier != protocol.identifier:
             raise WitnessPairingError(
-                f"required Tier 3 oracle inventory {role} must use {_REQUIRED_TIER3_ID}"
+                f"required Tier 3 {protocol.name} oracle inventory {role} "
+                f"must use {protocol.identifier}"
             )
         if (
             not isinstance(nodeid, str)
-            or not nodeid.startswith("tests.tier3.")
+            or not nodeid.startswith(protocol.node_prefix)
             or "::" not in nodeid
         ):
             raise WitnessPairingError(
-                f"required Tier 3 oracle inventory {role} must use a stable Tier 3 node ID"
+                f"required Tier 3 {protocol.name} oracle inventory {role} "
+                "must use a stable protocol-owned node ID"
             )
         declarations[role] = WitnessDeclaration("tier3", identifier, nodeid)
     if declarations["gate"].nodeid == declarations["witness"].nodeid:

@@ -323,7 +323,7 @@ def test_deleting_numeric_gate_witness_fails_collection_contract() -> None:
             sys.executable,
             "-m",
             "pytest",
-            "tests/tier3",
+            "tests/tier3/vn2",
             "--collect-only",
             "-q",
         ),
@@ -340,7 +340,7 @@ def test_deleting_numeric_gate_witness_fails_collection_contract() -> None:
             "-m",
             "pytest",
             (
-                "tests/tier3/test_conditional_replay.py::"
+                "tests/tier3/vn2/test_conditional_replay.py::"
                 "test_promoted_orders_match_independent_conditional_replay"
             ),
             "--collect-only",
@@ -359,8 +359,8 @@ def test_deleting_numeric_gate_witness_fails_collection_contract() -> None:
             sys.executable,
             "-m",
             "pytest",
-            "tests/tier3",
-            "--ignore=tests/tier3/test_conditional_replay.py",
+            "tests/tier3/vn2",
+            "--ignore=tests/tier3/vn2/test_conditional_replay.py",
             "--collect-only",
             "-q",
         ),
@@ -372,6 +372,62 @@ def test_deleting_numeric_gate_witness_fails_collection_contract() -> None:
     assert whole_module.returncode != 0
     assert "required Tier 3 oracle inventory mismatch" in (
         whole_module.stdout + whole_module.stderr
+    )
+
+    m5 = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/tier3/m5",
+            "--collect-only",
+            "-q",
+        ),
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert m5.returncode == 0, m5.stdout + m5.stderr
+
+    m5_one_half = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            (
+                "tests/tier3/m5/test_m5_frozen_scorer_parity.py::"
+                "test_successor_and_frozen_m5_scorers_have_exact_count_parity"
+            ),
+            "--collect-only",
+            "-q",
+        ),
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert m5_one_half.returncode != 0
+    assert "m5-frozen-scorer-parity" in m5_one_half.stdout + m5_one_half.stderr
+
+    m5_without_pair = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/tier3/m5",
+            "--ignore=tests/tier3/m5/test_m5_frozen_scorer_parity.py",
+            "--collect-only",
+            "-q",
+        ),
+        cwd=project_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert m5_without_pair.returncode != 0
+    assert "required Tier 3 oracle inventory mismatch" in (
+        m5_without_pair.stdout + m5_without_pair.stderr
     )
 
     paired = subprocess.run(
@@ -454,7 +510,7 @@ def test_witness_contract_requires_exactly_one_same_tier_pair(
                     "tier3",
                     "vn2-conditional-replay",
                     (
-                        "tests.tier3.test_conditional_replay::"
+                        "tests.tier3.vn2.test_conditional_replay::"
                         "test_promoted_orders_match_independent_conditional_replay"
                     ),
                 ),
@@ -469,7 +525,7 @@ def test_witness_contract_requires_exactly_one_same_tier_pair(
                     "tier3",
                     "vn2-conditional-replay",
                     (
-                        "tests.tier3.test_conditional_replay::"
+                        "tests.tier3.vn2.test_conditional_replay::"
                         "test_conditional_replay_rejects_one_successor_order_unit"
                     ),
                 ),
@@ -481,7 +537,7 @@ def test_witness_contract_requires_exactly_one_same_tier_pair(
                 WitnessDeclaration(
                     "tier3",
                     "vn2-conditional-replay",
-                    "tests.tier3.renamed_replay::test_promoted_orders",
+                    "tests.tier3.vn2.renamed_replay::test_promoted_orders",
                 ),
             ),
             (
@@ -489,7 +545,7 @@ def test_witness_contract_requires_exactly_one_same_tier_pair(
                     "tier3",
                     "vn2-conditional-replay",
                     (
-                        "tests.tier3.test_conditional_replay::"
+                        "tests.tier3.vn2.test_conditional_replay::"
                         "test_conditional_replay_rejects_one_successor_order_unit"
                     ),
                 ),
@@ -508,7 +564,7 @@ def test_required_tier3_inventory_refuses_empty_half_or_renamed_declarations(
             "tier3",
             "vn2-conditional-replay",
             (
-                "tests.tier3.test_conditional_replay::"
+                "tests.tier3.vn2.test_conditional_replay::"
                 "test_promoted_orders_match_independent_conditional_replay"
             ),
         ),
@@ -518,7 +574,7 @@ def test_required_tier3_inventory_refuses_empty_half_or_renamed_declarations(
             "tier3",
             "vn2-conditional-replay",
             (
-                "tests.tier3.test_conditional_replay::"
+                "tests.tier3.vn2.test_conditional_replay::"
                 "test_conditional_replay_rejects_one_successor_order_unit"
             ),
         ),
