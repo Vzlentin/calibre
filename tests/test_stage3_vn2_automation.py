@@ -106,8 +106,9 @@ def test_ray_starts_on_loopback_inside_a_hermetic_network_namespace() -> None:
     """Execute the production Ray startup inside an isolated Linux namespace."""
     sudo = shutil.which("sudo")
     unshare = shutil.which("unshare")
-    if sudo is None or unshare is None:
-        pytest.skip("requires sudo and unshare")
+    uv = shutil.which("uv")
+    if sudo is None or unshare is None or uv is None:
+        pytest.skip("requires sudo, unshare, and uv")
     capability = subprocess.run(
         [sudo, "-n", unshare, "-n", "true"],
         check=False,
@@ -145,7 +146,8 @@ set -euo pipefail
 ip link set lo up
 exec {shlex.quote(sudo)} -n -u {shlex.quote(os.environ.get("USER", ""))} \
   env PATH={shlex.quote(os.environ["PATH"])} HOME={shlex.quote(str(Path.home()))} \
-  {shlex.quote(sys.executable)} -c {shlex.quote(witness)}
+  {shlex.quote(uv)} run --project {shlex.quote(str(ROOT / "newcalibre"))} \
+  --locked --no-sync python -c {shlex.quote(witness)}
 """
     completed = subprocess.run(
         [sudo, "-n", unshare, "-n", "bash", "-c", namespace],
