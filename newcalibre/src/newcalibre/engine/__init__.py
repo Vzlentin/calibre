@@ -76,6 +76,7 @@ from newcalibre.engine.spine import (
     Phase,
     PhaseError,
     PhaseEvent,
+    PhaseStatus,
     SettlementWindow,
     Spine,
 )
@@ -148,6 +149,7 @@ __all__ = [
     "Phase",
     "PhaseError",
     "PhaseEvent",
+    "PhaseStatus",
     "SettlementError",
     "SettlementRequest",
     "SettlementResult",

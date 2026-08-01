@@ -12,8 +12,10 @@ from typing import Any, cast
 import pytest
 
 import newcalibre.protocols.m5.runner as runner
+from newcalibre.engine import PhaseEvent
 from newcalibre.forecasting import resolve_adapter
 from newcalibre.protocols.m5 import M5RunResult, run_m5
+from newcalibre.protocols.m5.runner import run_m5_fit_predict
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "m5" / "tiny"
 _LEVELS = frozenset({"bottom", "item", "department", "category", "store", "state", "total"})
@@ -39,6 +41,7 @@ def test_tiny_strict_release_runs_end_to_end_and_returns_only_compact_facts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
+    lifecycle: list[PhaseEvent] = []
     original_config = runner.load_m5_config
     original_load = runner.load_m5_dataset
     original_compile = runner.compile_m5_protocol
@@ -83,7 +86,7 @@ def test_tiny_strict_release_runs_end_to_end_and_returns_only_compact_facts(
     monkeypatch.setattr(runner, "InMemoryLedgerReader", record_reader)
     monkeypatch.setattr(runner, "score_m5", record_score)
 
-    result = run_m5(_isolated_config(tmp_path, monkeypatch))
+    result = run_m5(_isolated_config(tmp_path, monkeypatch), reporter=lifecycle.append)
 
     assert events == [
         "config",
@@ -95,6 +98,7 @@ def test_tiny_strict_release_runs_end_to_end_and_returns_only_compact_facts(
         "score",
     ]
     assert isinstance(result, M5RunResult)
+    assert len(lifecycle) == 14 * result.forecast_origin_count
     assert result.forecast_origin_count == 64
     assert result.commit_count == 65
     assert result.node_count == 7
@@ -269,6 +273,7 @@ def test_failure_at_each_owning_seam_stops_later_work_and_emits_no_diagnostics(
 
 def test_runner_source_keeps_one_generic_composition_and_no_extra_surface() -> None:
     source = inspect.getsource(runner)
+    ordinary_source = inspect.getsource(run_m5)
     tree = ast.parse(source)
     engine_runs = [
         node
@@ -289,8 +294,26 @@ def test_runner_source_keeps_one_generic_composition_and_no_extra_surface() -> N
     )
 
     assert len(engine_runs) == 1
-    assert all(term not in source for term in forbidden)
-    assert "newcalibre.ledger" not in source
-    assert ".forecasts" not in source
-    assert "RayDispatch" in source
-    assert "InProcessDispatch" not in source
+    assert all(term not in ordinary_source for term in forbidden)
+    assert "newcalibre.ledger" not in ordinary_source
+    assert ".forecasts" not in ordinary_source
+    assert "RayDispatch" in ordinary_source
+    assert "InProcessDispatch" not in ordinary_source
+
+
+def test_profile_serial_path_is_restricted_to_one_origin_fit_predict() -> None:
+    """Keep concurrency one out of full M5 and every downstream engine phase."""
+    source = inspect.getsource(run_m5_fit_predict)
+
+    assert "bottom_count != 1000" in source
+    assert "engine.fit(" in source
+    assert "engine.predict(" in source
+    for forbidden in (
+        "TimeLoop",
+        "engine.reconcile(",
+        "engine.calibrate(",
+        "engine.order(",
+        "engine.commit(",
+        "score_m5(",
+    ):
+        assert forbidden not in source

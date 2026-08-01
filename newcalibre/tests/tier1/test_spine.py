@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import pickle
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
 
 import pandas as pd
@@ -61,6 +62,7 @@ from newcalibre.engine import (
     Phase,
     PhaseError,
     PhaseEvent,
+    PhaseStatus,
     SettlementSnapshot,
     SettlementWindow,
     Spine,
@@ -408,7 +410,7 @@ def test_engine_supplies_panel_target_support_to_reconciler(
 
 
 def test_spine_runs_fixed_phases_and_publishes_one_atomic_transaction() -> None:
-    """Run the six orchestration phases and publish all durable effects together."""
+    """Run the seven orchestration phases and publish all durable effects together."""
     panel = _panel()
     session = _session(
         with_decision=True,
@@ -450,14 +452,21 @@ def test_spine_runs_fixed_phases_and_publishes_one_atomic_transaction() -> None:
         reporter=phase_events.append,
     )
 
-    assert [event.phase for event in phase_events] == [
+    phases = (
         Phase.RESOLVE,
+        Phase.FIT,
         Phase.PREDICT,
         Phase.RECONCILE,
         Phase.CALIBRATE,
         Phase.ORDER,
         Phase.COMMIT,
+    )
+    assert [(event.phase, event.status) for event in phase_events] == [
+        pair
+        for phase in phases
+        for pair in ((phase, PhaseStatus.STARTED), (phase, PhaseStatus.FINISHED))
     ]
+    assert all(event.origin == origin for event in phase_events)
     assert events == ["fit", "predict", "order"]
     assert dispatch.batch_sizes == [1]
     assert store.forecasts
@@ -776,7 +785,7 @@ def test_prediction_failure_publishes_no_checkpoint_or_ledger_state() -> None:
         ),
     )
     origin = pd.Timestamp("2026-01-05")
-    with pytest.raises(PhaseError, match="Predict.*fixture prediction failed"):
+    with pytest.raises(PhaseError, match="Fit.*fixture prediction failed"):
         _run_origin(
             engine,
             store,
@@ -789,6 +798,52 @@ def test_prediction_failure_publishes_no_checkpoint_or_ledger_state() -> None:
     assert store.states == {}
     assert store.forecasts == ()
     assert store.receipt(origin) is None
+
+
+def test_failed_phase_reports_started_then_failed_with_original_error() -> None:
+    """Report a terminal lifecycle failure without replacing its engine error."""
+    panel = _panel()
+    session = _session()
+    store = _store(session, panel)
+    engine = _engine(
+        session=session,
+        panel=panel,
+        store=store,
+        adapter_resolver=lambda _config: PersistentFixtureAdapter(
+            [],
+            fail_prediction=True,
+        ),
+    )
+    events: list[PhaseEvent] = []
+    origin = pd.Timestamp("2026-01-05")
+
+    with pytest.raises(PhaseError) as raised:
+        _run_origin(
+            engine,
+            store,
+            OriginRequest(session=session, origin=origin, scope=Scope.LOCAL),
+            reporter=events.append,
+        )
+
+    assert [(event.phase, event.status) for event in events[-2:]] == [
+        (Phase.FIT, PhaseStatus.STARTED),
+        (Phase.FIT, PhaseStatus.FAILED),
+    ]
+    assert str(raised.value.__cause__) == "fixture prediction failed"
+
+
+def test_engine_tree_contains_no_profile_clock_or_memory_artifact_concerns() -> None:
+    """Keep clocks, memory sampling, and profile artifacts outside the engine."""
+    source_file = inspect.getsourcefile(Engine)
+    assert source_file is not None
+    engine_root = Path(source_file).parent
+    source = "\n".join(path.read_text(encoding="utf-8") for path in engine_root.glob("*.py"))
+
+    assert "import time" not in source
+    assert "perf_counter" not in source
+    assert "duration_seconds" not in source
+    assert "cgroup" not in source
+    assert "profile.json" not in source
 
 
 def test_failed_phase_is_retryable_from_a_fresh_snapshot() -> None:

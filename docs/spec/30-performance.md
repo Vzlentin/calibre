@@ -41,9 +41,9 @@ to — with this shape:
 - **Ledger artifacts**: 1.01 GB pending ledger + 1.59 GB resolved ledger
   (columnar files).
 
-Single run, machine otherwise lightly loaded; no variance estimate. Peak RSS
-was **not** captured — a known gap this chapter closes for all future
-profiles (see "Require the standard profile deliverables").
+Single run, machine otherwise lightly loaded; no variance estimate. Peak
+resident memory was **not** captured — a known gap this chapter closes for all
+future profiles (see "Require the standard profile deliverables").
 
 ## State the measured baseline
 
@@ -186,10 +186,13 @@ Each requirement names the baseline cost it eliminates. These bind chapter 03
   pending / 1.59 GB resolved in the baseline); ledger I/O must stream —
   appending an origin's rows must not require materializing the full ledger
   in memory.
-- `[PRF-23]` Peak RSS per pipeline stage is a mandatory profile deliverable;
-  no memory ceiling in this chapter can tighten past `[PRF-20]` until the
-  first rewrite profile delivers it (the baseline profile did not capture
-  RSS).
+- `[PRF-23]` Resident-memory evidence is a mandatory profile deliverable.
+  `peak_process_resident_bytes` records each observed driver, Ray control,
+  object-store, and worker process peak plus their sum. The sum is diagnostic:
+  it can double-count shared memory and cannot determine `[PRF-20]`.
+  `peak_job_memory_bytes` records the cgroup-v2 charged job peak and is the sole
+  input to the 32 GB verdict. No memory ceiling in this chapter can tighten
+  past `[PRF-20]` until the first rewrite profile delivers these facts.
 
 ## Require the standard profile deliverables
 
@@ -200,13 +203,23 @@ must deliver, machine-readably:
   stage (resolve, fit, predict, reconcile, calibrate, order, commit) plus
   pre-origin and close segments, with totals reconciling to ≥ 99% of
   end-to-end wall clock.
-- `[PRF-31]` **Peak RSS per stage**, same granularity as `[PRF-30]`.
-- `[PRF-32]` **Scaling curve vs. series count**: wall clock and peak RSS at
-  no fewer than three panel sizes (order of 1k / 10k / full ~30k bottom
-  series), same config otherwise, so super-linear stages are visible.
-- `[PRF-33]` **Parallel efficiency** once distributed execution exists:
-  speedup vs. worker count for the fan-out stages, reported alongside the
-  single-process number.
+- `[PRF-31]` **Resident memory**: the sampled process inventory, sampling
+  interval and completeness, per-process and summed
+  `peak_process_resident_bytes`, cgroup-v2 identity, and
+  `peak_job_memory_bytes`. A missing or vanished required process, incomplete
+  sample, sampler failure, or unavailable, unreadable, or malformed cgroup-v2
+  identity or counter invalidates the attempt; process sums never substitute
+  for the cgroup measure.
+- `[PRF-32]` **Scaling curve vs. series count**: wall clock and cgroup-v2
+  `peak_job_memory_bytes` at deterministic digest-ranked populations of
+  approximately 1,000 and 10,000 bottom series plus the full 30,490-series
+  population. All three use the same strict global configuration, 16 logical
+  shards, 16 workers, and one numeric thread per worker.
+- `[PRF-33]` **Parallel efficiency**: one separately bounded comparison runs
+  Fit/Predict only for the 1,000-series population at one origin over the same
+  16 logical shards, first at concurrency one and then at concurrency 16. Each
+  run has a hard 60-second cap. It runs no reconciliation, conformal,
+  ordering, commit, ledger, scoring, or full-M5 serial path.
 
 ## Acceptance criteria
 
@@ -217,9 +230,13 @@ must deliver, machine-readably:
    ledger size) across the 64-origin run `[PRF-10]`.
 3. A trivial-model run shows per-origin fit cost near zero via the update
    path `[PRF-12]`.
-4. A profile artifact containing `[PRF-30]`–`[PRF-32]` (and `[PRF-33]` when
-   applicable) is produced by the same harness invocation that produces the
-   benchmark result — never assembled by hand.
+4. The same harness invocation that produces the benchmark result validates
+   and atomically publishes exactly `profile.json` and `environment.json`.
+   The former contains `[PRF-30]`–`[PRF-33]`; the latter binds CPU, memory, OS,
+   Python, dependency-lock and numeric-library provenance, Ray version,
+   worker/shard/thread budget, cgroup identity, and sampler facts. An invalid
+   attempt publishes no passing pair, and separately owned M5 diagnostics are
+   not performance artifacts.
 
 ## Provenance
 
@@ -232,4 +249,4 @@ possible and the rewrite keeps that discipline (`[PRF-30]`). Negative space:
 its per-origin actuals lookup, ledger rewrites, staging rebuilds, and
 refit-per-origin are the anti-patterns `[PRF-10]`–`[PRF-12]` exist to
 eliminate; its memory preflight (94 s group-by scan) motivates `[PRF-2]`; its
-missing RSS capture motivates `[PRF-31]`.
+missing resident-memory capture motivates `[PRF-31]`.

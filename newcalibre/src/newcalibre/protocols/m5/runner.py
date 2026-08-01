@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -24,6 +26,10 @@ from newcalibre.engine import (
     InMemoryIndexedRunStore,
     InMemoryLedgerReader,
     InMemoryPanelSource,
+    InProcessDispatch,
+    OriginIntent,
+    OriginRequest,
+    PhaseEvent,
     RayDispatch,
     TimeLoop,
     TimeLoopRequest,
@@ -103,7 +109,28 @@ class M5RunResult:
             raise ValueError("M5 run resolved and pending counts do not cover its row universe")
 
 
-def run_m5(config_path: Path) -> M5RunResult:
+@dataclass(frozen=True, slots=True)
+class M5FitPredictResult:
+    """Return one bounded-profile Fit/Predict fan-out measurement."""
+
+    concurrency: int
+    wall_seconds: float
+    dispatch_count: int
+
+    def __post_init__(self) -> None:
+        if self.concurrency not in (1, 16):
+            raise ValueError("M5 Fit/Predict profile concurrency must equal one or 16")
+        if not isinstance(self.wall_seconds, float) or self.wall_seconds <= 0.0:
+            raise ValueError("M5 Fit/Predict profile wall duration must be positive")
+        if self.dispatch_count != 16:
+            raise ValueError("M5 Fit/Predict profile must dispatch all 16 logical shards")
+
+
+def run_m5(
+    config_path: Path,
+    *,
+    reporter: Callable[[PhaseEvent], None] | None = None,
+) -> M5RunResult:
     """Run one strict M5 configuration through the generic time-loop engine."""
     config = load_m5_config(config_path)
     dataset = load_m5_dataset(_PROJECT_ROOT, config)
@@ -152,6 +179,7 @@ def run_m5(config_path: Path) -> M5RunResult:
                 initial_inventory_positions={},
                 actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
             ),
+            reporter=reporter,
         ).run()
     finally:
         dispatch.shutdown()
@@ -174,6 +202,71 @@ def run_m5(config_path: Path) -> M5RunResult:
         scored_row_count=diagnostics.population.counts.scored,
         pending_row_count=pending_count,
         diagnostics=diagnostics,
+    )
+
+
+def run_m5_fit_predict(config_path: Path, *, concurrency: int) -> M5FitPredictResult:
+    """Measure one 1,000-series origin through Fit/Predict only."""
+    if concurrency not in (1, 16):
+        raise ValueError("M5 Fit/Predict concurrency must equal one or 16")
+    config = load_m5_config(config_path)
+    if config.population.kind != "digest_rank" or config.population.bottom_count != 1000:
+        raise ValueError("M5 Fit/Predict profiling requires the 1,000-series population")
+    dataset = load_m5_dataset(_PROJECT_ROOT, config)
+    compiled = compile_m5_protocol(dataset, config)
+    forecast_panel = _all_node_panel(compiled.panel, hierarchy=compiled.hierarchy)
+    session = SessionIdentity.derive(
+        tenant=config.dataset,
+        series_keys=compiled.hierarchy.node_labels,
+        calendar=forecast_panel.calendar,
+        horizon=config.horizon,
+        model_config=compiled.model_config,
+        conformal_config=compiled.conformal_config,
+    )
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=forecast_panel.calendar,
+        actuals=compiled.panel,
+        actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
+        hierarchy=compiled.hierarchy,
+    )
+    dispatch = (
+        InProcessDispatch(logical_shards=compiled.execution.logical_shards)
+        if concurrency == 1
+        else RayDispatch(
+            logical_shards=compiled.execution.logical_shards,
+            workers=compiled.execution.workers,
+            numeric_threads_per_worker=compiled.execution.numeric_threads_per_worker,
+            retries=compiled.execution.retries,
+        )
+    )
+    try:
+        engine = Engine(
+            session=session,
+            panel_source=InMemoryPanelSource(forecast_panel),
+            run_store=store,
+            dispatch_backend=dispatch,
+            hierarchy=compiled.hierarchy,
+            adapter_resolver=resolve_adapter,
+            reconciliation_strategy=compiled.reconciliation_strategy,
+            orderer=None,
+        )
+        origin = compiled.origins[0]
+        snapshot = store.open(OriginIntent(session, origin))
+        engine.observe(origin, session=session, snapshot=snapshot)
+        request = OriginRequest(session=session, origin=origin, scope=Scope(config.model_scope))
+        started = time.perf_counter()
+        fitted = engine.fit(request)
+        engine.predict(fitted)
+        wall_seconds = time.perf_counter() - started
+    finally:
+        shutdown = getattr(dispatch, "shutdown", None)
+        if shutdown is not None:
+            shutdown()
+    return M5FitPredictResult(
+        concurrency=concurrency,
+        wall_seconds=wall_seconds,
+        dispatch_count=compiled.execution.logical_shards,
     )
 
 
@@ -207,4 +300,4 @@ def _all_node_panel(panel: Panel, *, hierarchy: HierarchyIndex) -> Panel:
     )
 
 
-__all__ = ["M5RunResult", "run_m5"]
+__all__ = ["M5FitPredictResult", "M5RunResult", "run_m5", "run_m5_fit_predict"]

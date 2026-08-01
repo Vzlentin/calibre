@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import time
 import uuid
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -120,9 +119,10 @@ ENGINE_VERBS = (
 
 
 class Phase(StrEnum):
-    """Name the six phases in their only legal per-origin order."""
+    """Name the seven phases in their only legal per-origin order."""
 
     RESOLVE = "Resolve"
+    FIT = "Fit"
     PREDICT = "Predict"
     RECONCILE = "Reconcile"
     CALIBRATE = "Calibrate"
@@ -140,14 +140,21 @@ class PhaseError(RuntimeError):
         self.__cause__ = cause
 
 
+class PhaseStatus(StrEnum):
+    """Name one closed lifecycle transition for an engine phase."""
+
+    STARTED = "started"
+    FINISHED = "finished"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True, slots=True)
 class PhaseEvent:
-    """Record one success or failure timing from the public spine."""
+    """Record one clock-free lifecycle transition from the public spine."""
 
     phase: Phase
     origin: pd.Timestamp
-    duration_seconds: float
-    error: str | None
+    status: PhaseStatus
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -1172,7 +1179,7 @@ class Engine:
 
 
 class Spine:
-    """Compose the exact six phases without adding another engine verb."""
+    """Compose the exact seven phases without adding another engine verb."""
 
     def __init__(self, engine: Engine, *, reporter: PhaseReporter | None = None) -> None:
         if not isinstance(engine, Engine):
@@ -1234,11 +1241,12 @@ class Spine:
                 token=token,
             )
 
-        def predict_phase() -> ForecastBatch:
-            fitted = self._engine.fit(request)
-            return self._engine.predict(fitted)
-
-        predicted = self._phase(Phase.PREDICT, request.origin, predict_phase)
+        fitted = self._phase(Phase.FIT, request.origin, lambda: self._engine.fit(request))
+        predicted = self._phase(
+            Phase.PREDICT,
+            request.origin,
+            lambda: self._engine.predict(fitted),
+        )
         reconciled = self._phase(
             Phase.RECONCILE,
             request.origin,
@@ -1301,24 +1309,23 @@ class Spine:
         *,
         unwrapped: tuple[type[Exception], ...] = (),
     ):
-        started = time.perf_counter()
+        self._report(phase, origin, PhaseStatus.STARTED)
         try:
             result = action()
         except Exception as error:
             self._engine._abort_origin(origin)
-            self._report(phase, origin, started, error)
+            self._report(phase, origin, PhaseStatus.FAILED)
             if isinstance(error, unwrapped):
                 raise
             raise PhaseError(phase, origin, error) from error
-        self._report(phase, origin, started, None)
+        self._report(phase, origin, PhaseStatus.FINISHED)
         return result
 
     def _report(
         self,
         phase: Phase,
         origin: pd.Timestamp,
-        started: float,
-        error: Exception | None,
+        status: PhaseStatus,
     ) -> None:
         if self._reporter is None:
             return
@@ -1327,8 +1334,7 @@ class Spine:
                 PhaseEvent(
                     phase=phase,
                     origin=origin,
-                    duration_seconds=time.perf_counter() - started,
-                    error=None if error is None else str(error),
+                    status=status,
                 )
             )
         except Exception as reporter_error:
@@ -1656,6 +1662,7 @@ __all__ = [
     "Phase",
     "PhaseError",
     "PhaseEvent",
+    "PhaseStatus",
     "SettlementWindow",
     "Spine",
 ]
