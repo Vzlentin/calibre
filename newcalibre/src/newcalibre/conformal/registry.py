@@ -10,9 +10,12 @@ import pandas as pd
 from pydantic import BaseModel, ValidationError
 
 from newcalibre.conformal.batch import (
+    CalibrationResult,
     CalibrationSeedBatch,
     ConformalStateBatch,
     DeliveryBatch,
+    ObserveEffect,
+    state_delta,
 )
 from newcalibre.conformal.manifest import (
     MethodManifest,
@@ -27,8 +30,6 @@ from newcalibre.conformal.state import (
 )
 from newcalibre.conformal.types import (
     CalibrationContext,
-    CalibrationResult,
-    ObserveEffect,
     RuntimeContractError,
 )
 from newcalibre.domain import GuaranteeClaim
@@ -391,10 +392,9 @@ def _validated_emitted_states(
     *,
     manifest: MethodManifest,
     verb: str,
-) -> dict[str, bytes]:
+) -> None:
     if not isinstance(states, ConformalStateBatch):
         raise RuntimeContractError(f"{verb} post-state must be a ConformalStateBatch")
-    snapshot = dict(states.items())
     try:
         validate_state_batch(
             states,
@@ -403,7 +403,6 @@ def _validated_emitted_states(
         )
     except StateCodecError as error:
         raise RuntimeContractError(f"{verb} emitted invalid state: {error}") from error
-    return snapshot
 
 
 def _validate_transition(
@@ -415,11 +414,10 @@ def _validate_transition(
 ) -> None:
     if not isinstance(prior, ConformalStateBatch):
         raise RuntimeContractError(f"{verb} input state must be a ConformalStateBatch")
-    removed = set(prior.labels).difference(post.labels)
+    removed, changed = state_delta(prior, post)
     if removed:
-        raise RuntimeContractError(f"{verb} post-state removed rows: {sorted(removed)!r}")
-    changed = {label for label in post.labels if label not in prior or prior[label] != post[label]}
-    if changed != set(dirty_labels):
+        raise RuntimeContractError(f"{verb} post-state removed rows: {list(removed)!r}")
+    if set(changed) != set(dirty_labels):
         raise RuntimeContractError(
             f"{verb} dirty labels must exactly identify changed post-state rows"
         )

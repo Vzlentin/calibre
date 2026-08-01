@@ -18,6 +18,7 @@ from newcalibre.conformal import (
     ObserveEffect,
     ResolvedObservation,
 )
+from newcalibre.conformal.batch import state_delta
 from newcalibre.domain import (
     CensoringAssertion,
     EmissionScope,
@@ -169,17 +170,10 @@ class ObserveLoop:
                 raise ObserveError(f"conformal observe failed: {error}") from error
             if not isinstance(effect, ObserveEffect):
                 raise ObserveError("conformal observe must return an ObserveEffect")
-            removed = set(prior_state.labels).difference(effect.state.labels)
+            removed, changed = state_delta(prior_state, effect.state)
             if removed:
-                raise ObserveError(
-                    f"conformal observe removed prior state rows: {sorted(removed)!r}"
-                )
-            changed = {
-                label
-                for label in effect.state.labels
-                if label not in prior_state or prior_state[label] != effect.state[label]
-            }
-            if changed != set(effect.dirty_labels):
+                raise ObserveError(f"conformal observe removed prior state rows: {list(removed)!r}")
+            if set(changed) != set(effect.dirty_labels):
                 raise ObserveError(
                     "conformal observe dirty labels must exactly identify changed state rows"
                 )

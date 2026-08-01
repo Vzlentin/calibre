@@ -857,9 +857,13 @@ class Engine:
                 f"conformal apply dirtied foreign partition state: {sorted(foreign_dirty)!r}"
             )
         final_state = runtime_result.state
+        dirty_candidates = {
+            *observation.cycle.state_updates,
+            *runtime_result.dirty_labels,
+        }
         final_dirty = tuple(
             label
-            for label in final_state.labels
+            for label in dirty_candidates
             if label not in prior_state or prior_state[label] != final_state[label]
         )
         merged_updates = dict(final_state.project(final_dirty))

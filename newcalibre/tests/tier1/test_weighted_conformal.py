@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
@@ -17,7 +18,6 @@ from newcalibre.conformal import (
     CalibrationSeedBatch,
     CensoringPolicy,
     ConformalRegistryError,
-    DeliveryBatch,
     EmissionForm,
     ForecastKey,
     PostWarmupNonFinite,
@@ -46,11 +46,6 @@ from newcalibre.domain import (
 pytestmark = pytest.mark.tier1
 _ORIGIN = pd.Timestamp("2026-01-05")
 _MODEL = "weighted-fixture"
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 def _frame(
@@ -279,7 +274,7 @@ def test_aggressive_decay_attributes_persistent_post_warmup_heldout_mass() -> No
     assert first_facts.bindings == ()
 
     observed = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 first,
@@ -361,7 +356,7 @@ def test_observe_preserves_canonical_append_order_censoring_and_sticky_series_la
     )
     issued = runtime.apply(_frame((4.0, 5.0, 6.0)), states)
     effect = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -399,7 +394,7 @@ def test_observe_rejects_overflowed_finite_residual_before_state_encoding() -> N
         configuration={"coverage": 0.5},
     )
     issued = runtime.apply(_frame((1e308,)), states)
-    delivery = Delivery(
+    delivery = delivery_batch(
         label,
         _observations(
             issued,
@@ -458,7 +453,7 @@ def test_observe_rejects_tampered_issuance_before_state_advancement(
 
     with pytest.raises(RuntimeContractError, match=message):
         runtime.observe(
-            Delivery(label, (replace(observation, issued=tampered),)),
+            delivery_batch(label, (replace(observation, issued=tampered),)),
             states,
         )
 
@@ -488,7 +483,7 @@ def test_factory_restoration_replays_apply_and_observe_exactly() -> None:
     assert original_apply.issuances == restored_apply.issuances
     assert original_apply.dirty_state == restored_apply.dirty_state
 
-    delivery = Delivery(
+    delivery = delivery_batch(
         label,
         _observations(
             original_apply,

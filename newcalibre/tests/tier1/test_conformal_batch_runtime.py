@@ -57,11 +57,14 @@ def test_state_batch_is_canonical_immutable_and_supports_exact_transitions() -> 
     batch = ConformalStateBatch(states)
     states[first] = b"mutated"
     transitioned = batch.with_rows({first: b"changed"})
+    unchanged = batch.with_rows({first: b"one"})
 
     assert batch.labels == tuple(sorted((first, second), key=str.encode))
+    assert unchanged is batch
     assert batch[first] == b"one"
     assert transitioned[first] == b"changed"
     assert transitioned[second] == b"two"
+    assert transitioned.labels is batch.labels
     assert transitioned.project((first,)) == {first: b"changed"}
     with pytest.raises(TypeError):
         transitioned.project((first,))[first] = b"again"  # type: ignore[index]
@@ -145,10 +148,9 @@ def test_every_registration_is_invariant_to_batch_row_and_label_placement(
                 issued.issuances[key],
             ),
         )
-    first = runtime.observe(
-        DeliveryBatch(list(reversed(tuple(observations.items())))),
-        issued.state,
-    )
+    deliveries = DeliveryBatch(list(reversed(tuple(observations.items()))))
+    assert deliveries.observations is deliveries.observations
+    first = runtime.observe(deliveries, issued.state)
     second = runtime.observe(DeliveryBatch(observations), issued.state)
 
     assert first == second

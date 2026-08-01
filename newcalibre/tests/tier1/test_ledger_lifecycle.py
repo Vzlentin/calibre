@@ -7,9 +7,9 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
-    DeliveryBatch,
     EmissionForm,
     IssuedBoundFacts,
     ObserveAnnotation,
@@ -53,11 +53,6 @@ from newcalibre.observe import ObservationResolution, ObserveCycle, PendingObser
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ISSUE_ORIGIN = pd.Timestamp("2026-01-01")
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 QUANTILE: BoundKey = (quantile_column(0.5),)
@@ -519,7 +514,7 @@ def test_delivery_facts_must_match_the_staged_resolution_without_effect() -> Non
     if issued is None:
         raise AssertionError("conformal fixture must carry issued facts")
     resolution = _resolution(pending, 11.0)
-    delivery = Delivery(
+    delivery = delivery_batch(
         issued.partition_label,
         (
             ResolvedObservation(

@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
@@ -18,7 +19,6 @@ from newcalibre.conformal import (
     CensoringPolicy,
     ConformalRegistryError,
     ConformalStateBatch,
-    DeliveryBatch,
     EmissionForm,
     ForecastKey,
     PostWarmupNonFinite,
@@ -48,11 +48,6 @@ pytestmark = pytest.mark.tier1
 _ORIGIN = pd.Timestamp("2026-05-04")
 _MODEL = "adaptive-fixture"
 _METHOD = "sequential-adaptive-per-step"
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 def _frame(
@@ -295,7 +290,7 @@ def test_warmup_scores_advance_without_feedback_then_first_ready_issue_stays_at_
     warm = runtime.apply(_frame(), states)
     warm_facts = next(iter(warm.issuances.values()))
     observed = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 warm,
@@ -328,7 +323,7 @@ def test_closed_boundary_hits_and_misses_follow_the_hand_derived_recurrence() ->
     )
     first = runtime.apply(_frame(), states)
     first_observe = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 first,
@@ -342,7 +337,7 @@ def test_closed_boundary_hits_and_misses_follow_the_hand_derived_recurrence() ->
     second_states = first_observe.state
     second = runtime.apply(_frame(), second_states)
     second_observe = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 second,
@@ -369,7 +364,7 @@ def test_raw_alpha_excursions_are_unclipped_but_only_quantile_input_is_clipped()
     )
     issued = runtime.apply(_frame(), states)
     miss = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -383,7 +378,7 @@ def test_raw_alpha_excursions_are_unclipped_but_only_quantile_input_is_clipped()
     below_states = miss.state
     unresolvable = runtime.apply(_frame(), below_states)
     returned = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 unresolvable,
@@ -400,7 +395,7 @@ def test_raw_alpha_excursions_are_unclipped_but_only_quantile_input_is_clipped()
     )
     cover_issue = cover_runtime.apply(_frame(), cover_states)
     cover = cover_runtime.observe(
-        Delivery(
+        delivery_batch(
             cover_label,
             _observations(
                 cover_issue,
@@ -447,7 +442,7 @@ def test_exact_active_window_trigger_attributes_nonfinite_and_trivial_cover_retu
     issued = runtime.apply(_frame(), states)
     facts = next(iter(issued.issuances.values()))
     observed = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -482,7 +477,7 @@ def test_declared_censoring_is_excluded_and_recorded_sales_label_is_sticky() -> 
     )
     issued = runtime.apply(_frame((4.0, 4.0)), states)
     effect = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -548,7 +543,7 @@ def test_observe_rejects_tampered_identity_before_state_advancement() -> None:
         before = dict(states)
         with pytest.raises(RuntimeContractError, match=message):
             runtime.observe(
-                Delivery(label, (replace(observation, issued=tampered),)),
+                delivery_batch(label, (replace(observation, issued=tampered),)),
                 states,
             )
         assert states == before
@@ -577,7 +572,7 @@ def test_factory_restoration_replays_apply_and_observe_exactly() -> None:
     assert original_apply.issuances == restored_apply.issuances
     assert original_apply.dirty_state == restored_apply.dirty_state
 
-    delivery = Delivery(
+    delivery = delivery_batch(
         label,
         _observations(
             original_apply,

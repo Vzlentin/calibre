@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 import newcalibre.conformal.methods.split as split_method
 from newcalibre.conformal import (
@@ -17,7 +18,6 @@ from newcalibre.conformal import (
     CalibrationSeedBatch,
     ConformalRegistryError,
     ConformalStateBatch,
-    DeliveryBatch,
     EmissionForm,
     ForecastKey,
     ResolvedObservation,
@@ -46,11 +46,6 @@ from newcalibre.reconcile import ReconciliationContext, resolve_strategy
 pytestmark = pytest.mark.tier1
 _ORIGIN = pd.Timestamp("2026-01-05")
 _MODEL = "fixture-model"
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 def _frame(
@@ -289,12 +284,12 @@ def test_series_horizon_delivery_updates_only_its_declared_step() -> None:
         (CensoringAssertion.UNCENSORED, CensoringAssertion.UNCENSORED),
     )
 
-    effect = runtime.observe(Delivery(first_label, (observations[0],)), states)
+    effect = runtime.observe(delivery_batch(first_label, (observations[0],)), states)
 
     assert set(effect.dirty_labels) == {first_label}
     assert second_label not in effect.dirty_labels
     with pytest.raises(RuntimeContractError, match="issued partition"):
-        Delivery(first_label, (observations[1],))
+        delivery_batch(first_label, (observations[1],))
 
 
 def test_series_horizon_labels_cannot_collide_with_series_values() -> None:
@@ -381,7 +376,7 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
         configuration={"coverage": 0.5, "calibration_window": 3},
     )
     issued = runtime.apply(_frame((4.0, 5.0, 6.0)), states)
-    delivery = Delivery(
+    delivery = delivery_batch(
         label,
         _observations(
             issued,
@@ -454,7 +449,7 @@ def test_observe_rejects_tampered_issuance_identity_before_state_advancement(
 
     with pytest.raises(RuntimeContractError, match=message):
         runtime.observe(
-            Delivery(label, (replace(observation, issued=tampered),)),
+            delivery_batch(label, (replace(observation, issued=tampered),)),
             states,
         )
 
@@ -469,7 +464,7 @@ def test_declared_censoring_without_an_undeclared_score_stays_demand_honest() ->
     )
     issued = runtime.apply(_frame((4.0, 5.0)), states)
     effect = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -497,7 +492,7 @@ def test_window_observe_scores_once_on_terminal_and_preserves_canonical_annotati
         (4.0, 4.0, 7.0),
         (CensoringAssertion.UNCENSORED,) * 3,
     )
-    effect = runtime.observe(Delivery(label, observations), states)
+    effect = runtime.observe(delivery_batch(label, observations), states)
     payload = _payload("split-window-sum", effect.dirty_state[label], label=label)
 
     assert [annotation.forecast_key.horizon_step for annotation in effect.annotations] == [
@@ -537,10 +532,10 @@ def test_window_observe_batches_canonical_windows_like_consecutive_calls() -> No
         for observation in first
     )
 
-    batched = runtime.observe(Delivery(label, (*first, *second)), states)
-    first_effect = runtime.observe(Delivery(label, first), states)
+    batched = runtime.observe(delivery_batch(label, (*first, *second)), states)
+    first_effect = runtime.observe(delivery_batch(label, first), states)
     consecutive = runtime.observe(
-        Delivery(label, second),
+        delivery_batch(label, second),
         first_effect.state,
     )
 
@@ -558,7 +553,7 @@ def test_window_censoring_excludes_the_composite_without_state_advancement() -> 
     )
     issued = runtime.apply(_frame((2.0, 3.0, 4.0)), states)
     effect = runtime.observe(
-        Delivery(
+        delivery_batch(
             label,
             _observations(
                 issued,
@@ -596,12 +591,12 @@ def test_window_observe_refuses_partial_foreign_out_of_range_and_noncanonical_me
     )
 
     with pytest.raises(RuntimeContractError, match="complete protection window"):
-        runtime.observe(Delivery(label, observations[:2]), states)
+        runtime.observe(delivery_batch(label, observations[:2]), states)
     with pytest.raises(RuntimeContractError, match="duplicate forecast key"):
-        Delivery(label, (observations[0], observations[0], observations[2]))
+        delivery_batch(label, (observations[0], observations[0], observations[2]))
     with pytest.raises(RuntimeContractError, match="canonical horizon steps"):
         runtime.observe(
-            Delivery(label, (observations[1], observations[0], observations[2])), states
+            delivery_batch(label, (observations[1], observations[0], observations[2])), states
         )
 
     foreign = replace(
@@ -612,14 +607,16 @@ def test_window_observe_refuses_partial_foreign_out_of_range_and_noncanonical_me
         RuntimeContractError,
         match="declared partition|share series|complete protection window",
     ):
-        runtime.observe(Delivery(label, (observations[0], foreign, observations[2])), states)
+        runtime.observe(delivery_batch(label, (observations[0], foreign, observations[2])), states)
 
     out_of_range = replace(
         observations[2],
         forecast_key=replace(observations[2].forecast_key, horizon_step=4),
     )
     with pytest.raises(RuntimeContractError, match="canonical horizon steps"):
-        runtime.observe(Delivery(label, (observations[0], observations[1], out_of_range)), states)
+        runtime.observe(
+            delivery_batch(label, (observations[0], observations[1], out_of_range)), states
+        )
 
 
 def test_clamps_record_binding_per_finite_row_and_void_only_changed_claims() -> None:

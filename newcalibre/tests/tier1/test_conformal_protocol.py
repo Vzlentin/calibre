@@ -7,12 +7,12 @@ import math
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     CalibrationResult,
     CalibrationSeedBatch,
     ConformalRuntime,
-    DeliveryBatch,
     ForecastKey,
     ResolvedObservation,
     available_methods,
@@ -38,11 +38,6 @@ from newcalibre.domain import (
 pytestmark = pytest.mark.tier1
 _METHODS = available_methods()
 _ORIGIN = pd.Timestamp("2026-02-02")
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 def _frame() -> pd.DataFrame:
@@ -165,7 +160,7 @@ def test_builtin_observe_replay_and_factory_restoration_are_exact(method: str) -
     )
     states = original.calibrate(CalibrationSeedBatch({label: list(range(1, 11))}))
     issued = original.apply(_frame(), states)
-    delivery = Delivery(label, (_observation(issued),))
+    delivery = delivery_batch(label, (_observation(issued),))
 
     first = original.observe(delivery, states)
     restored = resolve_method({"method": method}, states=states)

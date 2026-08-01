@@ -12,6 +12,7 @@ from typing import ClassVar
 import pandas as pd
 import pytest
 from pydantic import BaseModel, ConfigDict
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
@@ -62,11 +63,6 @@ from newcalibre.domain import (
 )
 
 pytestmark = pytest.mark.tier1
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 class _FixtureConfig(BaseModel):
@@ -444,7 +440,7 @@ def test_fixture_executes_calibrate_apply_observe_and_factory_restoration() -> N
     frame = _frame()
     applied = restored.apply(frame, calibrated_states)
     observed = restored.observe(
-        Delivery(partition, (_observation("sku", partition_label=partition, actual=7.0),)),
+        delivery_batch(partition, (_observation("sku", partition_label=partition, actual=7.0),)),
         calibrated_states,
     )
 
@@ -651,7 +647,7 @@ def test_registry_rejects_invalid_state_emitted_by_every_runtime_verb(
     )
     runtime = registry.resolve({"method": "fixture"})
     frame = _frame()
-    delivery = Delivery(
+    delivery = delivery_batch(
         partition,
         (_observation("sku", partition_label=partition, actual=7.0),),
     )
@@ -711,7 +707,7 @@ def test_registry_requires_observe_annotations_for_exactly_the_delivered_rows(
     )
     runtime = registry.resolve({"method": "fixture"})
     partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
-    delivery = Delivery(
+    delivery = delivery_batch(
         partition,
         (
             _observation("sku-a", partition_label=partition, actual=7.0),

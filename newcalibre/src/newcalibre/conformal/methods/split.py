@@ -14,9 +14,11 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from newcalibre.conformal.batch import (
+    CalibrationResult,
     CalibrationSeedBatch,
     ConformalStateBatch,
     DeliveryBatch,
+    ObserveEffect,
 )
 from newcalibre.conformal.manifest import (
     AssumptionClass,
@@ -35,11 +37,9 @@ from newcalibre.conformal.state import JsonStateCodec, StateCodecError, StateSco
 from newcalibre.conformal.types import (
     METHOD_SCOPE_LABEL,
     CalibrationContext,
-    CalibrationResult,
     ForecastKey,
     IssuedBoundFacts,
     ObserveAnnotation,
-    ObserveEffect,
     ResolvedObservation,
     RuntimeContractError,
     _decode_label,
@@ -338,7 +338,7 @@ class SplitConformalRuntime:
                 raise RuntimeContractError(str(error)) from error
             if scope is not StateScope.PARTITION:
                 raise RuntimeContractError("calibration scores must use partition labels")
-            normalized = tuple(_finite_score(value) for value in values)
+            normalized = values
             retained = normalized[-self._config.calibration_window :]
             state = _PartitionState(
                 scores=retained,
@@ -386,6 +386,8 @@ class SplitConformalRuntime:
         minimum = self.manifest.minimum_calibration_scores(self._config)
         radii: dict[str, float] = {}
         state_references: dict[str, str] = {}
+        partitions: dict[str, _PartitionState] = {}
+        empty_partition = _empty_partition()
 
         for row in rows:
             raw_upper = math.nan
@@ -395,7 +397,10 @@ class SplitConformalRuntime:
                 row.key.series_key,
                 row.key.horizon_step,
             )
-            partition = decoded.get(label, _empty_partition())
+            partition = partitions.get(label)
+            if partition is None:
+                partition = decoded.get(label, empty_partition)
+                partitions[label] = partition
             ready = len(partition.scores) >= minimum
             emitted = self.manifest.emission_scope is EmissionScope.PER_STEP or (
                 row.key.horizon_step == self._protection_period
@@ -491,9 +496,10 @@ class SplitConformalRuntime:
         updated_rows: dict[str, bytes] = {}
         dirty: list[str] = []
         annotations: list[ObserveAnnotation] = []
+        empty_partition = _empty_partition()
         for label, observations in deliveries.items():
             self._validate_delivery_issuance(label, observations)
-            partition = decoded.get(label, _empty_partition())
+            partition = decoded.get(label, empty_partition)
             if self.manifest.emission_scope is EmissionScope.PER_STEP:
                 updated, partition_annotations = self._observe_per_step(observations, partition)
             else:

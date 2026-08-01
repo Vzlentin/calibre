@@ -6,10 +6,9 @@ import base64
 import json
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from numbers import Integral, Real
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, cast
+from typing import Final, cast
 
 import pandas as pd
 
@@ -26,9 +25,6 @@ from newcalibre.domain import (
 )
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.domain.forecast_frame import ForecastFrameError, forecast_bound_groups
-
-if TYPE_CHECKING:
-    from newcalibre.conformal.batch import ConformalStateBatch
 
 _PARTITION_PREFIX: Final = "p1."
 _METHOD_PREFIX: Final = "m1."
@@ -387,85 +383,6 @@ class ObserveAnnotation:
             raise RuntimeContractError("delivered-score advancement must be a boolean")
         if self.advanced_delivered_score and not has_score:
             raise RuntimeContractError("only a scored observation may advance delivered score")
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class ObserveEffect:
-    """Return complete post-state, dirty labels, and observe annotations."""
-
-    state: ConformalStateBatch
-    dirty_labels: tuple[str, ...]
-    annotations: tuple[ObserveAnnotation, ...]
-
-    def __init__(
-        self,
-        state: ConformalStateBatch,
-        dirty_labels: Iterable[str] = (),
-        annotations: Iterable[ObserveAnnotation] = (),
-    ) -> None:
-        from newcalibre.conformal.batch import ConformalStateBatch, _snapshot_dirty_labels
-
-        if not isinstance(state, ConformalStateBatch):
-            raise RuntimeContractError("observe post-state must be a ConformalStateBatch")
-        dirty = _snapshot_dirty_labels(dirty_labels, state=state)
-        annotated = _snapshot_iterable(annotations, name="observe annotations")
-        if any(not isinstance(value, ObserveAnnotation) for value in annotated):
-            raise RuntimeContractError("every observe annotation must be an ObserveAnnotation")
-        keys = tuple(value.forecast_key for value in annotated)
-        if len(set(keys)) != len(keys):
-            raise RuntimeContractError("observe annotations contain a duplicate forecast key")
-        object.__setattr__(self, "state", state)
-        object.__setattr__(self, "dirty_labels", dirty)
-        object.__setattr__(self, "annotations", annotated)
-
-    @property
-    def dirty_state(self) -> Mapping[str, bytes]:
-        """Project dirty semantic rows from the complete post-state."""
-        return self.state.project(self.dirty_labels)
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class CalibrationResult:
-    """Return calibrated forecasts, complete post-state, and dirty labels."""
-
-    _forecasts: pd.DataFrame = field(repr=False)
-    state: ConformalStateBatch
-    dirty_labels: tuple[str, ...]
-    issuances: Mapping[ForecastKey, IssuedBoundFacts]
-
-    def __init__(
-        self,
-        forecasts: pd.DataFrame,
-        state: ConformalStateBatch,
-        dirty_labels: Iterable[str] = (),
-        issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
-    ) -> None:
-        from newcalibre.conformal.batch import ConformalStateBatch, _snapshot_dirty_labels
-
-        if not isinstance(forecasts, pd.DataFrame):
-            raise RuntimeContractError("calibrated forecasts must be a pandas DataFrame")
-        if forecasts.columns.has_duplicates:
-            raise RuntimeContractError("calibrated forecasts cannot have duplicate columns")
-        if not isinstance(state, ConformalStateBatch):
-            raise RuntimeContractError("apply post-state must be a ConformalStateBatch")
-        snapshot = forecasts.copy(deep=True)
-        snapshot.attrs = {}
-        dirty = _snapshot_dirty_labels(dirty_labels, state=state)
-        frozen_issuances = _snapshot_issuances(snapshot, issuances)
-        object.__setattr__(self, "_forecasts", snapshot)
-        object.__setattr__(self, "state", state)
-        object.__setattr__(self, "dirty_labels", dirty)
-        object.__setattr__(self, "issuances", MappingProxyType(frozen_issuances))
-
-    @property
-    def forecasts(self) -> pd.DataFrame:
-        """Return an isolated copy of the calibrated forecasts."""
-        return self._forecasts.copy(deep=True)
-
-    @property
-    def dirty_state(self) -> Mapping[str, bytes]:
-        """Project dirty semantic rows from the complete post-state."""
-        return self.state.project(self.dirty_labels)
 
 
 def _snapshot_issuances(

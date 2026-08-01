@@ -6,6 +6,7 @@ import math
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
@@ -32,11 +33,6 @@ from newcalibre.domain import (
 
 pytestmark = pytest.mark.tier2
 _MODEL = "roundtrip-model"
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 def _frame(
@@ -84,7 +80,7 @@ def _delivery(
                 issued=result.issuances[key],
             )
         )
-    return Delivery(observations[0].issued.partition_label, tuple(observations))
+    return delivery_batch(observations[0].issued.partition_label, tuple(observations))
 
 
 def _assert_apply_equal(left: CalibrationResult, right: CalibrationResult) -> None:

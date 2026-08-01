@@ -15,9 +15,11 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from newcalibre.conformal.batch import (
+    CalibrationResult,
     CalibrationSeedBatch,
     ConformalStateBatch,
     DeliveryBatch,
+    ObserveEffect,
 )
 from newcalibre.conformal.manifest import (
     AssumptionClass,
@@ -34,11 +36,9 @@ from newcalibre.conformal.state import JsonStateCodec, StateCodecError, StateSco
 from newcalibre.conformal.types import (
     METHOD_SCOPE_LABEL,
     CalibrationContext,
-    CalibrationResult,
     ForecastKey,
     IssuedBoundFacts,
     ObserveAnnotation,
-    ObserveEffect,
     ResolvedObservation,
     RuntimeContractError,
     _decode_label,
@@ -308,7 +308,7 @@ class SequentialAdaptiveConformalRuntime:
                 raise RuntimeContractError(str(error)) from error
             if scope is not StateScope.PARTITION:
                 raise RuntimeContractError("calibration scores must use partition labels")
-            normalized = tuple(_finite_score(value) for value in values)
+            normalized = values
             retained = normalized[-self._config.calibration_window :]
             updates[label] = self._codec.encode_partition(
                 label,
@@ -362,10 +362,15 @@ class SequentialAdaptiveConformalRuntime:
         state_references: dict[str, str] = {}
         descriptors: dict[ScoredSeries, GuaranteeDescriptor] = {}
         method_state = decoded.method_state
+        partitions: dict[str, _PartitionState] = {}
+        empty_partition = self._empty_partition()
 
         for row in rows:
             label = self._partition_label(row.key.model_name, row.key.series_key)
-            partition = decoded.get(label, self._empty_partition())
+            partition = partitions.get(label)
+            if partition is None:
+                partition = decoded.get(label, empty_partition)
+                partitions[label] = partition
             ready = len(partition.scores) >= minimum
             if not ready:
                 lower = math.nan
@@ -450,9 +455,10 @@ class SequentialAdaptiveConformalRuntime:
         updated_rows: dict[str, bytes] = {}
         dirty: list[str] = []
         annotations: list[ObserveAnnotation] = []
+        empty_partition = self._empty_partition()
         for label, observations in deliveries.items():
             self._validate_delivery_issuance(label, observations)
-            partition = decoded.get(label, self._empty_partition())
+            partition = decoded.get(label, empty_partition)
             scores = list(partition.scores)
             delivered_count = partition.delivered_score_count
             scored_series = partition.scored_series

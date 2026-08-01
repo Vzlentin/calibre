@@ -6,10 +6,10 @@ import inspect
 
 import pandas as pd
 import pytest
+from tests.conformal_fixtures import delivery_batch
 
 from newcalibre.conformal import (
     ConformalStateBatch,
-    DeliveryBatch,
     ObserveAnnotation,
     ResolvedObservation,
     resolve_method,
@@ -68,11 +68,6 @@ from newcalibre.observe import (
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ORIGIN_DATE = pd.Timestamp("2026-01-05")
-
-
-def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
-    """Build one partition row inside the batch API."""
-    return DeliveryBatch({label: observations})
 
 
 def _panel() -> Panel:
@@ -329,7 +324,7 @@ def test_commit_digest_is_sensitive_to_every_observe_materialization_family() ->
         {"method": "split-per-step", "coverage": 0.5, "partition_by": "global"}
     )
     issued = runtime.apply(_forecast_frame(), ConformalStateBatch()).issuances[key]
-    delivery = Delivery(
+    delivery = delivery_batch(
         issued.partition_label,
         (
             ResolvedObservation(
