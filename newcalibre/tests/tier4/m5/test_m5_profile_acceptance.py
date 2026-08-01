@@ -19,6 +19,15 @@ pytestmark = pytest.mark.tier4
 PROJECT_ROOT = Path(__file__).parents[3]
 SCRIPT = PROJECT_ROOT / "scripts" / "m5_benchmark.py"
 CONFIG = PROJECT_ROOT / "benchmarks" / "m5" / "gate-c.yaml"
+_THREAD_POLICY = {
+    "BLIS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
 
 
 class _Clock:
@@ -61,6 +70,9 @@ class _Monitor:
     def start(self) -> None:
         """Start the synthetic sampler."""
 
+    def finish_process_inventory(self) -> None:
+        """Finish the synthetic process inventory."""
+
     def stop(self) -> None:
         """Stop the synthetic sampler."""
 
@@ -72,22 +84,24 @@ def test_synthetic_profile_runs_all_intent_and_emits_exact_valid_pair(
     namespace = runpy.run_path(str(SCRIPT))
     run_standard_profile = namespace["run_standard_profile"]
     ordinary: list[tuple[int, int]] = []
+    diagnostic_destinations: list[Path] = []
     concurrency: list[tuple[int, int]] = []
 
     def runner(config_path: Path, *, reporter) -> object:
         config = load_m5_config(config_path)
         count = config.population.bottom_count or 30490
         ordinary.append((count, config.execution.workers))
+        diagnostic_destinations.append(config.output_dir)
         for origin in pd.date_range("2026-01-01", periods=config.origin_count, freq="D"):
             for phase in Phase:
                 reporter(PhaseEvent(phase, origin, PhaseStatus.STARTED))
                 reporter(PhaseEvent(phase, origin, PhaseStatus.FINISHED))
         return SimpleNamespace(forecast_origin_count=config.origin_count)
 
-    def concurrency_runner(config_path: Path, value: int) -> tuple[int, float, int]:
+    def concurrency_runner(config_path: Path, value: int) -> tuple[int, float, int, dict[str, str]]:
         config = load_m5_config(config_path)
         concurrency.append((config.population.bottom_count or 0, value))
-        return value, 4.0 if value == 1 else 1.0, 16
+        return value, 4.0 if value == 1 else 1.0, 16, dict(_THREAD_POLICY)
 
     lock = tmp_path / "uv.lock"
     lock.write_text("fixture-lock")
@@ -105,6 +119,8 @@ def test_synthetic_profile_runs_all_intent_and_emits_exact_valid_pair(
     )
 
     assert ordinary == [(1000, 16), (10000, 16), (30490, 16)]
+    assert len(set(diagnostic_destinations)) == 3
+    assert all(".profile-attempts" in destination.parts for destination in diagnostic_destinations)
     assert concurrency == [(1000, 1), (1000, 16)]
     assert {path.name for path in output.iterdir()} == {"profile.json", "environment.json"}
     profile = json.loads((output / "profile.json").read_text())

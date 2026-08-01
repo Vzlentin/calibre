@@ -82,8 +82,15 @@ class MemorySample:
 class MemoryReader(Protocol):
     """Read one process inventory and cgroup-v2 memory observation."""
 
+    def reset_peak(self) -> None:
+        """Reset the authoritative cgroup peak for one scaling point."""
+
     def sample(self) -> MemorySample:
         """Return one complete memory observation."""
+        ...
+
+    def sample_job_peak(self) -> MemorySample:
+        """Return a cgroup-only observation after process inventory closes."""
         ...
 
 
@@ -106,6 +113,7 @@ class MemoryMonitor:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._tracked_pids: frozenset[int] = frozenset()
+        self._inventory_finished = False
 
     @property
     def samples(self) -> tuple[MemorySample, ...]:
@@ -118,9 +126,14 @@ class MemoryMonitor:
         return self._failure
 
     def start(self) -> None:
-        """Take the initial observation and start periodic sampling."""
+        """Reset the cgroup peak, observe it, and start periodic sampling."""
         if self._thread is not None:
             raise RuntimeError("memory monitor has already started")
+        try:
+            self._reader.reset_peak()
+        except Exception as error:
+            self._failure = str(error)
+            return
         self._take_sample()
         if self._failure is not None:
             return
@@ -131,15 +144,26 @@ class MemoryMonitor:
         )
         self._thread.start()
 
+    def finish_process_inventory(self) -> None:
+        """Freeze required-role tracking after the final engine commit."""
+        if not self._tracked_pids and self._failure is None:
+            self._failure = "required process inventory was never complete"
+        self._inventory_finished = True
+
     def stop(self) -> None:
-        """Stop periodic sampling without taking a post-run observation."""
+        """Stop periodic sampling and take one synchronous final observation."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join()
+        if self._failure is None:
+            self._take_job_peak()
 
     def _sample_until_stopped(self) -> None:
         while not self._stop.wait(self._interval):
-            self._take_sample()
+            if self._inventory_finished:
+                self._take_job_peak()
+            else:
+                self._take_sample()
             if self._failure is not None:
                 self._stop.set()
 
@@ -148,19 +172,29 @@ class MemoryMonitor:
             sample = self._reader.sample()
             if not isinstance(sample, MemorySample):
                 raise TypeError("memory reader returned a non-MemorySample value")
-            current = frozenset(process.pid for process in sample.processes)
-            vanished = tuple(sorted(self._tracked_pids - current))
-            roles = {process.role for process in sample.processes}
-            if roles == REQUIRED_PROCESS_ROLES:
-                self._tracked_pids = current
-            if vanished:
-                sample = MemorySample(
-                    sample.processes,
-                    peak_job_memory_bytes=sample.peak_job_memory_bytes,
-                    cgroup_identity=sample.cgroup_identity,
-                    complete=sample.complete,
-                    vanished_pids=tuple(sorted((*sample.vanished_pids, *vanished))),
-                )
+            if not self._inventory_finished:
+                current = frozenset(process.pid for process in sample.processes)
+                vanished = tuple(sorted(self._tracked_pids - current))
+                roles = {process.role for process in sample.processes}
+                if roles == REQUIRED_PROCESS_ROLES:
+                    self._tracked_pids = current
+                if vanished:
+                    sample = MemorySample(
+                        sample.processes,
+                        peak_job_memory_bytes=sample.peak_job_memory_bytes,
+                        cgroup_identity=sample.cgroup_identity,
+                        complete=sample.complete,
+                        vanished_pids=tuple(sorted((*sample.vanished_pids, *vanished))),
+                    )
+            self._samples.append(sample)
+        except Exception as error:
+            self._failure = str(error)
+
+    def _take_job_peak(self) -> None:
+        try:
+            sample = self._reader.sample_job_peak()
+            if not isinstance(sample, MemorySample) or sample.processes:
+                raise TypeError("final memory reading must be a cgroup-only MemorySample")
             self._samples.append(sample)
         except Exception as error:
             self._failure = str(error)
@@ -179,10 +213,24 @@ class LinuxMemoryReader:
         self._proc_root = Path(proc_root)
         self._cgroup_root = Path(cgroup_root)
         self._driver_pid = os.getpid() if driver_pid is None else driver_pid
+        self._reset_identity: str | None = None
+
+    def reset_peak(self) -> None:
+        """Reset and synchronously verify the cgroup-v2 peak counter."""
+        identity = _cgroup_identity(self._proc_root / "self" / "cgroup")
+        path = self._cgroup_root / identity.removeprefix("/") / "memory.peak"
+        try:
+            path.write_text("0", encoding="ascii")
+        except OSError as error:
+            raise EnvironmentError("cgroup memory peak cannot be reset") from error
+        _nonnegative_integer_file(path, name="reset cgroup memory peak")
+        self._reset_identity = identity
 
     def sample(self) -> MemorySample:
         """Read one complete required-role inventory and cgroup peak."""
         identity = _cgroup_identity(self._proc_root / "self" / "cgroup")
+        if self._reset_identity != identity:
+            raise EnvironmentError("cgroup memory peak was not reset for this scaling point")
         peak = _nonnegative_integer_file(
             self._cgroup_root / identity.removeprefix("/") / "memory.peak",
             name="cgroup memory peak",
@@ -193,6 +241,9 @@ class LinuxMemoryReader:
                 continue
             pid = int(entry.name)
             try:
+                process_identity = _cgroup_identity(entry / "cgroup")
+                if not _is_same_job_cgroup(process_identity, identity):
+                    continue
                 command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8")
             except (FileNotFoundError, ProcessLookupError):
                 continue
@@ -209,6 +260,17 @@ class LinuxMemoryReader:
             peak_job_memory_bytes=peak,
             cgroup_identity=identity,
         )
+
+    def sample_job_peak(self) -> MemorySample:
+        """Read the authoritative cgroup peak without inventorying processes."""
+        identity = _cgroup_identity(self._proc_root / "self" / "cgroup")
+        if self._reset_identity != identity:
+            raise EnvironmentError("cgroup memory peak was not reset for this scaling point")
+        peak = _nonnegative_integer_file(
+            self._cgroup_root / identity.removeprefix("/") / "memory.peak",
+            name="cgroup memory peak",
+        )
+        return MemorySample((), peak_job_memory_bytes=peak, cgroup_identity=identity)
 
 
 def capture_environment(
@@ -391,6 +453,14 @@ def _cgroup_identity(path: Path) -> str:
     if len(matches) != 1 or not matches[0].startswith("/"):
         raise EnvironmentError("cgroup-v2 identity is unavailable")
     return matches[0]
+
+
+def _is_same_job_cgroup(candidate: str, job: str) -> bool:
+    """Accept only the profiled job cgroup or one of its descendants."""
+    if candidate == job:
+        return True
+    prefix = job.rstrip("/") + "/"
+    return candidate.startswith(prefix)
 
 
 def _nonnegative_integer_file(path: Path, *, name: str) -> int:

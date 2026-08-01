@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import os
 import re
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +22,7 @@ from newcalibre.domain import (
     SessionIdentity,
 )
 from newcalibre.engine import (
+    RAY_WORKER_THREAD_POLICY,
     DispatchBackend,
     Engine,
     InMemoryIndexedRunStore,
@@ -112,19 +113,19 @@ class M5RunResult:
 
 @dataclass(frozen=True, slots=True)
 class M5FitPredictResult:
-    """Return one bounded-profile Fit/Predict fan-out measurement."""
+    """Return clock-free facts from one bounded Fit/Predict fan-out."""
 
     concurrency: int
-    wall_seconds: float
     dispatch_count: int
+    thread_policy: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
         if self.concurrency not in (1, 16):
             raise ValueError("M5 Fit/Predict profile concurrency must equal one or 16")
-        if not isinstance(self.wall_seconds, float) or self.wall_seconds <= 0.0:
-            raise ValueError("M5 Fit/Predict profile wall duration must be positive")
         if self.dispatch_count != 16:
             raise ValueError("M5 Fit/Predict profile must dispatch all 16 logical shards")
+        if self.thread_policy != tuple(RAY_WORKER_THREAD_POLICY.items()):
+            raise ValueError("M5 Fit/Predict profile requires the one-thread numeric policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,13 +196,16 @@ def run_m5(
 
 
 def run_m5_fit_predict(config_path: Path, *, concurrency: int) -> M5FitPredictResult:
-    """Measure one 1,000-series origin through Fit/Predict only."""
+    """Run one 1,000-series origin through Fit/Predict only."""
     if concurrency not in (1, 16):
         raise ValueError("M5 Fit/Predict concurrency must equal one or 16")
     runtime = _prepare_m5(config_path)
     config = runtime.config
     if config.population.kind != "digest_rank" or config.population.bottom_count != 1000:
         raise ValueError("M5 Fit/Predict profiling requires the 1,000-series population")
+    observed_policy = tuple((name, os.environ.get(name, "")) for name in RAY_WORKER_THREAD_POLICY)
+    if observed_policy != tuple(RAY_WORKER_THREAD_POLICY.items()):
+        raise RuntimeError("M5 Fit/Predict process did not inherit the one-thread numeric policy")
     compiled = runtime.compiled
     dispatch = (
         InProcessDispatch(logical_shards=compiled.execution.logical_shards)
@@ -223,17 +227,15 @@ def run_m5_fit_predict(config_path: Path, *, concurrency: int) -> M5FitPredictRe
             origin=origin,
             scope=Scope(config.model_scope),
         )
-        started = time.perf_counter()
         fitted = engine.fit(request)
         engine.predict(fitted)
-        wall_seconds = time.perf_counter() - started
     finally:
-        if isinstance(dispatch, RayDispatch):
-            dispatch.shutdown()
+        if concurrency == 16:
+            cast(RayDispatch, dispatch).shutdown()
     return M5FitPredictResult(
         concurrency=concurrency,
-        wall_seconds=wall_seconds,
         dispatch_count=compiled.execution.logical_shards,
+        thread_policy=observed_policy,
     )
 
 

@@ -20,11 +20,10 @@ from newcalibre.benchmarking.environment import (
     validate_environment,
 )
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
-from newcalibre.engine import Phase, PhaseEvent, PhaseStatus
+from newcalibre.engine import RAY_WORKER_THREAD_POLICY, Phase, PhaseEvent, PhaseStatus
 
 _PHASES = tuple(Phase)
-_PROFILE_NAMES = frozenset({"profile.json", "environment.json"})
-_GIB = 1024**3
+_JOB_MEMORY_LIMIT_BYTES = 32_000_000_000
 
 
 class ProfileError(ValueError):
@@ -82,7 +81,7 @@ def aggregate_profile(
     sampling_interval_seconds: float,
     dispatch: Mapping[str, object],
     scaling: Sequence[tuple[int, int, float, int, int]],
-    concurrency: Sequence[tuple[int, float, int]],
+    concurrency: Sequence[tuple[int, float, int, Mapping[str, str]]],
     reporter_failure: str | None = None,
     sampler_failure: str | None = None,
 ) -> dict[str, object]:
@@ -192,8 +191,24 @@ def validate_profile(
         expected_origin_count=len(timing_origins),
     )
     _validate_environment_binding(environment_payload, memory=memory, dispatch=dispatch)
-    _validate_scaling_payload(root["scaling"])
+    scaling = _validate_scaling_payload(root["scaling"])
+    full = scaling[-1]
+    if not math.isclose(
+        cast(float, full["wall_seconds"]),
+        cast(float, timing["wall_seconds"]),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ProfileError("full scaling wall duration differs from primary timing")
+    if full["peak_job_memory_bytes"] != memory["peak_job_memory_bytes"]:
+        raise ProfileError("full scaling memory peak differs from primary memory")
+    if full["dispatch_count"] != dispatch["shard_dispatch_count"]:
+        raise ProfileError("full scaling dispatch count differs from primary dispatch")
     _validate_concurrency_payload(root["concurrency"])
+    sampler = cast(dict[str, object], environment_payload["sampler"])
+    expected_valid = not reasons and memory["complete"] is True and sampler["complete"] is True
+    if root["valid"] is not expected_valid:
+        raise ProfileError("profile validity disagrees with completeness facts")
     expected_budgets = _budgets(timings=timing, memory=memory)
     if reasons:
         for budget in expected_budgets.values():
@@ -214,10 +229,8 @@ def publish_profile_artifacts(
     target = Path(destination)
     if target.is_symlink():
         raise ProfileError("performance artifact destination must not be a symlink")
-    if target.exists() and (
-        not target.is_dir() or {path.name for path in target.iterdir()} != _PROFILE_NAMES
-    ):
-        raise ProfileError("performance artifact destination is dirty")
+    if target.exists():
+        raise ProfileError("performance artifact destination already exists")
     environment_payload = validate_environment(environment)
     profile_payload = validate_profile(profile, environment=environment_payload)
     if not profile_payload["valid"]:
@@ -225,28 +238,13 @@ def publish_profile_artifacts(
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=parent))
-    backup: Path | None = None
     try:
         (temporary / "profile.json").write_bytes(_json_bytes(profile_payload))
         (temporary / "environment.json").write_bytes(_json_bytes(environment_payload))
-        if target.exists():
-            backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.old.", dir=parent))
-            backup.rmdir()
-            os.replace(target, backup)
         os.replace(temporary, target)
-        if backup is not None:
-            shutil.rmtree(backup)
-    except Exception:
-        if backup is not None and backup.exists():
-            if target.exists():
-                shutil.rmtree(target)
-            os.replace(backup, target)
-        raise
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)
 
 
 def _aggregate_lifecycle(
@@ -363,7 +361,9 @@ def _scaling_payload(
     return payload
 
 
-def _concurrency_payload(values: tuple[tuple[int, float, int], ...]) -> dict[str, object]:
+def _concurrency_payload(
+    values: tuple[tuple[int, float, int, Mapping[str, str]], ...],
+) -> dict[str, object]:
     payload = {
         "series_count": 1000,
         "origin_count": 1,
@@ -371,8 +371,13 @@ def _concurrency_payload(values: tuple[tuple[int, float, int], ...]) -> dict[str
         "phases": ["Fit", "Predict"],
         "timeout_seconds": 60.0,
         "runs": [
-            {"concurrency": concurrency, "wall_seconds": wall, "dispatch_count": count}
-            for concurrency, wall, count in values
+            {
+                "concurrency": concurrency,
+                "wall_seconds": wall,
+                "dispatch_count": count,
+                "thread_policy": dict(policy),
+            }
+            for concurrency, wall, count, policy in values
         ],
     }
     _validate_concurrency_payload(payload)
@@ -512,10 +517,11 @@ def _validate_dispatch(
     return value
 
 
-def _validate_scaling_payload(value: object) -> None:
+def _validate_scaling_payload(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list) or len(value) != 3:
         raise ProfileError("scaling profile requires exactly three population points")
     expected_counts = (1000, 10000, 30490)
+    points: list[dict[str, object]] = []
     for point_value, expected_count in zip(value, expected_counts, strict=True):
         point = _mapping(
             point_value,
@@ -535,6 +541,8 @@ def _validate_scaling_payload(value: object) -> None:
         _positive_number(point["wall_seconds"], name="scaling wall duration")
         _nonnegative_integer(point["peak_job_memory_bytes"], name="scaling job memory peak")
         _positive_integer(point["dispatch_count"], name="scaling dispatch count")
+        points.append(point)
+    return points
 
 
 def _validate_concurrency_payload(value: object) -> None:
@@ -562,7 +570,7 @@ def _validate_concurrency_payload(value: object) -> None:
     for run_value, expected in zip(runs, (1, 16), strict=True):
         run = _mapping(
             run_value,
-            keys={"concurrency", "wall_seconds", "dispatch_count"},
+            keys={"concurrency", "wall_seconds", "dispatch_count", "thread_policy"},
             name="concurrency run",
         )
         if _positive_integer(run["concurrency"], name="concurrency") != expected:
@@ -571,6 +579,9 @@ def _validate_concurrency_payload(value: object) -> None:
             raise ProfileError("concurrency run exceeded its hard timeout")
         if _positive_integer(run["dispatch_count"], name="concurrency dispatch count") != 16:
             raise ProfileError("concurrency run must dispatch all 16 logical shards")
+        policy = run["thread_policy"]
+        if policy != dict(RAY_WORKER_THREAD_POLICY):
+            raise ProfileError("concurrency run did not observe the one-thread policy")
 
 
 def _budgets(
@@ -585,7 +596,10 @@ def _budgets(
     return {
         "wall_seconds": {"limit": 900.0, "passed": wall <= 900.0},
         "pre_origin_seconds": {"limit": 60.0, "passed": pre <= 60.0},
-        "peak_job_memory_bytes": {"limit": 32 * _GIB, "passed": job <= 32 * _GIB},
+        "peak_job_memory_bytes": {
+            "limit": _JOB_MEMORY_LIMIT_BYTES,
+            "passed": job <= _JOB_MEMORY_LIMIT_BYTES,
+        },
         "reconciliation_percent": {"minimum": 99.0, "passed": reconciliation >= 99.0},
     }
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import runpy
 from dataclasses import replace
 from pathlib import Path
@@ -20,6 +21,16 @@ from newcalibre.benchmarking import (
     aggregate_profile,
 )
 from newcalibre.engine import Phase, PhaseEvent, PhaseStatus
+
+_THREAD_POLICY = {
+    "BLIS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
 
 
 class Clock:
@@ -81,7 +92,10 @@ def _profile(*, hidden_gap: bool = False) -> dict[str, object]:
             (10000, 16, 20.0, 1800, 16),
             (30490, 16, 30.0, 2700, 16),
         ),
-        concurrency=((1, 4.0, 16), (16, 1.0, 16)),
+        concurrency=(
+            (1, 4.0, 16, _THREAD_POLICY),
+            (16, 1.0, 16, _THREAD_POLICY),
+        ),
     )
 
 
@@ -134,7 +148,10 @@ def test_lifecycle_validation_rejects_malformed_sequences(mutation: str) -> None
                 "workers": 16,
             },
             scaling=((1000, 16, 1.0, 1, 16), (10000, 16, 1.0, 1, 16), (30490, 16, 1.0, 1, 16)),
-            concurrency=((1, 1.0, 16), (16, 1.0, 16)),
+            concurrency=(
+                (1, 1.0, 16, _THREAD_POLICY),
+                (16, 1.0, 16, _THREAD_POLICY),
+            ),
         )
 
 
@@ -180,7 +197,10 @@ def test_memory_inventory_faults_invalidate_attempt(samples: tuple[MemorySample,
             "workers": 16,
         },
         scaling=((1000, 16, 1.0, 1, 16), (10000, 16, 1.0, 1, 16), (30490, 16, 1.0, 1, 16)),
-        concurrency=((1, 1.0, 16), (16, 1.0, 16)),
+        concurrency=(
+            (1, 1.0, 16, _THREAD_POLICY),
+            (16, 1.0, 16, _THREAD_POLICY),
+        ),
     )
     assert profile["valid"] is False
 
@@ -205,21 +225,34 @@ def test_memory_monitor_marks_a_vanished_required_process() -> None:
                 cgroup_identity="/gate-c",
             )
 
+        def reset_peak(self) -> None:
+            pass
+
+        def sample_job_peak(self) -> MemorySample:
+            return MemorySample((), peak_job_memory_bytes=901, cgroup_identity="/gate-c")
+
     monitor = MemoryMonitor(Reader(), interval_seconds=0.001)
     monitor.start()
     assert completed.wait(timeout=1.0)
     monitor.stop()
 
     assert monitor.failure is None
-    assert monitor.samples[-1].vanished_pids == (13,)
+    assert any(sample.vanished_pids == (13,) for sample in monitor.samples)
+    assert monitor.samples[-1].processes == ()
 
 
 def test_memory_monitor_records_sampler_failure() -> None:
     """Retain sampler failure as invalidating attempt evidence."""
 
     class Reader:
+        def reset_peak(self) -> None:
+            pass
+
         def sample(self) -> MemorySample:
             raise RuntimeError("fixture sampler failed")
+
+        def sample_job_peak(self) -> MemorySample:
+            raise AssertionError("final sample is unreachable after sampler failure")
 
     monitor = MemoryMonitor(Reader(), interval_seconds=0.1)
     monitor.start()
@@ -238,6 +271,7 @@ def test_concurrency_runner_terminates_work_at_the_hard_timeout() -> None:
         def __init__(self) -> None:
             self.alive = True
             self.terminated = False
+            self.killed = False
 
         def start(self) -> None:
             pass
@@ -250,6 +284,9 @@ def test_concurrency_runner_terminates_work_at_the_hard_timeout() -> None:
 
         def terminate(self) -> None:
             self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
             self.alive = False
 
     process = Process()
@@ -267,3 +304,115 @@ def test_concurrency_runner_terminates_work_at_the_hard_timeout() -> None:
         bounded(Path("profile.yaml"), concurrency=1)
 
     assert process.terminated
+    assert process.killed
+
+
+def test_memory_monitor_resets_each_scaling_peak_and_takes_final_cgroup_read() -> None:
+    """Reset the cgroup peak once and finish with a process-free synchronous read."""
+    events: list[str] = []
+
+    class Reader:
+        def reset_peak(self) -> None:
+            events.append("reset")
+
+        def sample(self) -> MemorySample:
+            events.append("inventory")
+            return _memory()[0]
+
+        def sample_job_peak(self) -> MemorySample:
+            events.append("final-peak")
+            return MemorySample((), peak_job_memory_bytes=999, cgroup_identity="/gate-c")
+
+    monitor = MemoryMonitor(Reader(), interval_seconds=100.0)
+    monitor.start()
+    monitor.finish_process_inventory()
+    monitor.stop()
+
+    assert events == ["reset", "inventory", "final-peak"]
+    assert monitor.samples[-1].processes == ()
+    assert monitor.samples[-1].peak_job_memory_bytes == 999
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["reporter", "sampler", "identity", "incomplete", "missing", "vanished"],
+)
+def test_every_reduced_scaling_measurement_fault_invalidates_attempt(fault: str) -> None:
+    """Retain every reduced-point fault for whole-attempt refusal."""
+    namespace = runpy.run_path(str(Path(__file__).parents[2] / "scripts" / "m5_benchmark.py"))
+    observation_type = namespace["ScalingObservation"]
+    observation_failures = namespace["_observation_failures"]
+    origin = pd.Timestamp("2026-01-01")
+    collector = LifecycleCollector(clock=Clock(*range(1, 15)))
+    for event in _events(origin):
+        collector(event)
+    samples = list(_memory())
+    reporter_failure = "reporter failed" if fault == "reporter" else None
+    sampler_failure = "sampler failed" if fault == "sampler" else None
+    if fault == "identity":
+        samples[-1] = replace(samples[-1], cgroup_identity="/other")
+    elif fault == "incomplete":
+        samples[-1] = replace(samples[-1], complete=False)
+    elif fault == "missing":
+        samples = [
+            MemorySample(
+                (ProcessResidentSample(10, "driver", 100),),
+                peak_job_memory_bytes=900,
+                cgroup_identity="/gate-c",
+            )
+        ]
+    elif fault == "vanished":
+        samples[-1] = replace(samples[-1], vanished_pids=(13,))
+    observation = observation_type(
+        series_count=1000,
+        wall_start=0.0,
+        wall_end=15.0,
+        origins=(origin,),
+        lifecycle=collector.records,
+        memory_samples=tuple(samples),
+        sampler_failure=sampler_failure,
+        reporter_failure=reporter_failure,
+        dispatch_count=16,
+    )
+
+    assert observation_failures(observation)
+
+
+def test_spawn_policy_is_set_before_child_start_and_restored_afterward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply one-thread settings at spawn time and record the child observation."""
+    namespace = runpy.run_path(str(Path(__file__).parents[2] / "scripts" / "m5_benchmark.py"))
+    bounded = namespace["run_bounded_concurrency"]
+    observed: dict[str, str | None] = {}
+
+    class Results:
+        def get(self, *, timeout: float) -> tuple[str, tuple[int, dict[str, str]]]:
+            assert timeout == 1.0
+            return "result", (16, dict(_THREAD_POLICY))
+
+    class Process:
+        def start(self) -> None:
+            observed.update({name: os.environ.get(name) for name in _THREAD_POLICY})
+
+        def join(self, _timeout: float | None = None) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+    class Context:
+        def Queue(self) -> Results:
+            return Results()
+
+        def Process(self, **_kwargs: object) -> Process:
+            return Process()
+
+    monkeypatch.setenv("OMP_NUM_THREADS", "fixture-previous")
+    bounded.__globals__["multiprocessing"] = SimpleNamespace(get_context=lambda _kind: Context())
+
+    result = bounded(Path("profile.yaml"), concurrency=1, clock=Clock(10.0, 12.0))
+
+    assert observed == _THREAD_POLICY
+    assert result == (1, 2.0, 16, _THREAD_POLICY)
+    assert os.environ["OMP_NUM_THREADS"] == "fixture-previous"

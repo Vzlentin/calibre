@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import multiprocessing
+import os
 import queue
 import sys
 import tempfile
@@ -55,6 +56,8 @@ class _Monitor(Protocol):
 
     def start(self) -> None: ...
 
+    def finish_process_inventory(self) -> None: ...
+
     def stop(self) -> None: ...
 
 
@@ -69,6 +72,7 @@ class ScalingObservation:
     lifecycle: tuple[LifecycleRecord, ...]
     memory_samples: tuple[MemorySample, ...]
     sampler_failure: str | None
+    reporter_failure: str | None
     dispatch_count: int
 
     @property
@@ -85,7 +89,7 @@ class ScalingObservation:
 
 
 def build_scaling_configs(config_path: Path, directory: Path) -> tuple[tuple[int, Path], ...]:
-    """Derive nested 1k/10k configs beside the committed full-M5 intent."""
+    """Clone all scaling configs with invocation-owned diagnostic destinations."""
     base = load_m5_config(config_path)
     if base.population.kind != "full":
         raise ProfileError("standard profiling requires the committed full-M5 config")
@@ -98,20 +102,25 @@ def build_scaling_configs(config_path: Path, directory: Path) -> tuple[tuple[int
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ProfileError("full-M5 configuration must be a mapping")
+    try:
+        diagnostic_root = directory.relative_to(PROJECT_ROOT)
+    except ValueError as error:
+        raise ProfileError("profiling work directory must be inside the project root") from error
     generated: list[tuple[int, Path]] = []
-    for count in _POPULATIONS[:-1]:
+    for count in _POPULATIONS:
         payload = copy.deepcopy(raw)
-        payload["protocol"]["population"] = {
-            "kind": "digest_rank",
-            "bottom_count": count,
-            "salt": _PROFILE_SALT,
-        }
-        payload["output_dir"] = f"results/m5/profile-{count}"
+        if count != _POPULATIONS[-1]:
+            payload["protocol"]["population"] = {
+                "kind": "digest_rank",
+                "bottom_count": count,
+                "salt": _PROFILE_SALT,
+            }
+        payload["output_dir"] = str(diagnostic_root / f"diagnostics-{count}")
         path = directory / f"gate-c-{count}.yaml"
         path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
         load_m5_config(path)
         generated.append((count, path))
-    return (*generated, (_POPULATIONS[-1], config_path))
+    return tuple(generated)
 
 
 def measure_scaling_point(
@@ -133,7 +142,7 @@ def measure_scaling_point(
         if event.phase is Phase.COMMIT and event.status is PhaseStatus.FINISHED:
             finished_commits += 1
             if finished_commits == origin_count:
-                monitor.stop()
+                monitor.finish_process_inventory()
 
     wall_start = clock()
     monitor.start()
@@ -156,6 +165,7 @@ def measure_scaling_point(
         lifecycle=collector.records,
         memory_samples=monitor.samples,
         sampler_failure=monitor.failure,
+        reporter_failure=collector.failure,
         dispatch_count=origin_count * 16,
     )
 
@@ -165,7 +175,9 @@ def run_bounded_concurrency(
     *,
     concurrency: int,
     timeout_seconds: float = 60.0,
-) -> tuple[int, float, int]:
+    clock: Callable[[], float] = time.perf_counter,
+    termination_grace_seconds: float = 1.0,
+) -> tuple[int, float, int, dict[str, str]]:
     """Run one Fit/Predict-only comparison in a killable child process."""
     context = multiprocessing.get_context("spawn")
     results = context.Queue()
@@ -173,11 +185,26 @@ def run_bounded_concurrency(
         target=_fit_predict_process,
         args=(config_path, concurrency, results),
     )
-    process.start()
+    wall_start = clock()
+    previous = {name: os.environ.get(name) for name in RAY_WORKER_THREAD_POLICY}
+    try:
+        os.environ.update(RAY_WORKER_THREAD_POLICY)
+        process.start()
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
     process.join(timeout_seconds)
     if process.is_alive():
         process.terminate()
-        process.join()
+        process.join(termination_grace_seconds)
+        if process.is_alive():
+            process.kill()
+            process.join(termination_grace_seconds)
+        if process.is_alive():
+            raise ProfileError("M5 Fit/Predict concurrency child resisted forced cleanup")
         raise ProfileError("M5 Fit/Predict concurrency run exceeded 60 seconds")
     try:
         kind, value = results.get(timeout=1.0)
@@ -185,8 +212,11 @@ def run_bounded_concurrency(
         raise ProfileError("M5 Fit/Predict concurrency run returned no result") from error
     if kind == "error":
         raise ProfileError(f"M5 Fit/Predict concurrency run failed: {value}")
-    wall_seconds, dispatch_count = value
-    return concurrency, wall_seconds, dispatch_count
+    wall_seconds = clock() - wall_start
+    if wall_seconds > timeout_seconds:
+        raise ProfileError("M5 Fit/Predict concurrency run exceeded 60 seconds")
+    dispatch_count, thread_policy = value
+    return concurrency, wall_seconds, dispatch_count, thread_policy
 
 
 def run_standard_profile(
@@ -199,10 +229,14 @@ def run_standard_profile(
     clock: Callable[[], float] = time.perf_counter,
     runner: Callable[..., object] = run_m5,
     monitor_factory: Callable[[], _Monitor] | None = None,
-    concurrency_runner: Callable[[Path, int], tuple[int, float, int]] | None = None,
+    concurrency_runner: (
+        Callable[[Path, int], tuple[int, float, int, dict[str, str]]] | None
+    ) = None,
 ) -> None:
     """Run, validate, and publish one complete standard M5 profile."""
-    with tempfile.TemporaryDirectory(prefix="calibre-m5-profile-") as temporary:
+    work_parent = PROJECT_ROOT / "results" / "m5" / ".profile-attempts"
+    work_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="attempt-", dir=work_parent) as temporary:
         configs = build_scaling_configs(config_path, Path(temporary))
         observations: list[ScalingObservation] = []
         for series_count, scaling_config in configs:
@@ -228,7 +262,8 @@ def run_standard_profile(
         concurrency_config = configs[0][1]
         if concurrency_runner is None:
             concurrency = tuple(
-                run_bounded_concurrency(concurrency_config, concurrency=value) for value in (1, 16)
+                run_bounded_concurrency(concurrency_config, concurrency=value, clock=clock)
+                for value in (1, 16)
             )
         else:
             concurrency = tuple(concurrency_runner(concurrency_config, value) for value in (1, 16))
@@ -243,6 +278,11 @@ def run_standard_profile(
         )
         for observation in observations
     )
+    failures = tuple(
+        reason for observation in observations for reason in _observation_failures(observation)
+    )
+    if failures:
+        raise ProfileError("standard profile measurement failed: " + "; ".join(failures))
     profile = aggregate_profile(
         attempt_id=attempt_id,
         expected_origins=full.origins,
@@ -260,7 +300,7 @@ def run_standard_profile(
         },
         scaling=scaling,
         concurrency=concurrency,
-        reporter_failure=None,
+        reporter_failure=full.reporter_failure,
         sampler_failure=full.sampler_failure,
     )
     cgroup_identity = str(profile["memory"]["cgroup_identity"])  # type: ignore[index]
@@ -313,7 +353,47 @@ def _fit_predict_process(config_path: Path, concurrency: int, results: Any) -> N
     except Exception as error:
         results.put(("error", str(error)))
         return
-    results.put(("result", (result.wall_seconds, result.dispatch_count)))
+    results.put(("result", (result.dispatch_count, dict(result.thread_policy))))
+
+
+def _observation_failures(observation: ScalingObservation) -> tuple[str, ...]:
+    """Return every invalidating fact retained for one scaling point."""
+    reasons: list[str] = []
+    if observation.reporter_failure:
+        reasons.append(
+            f"{observation.series_count}: lifecycle reporter failed: {observation.reporter_failure}"
+        )
+    if observation.sampler_failure:
+        reasons.append(
+            f"{observation.series_count}: memory sampler failed: {observation.sampler_failure}"
+        )
+    expected_lifecycle = tuple(
+        (origin, phase, status)
+        for origin in observation.origins
+        for phase in Phase
+        for status in (PhaseStatus.STARTED, PhaseStatus.FINISHED)
+    )
+    actual_lifecycle = tuple(
+        (record.event.origin, record.event.phase, record.event.status)
+        for record in observation.lifecycle
+    )
+    if actual_lifecycle != expected_lifecycle:
+        reasons.append(f"{observation.series_count}: lifecycle evidence was incomplete")
+    if not observation.memory_samples:
+        reasons.append(f"{observation.series_count}: memory sampling produced no observations")
+        return tuple(reasons)
+    identities = {sample.cgroup_identity for sample in observation.memory_samples}
+    if len(identities) != 1:
+        reasons.append(f"{observation.series_count}: cgroup identity changed")
+    if any(not sample.complete for sample in observation.memory_samples):
+        reasons.append(f"{observation.series_count}: memory sampling was incomplete")
+    if any(sample.vanished_pids for sample in observation.memory_samples):
+        reasons.append(f"{observation.series_count}: required process vanished")
+    roles = {process.role for sample in observation.memory_samples for process in sample.processes}
+    required_roles = {"driver", "ray-control", "object-store", "worker"}
+    if roles != required_roles:
+        reasons.append(f"{observation.series_count}: required process roles were incomplete")
+    return tuple(reasons)
 
 
 if __name__ == "__main__":

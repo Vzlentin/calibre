@@ -18,6 +18,16 @@ from newcalibre.benchmarking import (
     validate_profile,
 )
 
+_THREAD_POLICY = {
+    "BLIS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
+
 
 def _environment() -> dict[str, object]:
     return {
@@ -36,15 +46,7 @@ def _environment() -> dict[str, object]:
         "execution": {
             "logical_shards": 16,
             "numeric_threads_per_worker": 1,
-            "thread_policy": {
-                "BLIS_NUM_THREADS": "1",
-                "MKL_NUM_THREADS": "1",
-                "NUMEXPR_NUM_THREADS": "1",
-                "OMP_NUM_THREADS": "1",
-                "OPENBLAS_NUM_THREADS": "1",
-                "RAYON_NUM_THREADS": "1",
-                "VECLIB_MAXIMUM_THREADS": "1",
-            },
+            "thread_policy": dict(_THREAD_POLICY),
             "workers": 16,
         },
         "cgroup": {"identity": "/gate-c", "version": 2},
@@ -129,9 +131,9 @@ def _profile() -> dict[str, object]:
             },
             {
                 "dispatch_count": 16,
-                "peak_job_memory_bytes": 2700,
+                "peak_job_memory_bytes": 900,
                 "series_count": 30490,
-                "wall_seconds": 30.0,
+                "wall_seconds": 10.0,
                 "workers": 16,
             },
         ],
@@ -142,14 +144,24 @@ def _profile() -> dict[str, object]:
             "phases": ["Fit", "Predict"],
             "timeout_seconds": 60.0,
             "runs": [
-                {"concurrency": 1, "dispatch_count": 16, "wall_seconds": 4.0},
-                {"concurrency": 16, "dispatch_count": 16, "wall_seconds": 1.0},
+                {
+                    "concurrency": 1,
+                    "dispatch_count": 16,
+                    "thread_policy": dict(_THREAD_POLICY),
+                    "wall_seconds": 4.0,
+                },
+                {
+                    "concurrency": 16,
+                    "dispatch_count": 16,
+                    "thread_policy": dict(_THREAD_POLICY),
+                    "wall_seconds": 1.0,
+                },
             ],
         },
         "budgets": {
             "wall_seconds": {"limit": 900.0, "passed": True},
             "pre_origin_seconds": {"limit": 60.0, "passed": True},
-            "peak_job_memory_bytes": {"limit": 32 * 1024**3, "passed": True},
+            "peak_job_memory_bytes": {"limit": 32_000_000_000, "passed": True},
             "reconciliation_percent": {"minimum": 99.0, "passed": True},
         },
     }
@@ -180,9 +192,42 @@ def test_profile_job_memory_verdict_does_not_use_process_sum() -> None:
     """Use the cgroup-v2 peak alone for the 32 GB memory verdict."""
     profile = _profile()
     profile["memory"]["peak_process_resident_bytes"] = 1000  # type: ignore[index]
-    profile["memory"]["peak_job_memory_bytes"] = 33 * 1024**3  # type: ignore[index]
+    profile["memory"]["peak_job_memory_bytes"] = 32_000_000_001  # type: ignore[index]
+    profile["scaling"][-1]["peak_job_memory_bytes"] = 32_000_000_001  # type: ignore[index]
     profile["budgets"]["peak_job_memory_bytes"]["passed"] = False  # type: ignore[index]
     assert validate_profile(profile, environment=_environment()) == profile
+
+
+@pytest.mark.parametrize(("peak", "passed"), [(32_000_000_000, True), (32_000_000_001, False)])
+def test_decimal_job_memory_budget_boundary(peak: int, passed: bool) -> None:
+    """Bind the job-memory ceiling to decimal 32 GB at the exact boundary."""
+    profile = _profile()
+    profile["memory"]["peak_job_memory_bytes"] = peak  # type: ignore[index]
+    profile["scaling"][-1]["peak_job_memory_bytes"] = peak  # type: ignore[index]
+    profile["budgets"]["peak_job_memory_bytes"]["passed"] = passed  # type: ignore[index]
+
+    assert validate_profile(profile, environment=_environment()) == profile
+
+
+def test_incomplete_sampling_cannot_claim_a_valid_attempt() -> None:
+    """Reject synchronized false completeness facts when validity still passes."""
+    profile = _profile()
+    environment = _environment()
+    profile["memory"]["complete"] = False  # type: ignore[index]
+    environment["sampler"]["complete"] = False  # type: ignore[index]
+
+    with pytest.raises(ProfileError, match="validity disagrees"):
+        validate_profile(profile, environment=environment)
+
+
+@pytest.mark.parametrize("field", ["wall_seconds", "peak_job_memory_bytes", "dispatch_count"])
+def test_full_scaling_point_is_bound_to_primary_facts(field: str) -> None:
+    """Reject a full-population point detached from the primary observation."""
+    profile = _profile()
+    profile["scaling"][-1][field] += 1  # type: ignore[index,operator]
+
+    with pytest.raises(ProfileError, match="full scaling"):
+        validate_profile(profile, environment=_environment())
 
 
 def test_publish_emits_exact_deterministic_pair_and_refuses_dirty_root(
@@ -201,11 +246,8 @@ def test_publish_emits_exact_deterministic_pair_and_refuses_dirty_root(
     assert (first / "environment.json").read_bytes() == (second / "environment.json").read_bytes()
     assert json.loads((first / "profile.json").read_text()) == profile
 
-    dirty = tmp_path / "dirty"
-    dirty.mkdir()
-    (dirty / "run.log").write_text("not a performance artifact")
-    with pytest.raises(ProfileError, match="dirty"):
-        publish_profile_artifacts(dirty, profile=profile, environment=environment)
+    with pytest.raises(ProfileError, match="already exists"):
+        publish_profile_artifacts(first, profile=profile, environment=environment)
 
 
 def test_invalid_profile_never_emits_passing_artifacts(tmp_path: Path) -> None:
@@ -225,22 +267,16 @@ def test_invalid_profile_never_emits_passing_artifacts(tmp_path: Path) -> None:
     assert not (tmp_path / "profile").exists()
 
 
-def test_atomic_replacement_failure_restores_the_previous_pair(
+def test_atomic_install_failure_leaves_no_partial_pair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Restore both prior artifacts when publication cannot install the new pair."""
     target = tmp_path / "profile"
-    publish_profile_artifacts(target, profile=_profile(), environment=_environment())
-    previous = {path.name: path.read_bytes() for path in target.iterdir()}
     real_replace = os.replace
 
     def fail_install(source: Path, destination: Path) -> None:
-        if (
-            destination == target
-            and source.name.startswith(".profile.")
-            and ".old." not in source.name
-        ):
+        if destination == target and source.name.startswith(".profile."):
             raise OSError("fixture install failed")
         real_replace(source, destination)
 
@@ -248,7 +284,7 @@ def test_atomic_replacement_failure_restores_the_previous_pair(
     with pytest.raises(OSError, match="install failed"):
         publish_profile_artifacts(target, profile=_profile(), environment=_environment())
 
-    assert {path.name: path.read_bytes() for path in target.iterdir()} == previous
+    assert not target.exists()
 
 
 def test_linux_memory_reader_classifies_processes_and_reads_cgroup_peak(
@@ -270,14 +306,18 @@ def test_linux_memory_reader_classifies_processes_and_reads_cgroup_peak(
     for pid, command in commands.items():
         process = proc / str(pid)
         process.mkdir()
+        (process / "cgroup").write_text("0::/profile-job\n")
         (process / "cmdline").write_bytes(command.encode() + b"\0")
         (process / "status").write_text("Name:\tfixture\nVmRSS:\t2 kB\n")
 
-    sample = LinuxMemoryReader(
+    reader = LinuxMemoryReader(
         proc_root=proc,
         cgroup_root=cgroup,
         driver_pid=10,
-    ).sample()
+    )
+    reader.reset_peak()
+    (cgroup / "profile-job" / "memory.peak").write_text("4096\n")
+    sample = reader.sample()
 
     assert [(value.pid, value.role, value.resident_bytes) for value in sample.processes] == [
         (10, "driver", 2048),
@@ -298,5 +338,29 @@ def test_linux_memory_reader_rejects_unreadable_cgroup_peak(tmp_path: Path) -> N
     cgroup.mkdir(parents=True)
     (cgroup / "memory.peak").write_text("max\n")
 
+    reader = LinuxMemoryReader(proc_root=proc, cgroup_root=tmp_path / "cgroup")
+    reader.reset_peak()
+    (cgroup / "memory.peak").write_text("max\n")
     with pytest.raises(EnvironmentError, match="malformed"):
-        LinuxMemoryReader(proc_root=proc, cgroup_root=tmp_path / "cgroup").sample()
+        reader.sample()
+
+
+def test_linux_memory_reader_excludes_foreign_same_command_process(tmp_path: Path) -> None:
+    """Scope role inventory to the profiled job cgroup and descendants."""
+    proc = tmp_path / "proc"
+    cgroup = tmp_path / "cgroup" / "profile-job"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "cgroup").write_text("0::/profile-job\n")
+    cgroup.mkdir(parents=True)
+    (cgroup / "memory.peak").write_text("1\n")
+    for pid, identity in ((10, "/profile-job/ray-worker"), (11, "/foreign-job")):
+        process = proc / str(pid)
+        process.mkdir()
+        (process / "cgroup").write_text(f"0::{identity}\n")
+        (process / "cmdline").write_bytes(b"default_worker.py\0")
+        (process / "status").write_text("VmRSS:\t2 kB\n")
+
+    reader = LinuxMemoryReader(proc_root=proc, cgroup_root=tmp_path / "cgroup", driver_pid=99)
+    reader.reset_peak()
+
+    assert [(sample.pid, sample.role) for sample in reader.sample().processes] == [(10, "worker")]
