@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[1]
@@ -79,6 +83,80 @@ def test_workflow_has_pr_main_and_protocol_scoped_lanes() -> None:
     )
     assert type_step["working-directory"] == "newcalibre"
     assert type_step["run"] == "uv run --locked --no-sync ty check src/newcalibre/"
+
+
+def test_pr_unit_lane_provisions_only_loopback_in_its_network_namespace() -> None:
+    """Bring loopback up without restoring external connectivity."""
+    workflow = _workflow(REGRESSION)
+    step = next(
+        step
+        for step in workflow["jobs"]["newcalibre-unit"]["steps"]
+        if step.get("name") == "Run Tier 1 without repository, captures, or network"
+    )
+    run = step["run"]
+
+    assert "sudo unshare -n bash -c" in run
+    assert run.index("ip link set lo up") < run.index('exec sudo -u "$1"')
+    assert 'socket.create_connection((\\"1.1.1.1\\", 443), timeout=3)' in run
+    assert "uv run --no-sync pytest tests/tier1" in run
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires a Linux network namespace")
+def test_ray_starts_on_loopback_inside_a_hermetic_network_namespace() -> None:
+    """Execute the production Ray startup inside an isolated Linux namespace."""
+    sudo = shutil.which("sudo")
+    unshare = shutil.which("unshare")
+    if sudo is None or unshare is None:
+        pytest.skip("requires sudo and unshare")
+    capability = subprocess.run(
+        [sudo, "-n", unshare, "-n", "true"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if capability.returncode != 0:
+        pytest.skip("requires permission to create a network namespace")
+
+    witness = """
+import socket
+
+import ray
+
+from newcalibre.engine.ray import RayDispatch
+
+try:
+    socket.create_connection(("1.1.1.1", 443), timeout=1)
+except OSError:
+    pass
+else:
+    raise AssertionError("isolated namespace reached an external address")
+
+dispatch = RayDispatch()
+try:
+    dispatch._ensure_runtime()
+    nodes = [node for node in ray.nodes() if node.get("Alive")]
+    assert len(nodes) == 1
+    assert nodes[0]["NodeManagerAddress"] == "127.0.0.01"
+finally:
+    dispatch.shutdown()
+"""
+    namespace = f"""
+set -euo pipefail
+ip link set lo up
+exec {shlex.quote(sudo)} -n -u {shlex.quote(os.environ.get("USER", ""))} \
+  env PATH={shlex.quote(os.environ["PATH"])} HOME={shlex.quote(str(Path.home()))} \
+  {shlex.quote(sys.executable)} -c {shlex.quote(witness)}
+"""
+    completed = subprocess.run(
+        [sudo, "-n", unshare, "-n", "bash", "-c", namespace],
+        cwd=ROOT / "newcalibre",
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_protocol_jobs_pin_manual_candidates_end_to_end() -> None:

@@ -61,8 +61,12 @@ jobs:
           test ! -e "$EXPORT_ROOT/.git"
           test ! -e "$EXPORT_ROOT/stage3"
           test ! -e "$EXPORT_ROOT/calibre"
-          sudo unshare -n sudo -u "$USER" env "PATH=$PATH" "HOME=$HOME" \
-            "UV_CACHE_DIR=${UV_CACHE_DIR:-$HOME/.cache/uv}" bash -c '
+          sudo unshare -n bash -c '
+            set -euo pipefail
+            ip link set lo up
+            exec sudo -u "$1" env "PATH=$2" "HOME=$3" "UV_CACHE_DIR=$4" \
+              bash -c "$5"
+          ' _ "$USER" "$PATH" "$HOME" "${UV_CACHE_DIR:-$HOME/.cache/uv}" '
               set -euo pipefail
               uv run --no-sync python -c "
           import socket, sys
@@ -73,7 +77,7 @@ jobs:
           sys.exit(1)
           "
               uv run --no-sync pytest tests/tier1
-            '
+          '
 
   newcalibre-consistency:
     if: github.event_name == 'push'

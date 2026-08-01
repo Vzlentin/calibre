@@ -35,7 +35,8 @@ from newcalibre.forecasting import AdapterExecutionMode
 
 RAY_BACKEND: Final = "ray"
 _RAY_LOGICAL_SHARDS: Final = 16
-_LOOPBACK_ADDRESS: Final = "127.0.0.1"
+# This spelling resolves to 127.0.0.1 without triggering Ray's exact-string rewrite.
+_LOOPBACK_ADDRESS: Final = "127.0.0.01"
 _WORKER_ENV: Final = {
     "BLIS_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
