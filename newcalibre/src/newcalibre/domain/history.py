@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Protocol
@@ -23,7 +24,7 @@ class _HistoryStorage(Protocol):
     def identity(self) -> str: ...
 
     @property
-    def series_keys(self) -> tuple[str, ...]: ...
+    def series_keys(self) -> Sequence[str]: ...
 
     def materialize(
         self,

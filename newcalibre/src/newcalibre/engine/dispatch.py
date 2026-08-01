@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral
 from typing import Protocol, runtime_checkable
 
@@ -170,7 +170,7 @@ class InProcessDispatch:
         executor: ForecastShardExecutor,
     ) -> tuple[ForecastResultEnvelope, ...]:
         """Execute every shard once in canonical ordinal order."""
-        _require_backend_work(self, work)
+        require_backend_work(self, work)
         return tuple(executor.run_shard(shard) for shard in work.shards)
 
 
@@ -202,7 +202,8 @@ def build_forecast_work(
     token: CycleToken,
     task: ForecastTask,
     execution_mode: AdapterExecutionMode,
-    prior_states: dict[str, tuple[bytes, int, int]] | None = None,
+    prior_states: tuple[tuple[bytes, int], ...] | None = None,
+    prior_time_bound: int | None = None,
 ) -> ForecastWork:
     """Derive typed logical shards from one semantic forecast task."""
     if not isinstance(backend, str) or not backend:
@@ -218,7 +219,10 @@ def build_forecast_work(
     )
     work_key = _work_key(backend=backend, session=session, token=token, task=task)
     shards: list[ForecastShard] = []
-    states = prior_states or {}
+    if prior_states is not None and len(prior_states) != shard_count:
+        raise ForecastDispatchError("committed shard state count does not match canonical work")
+    if (prior_states is None) != (prior_time_bound is None):
+        raise ForecastDispatchError("committed shard state metadata is incomplete")
     for ordinal, (start, stop) in enumerate(ranges):
         empty = start == stop
         shard_task = task if empty else task._series_slice(start, stop)
@@ -230,7 +234,7 @@ def build_forecast_work(
             series_start=start,
             series_stop=stop,
         )
-        prior = states.get(shard_key)
+        prior = None if prior_states is None else prior_states[ordinal]
         shards.append(
             ForecastShard(
                 key=shard_key,
@@ -244,12 +248,10 @@ def build_forecast_work(
                 series_keys=series_keys,
                 empty=empty,
                 prior_native_state=None if prior is None else prior[0],
-                prior_time_bound=None if prior is None else prior[1],
-                fit_time_bound=None if prior is None else prior[2],
+                prior_time_bound=prior_time_bound,
+                fit_time_bound=None if prior is None else prior[1],
             )
         )
-    if states and set(states) != {shard.key for shard in shards}:
-        raise ForecastDispatchError("committed shard states do not match canonical work")
     return ForecastWork(
         key=work_key,
         backend=backend,
@@ -296,27 +298,16 @@ def validate_forecast_envelopes(
         actual_rows = tuple(zip(frame[SERIES_KEY], frame[HORIZON_STEP], strict=True))
         if actual_rows != expected_rows or not frame[ORIGIN].eq(work.task.origin).all():
             raise ForecastDispatchError("forecast result rows do not canonically own their shard")
-        by_ordinal[envelope.ordinal] = ForecastResultEnvelope(
-            work_key=envelope.work_key,
-            shard_key=envelope.shard_key,
-            backend=envelope.backend,
-            ordinal=envelope.ordinal,
-            session=envelope.session,
-            token=envelope.token,
-            semantic_task_identity=envelope.semantic_task_identity,
-            series_keys=envelope.series_keys,
-            frame=frame,
-            native_state=envelope.native_state,
-            fit_time_bound=envelope.fit_time_bound,
-        )
+        by_ordinal[envelope.ordinal] = replace(envelope, frame=frame)
     if set(by_ordinal) != set(expected_by_ordinal):
         raise ForecastDispatchError("forecast result is missing one or more logical shards")
     ordered = tuple(by_ordinal[ordinal] for ordinal in range(len(work.shards)))
     merged = pd.concat((envelope.frame for envelope in ordered), ignore_index=True)
-    return validate_forecast_frame(merged, calendar=work.task.calendar), ordered
+    return merged, ordered
 
 
-def _require_backend_work(backend: DispatchBackend, work: ForecastWork) -> None:
+def require_backend_work(backend: DispatchBackend, work: ForecastWork) -> None:
+    """Require typed work to match its selected backend and budget."""
     if work.backend != backend.backend or work.budget != backend.budget:
         raise ForecastDispatchError("forecast work does not match its dispatch backend")
 
@@ -378,5 +369,6 @@ __all__ = [
     "InProcessDispatch",
     "build_forecast_work",
     "canonical_shard_ranges",
+    "require_backend_work",
     "validate_forecast_envelopes",
 ]

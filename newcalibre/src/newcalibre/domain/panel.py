@@ -315,6 +315,24 @@ def _canonicalize_future_exogenous(
     return normalized
 
 
+def _series_row_bounds(frame: pd.DataFrame) -> dict[str, tuple[int, int]]:
+    """Index contiguous canonical rows by series without copying them."""
+    bounds: dict[str, tuple[int, int]] = {}
+    active: str | None = None
+    start = 0
+    for stop, raw_key in enumerate(frame[SERIES_KEY], start=1):
+        key = str(raw_key)
+        if active is None:
+            active = key
+        elif key != active:
+            bounds[active] = (start, stop - 1)
+            active = key
+            start = stop - 1
+    if active is not None:
+        bounds[active] = (start, len(frame))
+    return bounds
+
+
 def _sort_by_panel_key(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.sort_values(
         list(PANEL_KEY_COLUMNS),

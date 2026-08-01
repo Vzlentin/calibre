@@ -107,7 +107,8 @@ class ForecastLifecycle:
         execution_mode = _execution_mode(adapter)
         capabilities = _capability_names(adapter)
         persistent = AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities
-        prior_states: dict[str, tuple[bytes, int, int]] | None = None
+        prior_states: tuple[tuple[bytes, int], ...] | None = None
+        prior_time_bound: int | None = None
         checkpoint: _Checkpoint | None = None
         if persistent:
             lineage = _lineage_identity(task)
@@ -148,27 +149,16 @@ class ForecastLifecycle:
                     checkpoint_indexes=checkpoint_indexes,
                 )
 
-        unbound = build_forecast_work(
-            backend=backend,
-            budget=budget,
-            session=session,
-            token=token,
-            task=task,
-            execution_mode=execution_mode,
-        )
         if checkpoint is not None:
-            states = _decode_combined_state(
+            prior_states = _decode_combined_state(
                 checkpoint.native_state,
-                expected_count=len(unbound.shards),
+                expected_count=(
+                    budget.logical_shards
+                    if execution_mode is AdapterExecutionMode.SERIES_SEPARABLE
+                    else 1
+                ),
             )
-            prior_states = {
-                shard.key: (native_state, checkpoint.cursor.time_bound, fit_time_bound)
-                for shard, (native_state, fit_time_bound) in zip(
-                    unbound.shards,
-                    states,
-                    strict=True,
-                )
-            }
+            prior_time_bound = checkpoint.cursor.time_bound
         return build_forecast_work(
             backend=backend,
             budget=budget,
@@ -177,6 +167,7 @@ class ForecastLifecycle:
             task=task,
             execution_mode=execution_mode,
             prior_states=prior_states,
+            prior_time_bound=prior_time_bound,
         )
 
     def run_shard(self, shard: ForecastShard) -> ForecastResultEnvelope:
@@ -184,15 +175,8 @@ class ForecastLifecycle:
         if not isinstance(shard, ForecastShard):
             raise TypeError("forecast lifecycle requires a ForecastShard")
         if shard.empty:
-            return ForecastResultEnvelope(
-                work_key=shard.work_key,
-                shard_key=shard.key,
-                backend=shard.backend,
-                ordinal=shard.ordinal,
-                session=shard.session,
-                token=shard.token,
-                semantic_task_identity=shard.semantic_task_identity,
-                series_keys=(),
+            return _result_envelope(
+                shard,
                 frame=_empty_forecast_frame(),
                 native_state=b"",
                 fit_time_bound=shard.task.cursor.time_bound,
@@ -239,15 +223,8 @@ class ForecastLifecycle:
             if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities
             else None
         )
-        return ForecastResultEnvelope(
-            work_key=shard.work_key,
-            shard_key=shard.key,
-            backend=shard.backend,
-            ordinal=shard.ordinal,
-            session=shard.session,
-            token=shard.token,
-            semantic_task_identity=shard.semantic_task_identity,
-            series_keys=shard.series_keys,
+        return _result_envelope(
+            shard,
             frame=frame,
             native_state=native_state,
             fit_time_bound=fit_time_bound,
@@ -263,8 +240,6 @@ class ForecastLifecycle:
         adapter = self._adapter_resolver(work.task.model_config)
         pending = None
         if AdapterCapability.ARTIFACT_PERSISTENCE in adapter.capabilities:
-            if any(envelope.native_state is None for envelope in ordered):
-                raise ForecastLifecycleError("persistent forecast work omitted shard state")
             lineage = _lineage_identity(work.task)
             config_digest = _config_digest(work.task.model_config)
             key = _checkpoint_key(
@@ -473,19 +448,44 @@ def _empty_forecast_frame() -> pd.DataFrame:
     )
 
 
+def _result_envelope(
+    shard: ForecastShard,
+    *,
+    frame: pd.DataFrame,
+    native_state: bytes | None,
+    fit_time_bound: int,
+) -> ForecastResultEnvelope:
+    return ForecastResultEnvelope(
+        work_key=shard.work_key,
+        shard_key=shard.key,
+        backend=shard.backend,
+        ordinal=shard.ordinal,
+        session=shard.session,
+        token=shard.token,
+        semantic_task_identity=shard.semantic_task_identity,
+        series_keys=shard.series_keys,
+        frame=frame,
+        native_state=native_state,
+        fit_time_bound=fit_time_bound,
+    )
+
+
 def _encode_combined_state(envelopes: tuple[ForecastResultEnvelope, ...]) -> bytes:
+    states: list[dict[str, object]] = []
+    for envelope in envelopes:
+        native_state = envelope.native_state
+        if native_state is None:
+            raise ForecastLifecycleError("persistent forecast work omitted shard state")
+        states.append(
+            {
+                "fit_time_bound": envelope.fit_time_bound,
+                "native_state": base64.b64encode(native_state).decode("ascii"),
+            }
+        )
     return canonical_json_bytes(
         {
             "schema": _COMBINED_STATE_SCHEMA,
-            "states": [
-                {
-                    "fit_time_bound": envelope.fit_time_bound,
-                    "native_state": base64.b64encode(cast(bytes, envelope.native_state)).decode(
-                        "ascii"
-                    ),
-                }
-                for envelope in envelopes
-            ],
+            "states": states,
         },
         path="combined forecast state",
     )

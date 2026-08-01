@@ -22,6 +22,7 @@ from newcalibre.domain.panel import (
     TIMESTAMP,
     Scope,
     _canonicalize_future_exogenous,
+    _series_row_bounds,
 )
 
 HISTORY_TIMESTAMP = TIMESTAMP
@@ -181,7 +182,10 @@ class ForecastTask:
         series_keys = self._series_keys[start:stop]
         future = self._future_exogenous
         if future is not None and SERIES_KEY in future.columns:
-            future = future[future[SERIES_KEY].isin(series_keys)].reset_index(drop=True)
+            bounds = _series_row_bounds(future)
+            row_start = bounds[series_keys[0]][0]
+            row_stop = bounds[series_keys[-1]][1]
+            future = future.iloc[row_start:row_stop].reset_index(drop=True)
         history = self._history._series_slice(start, stop)
         delta = self._delta._series_slice(start, stop)
         return ForecastTask._from_components(

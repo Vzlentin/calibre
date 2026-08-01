@@ -23,7 +23,7 @@ from newcalibre.domain import (
     TargetSupport,
 )
 from newcalibre.domain._canonical_json import canonical_json_bytes
-from newcalibre.domain.panel import _canonicalize_future_exogenous
+from newcalibre.domain.panel import _canonicalize_future_exogenous, _series_row_bounds
 
 
 class IndexedPanelError(ValueError):
@@ -243,24 +243,6 @@ class IndexedPanel:
             (ordinal, ordinal + 1, (series_key,))
             for ordinal, series_key in enumerate(self.series_keys)
         )
-
-
-def _series_row_bounds(frame: pd.DataFrame) -> dict[str, tuple[int, int]]:
-    """Index contiguous canonical future rows by series without copying them."""
-    bounds: dict[str, tuple[int, int]] = {}
-    active: str | None = None
-    start = 0
-    for stop, raw_key in enumerate(frame[SERIES_KEY], start=1):
-        key = str(raw_key)
-        if active is None:
-            active = key
-        elif key != active:
-            bounds[active] = (start, stop - 1)
-            active = key
-            start = stop - 1
-    if active is not None:
-        bounds[active] = (start, len(frame))
-    return bounds
 
 
 def _panel_identity(
