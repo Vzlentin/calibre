@@ -13,7 +13,8 @@ from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     CalibrationContext,
     ConformalRuntime,
-    Delivery,
+    ConformalStateBatch,
+    DeliveryBatch,
     ObserveEffect,
     ResolvedObservation,
 )
@@ -58,7 +59,7 @@ class ObserveLoop:
         hierarchy: HierarchyIndex,
         observed_history: Iterable[ObservedActual] | Mapping[ActualKey, ObservedActual] = (),
         pending_observations: Iterable[PendingObservation] = (),
-        conformal_states: Mapping[str, bytes | None] | None = None,
+        conformal_states: Mapping[str, bytes] | None = None,
         runtime: ConformalRuntime | None = None,
     ) -> None:
         if not isinstance(hierarchy, HierarchyIndex):
@@ -101,7 +102,7 @@ class ObserveLoop:
         return self._pending
 
     @property
-    def conformal_states(self) -> Mapping[str, bytes | None]:
+    def conformal_states(self) -> Mapping[str, bytes]:
         """Return an isolated read-only snapshot of prior opaque state."""
         return MappingProxyType(dict(self._conformal_states))
 
@@ -155,12 +156,47 @@ class ObserveLoop:
         ready = tuple(row for row in candidates if row.forecast_key in ready_keys)
         retained = tuple(row for row in candidates if row.forecast_key not in ready_keys)
 
-        deliveries: tuple[Delivery, ...] = ()
+        deliveries = DeliveryBatch()
         annotations = ()
         updates: dict[str, bytes] = {}
         if self._runtime is not None and ready:
-            deliveries = self._deliveries(ready)
-            annotations, updates = self._observe_deliveries(deliveries)
+            deliveries = self._delivery_batch(ready)
+            context = self._calibration_context(deliveries)
+            prior_state = ConformalStateBatch(self._conformal_states)
+            try:
+                effect = self._runtime.observe(deliveries, prior_state, context=context)
+            except ValueError as error:
+                raise ObserveError(f"conformal observe failed: {error}") from error
+            if not isinstance(effect, ObserveEffect):
+                raise ObserveError("conformal observe must return an ObserveEffect")
+            removed = set(prior_state.labels).difference(effect.state.labels)
+            if removed:
+                raise ObserveError(
+                    f"conformal observe removed prior state rows: {sorted(removed)!r}"
+                )
+            changed = {
+                label
+                for label in effect.state.labels
+                if label not in prior_state or prior_state[label] != effect.state[label]
+            }
+            if changed != set(effect.dirty_labels):
+                raise ObserveError(
+                    "conformal observe dirty labels must exactly identify changed state rows"
+                )
+            expected = {value.forecast_key for value in deliveries.observations}
+            actual = {value.forecast_key for value in effect.annotations}
+            if actual != expected:
+                raise ObserveError(
+                    "conformal observe annotations must exactly cover the delivery batch"
+                )
+            addressed = {METHOD_SCOPE_LABEL, *deliveries.labels}
+            foreign_dirty = set(effect.dirty_labels).difference(addressed)
+            if foreign_dirty:
+                raise ObserveError(
+                    f"conformal observe dirtied foreign state rows: {sorted(foreign_dirty)!r}"
+                )
+            annotations = effect.annotations
+            updates = dict(effect.dirty_state)
 
         resolutions = tuple(row.resolution for row in ready if row.resolution is not None)
         return ObserveCycle(
@@ -277,9 +313,9 @@ class ObserveLoop:
                 ready.update(value.forecast_key for value in complete)
         return ready
 
-    def _deliveries(self, ready: tuple[PendingObservation, ...]) -> tuple[Delivery, ...]:
+    def _delivery_batch(self, ready: tuple[PendingObservation, ...]) -> DeliveryBatch:
         if self._runtime is None:
-            return ()
+            return DeliveryBatch()
         by_partition: dict[str, list[ResolvedObservation]] = {}
         for row in ready:
             issued = row.issued
@@ -310,67 +346,18 @@ class ObserveLoop:
             )
             by_partition.setdefault(issued.partition_label, []).append(observation)
 
-        deliveries: list[Delivery] = []
-        for label in sorted(by_partition, key=str.encode):
-            observations = tuple(sorted(by_partition[label], key=_delivery_order))
-            deliveries.append(Delivery(label, observations))
-        return tuple(deliveries)
+        return DeliveryBatch(
+            {
+                label: tuple(sorted(observations, key=_delivery_order))
+                for label, observations in by_partition.items()
+            }
+        )
 
-    def _observe_deliveries(
-        self,
-        deliveries: tuple[Delivery, ...],
-    ) -> tuple[tuple, dict[str, bytes]]:
-        if self._runtime is None:
-            return (), {}
-        updates: dict[str, bytes] = {}
-        annotations = []
-        for delivery in deliveries:
-            context = self._calibration_context(delivery)
-            addressed_labels = (METHOD_SCOPE_LABEL, delivery.partition_label)
-            addressed_states: dict[str, bytes | None] = {}
-            for label in addressed_labels:
-                if label in updates:
-                    addressed_states[label] = updates[label]
-                elif label in self._conformal_states:
-                    addressed_states[label] = self._conformal_states[label]
-            try:
-                effect = self._runtime.observe(
-                    delivery,
-                    MappingProxyType(addressed_states),
-                    context=context,
-                )
-            except ValueError as error:
-                raise ObserveError(
-                    f"conformal observe failed for partition {delivery.partition_label!r}: {error}"
-                ) from error
-            if not isinstance(effect, ObserveEffect):
-                raise ObserveError("conformal observe must return an ObserveEffect")
-            expected = {value.forecast_key for value in delivery.observations}
-            actual = {value.forecast_key for value in effect.annotations}
-            if actual != expected:
-                raise ObserveError(
-                    "conformal observe annotations must exactly cover the partition delivery"
-                )
-            emitted = dict(effect.state_updates)
-            if delivery.partition_label not in emitted:
-                raise ObserveError("conformal observe omitted the touched partition state update")
-            foreign = set(emitted).difference(addressed_labels)
-            if foreign:
-                raise ObserveError(
-                    f"conformal observe emitted foreign state updates: {sorted(foreign)}"
-                )
-            for label, value in emitted.items():
-                if label != METHOD_SCOPE_LABEL and label in updates and updates[label] != value:
-                    raise ObserveError(f"conformal observe emitted conflicting state for {label!r}")
-                updates[label] = value
-            annotations.extend(effect.annotations)
-        return tuple(annotations), updates
-
-    def _calibration_context(self, delivery: Delivery) -> CalibrationContext | None:
+    def _calibration_context(self, deliveries: DeliveryBatch) -> CalibrationContext | None:
         if self._runtime is None or not self._runtime.manifest.consumes_calibration_context:
             return None
         nodes = tuple(
-            self._node_by_label[value.forecast_key.series_key] for value in delivery.observations
+            self._node_by_label[value.forecast_key.series_key] for value in deliveries.observations
         )
         return CalibrationContext(
             series_keys=tuple(node.label for node in nodes),
@@ -426,7 +413,7 @@ def _pending_snapshot(
     return pending
 
 
-def _state_snapshot(values: Mapping[str, bytes | None] | None) -> dict[str, bytes | None]:
+def _state_snapshot(values: Mapping[str, bytes] | None) -> dict[str, bytes]:
     if values is None:
         return {}
     if not isinstance(values, Mapping):
@@ -435,8 +422,8 @@ def _state_snapshot(values: Mapping[str, bytes | None] | None) -> dict[str, byte
     for label, value in snapshot.items():
         if not isinstance(label, str) or not label:
             raise ObserveError("conformal state labels must be non-empty strings")
-        if value is not None and not isinstance(value, bytes):
-            raise ObserveError("conformal state values must be immutable bytes or missing")
+        if not isinstance(value, bytes):
+            raise ObserveError("conformal state values must be immutable bytes")
     return snapshot
 
 

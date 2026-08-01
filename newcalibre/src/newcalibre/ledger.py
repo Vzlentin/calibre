@@ -1096,8 +1096,7 @@ class Ledger:
 
         delivered_sequence = tuple(
             _ledger_forecast_key(observation.forecast_key)
-            for delivery in cycle.deliveries
-            for observation in delivery.observations
+            for observation in cycle.deliveries.observations
         )
         delivered_keys = set(delivered_sequence)
         if len(delivered_keys) != len(delivered_sequence):
@@ -1107,17 +1106,14 @@ class Ledger:
             raise LedgerError(
                 "observe deliveries must exactly match conformal-issued pending removals"
             )
-        for delivery in cycle.deliveries:
-            for observation in delivery.observations:
-                key = _ledger_forecast_key(observation.forecast_key)
-                if not _delivery_matches_staged_resolution(
-                    observation,
-                    pending=current[key],
-                    resolution=resolution_by_key[key],
-                ):
-                    raise LedgerError(
-                        f"observe delivery facts do not match staged resolution: {key!r}"
-                    )
+        for observation in cycle.deliveries.observations:
+            key = _ledger_forecast_key(observation.forecast_key)
+            if not _delivery_matches_staged_resolution(
+                observation,
+                pending=current[key],
+                resolution=resolution_by_key[key],
+            ):
+                raise LedgerError(f"observe delivery facts do not match staged resolution: {key!r}")
         annotation_by_key = {
             _ledger_forecast_key(value.forecast_key): value for value in cycle.annotations
         }

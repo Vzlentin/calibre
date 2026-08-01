@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral, Real
 from types import MappingProxyType
@@ -13,6 +13,11 @@ from typing import Literal, cast
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from newcalibre.conformal.batch import (
+    CalibrationSeedBatch,
+    ConformalStateBatch,
+    DeliveryBatch,
+)
 from newcalibre.conformal.manifest import (
     AssumptionClass,
     CensoringPolicy,
@@ -29,11 +34,11 @@ from newcalibre.conformal.types import (
     METHOD_SCOPE_LABEL,
     CalibrationContext,
     CalibrationResult,
-    Delivery,
     ForecastKey,
     IssuedBoundFacts,
     ObserveAnnotation,
     ObserveEffect,
+    ResolvedObservation,
     RuntimeContractError,
     _decode_label,
     derive_partition_label,
@@ -124,6 +129,43 @@ class _MethodState:
     issue_counter: int
 
 
+@dataclass(frozen=True, slots=True)
+class _WeightedStateColumns:
+    labels: tuple[str, ...]
+    scores: tuple[tuple[float, ...], ...]
+    delivered_score_counts: tuple[int, ...]
+    scored_series: tuple[ScoredSeries, ...]
+    route_by_label: Mapping[str, int]
+    method_state: _MethodState
+
+    @classmethod
+    def from_rows(
+        cls,
+        rows: Mapping[str, _PartitionState],
+        method_state: _MethodState,
+    ) -> _WeightedStateColumns:
+        labels = tuple(sorted(rows, key=str.encode))
+        states = tuple(rows[label] for label in labels)
+        return cls(
+            labels=labels,
+            scores=tuple(state.scores for state in states),
+            delivered_score_counts=tuple(state.delivered_score_count for state in states),
+            scored_series=tuple(state.scored_series for state in states),
+            route_by_label=MappingProxyType({label: route for route, label in enumerate(labels)}),
+            method_state=method_state,
+        )
+
+    def get(self, label: str, default: _PartitionState) -> _PartitionState:
+        route = self.route_by_label.get(label)
+        if route is None:
+            return default
+        return _PartitionState(
+            self.scores[route],
+            self.delivered_score_counts[route],
+            self.scored_series[route],
+        )
+
+
 class _WeightedStateCodec:
     def __init__(self) -> None:
         self._codec = JsonStateCodec(
@@ -210,7 +252,7 @@ class WeightedConformalRuntime:
             raise RuntimeContractError("weighted runtime configuration does not match its manifest")
         self._config = config
         self._codec = _WeightedStateCodec()
-        self._validate_states(states, allow_missing=False)
+        self._validate_states(ConformalStateBatch(states))
 
     @property
     def manifest(self) -> MethodManifest:
@@ -222,20 +264,18 @@ class WeightedConformalRuntime:
         """Return the frozen weighted runtime configuration."""
         return self._config
 
-    def calibrate(self, scores: Mapping[str, Sequence[float]]) -> Mapping[str, bytes]:
+    def calibrate(self, seeds: CalibrationSeedBatch) -> ConformalStateBatch:
         """Seed bounded chronological partition states from finite scores."""
-        if not isinstance(scores, Mapping):
-            raise RuntimeContractError("calibration scores must be a mapping")
+        if not isinstance(seeds, CalibrationSeedBatch):
+            raise RuntimeContractError("weighted calibration seeds must be a CalibrationSeedBatch")
         updates: dict[str, bytes] = {}
-        for label, values in scores.items():
+        for label, values in seeds.items():
             try:
                 scope = self._codec.scope_for(label)
             except StateCodecError as error:
                 raise RuntimeContractError(str(error)) from error
             if scope is not StateScope.PARTITION:
                 raise RuntimeContractError("calibration scores must use partition labels")
-            if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-                raise RuntimeContractError("partition calibration scores must be a sequence")
             normalized = tuple(_finite_score(value) for value in values)
             retained = normalized[-self._config.calibration_window :]
             updates[label] = self._codec.encode_partition(
@@ -247,12 +287,12 @@ class WeightedConformalRuntime:
                 ),
             )
         updates[METHOD_SCOPE_LABEL] = self._codec.encode_method(_MethodState(0))
-        return MappingProxyType(updates)
+        return ConformalStateBatch(updates)
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: Mapping[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
@@ -272,7 +312,7 @@ class WeightedConformalRuntime:
             context,
             series_keys=tuple(forecasts[SERIES_KEY]),
         )
-        decoded = self._validate_states(states, allow_missing=True)
+        decoded = self._validate_states(state)
         rows = _apply_rows(forecasts)
         lower_column, upper_column = interval_columns(self._config.coverage)
         lower_values: list[float] = []
@@ -282,13 +322,11 @@ class WeightedConformalRuntime:
         quantiles: dict[str, float | None] = {}
         state_references: dict[str, str] = {}
         descriptors: dict[ScoredSeries, GuaranteeDescriptor] = {}
-        method_state = self._method_state(states)
+        method_state = decoded.method_state
 
         for row in rows:
             label = self._partition_label(row.key.model_name, row.key.series_key)
-            partition = decoded.get(label)
-            if partition is None:
-                partition = _empty_partition()
+            partition = decoded.get(label, _empty_partition())
             ready = len(partition.scores) >= minimum
             if not ready:
                 lower = math.nan
@@ -348,57 +386,62 @@ class WeightedConformalRuntime:
         calibrated = forecasts.copy(deep=True)
         calibrated[lower_column] = pd.Series(lower_values, index=calibrated.index, dtype="float64")
         calibrated[upper_column] = pd.Series(upper_values, index=calibrated.index, dtype="float64")
-        updates = {
-            METHOD_SCOPE_LABEL: self._codec.encode_method(
-                _MethodState(method_state.issue_counter + len(rows))
-            )
-        }
-        return CalibrationResult(calibrated, updates, issuances)
+        method_blob = self._codec.encode_method(
+            _MethodState(method_state.issue_counter + len(rows))
+        )
+        post_state = state.with_rows({METHOD_SCOPE_LABEL: method_blob})
+        dirty = () if state.get(METHOD_SCOPE_LABEL) == method_blob else (METHOD_SCOPE_LABEL,)
+        return CalibrationResult(calibrated, post_state, dirty, issuances)
 
     def observe(
         self,
-        delivery: Delivery,
-        states: Mapping[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
-        """Append accepted scores in canonical delivery order."""
-        if not isinstance(delivery, Delivery):
-            raise RuntimeContractError("weighted observe delivery must be a Delivery")
+        """Append accepted scores across every canonical delivery partition."""
+        if not isinstance(deliveries, DeliveryBatch):
+            raise RuntimeContractError("weighted observe deliveries must be a DeliveryBatch")
         require_calibration_context(
             self.manifest,
             context,
             series_keys=tuple(
-                observation.forecast_key.series_key for observation in delivery.observations
+                observation.forecast_key.series_key for observation in deliveries.observations
             ),
         )
-        self._validate_delivery_issuance(delivery)
-        decoded = self._validate_states(states, allow_missing=True)
-        partition = decoded.get(delivery.partition_label)
-        if partition is None:
-            partition = _empty_partition()
-        scores = list(partition.scores)
-        count = partition.delivered_score_count
-        scored_series = partition.scored_series
+        decoded = self._validate_states(state)
+        updated_rows: dict[str, bytes] = {}
+        dirty: list[str] = []
         annotations: list[ObserveAnnotation] = []
-        for observation in delivery.observations:
-            if observation.censoring_assertion is CensoringAssertion.CENSORED:
-                annotations.append(
-                    ObserveAnnotation(observation.forecast_key, None, _CENSORED_CAUSE, False)
-                )
-                continue
-            score = abs(observation.actual - observation.point_forecast)
-            if not math.isfinite(score):
-                raise RuntimeContractError("weighted residual scores must be finite")
-            scores.append(score)
-            count += 1
-            if observation.censoring_assertion is None:
-                scored_series = ScoredSeries.RECORDED_SALES
-            annotations.append(ObserveAnnotation(observation.forecast_key, score, None, True))
-        bounded_scores = scores[-self._config.calibration_window :]
-        updated = _PartitionState(tuple(bounded_scores), count, scored_series)
-        state = self._codec.encode_partition(delivery.partition_label, updated)
-        return ObserveEffect({delivery.partition_label: state}, tuple(annotations))
+        for label, observations in deliveries.items():
+            self._validate_delivery_issuance(label, observations)
+            partition = decoded.get(label, _empty_partition())
+            scores = list(partition.scores)
+            count = partition.delivered_score_count
+            scored_series = partition.scored_series
+            for observation in observations:
+                if observation.censoring_assertion is CensoringAssertion.CENSORED:
+                    annotations.append(
+                        ObserveAnnotation(observation.forecast_key, None, _CENSORED_CAUSE, False)
+                    )
+                    continue
+                score = abs(observation.actual - observation.point_forecast)
+                if not math.isfinite(score):
+                    raise RuntimeContractError("weighted residual scores must be finite")
+                scores.append(score)
+                count += 1
+                if observation.censoring_assertion is None:
+                    scored_series = ScoredSeries.RECORDED_SALES
+                annotations.append(ObserveAnnotation(observation.forecast_key, score, None, True))
+            bounded_scores = scores[-self._config.calibration_window :]
+            updated = _PartitionState(tuple(bounded_scores), count, scored_series)
+            blob = self._codec.encode_partition(label, updated)
+            updated_rows[label] = blob
+            if state.get(label) != blob:
+                dirty.append(label)
+        post_state = state.with_rows(updated_rows)
+        return ObserveEffect(post_state, dirty, annotations)
 
     def _partition_label(self, model_name: str, series_key: str) -> str:
         value = "global" if self._config.partition_by == "global" else series_key
@@ -406,24 +449,17 @@ class WeightedConformalRuntime:
 
     def _validate_states(
         self,
-        states: Mapping[str, bytes | None],
-        *,
-        allow_missing: bool,
-    ) -> dict[str, _PartitionState]:
-        if not isinstance(states, Mapping):
-            raise RuntimeContractError("weighted states must be a mapping")
+        state: ConformalStateBatch,
+    ) -> _WeightedStateColumns:
+        if not isinstance(state, ConformalStateBatch):
+            raise RuntimeContractError("weighted state must be a ConformalStateBatch")
         partitions: dict[str, _PartitionState] = {}
-        for label, value in dict(states).items():
-            if value is None:
-                if allow_missing:
-                    continue
-                raise RuntimeContractError("restored weighted states must contain bytes")
-            if not isinstance(value, bytes):
-                raise RuntimeContractError("weighted state values must be immutable bytes")
+        method_state = _MethodState(0)
+        for label, value in state.items():
             try:
                 scope = self._codec.scope_for(label)
                 if scope is StateScope.METHOD:
-                    self._codec.decode_method(value)
+                    method_state = self._codec.decode_method(value)
                     continue
                 partition = self._codec.decode_partition(value, label=label)
             except StateCodecError as error:
@@ -433,18 +469,7 @@ class WeightedConformalRuntime:
                     "restored weighted scores exceed the configured calibration window"
                 )
             partitions[label] = partition
-        return partitions
-
-    def _method_state(self, states: Mapping[str, bytes | None]) -> _MethodState:
-        value = states.get(METHOD_SCOPE_LABEL)
-        if value is None:
-            return _MethodState(0)
-        if not isinstance(value, bytes):
-            raise RuntimeContractError("weighted method state must be immutable bytes")
-        try:
-            return self._codec.decode_method(value)
-        except StateCodecError as error:
-            raise RuntimeContractError(str(error)) from error
+        return _WeightedStateColumns.from_rows(partitions, method_state)
 
     def _descriptor(self, scored_series: ScoredSeries) -> GuaranteeDescriptor:
         return GuaranteeDescriptor(
@@ -459,8 +484,12 @@ class WeightedConformalRuntime:
             scope=DecisionScope(DecisionScopeKind.PER_DECISION_NODE, None),
         )
 
-    def _validate_delivery_issuance(self, delivery: Delivery) -> None:
-        for observation in delivery.observations:
+    def _validate_delivery_issuance(
+        self,
+        partition_label: str,
+        observations: tuple[ResolvedObservation, ...],
+    ) -> None:
+        for observation in observations:
             issued = observation.issued
             if issued.method_name != self.manifest.name:
                 raise RuntimeContractError("delivered issuance has the wrong weighted method")
@@ -474,7 +503,7 @@ class WeightedConformalRuntime:
                 observation.forecast_key.model_name,
                 observation.forecast_key.series_key,
             )
-            if expected != delivery.partition_label:
+            if expected != partition_label:
                 raise RuntimeContractError(
                     "delivered forecast does not belong to the declared partition"
                 )

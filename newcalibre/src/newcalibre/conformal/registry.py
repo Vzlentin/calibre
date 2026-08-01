@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
 import pandas as pd
 from pydantic import BaseModel, ValidationError
 
+from newcalibre.conformal.batch import (
+    CalibrationSeedBatch,
+    ConformalStateBatch,
+    DeliveryBatch,
+)
 from newcalibre.conformal.manifest import (
     MethodManifest,
     MethodManifestError,
     PostWarmupNonFinite,
 )
 from newcalibre.conformal.runtime import ConformalRuntime
-from newcalibre.conformal.state import StateCodecError, validate_state_blob
+from newcalibre.conformal.state import (
+    StateCodecError,
+    validate_state_batch,
+    validate_state_blob,
+)
 from newcalibre.conformal.types import (
     CalibrationContext,
     CalibrationResult,
-    Delivery,
     ObserveEffect,
     RuntimeContractError,
 )
@@ -64,26 +72,35 @@ class _ResultValidatingRuntime:
 
     def calibrate(
         self,
-        scores: Mapping[str, Sequence[float]],
-    ) -> Mapping[str, bytes]:
-        states = self._runtime.calibrate(scores)
-        return MappingProxyType(
-            _validated_emitted_states(states, manifest=self.manifest, verb="calibrate")
-        )
+        seeds: CalibrationSeedBatch,
+    ) -> ConformalStateBatch:
+        if not isinstance(seeds, CalibrationSeedBatch):
+            raise RuntimeContractError("calibrate seeds must be a CalibrationSeedBatch")
+        state = self._runtime.calibrate(seeds)
+        _validated_emitted_states(state, manifest=self.manifest, verb="calibrate")
+        return state
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: Mapping[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
-        result = self._runtime.apply(forecasts, states, context=context)
+        if not isinstance(state, ConformalStateBatch):
+            raise RuntimeContractError("apply state must be a ConformalStateBatch")
+        result = self._runtime.apply(forecasts, state, context=context)
         if not isinstance(result, CalibrationResult):
             raise RuntimeContractError("apply must return a CalibrationResult")
         _validated_emitted_states(
-            result.state_updates,
+            result.state,
             manifest=self.manifest,
+            verb="apply",
+        )
+        _validate_transition(
+            state,
+            result.state,
+            dirty_labels=result.dirty_labels,
             verb="apply",
         )
         for facts in result.issuances.values():
@@ -132,23 +149,33 @@ class _ResultValidatingRuntime:
 
     def observe(
         self,
-        delivery: Delivery,
-        states: Mapping[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
-        effect = self._runtime.observe(delivery, states, context=context)
+        if not isinstance(deliveries, DeliveryBatch):
+            raise RuntimeContractError("observe deliveries must be a DeliveryBatch")
+        if not isinstance(state, ConformalStateBatch):
+            raise RuntimeContractError("observe state must be a ConformalStateBatch")
+        effect = self._runtime.observe(deliveries, state, context=context)
         if not isinstance(effect, ObserveEffect):
             raise RuntimeContractError("observe must return an ObserveEffect")
-        expected_keys = {value.forecast_key for value in delivery.observations}
+        expected_keys = {value.forecast_key for value in deliveries.observations}
         actual_keys = {value.forecast_key for value in effect.annotations}
         if actual_keys != expected_keys:
             raise RuntimeContractError(
                 "observe annotations must exactly cover the delivered forecast keys"
             )
         _validated_emitted_states(
-            effect.state_updates,
+            effect.state,
             manifest=self.manifest,
+            verb="observe",
+        )
+        _validate_transition(
+            state,
+            effect.state,
+            dirty_labels=effect.dirty_labels,
             verb="observe",
         )
         return effect
@@ -365,26 +392,37 @@ def _validated_emitted_states(
     manifest: MethodManifest,
     verb: str,
 ) -> dict[str, bytes]:
-    if not isinstance(states, Mapping):
-        raise RuntimeContractError(f"{verb} state updates must be a mapping")
-    snapshot = dict(states)
-    for label, state in snapshot.items():
-        if not isinstance(label, str):
-            raise RuntimeContractError(f"{verb} state labels must be strings")
-        if not isinstance(state, bytes):
-            raise RuntimeContractError(f"{verb} state values must be immutable bytes")
-        try:
-            validate_state_blob(
-                state,
-                method_name=manifest.name,
-                schema_version=manifest.state_schema_version,
-                expected_label=label,
-            )
-        except StateCodecError as error:
-            raise RuntimeContractError(
-                f"{verb} emitted invalid state for label {label!r}: {error}"
-            ) from error
+    if not isinstance(states, ConformalStateBatch):
+        raise RuntimeContractError(f"{verb} post-state must be a ConformalStateBatch")
+    snapshot = dict(states.items())
+    try:
+        validate_state_batch(
+            states,
+            method_name=manifest.name,
+            schema_version=manifest.state_schema_version,
+        )
+    except StateCodecError as error:
+        raise RuntimeContractError(f"{verb} emitted invalid state: {error}") from error
     return snapshot
+
+
+def _validate_transition(
+    prior: ConformalStateBatch,
+    post: ConformalStateBatch,
+    *,
+    dirty_labels: tuple[str, ...],
+    verb: str,
+) -> None:
+    if not isinstance(prior, ConformalStateBatch):
+        raise RuntimeContractError(f"{verb} input state must be a ConformalStateBatch")
+    removed = set(prior.labels).difference(post.labels)
+    if removed:
+        raise RuntimeContractError(f"{verb} post-state removed rows: {sorted(removed)!r}")
+    changed = {label for label in post.labels if label not in prior or prior[label] != post[label]}
+    if changed != set(dirty_labels):
+        raise RuntimeContractError(
+            f"{verb} dirty labels must exactly identify changed post-state rows"
+        )
 
 
 def _validated_states(

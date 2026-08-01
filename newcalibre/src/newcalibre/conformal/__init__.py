@@ -4,6 +4,11 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel
 
+from newcalibre.conformal.batch import (
+    CalibrationSeedBatch,
+    ConformalStateBatch,
+    DeliveryBatch,
+)
 from newcalibre.conformal.manifest import (
     AssumptionClass,
     CalibrationRequirement,
@@ -46,7 +51,6 @@ from newcalibre.conformal.types import (
     METHOD_SCOPE_LABEL,
     CalibrationContext,
     CalibrationResult,
-    Delivery,
     ForecastKey,
     IssuedBoundFacts,
     ObserveAnnotation,
@@ -114,14 +118,16 @@ __all__ = [
     "CalibrationContext",
     "CalibrationRequirement",
     "CalibrationResult",
+    "CalibrationSeedBatch",
     "CensoringPolicy",
     "ClampDeclaration",
     "ClampGuaranteeImpact",
     "ConformalRegistry",
     "ConformalRegistryError",
     "ConformalRuntime",
+    "ConformalStateBatch",
     "ConservativeRankRequirement",
-    "Delivery",
+    "DeliveryBatch",
     "EmissionForm",
     "FixedCountRequirement",
     "ForecastKey",

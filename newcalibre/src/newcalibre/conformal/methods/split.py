@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from numbers import Integral, Real
 from types import MappingProxyType
@@ -13,6 +13,11 @@ from typing import Literal, cast
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from newcalibre.conformal.batch import (
+    CalibrationSeedBatch,
+    ConformalStateBatch,
+    DeliveryBatch,
+)
 from newcalibre.conformal.manifest import (
     AssumptionClass,
     CensoringPolicy,
@@ -31,7 +36,6 @@ from newcalibre.conformal.types import (
     METHOD_SCOPE_LABEL,
     CalibrationContext,
     CalibrationResult,
-    Delivery,
     ForecastKey,
     IssuedBoundFacts,
     ObserveAnnotation,
@@ -180,6 +184,43 @@ class _MethodState:
     issue_counter: int
 
 
+@dataclass(frozen=True, slots=True)
+class _SplitStateColumns:
+    labels: tuple[str, ...]
+    scores: tuple[tuple[float, ...], ...]
+    delivered_score_counts: tuple[int, ...]
+    scored_series: tuple[ScoredSeries, ...]
+    route_by_label: Mapping[str, int]
+    method_state: _MethodState
+
+    @classmethod
+    def from_rows(
+        cls,
+        rows: Mapping[str, _PartitionState],
+        method_state: _MethodState,
+    ) -> _SplitStateColumns:
+        labels = tuple(sorted(rows, key=str.encode))
+        states = tuple(rows[label] for label in labels)
+        return cls(
+            labels=labels,
+            scores=tuple(state.scores for state in states),
+            delivered_score_counts=tuple(state.delivered_score_count for state in states),
+            scored_series=tuple(state.scored_series for state in states),
+            route_by_label=MappingProxyType({label: route for route, label in enumerate(labels)}),
+            method_state=method_state,
+        )
+
+    def get(self, label: str, default: _PartitionState) -> _PartitionState:
+        route = self.route_by_label.get(label)
+        if route is None:
+            return default
+        return _PartitionState(
+            self.scores[route],
+            self.delivered_score_counts[route],
+            self.scored_series[route],
+        )
+
+
 class _SplitStateCodec:
     def __init__(self, manifest: MethodManifest) -> None:
         self._codec = JsonStateCodec(manifest.name, manifest.state_schema_version)
@@ -273,7 +314,7 @@ class SplitConformalRuntime:
         self._config = config
         self._manifest = manifest
         self._codec = _SplitStateCodec(manifest)
-        self._validate_states(states, allow_missing=False)
+        self._validate_states(ConformalStateBatch(states))
 
     @property
     def manifest(self) -> MethodManifest:
@@ -285,20 +326,18 @@ class SplitConformalRuntime:
         """Return the frozen split runtime configuration."""
         return self._config
 
-    def calibrate(self, scores: Mapping[str, Sequence[float]]) -> Mapping[str, bytes]:
+    def calibrate(self, seeds: CalibrationSeedBatch) -> ConformalStateBatch:
         """Deterministically seed bounded partition states from finite scores."""
-        if not isinstance(scores, Mapping):
-            raise RuntimeContractError("calibration scores must be a mapping")
+        if not isinstance(seeds, CalibrationSeedBatch):
+            raise RuntimeContractError("split calibration seeds must be a CalibrationSeedBatch")
         updates: dict[str, bytes] = {}
-        for label, values in scores.items():
+        for label, values in seeds.items():
             try:
                 scope = self._codec.scope_for(label)
             except StateCodecError as error:
                 raise RuntimeContractError(str(error)) from error
             if scope is not StateScope.PARTITION:
                 raise RuntimeContractError("calibration scores must use partition labels")
-            if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-                raise RuntimeContractError("partition calibration scores must be a sequence")
             normalized = tuple(_finite_score(value) for value in values)
             retained = normalized[-self._config.calibration_window :]
             state = _PartitionState(
@@ -308,12 +347,12 @@ class SplitConformalRuntime:
             )
             updates[label] = self._codec.encode_partition(label, state)
         updates[METHOD_SCOPE_LABEL] = self._codec.encode_method(_MethodState(0))
-        return MappingProxyType(updates)
+        return ConformalStateBatch(updates)
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: Mapping[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
@@ -333,7 +372,7 @@ class SplitConformalRuntime:
             context,
             series_keys=tuple(forecasts[SERIES_KEY]),
         )
-        decoded = self._validate_states(states, allow_missing=True)
+        decoded = self._validate_states(state)
         rows = _apply_rows(forecasts)
         centers = (
             self._window_centers(rows)
@@ -423,40 +462,49 @@ class SplitConformalRuntime:
         calibrated = forecasts.copy(deep=True)
         calibrated[lower_column] = pd.Series(lower_values, index=calibrated.index, dtype="float64")
         calibrated[upper_column] = pd.Series(upper_values, index=calibrated.index, dtype="float64")
-        method_state = self._method_state(states)
-        updates = {
-            METHOD_SCOPE_LABEL: self._codec.encode_method(
-                _MethodState(method_state.issue_counter + len(rows))
-            )
-        }
-        return CalibrationResult(calibrated, updates, issuances)
+        method_state = decoded.method_state
+        method_blob = self._codec.encode_method(
+            _MethodState(method_state.issue_counter + len(rows))
+        )
+        post_state = state.with_rows({METHOD_SCOPE_LABEL: method_blob})
+        dirty = () if state.get(METHOD_SCOPE_LABEL) == method_blob else (METHOD_SCOPE_LABEL,)
+        return CalibrationResult(calibrated, post_state, dirty, issuances)
 
     def observe(
         self,
-        delivery: Delivery,
-        states: Mapping[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
-        """Score one canonical delivery and return its bounded partition update."""
-        if not isinstance(delivery, Delivery):
-            raise RuntimeContractError("split observe delivery must be a Delivery")
+        """Score every canonical delivery partition in one runtime call."""
+        if not isinstance(deliveries, DeliveryBatch):
+            raise RuntimeContractError("split observe deliveries must be a DeliveryBatch")
         require_calibration_context(
             self.manifest,
             context,
             series_keys=tuple(
-                observation.forecast_key.series_key for observation in delivery.observations
+                observation.forecast_key.series_key for observation in deliveries.observations
             ),
         )
-        decoded = self._validate_states(states, allow_missing=True)
-        self._validate_delivery_issuance(delivery)
-        partition = decoded.get(delivery.partition_label, _empty_partition())
-        if self.manifest.emission_scope is EmissionScope.PER_STEP:
-            updated, annotations = self._observe_per_step(delivery, partition)
-        else:
-            updated, annotations = self._observe_window(delivery, partition)
-        state = self._codec.encode_partition(delivery.partition_label, updated)
-        return ObserveEffect({delivery.partition_label: state}, annotations)
+        decoded = self._validate_states(state)
+        updated_rows: dict[str, bytes] = {}
+        dirty: list[str] = []
+        annotations: list[ObserveAnnotation] = []
+        for label, observations in deliveries.items():
+            self._validate_delivery_issuance(label, observations)
+            partition = decoded.get(label, _empty_partition())
+            if self.manifest.emission_scope is EmissionScope.PER_STEP:
+                updated, partition_annotations = self._observe_per_step(observations, partition)
+            else:
+                updated, partition_annotations = self._observe_window(observations, partition)
+            blob = self._codec.encode_partition(label, updated)
+            updated_rows[label] = blob
+            if state.get(label) != blob:
+                dirty.append(label)
+            annotations.extend(partition_annotations)
+        post_state = state.with_rows(updated_rows)
+        return ObserveEffect(post_state, dirty, annotations)
 
     @property
     def _protection_period(self) -> int:
@@ -480,24 +528,17 @@ class SplitConformalRuntime:
 
     def _validate_states(
         self,
-        states: Mapping[str, bytes | None],
-        *,
-        allow_missing: bool,
-    ) -> dict[str, _PartitionState]:
-        if not isinstance(states, Mapping):
-            raise RuntimeContractError("split states must be a mapping")
+        state: ConformalStateBatch,
+    ) -> _SplitStateColumns:
+        if not isinstance(state, ConformalStateBatch):
+            raise RuntimeContractError("split state must be a ConformalStateBatch")
         partitions: dict[str, _PartitionState] = {}
-        for label, value in dict(states).items():
-            if value is None:
-                if allow_missing:
-                    continue
-                raise RuntimeContractError("restored split states must contain bytes")
-            if not isinstance(value, bytes):
-                raise RuntimeContractError("split state values must be immutable bytes")
+        method_state = _MethodState(0)
+        for label, value in state.items():
             try:
                 scope = self._codec.scope_for(label)
                 if scope is StateScope.METHOD:
-                    self._codec.decode_method(value)
+                    method_state = self._codec.decode_method(value)
                     continue
                 partition = self._codec.decode_partition(value, label=label)
             except StateCodecError as error:
@@ -507,18 +548,7 @@ class SplitConformalRuntime:
                     "restored split scores exceed the configured calibration window"
                 )
             partitions[label] = partition
-        return partitions
-
-    def _method_state(self, states: Mapping[str, bytes | None]) -> _MethodState:
-        value = states.get(METHOD_SCOPE_LABEL)
-        if value is None:
-            return _MethodState(0)
-        if not isinstance(value, bytes):
-            raise RuntimeContractError("split method state must be immutable bytes")
-        try:
-            return self._codec.decode_method(value)
-        except StateCodecError as error:
-            raise RuntimeContractError(str(error)) from error
+        return _SplitStateColumns.from_rows(partitions, method_state)
 
     def _window_centers(
         self, rows: tuple[_ApplyRow, ...]
@@ -575,8 +605,12 @@ class SplitConformalRuntime:
             scope=DecisionScope(DecisionScopeKind.PER_DECISION_NODE, None),
         )
 
-    def _validate_delivery_issuance(self, delivery: Delivery) -> None:
-        for observation in delivery.observations:
+    def _validate_delivery_issuance(
+        self,
+        partition_label: str,
+        observations: tuple[ResolvedObservation, ...],
+    ) -> None:
+        for observation in observations:
             issued = observation.issued
             if issued.method_name != self.manifest.name:
                 raise RuntimeContractError("delivered issuance has the wrong split method")
@@ -591,21 +625,21 @@ class SplitConformalRuntime:
                 observation.forecast_key.series_key,
                 observation.forecast_key.horizon_step,
             )
-            if expected != delivery.partition_label:
+            if expected != partition_label:
                 raise RuntimeContractError(
                     "delivered forecast does not belong to the declared partition"
                 )
 
     def _observe_per_step(
         self,
-        delivery: Delivery,
+        observations: tuple[ResolvedObservation, ...],
         partition: _PartitionState,
     ) -> tuple[_PartitionState, tuple[ObserveAnnotation, ...]]:
         scores = list(partition.scores)
         count = partition.delivered_score_count
         scored_series = partition.scored_series
         annotations: list[ObserveAnnotation] = []
-        for observation in delivery.observations:
+        for observation in observations:
             if observation.censoring_assertion is CensoringAssertion.CENSORED:
                 annotations.append(
                     ObserveAnnotation(observation.forecast_key, None, _CENSORED_CAUSE, False)
@@ -622,10 +656,9 @@ class SplitConformalRuntime:
 
     def _observe_window(
         self,
-        delivery: Delivery,
+        observations: tuple[ResolvedObservation, ...],
         partition: _PartitionState,
     ) -> tuple[_PartitionState, tuple[ObserveAnnotation, ...]]:
-        observations = delivery.observations
         if len(observations) % self._protection_period:
             raise RuntimeContractError(
                 "window-sum observe requires one or more complete protection windows"
