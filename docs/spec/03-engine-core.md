@@ -29,11 +29,13 @@ replayed clock.
   legal order, and marshal outputs. Any logic that changes a forecast, an
   interval, an order, or a booked cost belongs to the engine.
 - `[ENG-3]` **Orchestration is I/O-free.** The engine core sequences phases
-  over abstract ports — panel source, actuals source, artifact store,
-  calibration-state store, ledger sink, dispatch backend. All filesystem,
-  object-store, and database access lives behind those ports in adapters. The
-  engine core must be exercisable end-to-end with in-memory port
-  implementations only.
+  over exactly three abstract ports: the panel source loads immutable domain
+  input, the indexed run store owns transactional run state, and the dispatch
+  backend places state-free work. All filesystem, object-store, and database
+  access lives behind those ports in adapters. The engine core must be
+  exercisable end-to-end with in-memory port implementations only. The
+  `LedgerReader` remains a separate reporting boundary and is not an engine
+  mutation port.
 - `[ENG-4]` **No-op composability.** An unconfigured stage is the identity:
   no reconciler configured ⇒ Reconcile returns its input unchanged; no
   conformal method ⇒ Calibrate is a pass-through; no ordering policy ⇒ Order
@@ -81,11 +83,13 @@ For each origin, the engine runs a fixed phase cycle:
 5. **Order** — at decision origins (`[SET-7]`), apply the ordering policy to
    the calibrated forecast, the inventory position, and the cost structure,
    emitting orders `[ORD-1]`–`[ORD-3]` (chapter 08 owns the policy protocol).
-6. **Commit** — validate `[FRA-3]`, append this origin's rows to the ledger as
-   pending `[LED-1]`, and persist calibration state — exactly once per origin,
-   only here. Resolution belongs to Resolve alone: rows that become due after
-   this origin resolve at a later origin's Resolve phase (`[SET-5]` forbids a
-   second resolution path).
+6. **Commit** — validate `[FRA-3]` and atomically publish this origin's complete
+   transaction: accepted and derived actuals, immutable target-ordered forecast
+   segments, resolution facts, pending-index changes, calibration state, model
+   checkpoints, orders, settlements, resume marker, and receipt. This happens
+   exactly once per origin, only here. Resolution belongs to Resolve alone:
+   rows that become due after this origin resolve at a later origin's Resolve
+   phase (`[SET-5]` forbids a second resolution path).
 
 Spine rules:
 
@@ -132,6 +136,16 @@ Three state classes must survive process exit and cross between drivers:
 **calibration state**, **open orders**, and **model artifacts** (ledger rows
 are durable too, but the ledger is its own contract in chapter 02; storage
 topology is chapter 12's).
+
+The indexed run store exposes only `open(OriginIntent | ActualsIntent)` and
+`commit(OriginCommit | ActualsCommit)`. `open` is read-only and binds its
+snapshot to the session's current monotonic revision. `commit` admits only
+that revision, publishes every staged family atomically, advances the revision,
+and returns the durable receipt; stale work must reopen and recompute. The
+store owns actual-key and hierarchy-completeness indexes, target-time buckets,
+unresolved spans, due-frontier advancement, and the newly changed facts needed
+for delta-proportional work. Checkpoint staging and publication stay internal,
+so callers never pass artifact locations.
 
 - `[STA-1]` Every cross-boundary fact is durable and keyed by session (plus
   partition or series key as its term requires); at any phase boundary, no
