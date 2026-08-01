@@ -14,9 +14,10 @@ from newcalibre.conformal import (
     WEIGHTED_PER_STEP_MANIFEST,
     AssumptionClass,
     CalibrationResult,
+    CalibrationSeedBatch,
     CensoringPolicy,
     ConformalRegistryError,
-    Delivery,
+    DeliveryBatch,
     EmissionForm,
     ForecastKey,
     PostWarmupNonFinite,
@@ -45,6 +46,11 @@ from newcalibre.domain import (
 pytestmark = pytest.mark.tier1
 _ORIGIN = pd.Timestamp("2026-01-05")
 _MODEL = "weighted-fixture"
+
+
+def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
+    """Build one partition row inside the batch API."""
+    return DeliveryBatch({label: observations})
 
 
 def _frame(
@@ -90,7 +96,7 @@ def _states(
         series_key=series_key,
         partition_by=str(payload.get("partition_by", "global")),
     )
-    return runtime, label, runtime.calibrate({label: scores})
+    return runtime, label, runtime.calibrate(CalibrationSeedBatch({label: scores}))
 
 
 def _observations(
@@ -158,8 +164,8 @@ def test_calibration_is_deterministic_chronological_bounded_and_strict() -> None
         [],
         configuration={"coverage": 0.5, "calibration_window": 3},
     )
-    first = runtime.calibrate({label: [8.0, 9.0, 1.0, 2.0]})
-    second = runtime.calibrate({label: [8.0, 9.0, 1.0, 2.0]})
+    first = runtime.calibrate(CalibrationSeedBatch({label: [8.0, 9.0, 1.0, 2.0]}))
+    second = runtime.calibrate(CalibrationSeedBatch({label: [8.0, 9.0, 1.0, 2.0]}))
 
     assert first == second
     assert _payload(first[label], label=label) == {
@@ -170,7 +176,7 @@ def test_calibration_is_deterministic_chronological_bounded_and_strict() -> None
     assert _payload(first[METHOD_SCOPE_LABEL], label=METHOD_SCOPE_LABEL) == {"issue_counter": 0}
     for score in (math.nan, math.inf, -1.0):
         with pytest.raises(RuntimeContractError, match="scores"):
-            runtime.calibrate({label: [score]})
+            runtime.calibrate(CalibrationSeedBatch({label: [score]}))
 
 
 def test_weighted_quantile_uses_chronology_then_score_order_with_heldout_mass() -> None:
@@ -214,7 +220,7 @@ def test_tied_weighted_scores_replay_deterministically() -> None:
     assert first.forecasts.loc[0, interval_columns(0.5)[1]] == 6.0
     pd.testing.assert_frame_equal(first.forecasts, second.forecasts, check_exact=True)
     assert first.issuances == second.issuances
-    assert first.state_updates == second.state_updates
+    assert first.dirty_state == second.dirty_state
 
 
 def test_uniform_weight_boundary_matches_corrected_unweighted_rank() -> None:
@@ -235,7 +241,7 @@ def test_uniform_weight_boundary_matches_corrected_unweighted_rank() -> None:
 def test_default_weighting_is_warm_then_finite_at_exact_count_readiness() -> None:
     runtime, label, nine = _states(list(range(1, 10)))
     below = runtime.apply(_frame(), nine)
-    ten = runtime.calibrate({label: list(range(1, 11))})
+    ten = runtime.calibrate(CalibrationSeedBatch({label: list(range(1, 11))}))
     ready = runtime.apply(_frame(), ten)
     lower, upper = interval_columns(0.9)
     below_facts = next(iter(below.issuances.values()))
@@ -283,7 +289,7 @@ def test_aggressive_decay_attributes_persistent_post_warmup_heldout_mass() -> No
         ),
         states,
     )
-    evolved = {**states, **first.state_updates, **observed.state_updates}
+    evolved = observed.state
     second = runtime.apply(_frame(), evolved)
     second_facts = next(iter(second.issuances.values()))
 
@@ -303,7 +309,7 @@ def test_series_partitioning_uses_independent_weighted_score_states() -> None:
     )
     a_label = _partition(series_key="a", partition_by="series")
     b_label = _partition(series_key="b", partition_by="series")
-    states = runtime.calibrate({a_label: [1.0, 2.0], b_label: [10.0, 20.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({a_label: [1.0, 2.0], b_label: [10.0, 20.0]}))
     forecasts = pd.concat(
         [_frame(series_key="a"), _frame(series_key="b")],
         ignore_index=True,
@@ -327,10 +333,10 @@ def test_apply_ignores_poisoned_actuals_and_advances_only_method_issue_state() -
     result = runtime.apply(_frame(actuals=(Poison(),)), states)
 
     assert result.forecasts.loc[0, interval_columns(0.9)[1]] == 14.0
-    assert set(result.state_updates) == {METHOD_SCOPE_LABEL}
-    assert label not in result.state_updates
+    assert set(result.dirty_labels) == {METHOD_SCOPE_LABEL}
+    assert label not in result.dirty_labels
     assert _payload(
-        result.state_updates[METHOD_SCOPE_LABEL],
+        result.dirty_state[METHOD_SCOPE_LABEL],
         label=METHOD_SCOPE_LABEL,
     ) == {"issue_counter": 1}
 
@@ -339,7 +345,7 @@ def test_repeated_apply_advances_issuance_reference_without_observation() -> Non
     runtime, _label, states = _states(list(range(1, 11)))
 
     first = runtime.apply(_frame(), states)
-    second = runtime.apply(_frame(), {**states, **first.state_updates})
+    second = runtime.apply(_frame(), first.state)
     first_reference = next(iter(first.issuances.values())).state_reference
     second_reference = next(iter(second.issuances.values())).state_reference
 
@@ -365,7 +371,7 @@ def test_observe_preserves_canonical_append_order_censoring_and_sticky_series_la
         ),
         states,
     )
-    payload = _payload(effect.state_updates[label], label=label)
+    payload = _payload(effect.dirty_state[label], label=label)
 
     assert [annotation.score for annotation in effect.annotations] == [3.0, None, 2.0]
     assert effect.annotations[1].exclusion_cause == "declared-censored"
@@ -380,7 +386,7 @@ def test_observe_preserves_canonical_append_order_censoring_and_sticky_series_la
         "scores": [9.0, 3.0, 2.0],
     }
 
-    later = runtime.apply(_frame(), {**states, **effect.state_updates})
+    later = runtime.apply(_frame(), effect.state)
     later_facts = next(iter(later.issuances.values()))
     issued_facts = next(iter(issued.issuances.values()))
     assert later_facts.effective_descriptor.scored_series is ScoredSeries.RECORDED_SALES
@@ -480,7 +486,7 @@ def test_factory_restoration_replays_apply_and_observe_exactly() -> None:
         check_exact=True,
     )
     assert original_apply.issuances == restored_apply.issuances
-    assert original_apply.state_updates == restored_apply.state_updates
+    assert original_apply.dirty_state == restored_apply.dirty_state
 
     delivery = Delivery(
         label,

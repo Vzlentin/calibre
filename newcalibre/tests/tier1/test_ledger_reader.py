@@ -14,7 +14,7 @@ import pytest
 
 import newcalibre.engine as engine_exports
 from newcalibre.conformal import (
-    Delivery,
+    DeliveryBatch,
     EmissionForm,
     IssuedBoundFacts,
     ObserveAnnotation,
@@ -72,6 +72,11 @@ from newcalibre.observe import ObservationResolution, ObserveCycle
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ORIGIN_DATE = pd.Timestamp("2026-01-02")
+
+
+def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
+    """Build one partition row inside the batch API."""
+    return DeliveryBatch({label: observations})
 
 
 def _session(*, tenant: str = "tenant-a") -> SessionIdentity:
@@ -259,7 +264,7 @@ def _closed_sink(*, reverse_chunks: bool = False) -> InMemoryLedgerSink:
                 pending_retentions=tuple(
                     value for key, value in pending_by_key.items() if key not in actuals
                 ),
-                deliveries=(delivery,),
+                deliveries=delivery,
                 annotations=(
                     ObserveAnnotation(
                         delivered.forecast_key,

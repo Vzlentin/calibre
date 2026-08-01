@@ -14,7 +14,12 @@ from typing import Any, cast
 import pandas as pd
 import pytest
 
-from newcalibre.conformal import SPLIT_PER_STEP, derive_partition_label, resolve_method
+from newcalibre.conformal import (
+    SPLIT_PER_STEP,
+    CalibrationSeedBatch,
+    derive_partition_label,
+    resolve_method,
+)
 from newcalibre.domain import (
     ACTUAL_VALUE,
     HORIZON_STEP,
@@ -1461,7 +1466,9 @@ def test_real_conformal_apply_consumes_bottom_up_reconciled_points() -> None:
     )
     state_store = InMemoryCalibrationStateStore()
     partition = derive_partition_label("fixture", "global", EmissionScope.PER_STEP)
-    seeded = resolve_method(conformal_config).calibrate({partition: [2.0, 2.0, 2.0]})
+    seeded = resolve_method(conformal_config).calibrate(
+        CalibrationSeedBatch({partition: [2.0, 2.0, 2.0]})
+    )
     for label, value in seeded.items():
         state_store.save(
             session,

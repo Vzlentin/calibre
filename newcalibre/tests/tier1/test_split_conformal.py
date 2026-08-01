@@ -14,8 +14,10 @@ from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     SPLIT_PER_STEP_MANIFEST,
     CalibrationResult,
+    CalibrationSeedBatch,
     ConformalRegistryError,
-    Delivery,
+    ConformalStateBatch,
+    DeliveryBatch,
     EmissionForm,
     ForecastKey,
     ResolvedObservation,
@@ -44,6 +46,11 @@ from newcalibre.reconcile import ReconciliationContext, resolve_strategy
 pytestmark = pytest.mark.tier1
 _ORIGIN = pd.Timestamp("2026-01-05")
 _MODEL = "fixture-model"
+
+
+def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
+    """Build one partition row inside the batch API."""
+    return DeliveryBatch({label: observations})
 
 
 def _frame(
@@ -99,7 +106,7 @@ def _states(
         series_key=series_key,
         partition_by=str(payload.get("partition_by", "global")),
     )
-    states = runtime.calibrate({label: scores})
+    states = runtime.calibrate(CalibrationSeedBatch({label: scores}))
     return runtime, label, states
 
 
@@ -149,7 +156,7 @@ def test_rank_readiness_uses_the_strict_boundary_and_conservative_order_statisti
     assert not facts.calibration_ready
     assert facts.bounds_null_reason == "warm-up"
 
-    ten = runtime.calibrate({label: list(range(1, 11))})
+    ten = runtime.calibrate(CalibrationSeedBatch({label: list(range(1, 11))}))
     ready = runtime.apply(_frame(), ten)
     assert ready.forecasts.loc[0, lower] == 0.0
     assert ready.forecasts.loc[0, upper] == 14.0
@@ -174,8 +181,8 @@ def test_calibration_is_deterministic_bounded_and_rejects_nonfinite_scores() -> 
         [],
         configuration={"coverage": 0.5, "calibration_window": 2},
     )
-    first = runtime.calibrate({label: [1.0, 2.0, 3.0]})
-    second = runtime.calibrate({label: [1.0, 2.0, 3.0]})
+    first = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0, 3.0]}))
+    second = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0, 3.0]}))
     payload = _payload("split-per-step", first[label], label=label)
 
     assert first == second
@@ -190,7 +197,7 @@ def test_calibration_is_deterministic_bounded_and_rejects_nonfinite_scores() -> 
 
     for score in (math.nan, math.inf, -1.0):
         with pytest.raises(RuntimeContractError, match="scores"):
-            runtime.calibrate({label: [score]})
+            runtime.calibrate(CalibrationSeedBatch({label: [score]}))
 
 
 def test_series_partitioning_uses_independent_score_states() -> None:
@@ -203,7 +210,7 @@ def test_series_partitioning_uses_independent_score_states() -> None:
     )
     a_label = _partition(EmissionScope.PER_STEP, series_key="a", partition_by="series")
     b_label = _partition(EmissionScope.PER_STEP, series_key="b", partition_by="series")
-    states = runtime.calibrate({a_label: [1.0, 2.0], b_label: [10.0, 20.0]})
+    states = runtime.calibrate(CalibrationSeedBatch({a_label: [1.0, 2.0], b_label: [10.0, 20.0]}))
     forecasts = pd.concat(
         [_frame(series_key="a"), _frame(series_key="b")],
         ignore_index=True,
@@ -237,7 +244,9 @@ def test_series_horizon_partitioning_isolates_state_and_readiness_per_step() -> 
         horizon_step=2,
     )
     assert first_label != second_label
-    states = runtime.calibrate({first_label: [1.0, 2.0], second_label: [10.0]})
+    states = runtime.calibrate(
+        CalibrationSeedBatch({first_label: [1.0, 2.0], second_label: [10.0]})
+    )
 
     result = runtime.apply(_frame((4.0, 4.0)), states)
     lower, upper = interval_columns(0.5)
@@ -270,7 +279,9 @@ def test_series_horizon_delivery_updates_only_its_declared_step() -> None:
         partition_by="series-horizon",
         horizon_step=2,
     )
-    states = runtime.calibrate({first_label: [1.0, 2.0], second_label: [10.0, 20.0]})
+    states = runtime.calibrate(
+        CalibrationSeedBatch({first_label: [1.0, 2.0], second_label: [10.0, 20.0]})
+    )
     issued = runtime.apply(_frame((4.0, 4.0)), states)
     observations = _observations(
         issued,
@@ -280,8 +291,8 @@ def test_series_horizon_delivery_updates_only_its_declared_step() -> None:
 
     effect = runtime.observe(Delivery(first_label, (observations[0],)), states)
 
-    assert set(effect.state_updates) == {first_label}
-    assert second_label not in effect.state_updates
+    assert set(effect.dirty_labels) == {first_label}
+    assert second_label not in effect.dirty_labels
     with pytest.raises(RuntimeContractError, match="issued partition"):
         Delivery(first_label, (observations[1],))
 
@@ -311,11 +322,11 @@ def test_apply_ignores_poisoned_actuals_and_advances_only_method_issue_state() -
     result = runtime.apply(_frame(actuals=(Poison(),)), states)
 
     assert result.forecasts.loc[0, interval_columns(0.9)[1]] == 14.0
-    assert set(result.state_updates) == {METHOD_SCOPE_LABEL}
-    assert label not in result.state_updates
+    assert set(result.dirty_labels) == {METHOD_SCOPE_LABEL}
+    assert label not in result.dirty_labels
     assert _payload(
         "split-per-step",
-        result.state_updates[METHOD_SCOPE_LABEL],
+        result.dirty_state[METHOD_SCOPE_LABEL],
         label=METHOD_SCOPE_LABEL,
     ) == {"issue_counter": 1}
 
@@ -360,7 +371,7 @@ def test_window_apply_rejects_a_large_incomplete_period_before_range_allocation(
     monkeypatch.setattr(split_method, "range", fail_on_range, raising=False)
 
     with pytest.raises(RuntimeContractError, match="leading protection-window"):
-        runtime.apply(terminal_only, {})
+        runtime.apply(terminal_only, ConformalStateBatch())
 
 
 def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series() -> None:
@@ -379,7 +390,7 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
         ),
     )
     effect = runtime.observe(delivery, states)
-    payload = _payload("split-per-step", effect.state_updates[label], label=label)
+    payload = _payload("split-per-step", effect.dirty_state[label], label=label)
 
     assert [annotation.score for annotation in effect.annotations] == [3.0, None, 2.0]
     assert effect.annotations[1].exclusion_cause == "declared-censored"
@@ -392,7 +403,7 @@ def test_per_step_observe_handles_declared_censored_and_sticky_undeclared_series
     assert payload["delivered_score_count"] == 4
     assert payload["scored_series"] == "recorded-sales"
 
-    later = runtime.apply(_frame(), {**states, label: effect.state_updates[label]})
+    later = runtime.apply(_frame(), effect.state)
     later_facts = next(iter(later.issuances.values()))
     assert later_facts.effective_descriptor.scored_series is ScoredSeries.RECORDED_SALES
     before_reference = next(iter(issued.issuances.values())).state_reference
@@ -468,7 +479,7 @@ def test_declared_censoring_without_an_undeclared_score_stays_demand_honest() ->
         ),
         states,
     )
-    payload = _payload("split-per-step", effect.state_updates[label], label=label)
+    payload = _payload("split-per-step", effect.dirty_state[label], label=label)
 
     assert payload["delivered_score_count"] == 3
     assert payload["scored_series"] == "demand-honest"
@@ -487,7 +498,7 @@ def test_window_observe_scores_once_on_terminal_and_preserves_canonical_annotati
         (CensoringAssertion.UNCENSORED,) * 3,
     )
     effect = runtime.observe(Delivery(label, observations), states)
-    payload = _payload("split-window-sum", effect.state_updates[label], label=label)
+    payload = _payload("split-window-sum", effect.dirty_state[label], label=label)
 
     assert [annotation.forecast_key.horizon_step for annotation in effect.annotations] == [
         1,
@@ -530,12 +541,12 @@ def test_window_observe_batches_canonical_windows_like_consecutive_calls() -> No
     first_effect = runtime.observe(Delivery(label, first), states)
     consecutive = runtime.observe(
         Delivery(label, second),
-        {**states, **first_effect.state_updates},
+        first_effect.state,
     )
 
-    assert batched.state_updates == consecutive.state_updates
+    assert batched.dirty_state == consecutive.dirty_state
     assert batched.annotations == (*first_effect.annotations, *consecutive.annotations)
-    payload = _payload("split-window-sum", batched.state_updates[label], label=label)
+    payload = _payload("split-window-sum", batched.dirty_state[label], label=label)
     assert payload["delivered_score_count"] == 4
 
 
@@ -562,7 +573,8 @@ def test_window_censoring_excludes_the_composite_without_state_advancement() -> 
         states,
     )
 
-    assert effect.state_updates[label] == states[label]
+    assert effect.state[label] == states[label]
+    assert label not in effect.dirty_labels
     assert all(annotation.score is None for annotation in effect.annotations)
     assert all(
         annotation.exclusion_cause == "declared-censored-window"

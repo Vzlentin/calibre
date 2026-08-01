@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -18,11 +18,13 @@ from newcalibre.conformal import (
     AssumptionClass,
     CalibrationContext,
     CalibrationResult,
+    CalibrationSeedBatch,
     CensoringPolicy,
     ConformalRegistry,
     ConformalRegistryError,
     ConformalRuntime,
-    Delivery,
+    ConformalStateBatch,
+    DeliveryBatch,
     EmissionForm,
     FixedCountRequirement,
     ForecastKey,
@@ -60,6 +62,11 @@ from newcalibre.domain import (
 )
 
 pytestmark = pytest.mark.tier1
+
+
+def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
+    """Build one partition row inside the batch API."""
+    return DeliveryBatch({label: observations})
 
 
 class _FixtureConfig(BaseModel):
@@ -148,23 +155,23 @@ class _FixtureRuntime:
 
     def calibrate(
         self,
-        scores: Mapping[str, Sequence[float]],
-    ) -> Mapping[str, bytes]:
+        seeds: CalibrationSeedBatch,
+    ) -> ConformalStateBatch:
         states = {
             label: self._codec.encode_partition(
                 label,
                 count=len(values),
                 total=sum(values),
             )
-            for label, values in scores.items()
+            for label, values in seeds.items()
         }
         states[METHOD_SCOPE_LABEL] = self._codec.encode_method(issue_counter=0)
-        return states
+        return ConformalStateBatch(states)
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: Mapping[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
@@ -177,7 +184,7 @@ class _FixtureRuntime:
         calibrated["lower_0.9"] = 0.0
         calibrated["upper_0.9"] = calibrated["point_forecast"] + self._config.offset
         partition = next(
-            (label for label in states if label != METHOD_SCOPE_LABEL),
+            (label for label in state if label != METHOD_SCOPE_LABEL),
             derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP),
         )
         issuances = {
@@ -201,12 +208,12 @@ class _FixtureRuntime:
             )
             for row in calibrated.to_dict("records")
         }
-        return CalibrationResult(calibrated, {}, issuances)
+        return CalibrationResult(calibrated, state, issuances=issuances)
 
     def observe(
         self,
-        delivery: Delivery,
-        states: Mapping[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
@@ -214,31 +221,34 @@ class _FixtureRuntime:
             self.manifest,
             context,
             series_keys=tuple(
-                observation.forecast_key.series_key for observation in delivery.observations
+                observation.forecast_key.series_key for observation in deliveries.observations
             ),
         )
-        current = states.get(delivery.partition_label)
-        count, total = (
-            (0, 0.0)
-            if current is None
-            else self._codec.decode_partition(current, label=delivery.partition_label)
-        )
-        annotations = tuple(
-            ObserveAnnotation(
-                forecast_key=observation.forecast_key,
-                score=abs(observation.actual - observation.point_forecast),
-                exclusion_cause=None,
-                advanced_delivered_score=True,
+        updates: dict[str, bytes] = {}
+        annotations: list[ObserveAnnotation] = []
+        for label, observations in deliveries.items():
+            current = state.get(label)
+            count, total = (
+                (0, 0.0) if current is None else self._codec.decode_partition(current, label=label)
             )
-            for observation in delivery.observations
-        )
-        score_total = sum(annotation.score or 0.0 for annotation in annotations)
-        update = self._codec.encode_partition(
-            delivery.partition_label,
-            count=count + len(annotations),
-            total=total + score_total,
-        )
-        return ObserveEffect({delivery.partition_label: update}, annotations)
+            partition_annotations = tuple(
+                ObserveAnnotation(
+                    forecast_key=observation.forecast_key,
+                    score=abs(observation.actual - observation.point_forecast),
+                    exclusion_cause=None,
+                    advanced_delivered_score=True,
+                )
+                for observation in observations
+            )
+            score_total = sum(annotation.score or 0.0 for annotation in partition_annotations)
+            updates[label] = self._codec.encode_partition(
+                label,
+                count=count + len(partition_annotations),
+                total=total + score_total,
+            )
+            annotations.extend(partition_annotations)
+        post_state = state.with_rows(updates)
+        return ObserveEffect(post_state, updates, annotations)
 
 
 class _InvalidStateOutputRuntime(_FixtureRuntime):
@@ -253,36 +263,39 @@ class _InvalidStateOutputRuntime(_FixtureRuntime):
 
     def calibrate(
         self,
-        scores: Mapping[str, Sequence[float]],
-    ) -> Mapping[str, bytes]:
-        label = next(iter(scores))
-        return {label: self._invalid_state}
+        seeds: CalibrationSeedBatch,
+    ) -> ConformalStateBatch:
+        label = next(iter(seeds.labels))
+        return ConformalStateBatch({label: self._invalid_state})
 
     def apply(
         self,
         forecasts: pd.DataFrame,
-        states: Mapping[str, bytes | None],
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> CalibrationResult:
-        result = super().apply(forecasts, states, context=context)
-        label = next(iter(states))
+        result = super().apply(forecasts, state, context=context)
+        label = next(iter(state))
         return CalibrationResult(
             result.forecasts,
-            {label: self._invalid_state},
+            state.with_rows({label: self._invalid_state}),
+            (label,),
             result.issuances,
         )
 
     def observe(
         self,
-        delivery: Delivery,
-        states: Mapping[str, bytes | None],
+        deliveries: DeliveryBatch,
+        state: ConformalStateBatch,
         *,
         context: CalibrationContext | None = None,
     ) -> ObserveEffect:
-        effect = super().observe(delivery, states, context=context)
+        effect = super().observe(deliveries, state, context=context)
+        label = deliveries.labels[0]
         return ObserveEffect(
-            {delivery.partition_label: self._invalid_state},
+            state.with_rows({label: self._invalid_state}),
+            (label,),
             effect.annotations,
         )
 
@@ -425,7 +438,7 @@ def test_fixture_executes_calibrate_apply_observe_and_factory_restoration() -> N
     original_implementation = _FixtureRuntime.constructed[-1]
     partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
 
-    calibrated_states = original.calibrate({partition: [1.0, 2.0]})
+    calibrated_states = original.calibrate(CalibrationSeedBatch({partition: [1.0, 2.0]}))
     restored = registry.resolve({"method": "fixture"}, states=calibrated_states)
     restored_implementation = _FixtureRuntime.constructed[-1]
     frame = _frame()
@@ -438,11 +451,11 @@ def test_fixture_executes_calibrate_apply_observe_and_factory_restoration() -> N
     assert restored is not original
     assert restored_implementation is not original_implementation
     assert restored_implementation.instance_number != original_implementation.instance_number
-    assert restored_implementation.restored_states == calibrated_states
+    assert dict(restored_implementation.restored_states) == dict(calibrated_states)
     assert applied.forecasts.loc[0, "upper_0.9"] == 5.0
     assert observed.annotations[0].score == 3.0
     assert _FixtureCodec().decode_partition(
-        observed.state_updates[partition],
+        observed.dirty_state[partition],
         label=partition,
     ) == (3, 6.0)
 
@@ -642,14 +655,17 @@ def test_registry_rejects_invalid_state_emitted_by_every_runtime_verb(
         partition,
         (_observation("sku", partition_label=partition, actual=7.0),),
     )
+    valid_state = ConformalStateBatch(
+        {partition: _FixtureCodec().encode_partition(partition, count=0, total=0.0)}
+    )
 
     with pytest.raises(RuntimeContractError, match=f"{verb} emitted invalid state"):
         if verb == "calibrate":
-            runtime.calibrate({partition: [1.0]})
+            runtime.calibrate(CalibrationSeedBatch({partition: [1.0]}))
         elif verb == "apply":
-            runtime.apply(frame, {partition: None})
+            runtime.apply(frame, valid_state)
         else:
-            runtime.observe(delivery, {})
+            runtime.observe(delivery, ConformalStateBatch())
 
 
 @pytest.mark.parametrize("mismatch", ["missing", "extra"])
@@ -659,25 +675,25 @@ def test_registry_requires_observe_annotations_for_exactly_the_delivered_rows(
     class InvalidAnnotationRuntime(_FixtureRuntime):
         def observe(
             self,
-            delivery: Delivery,
-            states: Mapping[str, bytes | None],
+            deliveries: DeliveryBatch,
+            state: ConformalStateBatch,
             *,
             context: CalibrationContext | None = None,
         ) -> ObserveEffect:
-            effect = super().observe(delivery, states, context=context)
+            effect = super().observe(deliveries, state, context=context)
             if mismatch == "missing":
                 annotations = effect.annotations[:-1]
             else:
                 extra_key = _observation(
                     "unexpected",
-                    partition_label=delivery.partition_label,
+                    partition_label=deliveries.labels[0],
                     actual=7.0,
                 ).forecast_key
                 annotations = (
                     *effect.annotations,
                     ObserveAnnotation(extra_key, 3.0, None, True),
                 )
-            return ObserveEffect({}, annotations)
+            return ObserveEffect(effect.state, effect.dirty_labels, annotations)
 
     def invalid_annotation_factory(
         config: BaseModel,
@@ -704,7 +720,7 @@ def test_registry_requires_observe_annotations_for_exactly_the_delivered_rows(
     )
 
     with pytest.raises(RuntimeContractError, match="exactly cover"):
-        runtime.observe(delivery, {})
+        runtime.observe(delivery, ConformalStateBatch())
 
 
 @pytest.mark.parametrize(
@@ -726,16 +742,21 @@ def test_registry_rejects_issuance_shapes_that_disagree_with_the_manifest(
         def apply(
             self,
             forecasts: pd.DataFrame,
-            states: Mapping[str, bytes | None],
+            state: ConformalStateBatch,
             *,
             context: CalibrationContext | None = None,
         ) -> CalibrationResult:
-            result = super().apply(forecasts, states, context=context)
+            result = super().apply(forecasts, state, context=context)
             issuances = {
                 key: _invalid_issuance(facts, invalid_kind)
                 for key, facts in result.issuances.items()
             }
-            return CalibrationResult(result.forecasts, {}, issuances)
+            return CalibrationResult(
+                result.forecasts,
+                result.state,
+                result.dirty_labels,
+                issuances,
+            )
 
     def factory(config: BaseModel, states: Mapping[str, bytes]) -> ConformalRuntime:
         assert isinstance(config, _FixtureConfig)
@@ -744,10 +765,8 @@ def test_registry_rejects_issuance_shapes_that_disagree_with_the_manifest(
     registry = ConformalRegistry()
     registry.register("fixture", FIXTURE_MANIFEST, _FixtureConfig, factory)
     runtime = registry.resolve({"method": "fixture"})
-    partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
-
     with pytest.raises(RuntimeContractError, match=message):
-        runtime.apply(_frame(), {partition: None})
+        runtime.apply(_frame(), ConformalStateBatch())
 
 
 def test_registry_rejects_undeclared_post_readiness_nonfinite_bounds() -> None:
@@ -755,11 +774,11 @@ def test_registry_rejects_undeclared_post_readiness_nonfinite_bounds() -> None:
         def apply(
             self,
             forecasts: pd.DataFrame,
-            states: Mapping[str, bytes | None],
+            state: ConformalStateBatch,
             *,
             context: CalibrationContext | None = None,
         ) -> CalibrationResult:
-            result = super().apply(forecasts, states, context=context)
+            result = super().apply(forecasts, state, context=context)
             calibrated = result.forecasts
             calibrated.loc[:, ["lower_0.9", "upper_0.9"]] = float("nan")
             issuances = {
@@ -771,7 +790,12 @@ def test_registry_rejects_undeclared_post_readiness_nonfinite_bounds() -> None:
                 )
                 for key, facts in result.issuances.items()
             }
-            return CalibrationResult(calibrated, {}, issuances)
+            return CalibrationResult(
+                calibrated,
+                result.state,
+                result.dirty_labels,
+                issuances,
+            )
 
     def factory(config: BaseModel, states: Mapping[str, bytes]) -> ConformalRuntime:
         assert isinstance(config, _FixtureConfig)
@@ -780,10 +804,8 @@ def test_registry_rejects_undeclared_post_readiness_nonfinite_bounds() -> None:
     registry = ConformalRegistry()
     registry.register("fixture", FIXTURE_MANIFEST, _FixtureConfig, factory)
     runtime = registry.resolve({"method": "fixture"})
-    partition = derive_partition_label("fixture-model", "global", EmissionScope.PER_STEP)
-
     with pytest.raises(RuntimeContractError, match="post-readiness non-finite"):
-        runtime.apply(_frame(), {partition: None})
+        runtime.apply(_frame(), ConformalStateBatch())
 
 
 def test_fixture_extension_is_test_owned_and_runs_without_engine_changes() -> None:

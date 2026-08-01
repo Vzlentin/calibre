@@ -12,6 +12,7 @@ import pytest
 
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
+    CalibrationSeedBatch,
     derive_partition_label,
     resolve_method,
 )
@@ -407,7 +408,9 @@ def test_one_origin_uses_one_snapshot_and_preserves_untouched_partition_state() 
         "foreign",
         EmissionScope.PER_STEP,
     )
-    foreign_state = resolve_method(configuration).calibrate({foreign_label: [9.0]})[foreign_label]
+    foreign_state = resolve_method(configuration).calibrate(
+        CalibrationSeedBatch({foreign_label: [9.0]})
+    )[foreign_label]
     states.save(
         session,
         foreign_label,

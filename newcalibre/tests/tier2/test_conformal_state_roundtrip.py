@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
 
 import pandas as pd
 import pytest
@@ -11,7 +10,8 @@ import pytest
 from newcalibre.conformal import (
     METHOD_SCOPE_LABEL,
     CalibrationResult,
-    Delivery,
+    CalibrationSeedBatch,
+    DeliveryBatch,
     ForecastKey,
     ResolvedObservation,
     derive_partition_label,
@@ -32,6 +32,11 @@ from newcalibre.domain import (
 
 pytestmark = pytest.mark.tier2
 _MODEL = "roundtrip-model"
+
+
+def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
+    """Build one partition row inside the batch API."""
+    return DeliveryBatch({label: observations})
 
 
 def _frame(
@@ -59,7 +64,7 @@ def _delivery(
     result: CalibrationResult,
     actuals: tuple[float, ...],
     assertions: tuple[CensoringAssertion | None, ...],
-) -> Delivery:
+) -> DeliveryBatch:
     observations: list[ResolvedObservation] = []
     for position, row in enumerate(result.forecasts.to_dict("records")):
         key = ForecastKey(
@@ -85,15 +90,8 @@ def _delivery(
 def _assert_apply_equal(left: CalibrationResult, right: CalibrationResult) -> None:
     pd.testing.assert_frame_equal(left.forecasts, right.forecasts, check_exact=True)
     assert left.issuances == right.issuances
-    assert left.state_updates == right.state_updates
-
-
-def _combined_states(
-    seed: Mapping[str, bytes],
-    issued: CalibrationResult,
-    partition_update: Mapping[str, bytes],
-) -> dict[str, bytes]:
-    return {**seed, **issued.state_updates, **partition_update}
+    assert left.state == right.state
+    assert left.dirty_labels == right.dirty_labels
 
 
 def test_per_step_restart_preserves_censoring_label_clamp_and_later_replay() -> None:
@@ -105,7 +103,7 @@ def test_per_step_restart_preserves_censoring_label_clamp_and_later_replay() -> 
     }
     runtime = resolve_method(configuration)
     label = derive_partition_label(_MODEL, "global", runtime.manifest.emission_scope)
-    seed = runtime.calibrate({label: [1.0, 2.0]})
+    seed = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))
     issued = runtime.apply(
         _frame((2.0, 3.0), origin=pd.Timestamp("2026-03-02")),
         seed,
@@ -119,9 +117,9 @@ def test_per_step_restart_preserves_censoring_label_clamp_and_later_replay() -> 
             (99.0, 7.0),
             (CensoringAssertion.CENSORED, None),
         ),
-        seed,
+        issued.state,
     )
-    states = _combined_states(seed, issued, observed.state_updates)
+    states = observed.state
     restored = resolve_method(configuration, states=states)
 
     later_frame = _frame((6.0,), origin=pd.Timestamp("2026-03-09"))
@@ -138,8 +136,8 @@ def test_per_step_restart_preserves_censoring_label_clamp_and_later_replay() -> 
         (9.0,),
         (CensoringAssertion.UNCENSORED,),
     )
-    continued_observe = runtime.observe(later_delivery, states)
-    restored_observe = restored.observe(later_delivery, states)
+    continued_observe = runtime.observe(later_delivery, continued_apply.state)
+    restored_observe = restored.observe(later_delivery, restored_apply.state)
     assert continued_observe == restored_observe
 
 
@@ -159,7 +157,7 @@ def test_weighted_restart_matches_finite_and_heldout_mass_continuations(
     }
     runtime = resolve_method(configuration)
     label = derive_partition_label(_MODEL, "global", runtime.manifest.emission_scope)
-    seed = runtime.calibrate({label: list(range(1, 11))})
+    seed = runtime.calibrate(CalibrationSeedBatch({label: list(range(1, 11))}))
     issued = runtime.apply(
         _frame((2.0, 3.0), origin=pd.Timestamp("2026-04-06")),
         seed,
@@ -170,9 +168,9 @@ def test_weighted_restart_matches_finite_and_heldout_mass_continuations(
             (99.0, 7.0),
             (CensoringAssertion.CENSORED, None),
         ),
-        seed,
+        issued.state,
     )
-    states = _combined_states(seed, issued, observed.state_updates)
+    states = observed.state
     restored = resolve_method(configuration, states=states)
 
     assert all(isinstance(state, bytes) for state in states.values())
@@ -192,8 +190,8 @@ def test_weighted_restart_matches_finite_and_heldout_mass_continuations(
         (9.0,),
         (CensoringAssertion.UNCENSORED,),
     )
-    continued_observe = runtime.observe(later_delivery, states)
-    restored_observe = restored.observe(later_delivery, states)
+    continued_observe = runtime.observe(later_delivery, continued_apply.state)
+    restored_observe = restored.observe(later_delivery, restored_apply.state)
     assert continued_observe == restored_observe
 
 
@@ -206,7 +204,7 @@ def test_sequential_restart_matches_finite_unresolvable_and_trivial_cover_contin
     }
     runtime = resolve_method(configuration)
     label = derive_partition_label(_MODEL, "global", runtime.manifest.emission_scope)
-    seed = runtime.calibrate({label: [1.0, 3.0]})
+    seed = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 3.0]}))
     finite = runtime.apply(
         _frame((4.0,), origin=pd.Timestamp("2026-05-04")),
         seed,
@@ -217,9 +215,9 @@ def test_sequential_restart_matches_finite_unresolvable_and_trivial_cover_contin
             (8.0,),
             (CensoringAssertion.UNCENSORED,),
         ),
-        seed,
+        finite.state,
     )
-    after_finite = _combined_states(seed, finite, missed.state_updates)
+    after_finite = missed.state
     restored = resolve_method(configuration, states=after_finite)
 
     next_frame = _frame((4.0,), origin=pd.Timestamp("2026-05-11"))
@@ -235,14 +233,10 @@ def test_sequential_restart_matches_finite_unresolvable_and_trivial_cover_contin
         (100.0,),
         (CensoringAssertion.UNCENSORED,),
     )
-    continued_trivial = runtime.observe(trivial_delivery, after_finite)
-    restored_trivial = restored.observe(trivial_delivery, after_finite)
+    continued_trivial = runtime.observe(trivial_delivery, continued_unresolvable.state)
+    restored_trivial = restored.observe(trivial_delivery, restored_unresolvable.state)
     assert continued_trivial == restored_trivial
-    after_trivial = _combined_states(
-        after_finite,
-        continued_unresolvable,
-        continued_trivial.state_updates,
-    )
+    after_trivial = continued_trivial.state
     freshly_restored = resolve_method(configuration, states=after_trivial)
 
     later_frame = _frame((4.0,), origin=pd.Timestamp("2026-05-18"))
@@ -256,9 +250,9 @@ def test_sequential_restart_matches_finite_unresolvable_and_trivial_cover_contin
         (5.0,),
         (CensoringAssertion.UNCENSORED,),
     )
-    assert runtime.observe(finite_delivery, after_trivial) == freshly_restored.observe(
+    assert runtime.observe(finite_delivery, continued_finite.state) == freshly_restored.observe(
         finite_delivery,
-        after_trivial,
+        restored_finite.state,
     )
 
 
@@ -272,7 +266,7 @@ def test_window_restart_matches_after_incomplete_complete_censored_and_undeclare
     }
     runtime = resolve_method(configuration)
     label = derive_partition_label(_MODEL, "global", runtime.manifest.emission_scope)
-    seed = runtime.calibrate({label: [1.0, 2.0]})
+    seed = runtime.calibrate(CalibrationSeedBatch({label: [1.0, 2.0]}))
 
     incomplete = runtime.apply(
         _frame((2.0, 3.0), origin=pd.Timestamp("2026-04-06")),
@@ -284,7 +278,7 @@ def test_window_restart_matches_after_incomplete_complete_censored_and_undeclare
 
     complete = runtime.apply(
         _frame((8.0, 8.0, 8.0), origin=pd.Timestamp("2026-04-06")),
-        {**seed, **incomplete.state_updates},
+        incomplete.state,
     )
     terminal = tuple(complete.issuances.values())[-1]
     assert terminal.upper_bound == 20.0
@@ -300,9 +294,10 @@ def test_window_restart_matches_after_incomplete_complete_censored_and_undeclare
                 CensoringAssertion.UNCENSORED,
             ),
         ),
-        seed,
+        complete.state,
     )
-    assert censored.state_updates[label] == seed[label]
+    assert censored.state[label] == seed[label]
+    assert label not in censored.dirty_labels
 
     undeclared = runtime.observe(
         _delivery(
@@ -310,9 +305,9 @@ def test_window_restart_matches_after_incomplete_complete_censored_and_undeclare
             (9.0, 9.0, 9.0),
             (CensoringAssertion.UNCENSORED, None, CensoringAssertion.UNCENSORED),
         ),
-        censored.state_updates,
+        censored.state,
     )
-    states = _combined_states(seed, complete, undeclared.state_updates)
+    states = undeclared.state
     assert METHOD_SCOPE_LABEL in states
     restored = resolve_method(configuration, states=states)
 
@@ -326,6 +321,6 @@ def test_window_restart_matches_after_incomplete_complete_censored_and_undeclare
         (5.0, 7.0, 9.0),
         (CensoringAssertion.UNCENSORED,) * 3,
     )
-    continued_observe = runtime.observe(later_delivery, states)
-    restored_observe = restored.observe(later_delivery, states)
+    continued_observe = runtime.observe(later_delivery, continued_apply.state)
+    restored_observe = restored.observe(later_delivery, restored_apply.state)
     assert continued_observe == restored_observe

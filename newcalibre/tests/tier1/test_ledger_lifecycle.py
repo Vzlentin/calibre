@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from newcalibre.conformal import (
-    Delivery,
+    DeliveryBatch,
     EmissionForm,
     IssuedBoundFacts,
     ObserveAnnotation,
@@ -53,6 +53,13 @@ from newcalibre.observe import ObservationResolution, ObserveCycle, PendingObser
 
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 ISSUE_ORIGIN = pd.Timestamp("2026-01-01")
+
+
+def Delivery(label: str, observations: tuple[ResolvedObservation, ...]) -> DeliveryBatch:
+    """Build one partition row inside the batch API."""
+    return DeliveryBatch({label: observations})
+
+
 QUANTILE: BoundKey = (quantile_column(0.5),)
 
 
@@ -529,7 +536,7 @@ def test_delivery_facts_must_match_the_staged_resolution_without_effect() -> Non
     cycle = ObserveCycle(
         resolutions=(resolution,),
         pending_removals=(pending.forecast_key,),
-        deliveries=(delivery,),
+        deliveries=delivery,
         annotations=(ObserveAnnotation(pending.forecast_key, 2.0, None, True),),
     )
 
