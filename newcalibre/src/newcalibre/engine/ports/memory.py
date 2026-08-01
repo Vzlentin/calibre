@@ -35,6 +35,7 @@ from newcalibre.engine.ports import (
     ActualsCommitKey,
     CommitKey,
     CommitReceipt,
+    ForecastWrite,
     OriginCommit,
     SettlementSnapshot,
 )
@@ -48,6 +49,24 @@ from newcalibre.engine.reporting import (
     LedgerResolution,
     LedgerSelection,
     LedgerSessionMetadata,
+)
+from newcalibre.engine.run_store import (
+    ActualsCommit as RunActualsCommit,
+)
+from newcalibre.engine.run_store import (
+    ActualsIntent,
+    ActualsSnapshot,
+    OriginIntent,
+    OriginSnapshot,
+)
+from newcalibre.engine.run_store import (
+    CommitReceipt as RunCommitReceipt,
+)
+from newcalibre.engine.run_store import (
+    OriginCommit as RunOriginCommit,
+)
+from newcalibre.engine.run_store import (
+    SettlementSnapshot as RunSettlementSnapshot,
 )
 from newcalibre.engine.settlement._state import SettlementIndex, SettlementIndexAudit
 from newcalibre.ledger import (
@@ -560,6 +579,210 @@ class InMemoryLedgerSink:
         return self._ledger.settlements
 
 
+class InMemoryIndexedRunStore(InMemoryLedgerSink):
+    """Own one session's revisioned actuals, checkpoints, state, and ledger facts."""
+
+    def __init__(
+        self,
+        *,
+        session: SessionIdentity,
+        calendar: Calendar,
+        actuals: Panel | None = None,
+        actuals_semantics: ActualsSemantics,
+        initial_arrivals: Mapping[ActualKey, float] | None = None,
+    ) -> None:
+        if not isinstance(actuals_semantics, ActualsSemantics):
+            raise TypeError("in-memory run-store semantics must be ActualsSemantics")
+        super().__init__(
+            session=session,
+            calendar=calendar,
+            initial_arrivals=initial_arrivals,
+        )
+        source = (
+            None
+            if actuals is None
+            else InMemoryActualsSource(actuals, actuals_semantics=actuals_semantics)
+        )
+        self._source_records = () if source is None else source._records
+        self._actuals_semantics = actuals_semantics
+        self._revision = 0
+        self._states: dict[str, bytes] = {}
+        self._checkpoints: dict[str, bytes] = {}
+        self._checkpoint_indexes: dict[str, bytes] = {}
+        self._resume_marker: pd.Timestamp | None = None
+
+    def open(self, intent: OriginIntent | ActualsIntent) -> OriginSnapshot | ActualsSnapshot:
+        """Prepare one immutable transaction snapshot without publishing state."""
+        if not isinstance(intent, (OriginIntent, ActualsIntent)):
+            raise TypeError("run-store open requires an OriginIntent or ActualsIntent")
+        if intent.session != self.session:
+            raise LedgerError("run-store intent session does not match the store session")
+        with self._lock:
+            if isinstance(intent, OriginIntent):
+                self.calendar.require_member(intent.origin, name="run-store origin")
+                actuals = ActualsSubmission(
+                    record
+                    for record in self._source_records
+                    if record.timestamp < intent.origin
+                    and record.key not in self._ledger._observed_history
+                )
+                legacy_settlement = (
+                    None
+                    if not intent.settlement_periods
+                    else self.settlement_snapshot(intent.settlement_periods)
+                )
+                settlement = (
+                    None
+                    if legacy_settlement is None
+                    else _run_settlement_snapshot(legacy_settlement)
+                )
+                settlement_receipts = {
+                    period: cast(RunCommitReceipt, receipt)
+                    for period in intent.settlement_periods
+                    if (receipt := self.settlement_receipt(period)) is not None
+                }
+                return OriginSnapshot(
+                    session=self.session,
+                    origin=intent.origin,
+                    revision=self._revision,
+                    actuals=actuals,
+                    observed_history=self.observed_history,
+                    pending_observations=self.pending_observations,
+                    conformal_states=self._states,
+                    checkpoints=self._checkpoints,
+                    checkpoint_indexes=self._checkpoint_indexes,
+                    settlement=settlement,
+                    receipt=cast(RunCommitReceipt | None, self._commits.get(intent.origin)),
+                    settlement_receipts=settlement_receipts,
+                    earliest_origin=self.earliest_origin,
+                    latest_origin=self.latest_origin,
+                    forecast_origin_count=self.forecast_origin_count,
+                    resume_marker=self._resume_marker,
+                )
+
+            key = intent.commit_key
+            for _series_key, timestamp in key.keys:
+                self.calendar.require_member(timestamp, name="run-store actual timestamp")
+            admission_frontier = max(timestamp for _series_key, timestamp in key.keys)
+            if self.latest_origin is not None:
+                admission_frontier = max(admission_frontier, self.latest_origin)
+            origin = self.calendar.advance(admission_frontier, 1)
+            return ActualsSnapshot(
+                session=self.session,
+                origin=origin,
+                revision=self._revision,
+                actuals=intent.submission,
+                observed_history=self.observed_history,
+                pending_observations=self.pending_observations,
+                conformal_states=self._states,
+                settlement=None,
+                receipt=cast(
+                    RunCommitReceipt | None,
+                    self._commits.get(cast(CommitKey, key)),
+                ),
+                earliest_origin=self.earliest_origin,
+                latest_origin=self.latest_origin,
+                forecast_origin_count=self.forecast_origin_count,
+                resume_marker=self._resume_marker,
+            )
+
+    def commit(
+        self,
+        write: RunOriginCommit | RunActualsCommit,
+    ) -> RunCommitReceipt:  # ty: ignore[invalid-method-override]
+        """Validate and publish one complete transaction at the expected revision."""
+        if not isinstance(write, (RunOriginCommit, RunActualsCommit)):
+            raise TypeError("run-store commit requires an OriginCommit or ActualsCommit")
+        if write.session != self.session:
+            raise LedgerError("run-store commit session does not match the store session")
+        with self._lock:
+            previous = self._commits.get(cast(CommitKey, write.commit_key))
+            if previous is not None:
+                if previous.digest == write.digest:
+                    return cast(RunCommitReceipt, previous)
+                raise LedgerError(
+                    f"journal key {write.commit_key!r} already has a different committed write"
+                )
+            if write.expected_revision != self._revision:
+                raise LedgerError(
+                    "run-store commit revision is stale: "
+                    f"expected {write.expected_revision}, current {self._revision}"
+                )
+            checkpoint_updates = (
+                {} if isinstance(write, RunActualsCommit) else dict(write.checkpoint_updates)
+            )
+            checkpoint_indexes = (
+                {} if isinstance(write, RunActualsCommit) else dict(write.checkpoint_indexes)
+            )
+            for key, value in checkpoint_updates.items():
+                existing = self._checkpoints.get(key)
+                if existing is not None and existing != value:
+                    raise LedgerError(f"checkpoint key {key!r} already holds different bytes")
+
+            legacy = OriginCommit(
+                session=write.session,
+                origin=write.origin,
+                observe_cycle=write.observe_cycle,
+                forecasts=(
+                    ()
+                    if isinstance(write, RunActualsCommit)
+                    else tuple(
+                        ForecastWrite(
+                            value.frame,
+                            value.issuances,
+                            value.observation_issuances,
+                        )
+                        for value in write.forecasts
+                    )
+                ),
+                orders=() if isinstance(write, RunActualsCommit) else write.orders,
+                settlements=write.settlements,
+                state_updates=write.state_updates,
+                actual_keys=write.actual_keys if isinstance(write, RunActualsCommit) else (),
+                input_fingerprint=write.input_fingerprint,
+                expected_forecast_origin_count=(
+                    None
+                    if isinstance(write, RunActualsCommit)
+                    else write.expected_forecast_origin_count
+                ),
+                inventory_positions=write.inventory_positions,
+            )
+            super()._commit(legacy)
+            if legacy.commit_key != write.commit_key:
+                del self._commits[legacy.commit_key]
+            revision = self._revision + 1
+            receipt = RunCommitReceipt.from_commit(write, revision=revision)
+            self._states = dict(self._states) | dict(write.state_updates)
+            self._checkpoints = dict(self._checkpoints) | checkpoint_updates
+            self._checkpoint_indexes = dict(self._checkpoint_indexes) | checkpoint_indexes
+            self._resume_marker = write.resume_marker
+            self._revision = revision
+            self._commits[cast(CommitKey, write.commit_key)] = cast(CommitReceipt, receipt)
+            for period in receipt.settlement_periods:
+                self._settlement_receipts[period] = cast(CommitReceipt, receipt)
+            return receipt
+
+    @property
+    def revision(self) -> int:
+        """Return the current monotonic revision for diagnostics."""
+        return self._revision
+
+    @property
+    def states(self) -> Mapping[str, bytes]:
+        """Return immutable conformal rows for diagnostics."""
+        return MappingProxyType(dict(self._states))
+
+    @property
+    def checkpoints(self) -> Mapping[str, bytes]:
+        """Return immutable model checkpoints for diagnostics."""
+        return MappingProxyType(dict(self._checkpoints))
+
+    @property
+    def checkpoint_indexes(self) -> Mapping[str, bytes]:
+        """Return immutable checkpoint indexes for diagnostics."""
+        return MappingProxyType(dict(self._checkpoint_indexes))
+
+
 class InMemoryLedgerReader:
     """Stream bounded logical reporting batches from one closed in-memory sink."""
 
@@ -799,6 +1022,23 @@ def _forecast_scan_key(key: ForecastKey) -> tuple[pd.Timestamp, str, str, int]:
     return origin, series_key, model_name, horizon_step
 
 
+def _run_settlement_snapshot(value: SettlementSnapshot) -> RunSettlementSnapshot:
+    """Move one validated legacy projection into the transaction value."""
+    return RunSettlementSnapshot(
+        session=value.session,
+        calendar=value.calendar,
+        periods=value.periods,
+        frontier=value.frontier,
+        latest_positions=value.latest_positions,
+        open_order_quantities=value.open_order_quantities,
+        due_arrivals=value.due_arrivals,
+        actuals_semantics=value.actuals_semantics,
+        origin_order_quantities=value.origin_order_quantities,
+        current_positions=value.current_positions,
+        window_opening_positions=value.window_opening_positions,
+    )
+
+
 def _stage_new_rows(write: OriginCommit, *, calendar: Calendar) -> Ledger:
     staged = Ledger(session=write.session, calendar=calendar)
     for forecast in write.forecasts:
@@ -837,6 +1077,7 @@ def _require_session_partition(session: object, partition: object) -> None:
 
 
 __all__ = [
+    "InMemoryIndexedRunStore",
     "InMemoryActualsSource",
     "InMemoryArtifactStore",
     "InMemoryCalibrationStateStore",
