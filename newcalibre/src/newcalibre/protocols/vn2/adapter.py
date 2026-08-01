@@ -28,10 +28,7 @@ from newcalibre.engine import (
     ActualKey,
     ConfiguredPolicyOrderer,
     Engine,
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
-    InMemoryLedgerSink,
+    InMemoryIndexedRunStore,
     InMemoryPanelSource,
     InProcessDispatch,
     TimeLoop,
@@ -126,21 +123,17 @@ def run_vn2(dataset: VN2Dataset) -> VN2RunResult:
         decision_timing=config.timing,
         stockout_rule=config.stockout_rule,
     )
-    actuals = InMemoryActualsSource(
-        panel,
-        actuals_semantics=config.actuals_semantics,
-    )
-    sink = InMemoryLedgerSink(
+    store = InMemoryIndexedRunStore(
         session=session,
         calendar=config.calendar,
+        actuals=panel,
+        actuals_semantics=config.actuals_semantics,
         initial_arrivals=initial_arrivals,
     )
     engine = Engine(
+        session=session,
         panel_source=InMemoryPanelSource(panel),
-        actuals_source=actuals,
-        artifact_store=InMemoryArtifactStore(),
-        calibration_state_store=InMemoryCalibrationStateStore(),
-        ledger_sink=sink,
+        run_store=store,
         dispatch_backend=InProcessDispatch(),
         hierarchy=None,
         adapter_resolver=resolve_vn2_adapter,
@@ -152,8 +145,7 @@ def run_vn2(dataset: VN2Dataset) -> VN2RunResult:
         raise VN2DataError("VN2 realized periods do not derive the configured decision origins")
     time_loop = TimeLoop(
         engine=engine,
-        actuals_source=actuals,
-        ledger_sink=sink,
+        run_store=store,
         request=TimeLoopRequest(
             session=session,
             origins=origins,
@@ -169,10 +161,10 @@ def run_vn2(dataset: VN2Dataset) -> VN2RunResult:
         session=session,
         time_loop=time_loop,
         input_inventory_sha256=dataset.input_inventory_sha256,
-        forecasts=sink.forecasts,
-        coverage_report=sink.coverage_report(),
-        orders=sink.orders,
-        settlements=sink.settlements,
+        forecasts=store.logical_forecasts,
+        coverage_report=store.coverage_report(),
+        orders=store.orders,
+        settlements=store.settlements,
         series_identities=identities,
     )
 

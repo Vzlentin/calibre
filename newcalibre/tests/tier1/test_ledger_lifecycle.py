@@ -451,7 +451,7 @@ def test_due_frame_and_observe_cycle_require_an_owned_calendar_origin() -> None:
     assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
 
 
-def test_complete_delivery_materializes_censoring_aware_resolutions_once() -> None:
+def test_complete_delivery_appends_censoring_aware_resolutions_once() -> None:
     ledger = _ledger()
     before = ledger.forecasts
 
@@ -461,7 +461,7 @@ def test_complete_delivery_materializes_censoring_aware_resolutions_once() -> No
     )
 
     assert [row.key for row in ledger.forecasts] == [_key(2), _key(1), _key(3), _key(4)]
-    assert [row.actual_value for row in ledger.forecasts] == [22.0, 11.0, None, None]
+    assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
     assert [row.actual_value for row in before] == [None, None, None, None]
     assert [value.actual for value in ledger.observation_resolutions] == [11.0, 22.0]
     assert [value.forecast_key.horizon_step for value in ledger.pending_observations] == [3, 4]
@@ -486,7 +486,8 @@ def test_resolved_incomplete_window_remains_pending_until_delivery() -> None:
         _delivery_cycle(ledger, {1: 11.0, 2: 22.0}),
         origin=pd.Timestamp("2026-01-04"),
     )
-    assert [row.actual_value for row in ledger.forecasts] == [22.0, 11.0, None, None]
+    assert [row.actual_value for row in ledger.forecasts] == [None, None, None, None]
+    assert [value.actual for value in ledger.observation_resolutions] == [11.0, 22.0]
 
 
 def test_conformal_issued_removal_requires_a_matching_delivery_without_effect() -> None:

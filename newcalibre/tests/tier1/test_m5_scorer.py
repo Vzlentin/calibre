@@ -99,8 +99,8 @@ def _rows(
     first = pd.Timestamp("2026-01-01")
     for origin_index in range(config.origin_count):
         origin = first + pd.Timedelta(days=origin_index)
-        for node in sorted(_NODES, key=str.encode):
-            for horizon_step in range(1, config.horizon + 1):
+        for horizon_step in range(1, config.horizon + 1):
+            for node in sorted(_NODES, key=str.encode):
                 target = origin + pd.Timedelta(days=horizon_step - 1)
                 eligible = origin_index >= horizon_step + config.minimum_calibration_scores - 1
                 scored = eligible

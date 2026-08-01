@@ -51,10 +51,7 @@ from newcalibre.engine import (
     ActualsEvent,
     Engine,
     EventDriver,
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
-    InMemoryLedgerSink,
+    InMemoryIndexedRunStore,
     InMemoryPanelSource,
     InProcessDispatch,
     OrderProposal,
@@ -131,14 +128,12 @@ RUNTIME_CASES = (None, *available_methods())
 
 @dataclass(slots=True)
 class DriverWorld:
-    """Own one session's panel and caller-supplied durable in-memory stores."""
+    """Own one session's panel and transactional in-memory store."""
 
     runtime_name: str | None
     panel: Panel
     session: SessionIdentity
-    sink: InMemoryLedgerSink
-    states: InMemoryCalibrationStateStore
-    artifacts: InMemoryArtifactStore
+    store: InMemoryIndexedRunStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,36 +300,36 @@ def make_session(runtime_name: str | None) -> SessionIdentity:
 def make_world(
     runtime_name: str | None,
     *,
-    sink_factory: Callable[[SessionIdentity], InMemoryLedgerSink] | None = None,
-    states: InMemoryCalibrationStateStore | None = None,
-    artifacts: InMemoryArtifactStore | None = None,
+    source_actuals: bool = True,
+    store_factory: Callable[[SessionIdentity, Panel], InMemoryIndexedRunStore] | None = None,
 ) -> DriverWorld:
-    """Build a fresh world while allowing caller-owned durable stores."""
+    """Build a fresh world while allowing a caller-owned transactional store."""
     panel = make_panel()
     session = make_session(runtime_name)
-    sink = (
-        InMemoryLedgerSink(session=session, calendar=CALENDAR)
-        if sink_factory is None
-        else sink_factory(session)
+    store = (
+        InMemoryIndexedRunStore(
+            session=session,
+            calendar=CALENDAR,
+            actuals=panel if source_actuals else None,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
+        if store_factory is None
+        else store_factory(session, panel)
     )
     return DriverWorld(
         runtime_name=runtime_name,
         panel=panel,
         session=session,
-        sink=sink,
-        states=states or InMemoryCalibrationStateStore(),
-        artifacts=artifacts or InMemoryArtifactStore(),
+        store=store,
     )
 
 
-def build_engine(world: DriverWorld, *, actuals: InMemoryActualsSource) -> Engine:
-    """Reconstruct the engine over one world's durable stores."""
+def build_engine(world: DriverWorld) -> Engine:
+    """Reconstruct the engine over one world's transactional store."""
     return Engine(
+        session=world.session,
         panel_source=InMemoryPanelSource(world.panel),
-        actuals_source=actuals,
-        artifact_store=world.artifacts,
-        calibration_state_store=world.states,
-        ledger_sink=world.sink,
+        run_store=world.store,
         dispatch_backend=InProcessDispatch(),
         hierarchy=HierarchyIndex.flat(world.panel.series_keys),
         adapter_resolver=DeterministicArtifactAdapter,
@@ -343,14 +338,10 @@ def build_engine(world: DriverWorld, *, actuals: InMemoryActualsSource) -> Engin
 
 
 def build_event_driver(world: DriverWorld) -> EventDriver:
-    """Reconstruct an event driver over caller-owned durable stores."""
-    actuals = InMemoryActualsSource(
-        world.panel,
-        actuals_semantics=ActualsSemantics.DEMAND,
-    )
+    """Reconstruct an event driver over the caller-owned store."""
     return EventDriver(
-        engine=build_engine(world, actuals=actuals),
-        ledger_sink=world.sink,
+        engine=build_engine(world),
+        run_store=world.store,
         actuals_semantics=ActualsSemantics.DEMAND,
     )
 
@@ -361,15 +352,10 @@ def build_time_loop(
     origins: Sequence[pd.Timestamp] = ORIGINS,
     settlement_end: pd.Timestamp = SETTLEMENT_END,
 ) -> TimeLoop:
-    """Reconstruct a historical loop over caller-owned stores and schedule."""
-    actuals = InMemoryActualsSource(
-        world.panel,
-        actuals_semantics=ActualsSemantics.DEMAND,
-    )
+    """Reconstruct a historical loop over the caller-owned store and schedule."""
     return TimeLoop(
-        engine=build_engine(world, actuals=actuals),
-        actuals_source=actuals,
-        ledger_sink=world.sink,
+        engine=build_engine(world),
+        run_store=world.store,
         request=TimeLoopRequest(
             session=world.session,
             origins=origins,
@@ -468,7 +454,7 @@ def drive_origins(
 ) -> None:
     """Drive origins and same-period actual availability through final drain."""
     for origin in origins:
-        seed = world.sink.earliest_origin is None
+        seed = world.store.earliest_origin is None
         driver.handle(origin_event(world, origin, seed=seed))
         records = actual_records(world, timestamps=(origin,))
         submit_actuals(world, driver, records, rechunk=rechunk, reverse=reverse)
@@ -488,7 +474,7 @@ def run_event_world(
     reverse: bool = False,
 ) -> DriverWorld:
     """Run one uninterrupted event schedule with equivalent availability."""
-    world = make_world(runtime_name)
+    world = make_world(runtime_name, source_actuals=False)
     driver = build_event_driver(world)
     seed_event_history(world, driver, rechunk=rechunk, reverse=reverse)
     drive_origins(world, driver, rechunk=rechunk, reverse=reverse)
@@ -503,21 +489,19 @@ def runtime_witness(
     """Return delivered scores, state movement, and finite issuance facts."""
     delivered = tuple(
         value.forecast_key
-        for value in world.sink.observe_annotations
+        for value in world.store.observe_annotations
         if value.advanced_delivered_score
     )
     finite = tuple(
         row.key
-        for row in world.sink.forecasts
+        for row in world.store.forecasts
         if row.observation_issuance is not None
         and row.observation_issuance.calibration_ready
         and math.isfinite(row.observation_issuance.lower_bound)
         and math.isfinite(row.observation_issuance.upper_bound)
     )
     before = tuple(sorted((state_before or {}).items(), key=lambda item: item[0].encode()))
-    after = tuple(
-        sorted(world.states.snapshot(world.session).items(), key=lambda item: item[0].encode())
-    )
+    after = tuple(sorted(world.store.states.items(), key=lambda item: item[0].encode()))
     return RuntimeWitness(delivered, before, after, finite)
 
 

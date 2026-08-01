@@ -1,16 +1,16 @@
-"""Run the fixed chapter-03 engine spine over six abstract ports."""
+"""Run the fixed chapter-03 engine spine over three abstract ports."""
 
 from __future__ import annotations
 
 import json
 import math
 import time
+import uuid
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from itertools import count, islice
-from threading import Lock
+from itertools import islice
 from types import MappingProxyType
 from typing import overload
 
@@ -79,17 +79,16 @@ from newcalibre.engine._session import (
 from newcalibre.engine.errors import EngineError as _EngineError
 from newcalibre.engine.forecast_lifecycle import ForecastLifecycle, ForecastLifecycleResult
 from newcalibre.engine.indexed_panel import IndexedPanel
-from newcalibre.engine.ports import (
+from newcalibre.engine.ports import DispatchBackend, PanelSource
+from newcalibre.engine.run_store import (
     ActualKey,
-    ActualsSource,
-    ArtifactStore,
-    CalibrationStateStore,
+    ActualsCommit,
+    ActualsSnapshot,
     CommitReceipt,
-    DispatchBackend,
     ForecastWrite,
-    LedgerSink,
+    IndexedRunStore,
     OriginCommit,
-    PanelSource,
+    OriginSnapshot,
     SettlementSnapshot,
 )
 from newcalibre.engine.settlement import SettlementRequest as _SettlementRequest
@@ -103,7 +102,7 @@ from newcalibre.ledger import (
     GuaranteedSide,
     OrderRow,
 )
-from newcalibre.observe import ActualsSubmission, ObserveCycle, ObserveLoop
+from newcalibre.observe import ObserveCycle, ObserveLoop
 from newcalibre.ordering import OrderingInputError
 from newcalibre.reconcile import ReconciliationContext, resolve_strategy
 
@@ -117,9 +116,6 @@ ENGINE_VERBS = (
     "settle",
     "commit",
 )
-
-_CYCLE_REVISIONS = count(1)
-_CYCLE_REVISION_LOCK = Lock()
 
 
 class Phase(StrEnum):
@@ -554,16 +550,14 @@ type PhaseReporter = Callable[[PhaseEvent], None]
 
 
 class Engine:
-    """Own the exact eight-verb engine surface over six ports."""
+    """Own the exact eight-verb engine surface over three ports."""
 
     def __init__(
         self,
         *,
+        session: SessionIdentity,
         panel_source: PanelSource,
-        actuals_source: ActualsSource,
-        artifact_store: ArtifactStore,
-        calibration_state_store: CalibrationStateStore,
-        ledger_sink: LedgerSink,
+        run_store: IndexedRunStore,
         dispatch_backend: DispatchBackend,
         hierarchy: HierarchyIndex | None,
         adapter_resolver: AdapterResolver = resolve_adapter,
@@ -572,10 +566,7 @@ class Engine:
     ) -> None:
         ports = (
             (panel_source, PanelSource, "panel source"),
-            (actuals_source, ActualsSource, "actuals source"),
-            (artifact_store, ArtifactStore, "artifact store"),
-            (calibration_state_store, CalibrationStateStore, "calibration-state store"),
-            (ledger_sink, LedgerSink, "ledger sink"),
+            (run_store, IndexedRunStore, "run store"),
             (dispatch_backend, DispatchBackend, "dispatch backend"),
         )
         for adapter, port, name in ports:
@@ -589,16 +580,17 @@ class Engine:
             callable(orderer) or isinstance(orderer, ConfiguredPolicyOrderer)
         ):
             raise TypeError("engine orderer must be callable or a ConfiguredPolicyOrderer")
+        if not isinstance(session, SessionIdentity):
+            raise TypeError("engine session must be a SessionIdentity")
         # Resolve configuration before the panel port can perform any data load.
-        adapter_resolver(_session_model_config(ledger_sink.session))
+        adapter_resolver(_session_model_config(session))
         reconciler = resolve_strategy(reconciliation_strategy)
-        ordering_configuration = _session_ordering_configuration(ledger_sink.session)
-        state_snapshot = calibration_state_store.snapshot(ledger_sink.session)
-        conformal_configuration = _session_conformal_config(ledger_sink.session)
+        ordering_configuration = _session_ordering_configuration(session)
+        conformal_configuration = _session_conformal_config(session)
         runtime = (
             None
             if conformal_configuration is None
-            else resolve_method(conformal_configuration, states=state_snapshot)
+            else resolve_method(conformal_configuration, states={})
         )
         self._ordering_configuration = ordering_configuration
         self._runtime: ConformalRuntime | None = runtime
@@ -606,23 +598,29 @@ class Engine:
         loaded_panel = panel_source.load()
         _require_panel_session_binding(
             loaded_panel,
-            session=ledger_sink.session,
-            ledger_calendar=ledger_sink.calendar,
+            session=session,
+            ledger_calendar=loaded_panel.calendar,
         )
+        self._session = session
+        self._calendar = loaded_panel.calendar
         self._panel = IndexedPanel.from_panel(loaded_panel)
         self._hierarchy = hierarchy or HierarchyIndex.flat(self._panel.series_keys)
-        self._actuals_source = actuals_source
-        self._calibration_state_store = calibration_state_store
-        self._ledger_sink = ledger_sink
+        self._run_store = run_store
         self._dispatch_backend = dispatch_backend
         self._forecast_lifecycle = ForecastLifecycle(
-            artifact_store=artifact_store,
             adapter_resolver=adapter_resolver,
         )
         self._reconciler = reconciler
         self._orderer = orderer
         self._active_cycles: dict[tuple[SessionIdentity, pd.Timestamp], CycleToken] = {}
+        self._controller_nonce = uuid.uuid4().hex
+        self._next_cycle_attempt = 1
+        self._snapshots: dict[CycleToken, OriginSnapshot | ActualsSnapshot] = {}
         self._forecast_results: dict[tuple[CycleToken, str], ForecastLifecycleResult] = {}
+        self._checkpoint_effects: dict[
+            CycleToken,
+            tuple[Mapping[str, bytes], Mapping[str, bytes]],
+        ] = {}
         self._issued_decisions: dict[CycleToken, DecisionBatch] = {}
         hierarchy_node_series = tuple(sorted(self._hierarchy.node_labels, key=str.encode))
         if self._panel.series_keys not in (
@@ -639,6 +637,7 @@ class Engine:
             raise TypeError("fit requires an OriginRequest")
         self._require_session(request.session)
         token = self._cycle_for(session=request.session, origin=request.origin)
+        snapshot = self._origin_snapshot(token)
         try:
             provisional = self._panel.tasks(
                 origin=request.origin,
@@ -650,6 +649,7 @@ class Engine:
             previous_cursors = self._forecast_lifecycle.previous_cursors(
                 session=request.session,
                 tasks=provisional,
+                checkpoint_indexes=snapshot.checkpoint_indexes,
             )
             tasks = (
                 provisional
@@ -663,7 +663,16 @@ class Engine:
                     previous_cursors=previous_cursors,
                 )
             )
-            items = tuple((request.session, task, token) for task in tasks)
+            items = tuple(
+                (
+                    request.session,
+                    task,
+                    token,
+                    snapshot.checkpoints,
+                    snapshot.checkpoint_indexes,
+                )
+                for task in tasks
+            )
             results = self._dispatch_backend.map(self._forecast_lifecycle.run_item, items)
             staged = {
                 (token, task.identity): result for task, result in zip(tasks, results, strict=True)
@@ -698,11 +707,11 @@ class Engine:
             batch = _bind_forecast_batch(
                 ForecastBatch(
                     combined,
-                    calendar=self._ledger_sink.calendar,
+                    calendar=self._calendar,
                 ),
                 token=token,
             )
-            self._forecast_lifecycle.publish(results)
+            self._checkpoint_effects[token] = self._forecast_lifecycle.staged_updates(results)
         except Exception:
             self._retire_cycle(token)
             raise
@@ -920,23 +929,25 @@ class Engine:
         origin: pd.Timestamp,
         *,
         session: SessionIdentity,
-        submission: ActualsSubmission | None = None,
+        snapshot: OriginSnapshot | ActualsSnapshot | None = None,
     ) -> ObservationResult:
-        """Stage one complete durable-snapshot observe cycle without persistence."""
+        """Stage one observe cycle from the active revision snapshot."""
         self._require_session(session)
+        if snapshot is not None:
+            if snapshot.session != session or snapshot.origin != origin:
+                raise _EngineError("observe snapshot must match its session and origin")
+            self._begin_cycle(snapshot)
         token = self._cycle_for(session=session, origin=origin)
-        if submission is not None and not isinstance(submission, ActualsSubmission):
-            raise TypeError("observe submission must be an ActualsSubmission or None")
-        prior_states = dict(self._calibration_state_store.snapshot(session))
+        snapshot = self._snapshots[token]
+        prior_states = dict(snapshot.conformal_states)
         loop = ObserveLoop(
             hierarchy=self._hierarchy,
-            observed_history=self._ledger_sink.observed_history,
-            pending_observations=self._ledger_sink.pending_observations,
+            observed_history=snapshot.observed_history,
+            pending_observations=snapshot.pending_observations,
             conformal_states=prior_states,
             runtime=self._runtime,
         )
-        accepted = self._actuals_source.reveal(before=origin) if submission is None else submission
-        loop.accept(accepted)
+        loop.accept(snapshot.actuals)
         cycle = loop.cycle(origin)
         return _bind_observation_result(
             cycle,
@@ -952,22 +963,22 @@ class Engine:
         if request.token is None:
             raise _EngineError("engine settlement requires a cycle token")
         self._require_cycle(request.token)
-        if request.snapshot.calendar != self._ledger_sink.calendar:
-            raise _EngineError("settlement snapshot calendar does not match the engine ledger")
-        owned_snapshot = self._ledger_sink.settlement_snapshot(request.snapshot.periods)
-        if request.snapshot != owned_snapshot:
-            raise _EngineError("settlement snapshot does not match the engine ledger")
+        if request.snapshot.calendar != self._calendar:
+            raise _EngineError("settlement snapshot calendar does not match the engine store")
+        active = self._snapshots[request.token]
+        if active.settlement != request.snapshot:
+            raise _EngineError("settlement snapshot does not match the active store snapshot")
         return _settle(request)
 
     @overload
     def commit(self, request: CommitRequest) -> CommitResult: ...
 
     @overload
-    def commit(self, request: OriginCommit | CommitReceipt) -> CommitReceipt: ...
+    def commit(self, request: OriginCommit | ActualsCommit) -> CommitReceipt: ...
 
     def commit(
         self,
-        request: CommitRequest | OriginCommit | CommitReceipt,
+        request: CommitRequest | OriginCommit | ActualsCommit,
     ) -> CommitResult | CommitReceipt:
         """Persist an origin's ledger and monotone calibration-state mutations."""
         if isinstance(request, CommitRequest):
@@ -976,28 +987,18 @@ class Engine:
             except Exception:
                 self._retire_cycle(request.token)
                 raise
-        if not isinstance(request, (OriginCommit, CommitReceipt)):
-            raise TypeError("commit requires a CommitRequest, OriginCommit, or CommitReceipt")
+        if not isinstance(request, (OriginCommit, ActualsCommit)):
+            raise TypeError("commit requires a CommitRequest, OriginCommit, or ActualsCommit")
         self._require_session(request.session)
-        if isinstance(request, OriginCommit):
-            receipt = _snapshot_commit_receipt(self._ledger_sink.commit(request))
-            expected = CommitReceipt.from_commit(request, sequence=receipt.sequence)
-            if receipt != expected:
-                raise _EngineError("ledger sink returned a mismatched commit receipt")
-        else:
-            callback_receipt = self._ledger_sink.receipt(request.commit_key)
-            if callback_receipt is None:
-                raise _EngineError("commit receipt is not journaled by the ledger sink")
-            receipt = _snapshot_commit_receipt(callback_receipt)
-            if receipt != request:
-                raise _EngineError("commit receipt does not match the ledger journal")
-        for partition, value in receipt.state_updates.items():
-            self._calibration_state_store.save(
-                receipt.session,
-                partition,
-                value,
-                sequence=receipt.sequence,
-            )
+        receipt = self._run_store.commit(request)
+        if not isinstance(receipt, CommitReceipt):
+            raise _EngineError("run store must return a CommitReceipt")
+        expected = CommitReceipt.from_commit(
+            request,
+            revision=request.expected_revision + 1,
+        )
+        if receipt != expected:
+            raise _EngineError("run store returned a mismatched commit receipt")
         return receipt
 
     def _commit_request(self, request: CommitRequest) -> CommitResult:
@@ -1033,7 +1034,7 @@ class Engine:
         orders = _materialize_decisions(
             request.decisions,
             configuration=configuration,
-            calendar=self._ledger_sink.calendar,
+            calendar=self._calendar,
         )
         settlement_result: _SettlementResult | None = None
         if request.settlement is not None:
@@ -1046,15 +1047,16 @@ class Engine:
                 actuals_semantics=request.settlement.actuals_semantics,
                 token=request.token,
             )
-            settlement_result = (
-                self.settle(settlement_request)
-                if self._ledger_sink.receipt(request.origin) is None
-                else _settle(settlement_request)
-            )
+            settlement_result = self.settle(settlement_request)
+        checkpoint_updates, checkpoint_indexes = self._checkpoint_effects.get(
+            request.token,
+            ({}, {}),
+        )
         receipt = self.commit(
             OriginCommit(
                 session=request.session,
                 origin=request.origin,
+                expected_revision=request.token.revision,
                 observe_cycle=request.observation.cycle,
                 forecasts=(
                     ForecastWrite(
@@ -1066,9 +1068,12 @@ class Engine:
                 orders=orders,
                 settlements=() if settlement_result is None else settlement_result.records,
                 state_updates=request.calibration.state_updates,
+                checkpoint_updates=checkpoint_updates,
+                checkpoint_indexes=checkpoint_indexes,
                 input_fingerprint=request.input_fingerprint,
                 expected_forecast_origin_count=request.expected_forecast_origin_count,
                 inventory_positions=request.inventory_positions,
+                resume_marker=request.origin,
             )
         )
         result = CommitResult(
@@ -1081,16 +1086,16 @@ class Engine:
         return result
 
     def _require_session(self, session: SessionIdentity) -> None:
-        if session != self._ledger_sink.session:
-            raise _EngineError("engine session does not match its ledger sink")
+        if session != self._session:
+            raise _EngineError("engine session does not match its run store")
 
     def _require_forecast_batch(self, forecasts: ForecastBatch) -> None:
         if forecasts.token is None or forecasts.session is None:
             raise _EngineError("forecast batch was not produced by this engine")
         self._require_cycle(forecasts.token)
         self._require_session(forecasts.session)
-        if forecasts.calendar != self._ledger_sink.calendar:
-            raise _EngineError("forecast batch calendar does not match the engine ledger")
+        if forecasts.calendar != self._calendar:
+            raise _EngineError("forecast batch calendar does not match the engine store")
 
     def _required_batch_token(self, forecasts: ForecastBatch) -> CycleToken:
         self._require_forecast_batch(forecasts)
@@ -1102,17 +1107,28 @@ class Engine:
         active = self._active_cycles.get(key)
         if active is not None:
             return active
-        return self._begin_cycle(session=session, origin=origin)
+        raise _EngineError("state-bearing work requires an opened run-store snapshot")
 
-    def _begin_cycle(self, *, session: SessionIdentity, origin: pd.Timestamp) -> CycleToken:
-        self._require_session(session)
+    def _begin_cycle(
+        self,
+        snapshot: OriginSnapshot | ActualsSnapshot,
+    ) -> CycleToken:
+        self._require_session(snapshot.session)
+        session = snapshot.session
+        origin = snapshot.origin
         active = self._active_cycles.get((session, origin))
         if active is not None:
             self._retire_cycle(active)
-        with _CYCLE_REVISION_LOCK:
-            revision = next(_CYCLE_REVISIONS)
-        token = CycleToken(session, origin, revision)
+        token = CycleToken(
+            session,
+            origin,
+            snapshot.revision,
+            self._next_cycle_attempt,
+            self._controller_nonce,
+        )
+        self._next_cycle_attempt += 1
         self._active_cycles[(session, origin)] = token
+        self._snapshots[token] = snapshot
         return token
 
     def _require_cycle(self, token: CycleToken) -> None:
@@ -1126,6 +1142,8 @@ class Engine:
         key = (token.session, token.origin)
         if self._active_cycles.get(key) == token:
             del self._active_cycles[key]
+        self._snapshots.pop(token, None)
+        self._checkpoint_effects.pop(token, None)
         self._issued_decisions.pop(token, None)
         stale_results = [key for key in self._forecast_results if key[0] == token]
         for result_key in stale_results:
@@ -1133,26 +1151,21 @@ class Engine:
 
     def _abort_origin(self, origin: pd.Timestamp) -> None:
         """Invalidate the active cycle at a failed spine phase boundary."""
-        token = self._active_cycles.get((self._ledger_sink.session, origin))
+        token = self._active_cycles.get((self._session, origin))
         if token is not None:
             self._retire_cycle(token)
 
-    def _require_event_driver_port(self, *, ledger_sink: LedgerSink) -> None:
-        """Reject a driver wired to a different ledger than this engine."""
-        if ledger_sink is not self._ledger_sink:
-            raise _EngineError("event driver ledger sink does not belong to the engine")
+    def _origin_snapshot(self, token: CycleToken) -> OriginSnapshot:
+        """Return the active origin snapshot for a forecast lifecycle."""
+        snapshot = self._snapshots[token]
+        if not isinstance(snapshot, OriginSnapshot):
+            raise _EngineError("forecast lifecycle requires an origin snapshot")
+        return snapshot
 
-    def _require_time_loop_ports(
-        self,
-        *,
-        actuals_source: ActualsSource,
-        ledger_sink: LedgerSink,
-    ) -> None:
-        """Reject a driver wired to different ports than this engine."""
-        if actuals_source is not self._actuals_source:
-            raise _EngineError("time loop actuals source does not belong to the engine")
-        if ledger_sink is not self._ledger_sink:
-            raise _EngineError("time loop ledger sink does not belong to the engine")
+    def _require_driver_store(self, run_store: IndexedRunStore) -> None:
+        """Reject a driver wired to a different store than this engine."""
+        if run_store is not self._run_store:
+            raise _EngineError("driver run store does not belong to the engine")
 
 
 class Spine:
@@ -1168,15 +1181,19 @@ class Spine:
         self,
         request: OriginRequest,
         *,
+        snapshot: OriginSnapshot,
         decision_origin: bool = True,
         settlement: SettlementWindow | None = None,
-        submission: ActualsSubmission | None = None,
         input_fingerprint: str | None = None,
         expected_forecast_origin_count: int | None = None,
     ) -> OriginResult:
         """Run Resolve through Commit once for a declared origin."""
         if not isinstance(request, OriginRequest):
             raise TypeError("spine requires an OriginRequest")
+        if not isinstance(snapshot, OriginSnapshot):
+            raise TypeError("spine requires an OriginSnapshot")
+        if snapshot.session != request.session or snapshot.origin != request.origin:
+            raise _EngineError("spine snapshot must match its request session and origin")
         if not isinstance(decision_origin, bool):
             raise TypeError("decision_origin must be boolean")
         if settlement is not None and not isinstance(settlement, SettlementWindow):
@@ -1185,8 +1202,6 @@ class Spine:
             raise ValueError("spine settlement window must contain exactly its origin")
         if settlement is not None and settlement.token is not None:
             raise _EngineError("spine settlement token is engine-owned")
-        if submission is not None and not isinstance(submission, ActualsSubmission):
-            raise TypeError("spine submission must be an ActualsSubmission or None")
         if expected_forecast_origin_count is not None and (
             not isinstance(expected_forecast_origin_count, int)
             or isinstance(expected_forecast_origin_count, bool)
@@ -1195,11 +1210,10 @@ class Spine:
             raise ValueError("expected forecast origin count must be a non-negative integer")
 
         def resolve_phase() -> ObservationResult:
-            self._engine._begin_cycle(session=request.session, origin=request.origin)
             return self._engine.observe(
                 request.origin,
                 session=request.session,
-                submission=submission,
+                snapshot=snapshot,
             )
 
         observation = self._phase(
@@ -1342,26 +1356,6 @@ def _bind_forecast_batch(
     )
     object.__setattr__(bound, "_token", token)
     return bound
-
-
-def _snapshot_commit_receipt(receipt: object) -> CommitReceipt:
-    """Collapse a ledger callback result into one stable, exact receipt."""
-    if not isinstance(receipt, CommitReceipt):
-        raise _EngineError("ledger sink must return a CommitReceipt")
-    return CommitReceipt(
-        session=receipt.session,
-        origin=receipt.origin,
-        digest=receipt.digest,
-        state_updates=dict(receipt.state_updates),
-        has_forecasts=receipt.has_forecasts,
-        observe_cycle=receipt.observe_cycle,
-        settlement_periods=tuple(receipt.settlement_periods),
-        sequence=receipt.sequence,
-        actual_keys=tuple(receipt.actual_keys),
-        input_fingerprint=receipt.input_fingerprint,
-        orders=tuple(receipt.orders),
-        inventory_positions=dict(receipt.inventory_positions),
-    )
 
 
 def _bind_observation_result(

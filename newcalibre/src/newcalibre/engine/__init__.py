@@ -1,4 +1,4 @@
-"""Expose the chapter-03 engine spine, settlement core, and six ports."""
+"""Expose the engine spine, transactional store, and remaining ports."""
 
 from newcalibre.engine.errors import EngineError
 from newcalibre.engine.event_driver import (
@@ -12,26 +12,10 @@ from newcalibre.engine.event_driver import (
 )
 from newcalibre.engine.forecast_lifecycle import ForecastLifecycle, ForecastLifecycleError
 from newcalibre.engine.indexed_panel import IndexedPanel, IndexedPanelError
-from newcalibre.engine.ports import (
-    ActualKey,
-    ActualsCommitKey,
-    ActualsSource,
-    ArtifactStore,
-    CalibrationStateStore,
-    CommitReceipt,
-    DispatchBackend,
-    ForecastWrite,
-    LedgerSink,
-    OriginCommit,
-    PanelSource,
-    SettlementSnapshot,
-)
+from newcalibre.engine.ports import DispatchBackend, PanelSource
 from newcalibre.engine.ports.memory import (
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
+    InMemoryIndexedRunStore,
     InMemoryLedgerReader,
-    InMemoryLedgerSink,
     InMemoryPanelSource,
     InProcessDispatch,
 )
@@ -46,6 +30,20 @@ from newcalibre.engine.reporting import (
     LedgerResolution,
     LedgerSelection,
     LedgerSessionMetadata,
+)
+from newcalibre.engine.run_store import (
+    ActualKey,
+    ActualsCommit,
+    ActualsCommitKey,
+    ActualsIntent,
+    ActualsSnapshot,
+    CommitReceipt,
+    ForecastWrite,
+    IndexedRunStore,
+    OriginCommit,
+    OriginIntent,
+    OriginSnapshot,
+    SettlementSnapshot,
 )
 from newcalibre.engine.settlement import (
     SettlementError,
@@ -86,12 +84,12 @@ __all__ = [
     "ENGINE_VERBS",
     "ActualKey",
     "ActualsCommitKey",
+    "ActualsCommit",
+    "ActualsIntent",
+    "ActualsSnapshot",
     "ActualsEvent",
     "ActualsOutcome",
-    "ActualsSource",
-    "ArtifactStore",
     "CalibrationResult",
-    "CalibrationStateStore",
     "CommitReceipt",
     "CommitRequest",
     "CommitResult",
@@ -109,15 +107,13 @@ __all__ = [
     "ForecastLifecycle",
     "ForecastLifecycleError",
     "ForecastWrite",
-    "InMemoryActualsSource",
-    "InMemoryArtifactStore",
-    "InMemoryCalibrationStateStore",
+    "InMemoryIndexedRunStore",
     "InMemoryLedgerReader",
-    "InMemoryLedgerSink",
     "InMemoryPanelSource",
     "InProcessDispatch",
     "IndexedPanel",
     "IndexedPanelError",
+    "IndexedRunStore",
     "LedgerBatch",
     "LedgerBoundIssuance",
     "LedgerBoundScore",
@@ -128,11 +124,12 @@ __all__ = [
     "LedgerResolution",
     "LedgerSelection",
     "LedgerSessionMetadata",
-    "LedgerSink",
     "ObservationResult",
     "OrderProposal",
     "OrderRequest",
     "OriginCommit",
+    "OriginIntent",
+    "OriginSnapshot",
     "OriginEvent",
     "OriginOutcome",
     "OriginRequest",

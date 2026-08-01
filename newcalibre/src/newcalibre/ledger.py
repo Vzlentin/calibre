@@ -987,6 +987,17 @@ class Ledger:
             staged_rows[key] = row
         self._settlements.update(staged_rows)
 
+    def _publish_staged_rows(self, staged: Ledger) -> None:
+        """Publish rows already validated by an isolated sibling ledger."""
+        if not isinstance(staged, Ledger):
+            raise TypeError("staged ledger rows require a Ledger")
+        if staged.session != self._session or staged.calendar != self._calendar:
+            raise LedgerError("staged ledger rows do not match the owned ledger")
+        self._forecasts.update(staged._forecasts)
+        self._pending_forecasts.update(staged._pending_forecasts)
+        self._orders.update(staged._orders)
+        self._settlements.update(staged._settlements)
+
     def due_frame(self, origin: pd.Timestamp) -> pd.DataFrame:
         """Return a fresh append-ordered snapshot of pending rows due before origin."""
         self._require_calendar_origin(origin)
@@ -1007,10 +1018,11 @@ class Ledger:
     def apply_observe_cycle(self, cycle: ObserveCycle, *, origin: pd.Timestamp) -> None:
         """Validate then atomically materialize one complete observe-cycle delta."""
         staged = self._validated_observe_cycle(cycle, origin=origin)
-        history, pending, resolved_rows, resolutions, annotations = staged
+        history, retained, removal_keys, resolutions, annotations = staged
         self._observed_history.update(history)
-        self._pending_forecasts = pending
-        self._forecasts.update(resolved_rows)
+        for key in removal_keys:
+            self._pending_forecasts.pop(key)
+        self._pending_forecasts.update(retained)
         self._resolutions.update(resolutions)
         self._annotations.update(annotations)
 
@@ -1022,7 +1034,7 @@ class Ledger:
     ) -> tuple[
         dict[tuple[str, pd.Timestamp], ObservedActual],
         dict[ForecastKey, PendingObservation],
-        dict[ForecastKey, ForecastRow],
+        set[ForecastKey],
         dict[ForecastKey, ObservationResolution],
         dict[ForecastKey, ObserveAnnotation],
     ]:
@@ -1030,18 +1042,20 @@ class Ledger:
         if not isinstance(cycle, ObserveCycle):
             raise LedgerError("ledger observation requires an ObserveCycle")
 
-        history = dict(self._observed_history)
+        history: dict[tuple[str, pd.Timestamp], ObservedActual] = {}
         for value in cycle.history_appends:
             if value.timestamp >= origin:
                 raise LedgerError(f"observed actual is not admissible at origin: {value.key!r}")
-            previous = history.get(value.key)
+            previous = self._observed_history.get(value.key)
+            if previous is None:
+                previous = history.get(value.key)
             if previous is not None:
                 if previous.recorded_fact != value.recorded_fact:
                     raise LedgerError(f"conflicting observed actual: {value.key!r}")
                 raise LedgerError(f"observed actual is already recorded: {value.key!r}")
             history[value.key] = value
 
-        current = dict(self._pending_forecasts)
+        current = self._pending_forecasts
         removal_keys = {_ledger_forecast_key(key) for key in cycle.pending_removals}
         unknown_removal = next((key for key in removal_keys if key not in current), None)
         if unknown_removal is not None:
@@ -1049,15 +1063,17 @@ class Ledger:
         retention_by_key = {
             _ledger_forecast_key(value.forecast_key): value for value in cycle.pending_retentions
         }
-        expected_retentions = set(current) - removal_keys
-        if set(retention_by_key) != expected_retentions:
-            missing = sorted(expected_retentions - set(retention_by_key), key=repr)
-            extra = sorted(set(retention_by_key) - expected_retentions, key=repr)
+        unknown_retention = (
+            set(retention_by_key)
+            .difference(current)
+            .union(set(retention_by_key).intersection(removal_keys))
+        )
+        if unknown_retention:
             raise LedgerError(
-                "observe pending retentions must exactly cover non-removed rows; "
-                f"missing={missing!r}, extra={extra!r}"
+                "observe pending retentions must address known non-removed rows; "
+                f"invalid={sorted(unknown_retention, key=repr)!r}"
             )
-        pending: dict[ForecastKey, PendingObservation] = {}
+        retained_rows: dict[ForecastKey, PendingObservation] = {}
         for key, retained in retention_by_key.items():
             prior = current[key]
             if (
@@ -1071,14 +1087,13 @@ class Ledger:
                 raise LedgerError(f"pending retention changed a resolved row: {key!r}")
             if retained.resolution is not None and retained.target_timestamp >= origin:
                 raise LedgerError(f"pending retention resolved a row that is not due: {key!r}")
-            pending[key] = retained
+            retained_rows[key] = retained
 
         resolution_by_key = {
             _ledger_forecast_key(value.forecast_key): value for value in cycle.resolutions
         }
         if set(resolution_by_key) != removal_keys:
             raise LedgerError("observe resolutions must exactly match pending removals")
-        resolved_rows: dict[ForecastKey, ForecastRow] = {}
         for key, resolution in resolution_by_key.items():
             prior = current[key]
             if prior.target_timestamp >= origin:
@@ -1090,9 +1105,7 @@ class Ledger:
             row = self._forecasts[key]
             if row.actual_value is not None or key in self._resolutions:
                 raise LedgerError(f"forecast row is already resolved: {key!r}")
-            resolved_rows[key] = row._with_actual_value(
-                _finite_real(resolution.actual, name="resolved actual value")
-            )
+            _finite_real(resolution.actual, name="resolved actual value")
 
         delivered_sequence = tuple(
             _ledger_forecast_key(observation.forecast_key)
@@ -1128,8 +1141,8 @@ class Ledger:
 
         return (
             history,
-            pending,
-            resolved_rows,
+            retained_rows,
+            removal_keys,
             resolution_by_key,
             annotation_by_key,
         )
@@ -1141,25 +1154,38 @@ class Ledger:
 
         outcomes: list[ScoreOutcome] = []
         for forecast_key, row in self._forecasts.items():
+            resolution = self._resolutions.get(forecast_key)
+            row_actual = None if resolution is None else resolution.actual
+            window_sum_actual = (
+                _resolved_window_sum(
+                    self._forecasts,
+                    forecast_key=forecast_key,
+                    resolutions=self._resolutions,
+                )
+                if any(
+                    issuance.bounds_finite
+                    and issuance.descriptor.window is EmissionScope.WINDOW_SUM
+                    for issuance in row.issuances.values()
+                )
+                else None
+            )
+            annotation = self._annotations.get(forecast_key)
             for bound_key, issuance in row.issuances.items():
                 target = CoverageTarget(
                     descriptor=issuance.descriptor,
                     guaranteed_side=issuance.guaranteed_side,
                     bound_key=bound_key,
                 )
-                actual_value = row.actual_value
+                actual_value = row_actual
                 if issuance.bounds_finite and target.descriptor.window is EmissionScope.WINDOW_SUM:
-                    actual_value = _resolved_window_sum(
-                        self._forecasts,
-                        forecast_key=forecast_key,
-                    )
+                    actual_value = window_sum_actual
                 outcome = _score_bound(
                     forecast_key=forecast_key,
                     row=row,
                     actual_value=actual_value,
                     target=target,
                     issuance=issuance,
-                    annotation=self._annotations.get(forecast_key),
+                    annotation=annotation,
                     registry=registry,
                 )
                 outcomes.append(outcome)
@@ -1226,6 +1252,7 @@ def _resolved_window_sum(
     forecasts: Mapping[ForecastKey, ForecastRow],
     *,
     forecast_key: ForecastKey,
+    resolutions: Mapping[ForecastKey, ObservationResolution],
 ) -> float | None:
     series_key, origin, terminal_step, model_name = forecast_key
     members: list[ForecastRow] = []
@@ -1237,10 +1264,14 @@ def _resolved_window_sum(
             raise LedgerError(
                 "window-sum coverage requires every leading protection-window member"
             ) from error
-    if any(member.actual_value is None for member in members):
+    actuals = tuple(
+        None if (resolution := resolutions.get(member.key)) is None else resolution.actual
+        for member in members
+    )
+    if any(actual is None for actual in actuals):
         return None
     return _finite_real(
-        math.fsum(cast(float, member.actual_value) for member in members),
+        math.fsum(cast(float, actual) for actual in actuals),
         name="resolved window-sum actual",
     )
 

@@ -30,7 +30,12 @@ from newcalibre.domain import (
     SessionIdentity,
     StockoutRule,
 )
-from newcalibre.engine import InMemoryLedgerSink, SettlementRequest, SettlementResult, settle
+from newcalibre.engine import (
+    InMemoryIndexedRunStore,
+    SettlementRequest,
+    SettlementResult,
+    settle,
+)
 from newcalibre.ledger import OrderRow, SettlementRecord
 from newcalibre.oracle import CaptureBundle
 from newcalibre.protocols.vn2 import VN2Dataset
@@ -669,9 +674,10 @@ def _build_replay(bundle: CaptureBundle, dataset: VN2Dataset) -> CanonicalReplay
 
 
 def _settle_orders(inputs: ReplayInputs, orders: Sequence[OrderRow]) -> SettlementResult:
-    sink = InMemoryLedgerSink(
+    sink = InMemoryIndexedRunStore(
         session=inputs.session,
         calendar=inputs.calendar,
+        actuals_semantics=inputs.actuals_semantics,
         initial_arrivals=inputs.initial_arrivals,
     )
     request = SettlementRequest(

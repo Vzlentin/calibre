@@ -427,8 +427,8 @@ class _Reducer:
             self.issues.add("extra-row", key)
             self.population.forced_unequal = True
             return
-        node = self.nodes[position // self.config.horizon]
-        horizon_step = position % self.config.horizon + 1
+        horizon_step = position // len(self.nodes) + 1
+        node = self.nodes[position % len(self.nodes)]
         if (
             key.series_key != node
             or key.model_name != self.model_name
@@ -785,8 +785,8 @@ def _timestamp_text(value: pd.Timestamp | None) -> str | None:
     return None if value is None else value.date().isoformat()
 
 
-def _key_order(key: LedgerForecastKey) -> tuple[pd.Timestamp, bytes, bytes, int]:
-    return key.origin, key.series_key.encode(), key.model_name.encode(), key.horizon_step
+def _key_order(key: LedgerForecastKey) -> tuple[pd.Timestamp, int, bytes, bytes]:
+    return key.origin, key.horizon_step, key.series_key.encode(), key.model_name.encode()
 
 
 def _key_text(key: LedgerForecastKey) -> str:

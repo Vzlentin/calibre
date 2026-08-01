@@ -18,12 +18,15 @@ the three-file reading path without frozen code or private rationale.
 
 Engine work additionally starts from
 [`03-engine-core.md`](../docs/spec/03-engine-core.md), which owns the fixed
-spine, closed verb surface, and six ports.
+spine, closed verb surface, and three engine ports. The ports are the immutable
+panel source, the transactional indexed run store, and the dispatch backend;
+`LedgerReader` is the separate reporting boundary.
 
 ## Package layers
 
 - `src/newcalibre/domain/` owns the chapter 02 vocabulary and contracts.
-- `src/newcalibre/engine/` owns the chapter 03 spine and six I/O ports.
+- `src/newcalibre/engine/` owns the chapter 03 spine, transactional run store,
+  and three engine ports.
 - `src/newcalibre/forecasting/` owns the chapter 04 adapter surface and may
   depend on `domain`.
 

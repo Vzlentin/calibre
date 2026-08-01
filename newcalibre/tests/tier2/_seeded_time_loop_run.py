@@ -38,10 +38,7 @@ from newcalibre.domain import (
 from newcalibre.engine import (
     CommitReceipt,
     Engine,
-    InMemoryActualsSource,
-    InMemoryArtifactStore,
-    InMemoryCalibrationStateStore,
-    InMemoryLedgerSink,
+    InMemoryIndexedRunStore,
     InMemoryPanelSource,
     InProcessDispatch,
     OrderProposal,
@@ -131,7 +128,7 @@ class SeededFixtureAdapter:
         raise AdapterCapabilityError("tier-2 fixture has no incremental-update capability")
 
 
-class InterruptingLedgerSink(InMemoryLedgerSink):
+class InterruptingRunStore(InMemoryIndexedRunStore):
     """Interrupt one selected commit immediately before or after publication."""
 
     def __init__(
@@ -139,10 +136,16 @@ class InterruptingLedgerSink(InMemoryLedgerSink):
         *,
         session: SessionIdentity,
         calendar: Calendar,
+        actuals: Panel,
         fail_origin: pd.Timestamp,
         commit_before_failure: bool,
     ) -> None:
-        super().__init__(session=session, calendar=calendar)
+        super().__init__(
+            session=session,
+            calendar=calendar,
+            actuals=actuals,
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
         self._fail_origin = fail_origin
         self._commit_before_failure = commit_before_failure
         self._failed = False
@@ -215,16 +218,13 @@ def _order(request: OrderRequest) -> tuple[OrderProposal, ...]:
 def _engine(
     *,
     panel: Panel,
-    actuals: InMemoryActualsSource,
-    sink: InMemoryLedgerSink,
-    states: InMemoryCalibrationStateStore,
+    session: SessionIdentity,
+    store: InMemoryIndexedRunStore,
 ) -> Engine:
     return Engine(
+        session=session,
         panel_source=InMemoryPanelSource(panel),
-        actuals_source=actuals,
-        artifact_store=InMemoryArtifactStore(),
-        calibration_state_store=states,
-        ledger_sink=sink,
+        run_store=store,
         dispatch_backend=InProcessDispatch(),
         hierarchy=HierarchyIndex.flat(panel.series_keys),
         adapter_resolver=SeededFixtureAdapter,
@@ -248,52 +248,41 @@ def _request(*, session: SessionIdentity) -> TimeLoopRequest:
 
 def _run_uninterrupted(
     seed: int,
-) -> tuple[InMemoryLedgerSink, TimeLoopResult, InMemoryCalibrationStateStore]:
+) -> tuple[InMemoryIndexedRunStore, TimeLoopResult]:
     panel = _panel()
     session = _session(seed)
-    actuals = InMemoryActualsSource(
-        panel,
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=_CALENDAR,
+        actuals=panel,
         actuals_semantics=ActualsSemantics.DEMAND,
     )
-    sink = InMemoryLedgerSink(session=session, calendar=_CALENDAR)
-    states = InMemoryCalibrationStateStore()
     result = TimeLoop(
-        engine=_engine(panel=panel, actuals=actuals, sink=sink, states=states),
-        actuals_source=actuals,
-        ledger_sink=sink,
+        engine=_engine(panel=panel, session=session, store=store),
+        run_store=store,
         request=_request(session=session),
     ).run()
-    assert len(states.snapshot(session)) == 2
-    return sink, result, states
+    assert len(store.states) == 2
+    return store, result
 
 
 def _run_resumed(
     seed: int,
     *,
     commit_before_failure: bool,
-) -> tuple[InMemoryLedgerSink, TimeLoopResult, InMemoryCalibrationStateStore]:
+) -> tuple[InMemoryIndexedRunStore, TimeLoopResult]:
     panel = _panel()
     session = _session(seed)
-    actuals = InMemoryActualsSource(
-        panel,
-        actuals_semantics=ActualsSemantics.DEMAND,
-    )
-    sink = InterruptingLedgerSink(
+    store = InterruptingRunStore(
         session=session,
         calendar=_CALENDAR,
+        actuals=panel,
         fail_origin=_FAIL_ORIGIN,
         commit_before_failure=commit_before_failure,
     )
-    interrupted_states = InMemoryCalibrationStateStore()
     interrupted = TimeLoop(
-        engine=_engine(
-            panel=panel,
-            actuals=actuals,
-            sink=sink,
-            states=interrupted_states,
-        ),
-        actuals_source=actuals,
-        ledger_sink=sink,
+        engine=_engine(panel=panel, session=session, store=store),
+        run_store=store,
         request=_request(session=session),
     )
     try:
@@ -307,22 +296,16 @@ def _run_resumed(
         assert expected_error in str(error)
     else:
         raise AssertionError("tier-2 interruption fixture did not interrupt")
-    assert (sink.receipt(_FAIL_ORIGIN) is not None) is commit_before_failure
-    assert len(interrupted_states.snapshot(session)) == 2
+    assert (store.receipt(_FAIL_ORIGIN) is not None) is commit_before_failure
+    assert len(store.states) == 2
 
     result = TimeLoop(
-        engine=_engine(
-            panel=panel,
-            actuals=actuals,
-            sink=sink,
-            states=interrupted_states,
-        ),
-        actuals_source=actuals,
-        ledger_sink=sink,
+        engine=_engine(panel=panel, session=session, store=store),
+        run_store=store,
         request=_request(session=session),
     ).run()
-    assert len(interrupted_states.snapshot(session)) == 2
-    return sink, result, interrupted_states
+    assert len(store.states) == 2
+    return store, result
 
 
 def _float(value: float | None) -> str | None:
@@ -389,9 +372,8 @@ def _settlement_payload(row: SettlementRecord) -> dict[str, object]:
 
 
 def _ledger_bytes(
-    sink: InMemoryLedgerSink,
+    store: InMemoryIndexedRunStore,
     result: TimeLoopResult,
-    states: InMemoryCalibrationStateStore,
 ) -> bytes:
     payload = {
         "annotations": [
@@ -401,13 +383,11 @@ def _ledger_bytes(
                 "key": repr(value.forecast_key),
                 "score": _float(value.score),
             }
-            for value in sink.observe_annotations
+            for value in store.observe_annotations
         ],
-        "conformal_states": [
-            (label, value.hex()) for label, value in sorted(states.snapshot(sink.session).items())
-        ],
+        "conformal_states": [(label, value.hex()) for label, value in sorted(store.states.items())],
         "decision_origins": [_timestamp(origin) for origin in result.decision_origins],
-        "forecasts": [_forecast_payload(row) for row in sink.forecasts],
+        "forecasts": [_forecast_payload(row) for row in store.forecasts],
         "observed_history": [
             {
                 "availability_bound": _float(value.availability_bound),
@@ -418,9 +398,9 @@ def _ledger_bytes(
                 "series_key": value.series_key,
                 "timestamp": _timestamp(value.timestamp),
             }
-            for value in sink.observed_history
+            for value in store.observed_history
         ],
-        "orders": [_order_payload(row) for row in sink.orders],
+        "orders": [_order_payload(row) for row in store.orders],
         "receipts": [
             {
                 "digest": receipt.digest,
@@ -441,12 +421,12 @@ def _ledger_bytes(
                 "forecast_key": repr(value.forecast_key),
                 "target_timestamp": _timestamp(value.target_timestamp),
             }
-            for value in sink.pending_observations
+            for value in store.pending_observations
         ],
         "schema": "newcalibre.tier2-rolling-ledger/v2",
-        "session": sink.session.value,
+        "session": store.session.value,
         "settlement_periods": [_timestamp(period) for period in result.settlement_periods],
-        "settlements": [_settlement_payload(row) for row in sink.settlements],
+        "settlements": [_settlement_payload(row) for row in store.settlements],
     }
     return json.dumps(
         payload,
@@ -476,14 +456,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Run the selected fixture and write its canonical ledger bytes."""
     args = _parse_args(argv)
     if args.mode == "uninterrupted":
-        sink, result, states = _run_uninterrupted(args.seed)
+        store, result = _run_uninterrupted(args.seed)
     else:
-        sink, result, states = _run_resumed(
+        store, result = _run_resumed(
             args.seed,
             commit_before_failure=args.mode == "resumed-after-commit",
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(_ledger_bytes(sink, result, states))
+    args.output.write_bytes(_ledger_bytes(store, result))
 
 
 if __name__ == "__main__":
