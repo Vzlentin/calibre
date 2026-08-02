@@ -401,8 +401,8 @@ def validate_environment(value: object) -> dict[str, object]:
         root["memory"], keys={"total_bytes", "usable_bytes"}, name="environment memory"
     )
     _positive_integer(memory["total_bytes"], name="total memory")
-    if _positive_integer(memory["usable_bytes"], name="usable memory") < 64 * 1024**3:
-        raise EnvironmentError("environment requires at least 64 GiB usable memory")
+    if _positive_integer(memory["usable_bytes"], name="usable memory") < 64 * 1000**3:
+        raise EnvironmentError("environment requires at least 64 GB-class usable memory")
     operating = _mapping(
         root["os"],
         keys={"id", "machine", "pretty_name", "release", "system", "version_id"},

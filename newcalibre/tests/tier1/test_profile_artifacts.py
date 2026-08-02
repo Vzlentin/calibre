@@ -231,7 +231,7 @@ def test_validators_recompute_derived_facts_and_reject_tampering() -> None:
         (("reference", "instance_class"), "Standard_F8s_v6"),
         (("reference", "region"), "eastus"),
         (("cpu", "physical_count"), 15),
-        (("memory", "usable_bytes"), 64 * 1024**3 - 1),
+        (("memory", "usable_bytes"), 64 * 1000**3 - 1),
         (("execution", "gpu_count"), 1),
         (("execution", "cuda_visible_devices"), "0"),
         (("cgroup", "reset_verified"), False),
