@@ -30,7 +30,7 @@ from newcalibre.engine.reporting import (
     LedgerSelection,
     LedgerSessionMetadata,
 )
-from newcalibre.protocols.m5.artifacts import _emit_artifacts, _M5ArtifactError
+from newcalibre.protocols.m5.artifacts import M5ArtifactError, _emit_artifacts
 from newcalibre.protocols.m5.compiler import _level_from_node_label
 from newcalibre.protocols.m5.config import M5ProtocolConfig
 from newcalibre.protocols.m5.loader import M5DataError
@@ -625,7 +625,7 @@ def score_m5(
             summary=summary,
             node_rows=node_rows,
         )
-    except _M5ArtifactError as error:
+    except M5ArtifactError as error:
         raise M5ScoringError(str(error)) from error
     return M5Diagnostics(
         status=status,

@@ -7,6 +7,7 @@ import importlib.metadata
 import os
 import platform
 import re
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from newcalibre.engine.ray import RAY_WORKER_THREAD_POLICY
 
 REQUIRED_PROCESS_ROLES: Final = frozenset({"driver", "ray-control", "object-store", "worker"})
 _SHA256: Final = re.compile(r"[0-9a-f]{64}")
+_COMMIT_SHA: Final = re.compile(r"[0-9a-f]{40}")
 
 
 class EnvironmentError(ValueError):
@@ -280,16 +282,23 @@ def capture_environment(
     sampling_interval_seconds: float,
     cgroup_identity: str,
     lock_path: Path,
+    config_path: Path,
+    inventory_path: Path,
+    candidate_sha: str,
+    reference: dict[str, str],
     sampler_complete: bool,
 ) -> dict[str, object]:
     """Capture one public, deterministic-shape execution environment record."""
     _text(attempt_id, name="attempt identity")
-    if not isinstance(lock_path, Path):
-        raise EnvironmentError("lock path must be a pathlib.Path")
-    try:
-        lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
-    except OSError as error:
-        raise EnvironmentError("lock file is unreadable") from error
+    candidate = _commit(candidate_sha, name="candidate SHA")
+    reference_payload = _mapping(
+        reference,
+        keys={"provider", "image", "instance_class", "region"},
+        name="reference environment",
+    )
+    lock_sha256 = _file_digest(lock_path, name="lock")
+    config_sha256 = _file_digest(config_path, name="configuration")
+    inventory_sha256 = _file_digest(inventory_path, name="input inventory")
     if not isinstance(sampling_interval_seconds, (int, float)) or not (
         float(sampling_interval_seconds) > 0.0
     ):
@@ -297,37 +306,46 @@ def capture_environment(
     if not isinstance(sampler_complete, bool):
         raise EnvironmentError("sampler completeness must be boolean")
     total_memory = _total_memory_bytes()
+    operating = _operating_system()
     return {
         "schema": "calibre-performance-environment",
-        "schema_version": 1,
+        "schema_version": 2,
         "attempt_id": attempt_id,
+        "reference": reference_payload,
+        "candidate_sha": candidate,
         "cpu": {
             "logical_count": os.cpu_count() or 1,
+            "physical_count": _physical_core_count(),
             "model": platform.processor() or "unknown",
         },
-        "memory": {"total_bytes": total_memory},
-        "os": {
-            "machine": platform.machine(),
-            "release": platform.release(),
-            "system": platform.system(),
-        },
+        "memory": {"total_bytes": total_memory, "usable_bytes": total_memory},
+        "os": operating,
         "python": {
             "implementation": platform.python_implementation(),
             "version": platform.python_version(),
         },
         "provenance": {
+            "blas": _blas_provenance(),
             "lock_sha256": lock_sha256,
             "numeric_libraries": {
                 name: _distribution_version(name) for name in ("numpy", "scipy", "statsforecast")
             },
             "ray_version": _distribution_version("ray"),
+            "uv_version": _uv_version(),
+        },
+        "input": {
+            "config_sha256": config_sha256,
+            "dataset": "m5",
+            "inventory_sha256": inventory_sha256,
+            "inventory_verified": True,
         },
         "execution": dict(execution),
-        "cgroup": {"identity": cgroup_identity, "version": 2},
+        "cgroup": {"identity": cgroup_identity, "reset_verified": True, "version": 2},
         "sampler": {
             "complete": sampler_complete,
             "interval_seconds": float(sampling_interval_seconds),
         },
+        "output": {"persistent": True, "placement": "persistent-root"},
     }
 
 
@@ -339,34 +357,72 @@ def validate_environment(value: object) -> dict[str, object]:
             "schema",
             "schema_version",
             "attempt_id",
+            "reference",
+            "candidate_sha",
             "cpu",
             "memory",
             "os",
             "python",
             "provenance",
+            "input",
             "execution",
             "cgroup",
             "sampler",
+            "output",
         },
         name="environment",
     )
-    if root["schema"] != "calibre-performance-environment" or root["schema_version"] != 1:
+    if root["schema"] != "calibre-performance-environment" or root["schema_version"] != 2:
         raise EnvironmentError("environment schema is unsupported")
     _text(root["attempt_id"], name="environment attempt identity")
-    cpu = _mapping(root["cpu"], keys={"logical_count", "model"}, name="environment CPU")
+    reference = _mapping(
+        root["reference"],
+        keys={"provider", "image", "instance_class", "region"},
+        name="environment reference",
+    )
+    if reference["provider"] != "azure":
+        raise EnvironmentError("environment provider must equal azure")
+    _text(reference["image"], name="resolved Azure image")
+    if reference["instance_class"] != "Standard_F16as_v6":
+        raise EnvironmentError("environment instance class is not the pinned role-2 class")
+    if reference["region"] != "westeurope":
+        raise EnvironmentError("environment region is not the pinned role-2 region")
+    _commit(root["candidate_sha"], name="environment candidate SHA")
+    cpu = _mapping(
+        root["cpu"],
+        keys={"logical_count", "physical_count", "model"},
+        name="environment CPU",
+    )
     _positive_integer(cpu["logical_count"], name="logical CPU count")
+    if _positive_integer(cpu["physical_count"], name="physical CPU count") < 16:
+        raise EnvironmentError("environment requires at least 16 physical cores")
     _text(cpu["model"], name="CPU model")
-    memory = _mapping(root["memory"], keys={"total_bytes"}, name="environment memory")
+    memory = _mapping(
+        root["memory"], keys={"total_bytes", "usable_bytes"}, name="environment memory"
+    )
     _positive_integer(memory["total_bytes"], name="total memory")
-    operating = _mapping(root["os"], keys={"machine", "release", "system"}, name="environment OS")
-    for key in ("machine", "release", "system"):
+    if _positive_integer(memory["usable_bytes"], name="usable memory") < 64 * 1024**3:
+        raise EnvironmentError("environment requires at least 64 GiB usable memory")
+    operating = _mapping(
+        root["os"],
+        keys={"id", "machine", "pretty_name", "release", "system", "version_id"},
+        name="environment OS",
+    )
+    for key in ("id", "machine", "pretty_name", "release", "system", "version_id"):
         _text(operating[key], name=f"OS {key}")
+    if (
+        operating["id"] != "ubuntu"
+        or operating["version_id"] != "24.04"
+        or operating["machine"] != "x86_64"
+        or operating["system"] != "Linux"
+    ):
+        raise EnvironmentError("environment requires x86_64 Ubuntu 24.04")
     python = _mapping(root["python"], keys={"implementation", "version"}, name="environment Python")
     _text(python["implementation"], name="Python implementation")
     _text(python["version"], name="Python version")
     provenance = _mapping(
         root["provenance"],
-        keys={"lock_sha256", "numeric_libraries", "ray_version"},
+        keys={"blas", "lock_sha256", "numeric_libraries", "ray_version", "uv_version"},
         name="environment provenance",
     )
     if (
@@ -374,6 +430,11 @@ def validate_environment(value: object) -> dict[str, object]:
         or _SHA256.fullmatch(provenance["lock_sha256"]) is None
     ):
         raise EnvironmentError("environment lock digest must be SHA-256")
+    blas = _mapping(
+        provenance["blas"], keys={"configuration", "name", "version"}, name="BLAS provenance"
+    )
+    for key in ("configuration", "name", "version"):
+        _text(blas[key], name=f"BLAS {key}")
     libraries = provenance["numeric_libraries"]
     if not isinstance(libraries, dict) or not libraries:
         raise EnvironmentError("numeric-library provenance must be non-empty")
@@ -381,10 +442,22 @@ def validate_environment(value: object) -> dict[str, object]:
         _text(name, name="numeric-library name")
         _text(version, name="numeric-library version")
     _text(provenance["ray_version"], name="Ray version")
+    _text(provenance["uv_version"], name="uv version")
+    inputs = _mapping(
+        root["input"],
+        keys={"config_sha256", "dataset", "inventory_sha256", "inventory_verified"},
+        name="environment input",
+    )
+    for key in ("config_sha256", "inventory_sha256"):
+        _digest(inputs[key], name=f"environment {key}")
+    if inputs["dataset"] != "m5" or inputs["inventory_verified"] is not True:
+        raise EnvironmentError("environment requires verified M5 inputs")
     execution = _mapping(
         root["execution"],
         keys={
             "logical_shards",
+            "cuda_visible_devices",
+            "gpu_count",
             "numeric_threads_per_worker",
             "thread_policy",
             "workers",
@@ -407,17 +480,26 @@ def validate_environment(value: object) -> dict[str, object]:
         raise EnvironmentError("environment thread policy is incomplete")
     if set(thread_policy.values()) != {"1"}:
         raise EnvironmentError("environment thread policy must cap every pool at one")
-    cgroup = _mapping(root["cgroup"], keys={"identity", "version"}, name="environment cgroup")
+    if execution["gpu_count"] != 0 or execution["cuda_visible_devices"] != "":
+        raise EnvironmentError("environment requires no GPU visibility")
+    cgroup = _mapping(
+        root["cgroup"], keys={"identity", "reset_verified", "version"}, name="environment cgroup"
+    )
     if cgroup["version"] != 2:
         raise EnvironmentError("environment requires cgroup v2")
     if not isinstance(cgroup["identity"], str) or not cgroup["identity"].startswith("/"):
         raise EnvironmentError("environment cgroup identity must be absolute")
+    if cgroup["reset_verified"] is not True:
+        raise EnvironmentError("environment cgroup peak reset must be verified")
     sampler = _mapping(
         root["sampler"], keys={"complete", "interval_seconds"}, name="environment sampler"
     )
     if not isinstance(sampler["complete"], bool):
         raise EnvironmentError("sampler completeness must be boolean")
     _positive_number(sampler["interval_seconds"], name="sampling interval")
+    output = _mapping(root["output"], keys={"persistent", "placement"}, name="environment output")
+    if output != {"persistent": True, "placement": "persistent-root"}:
+        raise EnvironmentError("environment output must use persistent-root storage")
     return root
 
 
@@ -486,6 +568,87 @@ def _total_memory_bytes() -> int:
     return int(page_size) * int(pages)
 
 
+def _physical_core_count() -> int:
+    if sys.platform.startswith("linux"):
+        try:
+            blocks = Path("/proc/cpuinfo").read_text(encoding="ascii").split("\n\n")
+            identities: set[tuple[str, str]] = set()
+            for block in blocks:
+                facts = {
+                    key.strip(): value.strip()
+                    for line in block.splitlines()
+                    if ":" in line
+                    for key, value in (line.split(":", maxsplit=1),)
+                }
+                if "physical id" in facts and "core id" in facts:
+                    identities.add((facts["physical id"], facts["core id"]))
+            if identities:
+                return len(identities)
+        except OSError:
+            pass
+    return os.cpu_count() or 1
+
+
+def _operating_system() -> dict[str, str]:
+    facts: dict[str, str] = {}
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", maxsplit=1)
+            facts[key] = value.strip().strip('"')
+    except OSError:
+        pass
+    return {
+        "id": facts.get("ID", "unknown"),
+        "machine": platform.machine(),
+        "pretty_name": facts.get("PRETTY_NAME", "unknown"),
+        "release": platform.release(),
+        "system": platform.system(),
+        "version_id": facts.get("VERSION_ID", "unknown"),
+    }
+
+
+def _blas_provenance() -> dict[str, str]:
+    try:
+        import numpy as np
+
+        configuration = np.__config__.show(mode="dicts")
+        dependencies = cast(dict[str, object], configuration.get("Build Dependencies", {}))
+        blas = cast(dict[str, object], dependencies.get("blas", {}))
+    except Exception as error:
+        raise EnvironmentError("BLAS provenance is unavailable") from error
+    name = str(blas.get("name", ""))
+    version = str(blas.get("version", ""))
+    detail = str(blas.get("openblas configuration", blas.get("pc file directory", "")))
+    if not name or not version or not detail:
+        raise EnvironmentError("BLAS provenance is incomplete")
+    return {"configuration": detail, "name": name, "version": version}
+
+
+def _uv_version() -> str:
+    try:
+        result = subprocess.run(
+            ["uv", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise EnvironmentError("uv version is unavailable") from error
+    return _text(result.stdout.strip(), name="uv version")
+
+
+def _file_digest(path: Path, *, name: str) -> str:
+    if not isinstance(path, Path):
+        raise EnvironmentError(f"{name} path must be a pathlib.Path")
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise EnvironmentError(f"{name} file is unreadable") from error
+
+
 def _distribution_version(name: str) -> str:
     try:
         return importlib.metadata.version(name)
@@ -504,6 +667,18 @@ def _mapping(value: object, *, keys: set[str], name: str) -> dict[str, object]:
 def _text(value: object, *, name: str) -> str:
     if not isinstance(value, str) or not value:
         raise EnvironmentError(f"{name} must be non-empty text")
+    return value
+
+
+def _commit(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or _COMMIT_SHA.fullmatch(value) is None:
+        raise EnvironmentError(f"{name} must be a lowercase full commit SHA")
+    return value
+
+
+def _digest(value: object, *, name: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise EnvironmentError(f"{name} must be a lowercase sha256 digest")
     return value
 
 

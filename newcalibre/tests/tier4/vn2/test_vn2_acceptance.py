@@ -11,15 +11,17 @@ import pytest
 
 from newcalibre.oracle import load_capture
 from newcalibre.protocols.vn2 import (
-    build_tracking_record,
-    compare_tracking_records,
     emit_result_bundle,
     load_result_bundle,
-    load_tracking_history,
     load_vn2_config,
     load_vn2_dataset,
     run_vn2,
     verify_vn2_inputs,
+)
+from newcalibre.tracking import (
+    build_tracking_record,
+    compare_tracking_records,
+    load_tracking_history,
 )
 
 pytestmark = [

@@ -1,4 +1,4 @@
-"""Run the standard M5 performance profile and emit its two artifacts."""
+"""Run the standard M5 profile and publish one five-file Gate C result."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import copy
 import multiprocessing
 import os
 import queue
+import shutil
 import sys
 import tempfile
 import time
@@ -30,7 +31,7 @@ from newcalibre.benchmarking import (  # noqa: E402
     ProfileError,
     aggregate_profile,
     capture_environment,
-    publish_profile_artifacts,
+    publish_m5_gate_c_result,
 )
 from newcalibre.engine import (  # noqa: E402
     RAY_WORKER_THREAD_POLICY,
@@ -225,6 +226,8 @@ def run_standard_profile(
     output_dir: Path,
     attempt_id: str,
     lock_path: Path,
+    candidate_sha: str,
+    azure_image: str,
     sampling_interval_seconds: float,
     clock: Callable[[], float] = time.perf_counter,
     runner: Callable[..., object] = run_m5,
@@ -232,92 +235,117 @@ def run_standard_profile(
     concurrency_runner: (
         Callable[[Path, int], tuple[int, float, int, dict[str, str]]] | None
     ) = None,
+    environment_capture: Callable[..., dict[str, object]] = capture_environment,
 ) -> None:
-    """Run, validate, and publish one complete standard M5 profile."""
+    """Run, validate, and atomically publish one complete five-file result."""
     work_parent = PROJECT_ROOT / "results" / "m5" / ".profile-attempts"
     work_parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="attempt-", dir=work_parent) as temporary:
-        configs = build_scaling_configs(config_path, Path(temporary))
-        observations: list[ScalingObservation] = []
-        for series_count, scaling_config in configs:
-            config = load_m5_config(scaling_config)
-            monitor = (
-                MemoryMonitor(
-                    LinuxMemoryReader(),
-                    interval_seconds=sampling_interval_seconds,
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".gate-c-result-", dir=output_dir.parent) as staged:
+        diagnostics_copy = Path(staged) / "diagnostics"
+        with tempfile.TemporaryDirectory(prefix="attempt-", dir=work_parent) as temporary:
+            configs = build_scaling_configs(config_path, Path(temporary))
+            observations: list[ScalingObservation] = []
+            for series_count, scaling_config in configs:
+                config = load_m5_config(scaling_config)
+                monitor = (
+                    MemoryMonitor(
+                        LinuxMemoryReader(),
+                        interval_seconds=sampling_interval_seconds,
+                    )
+                    if monitor_factory is None
+                    else monitor_factory()
                 )
-                if monitor_factory is None
-                else monitor_factory()
-            )
-            observations.append(
-                measure_scaling_point(
-                    series_count=series_count,
-                    config_path=scaling_config,
-                    origin_count=config.origin_count,
-                    clock=clock,
-                    monitor=monitor,
-                    runner=runner,
+                observations.append(
+                    measure_scaling_point(
+                        series_count=series_count,
+                        config_path=scaling_config,
+                        origin_count=config.origin_count,
+                        clock=clock,
+                        monitor=monitor,
+                        runner=runner,
+                    )
                 )
+            concurrency_config = configs[0][1]
+            if concurrency_runner is None:
+                concurrency = tuple(
+                    run_bounded_concurrency(concurrency_config, concurrency=value, clock=clock)
+                    for value in (1, 16)
+                )
+            else:
+                concurrency = tuple(
+                    concurrency_runner(concurrency_config, value) for value in (1, 16)
+                )
+            full_config = load_m5_config(configs[-1][1])
+            shutil.copytree(PROJECT_ROOT / full_config.output_dir, diagnostics_copy)
+        full = observations[-1]
+        scaling = tuple(
+            (
+                observation.series_count,
+                16,
+                observation.wall_seconds,
+                observation.peak_job_memory_bytes,
+                observation.dispatch_count,
             )
-        concurrency_config = configs[0][1]
-        if concurrency_runner is None:
-            concurrency = tuple(
-                run_bounded_concurrency(concurrency_config, concurrency=value, clock=clock)
-                for value in (1, 16)
-            )
-        else:
-            concurrency = tuple(concurrency_runner(concurrency_config, value) for value in (1, 16))
-    full = observations[-1]
-    scaling = tuple(
-        (
-            observation.series_count,
-            16,
-            observation.wall_seconds,
-            observation.peak_job_memory_bytes,
-            observation.dispatch_count,
+            for observation in observations
         )
-        for observation in observations
-    )
-    failures = tuple(
-        reason for observation in observations for reason in _observation_failures(observation)
-    )
-    if failures:
-        raise ProfileError("standard profile measurement failed: " + "; ".join(failures))
-    profile = aggregate_profile(
-        attempt_id=attempt_id,
-        expected_origins=full.origins,
-        wall_start=full.wall_start,
-        wall_end=full.wall_end,
-        lifecycle=full.lifecycle,
-        memory_samples=full.memory_samples,
-        sampling_interval_seconds=sampling_interval_seconds,
-        dispatch={
-            "logical_shards": 16,
-            "numeric_threads_per_worker": 1,
-            "origin_count": len(full.origins),
-            "shard_dispatch_count": full.dispatch_count,
-            "workers": 16,
-        },
-        scaling=scaling,
-        concurrency=concurrency,
-        reporter_failure=full.reporter_failure,
-        sampler_failure=full.sampler_failure,
-    )
-    cgroup_identity = str(profile["memory"]["cgroup_identity"])  # type: ignore[index]
-    environment = capture_environment(
-        attempt_id=attempt_id,
-        execution={
-            "logical_shards": 16,
-            "numeric_threads_per_worker": 1,
-            "thread_policy": dict(RAY_WORKER_THREAD_POLICY),
-            "workers": 16,
-        },
-        sampling_interval_seconds=sampling_interval_seconds,
-        cgroup_identity=cgroup_identity,
-        lock_path=lock_path,
-        sampler_complete=bool(profile["memory"]["complete"]),  # type: ignore[index]
-    )
-    publish_profile_artifacts(output_dir, profile=profile, environment=environment)
+        failures = tuple(
+            reason for observation in observations for reason in _observation_failures(observation)
+        )
+        if failures:
+            raise ProfileError("standard profile measurement failed: " + "; ".join(failures))
+        profile = aggregate_profile(
+            attempt_id=attempt_id,
+            expected_origins=full.origins,
+            wall_start=full.wall_start,
+            wall_end=full.wall_end,
+            lifecycle=full.lifecycle,
+            memory_samples=full.memory_samples,
+            sampling_interval_seconds=sampling_interval_seconds,
+            dispatch={
+                "logical_shards": 16,
+                "numeric_threads_per_worker": 1,
+                "origin_count": len(full.origins),
+                "shard_dispatch_count": full.dispatch_count,
+                "workers": 16,
+            },
+            scaling=scaling,
+            concurrency=concurrency,
+            reporter_failure=full.reporter_failure,
+            sampler_failure=full.sampler_failure,
+        )
+        cgroup_identity = str(profile["memory"]["cgroup_identity"])  # type: ignore[index]
+        config = load_m5_config(config_path)
+        environment = environment_capture(
+            attempt_id=attempt_id,
+            execution={
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                "gpu_count": 0,
+                "logical_shards": 16,
+                "numeric_threads_per_worker": 1,
+                "thread_policy": dict(RAY_WORKER_THREAD_POLICY),
+                "workers": 16,
+            },
+            sampling_interval_seconds=sampling_interval_seconds,
+            cgroup_identity=cgroup_identity,
+            lock_path=lock_path,
+            config_path=config_path,
+            inventory_path=PROJECT_ROOT / config.inventory_path,
+            candidate_sha=candidate_sha,
+            reference={
+                "provider": "azure",
+                "image": azure_image,
+                "instance_class": "Standard_F16as_v6",
+                "region": "westeurope",
+            },
+            sampler_complete=bool(profile["memory"]["complete"]),  # type: ignore[index]
+        )
+        publish_m5_gate_c_result(
+            output_dir,
+            diagnostics=diagnostics_copy,
+            profile=profile,
+            environment=environment,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -326,6 +354,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--attempt-id", required=True)
+    parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--azure-image", required=True)
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
     parser.add_argument("--sampling-interval", type=float, default=0.1)
     return parser
@@ -340,6 +370,8 @@ def main() -> int:
             output_dir=args.output,
             attempt_id=args.attempt_id,
             lock_path=args.lock,
+            candidate_sha=args.candidate_sha,
+            azure_image=args.azure_image,
             sampling_interval_seconds=args.sampling_interval,
         )
     except (OSError, ValueError) as error:

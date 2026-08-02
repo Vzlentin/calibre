@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import math
-import os
-import shutil
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import cast
 
 import pandas as pd
@@ -19,7 +15,6 @@ from newcalibre.benchmarking.environment import (
     MemorySample,
     validate_environment,
 )
-from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.engine import RAY_WORKER_THREAD_POLICY, Phase, PhaseEvent, PhaseStatus
 
 _PHASES = tuple(Phase)
@@ -217,34 +212,6 @@ def validate_profile(
     if budgets != expected_budgets:
         raise ProfileError("profile budget verdicts do not match ordinary measurements")
     return root
-
-
-def publish_profile_artifacts(
-    destination: Path,
-    *,
-    profile: object,
-    environment: object,
-) -> None:
-    """Validate and atomically publish exactly the two performance artifacts."""
-    target = Path(destination)
-    if target.is_symlink():
-        raise ProfileError("performance artifact destination must not be a symlink")
-    if target.exists():
-        raise ProfileError("performance artifact destination already exists")
-    environment_payload = validate_environment(environment)
-    profile_payload = validate_profile(profile, environment=environment_payload)
-    if not profile_payload["valid"]:
-        raise ProfileError("invalid profile cannot be published")
-    parent = target.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=parent))
-    try:
-        (temporary / "profile.json").write_bytes(_json_bytes(profile_payload))
-        (temporary / "environment.json").write_bytes(_json_bytes(environment_payload))
-        os.replace(temporary, target)
-    finally:
-        if temporary.exists():
-            shutil.rmtree(temporary)
 
 
 def _aggregate_lifecycle(
@@ -624,13 +591,6 @@ def _validate_environment_binding(
         raise ProfileError("profile and environment sampling interval differs")
 
 
-def _json_bytes(value: object) -> bytes:
-    try:
-        return canonical_json_bytes(value, path="standard performance artifact") + b"\n"
-    except CanonicalJsonError as error:
-        raise ProfileError(str(error)) from error
-
-
 def _mapping(value: object, *, keys: set[str], name: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != keys:
         raise ProfileError(f"{name} must contain exact fields")
@@ -678,6 +638,5 @@ __all__ = [
     "LifecycleRecord",
     "ProfileError",
     "aggregate_profile",
-    "publish_profile_artifacts",
     "validate_profile",
 ]

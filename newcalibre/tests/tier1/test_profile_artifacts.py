@@ -12,11 +12,14 @@ import pytest
 from newcalibre.benchmarking import (
     EnvironmentError,
     LinuxMemoryReader,
+    M5GateCResultError,
     ProfileError,
-    publish_profile_artifacts,
+    publish_m5_gate_c_result,
     validate_environment,
     validate_profile,
 )
+from newcalibre.protocols.m5 import load_m5_config, score_m5
+from tier1.test_m5_scorer import _GATE_C, _Reader, _rows
 
 _THREAD_POLICY = {
     "BLIS_NUM_THREADS": "1",
@@ -32,25 +35,58 @@ _THREAD_POLICY = {
 def _environment() -> dict[str, object]:
     return {
         "schema": "calibre-performance-environment",
-        "schema_version": 1,
+        "schema_version": 2,
         "attempt_id": "attempt-a",
-        "cpu": {"logical_count": 16, "model": "fixture-cpu"},
-        "memory": {"total_bytes": 64 * 1024**3},
-        "os": {"machine": "x86_64", "release": "fixture", "system": "Linux"},
+        "reference": {
+            "provider": "azure",
+            "image": "Canonical:ubuntu-24_04-lts:server:24.04.202607250",
+            "instance_class": "Standard_F16as_v6",
+            "region": "westeurope",
+        },
+        "candidate_sha": "9" * 40,
+        "cpu": {"logical_count": 16, "physical_count": 16, "model": "fixture-cpu"},
+        "memory": {"total_bytes": 64 * 1024**3, "usable_bytes": 64 * 1024**3},
+        "os": {
+            "id": "ubuntu",
+            "machine": "x86_64",
+            "pretty_name": "Ubuntu 24.04 LTS",
+            "release": "fixture",
+            "system": "Linux",
+            "version_id": "24.04",
+        },
         "python": {"implementation": "CPython", "version": "3.12.0"},
         "provenance": {
+            "blas": {
+                "configuration": "fixture one-thread build",
+                "name": "OpenBLAS",
+                "version": "0.3",
+            },
             "lock_sha256": "a" * 64,
-            "numeric_libraries": {"numpy": "2.0.0"},
+            "numeric_libraries": {
+                "numpy": "2.0.0",
+                "scipy": "1.0.0",
+                "statsforecast": "2.0.3",
+            },
             "ray_version": "2.0.0",
+            "uv_version": "0.8.0",
+        },
+        "input": {
+            "config_sha256": "b" * 64,
+            "dataset": "m5",
+            "inventory_sha256": "c" * 64,
+            "inventory_verified": True,
         },
         "execution": {
+            "cuda_visible_devices": "",
+            "gpu_count": 0,
             "logical_shards": 16,
             "numeric_threads_per_worker": 1,
             "thread_policy": dict(_THREAD_POLICY),
             "workers": 16,
         },
-        "cgroup": {"identity": "/gate-c", "version": 2},
+        "cgroup": {"identity": "/gate-c", "reset_verified": True, "version": 2},
         "sampler": {"complete": True, "interval_seconds": 0.1},
+        "output": {"persistent": True, "placement": "persistent-root"},
     }
 
 
@@ -188,6 +224,35 @@ def test_validators_recompute_derived_facts_and_reject_tampering() -> None:
             validate_profile(tampered, environment=environment)
 
 
+@pytest.mark.parametrize(
+    ("path", "changed"),
+    [
+        (("candidate_sha",), "short"),
+        (("reference", "instance_class"), "Standard_F8s_v6"),
+        (("reference", "region"), "eastus"),
+        (("cpu", "physical_count"), 15),
+        (("memory", "usable_bytes"), 64 * 1024**3 - 1),
+        (("execution", "gpu_count"), 1),
+        (("execution", "cuda_visible_devices"), "0"),
+        (("cgroup", "reset_verified"), False),
+        (("input", "inventory_verified"), False),
+        (("output", "persistent"), False),
+    ],
+)
+def test_environment_requires_the_exact_role_two_preflight(
+    path: tuple[str, ...], changed: object
+) -> None:
+    """Reject any environment that fails one binding role-2 fact."""
+    environment = deepcopy(_environment())
+    target = environment
+    for key in path[:-1]:
+        target = target[key]  # type: ignore[index,assignment]
+    target[path[-1]] = changed
+
+    with pytest.raises(EnvironmentError):
+        validate_environment(environment)
+
+
 def test_profile_job_memory_verdict_does_not_use_process_sum() -> None:
     """Use the cgroup-v2 peak alone for the 32 GB memory verdict."""
     profile = _profile()
@@ -230,24 +295,53 @@ def test_full_scaling_point_is_bound_to_primary_facts(field: str) -> None:
         validate_profile(profile, environment=_environment())
 
 
-def test_publish_emits_exact_deterministic_pair_and_refuses_dirty_root(
+def _diagnostics(tmp_path: Path, name: str) -> Path:
+    destination = tmp_path / name
+    score_m5(load_m5_config(_GATE_C), _Reader(_rows()), output_dir=destination)
+    return destination
+
+
+def test_publish_emits_exact_deterministic_result_and_refuses_dirty_root(
     tmp_path: Path,
 ) -> None:
-    """Publish exactly two canonical files without exposing a partial pair."""
+    """Publish exactly five canonical files without exposing a partial set."""
     first = tmp_path / "first"
     second = tmp_path / "second"
     profile = _profile()
     environment = _environment()
-    publish_profile_artifacts(first, profile=profile, environment=environment)
-    publish_profile_artifacts(second, profile=profile, environment=environment)
+    publish_m5_gate_c_result(
+        first,
+        diagnostics=_diagnostics(tmp_path, "diagnostics-first"),
+        profile=profile,
+        environment=environment,
+    )
+    publish_m5_gate_c_result(
+        second,
+        diagnostics=_diagnostics(tmp_path, "diagnostics-second"),
+        profile=profile,
+        environment=environment,
+    )
 
-    assert {path.name for path in first.iterdir()} == {"profile.json", "environment.json"}
-    assert (first / "profile.json").read_bytes() == (second / "profile.json").read_bytes()
-    assert (first / "environment.json").read_bytes() == (second / "environment.json").read_bytes()
+    assert {path.name for path in first.iterdir()} == {
+        "coverage-summary.json",
+        "coverage-by-node.parquet",
+        "report.md",
+        "profile.json",
+        "environment.json",
+    }
+    assert all(
+        (first / name).read_bytes() == (second / name).read_bytes()
+        for name in (path.name for path in first.iterdir())
+    )
     assert json.loads((first / "profile.json").read_text()) == profile
 
-    with pytest.raises(ProfileError, match="already exists"):
-        publish_profile_artifacts(first, profile=profile, environment=environment)
+    with pytest.raises(M5GateCResultError, match="already exists"):
+        publish_m5_gate_c_result(
+            first,
+            diagnostics=_diagnostics(tmp_path, "diagnostics-third"),
+            profile=profile,
+            environment=environment,
+        )
 
 
 def test_invalid_profile_never_emits_passing_artifacts(tmp_path: Path) -> None:
@@ -258,20 +352,21 @@ def test_invalid_profile_never_emits_passing_artifacts(tmp_path: Path) -> None:
     for budget in profile["budgets"].values():  # type: ignore[union-attr]
         budget["passed"] = False
     assert validate_profile(profile, environment=_environment()) == profile
-    with pytest.raises(ProfileError, match="invalid"):
-        publish_profile_artifacts(
+    with pytest.raises(M5GateCResultError, match="invalid"):
+        publish_m5_gate_c_result(
             tmp_path / "profile",
+            diagnostics=_diagnostics(tmp_path, "diagnostics-invalid"),
             profile=profile,
             environment=_environment(),
         )
     assert not (tmp_path / "profile").exists()
 
 
-def test_atomic_install_failure_leaves_no_partial_pair(
+def test_atomic_install_failure_leaves_no_partial_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Restore both prior artifacts when publication cannot install the new pair."""
+    """Leave no result when the atomic five-file install fails."""
     target = tmp_path / "profile"
     real_replace = os.replace
 
@@ -282,7 +377,12 @@ def test_atomic_install_failure_leaves_no_partial_pair(
 
     monkeypatch.setattr(os, "replace", fail_install)
     with pytest.raises(OSError, match="install failed"):
-        publish_profile_artifacts(target, profile=_profile(), environment=_environment())
+        publish_m5_gate_c_result(
+            target,
+            diagnostics=_diagnostics(tmp_path, "diagnostics-install"),
+            profile=_profile(),
+            environment=_environment(),
+        )
 
     assert not target.exists()
 

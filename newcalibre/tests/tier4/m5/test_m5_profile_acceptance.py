@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import runpy
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,9 @@ import pytest
 
 from newcalibre.benchmarking import MemorySample, ProcessResidentSample, validate_profile
 from newcalibre.engine import Phase, PhaseEvent, PhaseStatus
-from newcalibre.protocols.m5 import load_m5_config
+from newcalibre.protocols.m5 import load_m5_config, score_m5
+from tier1.test_m5_scorer import _Reader, _rows
+from tier1.test_profile_artifacts import _environment
 
 pytestmark = pytest.mark.tier4
 
@@ -96,6 +99,7 @@ def test_synthetic_profile_runs_all_intent_and_emits_exact_valid_pair(
             for phase in Phase:
                 reporter(PhaseEvent(phase, origin, PhaseStatus.STARTED))
                 reporter(PhaseEvent(phase, origin, PhaseStatus.FINISHED))
+        score_m5(config, _Reader(_rows()), output_dir=PROJECT_ROOT / config.output_dir)
         return SimpleNamespace(forecast_origin_count=config.origin_count)
 
     def concurrency_runner(config_path: Path, value: int) -> tuple[int, float, int, dict[str, str]]:
@@ -106,23 +110,38 @@ def test_synthetic_profile_runs_all_intent_and_emits_exact_valid_pair(
     lock = tmp_path / "uv.lock"
     lock.write_text("fixture-lock")
     output = tmp_path / "profile"
+
+    def environment_capture(**_kwargs: object) -> dict[str, object]:
+        payload = deepcopy(_environment())
+        payload["attempt_id"] = "synthetic-attempt"
+        return payload
+
     run_standard_profile(
         config_path=CONFIG,
         output_dir=output,
         attempt_id="synthetic-attempt",
         lock_path=lock,
+        candidate_sha="9" * 40,
+        azure_image="fixture-image",
         sampling_interval_seconds=0.1,
         clock=_Clock(),
         runner=runner,
         monitor_factory=_Monitor,
         concurrency_runner=concurrency_runner,
+        environment_capture=environment_capture,
     )
 
     assert ordinary == [(1000, 16), (10000, 16), (30490, 16)]
     assert len(set(diagnostic_destinations)) == 3
     assert all(".profile-attempts" in destination.parts for destination in diagnostic_destinations)
     assert concurrency == [(1000, 1), (1000, 16)]
-    assert {path.name for path in output.iterdir()} == {"profile.json", "environment.json"}
+    assert {path.name for path in output.iterdir()} == {
+        "coverage-summary.json",
+        "coverage-by-node.parquet",
+        "report.md",
+        "profile.json",
+        "environment.json",
+    }
     profile = json.loads((output / "profile.json").read_text())
     environment = json.loads((output / "environment.json").read_text())
     assert validate_profile(profile, environment=environment) == profile
