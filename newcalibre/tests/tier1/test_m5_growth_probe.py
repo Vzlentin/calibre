@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import runpy
+import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -44,9 +46,9 @@ class Clock:
 
 def _namespace(root: Path) -> dict[str, Any]:
     namespace = runpy.run_path(str(_SCRIPT))
-    for value in namespace.values():
-        if callable(value) and getattr(value, "__module__", None) == "<run_path>":
-            value.__globals__["PROJECT_ROOT"] = root
+    # Every module-level definition shares one globals mapping, and it is not the
+    # dict run_path returns, so the project root must be rebound through it.
+    namespace["build_probe_config"].__globals__["PROJECT_ROOT"] = root
     return namespace
 
 
@@ -200,6 +202,83 @@ def test_frozen_probe_freezes_once_before_the_first_phase(tmp_path: Path) -> Non
 
     assert freezes == [1]
     assert payload["freeze_gc"] is True
+
+
+def _sampled_label(sampler: Any, call: Callable[[Callable[[], object]], object]) -> str:
+    """Label the live stack from inside one nested call, as the sampler would."""
+    captured: list[str] = []
+
+    def probe() -> None:
+        captured.append(sampler.label(sys._current_frames()[threading.get_ident()]))
+
+    call(probe)
+    return captured[0]
+
+
+def test_stack_labels_name_the_innermost_instrumented_region(tmp_path: Path) -> None:
+    """Charge each sample to the innermost region, not to a shared helper."""
+    sampler = _namespace(tmp_path)["StackSampler"](thread_id=threading.get_ident())
+
+    def _canonical_value_bytes(inner: Callable[[], object]) -> object:
+        return inner()
+
+    def _decode_envelope(inner: Callable[[], object]) -> object:
+        return inner()
+
+    def _forecast_write_digest(inner: Callable[[], object]) -> object:
+        return _canonical_value_bytes(inner)
+
+    def _commit_digest(inner: Callable[[], object]) -> object:
+        name = "state_updates"
+        assert name
+        return _canonical_value_bytes(inner)
+
+    def unlabelled(inner: Callable[[], object]) -> object:
+        return inner()
+
+    assert _sampled_label(sampler, _decode_envelope) == "conformal-state-decode"
+    assert _sampled_label(sampler, _forecast_write_digest) == "forecast-frame-digest"
+    assert _sampled_label(sampler, _commit_digest) == "commit-digest:state_updates"
+    assert _sampled_label(sampler, unlabelled) == "other"
+    assert sampler.label(None) == "other"
+
+
+def test_stack_samples_are_tagged_with_the_running_phase(tmp_path: Path) -> None:
+    """Attribute samples to the phase that was executing when they were taken."""
+    sampler = _namespace(tmp_path)["StackSampler"](thread_id=threading.get_ident())
+
+    sampler.observe(None)
+    sampler.set_phase("Commit")
+    sampler.observe(None)
+    sampler.observe(None)
+
+    assert sampler.counts == {("pre-origin", "other"): 1, ("Commit", "other"): 2}
+
+
+def test_stack_profile_reports_region_seconds_and_the_unsampled_gap(tmp_path: Path) -> None:
+    """Convert samples to seconds and expose the time no sample could observe."""
+    origins = (pd.Timestamp("2016-03-20"), pd.Timestamp("2016-03-21"))
+    audits = {origin: (_audit(commits=index + 1), (1, 1)) for index, origin in enumerate(origins)}
+    namespace = _namespace(tmp_path)
+    sampler = namespace["StackSampler"](thread_id=threading.get_ident(), interval_seconds=0.5)
+    sampler.set_phase("Commit")
+    for _ in range(4):
+        sampler.observe(None)
+
+    payload = namespace["collect_growth"](
+        config_path=tmp_path / "growth-probe-100.yaml",
+        bottom_count=100,
+        clock=Clock(*(float(value) for value in range(0, 60))),
+        runner=_fake_runner(origins, audits=audits),
+        sampler=sampler,
+    )
+
+    profile = payload["stack_profile"]
+    assert profile["interval_seconds"] == 0.5
+    assert profile["region_seconds"]["Commit"] == {"other": 2.0}
+    # Two origins contribute one second of Commit each, of which two were sampled.
+    assert profile["unsampled_seconds"]["Commit"] == 0.0
+    assert profile["unsampled_seconds"]["Resolve"] == 2.0
 
 
 def test_probe_refuses_a_run_whose_sink_and_lifecycle_disagree(tmp_path: Path) -> None:

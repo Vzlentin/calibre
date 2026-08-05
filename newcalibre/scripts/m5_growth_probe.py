@@ -14,10 +14,13 @@ import gc
 import json
 import sys
 import tempfile
+import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import fields
 from pathlib import Path
+from types import FrameType
 from typing import cast
 
 import pandas as pd
@@ -39,6 +42,95 @@ _GC_FIELDS = ("collections", "collected", "uncollectable")
 
 type _Audit = tuple[pd.Timestamp, RunStoreAudit, tuple[int, int]]
 type _GcStats = Sequence[dict[str, int]]
+
+# Innermost frame whose function appears here names the region a sample belongs
+# to; everything else rolls up into "other". Recursive helpers such as
+# `_canonical_value_bytes` are deliberately absent so their time is charged to
+# the caller that chose the work.
+STACK_LABELS = {
+    "_decode_envelope": "conformal-state-decode",
+    "_commit_digest": "commit-digest",
+    "_forecast_write_digest": "forecast-frame-digest",
+    "_pending_snapshot": "pending-snapshot",
+    "_history_snapshot": "history-snapshot",
+    "_validate_snapshot": "validate-snapshot",
+}
+_BETWEEN_PHASES = "between"
+
+
+class StackSampler:
+    """Attribute driver-thread stack samples to one phase and code region.
+
+    Sampling keeps the apportionment out of the engine entirely: no seam, no
+    flag, and no cost in any code path that is not being profiled. Time the
+    interpreter spends with the GIL held outside Python frames — notably
+    generational collection — cannot be sampled, so sampled seconds are a floor
+    on a region's cost and the gap to measured phase time is reported.
+    """
+
+    def __init__(
+        self,
+        *,
+        thread_id: int,
+        labels: dict[str, str] | None = None,
+        interval_seconds: float = 0.002,
+    ) -> None:
+        self._thread_id = thread_id
+        self._labels = STACK_LABELS if labels is None else labels
+        self._interval = interval_seconds
+        self._counts: Counter[tuple[str, str]] = Counter()
+        self._phase = "pre-origin"
+        self._stop = threading.Event()
+        self._worker: threading.Thread | None = None
+
+    @property
+    def interval_seconds(self) -> float:
+        """Return the nominal sampling period."""
+        return self._interval
+
+    @property
+    def counts(self) -> dict[tuple[str, str], int]:
+        """Return accumulated samples keyed by phase and region."""
+        return dict(self._counts)
+
+    def set_phase(self, phase: str) -> None:
+        """Tag every later sample with the phase now executing."""
+        self._phase = phase
+
+    def observe(self, frame: FrameType | None) -> None:
+        """Charge one stack sample to the current phase and innermost region."""
+        self._counts[(self._phase, self.label(frame))] += 1
+
+    def label(self, frame: FrameType | None) -> str:
+        """Name the innermost region the sampled stack is executing inside."""
+        while frame is not None:
+            name = frame.f_code.co_name
+            label = self._labels.get(name)
+            if label is not None:
+                if name == "_commit_digest":
+                    field_name = frame.f_locals.get("name")
+                    if isinstance(field_name, str):
+                        return f"{label}:{field_name}"
+                return label
+            frame = frame.f_back
+        return "other"
+
+    def start(self) -> None:
+        """Begin sampling the driver thread on a background timer."""
+        worker = threading.Thread(target=self._run, name="growth-probe-sampler", daemon=True)
+        self._worker = worker
+        worker.start()
+
+    def stop(self) -> None:
+        """Stop sampling and join the sampling thread."""
+        self._stop.set()
+        if self._worker is not None:
+            self._worker.join(timeout=5.0)
+            self._worker = None
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self.observe(sys._current_frames().get(self._thread_id))
 
 
 def build_probe_config(config_path: Path, directory: Path, *, bottom_count: int) -> Path:
@@ -79,6 +171,7 @@ def collect_growth(
     runner: Callable[..., object] = run_m5,
     freezer: Callable[[], None] = gc.freeze,
     progress: Callable[[str], None] = lambda _message: None,
+    sampler: StackSampler | None = None,
 ) -> dict[str, object]:
     """Run one probe population and assemble its per-origin growth record.
 
@@ -91,6 +184,7 @@ def collect_growth(
         runner: The ``run_m5`` seam, replaced by fakes under test.
         freezer: The ``gc.freeze`` seam, replaced by fakes under test.
         progress: Receives one human-readable line per committed origin.
+        sampler: Optional stack sampler apportioning phase time by region.
     """
     collector = LifecycleCollector(clock=clock)
     audits: list[_Audit] = []
@@ -102,6 +196,10 @@ def collect_growth(
         if freeze_gc and not frozen:
             freezer()
             frozen = True
+        if sampler is not None:
+            sampler.set_phase(
+                event.phase.value if event.status is PhaseStatus.STARTED else _BETWEEN_PHASES
+            )
         collector(event)
 
     def audit_sink(
@@ -119,7 +217,13 @@ def collect_growth(
 
     baseline = gc.get_stats()
     wall_start = clock()
-    result = runner(config_path, reporter=report, audit_sink=audit_sink)
+    if sampler is not None:
+        sampler.start()
+    try:
+        result = runner(config_path, reporter=report, audit_sink=audit_sink)
+    finally:
+        if sampler is not None:
+            sampler.stop()
     wall_end = clock()
     records = collector.records
     origins = tuple(dict.fromkeys(record.event.origin for record in records))
@@ -152,7 +256,28 @@ def collect_growth(
         "pre_origin_seconds": records[0].timestamp - wall_start,
         "close_seconds": wall_end - records[-1].timestamp,
         "phase_totals": totals,
+        "stack_profile": None if sampler is None else _stack_profile(sampler, totals=totals),
         "origins": per_origin,
+    }
+
+
+def _stack_profile(sampler: StackSampler, *, totals: dict[str, float]) -> dict[str, object]:
+    """Convert stack samples into per-phase region seconds and a sampling gap."""
+    interval = sampler.interval_seconds
+    by_phase: dict[str, dict[str, float]] = {}
+    for (phase, label), count in sampler.counts.items():
+        by_phase.setdefault(phase, {})[label] = count * interval
+    unobserved = {
+        phase: measured - sum(by_phase.get(phase, {}).values())
+        for phase, measured in totals.items()
+    }
+    return {
+        "interval_seconds": interval,
+        "sample_count": sum(sampler.counts.values()),
+        "region_seconds": {
+            phase: dict(sorted(regions.items())) for phase, regions in by_phase.items()
+        },
+        "unsampled_seconds": unobserved,
     }
 
 
@@ -224,6 +349,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bottom-count", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--freeze-gc", action="store_true")
+    parser.add_argument("--disable-gc", action="store_true")
+    parser.add_argument("--profile-stacks", action="store_true")
+    parser.add_argument("--sampling-interval", type=float, default=0.002)
     return parser
 
 
@@ -232,6 +360,16 @@ def main() -> int:
     args = build_parser().parse_args()
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.disable_gc:
+        gc.disable()
+    sampler = (
+        StackSampler(
+            thread_id=threading.get_ident(),
+            interval_seconds=args.sampling_interval,
+        )
+        if args.profile_stacks
+        else None
+    )
     # Scoring refuses a pre-existing destination, so every invocation owns a
     # private one; the per-origin JSON, not the diagnostics, is the probe result.
     with tempfile.TemporaryDirectory(prefix="attempt-", dir=DEFAULT_OUTPUT_DIR) as work:
@@ -241,7 +379,9 @@ def main() -> int:
             bottom_count=args.bottom_count,
             freeze_gc=args.freeze_gc,
             progress=_stderr_progress,
+            sampler=sampler,
         )
+    payload["gc_disabled"] = args.disable_gc
     args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return 0
 
