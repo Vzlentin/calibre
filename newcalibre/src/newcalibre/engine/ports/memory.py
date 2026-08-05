@@ -936,6 +936,15 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
         return MappingProxyType(dict(self._states))
 
     @property
+    def state_footprint(self) -> tuple[int, int]:
+        """Return committed conformal ``(row_count, total_bytes)`` without copying.
+
+        Sized for repeated per-origin measurement where :attr:`states` would
+        materialize a whole second mapping and perturb what it measures.
+        """
+        return len(self._states), sum(map(len, self._states.values()))
+
+    @property
     def checkpoints(self) -> Mapping[str, bytes]:
         """Return immutable model checkpoints for diagnostics."""
         return MappingProxyType(dict(self._checkpoints))

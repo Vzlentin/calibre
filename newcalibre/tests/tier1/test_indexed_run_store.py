@@ -178,6 +178,44 @@ def test_store_opens_revision_bound_delta_and_commits_atomically() -> None:
         )
 
 
+def test_state_footprint_tracks_committed_state_rows_and_bytes() -> None:
+    """Report the conformal state level without materializing a second mapping."""
+    session = _session()
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
+
+    assert store.state_footprint == (0, 0)
+
+    store.commit(
+        OriginCommit(
+            session=session,
+            origin=pd.Timestamp("2026-01-03"),
+            expected_revision=store.revision,
+            state_updates={"one": b"abc", "two": b"de"},
+        )
+    )
+
+    assert store.state_footprint == (2, 5)
+
+    store.commit(
+        OriginCommit(
+            session=session,
+            origin=pd.Timestamp("2026-01-04"),
+            expected_revision=store.revision,
+            state_updates={"two": b"defg", "three": b"h"},
+        )
+    )
+
+    assert store.state_footprint == (3, 8)
+    assert store.state_footprint == (
+        len(store.states),
+        sum(len(value) for value in store.states.values()),
+    )
+
+
 def test_natural_keys_replay_exact_digests_and_reject_conflicting_reuse() -> None:
     """Return exact receipts for retries and reject changed facts at either key kind."""
     session = _session()

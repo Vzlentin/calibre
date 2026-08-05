@@ -23,6 +23,7 @@ from newcalibre.engine.ports.memory import (
     InMemoryIndexedRunStore,
     InMemoryLedgerReader,
     InMemoryPanelSource,
+    RunStoreAudit,
 )
 from newcalibre.engine.ray import RAY_BACKEND, RAY_WORKER_THREAD_POLICY, RayDispatch
 from newcalibre.engine.reporting import (
@@ -146,6 +147,7 @@ __all__ = [
     "RAY_BACKEND",
     "RAY_WORKER_THREAD_POLICY",
     "RayDispatch",
+    "RunStoreAudit",
     "PanelSource",
     "Phase",
     "PhaseError",

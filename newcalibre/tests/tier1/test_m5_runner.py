@@ -9,10 +9,17 @@ from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 from typing import Any, cast
 
+import pandas as pd
 import pytest
 
 import newcalibre.protocols.m5.runner as runner
-from newcalibre.engine import RAY_WORKER_THREAD_POLICY, PhaseEvent
+from newcalibre.engine import (
+    RAY_WORKER_THREAD_POLICY,
+    Phase,
+    PhaseEvent,
+    PhaseStatus,
+    RunStoreAudit,
+)
 from newcalibre.forecasting import resolve_adapter
 from newcalibre.protocols.m5 import M5RunResult, run_m5
 from newcalibre.protocols.m5.runner import run_m5_fit_predict
@@ -130,6 +137,46 @@ def test_tiny_strict_release_runs_end_to_end_and_returns_only_compact_facts(
     assert not any(field.name.endswith("rows") for field in fields(result))
     with pytest.raises(FrozenInstanceError):
         cast(Any, result).node_count = 0
+
+
+def test_audit_sink_reports_store_work_once_per_committed_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fire the diagnostic sink in origin order with never-decreasing store work."""
+    lifecycle: list[PhaseEvent] = []
+    audits: list[tuple[pd.Timestamp, RunStoreAudit, tuple[int, int]]] = []
+
+    result = run_m5(
+        _isolated_config(tmp_path, monkeypatch),
+        reporter=lifecycle.append,
+        audit_sink=lambda origin, audit, footprint: audits.append((origin, audit, footprint)),
+    )
+
+    committed = [
+        event.origin
+        for event in lifecycle
+        if event.phase is Phase.COMMIT and event.status is PhaseStatus.FINISHED
+    ]
+    origins = [origin for origin, _audit, _footprint in audits]
+    counters = [
+        tuple(getattr(audit, field.name) for field in fields(audit))
+        for _origin, audit, _footprint in audits
+    ]
+    commits = [audit.commits for _origin, audit, _footprint in audits]
+    rows = [row_count for _origin, _audit, (row_count, _bytes) in audits]
+
+    assert len(audits) == result.forecast_origin_count == 64
+    assert origins == committed
+    assert origins == sorted(set(origins))
+    assert all(
+        all(before <= after for before, after in zip(earlier, later, strict=True))
+        for earlier, later in zip(counters, counters[1:], strict=False)
+    )
+    assert all(before < after for before, after in zip(commits, commits[1:], strict=False))
+    assert commits[-1] >= len(audits)
+    assert rows == sorted(rows)
+    assert audits[-1][2][1] > 0
 
 
 def test_full_and_digest_rank_fixture_configs_use_the_same_composition(
