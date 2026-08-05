@@ -62,10 +62,14 @@ class StackSampler:
     """Attribute driver-thread stack samples to one phase and code region.
 
     Sampling keeps the apportionment out of the engine entirely: no seam, no
-    flag, and no cost in any code path that is not being profiled. Time the
-    interpreter spends with the GIL held outside Python frames — notably
-    generational collection — cannot be sampled, so sampled seconds are a floor
-    on a region's cost and the gap to measured phase time is reported.
+    flag, and no cost in any code path that is not being profiled.
+
+    Each sample carries the wall time since its predecessor rather than a
+    nominal period, because a sampling thread only runs when the driver yields
+    the GIL and so cannot hold a fixed rate. Weighting by elapsed time makes
+    charged seconds add up to observed time even when the rate collapses; what
+    it cannot see is time inside a single GIL-holding C call, which is charged
+    to whichever region ran next.
     """
 
     def __init__(
@@ -79,30 +83,45 @@ class StackSampler:
         self._labels = STACK_LABELS if labels is None else labels
         self._interval = interval_seconds
         self._counts: Counter[tuple[str, str]] = Counter()
+        self._seconds: Counter[tuple[str, str]] = Counter()
         self._phase = "pre-origin"
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
+        self._switch_interval = sys.getswitchinterval()
 
     @property
     def interval_seconds(self) -> float:
-        """Return the nominal sampling period."""
+        """Return the requested sampling period."""
         return self._interval
 
     @property
     def counts(self) -> dict[tuple[str, str], int]:
-        """Return accumulated samples keyed by phase and region."""
+        """Return sample counts keyed by phase and region."""
         return dict(self._counts)
+
+    @property
+    def seconds(self) -> dict[tuple[str, str], float]:
+        """Return elapsed-weighted seconds keyed by phase and region."""
+        return dict(self._seconds)
 
     def set_phase(self, phase: str) -> None:
         """Tag every later sample with the phase now executing."""
         self._phase = phase
 
-    def observe(self, frame: FrameType | None) -> None:
-        """Charge one stack sample to the current phase and innermost region."""
-        self._counts[(self._phase, self.label(frame))] += 1
+    def observe(self, frame: FrameType | None, elapsed: float) -> None:
+        """Charge ``elapsed`` to the current phase and innermost sampled region."""
+        key = (self._phase, self.label(frame))
+        self._counts[key] += 1
+        self._seconds[key] += elapsed
 
     def label(self, frame: FrameType | None) -> str:
-        """Name the innermost region the sampled stack is executing inside."""
+        """Name the innermost region the sampled stack is executing inside.
+
+        Falls back to the innermost frame's own identity so that time outside
+        every named region still resolves to a function rather than to one
+        opaque remainder.
+        """
+        innermost = frame
         while frame is not None:
             name = frame.f_code.co_name
             label = self._labels.get(name)
@@ -113,24 +132,39 @@ class StackSampler:
                         return f"{label}:{field_name}"
                 return label
             frame = frame.f_back
-        return "other"
+        if innermost is None:
+            return "other"
+        module = innermost.f_globals.get("__name__", "?")
+        return f"{module}:{innermost.f_code.co_qualname}"
 
     def start(self) -> None:
-        """Begin sampling the driver thread on a background timer."""
+        """Begin sampling the driver thread on a background timer.
+
+        Tightens the interpreter switch interval for the duration: at the 5 ms
+        default the sampler waits longer for the GIL than it sleeps, which
+        collapses the rate to roughly one sample per eight requested.
+        """
+        self._switch_interval = sys.getswitchinterval()
+        sys.setswitchinterval(min(self._switch_interval, self._interval / 4))
         worker = threading.Thread(target=self._run, name="growth-probe-sampler", daemon=True)
         self._worker = worker
         worker.start()
 
     def stop(self) -> None:
-        """Stop sampling and join the sampling thread."""
+        """Stop sampling, join the sampling thread, and restore the interpreter."""
         self._stop.set()
         if self._worker is not None:
             self._worker.join(timeout=5.0)
             self._worker = None
+        sys.setswitchinterval(self._switch_interval)
 
     def _run(self) -> None:
+        previous = time.perf_counter()
         while not self._stop.wait(self._interval):
-            self.observe(sys._current_frames().get(self._thread_id))
+            frames = sys._current_frames()
+            now = time.perf_counter()
+            self.observe(frames.get(self._thread_id), now - previous)
+            previous = now
 
 
 def build_probe_config(config_path: Path, directory: Path, *, bottom_count: int) -> Path:
@@ -263,19 +297,24 @@ def collect_growth(
 
 def _stack_profile(sampler: StackSampler, *, totals: dict[str, float]) -> dict[str, object]:
     """Convert stack samples into per-phase region seconds and a sampling gap."""
-    interval = sampler.interval_seconds
     by_phase: dict[str, dict[str, float]] = {}
+    for (phase, label), seconds in sampler.seconds.items():
+        by_phase.setdefault(phase, {})[label] = seconds
+    counts: dict[str, dict[str, int]] = {}
     for (phase, label), count in sampler.counts.items():
-        by_phase.setdefault(phase, {})[label] = count * interval
+        counts.setdefault(phase, {})[label] = count
     unobserved = {
         phase: measured - sum(by_phase.get(phase, {}).values())
         for phase, measured in totals.items()
     }
     return {
-        "interval_seconds": interval,
+        "interval_seconds": sampler.interval_seconds,
         "sample_count": sum(sampler.counts.values()),
         "region_seconds": {
             phase: dict(sorted(regions.items())) for phase, regions in by_phase.items()
+        },
+        "region_samples": {
+            phase: dict(sorted(regions.items())) for phase, regions in counts.items()
         },
         "unsampled_seconds": unobserved,
     }

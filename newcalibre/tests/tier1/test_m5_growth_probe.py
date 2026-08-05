@@ -239,7 +239,7 @@ def test_stack_labels_name_the_innermost_instrumented_region(tmp_path: Path) -> 
     assert _sampled_label(sampler, _decode_envelope) == "conformal-state-decode"
     assert _sampled_label(sampler, _forecast_write_digest) == "forecast-frame-digest"
     assert _sampled_label(sampler, _commit_digest) == "commit-digest:state_updates"
-    assert _sampled_label(sampler, unlabelled) == "other"
+    assert _sampled_label(sampler, unlabelled).endswith(":_sampled_label.<locals>.probe")
     assert sampler.label(None) == "other"
 
 
@@ -247,12 +247,13 @@ def test_stack_samples_are_tagged_with_the_running_phase(tmp_path: Path) -> None
     """Attribute samples to the phase that was executing when they were taken."""
     sampler = _namespace(tmp_path)["StackSampler"](thread_id=threading.get_ident())
 
-    sampler.observe(None)
+    sampler.observe(None, 0.25)
     sampler.set_phase("Commit")
-    sampler.observe(None)
-    sampler.observe(None)
+    sampler.observe(None, 0.5)
+    sampler.observe(None, 1.5)
 
     assert sampler.counts == {("pre-origin", "other"): 1, ("Commit", "other"): 2}
+    assert sampler.seconds == {("pre-origin", "other"): 0.25, ("Commit", "other"): 2.0}
 
 
 def test_stack_profile_reports_region_seconds_and_the_unsampled_gap(tmp_path: Path) -> None:
@@ -263,7 +264,7 @@ def test_stack_profile_reports_region_seconds_and_the_unsampled_gap(tmp_path: Pa
     sampler = namespace["StackSampler"](thread_id=threading.get_ident(), interval_seconds=0.5)
     sampler.set_phase("Commit")
     for _ in range(4):
-        sampler.observe(None)
+        sampler.observe(None, 0.5)
 
     payload = namespace["collect_growth"](
         config_path=tmp_path / "growth-probe-100.yaml",
