@@ -61,6 +61,7 @@ def _fake_runner(
 ) -> Callable[..., object]:
     class Result:
         forecast_origin_count = len(origins)
+        node_count = 224
 
     def run(
         _config_path: Path,
@@ -156,6 +157,7 @@ def test_per_origin_records_pair_phase_durations_with_counter_deltas(tmp_path: P
 
     first, second = payload["origins"]
     assert payload["bottom_count"] == 100
+    assert payload["node_count"] == 224
     assert payload["origin_count"] == 2
     assert payload["freeze_gc"] is False
     assert payload["acceptance_evidence"] is False

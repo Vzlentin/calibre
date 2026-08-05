@@ -145,6 +145,7 @@ def collect_growth(
         "schema_version": 1,
         "acceptance_evidence": False,
         "bottom_count": bottom_count,
+        "node_count": getattr(result, "node_count", 0),
         "origin_count": len(origins),
         "freeze_gc": freeze_gc,
         "wall_seconds": wall_end - wall_start,
