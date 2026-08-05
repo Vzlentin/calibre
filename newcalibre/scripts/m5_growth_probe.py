@@ -12,6 +12,7 @@ import argparse
 import copy
 import gc
 import json
+import resource
 import sys
 import tempfile
 import threading
@@ -39,6 +40,8 @@ _PROFILE_SALT = "calibre-gate-c-profile-v1"
 _PHASES = tuple(Phase)
 _AUDIT_FIELDS = tuple(field.name for field in fields(RunStoreAudit))
 _GC_FIELDS = ("collections", "collected", "uncollectable")
+# getrusage reports maximum resident set in bytes on Darwin and kilobytes on Linux.
+_RSS_UNIT = 1 if sys.platform == "darwin" else 1024
 
 type _Audit = tuple[pd.Timestamp, RunStoreAudit, tuple[int, int]]
 type _GcStats = Sequence[dict[str, int]]
@@ -223,6 +226,7 @@ def collect_growth(
     collector = LifecycleCollector(clock=clock)
     audits: list[_Audit] = []
     stats: list[_GcStats] = []
+    peaks: list[int] = []
     frozen = False
 
     def report(event: PhaseEvent) -> None:
@@ -243,6 +247,7 @@ def collect_growth(
     ) -> None:
         audits.append((origin, audit, footprint))
         stats.append(gc.get_stats())
+        peaks.append(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * _RSS_UNIT)
         progress(
             f"origin {len(audits)} {origin.date()} "
             f"state_rows={footprint[0]} state_bytes={footprint[1]} "
@@ -273,6 +278,7 @@ def collect_growth(
         audits=audits,
         stats=stats,
         baseline=baseline,
+        peaks=peaks,
     )
     totals = {phase.value: 0.0 for phase in _PHASES}
     for record in per_origin:
@@ -327,6 +333,7 @@ def _origin_records(
     audits: Sequence[_Audit],
     stats: Sequence[_GcStats],
     baseline: _GcStats,
+    peaks: Sequence[int] = (),
 ) -> list[dict[str, object]]:
     """Assemble one record per origin from disjoint timing and counter streams."""
     expected = tuple(
@@ -363,6 +370,7 @@ def _origin_records(
                 },
                 "state_rows": footprint[0],
                 "state_bytes": footprint[1],
+                "rss_peak_bytes": peaks[index] if index < len(peaks) else 0,
                 **_gc_delta(stats[index], previous_stats),
             }
         )

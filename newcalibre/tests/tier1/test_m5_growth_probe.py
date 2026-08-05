@@ -176,6 +176,7 @@ def test_per_origin_records_pair_phase_durations_with_counter_deltas(tmp_path: P
     assert second["audit_delta"]["commits"] == 1
     assert second["audit_delta"]["pending_rows_examined"] == 25
     assert (second["state_rows"], second["state_bytes"]) == (7, 91)
+    assert 0 < first["rss_peak_bytes"] <= second["rss_peak_bytes"]
     assert all(
         len(record[f"gc_{name}_delta"]) == 3
         and all(isinstance(value, int) and value >= 0 for value in record[f"gc_{name}_delta"])
