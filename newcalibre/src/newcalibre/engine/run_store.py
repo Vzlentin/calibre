@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass
-from enum import Enum
+from dataclasses import dataclass, field
 from itertools import pairwise
 from numbers import Integral, Real
 from types import MappingProxyType
@@ -103,7 +101,6 @@ class ForecastWrite:
     """Carry one defensive forecast-frame snapshot into a store commit."""
 
     _frame: pd.DataFrame = field(repr=False)
-    _digest: str = field(repr=False)
     issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]]
     observation_issuances: Mapping[ForecastKey, IssuedBoundFacts]
 
@@ -132,17 +129,11 @@ class ForecastWrite:
         object.__setattr__(self, "_frame", frame.copy(deep=True))
         object.__setattr__(self, "issuances", MappingProxyType(frozen_issuances))
         object.__setattr__(self, "observation_issuances", MappingProxyType(observed))
-        object.__setattr__(self, "_digest", _forecast_write_digest(self))
 
     @property
     def frame(self) -> pd.DataFrame:
         """Return an isolated copy of the staged frame."""
         return self._frame.copy(deep=True)
-
-    @property
-    def digest(self) -> str:
-        """Return the compact identity of the staged immutable facts."""
-        return self._digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,21 +238,14 @@ class OriginCommit:
     expected_forecast_origin_count: int | None = None
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     resume_marker: pd.Timestamp | None = None
-    _digest: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         _validate_commit_common(self)
-        object.__setattr__(self, "_digest", _commit_digest(self, schema=b"origin/v1"))
 
     @property
     def commit_key(self) -> pd.Timestamp:
         """Return the origin natural key."""
         return self.origin
-
-    @property
-    def digest(self) -> str:
-        """Return the canonical digest of the complete transaction."""
-        return self._digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,7 +262,6 @@ class ActualsCommit:
     input_fingerprint: str | None = None
     inventory_positions: Mapping[str, InventoryPosition] = field(default_factory=dict)
     resume_marker: pd.Timestamp | None = None
-    _digest: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         _validate_commit_common(self)
@@ -286,17 +269,11 @@ class ActualsCommit:
         if not actual_keys:
             raise ValueError("actuals commit keys must not be empty")
         object.__setattr__(self, "actual_keys", actual_keys)
-        object.__setattr__(self, "_digest", _commit_digest(self, schema=b"actuals/v1"))
 
     @property
     def commit_key(self) -> ActualsCommitKey:
         """Return the actuals natural key."""
         return ActualsCommitKey(self.actual_keys)
-
-    @property
-    def digest(self) -> str:
-        """Return the canonical digest of the complete transaction."""
-        return self._digest
 
 
 type RunCommit = OriginCommit | ActualsCommit
@@ -308,7 +285,6 @@ class CommitReceipt:
 
     session: SessionIdentity
     origin: pd.Timestamp
-    digest: str
     expected_revision: int
     revision: int
     state_updates: Mapping[str, bytes]
@@ -327,7 +303,6 @@ class CommitReceipt:
         return cls(
             session=commit.session,
             origin=commit.origin,
-            digest=commit.digest,
             expected_revision=commit.expected_revision,
             revision=revision,
             state_updates=commit.state_updates,
@@ -344,7 +319,6 @@ class CommitReceipt:
     def __post_init__(self) -> None:
         _require_session(self.session, name="commit receipt session")
         _require_timestamp(self.origin, name="commit receipt origin")
-        _require_digest(self.digest, name="commit receipt digest")
         _require_revision(self.expected_revision, name="commit receipt expected revision")
         _require_revision(self.revision, name="commit receipt revision")
         if self.revision != self.expected_revision + 1:
@@ -546,111 +520,6 @@ def _validate_snapshot(snapshot: OriginSnapshot | ActualsSnapshot) -> None:
         object.__setattr__(snapshot, "checkpoints", MappingProxyType(checkpoints))
         object.__setattr__(snapshot, "checkpoint_indexes", MappingProxyType(indexes))
         object.__setattr__(snapshot, "settlement_receipts", MappingProxyType(receipts))
-
-
-def _forecast_write_digest(write: ForecastWrite) -> str:
-    digest = hashlib.sha256()
-    schema = tuple((str(column), str(write._frame[column].dtype)) for column in write._frame)
-    _update_digest(digest, b"schema", repr(schema).encode())
-    for column in write._frame:
-        _update_digest(
-            digest, str(column).encode(), _canonical_value_bytes(write._frame[column].tolist())
-        )
-    _update_digest(digest, b"issuances", _canonical_value_bytes(write.issuances))
-    _update_digest(
-        digest,
-        b"observation-issuances",
-        _canonical_value_bytes(write.observation_issuances),
-    )
-    return digest.hexdigest()
-
-
-def _commit_digest(commit: RunCommit, *, schema: bytes) -> str:
-    digest = hashlib.sha256()
-    _update_digest(digest, b"schema", b"newcalibre.run-commit/" + schema)
-    for name in (
-        "session",
-        "origin",
-        "expected_revision",
-        "observe_cycle",
-        "forecasts",
-        "orders",
-        "settlements",
-        "state_updates",
-        "checkpoint_updates",
-        "checkpoint_indexes",
-        "actual_keys",
-        "input_fingerprint",
-        "expected_forecast_origin_count",
-        "inventory_positions",
-        "resume_marker",
-    ):
-        if not hasattr(commit, name):
-            continue
-        value = getattr(commit, name)
-        if name == "session":
-            value = value.value
-        elif name == "forecasts":
-            value = tuple(item.digest for item in value)
-        _update_digest(digest, name.encode(), _canonical_value_bytes(value))
-    return digest.hexdigest()
-
-
-def _update_digest(digest, label: bytes, payload: bytes) -> None:
-    digest.update(len(label).to_bytes(4, "big"))
-    digest.update(label)
-    digest.update(len(payload).to_bytes(8, "big"))
-    digest.update(payload)
-
-
-def _canonical_value_bytes(value: object) -> bytes:
-    if value is None:
-        return _tagged(b"none", b"")
-    if isinstance(value, pd.Timestamp):
-        return _tagged(b"timestamp", f"{value.isoformat()}:{value.unit}".encode())
-    if isinstance(value, Enum):
-        return _tagged(
-            b"enum",
-            _tagged(b"type", _type_name(value).encode()) + _canonical_value_bytes(value.value),
-        )
-    if isinstance(value, bool):
-        return _tagged(b"bool", b"1" if value else b"0")
-    if isinstance(value, int):
-        return _tagged(b"int", str(value).encode())
-    if isinstance(value, float):
-        return _tagged(b"float", value.hex().encode())
-    if isinstance(value, str):
-        return _tagged(b"str", value.encode())
-    if isinstance(value, bytes):
-        return _tagged(b"bytes", value)
-    if is_dataclass(value) and not isinstance(value, type):
-        payload = bytearray(_tagged(b"type", _type_name(value).encode()))
-        for item in fields(value):
-            if item.name.startswith("_"):
-                continue
-            payload.extend(_tagged(b"field", item.name.encode()))
-            payload.extend(_canonical_value_bytes(getattr(value, item.name)))
-        return _tagged(b"dataclass", bytes(payload))
-    if isinstance(value, Mapping):
-        entries = sorted(
-            (_canonical_value_bytes(key), _canonical_value_bytes(item))
-            for key, item in value.items()
-        )
-        payload = b"".join(_tagged(b"key", key) + _tagged(b"value", item) for key, item in entries)
-        return _tagged(b"mapping", payload)
-    if isinstance(value, (tuple, list)):
-        payload = b"".join(_tagged(b"item", _canonical_value_bytes(item)) for item in value)
-        return _tagged(b"tuple" if isinstance(value, tuple) else b"list", payload)
-    raise TypeError(f"unsupported digest value type: {_type_name(value)}")
-
-
-def _tagged(label: bytes, payload: bytes) -> bytes:
-    return len(label).to_bytes(4, "big") + label + len(payload).to_bytes(8, "big") + payload
-
-
-def _type_name(value: object) -> str:
-    value_type = type(value)
-    return f"{value_type.__module__}.{value_type.__qualname__}"
 
 
 def _canonical_actual_keys(values: Sequence[ActualKey]) -> tuple[ActualKey, ...]:

@@ -411,7 +411,6 @@ def _ledger_bytes(
         "orders": [_order_payload(row) for row in store.orders],
         "receipts": [
             {
-                "digest": receipt.digest,
                 "origin": _timestamp(receipt.origin),
                 "settlement_periods": [_timestamp(period) for period in receipt.settlement_periods],
                 "state_updates": [
@@ -431,7 +430,7 @@ def _ledger_bytes(
             }
             for value in store.pending_observations
         ],
-        "schema": "newcalibre.tier2-rolling-ledger/v2",
+        "schema": "newcalibre.tier2-rolling-ledger/v3",
         "session": store.session.value,
         "settlement_periods": [_timestamp(period) for period in result.settlement_periods],
         "settlements": [_settlement_payload(row) for row in store.settlements],
