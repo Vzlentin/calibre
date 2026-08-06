@@ -31,8 +31,11 @@ from newcalibre.engine import (
     InProcessDispatch,
     OriginIntent,
     OriginRequest,
+    Phase,
     PhaseEvent,
+    PhaseStatus,
     RayDispatch,
+    RunStoreAudit,
     TimeLoop,
     TimeLoopRequest,
 )
@@ -144,8 +147,17 @@ def run_m5(
     config_path: Path,
     *,
     reporter: Callable[[PhaseEvent], None] | None = None,
+    audit_sink: Callable[[pd.Timestamp, RunStoreAudit, tuple[int, int]], None] | None = None,
 ) -> M5RunResult:
-    """Run one strict M5 configuration through the generic time-loop engine."""
+    """Run one strict M5 configuration through the generic time-loop engine.
+
+    Args:
+        config_path: Strict M5 configuration to compose and run.
+        reporter: Optional clock-free lifecycle observer.
+        audit_sink: Optional per-origin diagnostic observer receiving the committed
+            origin, the store's cumulative :class:`RunStoreAudit`, and its current
+            ``(row_count, total_bytes)`` conformal state footprint.
+    """
     runtime = _prepare_m5(config_path)
     config = runtime.config
     compiled = runtime.compiled
@@ -169,7 +181,11 @@ def run_m5(
                 initial_inventory_positions={},
                 actuals_semantics=ActualsSemantics.CENSORED_SALES_SURROGATE,
             ),
-            reporter=reporter,
+            reporter=(
+                reporter
+                if audit_sink is None
+                else _audited_reporter(reporter, store=store, audit_sink=audit_sink)
+            ),
         ).run()
     finally:
         dispatch.shutdown()
@@ -237,6 +253,23 @@ def run_m5_fit_predict(config_path: Path, *, concurrency: int) -> M5FitPredictRe
         dispatch_count=compiled.execution.logical_shards,
         thread_policy=observed_policy,
     )
+
+
+def _audited_reporter(
+    reporter: Callable[[PhaseEvent], None] | None,
+    *,
+    store: InMemoryIndexedRunStore,
+    audit_sink: Callable[[pd.Timestamp, RunStoreAudit, tuple[int, int]], None],
+) -> Callable[[PhaseEvent], None]:
+    """Fan one lifecycle stream out to the caller and a per-origin audit sink."""
+
+    def report(event: PhaseEvent) -> None:
+        if reporter is not None:
+            reporter(event)
+        if event.phase is Phase.COMMIT and event.status is PhaseStatus.FINISHED:
+            audit_sink(event.origin, store.audit(), store.state_footprint)
+
+    return report
 
 
 def _prepare_m5(config_path: Path) -> _M5Composition:
