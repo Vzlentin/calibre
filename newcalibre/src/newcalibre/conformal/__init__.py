@@ -97,6 +97,11 @@ def method_config_schema(method_name: str) -> type[BaseModel]:
     return _BUILTIN_METHODS.config_schema(method_name)
 
 
+def method_manifest(method_name: str) -> MethodManifest:
+    """Return one built-in method's declared manifest."""
+    return _BUILTIN_METHODS.manifest(method_name)
+
+
 def resolve_method(
     configuration: Mapping[str, object],
     *,
@@ -153,6 +158,7 @@ __all__ = [
     "available_methods",
     "derive_partition_label",
     "method_config_schema",
+    "method_manifest",
     "require_calibration_context",
     "resolve_method",
 ]

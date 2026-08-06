@@ -12,6 +12,7 @@ from typing import cast
 
 import pandas as pd
 
+from newcalibre.conformal import method_manifest
 from newcalibre.domain import (
     AVAILABILITY_BOUND,
     CENSOR_STATUS,
@@ -32,6 +33,7 @@ from newcalibre.domain import (
 )
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.engine._session import (
+    session_conformal_config,
     session_decision_inputs,
     session_definition,
     session_series_and_frequency,
@@ -161,6 +163,15 @@ class _IndexedLedgerDataPlane:
         self._latest_origin: pd.Timestamp | None = None
         self._forecast_origin_count = 0
         self._decision = session_decision_inputs(session)
+        # Only window-sum readiness reads whole forecast lineages, and the engine
+        # resolves its runtime from the same session, so store and engine cannot
+        # disagree about the scope. Everything else pays neither the wider
+        # snapshot nor the lineage index.
+        conformal = session_conformal_config(session)
+        method = None if conformal is None else conformal.get("method")
+        self._lineage_readiness = isinstance(method, str) and (
+            method_manifest(method).emission_scope is EmissionScope.WINDOW_SUM
+        )
         if self._decision is None and initial_arrivals is not None:
             if not isinstance(initial_arrivals, Mapping):
                 raise TypeError("initial arrivals must be a mapping")
@@ -438,12 +449,13 @@ class _IndexedLedgerDataPlane:
         *,
         members: tuple[str, ...],
     ) -> None:
-        """Insert or replace one pending row in its target and lineage indexes."""
+        """Insert or replace one pending row in every index its session reads."""
         key = _ledger_forecast_key(pending.forecast_key)
         target = pending.target_timestamp
         self._pending_rows[key] = pending
         self._pending_by_target.setdefault(target, {})[key] = pending
-        self._pending_by_group.setdefault(_pending_group(pending), {})[key] = pending
+        if self._lineage_readiness:
+            self._pending_by_group.setdefault(_pending_group(pending), {})[key] = pending
         for member in members:
             self._pending_by_actual.setdefault((member, target), {})[key] = pending
         if target not in self._known_due_targets:
@@ -457,11 +469,12 @@ class _IndexedLedgerDataPlane:
         target_rows.pop(key)
         if not target_rows:
             self._pending_by_target.pop(pending.target_timestamp)
-        group = _pending_group(pending)
-        group_rows = self._pending_by_group[group]
-        group_rows.pop(key)
-        if not group_rows:
-            self._pending_by_group.pop(group)
+        if self._lineage_readiness:
+            group = _pending_group(pending)
+            group_rows = self._pending_by_group[group]
+            group_rows.pop(key)
+            if not group_rows:
+                self._pending_by_group.pop(group)
         for member in self._members_by_node[pending.forecast_key.series_key]:
             actual_rows = self._pending_by_actual[(member, pending.target_timestamp)]
             actual_rows.pop(key)
@@ -855,7 +868,7 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
         due_targets: Iterable[pd.Timestamp],
         actual_keys: Iterable[ActualKey],
     ) -> tuple[tuple[PendingObservation, ...], int, int]:
-        """Read crossed targets, affected memberships, and bounded lineages."""
+        """Read crossed targets, affected memberships, and window-sum lineages."""
         canonical_targets = tuple(sorted(set(due_targets)))
         canonical_actuals = tuple(
             sorted(set(actual_keys), key=lambda key: (key[1], key[0].encode()))
@@ -865,8 +878,9 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
             rows.update(self._pending_by_target.get(target, {}))
         for actual_key in canonical_actuals:
             rows.update(self._pending_by_actual.get(actual_key, {}))
-        for group in {_pending_group(value) for value in rows.values()}:
-            rows.update(self._pending_by_group[group])
+        if self._lineage_readiness:
+            for group in {_pending_group(value) for value in rows.values()}:
+                rows.update(self._pending_by_group[group])
         pending = tuple(
             value
             for _key, value in sorted(

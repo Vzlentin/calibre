@@ -46,13 +46,19 @@ from newcalibre.observe import (
 CALENDAR = Calendar("D", phase=pd.Timestamp("2026-01-01"))
 
 
-def _session(series_keys: tuple[str, ...] = ("a",)) -> SessionIdentity:
+def _session(
+    series_keys: tuple[str, ...] = ("a",),
+    *,
+    horizon: int = 1,
+    conformal_config: dict[str, object] | None = None,
+) -> SessionIdentity:
     return SessionIdentity.derive(
         tenant="tenant-a",
         series_keys=series_keys,
         calendar=CALENDAR,
-        horizon=1,
+        horizon=horizon,
         model_config={"backend": "fixture", "name": "fixture"},
+        conformal_config=conformal_config,
     )
 
 
@@ -75,20 +81,46 @@ def _forecast_write(
     *,
     point: float = 7.0,
     series_keys: tuple[str, ...] = ("a",),
+    horizon: int = 1,
 ) -> ForecastWrite:
-    keys = tuple((series_key, origin, 1, "fixture") for series_key in series_keys)
+    rows = tuple((series_key, step) for step in range(1, horizon + 1) for series_key in series_keys)
+    keys = tuple((series_key, origin, step, "fixture") for series_key, step in rows)
     frame = pd.DataFrame(
         {
-            SERIES_KEY: pd.Series(series_keys, dtype="string"),
-            TARGET_TIMESTAMP: pd.to_datetime([origin] * len(series_keys)),
-            ACTUAL_VALUE: pd.Series([None] * len(series_keys), dtype="float64"),
-            POINT_FORECAST: pd.Series([point] * len(series_keys), dtype="float64"),
-            HORIZON_STEP: pd.Series([1] * len(series_keys), dtype="int64"),
-            ORIGIN: pd.to_datetime([origin] * len(series_keys)),
-            MODEL_NAME: pd.Series(["fixture"] * len(series_keys), dtype="string"),
+            SERIES_KEY: pd.Series([series_key for series_key, _step in rows], dtype="string"),
+            TARGET_TIMESTAMP: pd.to_datetime(
+                [CALENDAR.advance(origin, step - 1) for _series_key, step in rows]
+            ),
+            ACTUAL_VALUE: pd.Series([None] * len(rows), dtype="float64"),
+            POINT_FORECAST: pd.Series([point] * len(rows), dtype="float64"),
+            HORIZON_STEP: pd.Series([step for _series_key, step in rows], dtype="int64"),
+            ORIGIN: pd.to_datetime([origin] * len(rows)),
+            MODEL_NAME: pd.Series(["fixture"] * len(rows), dtype="string"),
         }
     )
     return ForecastWrite(frame, {key: {} for key in keys})
+
+
+def _bottom_panel(bottom_series: tuple[str, ...], timestamps) -> Panel:
+    """Observe every bottom series at every timestamp with distinct values."""
+    series_keys = tuple(series_key for _timestamp in timestamps for series_key in bottom_series)
+    repeated_timestamps = tuple(
+        timestamp for timestamp in timestamps for _series_key in bottom_series
+    )
+    return Panel.from_frame(
+        pd.DataFrame(
+            {
+                SERIES_KEY: pd.Series(series_keys, dtype="string"),
+                TIMESTAMP: pd.to_datetime(repeated_timestamps),
+                OBSERVED_VALUE: pd.Series(
+                    range(1, len(repeated_timestamps) + 1),
+                    dtype="float64",
+                ),
+            }
+        ),
+        calendar=CALENDAR,
+        target_support=TargetSupport.REAL,
+    )
 
 
 def _observe(snapshot, *, hierarchy: HierarchyIndex | None = None) -> ObserveCycle:
@@ -423,30 +455,10 @@ def test_sixty_four_origin_work_is_delta_proportional_and_reader_equivalent() ->
     hierarchy = HierarchyIndex.flat(("a", "b"))
     session = _session(hierarchy.node_labels)
     timestamps = pd.date_range("2026-01-01", periods=64, freq="D")
-    series_keys = tuple(
-        series_key for _timestamp in timestamps for series_key in hierarchy.bottom_series
-    )
-    repeated_timestamps = tuple(
-        timestamp for timestamp in timestamps for _series_key in hierarchy.bottom_series
-    )
-    panel = Panel.from_frame(
-        pd.DataFrame(
-            {
-                SERIES_KEY: pd.Series(series_keys, dtype="string"),
-                TIMESTAMP: pd.to_datetime(repeated_timestamps),
-                OBSERVED_VALUE: pd.Series(
-                    range(1, len(repeated_timestamps) + 1),
-                    dtype="float64",
-                ),
-            }
-        ),
-        calendar=CALENDAR,
-        target_support=TargetSupport.REAL,
-    )
     store = InMemoryIndexedRunStore(
         session=session,
         calendar=CALENDAR,
-        actuals=panel,
+        actuals=_bottom_panel(hierarchy.bottom_series, timestamps),
         actuals_semantics=ActualsSemantics.DEMAND,
         hierarchy=hierarchy,
     )
@@ -542,3 +554,117 @@ def test_sixty_four_origin_work_is_delta_proportional_and_reader_equivalent() ->
     assert one_by_one == logical_rows(17)
     assert len(one_by_one) == 192
     assert sum(row[-1] is not None for row in one_by_one) == 189
+
+
+def test_multi_horizon_pending_reads_stay_inside_the_due_window() -> None:
+    """Read one due window per origin, not every open forecast lineage."""
+    horizon = 4
+    hierarchy = HierarchyIndex.flat(("a", "b"))
+    session = _session(hierarchy.node_labels, horizon=horizon)
+    timestamps = pd.date_range("2026-01-01", periods=64, freq="D")
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals=_bottom_panel(hierarchy.bottom_series, timestamps),
+        actuals_semantics=ActualsSemantics.DEMAND,
+        hierarchy=hierarchy,
+    )
+    origins = tuple(CALENDAR.advance(timestamps[0], step) for step in range(1, 65))
+    nodes = len(hierarchy.node_labels)
+    # Every origin retires exactly one target, whose rows were issued by the
+    # last `horizon` origins; the lineages behind them still hold
+    # `horizon + (horizon - 1) + ... + 1` open rows per node.
+    due_window = nodes * horizon
+    open_rows = nodes * horizon * (horizon + 1) // 2
+
+    for index, origin in enumerate(origins):
+        before = store.audit()
+        snapshot = store.open(OriginIntent(session, origin))
+        cycle = _observe(snapshot, hierarchy=hierarchy)
+        store.commit(
+            OriginCommit(
+                session=session,
+                origin=origin,
+                expected_revision=snapshot.revision,
+                observe_cycle=cycle,
+                forecasts=(
+                    _forecast_write(
+                        origin,
+                        point=float(index + 1),
+                        series_keys=hierarchy.node_labels,
+                        horizon=horizon,
+                    ),
+                ),
+            )
+        )
+        after = store.audit()
+
+        assert after.pending_rows_examined - before.pending_rows_examined == nodes * min(
+            horizon, index
+        )
+        assert {
+            (
+                value.forecast_key.series_key,
+                value.forecast_key.origin,
+                value.forecast_key.horizon_step,
+            )
+            for value in cycle.resolutions
+        } == {
+            (label, origins[index - step], step)
+            for step in range(1, horizon + 1)
+            if index >= step
+            for label in hierarchy.node_labels
+        }
+        if index >= horizon:
+            assert after.pending_rows_examined - before.pending_rows_examined == due_window
+            assert store.pending_observation_count == open_rows
+
+    assert due_window < open_rows
+
+
+@pytest.mark.parametrize(
+    ("conformal_config", "expected_steps"),
+    [
+        (None, {1}),
+        ({"method": "split-per-step", "coverage": 0.5, "calibration_window": 32}, {1}),
+        (
+            {
+                "method": "split-window-sum",
+                "coverage": 0.5,
+                "calibration_window": 32,
+                "protection_period": 2,
+            },
+            {1, 2, 3, 4},
+        ),
+    ],
+    ids=["no-conformal", "per-step", "window-sum"],
+)
+def test_pending_snapshot_expands_a_due_lineage_only_for_window_sum_readiness(
+    conformal_config: dict[str, object] | None,
+    expected_steps: set[int],
+) -> None:
+    """Serve the sibling steps exactly when readiness spans the whole window."""
+    horizon = 4
+    session = _session(horizon=horizon, conformal_config=conformal_config)
+    timestamps = pd.date_range("2026-01-01", periods=4, freq="D")
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals=_bottom_panel(("a",), timestamps),
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
+    first = CALENDAR.advance(timestamps[0], 1)
+    snapshot = store.open(OriginIntent(session, first))
+    store.commit(
+        OriginCommit(
+            session=session,
+            origin=first,
+            expected_revision=snapshot.revision,
+            observe_cycle=_observe(snapshot),
+            forecasts=(_forecast_write(first, horizon=horizon),),
+        )
+    )
+
+    pending = store.open(OriginIntent(session, CALENDAR.advance(first, 1))).pending_observations
+
+    assert {value.forecast_key.horizon_step for value in pending} == expected_steps
