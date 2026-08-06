@@ -12,7 +12,6 @@ from typing import cast
 
 import pandas as pd
 
-from newcalibre.conformal import method_manifest
 from newcalibre.domain import (
     AVAILABILITY_BOUND,
     CENSOR_STATUS,
@@ -33,9 +32,9 @@ from newcalibre.domain import (
 )
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 from newcalibre.engine._session import (
-    session_conformal_config,
     session_decision_inputs,
     session_definition,
+    session_emission_scope,
     session_series_and_frequency,
 )
 from newcalibre.engine.reporting import (
@@ -87,6 +86,7 @@ from newcalibre.observe import (
 
 type _ForecastScanSegment = tuple[pd.Timestamp, tuple[ForecastKey, ...]]
 type _PendingGroup = tuple[str, pd.Timestamp, str]
+type _LineageIndex = dict[_PendingGroup, dict[ForecastKey, PendingObservation]]
 
 _CHECKPOINT_INDEX_SCHEMA = "newcalibre.forecast-checkpoint-index/v1"
 
@@ -142,7 +142,11 @@ class _IndexedLedgerDataPlane:
             pd.Timestamp,
             dict[ForecastKey, PendingObservation],
         ] = {}
-        self._pending_by_group: dict[_PendingGroup, dict[ForecastKey, PendingObservation]] = {}
+        # Only window-sum readiness reads whole forecast lineages, so every other
+        # session pays neither this index nor the wider pending snapshot it feeds.
+        self._pending_by_group: _LineageIndex | None = (
+            {} if session_emission_scope(session) is EmissionScope.WINDOW_SUM else None
+        )
         self._pending_by_actual: dict[
             ActualKey,
             dict[ForecastKey, PendingObservation],
@@ -163,15 +167,6 @@ class _IndexedLedgerDataPlane:
         self._latest_origin: pd.Timestamp | None = None
         self._forecast_origin_count = 0
         self._decision = session_decision_inputs(session)
-        # Only window-sum readiness reads whole forecast lineages, and the engine
-        # resolves its runtime from the same session, so store and engine cannot
-        # disagree about the scope. Everything else pays neither the wider
-        # snapshot nor the lineage index.
-        conformal = session_conformal_config(session)
-        method = None if conformal is None else conformal.get("method")
-        self._lineage_readiness = isinstance(method, str) and (
-            method_manifest(method).emission_scope is EmissionScope.WINDOW_SUM
-        )
         if self._decision is None and initial_arrivals is not None:
             if not isinstance(initial_arrivals, Mapping):
                 raise TypeError("initial arrivals must be a mapping")
@@ -454,7 +449,7 @@ class _IndexedLedgerDataPlane:
         target = pending.target_timestamp
         self._pending_rows[key] = pending
         self._pending_by_target.setdefault(target, {})[key] = pending
-        if self._lineage_readiness:
+        if self._pending_by_group is not None:
             self._pending_by_group.setdefault(_pending_group(pending), {})[key] = pending
         for member in members:
             self._pending_by_actual.setdefault((member, target), {})[key] = pending
@@ -469,7 +464,7 @@ class _IndexedLedgerDataPlane:
         target_rows.pop(key)
         if not target_rows:
             self._pending_by_target.pop(pending.target_timestamp)
-        if self._lineage_readiness:
+        if self._pending_by_group is not None:
             group = _pending_group(pending)
             group_rows = self._pending_by_group[group]
             group_rows.pop(key)
@@ -878,7 +873,7 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
             rows.update(self._pending_by_target.get(target, {}))
         for actual_key in canonical_actuals:
             rows.update(self._pending_by_actual.get(actual_key, {}))
-        if self._lineage_readiness:
+        if self._pending_by_group is not None:
             for group in {_pending_group(value) for value in rows.values()}:
                 rows.update(self._pending_by_group[group])
         pending = tuple(

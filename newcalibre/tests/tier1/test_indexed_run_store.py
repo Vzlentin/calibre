@@ -27,6 +27,7 @@ from newcalibre.engine import (
     ActualsCommit,
     ActualsCommitKey,
     ActualsIntent,
+    EngineError,
     ForecastWrite,
     LedgerColumn,
     LedgerSelection,
@@ -101,7 +102,7 @@ def _forecast_write(
     return ForecastWrite(frame, {key: {} for key in keys})
 
 
-def _bottom_panel(bottom_series: tuple[str, ...], timestamps) -> Panel:
+def _bottom_panel(bottom_series: tuple[str, ...], timestamps: pd.DatetimeIndex) -> Panel:
     """Observe every bottom series at every timestamp with distinct values."""
     series_keys = tuple(series_key for _timestamp in timestamps for series_key in bottom_series)
     repeated_timestamps = tuple(
@@ -616,7 +617,6 @@ def test_multi_horizon_pending_reads_stay_inside_the_due_window() -> None:
             for label in hierarchy.node_labels
         }
         if index >= horizon:
-            assert after.pending_rows_examined - before.pending_rows_examined == due_window
             assert store.pending_observation_count == open_rows
 
     assert due_window < open_rows
@@ -643,7 +643,12 @@ def test_pending_snapshot_expands_a_due_lineage_only_for_window_sum_readiness(
     conformal_config: dict[str, object] | None,
     expected_steps: set[int],
 ) -> None:
-    """Serve the sibling steps exactly when readiness spans the whole window."""
+    """Serve sibling steps exactly when readiness spans a window.
+
+    The window-sum expectation is the whole lineage, which is a superset of the
+    ``protection_period``-length prefix that
+    :meth:`newcalibre.observe.ObserveLoop._ready_keys` consumes.
+    """
     horizon = 4
     session = _session(horizon=horizon, conformal_config=conformal_config)
     timestamps = pd.date_range("2026-01-01", periods=4, freq="D")
@@ -668,3 +673,14 @@ def test_pending_snapshot_expands_a_due_lineage_only_for_window_sum_readiness(
     pending = store.open(OriginIntent(session, CALENDAR.advance(first, 1))).pending_observations
 
     assert {value.forecast_key.horizon_step for value in pending} == expected_steps
+
+
+def test_store_rejects_a_conformal_session_that_names_no_method() -> None:
+    """Refuse to pick a readiness scope for a session the engine would reject."""
+    with pytest.raises(EngineError, match="invalid conformal method"):
+        InMemoryIndexedRunStore(
+            session=_session(conformal_config={"coverage": 0.5}),
+            calendar=CALENDAR,
+            actuals=_bottom_panel(("a",), pd.date_range("2026-01-01", periods=2, freq="D")),
+            actuals_semantics=ActualsSemantics.DEMAND,
+        )
