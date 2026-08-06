@@ -47,13 +47,10 @@ type _Audit = tuple[pd.Timestamp, RunStoreAudit, tuple[int, int]]
 type _GcStats = Sequence[dict[str, int]]
 
 # Innermost frame whose function appears here names the region a sample belongs
-# to; everything else rolls up into "other". Recursive helpers such as
-# `_canonical_value_bytes` are deliberately absent so their time is charged to
-# the caller that chose the work.
+# to; everything else rolls up into "other". Recursive helpers are deliberately
+# absent so their time is charged to the caller that chose the work.
 STACK_LABELS = {
     "_decode_envelope": "conformal-state-decode",
-    "_commit_digest": "commit-digest",
-    "_forecast_write_digest": "forecast-frame-digest",
     "_pending_snapshot": "pending-snapshot",
     "_history_snapshot": "history-snapshot",
     "_validate_snapshot": "validate-snapshot",
@@ -129,10 +126,6 @@ class StackSampler:
             name = frame.f_code.co_name
             label = self._labels.get(name)
             if label is not None:
-                if name == "_commit_digest":
-                    field_name = frame.f_locals.get("name")
-                    if isinstance(field_name, str):
-                        return f"{label}:{field_name}"
                 return label
             frame = frame.f_back
         if innermost is None:

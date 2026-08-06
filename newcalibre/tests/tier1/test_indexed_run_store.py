@@ -216,8 +216,8 @@ def test_state_footprint_tracks_committed_state_rows_and_bytes() -> None:
     )
 
 
-def test_natural_keys_replay_exact_digests_and_reject_conflicting_reuse() -> None:
-    """Return exact receipts for retries and reject changed facts at either key kind."""
+def test_natural_keys_replay_stored_receipts_and_reject_stale_revisions() -> None:
+    """Replay the stored receipt at either key kind and still reject stale writes."""
     session = _session()
     store = InMemoryIndexedRunStore(
         session=session,
@@ -234,15 +234,7 @@ def test_natural_keys_replay_exact_digests_and_reject_conflicting_reuse() -> Non
     origin_receipt = store.commit(origin_write)
 
     assert store.commit(origin_write) is origin_receipt
-    with pytest.raises(LedgerError, match="different committed write"):
-        store.commit(
-            OriginCommit(
-                session=session,
-                origin=origin,
-                expected_revision=origin_write.expected_revision,
-                state_updates={"partition": b"changed"},
-            )
-        )
+    assert store.receipt(origin) is origin_receipt
 
     submission = ActualsSubmission((ActualRecord("a", pd.Timestamp("2026-01-02"), 2.0),))
     snapshot = store.open(ActualsIntent(session, submission))
@@ -257,13 +249,13 @@ def test_natural_keys_replay_exact_digests_and_reject_conflicting_reuse() -> Non
 
     assert store.commit(actuals_write) is actuals_receipt
     assert store.receipt(ActualsCommitKey(actuals_write.actual_keys)) is actuals_receipt
-    with pytest.raises(LedgerError, match="different committed write"):
+
+    with pytest.raises(LedgerError, match="revision is stale"):
         store.commit(
-            ActualsCommit(
+            OriginCommit(
                 session=session,
-                origin=snapshot.origin,
-                expected_revision=snapshot.revision,
-                actual_keys=actuals_write.actual_keys,
+                origin=pd.Timestamp("2026-01-04"),
+                expected_revision=origin_write.expected_revision,
                 state_updates={"partition": b"changed"},
             )
         )

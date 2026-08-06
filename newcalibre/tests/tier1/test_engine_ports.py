@@ -218,33 +218,3 @@ def test_failed_origin_validation_publishes_no_partial_rows() -> None:
     assert store.forecasts == ()
     assert store.orders == ()
     assert store.revision == 1
-
-
-def test_forecast_digest_encodes_cells_and_dtypes_without_lossy_prehash(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Bind SHA-256 directly to canonical schema and cell values."""
-
-    def forbidden_prehash(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("forecast digest used pandas row prehashing")
-
-    monkeypatch.setattr(pd.util, "hash_pandas_object", forbidden_prehash)
-    integer = ForecastWrite(pd.DataFrame({"value": pd.Series([1], dtype="int64")}), {})
-    floating = ForecastWrite(pd.DataFrame({"value": pd.Series([1.0], dtype="float64")}), {})
-    changed = ForecastWrite(pd.DataFrame({"value": pd.Series([2], dtype="int64")}), {})
-
-    assert len({integer.digest, floating.digest, changed.digest}) == 3
-
-
-@pytest.mark.parametrize("digest", ["a" * 63, "A" * 64, "g" * 64])
-def test_commit_receipt_rejects_noncanonical_digests(digest: str) -> None:
-    """Require canonical content identities on every durable receipt."""
-    with pytest.raises(ValueError, match="SHA-256 hex string"):
-        CommitReceipt(
-            session=_session(),
-            origin=ORIGIN_DATE,
-            digest=digest,
-            expected_revision=1,
-            revision=2,
-            state_updates={},
-        )

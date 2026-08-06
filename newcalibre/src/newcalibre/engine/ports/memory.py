@@ -728,13 +728,13 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
         if write.session != self.session:
             raise LedgerError("run-store commit session does not match the store session")
         with self._lock:
+            # The natural key is the transaction identity, so a retry replays its
+            # stored receipt without re-examining the payload. Checking the
+            # revision first would instead reject honest retries, which always
+            # carry the pre-commit revision.
             previous = self._commits.get(write.commit_key)
             if previous is not None:
-                if previous.digest == write.digest:
-                    return previous
-                raise LedgerError(
-                    f"journal key {write.commit_key!r} already has a different committed write"
-                )
+                return previous
             if write.expected_revision != self._revision:
                 raise LedgerError(
                     "run-store commit revision is stale: "

@@ -58,7 +58,7 @@ def test_identical_event_retries_replay_exact_receipts(runtime_name: str | None)
 
 @pytest.mark.parametrize("runtime_name", RUNTIME_CASES)
 def test_changed_facts_at_committed_natural_keys_are_rejected(runtime_name: str | None) -> None:
-    """Keep origin and actuals natural-key replay content-addressed."""
+    """Reject changed input facts at a committed origin or actuals natural key."""
     world = make_world(runtime_name, source_actuals=False)
     driver = build_event_driver(world)
     seed_event_history(world, driver)
