@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import cast
 
+from newcalibre.conformal import method_manifest
 from newcalibre.domain import (
     Calendar,
     CostStructure,
     DecisionTiming,
+    EmissionScope,
     ForecastTask,
     Panel,
     Scope,
@@ -108,6 +110,24 @@ def session_conformal_config(session: SessionIdentity) -> dict[str, object] | No
     if not isinstance(configuration, Mapping):
         raise EngineError("session identity has an invalid conformal configuration")
     return dict(cast(Mapping[str, object], configuration))
+
+
+def session_emission_scope(session: SessionIdentity) -> EmissionScope | None:
+    """Return the emission scope declared by a session's conformal method, if any.
+
+    Raises:
+        EngineError: If a declared conformal configuration names no usable method.
+        ConformalRegistryError: If the named method is unregistered, matching what
+            :func:`newcalibre.conformal.resolve_method` reports for the same
+            configuration.
+    """
+    configuration = session_conformal_config(session)
+    if configuration is None:
+        return None
+    method = configuration.get("method")
+    if not isinstance(method, str) or not method:
+        raise EngineError("session identity has an invalid conformal method")
+    return method_manifest(method).emission_scope
 
 
 def session_ordering_configuration(
@@ -345,6 +365,7 @@ __all__ = [
     "session_decision_inputs",
     "session_definition",
     "session_decision_series",
+    "session_emission_scope",
     "session_model_config",
     "session_ordering_configuration",
     "session_origin_inputs",

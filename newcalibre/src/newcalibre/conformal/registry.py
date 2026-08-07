@@ -271,6 +271,10 @@ class ConformalRegistry:
         """Return the exposed configuration schema for an explicit method."""
         return self._registration_for(method_name).config_schema
 
+    def manifest(self, method_name: str) -> MethodManifest:
+        """Return the declared manifest for an explicit method."""
+        return self._registration_for(method_name).manifest
+
     def resolve(
         self,
         configuration: Mapping[str, object],
