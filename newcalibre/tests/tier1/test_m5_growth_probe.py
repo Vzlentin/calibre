@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
 import runpy
 import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from types import FunctionType
 from typing import Any
 
 import pandas as pd
@@ -33,6 +35,14 @@ _AUDIT_FIELDS = (
     "staged_rows_validated",
     "due_targets_indexed",
     "checkpoint_indexes_decoded",
+)
+# The regions STACK_LABELS means to attribute all live in these modules, so a label
+# naming nothing here can never match a sampled frame.
+_ATTRIBUTED_MODULES = (
+    "newcalibre.conformal.state",
+    "newcalibre.engine.ports.memory",
+    "newcalibre.engine.run_store",
+    "newcalibre.observe.loop",
 )
 
 
@@ -218,7 +228,8 @@ def _sampled_label(sampler: Any, call: Callable[[Callable[[], object]], object])
 
 def test_stack_labels_name_the_innermost_instrumented_region(tmp_path: Path) -> None:
     """Charge each sample to the innermost region, not to a shared helper."""
-    sampler = _namespace(tmp_path)["StackSampler"](thread_id=threading.get_ident())
+    namespace = _namespace(tmp_path)
+    sampler = namespace["StackSampler"](thread_id=threading.get_ident())
 
     def shared_helper(inner: Callable[[], object]) -> object:
         return inner()
@@ -229,17 +240,51 @@ def test_stack_labels_name_the_innermost_instrumented_region(tmp_path: Path) -> 
     def _pending_snapshot(inner: Callable[[], object]) -> object:
         return shared_helper(inner)
 
+    def _history_snapshot(inner: Callable[[], object]) -> object:
+        return shared_helper(inner)
+
     def _validate_snapshot(inner: Callable[[], object]) -> object:
         return shared_helper(inner)
+
+    def nested_regions(inner: Callable[[], object]) -> object:
+        return _history_snapshot(lambda: _pending_snapshot(inner))
 
     def unlabelled(inner: Callable[[], object]) -> object:
         return inner()
 
-    assert _sampled_label(sampler, _decode_envelope) == "conformal-state-decode"
-    assert _sampled_label(sampler, _pending_snapshot) == "pending-snapshot"
-    assert _sampled_label(sampler, _validate_snapshot) == "validate-snapshot"
+    stubs = {
+        "_decode_envelope": _decode_envelope,
+        "_pending_snapshot": _pending_snapshot,
+        "_history_snapshot": _history_snapshot,
+        "_validate_snapshot": _validate_snapshot,
+    }
+    assert set(stubs) == set(namespace["STACK_LABELS"]), "every labelled region needs a stub here"
+    for name, stub in stubs.items():
+        assert _sampled_label(sampler, stub) == namespace["STACK_LABELS"][name]
+
+    # Two labelled frames on one stack: an outward walk would charge the outer one.
+    assert _sampled_label(sampler, nested_regions) == "pending-snapshot"
     assert _sampled_label(sampler, unlabelled).endswith(":_sampled_label.<locals>.probe")
     assert sampler.label(None) == "other"
+
+
+def test_every_stack_label_names_a_live_definition(tmp_path: Path) -> None:
+    """Refuse a label no attributed module defines, whose time would silently disperse."""
+    defined: set[str] = set()
+    for module_name in _ATTRIBUTED_MODULES:
+        module = importlib.import_module(module_name)
+        for value in vars(module).values():
+            if isinstance(value, FunctionType) and value.__module__ == module_name:
+                defined.add(value.__name__)
+            elif isinstance(value, type) and value.__module__ == module_name:
+                defined.update(
+                    attribute.__name__
+                    for attribute in vars(value).values()
+                    if isinstance(attribute, FunctionType)
+                )
+
+    dangling = sorted(set(_namespace(tmp_path)["STACK_LABELS"]) - defined)
+    assert not dangling, f"STACK_LABELS names regions that no longer exist: {dangling}"
 
 
 def test_stack_samples_are_tagged_with_the_running_phase(tmp_path: Path) -> None:
