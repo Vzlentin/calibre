@@ -736,13 +736,20 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
         if write.session != self.session:
             raise LedgerError("run-store commit session does not match the store session")
         with self._lock:
-            # The natural key is the transaction identity, so a retry replays its
-            # stored receipt without re-examining the payload. Checking the
-            # revision first would instead reject honest retries, which always
-            # carry the pre-commit revision.
+            # The natural key is the transaction identity, so the key check runs
+            # ahead of the stale-revision check: an honest retry carries the
+            # pre-commit revision and would otherwise be rejected as stale. That
+            # ordering gives up the stale check at a committed key, so comparing
+            # the revision inside the branch is all that still separates a retry
+            # from a conflicting write submitted under the same key.
             previous = self._commits.get(write.commit_key)
             if previous is not None:
-                return previous
+                if previous.expected_revision == write.expected_revision:
+                    return previous
+                raise LedgerError(
+                    f"journal key {write.commit_key!r} already has a committed write "
+                    f"from revision {previous.expected_revision}"
+                )
             if write.expected_revision != self._revision:
                 raise LedgerError(
                     "run-store commit revision is stale: "
@@ -781,8 +788,8 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
             self._revision = revision
             self._commits[write.commit_key] = receipt
             for period in receipt.settlement_periods:
-                previous = self._settlement_receipts.get(period)
-                if period in self._settlement_receipts and previous != receipt:
+                existing_receipt = self._settlement_receipts.get(period)
+                if period in self._settlement_receipts and existing_receipt != receipt:
                     self._settlement_receipts[period] = None
                 else:
                     self._settlement_receipts[period] = receipt

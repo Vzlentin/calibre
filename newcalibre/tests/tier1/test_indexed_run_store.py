@@ -250,7 +250,7 @@ def test_state_footprint_tracks_committed_state_rows_and_bytes() -> None:
 
 
 def test_natural_keys_replay_stored_receipts_and_reject_stale_revisions() -> None:
-    """Replay the stored receipt at either key kind and still reject stale writes."""
+    """Replay the stored receipt at either key kind and reject conflicting or stale writes."""
     session = _session()
     store = InMemoryIndexedRunStore(
         session=session,
@@ -282,6 +282,20 @@ def test_natural_keys_replay_stored_receipts_and_reject_stale_revisions() -> Non
 
     assert store.commit(actuals_write) is actuals_receipt
     assert store.receipt(ActualsCommitKey(actuals_write.actual_keys)) is actuals_receipt
+
+    revision_before_conflict = store.revision
+    with pytest.raises(LedgerError, match="already has a committed write"):
+        store.commit(
+            OriginCommit(
+                session=session,
+                origin=origin,
+                expected_revision=store.revision,
+                state_updates={"partition": b"changed"},
+            )
+        )
+
+    assert store.revision == revision_before_conflict
+    assert store.states["partition"] == b"one"
 
     with pytest.raises(LedgerError, match="revision is stale"):
         store.commit(
