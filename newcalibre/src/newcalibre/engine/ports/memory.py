@@ -738,17 +738,28 @@ class InMemoryIndexedRunStore(_IndexedLedgerDataPlane):
         with self._lock:
             # An honest retry carries the pre-commit revision, so the natural key
             # has to be checked ahead of the revision or every retry would be
-            # rejected as stale. The cost is that a committed key gets no stale
-            # check at all: the revision comparison below is the only guard left,
-            # so a conflicting write that happens to repeat the retry's revision
-            # still replays the stored receipt.
+            # rejected as stale. That forfeits the stale check here, leaving the
+            # stored receipt as the retry predicate: bare revision equality cannot
+            # separate a resubmission from a concurrent writer that opened at the
+            # same revision, and receipt equality can. What it still cannot see is
+            # what the receipt does not carry, meaning forecast rows and checkpoint
+            # bytes, and seeing those would take the payload walk this store is
+            # built without. The comparison receipt is allocated on this branch
+            # alone; origins advance monotonically, so the lookup misses on every
+            # commit a real run makes.
             previous = self._commits.get(write.commit_key)
             if previous is not None:
-                if previous.expected_revision == write.expected_revision:
+                resubmitted = CommitReceipt.from_commit(
+                    write,
+                    revision=write.expected_revision + 1,
+                )
+                if previous == resubmitted:
                     return previous
                 raise LedgerError(
-                    f"natural key {write.commit_key!r} already has a committed write "
-                    f"from revision {previous.expected_revision}"
+                    f"{_commit_key_label(write)} already has a committed write from "
+                    f"revision {previous.expected_revision}: rejecting a differing "
+                    f"write at revision {write.expected_revision}, current "
+                    f"{self._revision}"
                 )
             if write.expected_revision != self._revision:
                 raise LedgerError(
@@ -1253,6 +1264,19 @@ def _pending_group(value: PendingObservation) -> _PendingGroup:
     """Return the bounded forecast lineage needed for window-sum readiness."""
     key = value.forecast_key
     return key.series_key, key.origin, key.model_name
+
+
+def _commit_key_label(write: OriginCommit | ActualsCommit) -> str:
+    """Name a transaction's natural key without rendering every key it holds.
+
+    An actuals natural key carries one entry per submitted record, which renders
+    to over a million characters at full M5 width, so only its size and endpoints
+    are reported.
+    """
+    if isinstance(write, OriginCommit):
+        return f"origin natural key {write.origin!r}"
+    keys = write.actual_keys
+    return f"actuals natural key of {len(keys)} records from {keys[0]!r} to {keys[-1]!r}"
 
 
 def _checkpoint_key_from_index(encoded: bytes) -> str:

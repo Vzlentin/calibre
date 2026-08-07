@@ -283,7 +283,36 @@ def test_natural_keys_replay_stored_receipts_and_reject_conflicting_or_stale_wri
     assert store.commit(actuals_write) is actuals_receipt
     assert store.receipt(ActualsCommitKey(actuals_write.actual_keys)) is actuals_receipt
 
+    # The origin receipt is now more than one revision behind, which is the case
+    # the key-before-revision ordering exists for.
+    assert store.commit(origin_write) is origin_receipt
+
     before_conflict = _durable_families(store)
+    # A conflicting write reusing the committed write's own revision, at each key
+    # kind: the revision alone cannot tell it from a resubmission.
+    with pytest.raises(LedgerError, match="origin natural key .* already has a committed write"):
+        store.commit(
+            OriginCommit(
+                session=session,
+                origin=origin,
+                expected_revision=origin_write.expected_revision,
+                state_updates={"partition": b"changed"},
+            )
+        )
+
+    with pytest.raises(LedgerError, match="actuals natural key of 1 records"):
+        store.commit(
+            ActualsCommit(
+                session=session,
+                origin=snapshot.origin,
+                expected_revision=snapshot.revision,
+                actual_keys=actuals_write.actual_keys,
+                observe_cycle=_observe(snapshot),
+                state_updates={"partition": b"changed"},
+            )
+        )
+
+    # A fresh, non-stale write at a committed key.
     with pytest.raises(LedgerError, match="already has a committed write"):
         store.commit(
             OriginCommit(
@@ -303,6 +332,42 @@ def test_natural_keys_replay_stored_receipts_and_reject_conflicting_or_stale_wri
                 origin=pd.Timestamp("2026-01-04"),
                 expected_revision=origin_write.expected_revision,
                 state_updates={"partition": b"changed"},
+            )
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="A receipt carries has_forecasts, not forecast rows or checkpoint bytes, so "
+    "separating this write from the stored one needs the payload walk the store omits.",
+)
+def test_conflicting_write_differing_only_beyond_the_receipt_is_rejected() -> None:
+    """Reject a same-revision write whose only differences the receipt cannot see."""
+    session = _session()
+    store = InMemoryIndexedRunStore(
+        session=session,
+        calendar=CALENDAR,
+        actuals_semantics=ActualsSemantics.DEMAND,
+    )
+    origin = pd.Timestamp("2026-01-03")
+    opened_revision = store.revision
+    store.commit(
+        OriginCommit(
+            session=session,
+            origin=origin,
+            expected_revision=opened_revision,
+            forecasts=(_forecast_write(origin),),
+        )
+    )
+
+    with pytest.raises(LedgerError, match="already has a committed write"):
+        store.commit(
+            OriginCommit(
+                session=session,
+                origin=origin,
+                expected_revision=opened_revision,
+                forecasts=(_forecast_write(origin, point=999.0),),
+                checkpoint_updates={"staged": b"never-lands"},
             )
         )
 

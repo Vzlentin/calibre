@@ -416,7 +416,19 @@ class IndexedRunStore(Protocol):
         ...
 
     def commit(self, write: OriginCommit | ActualsCommit) -> CommitReceipt:
-        """Atomically publish one revision-bound transaction."""
+        """Atomically publish one revision-bound transaction.
+
+        A natural key admits exactly one transaction. Resubmitting that same
+        transaction replays its stored receipt so a lost response is recoverable;
+        a write that differs from the stored receipt at a committed key is
+        rejected rather than silently discarded, so concurrent writers resolve at
+        the store instead of by a read-then-insert race.
+
+        Raises:
+            LedgerError: If the write is stale, conflicts with the receipt
+                already committed at its natural key, or violates any durable
+                invariant the store enforces.
+        """
         ...
 
 
