@@ -42,8 +42,9 @@ from newcalibre.conformal.types import (
     ObserveAnnotation,
     ResolvedObservation,
     RuntimeContractError,
-    _decode_label,
+    StateLabel,
     derive_partition_label,
+    require_state_label,
 )
 from newcalibre.domain import (
     HORIZON_STEP,
@@ -282,11 +283,7 @@ class _SplitStateCodec:
     def scope_for(self, label: str) -> StateScope:
         scope = self._codec.scope_for(label)
         if scope is StateScope.PARTITION:
-            try:
-                _namespace, payload = _decode_label(label)
-            except RuntimeContractError as error:
-                raise StateCodecError(str(error)) from error
-            fields = cast(dict[str, object], payload)
+            fields = cast(dict[str, object], require_state_label(label).payload)
             if fields["horizon_scope"] != self._emission_scope.value:
                 raise StateCodecError("split partition label has the wrong method emission scope")
         return scope
@@ -525,7 +522,7 @@ class SplitConformalRuntime:
         model_name: str,
         series_key: str,
         horizon_step: int,
-    ) -> str:
+    ) -> StateLabel:
         value = "global" if self._config.partition_by == "global" else series_key
         return derive_partition_label(
             model_name,

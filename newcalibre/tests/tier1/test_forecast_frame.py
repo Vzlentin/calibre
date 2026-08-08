@@ -220,6 +220,34 @@ def test_frame_validation_rejects_duplicate_keys_and_wrong_target_derivation() -
         validate_forecast_frame(wrong_target, calendar=WEEKLY)
 
 
+def test_frame_validation_reports_the_first_offending_target_across_repeated_pairs() -> None:
+    """Fan one advance per unique origin/step back to every row that shares it."""
+    monthly = Calendar("MS").bind(pd.Timestamp("2026-01-01"))
+    frame = pd.DataFrame(
+        {
+            SERIES_KEY: pd.Series(["sku-a", "sku-b", "sku-a", "sku-b"], dtype="string"),
+            TARGET_TIMESTAMP: pd.to_datetime(
+                ["2026-02-01", "2026-02-01", "2026-01-01", "2026-01-01"]
+            ),
+            ACTUAL_VALUE: pd.Series([np.nan] * 4, dtype="float64"),
+            POINT_FORECAST: pd.Series([1.0, 2.0, 3.0, 4.0], dtype="float64"),
+            HORIZON_STEP: pd.Series([2, 2, 1, 1], dtype="int64"),
+            ORIGIN: pd.to_datetime(["2026-01-01"] * 4),
+            MODEL_NAME: pd.Series(["seasonal-naive"] * 4, dtype="string"),
+        }
+    )
+
+    pd.testing.assert_frame_equal(validate_forecast_frame(frame, calendar=monthly), frame)
+
+    mismatched = frame.copy(deep=True)
+    mismatched.loc[3, TARGET_TIMESTAMP] = pd.Timestamp("2026-03-01")
+    with pytest.raises(
+        ForecastFrameError,
+        match="row 3 has 2026-03-01 00:00:00, expected 2026-01-01 00:00:00",
+    ):
+        validate_forecast_frame(mismatched, calendar=monthly)
+
+
 def test_frame_validation_rejects_off_calendar_origin() -> None:
     frame = _weekly_frame().iloc[[0]].copy()
     frame[ORIGIN] = pd.to_datetime(["2026-01-13"])

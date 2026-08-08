@@ -40,8 +40,9 @@ from newcalibre.conformal.types import (
     ObserveAnnotation,
     ResolvedObservation,
     RuntimeContractError,
-    _decode_label,
+    StateLabel,
     derive_partition_label,
+    require_state_label,
 )
 from newcalibre.domain import (
     HORIZON_STEP,
@@ -228,11 +229,7 @@ class _WeightedStateCodec:
     def scope_for(self, label: str) -> StateScope:
         scope = self._codec.scope_for(label)
         if scope is StateScope.PARTITION:
-            try:
-                _namespace, payload = _decode_label(label)
-            except RuntimeContractError as error:
-                raise StateCodecError(str(error)) from error
-            fields = cast(dict[str, object], payload)
+            fields = cast(dict[str, object], require_state_label(label).payload)
             if fields["horizon_scope"] != EmissionScope.PER_STEP.value:
                 raise StateCodecError(
                     "weighted partition label has the wrong method emission scope"
@@ -451,7 +448,7 @@ class WeightedConformalRuntime:
         post_state = state.with_rows(updated_rows)
         return ObserveEffect(post_state, dirty, annotations)
 
-    def _partition_label(self, model_name: str, series_key: str) -> str:
+    def _partition_label(self, model_name: str, series_key: str) -> StateLabel:
         value = "global" if self._config.partition_by == "global" else series_key
         return derive_partition_label(model_name, value, self.manifest.emission_scope)
 

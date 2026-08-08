@@ -57,6 +57,7 @@ from newcalibre.conformal.types import (
     ObserveAnnotation,
     ResolvedObservation,
     RuntimeContractError,
+    StateLabel,
     derive_partition_label,
 )
 
@@ -151,6 +152,7 @@ __all__ = [
     "SplitConformalRuntime",
     "SplitPerStepConfig",
     "SplitWindowSumConfig",
+    "StateLabel",
     "WEIGHTED_PER_STEP",
     "WEIGHTED_PER_STEP_MANIFEST",
     "WeightedConformalRuntime",

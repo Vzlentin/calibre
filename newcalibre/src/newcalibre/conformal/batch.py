@@ -17,9 +17,10 @@ from newcalibre.conformal.types import (
     ObserveAnnotation,
     ResolvedObservation,
     RuntimeContractError,
-    _decode_label,
+    StateLabel,
     _snapshot_issuances,
     _snapshot_iterable,
+    require_state_label,
 )
 
 type _PairRows[T] = Mapping[str, T] | Iterable[tuple[str, T]]
@@ -45,12 +46,13 @@ def _pairs[T](values: _PairRows[T] | None, *, name: str) -> tuple[tuple[str, T],
     return cast(tuple[tuple[str, T], ...], snapshot)
 
 
-def _canonical_labels(labels: Iterable[str], *, partitions_only: bool) -> tuple[str, ...]:
-    snapshot = tuple(labels)
-    for label in snapshot:
-        scope, _payload = _decode_label(label)
-        if partitions_only and scope != "partition":
+def _canonical_labels(labels: Iterable[str], *, partitions_only: bool) -> tuple[StateLabel, ...]:
+    snapshot: list[StateLabel] = []
+    for label in labels:
+        typed = require_state_label(label)
+        if partitions_only and typed.scope != "partition":
             raise RuntimeContractError("batch rows must use partition labels")
+        snapshot.append(typed)
     return tuple(sorted(snapshot, key=str.encode))
 
 
@@ -382,17 +384,17 @@ class CalibrationResult:
         dirty_labels: Iterable[str] = (),
         issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
     ) -> None:
+        """Take ownership of the calibrated frame a method has just built."""
         if not isinstance(forecasts, pd.DataFrame):
             raise RuntimeContractError("calibrated forecasts must be a pandas DataFrame")
         if forecasts.columns.has_duplicates:
             raise RuntimeContractError("calibrated forecasts cannot have duplicate columns")
         if not isinstance(state, ConformalStateBatch):
             raise RuntimeContractError("apply post-state must be a ConformalStateBatch")
-        snapshot = forecasts.copy(deep=True)
-        snapshot.attrs = {}
+        forecasts.attrs = {}
         dirty = _snapshot_dirty_labels(dirty_labels, state=state)
-        frozen_issuances = _snapshot_issuances(snapshot, issuances)
-        object.__setattr__(self, "_forecasts", snapshot)
+        frozen_issuances = _snapshot_issuances(forecasts, issuances)
+        object.__setattr__(self, "_forecasts", forecasts)
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "dirty_labels", dirty)
         object.__setattr__(self, "issuances", MappingProxyType(frozen_issuances))

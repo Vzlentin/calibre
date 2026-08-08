@@ -175,8 +175,7 @@ class ForecastBatch:
         issuances: Mapping[ForecastKey, Mapping[BoundKey, ForecastIssuance]] | None = None,
         observation_issuances: Mapping[ForecastKey, IssuedBoundFacts] | None = None,
     ) -> None:
-        owned_frame = pd.DataFrame(frame, copy=True)
-        validated = validate_forecast_frame(owned_frame, calendar=calendar)
+        validated = validate_forecast_frame(frame, calendar=calendar)
         keys = _forecast_keys(validated)
         bound_groups = forecast_bound_groups(validated.columns)
         interval_groups = tuple(group for group in bound_groups if len(group) == 2)
@@ -734,7 +733,9 @@ class Engine:
         if not isinstance(forecasts, ForecastBatch):
             raise TypeError("reconcile requires a ForecastBatch")
         self._require_forecast_batch(forecasts)
-        reconciliation_input = forecasts.frame
+        # Reconcilers copy before writing, and every path back into a batch
+        # revalidates into a fresh deep copy, so the owned frame cannot alias out.
+        reconciliation_input = forecasts._frame
         preserved_distributional: pd.DataFrame | None = None
         if self._reconciliation_hierarchy is None:
             bound_columns = tuple(
@@ -755,10 +756,7 @@ class Engine:
         if not isinstance(result, pd.DataFrame):
             raise _EngineError("reconciliation strategy must return a pandas DataFrame")
         if preserved_distributional is not None:
-            point_result = validate_forecast_frame(
-                pd.DataFrame(result, copy=True),
-                calendar=forecasts.calendar,
-            )
+            point_result = validate_forecast_frame(result, calendar=forecasts.calendar)
             if _forecast_keys(point_result) != _forecast_keys(reconciliation_input):
                 raise _EngineError(
                     "no-hierarchy reconciliation changed forecast rows before bound restoration"
@@ -766,10 +764,7 @@ class Engine:
             restored = preserved_distributional.copy(deep=True)
             restored[POINT_FORECAST] = point_result[POINT_FORECAST].to_numpy(copy=True)
             result = restored
-        normalized = validate_forecast_frame(
-            pd.DataFrame(result, copy=True),
-            calendar=forecasts.calendar,
-        )
+        normalized = validate_forecast_frame(result, calendar=forecasts.calendar)
         result_keys = _forecast_keys(normalized)
         original_keys = set(forecasts.issuances)
         removed = original_keys - set(result_keys)
@@ -841,7 +836,7 @@ class Engine:
         )
         try:
             runtime_result = self._runtime.apply(
-                forecasts.frame,
+                forecasts._frame,
                 observed_state,
                 context=context,
             )
@@ -856,7 +851,7 @@ class Engine:
             for key in forecasts.issuances
         }
         calibrated_value = ForecastBatch(
-            runtime_result.forecasts,
+            runtime_result._forecasts,
             calendar=forecasts.calendar,
             issuances=ledger_issuances,
             observation_issuances=observation_issuances,

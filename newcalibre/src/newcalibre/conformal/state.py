@@ -12,7 +12,7 @@ from newcalibre.conformal.batch import ConformalStateBatch
 from newcalibre.conformal.types import (
     METHOD_SCOPE_LABEL,
     RuntimeContractError,
-    _decode_label,
+    require_state_label,
 )
 from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json_bytes
 
@@ -63,10 +63,10 @@ class JsonStateCodec:
     def scope_for(self, label: str) -> StateScope:
         """Return the structural scope encoded by one validated state label."""
         try:
-            scope, _ = _decode_label(label)
+            typed = require_state_label(label)
         except RuntimeContractError as error:
             raise StateCodecError(str(error)) from error
-        return StateScope(scope)
+        return StateScope(typed.scope)
 
     def encode(self, label: str, payload: object) -> bytes:
         """Encode one independently addressable finite payload as opaque bytes."""
