@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import inspect
 import json
 import math
+import string
 from dataclasses import FrozenInstanceError
 from typing import Any, cast
 
@@ -34,6 +36,7 @@ from newcalibre.conformal import (
     PostWarmupNonFinite,
     ResolvedObservation,
     RuntimeContractError,
+    StateLabel,
     derive_partition_label,
     require_calibration_context,
 )
@@ -51,6 +54,7 @@ from newcalibre.domain import (
 )
 
 pytestmark = pytest.mark.tier1
+_BASE64URL_DIGITS = string.ascii_uppercase + string.ascii_lowercase + string.digits + "-_"
 
 
 class _Config(BaseModel):
@@ -274,6 +278,69 @@ def test_partition_label_rejects_malformed_inputs(
             cast(Any, partition_value),
             cast(Any, horizon_scope),
         )
+
+
+def _forge_trailing_bits(label: str) -> str:
+    """Re-spell a label's final base64url digit with non-zero trailing bits."""
+    prefix, token = label[:3], label[3:]
+    decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    for digit in _BASE64URL_DIGITS:
+        forged = token[:-1] + digit
+        if (
+            digit != token[-1]
+            and base64.urlsafe_b64decode(forged + "=" * (-len(forged) % 4)) == decoded
+        ):
+            return prefix + forged
+    raise AssertionError("label token carries no spare trailing bits to forge")
+
+
+def test_state_labels_reject_noncanonical_encodings_at_every_ingress() -> None:
+    label = _partition()
+    trailing_bits = _forge_trailing_bits(label)
+    unsorted_payload = json.dumps(
+        {
+            "partition_value": {"tag": "string", "value": "global"},
+            "model_name": "fixture-model",
+            "horizon_scope": EmissionScope.PER_STEP.value,
+        },
+        separators=(",", ":"),
+    ).encode()
+    unsorted = "p1." + base64.urlsafe_b64encode(unsorted_payload).rstrip(b"=").decode("ascii")
+
+    assert trailing_bits != label
+    for forged in (trailing_bits, unsorted):
+        with pytest.raises(RuntimeContractError, match="canonical encoding"):
+            ConformalStateBatch({forged: b"state"})
+        with pytest.raises(RuntimeContractError, match="canonical encoding"):
+            CalibrationSeedBatch({forged: [1.0]})
+
+
+def test_state_envelope_label_is_reproven_when_it_arrives_from_json() -> None:
+    codec = JsonStateCodec("fixture", 1)
+    label = _partition()
+    envelope = json.loads(codec.encode(label, {"score": 1.0}))
+    envelope["label"] = _forge_trailing_bits(label)
+    forged = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+    with pytest.raises(StateCodecError, match="canonical encoding"):
+        codec.decode(forged)
+
+
+def test_issued_bound_facts_require_a_typed_label_and_reuse_immutable_snapshots() -> None:
+    label = _partition()
+    facts = _issued(label)
+
+    assert IssuedBoundFacts.snapshot(facts) is facts
+    # A plain string never carries the construction-time canonicity proof.
+    assert not isinstance(str(label), StateLabel)
+    for rejected in (str(label), METHOD_SCOPE_LABEL):
+        with pytest.raises(RuntimeContractError, match="data-derived label"):
+            _issued(rejected)
 
 
 def test_delivery_preserves_partition_row_order_and_snapshots_observations() -> None:
@@ -548,10 +615,12 @@ def test_effect_and_calibration_result_snapshot_values_and_require_bytes() -> No
             ConformalStateBatch({_partition(): bytearray(b"state")}), ()
         )
 
+    # A calibration result owns the frame the calling method just built, and
+    # hands out only isolated copies of it.
     frame = pd.DataFrame({"series_key": ["a"], "point_forecast": [1.0]})
     result = CalibrationResult(frame, ConformalStateBatch({_partition(): b"state"}))
-    frame.loc[0, "point_forecast"] = 99.0
     returned = result.forecasts
+    assert returned is not result.forecasts
     returned.loc[0, "point_forecast"] = 88.0
     assert result.forecasts.loc[0, "point_forecast"] == 1.0
 

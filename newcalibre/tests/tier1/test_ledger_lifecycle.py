@@ -233,7 +233,9 @@ def test_pending_observation_projection_is_exact_append_ordered_and_defensive() 
     assert second == first
     assert second is not first
     assert second[0] is not first[0]
-    assert second[0].issued is not first[0].issued
+    # Issued facts are deeply immutable, so each projection shares them instead
+    # of rebuilding an identical value object per row.
+    assert second[0].issued is first[0].issued
 
 
 def test_pending_projection_preserves_missing_facts_and_cold_start_nan_bounds() -> None:

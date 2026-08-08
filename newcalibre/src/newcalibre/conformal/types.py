@@ -39,13 +39,36 @@ class RuntimeContractError(ValueError):
     """Report an invalid conformal runtime value or call contract."""
 
 
-def _encoded_label(prefix: str, payload: object) -> str:
+class StateLabel(str):
+    """Address conformal state with a label that is canonical by construction.
+
+    Only :func:`_encoded_label` mints one, so holding an instance is itself the
+    proof of canonical encoding, and the decoded payload travels with it. A
+    ``str`` subclass keeps every dict key, comparison, sort, and JSON write of a
+    label unchanged. Use :func:`require_state_label` at every ingress where an
+    untrusted string arrives.
+    """
+
+    __slots__ = ("payload", "scope")
+
+    scope: str
+    payload: object
+
+    def __new__(cls, text: str, *, scope: str, payload: object) -> StateLabel:
+        label = super().__new__(cls, text)
+        label.scope = scope
+        label.payload = payload
+        return label
+
+
+def _encoded_label(prefix: str, payload: object) -> StateLabel:
     try:
         raw = canonical_json_bytes(payload, path="conformal state label")
     except CanonicalJsonError as error:
         raise RuntimeContractError(str(error)) from error
     token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-    return f"{prefix}{token}"
+    scope = "method" if prefix == _METHOD_PREFIX else "partition"
+    return StateLabel(f"{prefix}{token}", scope=scope, payload=payload)
 
 
 METHOD_SCOPE_LABEL: Final = _encoded_label(_METHOD_PREFIX, _METHOD_SCOPE_PAYLOAD)
@@ -57,7 +80,7 @@ def derive_partition_label(
     horizon_scope: EmissionScope,
     *,
     horizon_step: int | None = None,
-) -> str:
+) -> StateLabel:
     """Derive an injective label from model, typed partition, scope, and step."""
     model = _require_text(model_name, name="model name", trimmed=True)
     if not isinstance(horizon_scope, EmissionScope):
@@ -94,7 +117,10 @@ def _partition_value(value: object) -> tuple[str, object]:
     )
 
 
-def _decode_label(label: object) -> tuple[str, object]:
+def require_state_label(label: object) -> StateLabel:
+    """Prove one label's canonicity, unless it is already a :class:`StateLabel`."""
+    if isinstance(label, StateLabel):
+        return label
     text = _require_text(label, name="state label")
     if text.startswith(_PARTITION_PREFIX):
         prefix = _PARTITION_PREFIX
@@ -125,14 +151,17 @@ def _decode_label(label: object) -> tuple[str, object]:
         canonical = canonical_json_bytes(payload, path="conformal state label")
     except (CanonicalJsonError, json.JSONDecodeError) as error:
         raise RuntimeContractError("state label payload must be canonical JSON") from error
-    if raw != canonical or _encoded_label(prefix, payload) != text:
+    # Comparing the re-encoded token rejects the non-zero trailing bits that
+    # base64 validation admits, without a second canonical-JSON encode.
+    canonical_token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    if raw != canonical or canonical_token != token:
         raise RuntimeContractError("state label payload must use canonical encoding")
     if scope == "method":
         if payload != _METHOD_SCOPE_PAYLOAD or text != METHOD_SCOPE_LABEL:
             raise RuntimeContractError("method-scope state label is not the reserved label")
-        return scope, payload
-    _validate_partition_payload(payload)
-    return scope, payload
+    else:
+        _validate_partition_payload(payload)
+    return StateLabel(text, scope=scope, payload=payload)
 
 
 def _validate_partition_payload(payload: object) -> None:
@@ -210,7 +239,7 @@ class IssuedBoundFacts:
     method_name: str
     emission_form: EmissionForm
     emission_scope: EmissionScope
-    partition_label: str
+    partition_label: StateLabel
     working_level: float
     state_reference: str
     lower_bound: float
@@ -223,6 +252,10 @@ class IssuedBoundFacts:
     @classmethod
     def snapshot(cls, facts: IssuedBoundFacts) -> IssuedBoundFacts:
         """Return an exact immutable snapshot of issued bound facts."""
+        # Every field is normalized and deeply immutable once __post_init__ has
+        # run, so an instance of exactly this class already is its own snapshot.
+        if type(facts) is cls:
+            return facts
         if not isinstance(facts, cls):
             raise RuntimeContractError("issuance metadata must contain IssuedBoundFacts")
         return cls(
@@ -246,8 +279,8 @@ class IssuedBoundFacts:
             raise RuntimeContractError("issued emission form must be an EmissionForm")
         if not isinstance(self.emission_scope, EmissionScope):
             raise RuntimeContractError("issued emission scope must be an EmissionScope")
-        scope, _ = _decode_label(self.partition_label)
-        if scope != "partition":
+        label = self.partition_label
+        if not isinstance(label, StateLabel) or label.scope != "partition":
             raise RuntimeContractError("issued partition label must be a data-derived label")
         level = _finite_real(self.working_level, name="working level")
         _require_text(self.state_reference, name="state reference")
@@ -426,17 +459,21 @@ def _snapshot_issuances(
             "calibration issuances must exactly cover calibrated forecast keys"
         )
     lower_column, upper_column = interval_groups[0]
+    lower_values = forecasts[lower_column].to_numpy(dtype=float)
+    upper_values = forecasts[upper_column].to_numpy(dtype=float)
+    matching_levels: set[float] = set()
     frozen: dict[ForecastKey, IssuedBoundFacts] = {}
     for position, key in enumerate(expected_keys):
         facts = IssuedBoundFacts.snapshot(snapshot[key])
-        if interval_columns(facts.effective_descriptor.level) != (lower_column, upper_column):
-            raise RuntimeContractError(
-                "issuance descriptor level must identify the calibrated interval columns"
-            )
-        lower = float(forecasts.iloc[position][lower_column])
-        upper = float(forecasts.iloc[position][upper_column])
-        if not _same_bound(lower, facts.lower_bound) or not _same_bound(
-            upper,
+        level = facts.effective_descriptor.level
+        if level not in matching_levels:
+            if interval_columns(level) != (lower_column, upper_column):
+                raise RuntimeContractError(
+                    "issuance descriptor level must identify the calibrated interval columns"
+                )
+            matching_levels.add(level)
+        if not _same_bound(float(lower_values[position]), facts.lower_bound) or not _same_bound(
+            float(upper_values[position]),
             facts.upper_bound,
         ):
             raise RuntimeContractError("issuance bounds must equal the calibrated frame row")
