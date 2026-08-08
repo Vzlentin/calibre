@@ -180,10 +180,12 @@ def validate_forecast_frame(
     *,
     calendar: Calendar,
 ) -> pd.DataFrame:
-    """Validate a frame atomically and return its normalized copy.
+    """Validate a frame atomically and return its normalized owned copy.
 
     Accepted real-numeric value columns are copied and normalized to
-    ``float64``. All other required dtypes must already be exact.
+    ``float64``. All other required dtypes must already be exact. Any
+    ``DataFrame`` subclass is collapsed first, so overridden accessors cannot
+    mask malformed values from validation.
     """
     if not isinstance(frame, pd.DataFrame):
         raise ForecastFrameError("forecast frame must be a pandas DataFrame")
@@ -199,7 +201,7 @@ def validate_forecast_frame(
     if _FITTED_VALUE_SIDECAR_COLUMN in frame.columns:
         raise ForecastFrameError("fitted values belong in the separate fitted-values sidecar")
 
-    normalized = frame.copy(deep=True).set_flags(allows_duplicate_labels=True)
+    normalized = pd.DataFrame(frame, copy=True).set_flags(allows_duplicate_labels=True)
     normalized.attrs = {}
     normalized.index.name = None
     normalized.columns.name = None
@@ -454,17 +456,20 @@ def _validate_row_identity(frame: pd.DataFrame) -> None:
 def _validate_target_timestamps(frame: pd.DataFrame, calendar: Calendar) -> None:
     if not isinstance(calendar, Calendar):
         raise ForecastFrameError("calendar must be a Calendar")
-    expected: list[pd.Timestamp] = []
-    for origin, horizon_step in zip(frame[ORIGIN], frame[HORIZON_STEP], strict=True):
-        if pd.isna(origin):
-            raise ForecastFrameError("origin cannot be missing")
+    if frame[ORIGIN].isna().any():
+        raise ForecastFrameError("origin cannot be missing")
+    # A frame carries at most horizon distinct (origin, step) pairs, so advance
+    # the calendar once per pair and fan the results back out by row.
+    codes, pairs = pd.MultiIndex.from_arrays([frame[ORIGIN], frame[HORIZON_STEP]]).factorize()
+    advanced: list[pd.Timestamp] = []
+    for origin, horizon_step in pairs:
         try:
-            expected.append(calendar.advance(pd.Timestamp(origin), int(horizon_step) - 1))
+            advanced.append(calendar.advance(pd.Timestamp(origin), int(horizon_step) - 1))
         except CalendarError as error:
             raise ForecastFrameError(str(error)) from error
 
     actual_targets = pd.DatetimeIndex(frame[TARGET_TIMESTAMP])
-    expected_targets = pd.DatetimeIndex(expected)
+    expected_targets = pd.DatetimeIndex(advanced).take(codes)
     mismatch = actual_targets != expected_targets
     if mismatch.any():
         first = int(np.flatnonzero(mismatch)[0])
