@@ -13,7 +13,7 @@ from newcalibre.protocols.vn2 import (
     load_vn2_dataset,
     run_vn2,
 )
-from newcalibre.protocols.vn2.tracking import (
+from newcalibre.tracking import (
     TrackingError,
     VN2TrackingRecord,
     build_tracking_record,

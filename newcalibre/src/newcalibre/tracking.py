@@ -1,4 +1,4 @@
-"""Build, compare, and append compact VN2 regression records."""
+"""Build, compare, and append protocol-neutral compact tracking records."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from newcalibre.domain._canonical_json import CanonicalJsonError, canonical_json
 from newcalibre.protocols.vn2.artifacts import PLATFORM, VN2ResultBundle
 
 TRACKING_SCHEMA = 2
+M5_TRACKING_SCHEMA = 3
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LEGACY_RECORD_SHA256 = "5f094f8e1c10c2528671281e5435061544e2378fc44ba5ff6c5e82935dec179c"
@@ -32,6 +33,22 @@ _RECORD_KEYS = frozenset(
         "schema",
         "shortage_cost",
         "total_cost",
+    }
+)
+_M5_RECORD_KEYS = frozenset(
+    {
+        "candidate_sha",
+        "config_digest",
+        "coverage_by_node_digest",
+        "coverage_summary_digest",
+        "disposition",
+        "environment_digest",
+        "input_inventory_digest",
+        "lock_digest",
+        "profile_digest",
+        "record_kind",
+        "report_digest",
+        "schema",
     }
 )
 _COMPARABILITY_FIELDS = (
@@ -98,6 +115,42 @@ class VN2TrackingRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class M5TrackingRecord:
+    """Carry one compact M5 performance-result identity and disposition."""
+
+    candidate_sha: str
+    config_digest: str
+    input_inventory_digest: str
+    lock_digest: str
+    coverage_summary_digest: str
+    coverage_by_node_digest: str
+    report_digest: str
+    profile_digest: str
+    environment_digest: str
+    disposition: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "candidate_sha", _commit(self.candidate_sha, name="candidate"))
+        for name in (
+            "config_digest",
+            "input_inventory_digest",
+            "lock_digest",
+            "coverage_summary_digest",
+            "coverage_by_node_digest",
+            "report_digest",
+            "profile_digest",
+            "environment_digest",
+        ):
+            object.__setattr__(self, name, _digest(getattr(self, name), name=name))
+        if self.disposition not in {"GO", "NO-GO"}:
+            raise TrackingError("M5 disposition must equal GO or NO-GO")
+
+    def to_bytes(self) -> bytes:
+        """Serialize one record as canonical LF-terminated JSONL."""
+        return _canonical_bytes(_m5_record_value(self))
+
+
+@dataclass(frozen=True, slots=True)
 class TrackingComparison:
     """Expose signed candidate-minus-baseline cost changes."""
 
@@ -126,16 +179,38 @@ def build_tracking_record(bundle: VN2ResultBundle) -> VN2TrackingRecord:
     )
 
 
+def build_m5_tracking_record(result: object) -> M5TrackingRecord:
+    """Reduce one validated Gate C result to its compact five-file identity."""
+    from newcalibre.benchmarking.result import M5GateCResult
+
+    if not isinstance(result, M5GateCResult):
+        raise TrackingError("M5 tracking projection requires a validated M5GateCResult")
+    inputs = cast(dict[str, object], result.environment["input"])
+    provenance = cast(dict[str, object], result.environment["provenance"])
+    return M5TrackingRecord(
+        candidate_sha=cast(str, result.environment["candidate_sha"]),
+        config_digest=cast(str, inputs["config_sha256"]),
+        input_inventory_digest=cast(str, inputs["inventory_sha256"]),
+        lock_digest=cast(str, provenance["lock_sha256"]),
+        coverage_summary_digest=result.artifacts.coverage_summary_digest,
+        coverage_by_node_digest=result.artifacts.coverage_by_node_digest,
+        report_digest=result.artifacts.report_digest,
+        profile_digest=result.profile_digest,
+        environment_digest=result.environment_digest,
+        disposition=result.disposition,
+    )
+
+
 def load_tracking_history(
     value: bytes | bytearray | str | Path,
-) -> tuple[VN2TrackingRecord, ...]:
+) -> tuple[VN2TrackingRecord | M5TrackingRecord, ...]:
     """Load canonical compact JSONL records in their exact append order."""
     payload = _tracking_bytes(value)
     if not payload:
         return ()
     if not payload.endswith(b"\n") or b"\r" in payload:
         raise TrackingError("tracking history must use LF-terminated JSONL")
-    records: list[VN2TrackingRecord] = []
+    records: list[VN2TrackingRecord | M5TrackingRecord] = []
     for index, line in enumerate(payload.splitlines(), start=1):
         try:
             raw = json.loads(line.decode("utf-8"))
@@ -146,6 +221,23 @@ def load_tracking_history(
             if index != 1 or not isinstance(raw, dict):
                 raise TrackingError("the historical Gate A record must remain first")
             record = _legacy_record(cast(dict[str, object], raw))
+        elif isinstance(raw, dict) and raw.get("record_kind") == "m5-performance":
+            if set(raw) != _M5_RECORD_KEYS or raw.get("schema") != M5_TRACKING_SCHEMA:
+                raise TrackingError(f"tracking line {index} does not use M5 compact schema 3")
+            record = M5TrackingRecord(
+                candidate_sha=raw["candidate_sha"],
+                config_digest=raw["config_digest"],
+                input_inventory_digest=raw["input_inventory_digest"],
+                lock_digest=raw["lock_digest"],
+                coverage_summary_digest=raw["coverage_summary_digest"],
+                coverage_by_node_digest=raw["coverage_by_node_digest"],
+                report_digest=raw["report_digest"],
+                profile_digest=raw["profile_digest"],
+                environment_digest=raw["environment_digest"],
+                disposition=raw["disposition"],
+            )
+            if record.to_bytes() != encoded_line:
+                raise TrackingError(f"tracking line {index} is not canonical JSON")
         else:
             if (
                 not isinstance(raw, dict)
@@ -169,9 +261,9 @@ def load_tracking_history(
             if record.to_bytes() != encoded_line:
                 raise TrackingError(f"tracking line {index} is not canonical JSON")
         records.append(record)
-    candidates = [record.candidate_sha for record in records]
-    if len(set(candidates)) != len(candidates):
-        raise TrackingError("tracking candidate SHAs must be unique")
+    identities = [(type(record), record.candidate_sha) for record in records]
+    if len(set(identities)) != len(identities):
+        raise TrackingError("tracking record-family candidate SHAs must be unique")
     return tuple(records)
 
 
@@ -194,7 +286,7 @@ def compare_tracking_records(
 def validate_tracking_append(
     base: bytes | bytearray | str | Path,
     head: bytes | bytearray | str | Path,
-) -> tuple[VN2TrackingRecord, ...]:
+) -> tuple[VN2TrackingRecord | M5TrackingRecord, ...]:
     """Require the proposed history to preserve every base byte as an exact prefix."""
     base_bytes = _tracking_bytes(base)
     head_bytes = _tracking_bytes(head)
@@ -255,6 +347,23 @@ def _record_value(record: VN2TrackingRecord) -> dict[str, object]:
     }
 
 
+def _m5_record_value(record: M5TrackingRecord) -> dict[str, object]:
+    return {
+        "candidate_sha": record.candidate_sha,
+        "config_digest": record.config_digest,
+        "coverage_by_node_digest": record.coverage_by_node_digest,
+        "coverage_summary_digest": record.coverage_summary_digest,
+        "disposition": record.disposition,
+        "environment_digest": record.environment_digest,
+        "input_inventory_digest": record.input_inventory_digest,
+        "lock_digest": record.lock_digest,
+        "profile_digest": record.profile_digest,
+        "record_kind": "m5-performance",
+        "report_digest": record.report_digest,
+        "schema": M5_TRACKING_SCHEMA,
+    }
+
+
 def _canonical_bytes(value: object) -> bytes:
     try:
         return canonical_json_bytes(value, path="VN2 tracking record") + b"\n"
@@ -301,12 +410,15 @@ def _cost(value: object, *, name: str) -> float:
 
 
 __all__ = [
+    "M5_TRACKING_SCHEMA",
+    "M5TrackingRecord",
     "PLATFORM",
     "TRACKING_SCHEMA",
     "TrackingComparison",
     "TrackingError",
     "VN2TrackingRecord",
     "build_tracking_record",
+    "build_m5_tracking_record",
     "compare_tracking_records",
     "load_tracking_history",
     "validate_tracking_append",

@@ -11,7 +11,7 @@ import pytest
 
 from newcalibre.domain._canonical_json import canonical_json_bytes
 from newcalibre.engine import LedgerBatch, LedgerSelection
-from newcalibre.protocols.m5 import load_m5_config, score_m5
+from newcalibre.protocols.m5 import M5ArtifactError, load_m5_artifacts, load_m5_config, score_m5
 from newcalibre.protocols.m5.scorer import M5ScoringError
 from tier1.test_m5_scorer import _GATE_C, _Reader, _rows
 
@@ -94,6 +94,9 @@ def test_artifacts_have_exact_names_canonical_summary_and_fixed_node_schema(
         "mask_identity",
         "mask_equal",
     ]
+    loaded = load_m5_artifacts(output)
+    assert loaded.summary == summary
+    assert loaded.nodes.equals(table)
     assert table.num_rows == 7
     rows = table.to_pylist()
     assert [(row["level"], row["node"].encode(), row["model"].encode()) for row in rows] == sorted(
@@ -101,6 +104,20 @@ def test_artifacts_have_exact_names_canonical_summary_and_fixed_node_schema(
     )
     assert all(row["metric"] == "sales-coverage" for row in rows)
     assert all(row["mask_equal"] for row in rows)
+
+
+def test_artifact_loader_rejects_cross_projection_tampering(tmp_path: Path) -> None:
+    """Reject canonical-looking files whose projections no longer agree."""
+    output = tmp_path / "diagnostics"
+    score_m5(load_m5_config(_GATE_C), _Reader(_rows()), output_dir=output)
+    summary = json.loads((output / "coverage-summary.json").read_text())
+    summary["population"]["counts"]["covered"] -= 1
+    (output / "coverage-summary.json").write_bytes(
+        canonical_json_bytes(summary, path="tampered summary") + b"\n"
+    )
+
+    with pytest.raises(M5ArtifactError, match="inconsistent"):
+        load_m5_artifacts(output)
 
 
 def test_all_projections_repeat_complete_context_and_sales_limitation(tmp_path: Path) -> None:

@@ -10,13 +10,10 @@ PROJECT_ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from newcalibre.oracle import OracleEvidenceError, load_capture  # noqa: E402
-from newcalibre.protocols.vn2 import (  # noqa: E402
-    VN2ResultError,
-    build_tracking_record,
-    load_result_bundle,
-)
-from newcalibre.protocols.vn2.tracking import (  # noqa: E402
+from newcalibre.protocols.vn2 import VN2ResultError, load_result_bundle  # noqa: E402
+from newcalibre.tracking import (  # noqa: E402
     TrackingError,
+    build_tracking_record,
     validate_tracking_append,
 )
 

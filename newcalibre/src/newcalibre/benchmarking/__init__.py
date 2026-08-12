@@ -14,8 +14,15 @@ from newcalibre.benchmarking.profile import (
     LifecycleRecord,
     ProfileError,
     aggregate_profile,
-    publish_profile_artifacts,
     validate_profile,
+)
+from newcalibre.benchmarking.result import (
+    RESULT_FILE_NAMES,
+    M5GateCResult,
+    M5GateCResultError,
+    load_m5_gate_c_result,
+    publish_m5_gate_c_result,
+    recompute_gate_c_failures,
 )
 
 __all__ = [
@@ -25,11 +32,16 @@ __all__ = [
     "LinuxMemoryReader",
     "MemoryMonitor",
     "MemorySample",
+    "M5GateCResult",
+    "M5GateCResultError",
     "ProcessResidentSample",
     "ProfileError",
+    "RESULT_FILE_NAMES",
     "aggregate_profile",
     "capture_environment",
-    "publish_profile_artifacts",
+    "load_m5_gate_c_result",
+    "publish_m5_gate_c_result",
+    "recompute_gate_c_failures",
     "validate_environment",
     "validate_profile",
 ]

@@ -211,11 +211,15 @@ def test_selected_reads_rehash_immediately_before_consumption(tmp_path: Path) ->
 
 def test_package_and_script_are_verification_only() -> None:
     assert m5.__all__ == [
+        "M5ArtifactError",
+        "M5ArtifactSet",
         "M5Diagnostics",
         "M5RunResult",
+        "load_m5_artifacts",
         "load_m5_config",
         "run_m5",
         "score_m5",
+        "validate_m5_artifact_files",
         "verify_m5_inputs",
     ]
     assert not hasattr(inventory_module, "ByteFetcher")

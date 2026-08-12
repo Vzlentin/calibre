@@ -460,11 +460,15 @@ def test_m5_package_exposes_only_loading_execution_verification_and_scoring() ->
     import newcalibre.protocols.m5 as m5
 
     assert m5.__all__ == [
+        "M5ArtifactError",
+        "M5ArtifactSet",
         "M5Diagnostics",
         "M5RunResult",
+        "load_m5_artifacts",
         "load_m5_config",
         "run_m5",
         "score_m5",
+        "validate_m5_artifact_files",
         "verify_m5_inputs",
     ]
     forbidden = {
