@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group dev
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked ty check src/calibre/
+      - run: uv run --locked pytest
+      - name: README quick start
+        run: |
+          uv run --locked python - <<'PY'
+          import re
+          text = open("README.md").read()
+          exec(re.search(r"```python\n(.*?)```", text, re.S).group(1))
+          PY
+      - run: uv build --no-sources

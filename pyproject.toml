@@ -1,0 +1,54 @@
+[project]
+name = "calibre"
+version = "0.1.0"
+description = "Conformal forecasting: point forecasts, hierarchy reconciliation, and calibrated bands."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+]
+
+[project.optional-dependencies]
+stats = ["statsforecast"]
+ml = ["mlforecast"]
+neural = ["neuralforecast"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "mlforecast",
+    "neuralforecast",
+    "pytest",
+    "statsforecast",
+    "ruff",
+    "ty",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+# Warnings raised inside vendor libraries about their own internals.
+filterwarnings = [
+    "ignore:.*does not have many workers",
+    "ignore:GPU available but not used",
+    "ignore:.*LeafSpec.*is deprecated",
+    "ignore:The copy keyword is deprecated",
+    "ignore:The given NumPy array is not writable",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ty.environment]
+python-version = "3.12"
