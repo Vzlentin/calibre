@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from mlforecast import MLForecast as Engine
 
-from calibre.forecast.models import _frames
+from calibre.forecast.models import frames
 from calibre.forecast.models.base import Fitted, Forecaster, Window
 
 
@@ -57,7 +57,7 @@ class MLForecast(Forecaster):
         static, future = _features(window, self.features)
         engine = Engine(
             models=[copy.deepcopy(self.model)],
-            freq=_frames.freq(window),
+            freq=frames.freq(window),
             lags=self.lags or None,
             lag_transforms=copy.deepcopy(self.lag_transforms),
             date_features=self.date_features or None,
@@ -65,7 +65,7 @@ class MLForecast(Forecaster):
             target_transforms=copy.deepcopy(self.target_transforms),
         )
         engine.fit(
-            _frames.history(window, self.fit_periods, static + future), static_features=static
+            frames.history(window, self.fit_periods, static + future), static_features=static
         )
         return FittedMLForecast(engine, self.features, self.lookback)
 
@@ -81,14 +81,14 @@ class FittedMLForecast(Fitted):
         out = self.engine.predict(
             h=window.horizon,
             before_predict_callback=_reject_missing,
-            new_df=_frames.history(window, self.lookback, static + future),
-            X_df=_frames.future(window, future) if future else None,
+            new_df=frames.history(window, self.lookback, static + future),
+            X_df=frames.future(window, future) if future else None,
         )
-        return _frames.points(out, window)
+        return frames.points(out, window)
 
 
 def _features(window: Window, names: list[str]) -> tuple[list[str], list[str]]:
-    static, historical, future = _frames.split_features(window, names)
+    static, historical, future = frames.split_features(window, names)
     if historical:
         raise ValueError(f"features {historical} are not known ahead; lag them before the call")
     return static, future

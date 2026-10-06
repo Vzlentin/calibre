@@ -25,7 +25,7 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `data/hierarchy.py` | `Hierarchy`, node labels and the summing matrix |
 | `forecast/models/base.py` | `Window`, `Covariate`, `Forecaster` and `Fitted` contracts |
 | `forecast/models/` | `naive.SeasonalNaive`, `statsforecast.StatsForecastModel`, `mlforecast.MLForecast`, `neuralforecast.NeuralForecast` |
-| `forecast/models/_frames.py` | Long frames for the mlforecast and neuralforecast adapters |
+| `forecast/models/frames.py` | Long frames for the mlforecast and neuralforecast adapters |
 | `forecast/reconcile.py` | `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
 | `conformal/scores.py` | `Score` contract, `Absolute`, `Signed` |

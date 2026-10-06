@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 from neuralforecast import NeuralForecast as Engine
 
-from calibre.forecast.models import _frames
+from calibre.forecast.models import frames
 from calibre.forecast.models.base import Fitted, Forecaster, Window
 
 _OWNED = {"h", "stat_exog_list", "hist_exog_list", "futr_exog_list"}
@@ -43,7 +43,7 @@ class NeuralForecast(Forecaster):
         self.fit_periods = fit_periods
 
     def fit(self, window: Window) -> "FittedNeuralForecast":
-        static, historical, future = _frames.split_features(window, self.features)
+        static, historical, future = frames.split_features(window, self.features)
         model = self.model_cls(
             **_QUIET,
             **self.config,
@@ -52,10 +52,10 @@ class NeuralForecast(Forecaster):
             hist_exog_list=historical or None,
             futr_exog_list=future or None,
         )
-        engine = Engine(models=[model], freq=_frames.freq(window))
+        engine = Engine(models=[model], freq=frames.freq(window))
         engine.fit(
-            _frames.history(window, self.fit_periods, historical + future),
-            static_df=_frames.static(window, static) if static else None,
+            frames.history(window, self.fit_periods, historical + future),
+            static_df=frames.static(window, static) if static else None,
         )
         input_size = self.config["input_size"]
         return FittedNeuralForecast(engine, self.features, input_size if input_size > 0 else None)
@@ -68,10 +68,10 @@ class FittedNeuralForecast(Fitted):
         self.lookback = lookback
 
     def predict(self, window: Window) -> np.ndarray:
-        static, historical, future = _frames.split_features(window, self.features)
+        static, historical, future = frames.split_features(window, self.features)
         out = self.engine.predict(
-            df=_frames.history(window, self.lookback, historical + future),
-            static_df=_frames.static(window, static) if static else None,
-            futr_df=_frames.future(window, future) if future else None,
+            df=frames.history(window, self.lookback, historical + future),
+            static_df=frames.static(window, static) if static else None,
+            futr_df=frames.future(window, future) if future else None,
         )
-        return _frames.points(out, window)
+        return frames.points(out, window)
