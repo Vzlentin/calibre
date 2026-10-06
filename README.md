@@ -10,9 +10,9 @@ bounds from out-of-sample residuals.
 import numpy as np
 import pandas as pd
 
-from calibre import AbsoluteResidual, BottomUp, Conformal, Hierarchy, Panel, SeasonalNaive
-from calibre import SplitQuantile, WindowSum, forecast_origins
-from calibre.evaluate import coverage
+from calibre import Absolute, BottomUp, Hierarchy, LeadTime, Panel, SeasonalNaive, Signed
+from calibre import SplitQuantile, Step, replay, rolling_forecasts
+from calibre.metrics import coverage
 
 rng = np.random.default_rng(0)
 series = np.array(["a", "b", "c"])
@@ -23,11 +23,12 @@ hierarchy = Hierarchy.from_attributes(
 )
 
 origins = np.arange(60, 113)  # each origin is the index of the last observed period
-run = forecast_origins(panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), origins, 7)
+run = rolling_forecasts(panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), origins, 7)
 actuals = hierarchy.aggregate(panel.values)
 
-bands = Conformal(AbsoluteResidual(), SplitQuantile(window=28), level=0.9).replay(run, actuals)
-bound = Conformal(WindowSum(7), SplitQuantile(window=28), level=0.9).replay(run, actuals)
+calibrator = SplitQuantile(window=28)
+bands = replay(run, actuals, target=Step(), score=Absolute(), calibrator=calibrator, level=0.9)
+bound = replay(run, actuals, target=LeadTime(7), score=Signed(), calibrator=calibrator, level=0.9)
 print(coverage(bands.target, bands.lower, bands.upper))
 ```
 
@@ -47,24 +48,30 @@ print(coverage(bands.target, bands.lower, bands.upper))
   returns base points `[S, H]`. Fitting never changes the forecaster.
 - **Reconciler**: maps base points `[S, H]` to node points `[N, H]`. `BottomUp`
   forecasts the bottoms, `Identity` and `WlsStruct` forecast every node.
-- **forecast_origins**: builds the windows, fits every `refit_every` origins, and
+- **rolling_forecasts**: builds the windows, fits every `refit_every` origins, and
   returns **Forecasts**: points `[O, N, H]`.
-- **Score**: how wrong a forecast was, in columns. `AbsoluteResidual` per step for a
-  band, `SignedResidual` per step for an upper bound, `WindowSum(steps)` for a bound on
-  a multi-step total.
+- **Target**: which quantity each column bounds. `Step` gives one column per step,
+  `LeadTime(steps)` one column for the total over the first steps.
+- **Score**: how wrong a point was on a target column, and the bound that a threshold
+  gives. `Absolute` for a two-sided band, `Signed` for an upper bound.
 - **Calibrator**: from the scores known so far to a threshold per node and column.
   `SplitQuantile`, and the online `ACI` and `QuantileTracker`.
-- **Conformal**: runs a score and a calibrator origin by origin. `step` is one origin,
-  `replay` is a backtest. It returns **Calibrated**: thresholds, bounds, targets,
-  and scores `[O, N, C]`.
+- **step**: one origin of online calibration. It gives the calibrator the scores whose
+  targets are now known, then issues an **Issue**: thresholds and bounds `[N, C]`.
+- **replay**: `step` over the origins of a backtest. It returns a **Replay**:
+  thresholds, bounds, targets, and scores `[O, N, C]`.
+- **Decision**: `critical_ratio(holding, shortage)` gives the newsvendor level for a
+  calibrator. `order_up_to` turns an upper bound into an order, and `settle` runs one
+  period of lost-sales inventory and returns its cost.
 - **State**: a nested dict of numpy arrays. `flatten` gives one named array per key,
   for any store.
 
 ```text
 Panel ─ Hierarchy ─▶ Window per origin ─ Forecaster.fit / Fitted.predict ─▶ base [S, H]
 base ─ Reconciler ─▶ points [O, N, H]
-points + actuals ─ Conformal(Score, Calibrator, level).step per origin ─▶ thresholds, bounds
-Calibrated ─ calibre.evaluate ─▶ coverage, width, interval score, pinball, cost
+points + actuals ─ step(Target, Score, Calibrator, level) per origin ─▶ thresholds, bounds
+upper bound ─ order_up_to ─▶ order ─ settle ─▶ holding and shortage cost
+Replay ─ calibre.metrics ─▶ coverage, width, interval score, pinball, cost
 ```
 
 Two rules hold everywhere. A model reads only its window, so a later value cannot
@@ -73,14 +80,18 @@ only once its target is known, and before the origin that knows it issues.
 
 ## Write a calibrator
 
-A calibrator is three functions of an explicit state. `Conformal` handles the
-origins, the delays, and the indexing. This is the whole of a quantile tracker:
+A calibrator is three functions of an explicit state. `calibre.online` handles the
+origins, the delays, and the indexing. A new method is one file in
+`calibre/conformal/calibrators/` that imports only `calibrators.base` and
+`calibrators.ranks`. This is the whole of a quantile tracker:
 
 ```python
 import numpy as np
 
+from calibre.conformal.calibrators.base import Calibrator
 
-class Tracker:
+
+class Tracker(Calibrator):
     def __init__(self, lr):
         self.lr = lr
 
@@ -99,27 +110,27 @@ class Tracker:
 ```
 
 Keep the state in numpy arrays. Then a product can save it after each origin with
-`calibre.conformal.state.flatten` and continue from it.
+`calibre.online.state.flatten` and continue from it.
 
 ## Models
 
 | Model | Kind | Install |
 |---|---|---|
-| `SeasonalNaive` | local | core |
-| `calibre.forecast.statsforecast.StatsForecastModel` | local, any `statsforecast.models` model | `calibre[stats]` |
-| `calibre.forecast.mlforecast.MLForecast` | global regressor with lags and covariates | `calibre[ml]` |
-| `calibre.forecast.neuralforecast.NeuralForecast` | global network from `neuralforecast.models` | `calibre[neural]` |
+| `calibre.forecast.models.naive.SeasonalNaive` | local | core |
+| `calibre.forecast.models.statsforecast.StatsForecastModel` | local, any `statsforecast.models` model | `calibre[stats]` |
+| `calibre.forecast.models.mlforecast.MLForecast` | global regressor with lags and covariates | `calibre[ml]` |
+| `calibre.forecast.models.neuralforecast.NeuralForecast` | global network from `neuralforecast.models` | `calibre[neural]` |
 
 ```python
 from lightgbm import LGBMRegressor
 from calibre import Covariate
-from calibre.forecast.mlforecast import MLForecast
+from calibre.forecast.models.mlforecast import MLForecast
 
 model = MLForecast(
     LGBMRegressor(), lags=[7, 14, 28], features=["price"], fit_periods=365, lookback=84
 )
 price = Covariate(prices, known_ahead=True, aggregate="mean")  # [B, T + H]
-run = forecast_origins(
+run = rolling_forecasts(
     panel,
     hierarchy,
     model,
@@ -133,21 +144,20 @@ run = forecast_origins(
 
 ## Benchmarks
 
-`calibre_bench` is a second package in this repository. It loads benchmark data from
-a directory, runs benchmark protocols, and compares calibrators. Raw data is not in
-Git.
+`bench/` is a folder of scripts. They load benchmark data from a directory, run
+benchmark protocols, and compare calibrators. They import the installed `calibre`.
+Raw data is not in Git.
 
-| Module | Content |
+| Script | Content |
 |---|---|
-| `calibre_bench.vn2` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
-| `calibre_bench.m5` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
-| `calibre_bench.inventory` | `order_up_to` and lost-sales `settle` |
-| `calibre_bench.compare` | `compare(forecasts, actuals, calibrators, score, level)`: one row of metrics per method, on the cells where each method was ready |
+| `vn2.py` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
+| `m5.py` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
+| `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready |
 
-`examples/vn2_conformal.py` runs the whole VN2 path in about one second:
+`vn2_conformal.py` runs the whole VN2 path in about one second:
 
 ```sh
-uv run --locked python examples/vn2_conformal.py data/vn2
+uv run --locked python bench/vn2_conformal.py data/vn2
 ```
 
 ## Documents

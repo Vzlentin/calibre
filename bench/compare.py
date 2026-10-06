@@ -5,21 +5,21 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
-from calibre.conformal import Calibrator, Score
-from calibre.conformal.origins import Calibrated, Conformal
-from calibre.evaluate import coverage, interval_score, pinball, width
-from calibre.forecast.origins import Forecasts
+from calibre.backtest import Forecasts, Replay, replay
+from calibre.conformal import Calibrator, Score, Target
+from calibre.metrics import coverage, interval_score, pinball, width
 
 
 def compare(
     forecasts: Forecasts,
     actuals: np.ndarray,
     calibrators: Mapping[str, Calibrator],
+    target: Target,
     score: Score,
     level: float,
     censored: np.ndarray | None = None,
     by: np.ndarray | None = None,
-) -> tuple[pd.DataFrame, dict[str, Calibrated]]:
+) -> tuple[pd.DataFrame, dict[str, Replay]]:
     """Replay each calibrator and measure it on the cells where it was ready.
 
     `by` labels nodes, for example `hierarchy.level`, to get one row per method and
@@ -30,7 +30,15 @@ def compare(
     rows, runs = [], {}
     labels = np.zeros(actuals.shape[0], dtype=int) if by is None else np.asarray(by)
     for name, calibrator in calibrators.items():
-        run = Conformal(score, calibrator, level).replay(forecasts, actuals, censored)
+        run = replay(
+            forecasts,
+            actuals,
+            target=target,
+            score=score,
+            calibrator=calibrator,
+            level=level,
+            censored=censored,
+        )
         runs[name] = run
         for label in np.unique(labels):
             nodes = labels == label
@@ -39,7 +47,7 @@ def compare(
     return (table.droplevel("by") if by is None else table), runs
 
 
-def _metrics(run: Calibrated, nodes: np.ndarray, level: float) -> dict[str, float]:
+def _metrics(run: Replay, nodes: np.ndarray, level: float) -> dict[str, float]:
     ready = np.isfinite(run.threshold[:, nodes])
     target = np.where(ready, run.target[:, nodes], np.nan)
     lower, upper = run.lower[:, nodes], run.upper[:, nodes]

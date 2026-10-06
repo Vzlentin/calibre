@@ -1,13 +1,12 @@
 import numpy as np
 import pytest
 
-from calibre.conformal import Feedback
-from calibre.conformal.calibrators import ACI, QuantileTracker, SplitQuantile
-from calibre.conformal.origins import Conformal
-from calibre.conformal.scores import SignedResidual
-from calibre.conformal.state import flatten, unflatten
-from calibre.evaluate import coverage
-from calibre.forecast.origins import Forecasts
+from calibre.backtest import Forecasts, replay
+from calibre.conformal.calibrators import ACI, Feedback, QuantileTracker, SplitQuantile
+from calibre.conformal.scores import Signed
+from calibre.conformal.targets import Step
+from calibre.metrics import coverage
+from calibre.online.state import flatten, unflatten
 
 
 def feedback(origin: int, score: float, issued: float, column: int = 0) -> Feedback:
@@ -68,10 +67,9 @@ def test_aci_holds_long_run_coverage_through_a_shift_where_split_does_not():
     actuals = noise[None].astype(np.float32)
     origins = np.arange(50, n - 1)
     forecasts = Forecasts(origins, np.zeros((len(origins), 1, 1), dtype=np.float32))
-    split = Conformal(SignedResidual(), SplitQuantile(), 0.9).replay(forecasts, actuals)
-    aci = Conformal(SignedResidual(), ACI(SplitQuantile(), gamma=0.01), 0.9).replay(
-        forecasts, actuals
-    )
+    setup = {"target": Step(), "score": Signed(), "level": 0.9}
+    split = replay(forecasts, actuals, calibrator=SplitQuantile(), **setup)
+    aci = replay(forecasts, actuals, calibrator=ACI(SplitQuantile(), gamma=0.01), **setup)
     after = slice(500, None)
     split_coverage = coverage(split.target[after], split.lower[after], split.upper[after])
     aci_coverage = coverage(aci.target[after], aci.lower[after], aci.upper[after])

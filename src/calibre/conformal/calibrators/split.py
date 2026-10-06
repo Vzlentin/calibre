@@ -1,12 +1,12 @@
-"""Calibrators: from the scores known so far to a threshold per node and column."""
+"""Split conformal quantile of the known scores, with retention and pooling."""
 
 import numpy as np
 
-from calibre.conformal import Feedback, State
-from calibre.conformal.quantile import retained_quantile
+from calibre.conformal.calibrators.base import Calibrator, Feedback, State
+from calibre.conformal.calibrators.ranks import retained_quantile
 
 
-class SplitQuantile:
+class SplitQuantile(Calibrator):
     """Split conformal quantile of the known scores, per column.
 
     `window` keeps the last resolved origins per pool, `groups` pools nodes (one
@@ -66,74 +66,6 @@ class SplitQuantile:
                 self.groups,
             )
         return out
-
-
-class ACI:
-    """Adaptive conformal inference (Gibbs and Candès 2021), per node and column.
-
-    After each known score, the working level moves by `gamma * (miss - (1 - level))`,
-    where a miss is a score above the threshold that was issued for it. The base
-    calibrator gives the threshold at the working level. A working level at or above
-    one gives an infinite threshold, at or below zero an empty interval.
-    """
-
-    def __init__(self, base, gamma: float = 0.005) -> None:
-        if gamma <= 0:
-            raise ValueError(f"gamma must be positive, got {gamma}")
-        self.base = base
-        self.gamma = gamma
-
-    def init(self, n_nodes: int, n_columns: int) -> State:
-        return {
-            "base": self.base.init(n_nodes, n_columns),
-            "level": np.full((n_nodes, n_columns), np.nan),
-        }
-
-    def update(self, state: State, feedback: Feedback, level: float) -> State:
-        working = np.where(np.isnan(state["level"]), level, state["level"])
-        misses, known = _misses(feedback, working.shape[1])
-        working = working + self.gamma * (misses - (1 - level) * known)
-        return {"base": self.base.update(state["base"], feedback, level), "level": working}
-
-    def threshold(self, state: State, level: float) -> np.ndarray:
-        working = np.where(np.isnan(state["level"]), level, state["level"])
-        inside = np.clip(working, 1e-6, 1 - 1e-6)
-        out = self.base.threshold(state["base"], inside)
-        out = np.where(working >= 1, np.inf, out)
-        return np.where(working <= 0, -np.inf, out).astype(np.float32)
-
-
-class QuantileTracker:
-    """Online quantile tracking, the P term of conformal PID (Angelopoulos et al. 2023).
-
-    The threshold moves by `lr * (miss - (1 - level))` after each known score. It needs
-    no stored scores, so its state is one value per node and column. The integral and
-    scorecaster terms of conformal PID are not here.
-    """
-
-    def __init__(self, lr: float, start: float = 0.0) -> None:
-        if lr <= 0:
-            raise ValueError(f"lr must be positive, got {lr}")
-        self.lr = lr
-        self.start = start
-
-    def init(self, n_nodes: int, n_columns: int) -> State:
-        return {"threshold": np.full((n_nodes, n_columns), self.start, dtype=np.float64)}
-
-    def update(self, state: State, feedback: Feedback, level: float) -> State:
-        misses, known = _misses(feedback, state["threshold"].shape[1])
-        return {"threshold": state["threshold"] + self.lr * (misses - (1 - level) * known)}
-
-    def threshold(self, state: State, level: float) -> np.ndarray:
-        return state["threshold"].astype(np.float32)
-
-
-def _misses(feedback: Feedback, n_columns: int) -> tuple[np.ndarray, np.ndarray]:
-    """Counts `[N, C]` of misses (score above the issued threshold) and known scores."""
-    known = np.isfinite(feedback.scores)
-    miss = (feedback.scores > feedback.issued) & known
-    columns = np.eye(n_columns)[feedback.column]  # [K, C]
-    return miss.T @ columns, known.T @ columns
 
 
 def _row(state: State, origin: int, capacity: int | None) -> tuple[State, int]:

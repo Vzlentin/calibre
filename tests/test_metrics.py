@@ -1,6 +1,6 @@
 import numpy as np
 
-from calibre.evaluate import coverage, interval_score, newsvendor_cost, pinball, width
+from calibre.metrics import coverage, interval_score, newsvendor_cost, pinball, width
 
 TARGET = np.array([[1.0, 5.0, np.nan], [3.0, 0.0, 2.0]])
 LOWER = np.zeros((2, 3))

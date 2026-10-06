@@ -2,10 +2,10 @@
 
 import numpy as np
 
-from calibre.forecast import Window
+from calibre.forecast.models.base import Fitted, Forecaster, Window
 
 
-class SeasonalNaive:
+class SeasonalNaive(Forecaster, Fitted):
     """A local model with nothing to fit. `fit` returns the model itself."""
 
     def __init__(self, season: int) -> None:

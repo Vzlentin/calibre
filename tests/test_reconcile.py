@@ -1,6 +1,6 @@
 import numpy as np
 
-from calibre.reconcile import BottomUp, Identity, WlsStruct
+from calibre.forecast.reconcile import BottomUp, Identity, WlsStruct
 from tests.synthetic import make_panel
 
 

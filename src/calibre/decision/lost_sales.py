@@ -1,4 +1,4 @@
-"""Lost-sales inventory: order up to a bound, then settle one period at a time."""
+"""Lost-sales inventory: settle one period at a time to measure the cost of orders."""
 
 from dataclasses import dataclass
 
@@ -6,7 +6,7 @@ import numpy as np
 
 
 @dataclass(frozen=True)
-class Week:
+class Settlement:
     """One settled period, per series `[B]`."""
 
     arrivals: np.ndarray
@@ -18,12 +18,6 @@ class Week:
     shortage_cost: np.ndarray
 
 
-def order_up_to(bound: np.ndarray, on_hand: np.ndarray, in_transit: np.ndarray) -> np.ndarray:
-    """Order enough to raise the inventory position to `bound`, never below zero."""
-    position = on_hand + in_transit.sum(axis=1)
-    return np.maximum(bound - position, 0).astype(np.float32)
-
-
 def settle(
     on_hand: np.ndarray,
     in_transit: np.ndarray,
@@ -31,7 +25,7 @@ def settle(
     order: np.ndarray,
     holding: float,
     shortage: float,
-) -> tuple[np.ndarray, np.ndarray, Week]:
+) -> tuple[np.ndarray, np.ndarray, Settlement]:
     """Receive the first pipeline slot, sell, then add `order` at the end of the pipeline.
 
     `in_transit` is `[B, L]`: slot 0 arrives this period. Unmet demand is lost. Returns
@@ -45,5 +39,5 @@ def settle(
     missed = demand - sales
     end = start - sales
     pipeline = np.column_stack([in_transit[:, 1:], order])
-    week = Week(arrivals, demand, sales, missed, end, end * holding, missed * shortage)
-    return end, pipeline, week
+    settled = Settlement(arrivals, demand, sales, missed, end, end * holding, missed * shortage)
+    return end, pipeline, settled

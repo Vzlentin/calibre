@@ -2,17 +2,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.forecast import Covariate, Window
-from calibre.forecast.origins import forecast_origins
-from calibre.forecast.seasonal_naive import SeasonalNaive
-from calibre.hierarchy import Hierarchy
-from calibre.panel import Panel
-from calibre.reconcile import BottomUp, Identity, WlsStruct
+from calibre.backtest import rolling_forecasts
+from calibre.data import Hierarchy, Panel
+from calibre.forecast import Covariate, Fitted, Forecaster, Window
+from calibre.forecast.models.naive import SeasonalNaive
+from calibre.forecast.reconcile import BottomUp, Identity, WlsStruct
 
 ORIGINS = np.array([3, 5, 8])
 
 
-class MeanAtFit:
+class MeanAtFit(Forecaster, Fitted):
     """A global model: it learns each series mean at fit time and repeats it."""
 
     def fit(self, window: Window) -> "MeanAtFit":
@@ -24,7 +23,7 @@ class MeanAtFit:
         return np.repeat(self.mean[:, None], window.horizon, axis=1)
 
 
-class Echo:
+class Echo(Forecaster, Fitted):
     """Return the last `horizon` visible values of one covariate for every series."""
 
     def __init__(self, name: str) -> None:
@@ -39,7 +38,7 @@ class Echo:
         return np.broadcast_to(tail, (window.y.shape[0], window.horizon))
 
 
-class WrongShape:
+class WrongShape(Forecaster, Fitted):
     def fit(self, window: Window) -> "WrongShape":
         return self
 
@@ -47,7 +46,7 @@ class WrongShape:
         return np.zeros((1, 1))
 
 
-class Writer:
+class Writer(Forecaster, Fitted):
     def fit(self, window: Window) -> "Writer":
         return self
 
@@ -70,7 +69,7 @@ def tiny() -> tuple[Panel, Hierarchy]:
 
 def test_bottom_up_points_and_residuals():
     panel, hierarchy = tiny()
-    run = forecast_origins(panel, hierarchy, SeasonalNaive(1), BottomUp(hierarchy), ORIGINS, 2)
+    run = rolling_forecasts(panel, hierarchy, SeasonalNaive(1), BottomUp(hierarchy), ORIGINS, 2)
     assert list(hierarchy.nodes) == ["a", "b", "c", "group=g1", "total"]
     # Last value at origin o: a = o, b = 10 + o, c = 100 + o, then sums.
     assert run.points[0, :, 0].tolist() == [3, 13, 103, 16, 119]
@@ -84,19 +83,19 @@ def test_bottom_up_points_and_residuals():
 
 def test_wls_on_coherent_base_points_equals_bottom_up():
     panel, hierarchy = tiny()
-    bottom_up = forecast_origins(
+    bottom_up = rolling_forecasts(
         panel, hierarchy, SeasonalNaive(1), BottomUp(hierarchy), ORIGINS, 2
     )
-    wls = forecast_origins(panel, hierarchy, SeasonalNaive(1), WlsStruct(hierarchy), ORIGINS, 2)
+    wls = rolling_forecasts(panel, hierarchy, SeasonalNaive(1), WlsStruct(hierarchy), ORIGINS, 2)
     np.testing.assert_allclose(wls.points, bottom_up.points, atol=1e-4)
 
 
 def test_refit_every_controls_when_the_model_learns():
     panel, hierarchy = tiny()
-    once = forecast_origins(panel, hierarchy, MeanAtFit(), BottomUp(hierarchy), ORIGINS, 1)
+    once = rolling_forecasts(panel, hierarchy, MeanAtFit(), BottomUp(hierarchy), ORIGINS, 1)
     # Fitted at origin 3 only: mean of a over periods 0..3 is 1.5.
     assert once.points[:, 0, 0].tolist() == [1.5, 1.5, 1.5]
-    every_two = forecast_origins(
+    every_two = rolling_forecasts(
         panel, hierarchy, MeanAtFit(), BottomUp(hierarchy), ORIGINS, 1, refit_every=2
     )
     # Fitted at origins 3 and 8: means 1.5 and 4.
@@ -109,8 +108,8 @@ def test_a_value_after_the_origin_never_changes_its_points():
     changed[0, 6] = 1000
     other = Panel(panel.series, panel.periods, changed, "D")
     model = MeanAtFit()
-    before = forecast_origins(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 2, 1)
-    after = forecast_origins(other, hierarchy, model, BottomUp(hierarchy), ORIGINS, 2, 1)
+    before = rolling_forecasts(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 2, 1)
+    after = rolling_forecasts(other, hierarchy, model, BottomUp(hierarchy), ORIGINS, 2, 1)
     np.testing.assert_array_equal(after.points[:2], before.points[:2])
     assert not np.array_equal(after.points[2], before.points[2])
 
@@ -146,7 +145,7 @@ def covariates() -> dict[str, Covariate]:
 def test_window_shows_covariates_by_availability_and_node(name, expected):
     panel, hierarchy = tiny()
     identity = Identity(hierarchy)
-    run = forecast_origins(
+    run = rolling_forecasts(
         panel, hierarchy, Echo(name), identity, ORIGINS, 2, covariates=covariates()
     )
     np.testing.assert_array_equal(run.points[0], expected)
@@ -162,30 +161,30 @@ def test_window_shows_covariates_by_availability_and_node(name, expected):
         (ORIGINS, 2, 0, "refit_every"),
     ],
 )
-def test_forecast_origins_rejects_invalid_schedules(origins, horizon, refit_every, match):
+def test_rolling_forecasts_rejects_invalid_schedules(origins, horizon, refit_every, match):
     panel, hierarchy = tiny()
     with pytest.raises(ValueError, match=match):
-        forecast_origins(
+        rolling_forecasts(
             panel, hierarchy, SeasonalNaive(1), BottomUp(hierarchy), origins, horizon, refit_every
         )
 
 
-def test_forecast_origins_rejects_bad_covariates_models_and_reconcilers():
+def test_rolling_forecasts_rejects_bad_covariates_models_and_reconcilers():
     panel, hierarchy = tiny()
     short = {"promo": Covariate(np.ones((3, 10)), known_ahead=True, aggregate="sum")}
     with pytest.raises(ValueError, match="has 10 periods, needs 11"):
-        forecast_origins(
+        rolling_forecasts(
             panel, hierarchy, Echo("promo"), BottomUp(hierarchy), ORIGINS, 2, None, short
         )
     rows = {"promo": Covariate(np.ones((2, 12)), known_ahead=True, aggregate="sum")}
     with pytest.raises(ValueError, match="one row per bottom series"):
-        forecast_origins(
+        rolling_forecasts(
             panel, hierarchy, Echo("promo"), BottomUp(hierarchy), ORIGINS, 2, None, rows
         )
     with pytest.raises(ValueError, match=r"model returned shape \(1, 1\)"):
-        forecast_origins(panel, hierarchy, WrongShape(), BottomUp(hierarchy), ORIGINS, 2)
+        rolling_forecasts(panel, hierarchy, WrongShape(), BottomUp(hierarchy), ORIGINS, 2)
     other = BottomUp(Hierarchy.flat(panel.series))
     with pytest.raises(ValueError, match="does not fit the hierarchy"):
-        forecast_origins(panel, hierarchy, SeasonalNaive(1), other, ORIGINS, 2)
+        rolling_forecasts(panel, hierarchy, SeasonalNaive(1), other, ORIGINS, 2)
     with pytest.raises(ValueError, match="read-only"):
-        forecast_origins(panel, hierarchy, Writer(), BottomUp(hierarchy), ORIGINS, 2)
+        rolling_forecasts(panel, hierarchy, Writer(), BottomUp(hierarchy), ORIGINS, 2)

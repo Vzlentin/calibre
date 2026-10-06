@@ -17,10 +17,11 @@ import numpy as np
 import pandas as pd
 from mlforecast import MLForecast as Engine
 
-from calibre.forecast import Window, _frames
+from calibre.forecast.models import _frames
+from calibre.forecast.models.base import Fitted, Forecaster, Window
 
 
-class MLForecast:
+class MLForecast(Forecaster):
     """A global model: one regressor fitted on every forecast series at once."""
 
     def __init__(
@@ -69,7 +70,7 @@ class MLForecast:
         return FittedMLForecast(engine, self.features, self.lookback)
 
 
-class FittedMLForecast:
+class FittedMLForecast(Fitted):
     def __init__(self, engine: Engine, features: list[str], lookback: int | None) -> None:
         self.engine = engine
         self.features = features

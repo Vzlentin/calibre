@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from calibre.panel import Panel
+from calibre.data import Panel
 
 
 def test_from_long_pivots_and_sorts():

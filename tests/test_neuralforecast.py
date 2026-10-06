@@ -3,12 +3,11 @@ import pandas as pd
 import pytest
 from neuralforecast.models import MLP
 
+from calibre.backtest import rolling_forecasts
+from calibre.data import Hierarchy, Panel
 from calibre.forecast import Covariate
-from calibre.forecast.neuralforecast import NeuralForecast
-from calibre.forecast.origins import forecast_origins
-from calibre.hierarchy import Hierarchy
-from calibre.panel import Panel
-from calibre.reconcile import BottomUp
+from calibre.forecast.models.neuralforecast import NeuralForecast
+from calibre.forecast.reconcile import BottomUp
 
 ORIGINS = np.array([30, 35])
 HORIZON = 3
@@ -33,7 +32,7 @@ def panel() -> tuple[Panel, Hierarchy]:
 
 def run(model: NeuralForecast, covariates: dict | None = None) -> np.ndarray:
     data, hierarchy = panel()
-    return forecast_origins(
+    return rolling_forecasts(
         data, hierarchy, model, BottomUp(hierarchy), ORIGINS, HORIZON, covariates=covariates
     ).points
 

@@ -1,6 +1,6 @@
-"""Point forecasts at many origins: the one origin loop in Calibre.
+"""Rolling-origin point forecasts: fit, predict, and reconcile at each origin.
 
-`forecast_origins` keeps no state between calls and stores nothing. Each window is a
+`rolling_forecasts` keeps no state between calls and stores nothing. Each window is a
 read-only slice that ends at its origin, so a model sees only what was known there.
 """
 
@@ -10,10 +10,10 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from calibre.forecast import Covariate, Fitted, Forecaster, Window
-from calibre.hierarchy import Hierarchy
-from calibre.panel import Panel
-from calibre.reconcile import Reconciler
+from calibre.data.hierarchy import Hierarchy
+from calibre.data.panel import Panel
+from calibre.forecast.models.base import Covariate, Fitted, Forecaster, Window
+from calibre.forecast.reconcile import Reconciler
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class Forecasts:
         return np.where((targets < n_periods)[:, None, :], resid, np.float32(np.nan))
 
 
-def forecast_origins(
+def rolling_forecasts(
     panel: Panel,
     hierarchy: Hierarchy,
     model: Forecaster,

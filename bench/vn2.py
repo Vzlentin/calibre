@@ -16,9 +16,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from calibre.hierarchy import Hierarchy
-from calibre.panel import Panel
-from calibre_bench.inventory import Week, order_up_to, settle
+from calibre.data import Hierarchy, Panel
+from calibre.decision import Settlement, order_up_to, settle
 
 HOLDING = 0.2
 SHORTAGE = 1.0
@@ -58,7 +57,7 @@ class Played:
     """Settled weeks of one policy, with costs."""
 
     orders: np.ndarray
-    weeks: list[Week]
+    weeks: list[Settlement]
 
     @property
     def holding_cost(self) -> float:
@@ -115,7 +114,7 @@ def play(data: VN2, bounds: np.ndarray) -> Played:
     """Order up to `bounds` `[6, B]` at each decision and settle the eight weeks.
 
     Each bound is an upper bound on the demand of the three protected weeks after its
-    decision, for example `Calibrated.upper[:, :B, 0]` of a `WindowSum(3)` score.
+    decision, for example `Replay.upper[:, :B, 0]` of a `LeadTime(3)` target with a `Signed` score.
     """
     n_series = len(data.panel.series)
     if bounds.shape != (DECISIONS, n_series):

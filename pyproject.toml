@@ -26,9 +26,6 @@ dev = [
     "ty",
 ]
 
-[tool.uv.build-backend]
-module-name = ["calibre", "calibre_bench"]
-
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
@@ -48,7 +45,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "bench"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]

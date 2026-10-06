@@ -4,27 +4,26 @@ S is B for `BottomUp` and N for `Identity` and `WlsStruct`. Nodes are ordered bo
 first, so the forecast series are always the first S nodes.
 """
 
-from typing import Protocol
+from abc import ABC, abstractmethod
 
 import numpy as np
 import scipy.sparse as sp
 from scipy.linalg import cho_factor, cho_solve
 
-from calibre.hierarchy import Hierarchy
+from calibre.data.hierarchy import Hierarchy
 
 
-class Reconciler(Protocol):
-    @property
-    def shape(self) -> tuple[int, int]:
-        """`(N, S)`: nodes out, forecast series in."""
-        ...
+class Reconciler(ABC):
+    """A linear map from S forecast series to N nodes. Set `shape` to `(N, S)`."""
 
+    shape: tuple[int, int]
+
+    @abstractmethod
     def __call__(self, base: np.ndarray) -> np.ndarray:
         """Return node points `[N, H]` float32 from base forecasts `[S, H]`."""
-        ...
 
 
-class BottomUp:
+class BottomUp(Reconciler):
     """Forecast the bottom series and sum them."""
 
     def __init__(self, hierarchy: Hierarchy) -> None:
@@ -35,7 +34,7 @@ class BottomUp:
         return np.asarray(self.summing @ base, dtype=np.float32)
 
 
-class Identity:
+class Identity(Reconciler):
     """Forecast every node and keep the base forecasts. They are not coherent."""
 
     def __init__(self, hierarchy: Hierarchy) -> None:
@@ -46,7 +45,7 @@ class Identity:
         return np.asarray(base, dtype=np.float32)
 
 
-class WlsStruct:
+class WlsStruct(Reconciler):
     """MinT with structural weights, solved through the aggregation constraints.
 
     Coherent points `y` satisfy `J y = 0` with `J = [A, -I]`, `A` the aggregate rows of

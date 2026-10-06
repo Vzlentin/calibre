@@ -12,14 +12,15 @@ from typing import Any
 import numpy as np
 from neuralforecast import NeuralForecast as Engine
 
-from calibre.forecast import Window, _frames
+from calibre.forecast.models import _frames
+from calibre.forecast.models.base import Fitted, Forecaster, Window
 
 _OWNED = {"h", "stat_exog_list", "hist_exog_list", "futr_exog_list"}
 # Lightning prints progress, summaries, and logs by default. A library call stays quiet.
 _QUIET = {"enable_progress_bar": False, "enable_model_summary": False, "logger": False}
 
 
-class NeuralForecast:
+class NeuralForecast(Forecaster):
     """A global model: one `neuralforecast.models` network fitted on every forecast series."""
 
     def __init__(
@@ -60,7 +61,7 @@ class NeuralForecast:
         return FittedNeuralForecast(engine, self.features, input_size if input_size > 0 else None)
 
 
-class FittedNeuralForecast:
+class FittedNeuralForecast(Fitted):
     def __init__(self, engine: Engine, features: list[str], lookback: int | None) -> None:
         self.engine = engine
         self.features = features

@@ -11,10 +11,10 @@ from typing import Any
 
 import numpy as np
 
-from calibre.forecast import Window
+from calibre.forecast.models.base import Fitted, Forecaster, Window
 
 
-class StatsForecastModel:
+class StatsForecastModel(Forecaster, Fitted):
     """A local model: `predict` fits each series on the window. `fit` returns the model."""
 
     def __init__(self, model: Any) -> None:

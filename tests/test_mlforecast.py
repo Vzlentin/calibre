@@ -4,12 +4,11 @@ import pytest
 from mlforecast.lag_transforms import RollingMean
 from sklearn.linear_model import LinearRegression
 
+from calibre.backtest import rolling_forecasts
+from calibre.data import Hierarchy, Panel
 from calibre.forecast import Covariate
-from calibre.forecast.mlforecast import MLForecast
-from calibre.forecast.origins import forecast_origins
-from calibre.hierarchy import Hierarchy
-from calibre.panel import Panel
-from calibre.reconcile import BottomUp
+from calibre.forecast.models.mlforecast import MLForecast
+from calibre.forecast.reconcile import BottomUp
 
 ORIGINS = np.array([10, 15])
 
@@ -28,7 +27,7 @@ def trend() -> tuple[Panel, Hierarchy]:
 def test_global_lag_model_continues_the_trend_recursively():
     panel, hierarchy = trend()
     model = MLForecast(LinearRegression(), lags=[1])
-    run = forecast_origins(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3)
+    run = rolling_forecasts(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3)
     np.testing.assert_allclose(run.points[0], [[11, 12, 13], [21, 22, 23]], atol=1e-4)
     np.testing.assert_allclose(run.points[1], [[16, 17, 18], [26, 27, 28]], atol=1e-4)
 
@@ -37,8 +36,8 @@ def test_short_fit_and_predict_tails_give_the_same_points():
     panel, hierarchy = trend()
     full = MLForecast(LinearRegression(), lags=[1, 2])
     tail = MLForecast(LinearRegression(), lags=[1, 2], fit_periods=6, lookback=2)
-    expected = forecast_origins(panel, hierarchy, full, BottomUp(hierarchy), ORIGINS, 3)
-    got = forecast_origins(panel, hierarchy, tail, BottomUp(hierarchy), ORIGINS, 3)
+    expected = rolling_forecasts(panel, hierarchy, full, BottomUp(hierarchy), ORIGINS, 3)
+    got = rolling_forecasts(panel, hierarchy, tail, BottomUp(hierarchy), ORIGINS, 3)
     np.testing.assert_allclose(got.points, expected.points, atol=1e-4)
 
 
@@ -53,7 +52,7 @@ def test_known_ahead_and_static_features():
         "size": Covariate(size, known_ahead=False, aggregate="sum"),
     }
     model = MLForecast(LinearRegression(), features=["promo", "size"])
-    run = forecast_origins(
+    run = rolling_forecasts(
         panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3, covariates=covariates
     )
     for index, origin in enumerate(ORIGINS):
@@ -66,17 +65,17 @@ def test_unknown_dynamic_features_and_missing_names_are_rejected():
     weather = {"weather": Covariate(np.ones((2, 20)), known_ahead=False, aggregate="mean")}
     model = MLForecast(LinearRegression(), features=["weather"])
     with pytest.raises(ValueError, match="not known ahead"):
-        forecast_origins(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3, None, weather)
+        rolling_forecasts(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3, None, weather)
     model = MLForecast(LinearRegression(), features=["price"])
     with pytest.raises(ValueError, match="not a covariate"):
-        forecast_origins(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3, None, weather)
+        rolling_forecasts(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3, None, weather)
 
 
 def test_refit_returns_a_new_model_and_keeps_the_forecaster_unchanged():
     panel, hierarchy = trend()
     regressor = LinearRegression()
     model = MLForecast(regressor, lags=[1])
-    forecast_origins(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3, refit_every=1)
+    rolling_forecasts(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3, refit_every=1)
     assert not hasattr(regressor, "coef_")
 
 
@@ -100,6 +99,6 @@ def test_a_lookback_shorter_than_a_lag_transform_window_fails():
     short = MLForecast(
         LinearRegression(), lag_transforms={1: [RollingMean(window_size=4)]}, lookback=2
     )
-    forecast_origins(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3)
+    rolling_forecasts(panel, hierarchy, model, BottomUp(hierarchy), ORIGINS, 3)
     with pytest.raises(ValueError, match="lookback is shorter"):
-        forecast_origins(panel, hierarchy, short, BottomUp(hierarchy), ORIGINS, 3)
+        rolling_forecasts(panel, hierarchy, short, BottomUp(hierarchy), ORIGINS, 3)

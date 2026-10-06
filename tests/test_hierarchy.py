@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from calibre.hierarchy import Hierarchy
+from calibre.data import Hierarchy
 from tests.synthetic import make_panel
 
 

@@ -8,7 +8,7 @@ Columns are copies, because torch warns on the read-only arrays of a window.
 import numpy as np
 import pandas as pd
 
-from calibre.forecast import Window
+from calibre.forecast.models.base import Window
 
 
 def split_features(window: Window, names: list[str]) -> tuple[list[str], list[str], list[str]]:
