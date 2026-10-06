@@ -131,6 +131,25 @@ run = forecast_origins(
 )
 ```
 
+## Benchmarks
+
+`calibre_bench` is a second package in this repository. It loads benchmark data from
+a directory, runs benchmark protocols, and compares calibrators. Raw data is not in
+Git.
+
+| Module | Content |
+|---|---|
+| `calibre_bench.vn2` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
+| `calibre_bench.m5` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
+| `calibre_bench.inventory` | `order_up_to` and lost-sales `settle` |
+| `calibre_bench.compare` | `compare(forecasts, actuals, calibrators, score, level)`: one row of metrics per method, on the cells where each method was ready |
+
+`examples/vn2_conformal.py` runs the whole VN2 path in about one second:
+
+```sh
+uv run --locked python examples/vn2_conformal.py data/vn2
+```
+
 ## Documents
 
 - [Architecture](docs/architecture.md): modules, array contracts, and costs.
@@ -143,6 +162,6 @@ uv sync --locked --group dev
 uv run --locked pytest
 uv run --locked ruff check .
 uv run --locked ruff format --check .
-uv run --locked ty check src/calibre/
+uv run --locked ty check src/
 uv build --no-sources
 ```

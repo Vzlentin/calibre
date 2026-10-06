@@ -30,7 +30,17 @@ the state between origins and continue later.
 | `conformal/state.py` | `flatten`, `unflatten` for storage | nothing |
 | `evaluate.py` | coverage, width, interval score, pinball, newsvendor cost | nothing |
 
-`conformal` does not depend on hierarchy code. It needs points and actuals. Forecast adapters can depend on vendor libraries, but not on calibration.
+`conformal` does not depend on hierarchy code. It needs points and actuals.
+
+`calibre_bench` is a separate package in the same repository and wheel. It may name
+datasets and reproduce benchmark protocols. `calibre` never imports it.
+
+| Module | Responsibility |
+|---|---|
+| `calibre_bench/vn2.py` | VN2 files to `Panel` with the out-of-stock mask, hierarchy, and stock. `play`: the six-decision protocol |
+| `calibre_bench/m5.py` | M5 files to `Panel`, the 12-level hierarchy, and the price covariate |
+| `calibre_bench/inventory.py` | Order-up-to and lost-sales settlement |
+| `calibre_bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method | Forecast adapters can depend on vendor libraries, but not on calibration.
 Each vendor library is an extra: `calibre[stats]`, `calibre[ml]`, `calibre[neural]`.
 `import calibre` needs none of them.
 
