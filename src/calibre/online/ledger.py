@@ -37,7 +37,7 @@ def reach(cover: np.ndarray) -> int:
     return int(np.flatnonzero(cover.any(axis=0))[-1]) + 1
 
 
-def start(n_nodes: int, cover: np.ndarray) -> State:
+def initial_state(n_nodes: int, cover: np.ndarray) -> State:
     """Empty ledger for `n_nodes` nodes and the columns of `cover` `[C, H]`."""
     slots = reach(cover)
     return {

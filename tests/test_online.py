@@ -7,14 +7,14 @@ from calibre.backtest import Forecasts, replay
 from calibre.conformal.calibrators import ACI, Calibrator, Feedback, SplitQuantile, State
 from calibre.conformal.scores import Absolute, Signed
 from calibre.conformal.targets import LeadTime, Step
-from calibre.online import start, step
+from calibre.online import initial_state, step
 from calibre.online.state import flatten, unflatten
 
 
 class CensoredCount(Calibrator):
     """Threshold = number of censored known cells so far, per node and column."""
 
-    def init(self, n_nodes: int, n_columns: int) -> State:
+    def initial_state(self, n_nodes: int, n_columns: int) -> State:
         return {"count": np.zeros((n_nodes, n_columns))}
 
     def update(self, state: State, feedback: Feedback) -> State:
@@ -110,7 +110,7 @@ def test_a_saved_and_reloaded_state_continues_exactly():
     }
     whole = replay(Forecasts(origins, points), actuals, **setup)
 
-    state = start(setup["target"], setup["calibrator"], n_nodes=4, horizon=3)
+    state = initial_state(setup["target"], setup["calibrator"], n_nodes=4, horizon=3)
     previous, issued = -1, []
     for index, origin in enumerate(origins):
         if index == 30:
@@ -127,7 +127,7 @@ def test_a_saved_and_reloaded_state_continues_exactly():
 
 def test_step_needs_every_period_since_the_last_origin():
     setup = {"target": Step(), "score": Signed(), "calibrator": SplitQuantile(0.5)}
-    state = start(setup["target"], setup["calibrator"], 1, 2)
+    state = initial_state(setup["target"], setup["calibrator"], 1, 2)
     state, _ = step(state, 10, np.zeros((1, 2)), np.zeros((1, 11)), **setup)
     with pytest.raises(ValueError, match="needs 3 new periods"):
         step(state, 13, np.zeros((1, 2)), np.zeros((1, 2)), **setup)

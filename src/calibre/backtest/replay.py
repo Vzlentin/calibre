@@ -8,7 +8,7 @@ from calibre.backtest.forecasts import Forecasts
 from calibre.conformal.calibrators.base import Calibrator, State
 from calibre.conformal.scores import Score
 from calibre.conformal.targets import Target, columns
-from calibre.online.step import start, step
+from calibre.online.step import initial_state, step
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ def replay(
     n_origins, n_nodes, horizon = forecasts.points.shape
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
-    state = start(target, calibrator, n_nodes, horizon)
+    state = initial_state(target, calibrator, n_nodes, horizon)
     issued = []
     previous = -1
     for index, origin in enumerate(origins):

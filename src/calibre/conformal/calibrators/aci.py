@@ -22,9 +22,9 @@ class ACI(Calibrator):
         self.level = base.level
         self.gamma = gamma
 
-    def init(self, n_nodes: int, n_columns: int) -> State:
+    def initial_state(self, n_nodes: int, n_columns: int) -> State:
         return {
-            "base": self.base.init(n_nodes, n_columns),
+            "base": self.base.initial_state(n_nodes, n_columns),
             "level": np.full((n_nodes, n_columns), np.nan),
         }
 

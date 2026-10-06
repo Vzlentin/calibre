@@ -37,7 +37,7 @@ class SplitQuantile(QuantileCalibrator):
         self.groups = None if groups is None else np.asarray(groups)
         self.capacity = capacity
 
-    def init(self, n_nodes: int, n_columns: int) -> State:
+    def initial_state(self, n_nodes: int, n_columns: int) -> State:
         """Stored origins in order. Rows after `size` are spare, with origin -1."""
         return {
             "size": np.array(0, dtype=np.int64),

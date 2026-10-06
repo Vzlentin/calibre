@@ -99,7 +99,7 @@ class Tracker(Calibrator):
         self.level = level
         self.lr = lr
 
-    def init(self, n_nodes, n_columns):
+    def initial_state(self, n_nodes, n_columns):
         return {"q": np.zeros((n_nodes, n_columns))}
 
     def update(self, state, feedback):

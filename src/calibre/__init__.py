@@ -33,7 +33,7 @@ from calibre.forecast import (
     Window,
     WlsStruct,
 )
-from calibre.online import Issue, start, step
+from calibre.online import Issue, initial_state, step
 
 __all__ = [
     "ACI",
@@ -66,10 +66,10 @@ __all__ = [
     "Window",
     "WlsStruct",
     "critical_ratio",
+    "initial_state",
     "order_up_to",
     "replay",
     "rolling_forecasts",
     "settle",
-    "start",
     "step",
 ]

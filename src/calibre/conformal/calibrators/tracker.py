@@ -21,7 +21,7 @@ class QuantileTracker(Calibrator):
         self.lr = lr
         self.start = start
 
-    def init(self, n_nodes: int, n_columns: int) -> State:
+    def initial_state(self, n_nodes: int, n_columns: int) -> State:
         return {"threshold": np.full((n_nodes, n_columns), self.start, dtype=np.float64)}
 
     def update(self, state: State, feedback: Feedback) -> State:

@@ -49,7 +49,7 @@ class Calibrator(ABC):
     """A calibration method. It owns its target level, set at construction."""
 
     @abstractmethod
-    def init(self, n_nodes: int, n_columns: int) -> State:
+    def initial_state(self, n_nodes: int, n_columns: int) -> State:
         """Return the empty state."""
 
     @abstractmethod

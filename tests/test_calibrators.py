@@ -23,7 +23,7 @@ def feedback(origin: int, score: float, issued: float, column: int = 0) -> Feedb
 
 def test_aci_raises_the_level_after_a_miss_and_lowers_it_after_a_hit():
     aci = ACI(SplitQuantile(0.9), gamma=0.1)
-    state = aci.init(1, 1)
+    state = aci.initial_state(1, 1)
     missed = aci.update(state, feedback(0, 5.0, 1.0))
     hit = aci.update(state, feedback(0, 0.5, 1.0))
     # Level moves by gamma * (miss - (1 - level)): +0.09 after a miss, -0.01 after a hit.
@@ -34,14 +34,14 @@ def test_aci_raises_the_level_after_a_miss_and_lowers_it_after_a_hit():
 
 def test_aci_threshold_is_infinite_at_level_one_and_empty_at_zero():
     aci = ACI(SplitQuantile(0.9), gamma=1.0)
-    state = aci.init(2, 1)
+    state = aci.initial_state(2, 1)
     state["level"] = np.array([[1.2], [-0.1]])
     assert aci.threshold(state).tolist() == [[np.inf], [-np.inf]]
 
 
 def test_quantile_tracker_moves_its_threshold_without_stored_scores():
     tracker = QuantileTracker(0.9, lr=1.0, start=2.0)
-    state = tracker.update(tracker.init(1, 1), feedback(0, 5.0, 2.0))
+    state = tracker.update(tracker.initial_state(1, 1), feedback(0, 5.0, 2.0))
     assert state["threshold"].tolist() == [[2.9]]
     state = tracker.update(state, feedback(1, 0.0, 2.9))
     np.testing.assert_allclose(state["threshold"], [[2.8]])
@@ -50,7 +50,7 @@ def test_quantile_tracker_moves_its_threshold_without_stored_scores():
 
 def test_split_quantile_capacity_keeps_the_last_origins_and_fills_late_columns():
     split = SplitQuantile(0.5, capacity=2)
-    state = split.init(1, 2)
+    state = split.initial_state(1, 2)
     for origin in range(4):
         state = split.update(state, feedback(origin, float(origin), 0.0))
     state = split.update(state, feedback(3, 7.0, 0.0, column=1))
@@ -93,7 +93,7 @@ def test_calibrators_reject_invalid_settings(factory, match):
 
 
 def test_state_flattens_to_named_arrays_and_back():
-    state = ACI(SplitQuantile(0.9)).init(3, 2)
+    state = ACI(SplitQuantile(0.9)).initial_state(3, 2)
     flat = flatten(state)
     assert sorted(flat) == ["base/known", "base/origin", "base/scores", "base/size", "level"]
     back = unflatten(flat)
@@ -125,7 +125,7 @@ def test_aci_targets_the_level_of_its_base_per_node():
         issued=np.ones((1, 2), dtype=np.float32),
         censored=np.zeros((1, 2), dtype=bool),
     )
-    state = aci.update(aci.init(2, 1), hits)
+    state = aci.update(aci.initial_state(2, 1), hits)
     # A hit moves each working level by -gamma * (1 - level): -0.01 and -0.05.
     np.testing.assert_allclose(state["level"], [[0.89], [0.45]])
 
@@ -139,7 +139,7 @@ def test_quantile_tracker_moves_each_node_by_its_own_level():
         issued=np.zeros((1, 2), dtype=np.float32),
         censored=np.zeros((1, 2), dtype=bool),
     )
-    state = tracker.update(tracker.init(2, 1), misses)
+    state = tracker.update(tracker.initial_state(2, 1), misses)
     np.testing.assert_allclose(state["threshold"], [[0.9], [0.5]])
 
 

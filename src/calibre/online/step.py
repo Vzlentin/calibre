@@ -25,12 +25,12 @@ class Issue:
     upper: np.ndarray
 
 
-def start(target: Target, calibrator: Calibrator, n_nodes: int, horizon: int) -> State:
+def initial_state(target: Target, calibrator: Calibrator, n_nodes: int, horizon: int) -> State:
     """Empty state for `n_nodes` nodes and `horizon` steps."""
     cover = target.cover(horizon)
     return {
-        "ledger": ledger.start(n_nodes, cover),
-        "calibrator": calibrator.init(n_nodes, len(cover)),
+        "ledger": ledger.initial_state(n_nodes, cover),
+        "calibrator": calibrator.initial_state(n_nodes, len(cover)),
     }
 
 

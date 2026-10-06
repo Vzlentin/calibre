@@ -2,6 +2,6 @@
 
 from calibre.online.ledger import Matured
 from calibre.online.state import flatten, unflatten
-from calibre.online.step import Issue, start, step
+from calibre.online.step import Issue, initial_state, step
 
-__all__ = ["Issue", "Matured", "flatten", "start", "step", "unflatten"]
+__all__ = ["Issue", "Matured", "flatten", "initial_state", "step", "unflatten"]
