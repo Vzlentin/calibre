@@ -1,6 +1,6 @@
 """VN2: calibrate a three-week decision bound several ways, then play the orders.
 
-uv run --locked python bench/vn2_conformal.py data/vn2
+uv run python bench/vn2_conformal.py data/vn2
 """
 
 import sys

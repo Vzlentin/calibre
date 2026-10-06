@@ -141,7 +141,7 @@ Raw data is not in Git.
 `vn2_conformal.py` runs the whole VN2 path in about one second:
 
 ```sh
-uv run --locked python bench/vn2_conformal.py data/vn2
+uv run python bench/vn2_conformal.py data/vn2
 ```
 
 ## Documents
@@ -152,10 +152,10 @@ uv run --locked python bench/vn2_conformal.py data/vn2
 ## Development
 
 ```sh
-uv sync --locked --group dev
-uv run --locked pytest
-uv run --locked ruff check .
-uv run --locked ruff format --check .
-uv run --locked ty check src/
+uv sync --group dev
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check src/
 uv build --no-sources
 ```

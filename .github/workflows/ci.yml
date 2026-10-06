@@ -8,12 +8,14 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      UV_LOCKED: 1
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
-      - run: uv run --locked ruff check .
-      - run: uv run --locked ruff format --check .
-      - run: uv run --locked ty check
-      - run: uv run --locked pytest
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check
+      - run: uv run pytest

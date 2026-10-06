@@ -13,4 +13,4 @@ Calibre is an open-source conformal forecasting library. [docs/architecture.md](
 - Numerical tests use real implementations and independent expected values, not mocks, stubs, or monkeypatches.
 - Hot paths work on typed arrays: no per-cell objects, hashes, or serialization. Validate at input boundaries once.
 - Keep files below 1000 lines. Use concise public docstrings; comments explain why.
-- Run Python tooling through `uv run --locked`.
+- Run Python tooling through `uv run`.
