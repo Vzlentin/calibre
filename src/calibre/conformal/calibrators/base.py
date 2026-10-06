@@ -1,6 +1,8 @@
 """The calibrator contract: what a calibration method receives, keeps, and returns.
 
-A calibrator turns the scores known so far into a threshold per node and column. Its
+A calibrator turns the targets known so far into a threshold per node and column. A
+threshold indexes a nested family of bounds, the `Score`: a quantile calibrator ranks
+the scores, and a risk calibrator picks the threshold whose bounds have the least loss. Its
 state is a nested dict of numpy arrays, and its methods are functions of that state.
 So a product can save the state after each origin and continue later, and a backtest
 is the same loop as production. A call owns the state it receives: it can write into
@@ -13,6 +15,8 @@ from typing import Any
 
 import numpy as np
 
+from calibre.conformal.scores import Score
+
 State = dict[str, Any]
 """Nested dict of numpy arrays. `calibre.online.state` flattens it for storage."""
 
@@ -22,25 +26,37 @@ Level = float | np.ndarray
 
 @dataclass(frozen=True)
 class Feedback:
-    """Scores that became known at one origin. Each row `[K]` is one score column of
+    """Targets that became known at one origin. Each row `[K]` is one target column of
     one issuing origin, for all nodes.
 
-    Rows are in origin order. `scores` is `[K, N]`, NaN where the actual is missing.
-    `issued` is the threshold that was issued for each score, and `censored` marks
-    targets that are lower bounds.
+    Rows are in origin order. `point` and `target` are the column sums `[K, N]`, NaN
+    where the actual is missing. `issued` is the threshold that was issued for each
+    row, `censored` marks targets that are lower bounds, and `score` is the family of
+    bounds the thresholds index.
     """
 
     origin: np.ndarray
     column: np.ndarray
-    scores: np.ndarray
+    point: np.ndarray
+    target: np.ndarray
     issued: np.ndarray
     censored: np.ndarray
+    score: Score
 
-    @abstractmethod
+    @property
+    def scores(self) -> np.ndarray:
+        """Nonconformity scores `[K, N]` float32: the smallest threshold that holds the target."""
+        return self.score.score(self.target, self.point).astype(np.float32)
+
+    def bounds(self, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Bounds `[K, N, G]` that thresholds `[G]` or `[N, G]` would have issued."""
+        return self.score.bound(self.point[..., None], threshold)
+
     def misses(self, n_columns: int) -> tuple[np.ndarray, np.ndarray]:
         """Counts `[N, C]` of misses (score above the issued threshold) and known scores."""
-        known = np.isfinite(self.scores)
-        miss = (self.scores > self.issued) & known
+        scores = self.scores
+        known = np.isfinite(scores)
+        miss = (scores > self.issued) & known
         columns = np.eye(n_columns)[self.column]  # [K, C]
         return miss.T @ columns, known.T @ columns
 
