@@ -41,7 +41,7 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `decision/lost_sales.py` | `settle`, `Settlement`: one period of lost-sales inventory and its cost |
 | `metrics.py` | coverage, width, interval score, pinball, newsvendor cost |
 
-Each package imports only these Calibre packages. `tests/test_layout.py` enforces it.
+Each package imports only these Calibre packages.
 
 | Package | Imports |
 |---|---|
