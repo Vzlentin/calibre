@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from calibre.conformal.calibrators.base import Calibrator, Feedback, State
+from calibre.conformal.calibrators.base import Calibrator, State
 from calibre.conformal.scores import Score
 from calibre.conformal.targets import Target, columns
 from calibre.online import ledger
@@ -55,16 +55,11 @@ def step(
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
     cover = target.cover(points.shape[1])
-    ledger_state, known = ledger.observe(state["ledger"], cover, origin, actuals, censored)
+    ledger_state, feedback = ledger.observe(
+        state["ledger"], cover, score, origin, actuals, censored
+    )
     calibrator_state = state["calibrator"]
-    if known is not None:
-        feedback = Feedback(
-            origin=known.origin,
-            column=known.column,
-            scores=score.score(known.target, known.point).astype(np.float32),
-            issued=known.issued,
-            censored=known.censored,
-        )
+    if feedback is not None:
         calibrator_state = calibrator.update(calibrator_state, feedback)
     threshold = calibrator.threshold(calibrator_state)
     point = columns(points.astype(np.float32), cover)

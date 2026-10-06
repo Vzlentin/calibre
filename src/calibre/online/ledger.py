@@ -2,34 +2,17 @@
 
 An h-step forecast is known h periods after its origin. The ledger keeps the issued
 points and thresholds until then, and releases a column only when the last step it
-covers is known. It knows the target cover, not scores or calibrators.
+covers is known. It scores the columns it releases, and knows no calibrator.
 
 Origins wait in a ring of slots. An origin waits until its last covered step, `reach`
 periods later, so at most `reach` origins wait, and slot `origin % reach` is free again
 when reused. Only the covered steps are kept. Origin -1 marks an empty slot.
 """
 
-from dataclasses import dataclass
-
 import numpy as np
 
-from calibre.conformal.calibrators.base import State
-
-
-@dataclass(frozen=True)
-class Known:
-    """Columns whose targets became known at one origin, in origin order.
-
-    Each row `[K]` is one column of one issuing origin. `target`, `point`, `issued`,
-    and `censored` are `[K, N]`: the column sums and the threshold issued for them.
-    """
-
-    origin: np.ndarray
-    column: np.ndarray
-    target: np.ndarray
-    point: np.ndarray
-    issued: np.ndarray
-    censored: np.ndarray
+from calibre.conformal.calibrators.base import Feedback, State
+from calibre.conformal.scores import Score
 
 
 def last_step(cover: np.ndarray) -> np.ndarray:
@@ -57,8 +40,13 @@ def initial_state(n_nodes: int, cover: np.ndarray) -> State:
 
 
 def observe(
-    state: State, cover: np.ndarray, origin: int, actuals: np.ndarray, censored: np.ndarray
-) -> tuple[State, Known | None]:
+    state: State,
+    cover: np.ndarray,
+    score: Score,
+    origin: int,
+    actuals: np.ndarray,
+    censored: np.ndarray,
+) -> tuple[State, Feedback | None]:
     """Record the periods that end at `origin`, and release the columns now known.
 
     `actuals` is `[N, k]`, the node values of the k periods after the previous origin.
@@ -70,11 +58,11 @@ def observe(
     cover = cover[:, : state["point"].shape[2]]
     _record(state, origin - actuals.shape[1] + 1, actuals, censored)
     rows, columns = _due(state, cover, origin)
-    known = _sum(state, cover, rows, columns) if len(rows) else None
+    feedback = _feedback(state, cover, score, rows, columns) if len(rows) else None
     state["released"][rows, columns] = True
     state["origin"][state["released"].all(axis=1)] = -1
     state["last"] = np.array(origin, dtype=np.int64)
-    return state, known
+    return state, feedback
 
 
 def issue(state: State, origin: int, points: np.ndarray, threshold: np.ndarray) -> State:
@@ -113,14 +101,17 @@ def _due(state: State, cover: np.ndarray, origin: int) -> tuple[np.ndarray, np.n
     return rows[order], columns[order]
 
 
-def _sum(state: State, cover: np.ndarray, rows: np.ndarray, columns: np.ndarray) -> Known:
-    """Column sums of the targets and points of the given slots."""
+def _feedback(
+    state: State, cover: np.ndarray, score: Score, rows: np.ndarray, columns: np.ndarray
+) -> Feedback:
+    """Scores of the column sums of the given slots, with their issued thresholds."""
     covered = cover[columns][:, None, :]
-    return Known(
+    target = np.where(covered, state["actual"][rows], 0).sum(axis=-1)
+    point = np.where(covered, state["point"][rows], 0).sum(axis=-1)
+    return Feedback(
         origin=state["origin"][rows],
         column=columns,
-        target=np.where(covered, state["actual"][rows], 0).sum(axis=-1),
-        point=np.where(covered, state["point"][rows], 0).sum(axis=-1),
+        scores=score.score(target, point).astype(np.float32),
         issued=state["issued"][rows, :, columns],
         censored=(covered & state["censored"][rows]).any(axis=-1),
     )
