@@ -14,6 +14,8 @@ ORIGINS = np.array([3, 5, 8])
 class MeanAtFit(Forecaster, Fitted):
     """A global model: it learns each series mean at fit time and repeats it."""
 
+    mean: np.ndarray
+
     def fit(self, window: Window) -> "MeanAtFit":
         fitted = MeanAtFit()
         fitted.mean = window.y.mean(axis=1)
@@ -120,7 +122,7 @@ def covariates() -> dict[str, Covariate]:
         "promo": Covariate(dynamic, known_ahead=True, aggregate="mean"),
         "weather": Covariate(dynamic, known_ahead=False, aggregate="sum"),
         "calendar": Covariate(np.arange(12)[None], known_ahead=True, aggregate="sum"),
-        "size": Covariate([[1], [2], [3]], known_ahead=False, aggregate="sum"),
+        "size": Covariate(np.array([[1], [2], [3]]), known_ahead=False, aggregate="sum"),
     }
 
 

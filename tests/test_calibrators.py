@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -68,7 +70,7 @@ def test_aci_holds_long_run_coverage_through_a_shift_where_split_does_not():
     actuals = noise[None].astype(np.float32)
     origins = np.arange(50, n - 1)
     forecasts = Forecasts(origins, np.zeros((len(origins), 1, 1), dtype=np.float32))
-    setup = {"target": Step(), "score": Signed()}
+    setup: dict[str, Any] = {"target": Step(), "score": Signed()}
     split = replay(forecasts, actuals, calibrator=SplitQuantile(0.9), **setup)
     aci = replay(forecasts, actuals, calibrator=ACI(SplitQuantile(0.9), gamma=0.01), **setup)
     after = slice(500, None)
@@ -109,7 +111,7 @@ def test_a_per_node_level_gives_each_node_the_threshold_of_its_own_level():
     forecasts = Forecasts(origins, np.zeros((len(origins), 2, 2), dtype=np.float32))
     # Shortage costs 1 for both nodes, holding 1 and 0.25: levels 0.5 and 0.8.
     level = critical_ratio(np.array([[1.0], [0.25]]), 1.0)
-    setup = {"target": Step(), "score": Signed()}
+    setup: dict[str, Any] = {"target": Step(), "score": Signed()}
     both = replay(forecasts, actuals, calibrator=SplitQuantile(level, window=30), **setup)
     for node, scalar in enumerate([0.5, 0.8]):
         alone = replay(forecasts, actuals, calibrator=SplitQuantile(scalar, window=30), **setup)

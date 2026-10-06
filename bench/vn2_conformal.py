@@ -31,6 +31,8 @@ origins = np.arange(60, int(data.decisions[-1]) + 1)
 model = StatsForecastModel(WindowAverage(window_size=13))
 run = rolling_forecasts(data.panel, hierarchy, model, BottomUp(hierarchy), origins, vn2.PROTECTION)
 actuals = hierarchy.aggregate(data.panel.values)
+if data.panel.censored is None:
+    raise ValueError("the VN2 panel has no censored mask")
 censored = hierarchy.any_bottom(data.panel.censored)
 
 calibrators = {

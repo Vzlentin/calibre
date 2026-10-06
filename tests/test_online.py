@@ -1,4 +1,5 @@
 import io
+from typing import Any
 
 import numpy as np
 import pytest
@@ -54,7 +55,11 @@ def test_gapped_origins_see_only_targets_known_at_the_origin():
 def test_a_later_actual_never_changes_an_issued_threshold():
     origins = np.arange(20, 60)
     actuals = np.random.default_rng(0).normal(size=(3, 80)).astype(np.float32)
-    setup = {"target": Step(), "score": Absolute(), "calibrator": SplitQuantile(0.8, window=10)}
+    setup: dict[str, Any] = {
+        "target": Step(),
+        "score": Absolute(),
+        "calibrator": SplitQuantile(0.8, window=10),
+    }
     before = replay(zero_forecasts(origins, 3, 4), actuals, **setup)
     changed = actuals.copy()
     changed[:, 45] = 1000
@@ -103,7 +108,7 @@ def test_a_saved_and_reloaded_state_continues_exactly():
     actuals = rng.normal(size=(4, 120)).astype(np.float32)
     points = rng.normal(size=(60, 4, 3)).astype(np.float32)
     origins = np.arange(40, 100)
-    setup = {
+    setup: dict[str, Any] = {
         "target": Step(),
         "score": Absolute(),
         "calibrator": ACI(SplitQuantile(0.9, window=20), gamma=0.05),
@@ -115,7 +120,8 @@ def test_a_saved_and_reloaded_state_continues_exactly():
     for index, origin in enumerate(origins):
         if index == 30:
             buffer = io.BytesIO()
-            np.savez(buffer, **flatten(state))
+            flat: dict[str, Any] = flatten(state)
+            np.savez(buffer, **flat)
             buffer.seek(0)
             state = unflatten(dict(np.load(buffer)))
         seen = slice(previous + 1, origin + 1)
@@ -126,7 +132,7 @@ def test_a_saved_and_reloaded_state_continues_exactly():
 
 
 def test_step_needs_every_period_since_the_last_origin():
-    setup = {"target": Step(), "score": Signed(), "calibrator": SplitQuantile(0.5)}
+    setup: dict[str, Any] = {"target": Step(), "score": Signed(), "calibrator": SplitQuantile(0.5)}
     state = initial_state(setup["target"], setup["calibrator"], 1, 2)
     state, _ = step(state, 10, np.zeros((1, 2)), np.zeros((1, 11)), **setup)
     with pytest.raises(ValueError, match="needs 3 new periods"):

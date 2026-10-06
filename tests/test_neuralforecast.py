@@ -63,11 +63,13 @@ def test_historical_and_static_features_are_used():
     rng = np.random.default_rng(2)
     covariates = {
         "weather": Covariate(rng.normal(size=(3, 40)), known_ahead=False, aggregate="mean"),
-        "size": Covariate([[1.0], [2.0], [3.0]], known_ahead=False, aggregate="sum"),
+        "size": Covariate(np.array([[1.0], [2.0], [3.0]]), known_ahead=False, aggregate="sum"),
     }
     model = NeuralForecast(MLP, CONFIG, features=["weather", "size"])
     base = run(model, covariates)
-    covariates["size"] = Covariate([[1.0], [2.0], [9.0]], known_ahead=False, aggregate="sum")
+    covariates["size"] = Covariate(
+        np.array([[1.0], [2.0], [9.0]]), known_ahead=False, aggregate="sum"
+    )
     assert not np.array_equal(run(model, covariates), base)
 
 
