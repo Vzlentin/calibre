@@ -28,10 +28,11 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `forecast/models/frames.py` | Long frames for the mlforecast and neuralforecast adapters |
 | `forecast/reconcile.py` | `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
-| `conformal/scores.py` | `Score` contract, `Absolute`, `Signed` |
+| `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`: nested bounds indexed by a threshold, and the score that inverts them |
+| `conformal/losses.py` | `Loss` contract, `Miss`, `Newsvendor`: the cost of issued bounds once their target is known |
 | `conformal/calibrators/base.py` | `Calibrator` and `QuantileCalibrator` contracts, `Feedback`, `State`, `Level`, `check_level` |
 | `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: rank, window, pooling |
-| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker` |
+| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.MinRisk` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
@@ -54,7 +55,7 @@ Each package imports only these Calibre packages.
 | `metrics` | nothing |
 
 A calibration method is one file in `conformal/calibrators/`. It imports only
-`calibrators.base` and `calibrators.ranks`.
+`calibrators.base`, `calibrators.ranks`, and the `Loss` contract in `conformal.losses`.
 
 `conformal` and `online` do not depend on hierarchy code. They need points and actuals.
 
@@ -92,7 +93,8 @@ O origins, and H forecast steps.
 | Residuals | `[O, N, H]` | `actual - point`, NaN until the actual is known |
 | `Panel.censored` | `[B, T]` bool, optional | True where a value is a lower bound of the target |
 | `Target.cover` | `[C, H]` bool | Steps that each target column sums. C = H for `Step`, 1 for `LeadTime` |
-| `Feedback.scores` | `[K, N]` | One row per newly known (issuing origin, column), in origin order |
+| `Feedback.point`, `Feedback.target` | `[K, N]` | Column sums, one row per newly known (issuing origin, column), in origin order. `scores` and `bounds(grid)` derive from them through `Feedback.score` |
+| Loss grid | `[G]` or `[N, G]` | Increasing candidate thresholds of a `MinRisk`, in score units. Losses are evaluated as `[K, N, G]` |
 | Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
 | Threshold | `[N, C]` float32 | Issued per origin. inf means not ready |
 | `Replay` arrays | `[O, N, C]` | Points, thresholds, bounds, targets, scores, and censored flags per column |

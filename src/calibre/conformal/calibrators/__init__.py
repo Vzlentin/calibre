@@ -8,6 +8,7 @@ from calibre.conformal.calibrators.base import (
     QuantileCalibrator,
     State,
 )
+from calibre.conformal.calibrators.risk import MinRisk
 from calibre.conformal.calibrators.split import SplitQuantile
 from calibre.conformal.calibrators.tracker import QuantileTracker
 
@@ -16,6 +17,7 @@ __all__ = [
     "Calibrator",
     "Feedback",
     "Level",
+    "MinRisk",
     "QuantileCalibrator",
     "QuantileTracker",
     "SplitQuantile",
