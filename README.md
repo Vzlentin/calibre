@@ -107,7 +107,7 @@ Keep the state in numpy arrays. Then a product can save it after each origin wit
 
 ```python
 from lightgbm import LGBMRegressor
-from calibre import Covariate
+from calibre import BottomUp, Covariate, rolling_forecasts
 from calibre.forecast.models.mlforecast import MLForecast
 
 model = MLForecast(
