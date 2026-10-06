@@ -85,3 +85,19 @@ def test_an_aggregate_equal_to_the_total_or_an_earlier_aggregate_is_dropped():
     hierarchy = Hierarchy.from_attributes(series, attributes, ["country", "state", "region"])
     assert hierarchy.nodes[5:].tolist() == ["state=CA", "state=TX", "total"]
     assert hierarchy.level.tolist() == [0] * 5 + [2, 2, 4]
+
+
+def test_nodes_sum_bottom_values_and_flag_when_any_bottom_is_flagged():
+    series, attributes = crossed_attributes()
+    hierarchy = Hierarchy.from_attributes(series, attributes, ["state"])
+    values = np.arange(10, dtype=np.float32).reshape(5, 2)
+    flags = np.zeros((5, 2), dtype=bool)
+    flags[3, 1] = True  # d, in TX
+    nodes = list(hierarchy.nodes)
+    totals = hierarchy.aggregate(values)
+    assert totals[nodes.index("state=CA")].tolist() == [2, 4]
+    assert totals[nodes.index("total")].tolist() == [20, 25]
+    flagged = hierarchy.any_bottom(flags)
+    assert flagged[nodes.index("state=TX")].tolist() == [False, True]
+    assert flagged[nodes.index("state=CA")].tolist() == [False, False]
+    assert flagged[nodes.index("total")].tolist() == [False, True]

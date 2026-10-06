@@ -8,12 +8,17 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class Panel:
-    """Bottom series values `[B, T]` as read-only float32. Downstream code trusts them."""
+    """Bottom series values `[B, T]` as read-only float32. Downstream code trusts them.
+
+    `censored` is an optional `[B, T]` mask: True where the value is a lower bound of
+    the true target, for example sales during a stockout.
+    """
 
     series: np.ndarray
     periods: pd.DatetimeIndex
     values: np.ndarray
     freq: str
+    censored: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         series = np.array(self.series, dtype=str)
@@ -29,6 +34,12 @@ class Panel:
             raise ValueError("panel values must be finite (no NaN or infinity)")
         if not periods.equals(pd.date_range(periods[0], periods[-1], freq=self.freq)):
             raise ValueError(f"panel periods are not a complete {self.freq} range")
+        if self.censored is not None:
+            censored = np.array(self.censored, dtype=bool)
+            if censored.shape != values.shape:
+                raise ValueError(f"panel censored shape {censored.shape} != {values.shape}")
+            censored.flags.writeable = False
+            object.__setattr__(self, "censored", censored)
         series.flags.writeable = False
         values.flags.writeable = False
         object.__setattr__(self, "series", series)

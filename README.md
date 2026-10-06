@@ -10,8 +10,9 @@ bounds from out-of-sample residuals.
 import numpy as np
 import pandas as pd
 
-from calibre import BottomUp, Hierarchy, Panel, SeasonalNaive, forecast_origins
-from calibre import resolved_rows, width, window_bound
+from calibre import AbsoluteResidual, BottomUp, Conformal, Hierarchy, Panel, SeasonalNaive
+from calibre import SplitQuantile, WindowSum, forecast_origins
+from calibre.evaluate import coverage
 
 rng = np.random.default_rng(0)
 series = np.array(["a", "b", "c"])
@@ -21,21 +22,19 @@ hierarchy = Hierarchy.from_attributes(
     series, pd.DataFrame({"group": ["x", "x", "y"]}, index=series)
 )
 
-horizon = 7
 origins = np.arange(60, 113)  # each origin is the index of the last observed period
-run = forecast_origins(panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), origins, horizon)
-resid = run.residuals(hierarchy.summing @ panel.values)
+run = forecast_origins(panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), origins, 7)
+actuals = hierarchy.aggregate(panel.values)
 
-last = len(origins) - 1
-rows = resolved_rows(origins, last, horizon)
-half_width = width(resid, rows, level=0.9, window=28)
-upper = window_bound(run.points[last], resid, int(rows[-1]), 0.9, horizon, window=28)
+bands = Conformal(AbsoluteResidual(), SplitQuantile(window=28), level=0.9).replay(run, actuals)
+bound = Conformal(WindowSum(7), SplitQuantile(window=28), level=0.9).replay(run, actuals)
+print(coverage(bands.target, bands.lower, bands.upper))
 ```
 
 ## Concepts
 
-- **Panel**: bottom series values `[B, T]` on a complete calendar. Validated once,
-  then read-only.
+- **Panel**: bottom series values `[B, T]` on a complete calendar, with an optional
+  `censored` mask. Validated once, then read-only.
 - **Hierarchy**: node labels and the summing matrix `[N, B]`, bottoms first.
   `from_attributes` builds it from attribute columns, crossed when a level lists
   several, and drops an aggregate that repeats another node.
@@ -48,19 +47,59 @@ upper = window_bound(run.points[last], resid, int(rows[-1]), 0.9, horizon, windo
   returns base points `[S, H]`. Fitting never changes the forecaster.
 - **Reconciler**: maps base points `[S, H]` to node points `[N, H]`. `BottomUp`
   forecasts the bottoms, `Identity` and `WlsStruct` forecast every node.
-- **forecast_origins**: the one origin loop. It builds the windows, fits every
-  `refit_every` origins, and returns **Forecasts**: points `[O, N, H]` and residuals.
-- **Calibration**: `width` gives per-step two-sided bands, and `window_bound` gives a
-  one-sided bound on a multi-step total. Both read only residuals known at the origin.
+- **forecast_origins**: builds the windows, fits every `refit_every` origins, and
+  returns **Forecasts**: points `[O, N, H]`.
+- **Score**: how wrong a forecast was, in columns. `AbsoluteResidual` per step for a
+  band, `SignedResidual` per step for an upper bound, `WindowSum(steps)` for a bound on
+  a multi-step total.
+- **Calibrator**: from the scores known so far to a threshold per node and column.
+  `SplitQuantile`, and the online `ACI` and `QuantileTracker`.
+- **Conformal**: runs a score and a calibrator origin by origin. `step` is one origin,
+  `replay` is a backtest. It returns **Calibrated**: thresholds, bounds, targets,
+  and scores `[O, N, C]`.
+- **State**: a nested dict of numpy arrays. `flatten` gives one named array per key,
+  for any store.
 
 ```text
 Panel ─ Hierarchy ─▶ Window per origin ─ Forecaster.fit / Fitted.predict ─▶ base [S, H]
-base ─ Reconciler ─▶ points [O, N, H] ─ actuals ─▶ residuals ─ width / window_bound ─▶ bands
+base ─ Reconciler ─▶ points [O, N, H]
+points + actuals ─ Conformal(Score, Calibrator, level).step per origin ─▶ thresholds, bounds
+Calibrated ─ calibre.evaluate ─▶ coverage, width, interval score, pinball, cost
 ```
 
 Two rules hold everywhere. A model reads only its window, so a later value cannot
-change a point unless a covariate declares it known ahead. A band reads only residuals
-whose target is known at the origin.
+change a point unless a covariate declares it known ahead. A calibrator sees a score
+only once its target is known, and before the origin that knows it issues.
+
+## Write a calibrator
+
+A calibrator is three functions of an explicit state. `Conformal` handles the
+origins, the delays, and the indexing. This is the whole of a quantile tracker:
+
+```python
+import numpy as np
+
+
+class Tracker:
+    def __init__(self, lr):
+        self.lr = lr
+
+    def init(self, n_nodes, n_columns):
+        return {"q": np.zeros((n_nodes, n_columns))}
+
+    def update(self, state, feedback, level):
+        q = state["q"].copy()
+        for row, column in enumerate(feedback.column):  # one row = one origin, one column
+            miss = feedback.scores[row] > feedback.issued[row]
+            q[:, column] += self.lr * (miss - (1 - level))
+        return {"q": q}
+
+    def threshold(self, state, level):
+        return state["q"].astype(np.float32)
+```
+
+Keep the state in numpy arrays. Then a product can save it after each origin with
+`calibre.conformal.state.flatten` and continue from it.
 
 ## Models
 

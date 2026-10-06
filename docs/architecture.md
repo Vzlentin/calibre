@@ -6,9 +6,10 @@ Calibre is an open-source library of array functions for conformal forecasting:
 validated panel input, point forecasts, hierarchy reconciliation, and calibrated bands
 and bounds. [Semantics](semantics.md) defines the calibration rules.
 
-`forecast_origins` is the one origin loop: a pure function from a list of origins to
-points. It keeps no state between calls and stores nothing. The caller owns the
-origins and the residual array.
+There are two loops over origins. `forecast_origins` makes points, and
+`Conformal.replay` calibrates them. Neither stores anything. `Conformal.step` is one
+calibration origin: it takes a state and returns the next one, so a product can save
+the state between origins and continue later.
 
 ## Modules
 
@@ -21,10 +22,15 @@ origins and the residual array.
 | `forecast/origins.py` | `forecast_origins`, `Forecasts.residuals` | `panel`, `hierarchy`, `reconcile`, `forecast` |
 | `forecast/` adapters | `SeasonalNaive`, `StatsForecastModel`, `MLForecast`, `NeuralForecast` | `forecast` |
 | `forecast/_frames.py` | Long frames for the mlforecast and neuralforecast adapters | `forecast` |
-| `conformal.py` | Score quantiles, per-step bands, window-sum bounds | nothing |
+| `conformal/__init__.py` | `Score`, `Calibrator` protocols, `Feedback` | nothing |
+| `conformal/scores.py` | `AbsoluteResidual`, `SignedResidual`, `WindowSum` | `conformal` |
+| `conformal/quantile.py` | `score_quantile`, `retained_quantile`: rank, window, pooling | nothing |
+| `conformal/calibrators.py` | `SplitQuantile`, `ACI`, `QuantileTracker` | `conformal` |
+| `conformal/origins.py` | `Conformal` (`start`, `step`, `replay`), `Calibrated` | `conformal`, `forecast.origins` |
+| `conformal/state.py` | `flatten`, `unflatten` for storage | nothing |
+| `evaluate.py` | coverage, width, interval score, pinball, newsvendor cost | nothing |
 
-`conformal` does not depend on forecasting or hierarchy code. It only needs residuals
-and points. Forecast adapters can depend on vendor libraries, but not on calibration.
+`conformal` does not depend on hierarchy code. It needs points and actuals. Forecast adapters can depend on vendor libraries, but not on calibration.
 Each vendor library is an extra: `calibre[stats]`, `calibre[ml]`, `calibre[neural]`.
 `import calibre` needs none of them.
 
@@ -45,14 +51,23 @@ O origins, and H forecast steps.
 | Origins | `[O]` int | Increasing period indexes, each the last observed period |
 | Points | `[O, N, H]` | Reconciled points, owned by the caller |
 | Residuals | `[O, N, H]` | `actual - point`, NaN until the actual is known |
-| `resolved_rows` | `[H]` | Per step, the number of earlier origins whose target is complete |
-| `width` output | `[N, H]` float32 | Two-sided half-width, inf when not ready |
-| `window_bound` output | `[R]` | Upper bound on the total of the first steps, inf when not ready |
+| `Panel.censored` | `[B, T]` bool, optional | True where a value is a lower bound of the target |
+| `Score.cover` | `[C, H]` bool | Steps that each score column sums. C = H per step, 1 per window |
+| `Feedback.scores` | `[K, N]` | One row per newly known (issuing origin, column), in origin order |
+| Threshold | `[N, C]` float32 | Issued per origin. inf means not ready |
+| `Calibrated` arrays | `[O, N, C]` | Points, thresholds, bounds, targets, scores, and censored flags per column |
+| State | nested dict of arrays | `flatten` gives one named array per key |
 
-`width` and `window_bound` read only the first `rows` origins of the residual array.
-A caller that passes `resolved_rows(origins, index, horizon)` gets causal calibration
-for origin `index` even when later residuals are already filled in. Scores are not
-cached between calls.
+`Conformal.step` observes the periods since the last origin, scores the columns whose
+last covered step is now known, gives them to the calibrator with the thresholds issued
+for them, and only then issues for the new origin. Origins wait in a ring of slots,
+one per step up to the last scored step, so the driver state has a fixed shape.
+
+A call owns the state it receives: it can write into those arrays, and the caller
+continues with the returned state. A calibrator keeps its state in numpy arrays only,
+never fitted objects. Anything else it needs is recomputed from those arrays. Every
+state array keeps the node axis, so a product can shard state by node ranges unless
+`groups` pools nodes across shards.
 
 A model sees data only through `Window`. `forecast_origins` builds each window by
 slicing, so a value after the origin cannot reach a model, except a covariate marked
@@ -74,8 +89,9 @@ paths work on typed arrays, with no per-cell objects, hashes, or serialization.
 
 | Operation | Cost |
 |---|---|
-| `width` | One sort of a `[K, N]` slice per step, `O(H * N * K log K)`. No `[K, N, H]` copy |
-| `window_bound` | One `[K, R]` sum and sort |
+| `SplitQuantile` threshold | One sort of a contiguous `[K, N]` slice per column, `O(C * N * K log K)` |
+| `Conformal.replay` at M5 | 42,840 nodes, 64 origins, 28 steps, window 28: 3.5 s, 7.6 GB peak, against 2.5 s and 9.9 GB for the earlier stateless functions, with identical thresholds |
+| Saved state at M5 | `WindowSum(7)` with `SplitQuantile(window=28, capacity=40)`: 26 MB |
 | Bottom-up | `O(nnz(S) * H)` per origin |
 | `WlsStruct` | Dense Cholesky of the `A x A` aggregate system once per hierarchy, A = N - B. At M5 with 5 single-attribute levels this is 3,073 x 3,073 float64, 75 MB. With the 12 standard levels it is 12,350 x 12,350, 1.2 GB, factored in 2.3 s |
 | `StatsForecastModel` | One Python call per series and origin |

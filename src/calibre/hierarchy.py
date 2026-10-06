@@ -46,6 +46,14 @@ class Hierarchy:
     def n_bottom(self) -> int:
         return self.summing.shape[1]
 
+    def aggregate(self, values: np.ndarray) -> np.ndarray:
+        """Node values `[N, T]` float32 from bottom values `[B, T]`: sums."""
+        return np.asarray(self.summing @ values, dtype=np.float32)
+
+    def any_bottom(self, flags: np.ndarray) -> np.ndarray:
+        """Node flags `[N, T]`: True when any bottom series of the node is True."""
+        return np.asarray(self.summing @ flags.astype(np.float32)) > 0
+
     @classmethod
     def flat(cls, series: np.ndarray) -> "Hierarchy":
         """Bottom series only, no aggregates."""

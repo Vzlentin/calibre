@@ -52,3 +52,13 @@ def test_panel_rejects_empty_input_and_is_read_only():
     assert np.isfinite(panel.values).all()
     with pytest.raises(ValueError):
         panel.values[0, 0] = np.nan
+
+
+def test_panel_censored_mask_is_checked_and_read_only():
+    periods = pd.date_range("2020-01-01", periods=2)
+    panel = Panel(np.array(["a"]), periods, np.ones((1, 2)), "D", censored=[[False, True]])
+    assert panel.censored.dtype == bool and panel.censored.tolist() == [[False, True]]
+    with pytest.raises(ValueError):
+        panel.censored[0, 0] = True
+    with pytest.raises(ValueError, match="censored shape"):
+        Panel(np.array(["a"]), periods, np.ones((1, 2)), "D", censored=np.zeros((1, 3)))
