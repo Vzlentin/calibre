@@ -1,4 +1,4 @@
-"""The ledger: issued forecasts that wait for their targets, and the order they mature in.
+"""The ledger: issued forecasts that wait for their targets, and the order they become known.
 
 An h-step forecast is known h periods after its origin. The ledger keeps the issued
 points and thresholds until then, and releases a column only when the last step it
@@ -17,7 +17,7 @@ from calibre.conformal.calibrators.base import State
 
 
 @dataclass(frozen=True)
-class Matured:
+class Known:
     """Columns whose targets became known at one origin, in origin order.
 
     Each row `[K]` is one column of one issuing origin. `target`, `point`, `issued`,
@@ -32,9 +32,14 @@ class Matured:
     censored: np.ndarray
 
 
+def last_step(cover: np.ndarray) -> np.ndarray:
+    """Last step that each column of `cover` `[C, H]` covers, counted from 1."""
+    return (cover * np.arange(1, cover.shape[1] + 1)).max(axis=1)
+
+
 def reach(cover: np.ndarray) -> int:
     """Number of steps up to the last step that any column covers."""
-    return int(np.flatnonzero(cover.any(axis=0))[-1]) + 1
+    return int(last_step(cover).max())
 
 
 def initial_state(n_nodes: int, cover: np.ndarray) -> State:
@@ -47,26 +52,29 @@ def initial_state(n_nodes: int, cover: np.ndarray) -> State:
         "actual": np.full((slots, n_nodes, slots), np.nan, dtype=np.float32),
         "censored": np.zeros((slots, n_nodes, slots), dtype=bool),
         "issued": np.zeros((slots, n_nodes, len(cover)), dtype=np.float32),
-        "known": np.zeros((slots, len(cover)), dtype=bool),
+        "released": np.zeros((slots, len(cover)), dtype=bool),
     }
 
 
 def observe(
     state: State, cover: np.ndarray, origin: int, actuals: np.ndarray, censored: np.ndarray
-) -> tuple[State, Matured | None]:
+) -> tuple[State, Known | None]:
     """Record the periods that end at `origin`, and release the columns now known.
 
     `actuals` is `[N, k]`, the node values of the k periods after the previous origin.
     On the first call, k can be any length.
     """
     last = int(state["last"])
-    n_new = actuals.shape[1]
-    if last >= 0 and (origin <= last or n_new != origin - last):
+    if last >= 0 and (origin <= last or actuals.shape[1] != origin - last):
         raise ValueError(f"origin {origin} after {last} needs {origin - last} new periods")
-    _record(state, actuals, censored, origin - n_new, origin)
-    matured = _release(state, cover[:, : reach(cover)], origin)
+    cover = cover[:, : state["point"].shape[2]]
+    _record(state, origin - actuals.shape[1] + 1, actuals, censored)
+    rows, columns = _due(state, cover, origin)
+    known = _sum(state, cover, rows, columns) if len(rows) else None
+    state["released"][rows, columns] = True
+    state["origin"][state["released"].all(axis=1)] = -1
     state["last"] = np.array(origin, dtype=np.int64)
-    return state, matured
+    return state, known
 
 
 def issue(state: State, origin: int, points: np.ndarray, threshold: np.ndarray) -> State:
@@ -81,52 +89,38 @@ def issue(state: State, origin: int, points: np.ndarray, threshold: np.ndarray) 
     state["actual"][slot] = np.nan
     state["censored"][slot] = False
     state["issued"][slot] = threshold
-    state["known"][slot] = False
+    state["released"][slot] = False
     return state
 
 
-def _record(
-    state: State, actuals: np.ndarray, censored: np.ndarray, last: int, origin: int
-) -> None:
-    """Write the newly observed periods into the targets of waiting origins, in place."""
-    slots = state["point"].shape[2]
-    targets = state["origin"][:, None] + np.arange(1, slots + 1)
+def _record(state: State, first: int, actuals: np.ndarray, censored: np.ndarray) -> None:
+    """Write the periods from `first` into the targets of the waiting origins."""
+    steps = np.arange(1, state["point"].shape[2] + 1)
+    periods = state["origin"][:, None] + steps - first
     waiting = (state["origin"] >= 0)[:, None]
-    rows, steps = np.nonzero(waiting & (targets > last) & (targets <= origin))
-    periods = targets[rows, steps] - last - 1
-    state["actual"][rows, :, steps] = actuals[:, periods].T
-    state["censored"][rows, :, steps] = censored[:, periods].T
+    rows, columns = np.nonzero(waiting & (periods >= 0) & (periods < actuals.shape[1]))
+    periods = periods[rows, columns]
+    state["actual"][rows, :, columns] = actuals[:, periods].T
+    state["censored"][rows, :, columns] = censored[:, periods].T
 
 
-def _release(state: State, cover: np.ndarray, origin: int) -> Matured | None:
-    """Sum the columns whose last step is now known, and free finished slots."""
-    last_step = cover.shape[1] - np.argmax(cover[:, ::-1], axis=1)
-    waiting = state["origin"] >= 0
-    known = waiting[:, None] & (state["origin"][:, None] + last_step <= origin)
-    new = known & ~state["known"]
-    rows, columns = np.nonzero(new)
+def _due(state: State, cover: np.ndarray, origin: int) -> tuple[np.ndarray, np.ndarray]:
+    """Slots and columns whose last covered step is now known, in origin order."""
+    waiting = (state["origin"] >= 0)[:, None]
+    ended = state["origin"][:, None] + last_step(cover) <= origin
+    rows, columns = np.nonzero(waiting & ended & ~state["released"])
     order = np.lexsort((columns, state["origin"][rows]))
-    rows, columns = rows[order], columns[order]
-    matured = None
-    if len(rows):
-        n_nodes = state["point"].shape[1]
-        target = np.empty((len(rows), n_nodes), dtype=np.float32)
-        point = np.empty((len(rows), n_nodes), dtype=np.float32)
-        flags = np.empty((len(rows), n_nodes), dtype=bool)
-        for column in np.unique(columns):
-            these = np.flatnonzero(columns == column)
-            steps = np.flatnonzero(cover[column])
-            target[these] = state["actual"][rows[these]][:, :, steps].sum(axis=-1)
-            point[these] = state["point"][rows[these]][:, :, steps].sum(axis=-1)
-            flags[these] = state["censored"][rows[these]][:, :, steps].any(axis=-1)
-        matured = Matured(
-            origin=state["origin"][rows],
-            column=columns,
-            target=target,
-            point=point,
-            issued=state["issued"][rows, :, columns],
-            censored=flags,
-        )
-    state["known"] |= new
-    state["origin"][waiting & state["known"].all(axis=1)] = -1
-    return matured
+    return rows[order], columns[order]
+
+
+def _sum(state: State, cover: np.ndarray, rows: np.ndarray, columns: np.ndarray) -> Known:
+    """Column sums of the targets and points of the given slots."""
+    covered = cover[columns][:, None, :]
+    return Known(
+        origin=state["origin"][rows],
+        column=columns,
+        target=np.where(covered, state["actual"][rows], 0).sum(axis=-1),
+        point=np.where(covered, state["point"][rows], 0).sum(axis=-1),
+        issued=state["issued"][rows, :, columns],
+        censored=(covered & state["censored"][rows]).any(axis=-1),
+    )

@@ -32,7 +32,7 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `conformal/calibrators/base.py` | `Calibrator` and `QuantileCalibrator` contracts, `Feedback`, `State`, `Level`, `check_level` |
 | `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: rank, window, pooling |
 | `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker` |
-| `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Matured` |
+| `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Known` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
 | `backtest/forecasts.py` | `rolling_forecasts`, `Forecasts.residuals` |

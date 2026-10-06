@@ -55,15 +55,15 @@ def step(
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
     cover = target.cover(points.shape[1])
-    ledger_state, matured = ledger.observe(state["ledger"], cover, origin, actuals, censored)
+    ledger_state, known = ledger.observe(state["ledger"], cover, origin, actuals, censored)
     calibrator_state = state["calibrator"]
-    if matured is not None:
+    if known is not None:
         feedback = Feedback(
-            origin=matured.origin,
-            column=matured.column,
-            scores=score.score(matured.target, matured.point).astype(np.float32),
-            issued=matured.issued,
-            censored=matured.censored,
+            origin=known.origin,
+            column=known.column,
+            scores=score.score(known.target, known.point).astype(np.float32),
+            issued=known.issued,
+            censored=known.censored,
         )
         calibrator_state = calibrator.update(calibrator_state, feedback)
     threshold = calibrator.threshold(calibrator_state)
