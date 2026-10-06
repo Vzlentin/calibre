@@ -64,8 +64,7 @@ only once its target is known, and before the origin that knows it issues.
 
 A calibrator owns its target, a level or a loss, and is three functions of an explicit
 state. `calibre.online` handles the origins, the delays, and the indexing. A new method
-is one file in `calibre/conformal/calibrators/` that imports only `calibrators.base`,
-`calibrators.ranks`, and the `Loss` contract. This is the whole of a quantile tracker:
+is one file in `calibre/conformal/calibrators/`. This is the whole of a quantile tracker:
 
 ```python
 import numpy as np
