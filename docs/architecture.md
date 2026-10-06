@@ -54,8 +54,7 @@ Each package imports only these Calibre packages.
 | `decision` | nothing |
 | `metrics` | nothing |
 
-A calibration method is one file in `conformal/calibrators/`. It imports only
-`calibrators.base`, `calibrators.ranks`, and the `Loss` contract in `conformal.losses`.
+A calibration method is one file in `conformal/calibrators/`.
 
 `conformal` and `online` do not depend on hierarchy code. They need points and actuals.
 
