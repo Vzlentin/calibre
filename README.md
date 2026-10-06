@@ -34,51 +34,31 @@ print(coverage(bands.target, bands.lower, bands.upper))
 
 ## Concepts
 
-- **Panel**: bottom series values `[B, T]` on a complete calendar, with an optional
-  `censored` mask. Validated once, then read-only.
-- **Hierarchy**: node labels and the summing matrix `[N, B]`, bottoms first.
-  `from_attributes` builds it from attribute columns, crossed when a level lists
-  several, and drops an aggregate that repeats another node.
-- **Covariate**: an input aligned on the panel calendar. Its shape gives the kind:
-  `[B, 1]` static, `[1, L]` calendar, `[B, L]` dynamic. It declares if it is known
-  ahead and how aggregate nodes get it, `sum` or `mean`.
-- **Window**: what a model can see at one origin. History through the origin,
-  covariates through the origin, and known-ahead covariates through the last step.
-- **Forecaster**: `fit(window)` returns a **Fitted** model, and `predict(window)`
-  returns base points `[S, H]`. Fitting never changes the forecaster.
-- **Reconciler**: maps base points `[S, H]` to node points `[N, H]`. `BottomUp`
-  forecasts the bottoms, `Identity` and `WlsStruct` forecast every node.
-- **rolling_forecasts**: builds the windows, fits every `refit_every` origins, and
-  returns **Forecasts**: points `[O, N, H]`.
-- **Target**: which quantity each column bounds. `Step` gives one column per step,
-  `LeadTime(steps)` one column for the total over the first steps.
-- **Score**: how wrong a point was on a target column, and the bound that a threshold
-  gives. `Absolute` for a two-sided band, `Signed` for an upper bound.
-- **Calibrator**: from the scores known so far to a threshold per node and column, at
-  its own target level: a scalar, or `[N, C]` per node and column. `SplitQuantile`, and
-  the online `ACI` and `QuantileTracker`. A **QuantileCalibrator** also gives its
-  threshold at any other level, which `ACI` needs from its base.
-- **step**: one origin of online calibration. It gives the calibrator the scores whose
-  targets are now known, then issues an **Issue**: thresholds and bounds `[N, C]`.
-- **replay**: `step` over the origins of a backtest. It returns a **Replay**:
-  thresholds, bounds, targets, and scores `[O, N, C]`.
-- **Decision**: `critical_ratio(holding, shortage)` gives the newsvendor level for a
-  calibrator, per node when the costs are per node. `order_up_to` turns an upper bound into an order, and `settle` runs one
-  period of lost-sales inventory and returns its cost.
-- **State**: a nested dict of numpy arrays. `flatten` gives one named array per key,
-  for any store.
+Shapes use these axes: B bottom series, T periods, N nodes with bottoms first,
+S forecast series (B for `BottomUp`, N otherwise), O origins, H forecast steps, and
+C target columns (H for `Step`, 1 for `LeadTime`).
 
-```text
-Panel ─ Hierarchy ─▶ Window per origin ─ Forecaster.fit / Fitted.predict ─▶ base [S, H]
-base ─ Reconciler ─▶ points [O, N, H]
-points + actuals ─ step(Target, Score, Calibrator) per origin ─▶ thresholds, bounds
-upper bound ─ order_up_to ─▶ order ─ settle ─▶ holding and shortage cost
-Replay ─ calibre.metrics ─▶ coverage, width, interval score, pinball, cost
+```mermaid
+flowchart LR
+    data["Panel [B, T]<br/>Hierarchy [N, B]"] --> forecaster[Forecaster]
+    forecaster -- "base [S, H]" --> reconciler[Reconciler]
+    reconciler -- "points [O, N, H]" --> calibrator[Calibrator]
+    calibrator -- "bounds [O, N, C]" --> decision[order_up_to, settle]
 ```
+
+| Stage | Names |
+|---|---|
+| Data | `Panel`, `Hierarchy`, `Covariate` |
+| Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`), `step`, `replay` |
+| Decide | `critical_ratio`, `order_up_to`, `settle` |
+| Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
 Two rules hold everywhere. A model reads only its window, so a later value cannot
 change a point unless a covariate declares it known ahead. A calibrator sees a score
 only once its target is known, and before the origin that knows it issues.
+
+[Architecture](docs/architecture.md) has the shapes and the modules.
 
 ## Write a calibrator
 
