@@ -26,9 +26,9 @@ origins = np.arange(60, 113)  # each origin is the index of the last observed pe
 run = rolling_forecasts(panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), origins, 7)
 actuals = hierarchy.aggregate(panel.values)
 
-calibrator = SplitQuantile(window=28)
-bands = replay(run, actuals, target=Step(), score=Absolute(), calibrator=calibrator, level=0.9)
-bound = replay(run, actuals, target=LeadTime(7), score=Signed(), calibrator=calibrator, level=0.9)
+calibrator = SplitQuantile(0.9, window=28)
+bands = replay(run, actuals, target=Step(), score=Absolute(), calibrator=calibrator)
+bound = replay(run, actuals, target=LeadTime(7), score=Signed(), calibrator=calibrator)
 print(coverage(bands.target, bands.lower, bands.upper))
 ```
 
@@ -54,14 +54,16 @@ print(coverage(bands.target, bands.lower, bands.upper))
   `LeadTime(steps)` one column for the total over the first steps.
 - **Score**: how wrong a point was on a target column, and the bound that a threshold
   gives. `Absolute` for a two-sided band, `Signed` for an upper bound.
-- **Calibrator**: from the scores known so far to a threshold per node and column.
-  `SplitQuantile`, and the online `ACI` and `QuantileTracker`.
+- **Calibrator**: from the scores known so far to a threshold per node and column, at
+  its own target level: a scalar, or `[N, C]` per node and column. `SplitQuantile`, and
+  the online `ACI` and `QuantileTracker`. A **QuantileCalibrator** also gives its
+  threshold at any other level, which `ACI` needs from its base.
 - **step**: one origin of online calibration. It gives the calibrator the scores whose
   targets are now known, then issues an **Issue**: thresholds and bounds `[N, C]`.
 - **replay**: `step` over the origins of a backtest. It returns a **Replay**:
   thresholds, bounds, targets, and scores `[O, N, C]`.
 - **Decision**: `critical_ratio(holding, shortage)` gives the newsvendor level for a
-  calibrator. `order_up_to` turns an upper bound into an order, and `settle` runs one
+  calibrator, per node when the costs are per node. `order_up_to` turns an upper bound into an order, and `settle` runs one
   period of lost-sales inventory and returns its cost.
 - **State**: a nested dict of numpy arrays. `flatten` gives one named array per key,
   for any store.
@@ -69,7 +71,7 @@ print(coverage(bands.target, bands.lower, bands.upper))
 ```text
 Panel ─ Hierarchy ─▶ Window per origin ─ Forecaster.fit / Fitted.predict ─▶ base [S, H]
 base ─ Reconciler ─▶ points [O, N, H]
-points + actuals ─ step(Target, Score, Calibrator, level) per origin ─▶ thresholds, bounds
+points + actuals ─ step(Target, Score, Calibrator) per origin ─▶ thresholds, bounds
 upper bound ─ order_up_to ─▶ order ─ settle ─▶ holding and shortage cost
 Replay ─ calibre.metrics ─▶ coverage, width, interval score, pinball, cost
 ```
@@ -80,7 +82,8 @@ only once its target is known, and before the origin that knows it issues.
 
 ## Write a calibrator
 
-A calibrator is three functions of an explicit state. `calibre.online` handles the
+A calibrator owns its target level and is three functions of an explicit state.
+`calibre.online` handles the
 origins, the delays, and the indexing. A new method is one file in
 `calibre/conformal/calibrators/` that imports only `calibrators.base` and
 `calibrators.ranks`. This is the whole of a quantile tracker:
@@ -92,20 +95,21 @@ from calibre.conformal.calibrators.base import Calibrator
 
 
 class Tracker(Calibrator):
-    def __init__(self, lr):
+    def __init__(self, level, lr):
+        self.level = level
         self.lr = lr
 
     def init(self, n_nodes, n_columns):
         return {"q": np.zeros((n_nodes, n_columns))}
 
-    def update(self, state, feedback, level):
+    def update(self, state, feedback):
         q = state["q"].copy()
         for row, column in enumerate(feedback.column):  # one row = one origin, one column
             miss = feedback.scores[row] > feedback.issued[row]
-            q[:, column] += self.lr * (miss - (1 - level))
+            q[:, column] += self.lr * (miss - (1 - self.level))
         return {"q": q}
 
-    def threshold(self, state, level):
+    def threshold(self, state):
         return state["q"].astype(np.float32)
 ```
 

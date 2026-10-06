@@ -17,13 +17,13 @@ class CensoredCount(Calibrator):
     def init(self, n_nodes: int, n_columns: int) -> State:
         return {"count": np.zeros((n_nodes, n_columns))}
 
-    def update(self, state: State, feedback: Feedback, level: float) -> State:
+    def update(self, state: State, feedback: Feedback) -> State:
         count = state["count"].copy()
         for row, column in enumerate(feedback.column):
             count[:, column] += feedback.censored[row]
         return {"count": count}
 
-    def threshold(self, state: State, level: float) -> np.ndarray:
+    def threshold(self, state: State) -> np.ndarray:
         return state["count"].astype(np.float32)
 
 
@@ -42,8 +42,7 @@ def test_gapped_origins_see_only_targets_known_at_the_origin():
         ramp(200),
         target=Step(),
         score=Signed(),
-        calibrator=SplitQuantile(),
-        level=0.5,
+        calibrator=SplitQuantile(0.5),
     )
     scores = run.state["calibrator"]["scores"]  # [C, R, N]
     known = np.isfinite(scores[:, :, 0]).sum(axis=1)
@@ -55,11 +54,11 @@ def test_gapped_origins_see_only_targets_known_at_the_origin():
 def test_a_later_actual_never_changes_an_issued_threshold():
     origins = np.arange(20, 60)
     actuals = np.random.default_rng(0).normal(size=(3, 80)).astype(np.float32)
-    setup = {"target": Step(), "score": Absolute(), "calibrator": SplitQuantile(window=10)}
-    before = replay(zero_forecasts(origins, 3, 4), actuals, **setup, level=0.8)
+    setup = {"target": Step(), "score": Absolute(), "calibrator": SplitQuantile(0.8, window=10)}
+    before = replay(zero_forecasts(origins, 3, 4), actuals, **setup)
     changed = actuals.copy()
     changed[:, 45] = 1000
-    after = replay(zero_forecasts(origins, 3, 4), changed, **setup, level=0.8)
+    after = replay(zero_forecasts(origins, 3, 4), changed, **setup)
     # Period 45 is first known at origin 45, index 25, and that origin already uses it.
     np.testing.assert_array_equal(after.threshold[:25], before.threshold[:25])
     assert not np.array_equal(after.threshold[25], before.threshold[25])
@@ -72,8 +71,7 @@ def test_a_lead_time_score_is_known_only_when_its_last_step_is():
         ramp(40),
         target=LeadTime(3),
         score=Signed(),
-        calibrator=SplitQuantile(),
-        level=0.5,
+        calibrator=SplitQuantile(0.5),
     )
     # Origin 10 + 3 steps is known at origin 13: 7 of 10 origins are scored by the end.
     assert np.isfinite(run.state["calibrator"]["scores"]).sum() == 7
@@ -92,7 +90,6 @@ def test_feedback_marks_a_lead_time_censored_when_any_step_is():
         target=LeadTime(2),
         score=Signed(),
         calibrator=CensoredCount(),
-        level=0.5,
         censored=censored,
     )
     # Period 12 is in the windows of origins 10 and 11. They are known at origins 12
@@ -109,8 +106,7 @@ def test_a_saved_and_reloaded_state_continues_exactly():
     setup = {
         "target": Step(),
         "score": Absolute(),
-        "calibrator": ACI(SplitQuantile(window=20), gamma=0.05),
-        "level": 0.9,
+        "calibrator": ACI(SplitQuantile(0.9, window=20), gamma=0.05),
     }
     whole = replay(Forecasts(origins, points), actuals, **setup)
 
@@ -130,7 +126,7 @@ def test_a_saved_and_reloaded_state_continues_exactly():
 
 
 def test_step_needs_every_period_since_the_last_origin():
-    setup = {"target": Step(), "score": Signed(), "calibrator": SplitQuantile(), "level": 0.5}
+    setup = {"target": Step(), "score": Signed(), "calibrator": SplitQuantile(0.5)}
     state = start(setup["target"], setup["calibrator"], 1, 2)
     state, _ = step(state, 10, np.zeros((1, 2)), np.zeros((1, 11)), **setup)
     with pytest.raises(ValueError, match="needs 3 new periods"):
@@ -145,8 +141,7 @@ def test_covered_matches_the_issued_interval():
         actuals,
         target=Step(),
         score=Absolute(),
-        calibrator=SplitQuantile(),
-        level=0.8,
+        calibrator=SplitQuantile(0.8),
     )
     inside = (run.lower <= run.target) & (run.target <= run.upper)
     known = np.isfinite(run.target)

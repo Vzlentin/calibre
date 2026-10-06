@@ -34,10 +34,10 @@ actuals = hierarchy.aggregate(data.panel.values)
 censored = hierarchy.any_bottom(data.panel.censored)
 
 calibrators = {
-    "split": SplitQuantile(window=52),
-    "split-pooled": SplitQuantile(window=52, groups=hierarchy.level),
-    "aci": ACI(SplitQuantile(window=52), gamma=0.01),
-    "tracker": QuantileTracker(lr=0.5),
+    "split": SplitQuantile(level, window=52),
+    "split-pooled": SplitQuantile(level, window=52, groups=hierarchy.level),
+    "aci": ACI(SplitQuantile(level, window=52), gamma=0.01),
+    "tracker": QuantileTracker(level, lr=0.5),
 }
 table, runs = compare(
     run, actuals, calibrators, LeadTime(vn2.PROTECTION), Signed(), level, censored

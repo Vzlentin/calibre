@@ -16,6 +16,9 @@ import numpy as np
 State = dict[str, Any]
 """Nested dict of numpy arrays. `calibre.online.state` flattens it for storage."""
 
+Level = float | np.ndarray
+"""Target level: a scalar, or `[N, C]` per node and column. `[N, 1]` is one per node."""
+
 
 @dataclass(frozen=True)
 class Feedback:
@@ -43,14 +46,39 @@ class Feedback:
 
 
 class Calibrator(ABC):
+    """A calibration method. It owns its target level, set at construction."""
+
     @abstractmethod
     def init(self, n_nodes: int, n_columns: int) -> State:
         """Return the empty state."""
 
     @abstractmethod
-    def update(self, state: State, feedback: Feedback, level: float) -> State:
+    def update(self, state: State, feedback: Feedback) -> State:
         """Return the state after the feedback. It can reuse the input arrays."""
 
     @abstractmethod
-    def threshold(self, state: State, level: float) -> np.ndarray:
-        """Return thresholds `[N, C]`. inf means not ready."""
+    def threshold(self, state: State) -> np.ndarray:
+        """Return thresholds `[N, C]` at the target level. inf means not ready."""
+
+
+class QuantileCalibrator(Calibrator):
+    """A calibrator that can give its threshold at any level, not only its own.
+
+    Wrappers such as `ACI` move the level and ask the base for the threshold there.
+    """
+
+    level: Level
+
+    @abstractmethod
+    def threshold_at(self, state: State, level: Level) -> np.ndarray:
+        """Return thresholds `[N, C]` at `level` instead of the target level."""
+
+
+def check_level(level: Level) -> Level:
+    """A scalar or `[N, C]` level strictly between zero and one."""
+    values = np.asarray(level, dtype=np.float64)
+    if values.ndim not in (0, 2):
+        raise ValueError(f"level must be a scalar or [N, C], got shape {values.shape}")
+    if not np.isfinite(values).all() or ((values <= 0) | (values >= 1)).any():
+        raise ValueError("level must be strictly between zero and one")
+    return float(values) if values.ndim == 0 else values

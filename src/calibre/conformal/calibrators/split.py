@@ -2,12 +2,18 @@
 
 import numpy as np
 
-from calibre.conformal.calibrators.base import Calibrator, Feedback, State
+from calibre.conformal.calibrators.base import (
+    Feedback,
+    Level,
+    QuantileCalibrator,
+    State,
+    check_level,
+)
 from calibre.conformal.calibrators.ranks import retained_quantile
 
 
-class SplitQuantile(Calibrator):
-    """Split conformal quantile of the known scores, per column.
+class SplitQuantile(QuantileCalibrator):
+    """Split conformal quantile of the known scores at `level`, per column.
 
     `window` keeps the last resolved origins per pool, `groups` pools nodes (one
     integer per node). `capacity` bounds the stored origins, so the saved state has a
@@ -17,6 +23,7 @@ class SplitQuantile(Calibrator):
 
     def __init__(
         self,
+        level: Level,
         window: int | None = None,
         groups: np.ndarray | None = None,
         capacity: int | None = None,
@@ -25,6 +32,7 @@ class SplitQuantile(Calibrator):
             raise ValueError(f"window must be at least 1, got {window}")
         if capacity is not None and window is not None and capacity < window:
             raise ValueError(f"capacity {capacity} is smaller than window {window}")
+        self.level = check_level(level)
         self.window = window
         self.groups = None if groups is None else np.asarray(groups)
         self.capacity = capacity
@@ -38,7 +46,7 @@ class SplitQuantile(Calibrator):
             "scores": np.empty((n_columns, 0, n_nodes), dtype=np.float32),
         }
 
-    def update(self, state: State, feedback: Feedback, level: float) -> State:
+    def update(self, state: State, feedback: Feedback) -> State:
         for origin in np.unique(feedback.origin):
             state, _ = _row(state, int(origin), self.capacity)
         size = int(state["size"])
@@ -47,8 +55,10 @@ class SplitQuantile(Calibrator):
         state["known"][rows, feedback.column] = True
         return state
 
-    def threshold(self, state: State, level: float | np.ndarray) -> np.ndarray:
-        """`level` is a scalar or one value per node and column."""
+    def threshold(self, state: State) -> np.ndarray:
+        return self.threshold_at(state, self.level)
+
+    def threshold_at(self, state: State, level: Level) -> np.ndarray:
         size = int(state["size"])
         n_columns, _, n_nodes = state["scores"].shape
         levels = np.broadcast_to(np.asarray(level, dtype=np.float64), (n_nodes, n_columns))

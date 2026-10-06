@@ -24,7 +24,8 @@ def compare(
 
     `by` labels nodes, for example `hierarchy.level`, to get one row per method and
     label. A two-sided score reports coverage, width, and interval score. A one-sided
-    upper bound reports coverage and the pinball loss of the bound at `level`.
+    upper bound reports coverage and the pinball loss of the bound at `level`, the level
+    that the calibrators target.
     `ready` is the share of cells with a finite threshold. The runs are returned too.
     """
     rows, runs = [], {}
@@ -36,7 +37,6 @@ def compare(
             target=target,
             score=score,
             calibrator=calibrator,
-            level=level,
             censored=censored,
         )
         runs[name] = run

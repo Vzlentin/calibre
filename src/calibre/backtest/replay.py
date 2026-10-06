@@ -43,7 +43,6 @@ def replay(
     target: Target,
     score: Score,
     calibrator: Calibrator,
-    level: float,
     censored: np.ndarray | None = None,
 ) -> Replay:
     """Run `calibre.online.step` at each origin of `forecasts` on node actuals `[N, T]`."""
@@ -64,7 +63,6 @@ def replay(
             target=target,
             score=score,
             calibrator=calibrator,
-            level=level,
             censored=censored[:, seen],
         )
         issued.append(out)

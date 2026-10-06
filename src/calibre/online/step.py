@@ -43,7 +43,6 @@ def step(
     target: Target,
     score: Score,
     calibrator: Calibrator,
-    level: float,
     censored: np.ndarray | None = None,
 ) -> tuple[State, Issue]:
     """Observe the periods up to `origin`, update the calibrator, and issue for `points`.
@@ -66,8 +65,8 @@ def step(
             issued=matured.issued,
             censored=matured.censored,
         )
-        calibrator_state = calibrator.update(calibrator_state, feedback, level)
-    threshold = calibrator.threshold(calibrator_state, level)
+        calibrator_state = calibrator.update(calibrator_state, feedback)
+    threshold = calibrator.threshold(calibrator_state)
     point = columns(points.astype(np.float32), cover)
     lower, upper = score.bound(point, threshold)
     ledger_state = ledger.issue(ledger_state, origin, points, threshold)

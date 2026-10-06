@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from calibre.conformal import Calibrator, Score, Target
+from calibre.conformal import Calibrator, QuantileCalibrator, Score, Target
 from calibre.forecast import Fitted, Forecaster, Reconciler
 
 SOURCE = Path(__file__).parent.parent / "src" / "calibre"
@@ -62,7 +62,9 @@ def test_no_module_has_a_name_without_content():
     assert not [path for path in SOURCE.rglob("*.py") if path.stem in vague]
 
 
-@pytest.mark.parametrize("contract", [Target, Score, Calibrator, Forecaster, Fitted, Reconciler])
+@pytest.mark.parametrize(
+    "contract", [Target, Score, Calibrator, QuantileCalibrator, Forecaster, Fitted, Reconciler]
+)
 def test_contracts_hold_only_abstract_methods(contract):
     methods = {name for name, value in vars(contract).items() if inspect.isfunction(value)}
-    assert methods == set(contract.__abstractmethods__)
+    assert methods <= set(contract.__abstractmethods__)

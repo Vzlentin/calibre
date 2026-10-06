@@ -29,7 +29,7 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `forecast/reconcile.py` | `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
 | `conformal/scores.py` | `Score` contract, `Absolute`, `Signed` |
-| `conformal/calibrators/base.py` | `Calibrator` contract, `Feedback`, `State` |
+| `conformal/calibrators/base.py` | `Calibrator` and `QuantileCalibrator` contracts, `Feedback`, `State`, `Level`, `check_level` |
 | `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: rank, window, pooling |
 | `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Matured` |
@@ -93,6 +93,7 @@ O origins, and H forecast steps.
 | `Panel.censored` | `[B, T]` bool, optional | True where a value is a lower bound of the target |
 | `Target.cover` | `[C, H]` bool | Steps that each target column sums. C = H for `Step`, 1 for `LeadTime` |
 | `Feedback.scores` | `[K, N]` | One row per newly known (issuing origin, column), in origin order |
+| Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
 | Threshold | `[N, C]` float32 | Issued per origin. inf means not ready |
 | `Replay` arrays | `[O, N, C]` | Points, thresholds, bounds, targets, scores, and censored flags per column |
 | State | nested dict of arrays | `flatten` gives one named array per key |
