@@ -4,11 +4,39 @@ version = "0.1.0"
 description = "Conformal forecasting: point forecasts, hierarchy reconciliation, and calibrated bands."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Valentin Dusserre", email = "valentindusserre@gmail.com" }]
+keywords = [
+    "conformal prediction",
+    "forecasting",
+    "time series",
+    "hierarchical reconciliation",
+    "prediction intervals",
+    "inventory",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
 dependencies = [
     "numpy",
     "pandas",
     "scipy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Vzlentin/calibre"
+Repository = "https://github.com/Vzlentin/calibre"
+Issues = "https://github.com/Vzlentin/calibre/issues"
+Documentation = "https://github.com/Vzlentin/calibre/tree/main/docs"
 
 [project.optional-dependencies]
 stats = ["statsforecast"]

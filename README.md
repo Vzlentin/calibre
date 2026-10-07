@@ -1,8 +1,29 @@
 # Calibre
 
+[![CI](https://github.com/Vzlentin/calibre/actions/workflows/ci.yml/badge.svg)](https://github.com/Vzlentin/calibre/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
+
 Calibre is a conformal forecasting library for panels of time series. It makes point
 forecasts at many origins, reconciles them over a hierarchy, and calibrates bands and
 bounds from out-of-sample residuals.
+
+## Install
+
+Calibre is not on PyPI yet. Install it from GitHub:
+
+```sh
+pip install "calibre @ git+https://github.com/Vzlentin/calibre.git"
+# or
+uv add "calibre @ git+https://github.com/Vzlentin/calibre.git"
+```
+
+The vendor model adapters need an extra: `stats` (statsforecast), `ml` (mlforecast), or
+`neural` (neuralforecast).
+
+```sh
+pip install "calibre[stats] @ git+https://github.com/Vzlentin/calibre.git"
+```
 
 ## Quick start
 
@@ -158,3 +179,9 @@ uv run ruff format --check .
 uv run ty check src/
 uv build --no-sources
 ```
+
+See [Contributing](CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE)
