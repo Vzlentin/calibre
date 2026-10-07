@@ -69,6 +69,7 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 | `bench/vn2.py` | VN2 files to `Panel` with the out-of-stock mask, hierarchy, and stock. `play`: the six-decision protocol |
 | `bench/m5.py` | M5 files to `Panel`, the 12-level hierarchy, and the price covariate |
 | `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method |
+| `bench/selective_imagenet.py` | `RiskControl` with a non-monotone loss against the ImageNet selective classification of Angelopoulos (2026) |
 | `bench/vn2_conformal.py` | The VN2 run: forecasts, four calibrators, and the played cost |
 
 Forecast adapters can depend on vendor libraries, but not on calibration.
