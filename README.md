@@ -1,7 +1,7 @@
 # Calibre
 
 [![CI](https://github.com/Vzlentin/calibre/actions/workflows/ci.yml/badge.svg)](https://github.com/Vzlentin/calibre/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Vzlentin/calibre/blob/main/LICENSE)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
 
 Calibre is a conformal forecasting library for panels of time series. It makes point
@@ -60,13 +60,7 @@ Shapes use these axes: B bottom series, T periods, N nodes with bottoms first,
 S forecast series (B for `BottomUp`, N otherwise), O origins, H forecast steps, and
 C target columns (H for `Step`, 1 for `LeadTime`).
 
-```mermaid
-flowchart LR
-    data["Panel [B, T]<br/>Hierarchy [N, B]"] --> forecaster[Forecaster]
-    forecaster -- "base [S, H]" --> reconciler[Reconciler]
-    reconciler -- "points [O, N, H]" --> calibrator[Calibrator]
-    calibrator -- "bounds [O, N, C]" --> decision[order_up_to, settle]
-```
+![Panel and Hierarchy go to the Forecaster, base forecasts to the Reconciler, points to the Calibrator, bounds to order_up_to and settle](https://raw.githubusercontent.com/Vzlentin/calibre/main/docs/pipeline.png)
 
 | Stage | Names |
 |---|---|
@@ -80,7 +74,7 @@ Two rules hold everywhere. A model reads only its window, so a later value canno
 change a point unless a covariate declares it known ahead. A calibrator sees a score
 only once its target is known, and before the origin that knows it issues.
 
-[Architecture](docs/architecture.md) has the shapes and the modules.
+[Architecture](https://github.com/Vzlentin/calibre/blob/main/docs/architecture.md) has the shapes and the modules.
 
 ## Write a calibrator
 
@@ -167,8 +161,8 @@ uv run python bench/vn2_conformal.py data/vn2
 
 ## Documents
 
-- [Architecture](docs/architecture.md): modules, array contracts, and costs.
-- [Semantics](docs/semantics.md): the calibration rules.
+- [Architecture](https://github.com/Vzlentin/calibre/blob/main/docs/architecture.md): modules, array contracts, and costs.
+- [Semantics](https://github.com/Vzlentin/calibre/blob/main/docs/semantics.md): the calibration rules.
 
 ## Development
 
@@ -181,8 +175,8 @@ uv run ty check src/
 uv build --no-sources
 ```
 
-See [Contributing](CONTRIBUTING.md).
+See [Contributing](https://github.com/Vzlentin/calibre/blob/main/CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/Vzlentin/calibre/blob/main/LICENSE)

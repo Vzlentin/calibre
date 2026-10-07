@@ -1,0 +1,7 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Arial", "fontSize": "15px", "primaryColor": "#eef3fb", "primaryBorderColor": "#4a6fa5", "primaryTextColor": "#1f2937", "lineColor": "#4a6fa5", "edgeLabelBackground": "#ffffff"}, "flowchart": {"nodeSpacing": 40, "rankSpacing": 70, "padding": 14, "curve": "basis", "diagramPadding": 24}}}%%
+%% README image: npx @mermaid-js/mermaid-cli -i docs/pipeline.mmd -o docs/pipeline.png -b white --size 2400
+flowchart LR
+    data["Panel [B, T]<br/>Hierarchy [N, B]"] --> forecaster[Forecaster]
+    forecaster -- "base [S, H]" --> reconciler[Reconciler]
+    reconciler -- "points [O, N, H]" --> calibrator[Calibrator]
+    calibrator -- "bounds [O, N, C]" --> decision["order_up_to<br/>settle"]
