@@ -72,7 +72,7 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 | `bench/vn2_conformal.py` | The VN2 run: forecasts, four calibrators, and the played cost |
 
 Forecast adapters can depend on vendor libraries, but not on calibration.
-Each vendor library is an extra: `calibre[stats]`, `calibre[ml]`, `calibre[neural]`.
+Each vendor library is an extra: `libcalibre[stats]`, `libcalibre[ml]`, `libcalibre[neural]`.
 `import calibre` needs none of them.
 
 ## Array contracts

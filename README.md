@@ -10,19 +10,20 @@ bounds from out-of-sample residuals.
 
 ## Install
 
-Calibre is not on PyPI yet. Install it from GitHub:
+Calibre is not on PyPI yet. Install it from GitHub. The distribution is `libcalibre`, and the
+import name is `calibre`:
 
 ```sh
-pip install "calibre @ git+https://github.com/Vzlentin/calibre.git"
+pip install "libcalibre @ git+https://github.com/Vzlentin/calibre.git"
 # or
-uv add "calibre @ git+https://github.com/Vzlentin/calibre.git"
+uv add "libcalibre @ git+https://github.com/Vzlentin/calibre.git"
 ```
 
 The vendor model adapters need an extra: `stats` (statsforecast), `ml` (mlforecast), or
 `neural` (neuralforecast).
 
 ```sh
-pip install "calibre[stats] @ git+https://github.com/Vzlentin/calibre.git"
+pip install "libcalibre[stats] @ git+https://github.com/Vzlentin/calibre.git"
 ```
 
 ## Quick start
@@ -121,9 +122,9 @@ Keep the state in numpy arrays. Then a product can save it after each origin wit
 | Model | Kind | Install |
 |---|---|---|
 | `calibre.forecast.models.naive.SeasonalNaive` | local | core |
-| `calibre.forecast.models.statsforecast.StatsForecastModel` | local, any `statsforecast.models` model | `calibre[stats]` |
-| `calibre.forecast.models.mlforecast.MLForecast` | global regressor with lags and covariates | `calibre[ml]` |
-| `calibre.forecast.models.neuralforecast.NeuralForecast` | global network from `neuralforecast.models` | `calibre[neural]` |
+| `calibre.forecast.models.statsforecast.StatsForecastModel` | local, any `statsforecast.models` model | `libcalibre[stats]` |
+| `calibre.forecast.models.mlforecast.MLForecast` | global regressor with lags and covariates | `libcalibre[ml]` |
+| `calibre.forecast.models.neuralforecast.NeuralForecast` | global network from `neuralforecast.models` | `libcalibre[neural]` |
 
 ```python
 from lightgbm import LGBMRegressor

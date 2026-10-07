@@ -52,3 +52,20 @@ uv run pytest
 - A change to calibration behavior updates `docs/semantics.md` in the same pull request.
 - Add tests for new behavior. If you remove a test, cover the behavior it checked.
 - Open an issue first for a new public API or a new dependency.
+- Add a line under `Unreleased` in `CHANGELOG.md` for a change users see.
+
+## Release
+
+Releases are tags on `main`. The version lives in `pyproject.toml`.
+
+```sh
+uv version --bump minor  # or patch
+# in CHANGELOG.md, rename "Unreleased" to the new version
+git commit -am "Release 0.2.0"
+git tag -a v0.2.0 -m "0.2.0"
+git push origin main v0.2.0
+```
+
+The tag starts `.github/workflows/release.yml`. It runs the checks, stops if the tag is not on
+`main` or does not match the version, and builds the package. After approval in the `pypi`
+environment, it publishes to PyPI and creates the GitHub release.
