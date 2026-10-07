@@ -1,4 +1,9 @@
-"""Scores: how wrong a point was on a target column, and the bound a threshold gives."""
+"""Scores: nested families of bounds indexed by a threshold, and their inverse.
+
+`bound(point, t)` is the bound that threshold t issues, and `score(target, point)` is the
+smallest t whose bound holds the target. A quantile of scores is a threshold, and a
+loss of bounds is a function of the threshold.
+"""
 
 from abc import ABC, abstractmethod
 
@@ -12,7 +17,7 @@ class Score(ABC):
 
     @abstractmethod
     def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Lower and upper bounds `[N, C]` that hold exactly when score <= threshold."""
+        """Lower and upper bounds, broadcast together. They hold when score <= threshold."""
 
 
 class Absolute(Score):
@@ -35,4 +40,5 @@ class Signed(Score):
         return target - point
 
     def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return np.full_like(point, -np.inf), point + threshold
+        upper = point + threshold
+        return np.full_like(upper, -np.inf), upper

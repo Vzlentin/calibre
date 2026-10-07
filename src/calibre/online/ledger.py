@@ -2,7 +2,7 @@
 
 An h-step forecast is known h periods after its origin. The ledger keeps the issued
 points and thresholds until then, and releases a column only when the last step it
-covers is known. It scores the columns it releases, and knows no calibrator.
+covers is known. It sums the columns it releases, and knows no calibrator.
 
 Origins wait in a ring of slots. An origin waits until its last covered step, `reach`
 periods later, so at most `reach` origins wait, and slot `origin % reach` is free again
@@ -104,14 +104,16 @@ def _due(state: State, cover: np.ndarray, origin: int) -> tuple[np.ndarray, np.n
 def _feedback(
     state: State, cover: np.ndarray, score: Score, rows: np.ndarray, columns: np.ndarray
 ) -> Feedback:
-    """Scores of the column sums of the given slots, with their issued thresholds."""
+    """Column sums of the given slots, with their issued thresholds."""
     covered = cover[columns][:, None, :]
     target = np.where(covered, state["actual"][rows], 0).sum(axis=-1)
     point = np.where(covered, state["point"][rows], 0).sum(axis=-1)
     return Feedback(
         origin=state["origin"][rows],
         column=columns,
-        scores=score.score(target, point).astype(np.float32),
+        point=point,
+        target=target,
         issued=state["issued"][rows, :, columns],
         censored=(covered & state["censored"][rows]).any(axis=-1),
+        score=score,
     )

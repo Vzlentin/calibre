@@ -17,9 +17,11 @@ def feedback(origin: int, score: float, issued: float, column: int = 0) -> Feedb
     return Feedback(
         origin=np.array([origin]),
         column=np.array([column]),
-        scores=np.array([[score]], dtype=np.float32),
+        point=np.zeros((1, 1), dtype=np.float32),
+        target=np.array([[score]], dtype=np.float32),
         issued=np.array([[issued]], dtype=np.float32),
         censored=np.array([[False]]),
+        score=Signed(),
     )
 
 
@@ -123,9 +125,11 @@ def test_aci_targets_the_level_of_its_base_per_node():
     hits = Feedback(
         origin=np.array([0]),
         column=np.array([0]),
-        scores=np.zeros((1, 2), dtype=np.float32),
+        point=np.zeros((1, 2), dtype=np.float32),
+        target=np.zeros((1, 2), dtype=np.float32),
         issued=np.ones((1, 2), dtype=np.float32),
         censored=np.zeros((1, 2), dtype=bool),
+        score=Signed(),
     )
     state = aci.update(aci.initial_state(2, 1), hits)
     # A hit moves each working level by -gamma * (1 - level): -0.01 and -0.05.
@@ -137,9 +141,11 @@ def test_quantile_tracker_moves_each_node_by_its_own_level():
     misses = Feedback(
         origin=np.array([0]),
         column=np.array([0]),
-        scores=np.ones((1, 2), dtype=np.float32),
+        point=np.zeros((1, 2), dtype=np.float32),
+        target=np.ones((1, 2), dtype=np.float32),
         issued=np.zeros((1, 2), dtype=np.float32),
         censored=np.zeros((1, 2), dtype=bool),
+        score=Signed(),
     )
     state = tracker.update(tracker.initial_state(2, 1), misses)
     np.testing.assert_allclose(state["threshold"], [[0.9], [0.5]])

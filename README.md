@@ -50,7 +50,7 @@ flowchart LR
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `RiskControl`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -62,11 +62,10 @@ only once its target is known, and before the origin that knows it issues.
 
 ## Write a calibrator
 
-A calibrator owns its target level and is three functions of an explicit state.
-`calibre.online` handles the
-origins, the delays, and the indexing. A new method is one file in
-`calibre/conformal/calibrators/` that imports only `calibrators.base` and
-`calibrators.ranks`. This is the whole of a quantile tracker:
+A calibrator owns its target, a level or a loss, and is three functions of an explicit
+state. `calibre.online` handles the origins, the delays, and the indexing. A new method
+is one file in `calibre/conformal/calibrators/` that imports only `calibrators.base`,
+`calibrators.ranks`, and `conformal.losses`. This is the whole of a quantile tracker:
 
 ```python
 import numpy as np
