@@ -60,7 +60,7 @@ def test_min_risk_is_not_ready_before_a_known_target_and_ignores_missing_ones():
     state = calibrator.update(state, rows(np.zeros((1, 2)), np.array([[3.0, np.nan]])))
     assert state["count"].tolist() == [[1], [0]]
     assert calibrator.threshold(state).tolist() == [[3.0], [np.inf]]
-    assert sorted(flatten(state)) == ["count", "risk"]
+    assert sorted(flatten(state)) == ["count", "loss_sum"]
 
 
 def test_replay_issues_from_the_lead_time_targets_known_at_each_origin():
