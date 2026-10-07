@@ -50,7 +50,7 @@ flowchart LR
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`), `Loss` (`Miss`, `Newsvendor`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `MinRisk`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`), `Loss` (`Miss`, `Newsvendor`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `MinRisk`, `RiskControl`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 

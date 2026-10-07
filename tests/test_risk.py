@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from calibre.backtest import Forecasts, replay
-from calibre.conformal.calibrators import Feedback, MinRisk
+from calibre.conformal.calibrators import Feedback, MinRisk, RiskControl, SplitQuantile
 from calibre.conformal.losses import Miss, Newsvendor
 from calibre.conformal.scores import Absolute, Signed
 from calibre.conformal.targets import LeadTime
@@ -89,17 +89,14 @@ def test_replay_issues_from_the_lead_time_targets_known_at_each_origin():
 
 
 def test_losses_score_bounds_against_known_targets():
-    target = np.array([1.0, 4.0, np.nan])
+    target = np.array([1.0, 4.0, 0.0])
     lower, upper = Absolute().bound(np.full(3, 2.0), np.array(1.5))
     censored = np.zeros(3, dtype=bool)
-    assert np.nan_to_num(Miss().loss(lower, upper, target, censored), nan=-1).tolist() == [
-        0.0,
-        1.0,
-        -1.0,
-    ]
+    assert Miss().loss(lower, upper, target, censored).tolist() == [0.0, 1.0, 1.0]
     cost = Newsvendor(holding=0.2, shortage=1.0).loss(lower, upper, target, censored)
-    np.testing.assert_allclose(cost[:2], [0.2 * 2.5, 1.0 * 0.5])
-    assert np.isnan(cost[2])
+    np.testing.assert_allclose(cost, [0.2 * 2.5, 1.0 * 0.5, 0.2 * 3.5])
+    assert Miss().maximum == 1.0
+    assert np.isinf(Newsvendor(1.0, 1.0).maximum)
 
 
 @pytest.mark.parametrize(
@@ -108,7 +105,9 @@ def test_losses_score_bounds_against_known_targets():
         (lambda: MinRisk(Miss(), np.array([1.0, 1.0])), "increasing"),
         (lambda: MinRisk(Miss(), np.array([0.0, np.inf])), "finite"),
         (lambda: MinRisk(Miss(), np.zeros((2, 2, 2))), "grid"),
-        (lambda: Newsvendor(-1.0, 1.0), "negative"),
+        (lambda: Newsvendor(0.0, 1.0), "positive"),
+        (lambda: RiskControl(Newsvendor(1.0, 1.0), np.arange(3.0), 0.1), "finite maximum"),
+        (lambda: RiskControl(Miss(), np.arange(3.0), 1.0), "alpha"),
     ],
 )
 def test_risk_settings_are_validated(factory, match):
@@ -119,3 +118,26 @@ def test_risk_settings_are_validated(factory, match):
 def test_a_per_node_grid_must_match_the_nodes():
     with pytest.raises(ValueError, match="rows"):
         MinRisk(Miss(), np.zeros((3, 1))).initial_state(2, 1)
+
+
+@pytest.mark.parametrize("n", [3, 37])
+def test_risk_control_of_misses_is_the_split_conformal_threshold(n):
+    rng = np.random.default_rng(3)
+    point = rng.integers(0, 20, size=(n, 3))
+    target = rng.integers(0, 20, size=(n, 3))
+    feedback = rows(point, target)
+    control = RiskControl(Miss(), np.arange(-25, 26), alpha=0.2)
+    split = SplitQuantile(0.8)
+    controlled = control.threshold(control.update(control.initial_state(3, 1), feedback))
+    expected = split.threshold(split.update(split.initial_state(3, 1), feedback))
+    # n = 3 is too few for a level of 0.8: both are not ready.
+    assert controlled.tolist() == expected.tolist()
+
+
+def test_risk_control_issues_the_smallest_grid_threshold_with_a_corrected_risk_below_alpha():
+    calibrator = RiskControl(Miss(), np.array([0.0, 1.0, 2.0, 3.0]), alpha=0.3)
+    # Scores 0.5, 1.5, 2.5 for node 0. Misses at 1 and 2: 2 and 1, so (2 + 1) / 4 > 0.3
+    # and (1 + 1) / 4 > 0.3. At 3: (0 + 1) / 4 <= 0.3.
+    feedback = rows(np.zeros((3, 1)), np.array([[0.5], [1.5], [2.5]]))
+    state = calibrator.update(calibrator.initial_state(1, 1), feedback)
+    assert calibrator.threshold(state).tolist() == [[3.0]]

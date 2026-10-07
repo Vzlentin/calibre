@@ -14,6 +14,7 @@ from calibre.conformal.calibrators import (
     MinRisk,
     QuantileCalibrator,
     QuantileTracker,
+    RiskControl,
     SplitQuantile,
     State,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "Newsvendor",
     "QuantileCalibrator",
     "QuantileTracker",
+    "RiskControl",
     "Score",
     "Signed",
     "SplitQuantile",

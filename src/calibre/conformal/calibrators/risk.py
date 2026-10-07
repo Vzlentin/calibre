@@ -1,9 +1,9 @@
 """Risk calibrators: thresholds from the mean loss of each candidate on a declared grid.
 
-The state is a loss sum `[N, C, G]` per grid threshold and a count `[N, C]` of known
-targets, so its size does not grow with the origins. The grid is `[G]` or `[N, G]`
-increasing thresholds in the units of the score. Every known target counts once, with
-no window.
+They keep the same state, a loss sum `[N, C, G]` per grid threshold and a count `[N, C]`
+of known targets, so its size does not grow with the origins. They differ only in how
+they choose a threshold from it. The grid is `[G]` or `[N, G]` increasing thresholds in
+the units of the score. Every known target counts once, with no window.
 """
 
 import numpy as np
@@ -36,6 +36,40 @@ class MinRisk(Calibrator):
         # The count is the same for every grid value, so the least sum is the least mean.
         best = _grid_value(self.grid, np.argmin(state["loss_sum"], axis=-1))
         return np.where(state["count"] > 0, best, np.inf).astype(np.float32)
+
+
+class RiskControl(Calibrator):
+    """Conformal risk control (Angelopoulos et al. 2024, 2026): the smallest grid threshold
+    whose corrected mean loss is at most `alpha`, per node and column.
+
+    With n known targets and a loss of at most B, a threshold is feasible when
+    `(loss sum + B) / (n + 1) <= alpha`. No feasible grid threshold gives inf. The loss
+    must have a finite `maximum`.
+
+    With `Miss`, the loss is nonincreasing in the threshold, and the result is the
+    `SplitQuantile(1 - alpha)` threshold, rounded up to the grid.
+    """
+
+    def __init__(self, loss: Loss, grid: np.ndarray, alpha: float) -> None:
+        if not np.isfinite(loss.maximum):
+            raise ValueError("risk control needs a loss with a finite maximum")
+        if not 0 < alpha < loss.maximum:
+            raise ValueError(f"alpha must be between zero and {loss.maximum}, got {alpha}")
+        self.loss = loss
+        self.grid = _check_grid(grid)
+        self.alpha = alpha
+
+    def initial_state(self, n_nodes: int, n_columns: int) -> State:
+        return _initial_sums(self.grid, n_nodes, n_columns)
+
+    def update(self, state: State, feedback: Feedback) -> State:
+        return _add_losses(state, feedback, self.loss, self.grid)
+
+    def threshold(self, state: State) -> np.ndarray:
+        count = state["count"][..., None]
+        feasible = state["loss_sum"] + self.loss.maximum <= self.alpha * (count + 1)
+        first = _grid_value(self.grid, np.argmax(feasible, axis=-1))
+        return np.where(feasible.any(axis=-1), first, np.inf).astype(np.float32)
 
 
 def _check_grid(grid: np.ndarray) -> np.ndarray:
