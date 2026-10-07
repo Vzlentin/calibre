@@ -10,20 +10,19 @@ bounds from out-of-sample residuals.
 
 ## Install
 
-Calibre is not on PyPI yet. Install it from GitHub. The distribution is `libcalibre`, and the
-import name is `calibre`:
+The package is `libcalibre` on PyPI, and the import name is `calibre`:
 
 ```sh
-pip install "libcalibre @ git+https://github.com/Vzlentin/calibre.git"
+pip install libcalibre
 # or
-uv add "libcalibre @ git+https://github.com/Vzlentin/calibre.git"
+uv add libcalibre
 ```
 
 The vendor model adapters need an extra: `stats` (statsforecast), `ml` (mlforecast), or
 `neural` (neuralforecast).
 
 ```sh
-pip install "libcalibre[stats] @ git+https://github.com/Vzlentin/calibre.git"
+pip install "libcalibre[stats]"
 ```
 
 ## Quick start
