@@ -11,14 +11,13 @@ from calibre.conformal.calibrators import (
     Calibrator,
     Feedback,
     Level,
-    MinRisk,
     QuantileCalibrator,
     QuantileTracker,
     RiskControl,
     SplitQuantile,
     State,
 )
-from calibre.conformal.losses import Loss, Miss, Newsvendor
+from calibre.conformal.losses import Loss, Miss
 from calibre.conformal.scores import Absolute, Score, Signed
 from calibre.conformal.targets import LeadTime, Step, Target
 
@@ -30,9 +29,7 @@ __all__ = [
     "LeadTime",
     "Level",
     "Loss",
-    "MinRisk",
     "Miss",
-    "Newsvendor",
     "QuantileCalibrator",
     "QuantileTracker",
     "RiskControl",

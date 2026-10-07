@@ -34,26 +34,25 @@ REPLICATES = 100
 BOOTSTRAPS = 50
 
 
+def selective_loss(error: np.ndarray, predicted: np.ndarray) -> np.ndarray:
+    """`1{error, predicted} - alpha 1{predicted} + alpha`, between 0 and 1."""
+    return error * predicted - ALPHA * predicted + ALPHA
+
+
 class SelectiveLoss(Loss):
-    """`1{error, predicted} - alpha 1{predicted} + alpha`, as a loss of `Signed` bounds.
+    """`selective_loss` as a loss of `Signed` bounds.
 
     The point is minus the confidence and the target is the error indicator, so the
     upper bound `threshold - confidence` is negative exactly when the classifier
     predicts.
     """
 
-    def __init__(self, alpha: float) -> None:
-        self.alpha = alpha
-
     @property
     def maximum(self) -> float:
         return 1.0
 
-    def loss(
-        self, lower: np.ndarray, upper: np.ndarray, target: np.ndarray, censored: np.ndarray
-    ) -> np.ndarray:
-        predicted = upper < 0
-        return target * predicted - self.alpha * predicted + self.alpha
+    def loss(self, lower: np.ndarray, upper: np.ndarray, target: np.ndarray) -> np.ndarray:
+        return selective_loss(target, upper < 0)
 
 
 def load(directory: str) -> tuple[np.ndarray, np.ndarray]:
@@ -75,7 +74,7 @@ def calibre_threshold(confidence: np.ndarray, error: np.ndarray, grid: np.ndarra
         censored=np.zeros((n, 1), dtype=bool),
         score=Signed(),
     )
-    calibrator = RiskControl(SelectiveLoss(ALPHA), grid, ALPHA)
+    calibrator = RiskControl(SelectiveLoss(), grid, ALPHA)
     state = calibrator.update(calibrator.initial_state(1, 1), feedback)
     return float(calibrator.threshold(state)[0, 0])
 
@@ -83,7 +82,7 @@ def calibre_threshold(confidence: np.ndarray, error: np.ndarray, grid: np.ndarra
 def reference_threshold(confidence: np.ndarray, error: np.ndarray, grid: np.ndarray) -> float:
     """Smallest grid threshold with `(loss sum + 1) / (n + 1) <= alpha`, else inf."""
     predicted = confidence[:, None] > grid[None, :]  # [n, G]
-    losses = error[:, None] * predicted - ALPHA * predicted + ALPHA
+    losses = selective_loss(error[:, None], predicted)
     feasible = losses.sum(axis=0) + 1 <= ALPHA * (len(confidence) + 1)
     return float(grid[np.argmax(feasible)]) if feasible.any() else np.inf
 
@@ -106,9 +105,7 @@ def paper_stability(confidence: np.ndarray, error: np.ndarray, rng: np.random.Ge
         star = paper_threshold(p, e)
         keep = ~np.eye(n + 1, dtype=bool)
         loo = np.array([paper_threshold(p[keep[i]], e[keep[i]]) for i in range(n + 1)])
-        loss_loo = e * (p > loo) - ALPHA * (p > loo) + ALPHA
-        loss_star = e * (p > star) - ALPHA * (p > star) + ALPHA
-        deltas.append((loss_loo - loss_star).mean())
+        deltas.append((selective_loss(e, p > loo) - selective_loss(e, p > star)).mean())
     return max(0.0, float(np.mean(deltas)))
 
 
@@ -116,7 +113,7 @@ def evaluate(threshold: float, confidence: np.ndarray, error: np.ndarray) -> dic
     """Selective accuracy, prediction rate, and mean loss on the held-out images."""
     predicted = confidence > threshold
     accuracy = 1 - error[predicted].mean() if predicted.any() else np.nan
-    loss = (error * predicted - ALPHA * predicted + ALPHA).mean()
+    loss = selective_loss(error, predicted).mean()
     return {"threshold": threshold, "accuracy": accuracy, "rate": predicted.mean(), "risk": loss}
 
 

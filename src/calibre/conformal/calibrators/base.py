@@ -2,7 +2,8 @@
 
 A calibrator turns the targets known so far into a threshold per node and column. A
 threshold indexes a nested family of bounds, the `Score`: a quantile calibrator ranks
-the scores, and a risk calibrator picks the threshold whose bounds have the least loss. Its
+the scores, and a risk calibrator picks the smallest threshold whose bounds have a low
+enough loss. Its
 state is a nested dict of numpy arrays, and its methods are functions of that state.
 So a product can save the state after each origin and continue later, and a backtest
 is the same loop as production. A call owns the state it receives: it can write into
@@ -32,7 +33,7 @@ class Feedback:
     Rows are in origin order. `point` and `target` are the column sums `[K, N]`, NaN
     where the actual is missing. `issued` is the threshold that was issued for each
     row, `censored` marks targets that are lower bounds, and `score` is the family of
-    bounds the thresholds index.
+    bounds the thresholds index, so a calibrator can find the bounds of any threshold.
     """
 
     origin: np.ndarray
@@ -47,10 +48,6 @@ class Feedback:
     def scores(self) -> np.ndarray:
         """Nonconformity scores `[K, N]` float32: the smallest threshold that holds the target."""
         return self.score.score(self.target, self.point).astype(np.float32)
-
-    def bounds(self, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Bounds `[K, N, G]` that thresholds `[G]` or `[N, G]` would have issued."""
-        return self.score.bound(self.point[..., None], threshold)
 
     def misses(self, n_columns: int) -> tuple[np.ndarray, np.ndarray]:
         """Counts `[N, C]` of misses (score above the issued threshold) and known scores."""
