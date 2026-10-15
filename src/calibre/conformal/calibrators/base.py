@@ -1,10 +1,8 @@
 """The calibrator contract: what a calibration method receives, keeps, and returns.
 
-A calibrator turns the targets known so far into a threshold per node and column. A
-threshold indexes a nested family of bounds, the `Score`: a quantile calibrator ranks
-the scores, and a risk calibrator picks the smallest threshold whose bounds have a low
-enough loss. Its
-state is a nested dict of numpy arrays, and its methods are functions of that state.
+A calibrator turns known targets into bound parameters per node and column. Scalar
+thresholds index nested bounds; asymmetric intervals use a lower/upper pair instead.
+Its state is a nested dict of numpy arrays, and its methods are functions of that state.
 So a product can save the state after each origin and continue later, and a backtest
 is the same loop as production. A call owns the state it receives: it can write into
 those arrays, and the caller continues only with the returned state.
@@ -30,9 +28,9 @@ class Feedback:
     """Targets that became known at one origin. Each row `[K]` is one target column of
     one issuing origin, for all nodes.
 
-    Rows are in origin order. `point` and `target` are the column sums `[K, N]`, NaN
-    where the actual is missing. `issued` is the threshold that was issued for each
-    row, `censored` marks targets that are lower bounds, and `score` is the family of
+    Rows are in origin order. `point` and `target` are column sums `[K, N]`, NaN
+    where the actual is missing. `issued` is `[K, N]`, or `[K, N, 2]` for paired
+    corrections. `censored` marks targets that are lower bounds, and `score` defines
     bounds the thresholds index, so a calibrator can find the bounds of any threshold.
     """
 
@@ -46,14 +44,18 @@ class Feedback:
 
     @property
     def scores(self) -> np.ndarray:
-        """Nonconformity scores `[K, N]` float32: the smallest threshold that holds the target."""
+        """Scores `[K, N]` float32, signed residuals for asymmetric intervals."""
         return self.score.score(self.target, self.point).astype(np.float32)
 
     def misses(self, n_columns: int) -> tuple[np.ndarray, np.ndarray]:
-        """Counts `[N, C]` of misses (score above the issued threshold) and known scores."""
+        """Counts `[N, C]` of misses against issued parameters and known scores."""
         scores = self.scores
         known = np.isfinite(scores)
-        miss = (scores > self.issued) & known
+        if self.score.parameter_shape():
+            lower, upper = self.score.bound(self.point, self.issued)
+            miss = ((self.target < lower) | (self.target > upper)) & known
+        else:
+            miss = (scores > self.issued) & known
         columns = np.eye(n_columns)[self.column]  # [K, C]
         return miss.T @ columns, known.T @ columns
 
@@ -71,7 +73,10 @@ class Calibrator(ABC):
 
     @abstractmethod
     def threshold(self, state: State) -> np.ndarray:
-        """Return thresholds `[N, C]` at the target level. inf means not ready."""
+        """Return scalar `[N, C]` or paired `[N, C, 2]` bound parameters.
+
+        A scalar inf or the pair [-inf, inf] represents an unready cell.
+        """
 
 
 class QuantileCalibrator(Calibrator):

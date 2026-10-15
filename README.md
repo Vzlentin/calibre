@@ -65,7 +65,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `RiskControl`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -115,6 +115,7 @@ Keep the state in numpy arrays. Then a product can save it after each origin wit
 | Model | Kind | Install |
 |---|---|---|
 | `calibre.forecast.models.naive.SeasonalNaive` | local | core |
+| `calibre.forecast.models.bootstrap.BootstrapEnsemble` | local, frozen one-step lag-row ensembles with OOB errors | `libcalibre[bootstrap]` |
 | `calibre.forecast.models.statsforecast.StatsForecastModel` | local, any `statsforecast.models` model | `libcalibre[stats]` |
 | `calibre.forecast.models.mlforecast.MLForecast` | global regressor with lags and covariates | `libcalibre[ml]` |
 | `calibre.forecast.models.neuralforecast.NeuralForecast` | global network from `neuralforecast.models` | `libcalibre[neural]` |
@@ -139,6 +140,55 @@ run = rolling_forecasts(
     covariates={"price": price},
 )
 ```
+
+## EnbPI
+
+Install `libcalibre[bootstrap]` for the scikit-learn bootstrap adapter. Forecasting
+and residual calibration are separate: `BootstrapEnsemble` trains frozen learners;
+`EnbPI` maintains signed errors; `Asymmetric` turns the two quantiles into bounds.
+
+Using the `panel` and `hierarchy` from the quick start:
+
+```python
+from sklearn.linear_model import Ridge
+
+from calibre import Asymmetric, EnbPI, initial_state
+from calibre.forecast.models.bootstrap import BootstrapEnsemble
+
+forecasts = rolling_forecasts(
+    panel,
+    hierarchy,
+    BootstrapEnsemble(Ridge(), n_lags=7, random_state=42),
+    BottomUp(hierarchy),
+    np.arange(60, 113),
+    1,
+    initial_residuals=True,
+)
+seed = forecasts.initial_residuals
+assert seed is not None
+calibrator = EnbPI(level=0.9, window=len(seed.values))
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1)
+state["calibrator"] = calibrator.seed(state["calibrator"], seed.values)
+intervals = replay(
+    forecasts,
+    hierarchy.aggregate(panel.values),
+    target=Step(),
+    score=Asymmetric(),
+    calibrator=calibrator,
+    state=state,
+)
+print(coverage(intervals.target, intervals.lower, intervals.upper))
+```
+
+The adapter supports one-step lag regression only and rejects covariates.
+OOB errors are initialization data, not chronological forecast errors. Only their
+known initial training prefix may seed calibration; no refits are allowed when
+collecting these errors. The empirical interval searches both residual tails, with
+no split-conformal n+1 correction. Its parameters are [N, C, 2]; bounds remain [N, C].
+This does not establish distribution-free conditional coverage for dependent series.
+See [Semantics](docs/semantics.md#enbpi-explicit-semantic-additions) for the precise
+center, ranks, missing-data policy, and scope. A saved online state can be passed
+back to `replay(state=...)` to continue, without retraining the point model.
 
 ## Benchmarks
 
