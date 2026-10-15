@@ -61,6 +61,47 @@ class Fitted(ABC):
         """Return point forecasts `[S, horizon]` for the window."""
 
 
+@dataclass(frozen=True)
+class FitResiduals:
+    """Out-of-sample signed errors [K, S, H] and their issuing origin indexes.
+
+    For OOB errors, origins index the lag-row predictions, not the time the model
+    was fitted. These errors are initialization data, not chronological forecasts.
+    """
+
+    origins: np.ndarray
+    values: np.ndarray
+
+    def __post_init__(self) -> None:
+        origins = np.asarray(self.origins)
+        values = np.array(self.values, dtype=np.float32)
+        if (
+            origins.ndim != 1
+            or not np.issubdtype(origins.dtype, np.integer)
+            or len(origins) == 0
+            or (origins < 0).any()
+            or (np.diff(origins) <= 0).any()
+        ):
+            raise ValueError("residual origins must be nonempty, increasing period indexes")
+        if values.ndim != 3 or values.shape[0] != len(origins) or min(values.shape[1:]) < 1:
+            raise ValueError("fit residuals must be [K, S, H] matching the origins")
+        if np.isinf(values).any():
+            raise ValueError("fit residuals must be finite or NaN")
+        origins = origins.astype(np.int64, copy=True)
+        origins.flags.writeable = False
+        values.flags.writeable = False
+        object.__setattr__(self, "origins", origins)
+        object.__setattr__(self, "values", values)
+
+
+class FittedResiduals(Fitted):
+    """A fitted model that exposes out-of-sample initialization errors."""
+
+    @abstractmethod
+    def residuals(self) -> FitResiduals:
+        """Return signed errors known by the fitting origin."""
+
+
 class Forecaster(ABC):
     @abstractmethod
     def fit(self, window: Window) -> Fitted:

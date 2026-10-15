@@ -75,6 +75,49 @@ def retained_quantile(
     return out
 
 
+def empirical_interval(
+    scores: np.ndarray, level: float | np.ndarray, beta_grid_size: int = 21
+) -> np.ndarray:
+    """Shortest empirical signed-residual interval per column, returned as [N, 2].
+
+    Scores are [K, N], with NaN holes. Quantiles use ceil(n * q), clamped to the
+    finite endpoints, not the conformal n+1 correction. Search beta on an inclusive
+    grid from zero to 1-level; ties choose the first beta. No scores gives [-inf, inf].
+    """
+    scores = np.asarray(scores)
+    levels = np.asarray(level, dtype=np.float64)
+    if scores.ndim != 2 or levels.ndim > 1:
+        raise ValueError("scores must be [K, N] and level a scalar or vector")
+    if not np.isfinite(levels).all() or ((levels <= 0) | (levels >= 1)).any():
+        raise ValueError("level must be strictly between zero and one")
+    if (
+        isinstance(beta_grid_size, (bool, np.bool_))
+        or not isinstance(beta_grid_size, (int, np.integer))
+        or beta_grid_size < 2
+    ):
+        raise ValueError("beta_grid_size must be an integer of at least 2")
+    if np.isinf(scores).any():
+        raise ValueError("scores must be finite or NaN")
+    levels = np.broadcast_to(levels, (scores.shape[1],))
+    counts = np.isfinite(scores).sum(axis=0)
+    out = np.tile([-np.inf, np.inf], (scores.shape[1], 1))
+    ready = counts > 0
+    if not ready.any():
+        return out.astype(np.float32)
+    ordered = np.sort(scores[:, ready].astype(np.float64), axis=0)
+    counts = counts[ready]
+    levels = levels[ready]
+    beta = np.linspace(0, 1, beta_grid_size)[:, None] * (1 - levels)
+    low = np.clip(np.ceil(counts * beta).astype(np.int64) - 1, 0, counts - 1)
+    high = np.clip(np.ceil(counts * (levels + beta)).astype(np.int64) - 1, 0, counts - 1)
+    columns = np.arange(len(counts))
+    lower, upper = ordered[low, columns], ordered[high, columns]
+    best = np.argmin(upper - lower, axis=0)
+    out[ready, 0] = lower[best, columns]
+    out[ready, 1] = upper[best, columns]
+    return out.astype(np.float32)
+
+
 def _finite_quantile(scores: np.ndarray, level: float | np.ndarray) -> np.ndarray:
     """Independent column ranks from finite counts; NaN cells supply no score."""
     if np.isfinite(scores).all():

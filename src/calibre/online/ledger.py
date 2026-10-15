@@ -25,7 +25,7 @@ def reach(cover: np.ndarray) -> int:
     return int(last_step(cover).max())
 
 
-def initial_state(n_nodes: int, cover: np.ndarray) -> State:
+def initial_state(n_nodes: int, cover: np.ndarray, parameter_shape: tuple[int, ...] = ()) -> State:
     """Empty ledger for `n_nodes` nodes and the columns of `cover` `[C, H]`."""
     slots = reach(cover)
     return {
@@ -34,7 +34,7 @@ def initial_state(n_nodes: int, cover: np.ndarray) -> State:
         "point": np.zeros((slots, n_nodes, slots), dtype=np.float32),
         "actual": np.full((slots, n_nodes, slots), np.nan, dtype=np.float32),
         "censored": np.zeros((slots, n_nodes, slots), dtype=bool),
-        "issued": np.zeros((slots, n_nodes, len(cover)), dtype=np.float32),
+        "issued": np.zeros((slots, n_nodes, len(cover)) + parameter_shape, dtype=np.float32),
         "released": np.zeros((slots, len(cover)), dtype=bool),
     }
 
@@ -66,7 +66,7 @@ def observe(
 
 
 def issue(state: State, origin: int, points: np.ndarray, threshold: np.ndarray) -> State:
-    """Put the points `[N, H]` and threshold `[N, C]` issued at `origin` in its slot."""
+    """Archive points and scalar or paired parameters issued at `origin`."""
     slot = origin % len(state["origin"])
     if state["origin"][slot] >= 0:
         raise ValueError(

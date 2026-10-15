@@ -15,6 +15,8 @@ from calibre.online.step import initial_state, step
 class Replay:
     """Calibration over origins `[O]`. Arrays are `[O, N, C]`.
 
+    Asymmetric thresholds have an additional trailing lower/upper axis of size two.
+
     `target` and `score` are NaN when the target is not known at the end of the data.
     `state` continues the run with `calibre.online.step`.
     """
@@ -31,9 +33,13 @@ class Replay:
 
     @property
     def covered(self) -> np.ndarray:
-        """1.0 when the score is within its threshold, NaN when not known."""
+        """Coverage against issued scalar thresholds or paired bounds; NaN if unknown."""
         known = np.isfinite(self.score)
-        return np.where(known, (self.score <= self.threshold).astype(np.float32), np.nan)
+        if self.threshold.ndim == self.score.ndim:
+            inside = self.score <= self.threshold
+        else:
+            inside = (self.lower <= self.target) & (self.target <= self.upper)
+        return np.where(known, inside.astype(np.float32), np.nan)
 
 
 def replay(
@@ -44,15 +50,17 @@ def replay(
     score: Score,
     calibrator: Calibrator,
     censored: np.ndarray | None = None,
+    state: State | None = None,
 ) -> Replay:
-    """Run `calibre.online.step` at each origin of `forecasts` on node actuals `[N, T]`."""
+    """Replay node actuals `[N, T]`, optionally from a seeded or saved online state."""
     origins = forecasts.origins
     n_origins, n_nodes, horizon = forecasts.points.shape
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
-    state = initial_state(target, calibrator, n_nodes, horizon)
+    if state is None:
+        state = initial_state(target, calibrator, n_nodes, horizon)
     issued = []
-    previous = -1
+    previous = int(state["ledger"]["last"])
     for index, origin in enumerate(origins):
         seen = slice(previous + 1, int(origin) + 1)
         state, out = step(

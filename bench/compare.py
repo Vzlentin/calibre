@@ -49,6 +49,8 @@ def compare(
 
 def _metrics(run: Replay, nodes: np.ndarray, level: float) -> dict[str, float]:
     ready = np.isfinite(run.threshold[:, nodes])
+    if ready.ndim == run.target.ndim + 1:
+        ready = ready.all(axis=-1)
     target = np.where(ready, run.target[:, nodes], np.nan)
     lower, upper = run.lower[:, nodes], run.upper[:, nodes]
     metrics = {"ready": float(ready.mean()), "coverage": float(coverage(target, lower, upper))}

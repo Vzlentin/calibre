@@ -40,6 +40,7 @@ Documentation = "https://github.com/Vzlentin/calibre/tree/main/docs"
 Changelog = "https://github.com/Vzlentin/calibre/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
+bootstrap = ["scikit-learn"]
 stats = ["statsforecast"]
 ml = ["mlforecast"]
 neural = ["neuralforecast"]
@@ -52,6 +53,7 @@ dev = [
     "pytest",
     "statsforecast",
     "ruff",
+    "scikit-learn",
     "ty",
 ]
 

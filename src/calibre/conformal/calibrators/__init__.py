@@ -8,6 +8,7 @@ from calibre.conformal.calibrators.base import (
     QuantileCalibrator,
     State,
 )
+from calibre.conformal.calibrators.enbpi import EnbPI
 from calibre.conformal.calibrators.risk import RiskControl
 from calibre.conformal.calibrators.split import SplitQuantile
 from calibre.conformal.calibrators.tracker import QuantileTracker
@@ -15,6 +16,7 @@ from calibre.conformal.calibrators.tracker import QuantileTracker
 __all__ = [
     "ACI",
     "Calibrator",
+    "EnbPI",
     "Feedback",
     "Level",
     "QuantileCalibrator",
