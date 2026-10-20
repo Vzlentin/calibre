@@ -17,7 +17,7 @@ from calibre.online import ledger
 
 @dataclass(frozen=True)
 class Issue:
-    """What one origin issues, per node and target column `[N, C]`."""
+    """Issued points/bounds `[N, C]`; threshold may also have a trailing pair axis."""
 
     point: np.ndarray
     threshold: np.ndarray
@@ -28,9 +28,13 @@ class Issue:
 def initial_state(target: Target, calibrator: Calibrator, n_nodes: int, horizon: int) -> State:
     """Empty state for `n_nodes` nodes and `horizon` steps."""
     cover = target.cover(horizon)
+    calibration = calibrator.initial_state(n_nodes, len(cover))
+    shape = calibrator.threshold(calibration).shape
+    if shape[:2] != (n_nodes, len(cover)) or shape[2:] not in ((), (2,)):
+        raise ValueError("calibrator parameters must be [N, C] or [N, C, 2]")
     return {
-        "ledger": ledger.initial_state(n_nodes, cover),
-        "calibrator": calibrator.initial_state(n_nodes, len(cover)),
+        "ledger": ledger.initial_state(n_nodes, cover, shape[2:]),
+        "calibrator": calibration,
     }
 
 
@@ -55,6 +59,10 @@ def step(
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
     cover = target.cover(points.shape[1])
+    if int(state["ledger"]["last"]) == -1:
+        parameters = state["ledger"]["issued"].shape[3:]
+        if parameters != score.parameter_shape():
+            raise ValueError("score parameter shape does not match the calibrator")
     ledger_state, feedback = ledger.observe(
         state["ledger"], cover, score, origin, actuals, censored
     )

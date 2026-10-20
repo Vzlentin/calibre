@@ -12,7 +12,14 @@ import pandas as pd
 
 from calibre.data.hierarchy import Hierarchy
 from calibre.data.panel import Panel
-from calibre.forecast.models.base import Covariate, Fitted, Forecaster, Window
+from calibre.forecast.models.base import (
+    Covariate,
+    FitResiduals,
+    Fitted,
+    FittedResiduals,
+    Forecaster,
+    Window,
+)
 from calibre.forecast.reconcile import Reconciler
 
 
@@ -22,6 +29,7 @@ class Forecasts:
 
     origins: np.ndarray
     points: np.ndarray
+    initial_residuals: FitResiduals | None = None
 
     def residuals(self, actuals: np.ndarray) -> np.ndarray:
         """Return `actual - point` `[O, N, H]` from node actuals `[N, T]`.
@@ -44,12 +52,18 @@ def rolling_forecasts(
     horizon: int,
     refit_every: int | None = None,
     covariates: Mapping[str, Covariate] | None = None,
+    *,
+    initial_residuals: bool = False,
 ) -> Forecasts:
     """Fit, predict, and reconcile at each origin, the index of the last observed period.
 
     The model forecasts the first S nodes, with S from the reconciler shape `(N, S)`. It
     is fitted at the first origin and again every `refit_every` origins. None fits once.
+    initial_residuals collects fit-time OOB errors, reconciled to the node axis.
+    It requires FittedResiduals and no refit, so seeds never mix model generations.
     """
+    if initial_residuals and refit_every is not None:
+        raise ValueError("initial residuals require a frozen model, without refit_every")
     origins = _check_schedule(origins, len(panel.periods), horizon, refit_every)
     covariates = dict(covariates or {})
     n_nodes, n_series = reconciler.shape
@@ -69,6 +83,7 @@ def rolling_forecasts(
 
     points = np.empty((len(origins), n_nodes, horizon), dtype=np.float32)
     fitted: Fitted | None = None
+    seed: FitResiduals | None = None
     for index, origin in enumerate(origins):
         seen = int(origin) + 1
         window = Window(
@@ -79,13 +94,32 @@ def rolling_forecasts(
         )
         if fitted is None or (refit_every is not None and index % refit_every == 0):
             fitted = model.fit(window)
+            if initial_residuals:
+                if not isinstance(fitted, FittedResiduals):
+                    raise TypeError("model does not expose FittedResiduals")
+                seed = _reconciled_residuals(fitted.residuals(), reconciler, int(origin), horizon)
         base = np.asarray(fitted.predict(window))
         if base.shape != (n_series, horizon):
             raise ValueError(f"model returned shape {base.shape}, expected {(n_series, horizon)}")
         if not np.isfinite(base).all():
             raise ValueError(f"model returned nonfinite points at origin {origin}")
         points[index] = reconciler(base)
-    return Forecasts(origins=origins, points=points)
+    return Forecasts(origins=origins, points=points, initial_residuals=seed)
+
+
+def _reconciled_residuals(
+    residuals: FitResiduals, reconciler: Reconciler, origin: int, horizon: int
+) -> FitResiduals:
+    """Apply the same linear reconciliation to each aligned OOB error vector."""
+    values = residuals.values
+    if values.shape[1:] != (reconciler.shape[1], horizon):
+        raise ValueError("fit residual shape does not match the forecast series and horizon")
+    if (residuals.origins + horizon > origin).any():
+        raise ValueError("fit residual targets must be known at the first forecast origin")
+    # Flatten time/step columns rather than adding another loop over origins.
+    mapped = reconciler(values.transpose(1, 0, 2).reshape(reconciler.shape[1], -1))
+    mapped = mapped.reshape(reconciler.shape[0], len(values), horizon).transpose(1, 0, 2)
+    return FitResiduals(residuals.origins, mapped)
 
 
 def _check_schedule(

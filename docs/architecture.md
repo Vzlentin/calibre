@@ -23,16 +23,16 @@ a package, the contract is in `base.py` and each implementation is one file.
 |---|---|
 | `data/panel.py` | `Panel`, validated once |
 | `data/hierarchy.py` | `Hierarchy`, node labels and the summing matrix |
-| `forecast/models/base.py` | `Window`, `Covariate`, `Forecaster` and `Fitted` contracts |
-| `forecast/models/` | `naive.SeasonalNaive`, `statsforecast.StatsForecastModel`, `mlforecast.MLForecast`, `neuralforecast.NeuralForecast` |
+| `forecast/models/base.py` | `Window`, `Covariate`, `Forecaster`, `Fitted`, `FittedResiduals` contracts, and `FitResiduals` arrays |
+| `forecast/models/` | `naive.SeasonalNaive`, `bootstrap.BootstrapEnsemble`, `statsforecast.StatsForecastModel`, `mlforecast.MLForecast`, `neuralforecast.NeuralForecast` |
 | `forecast/models/frames.py` | Long frames for the mlforecast and neuralforecast adapters |
 | `forecast/reconcile.py` | `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
-| `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`: nested bounds indexed by a threshold, and the score that inverts them |
+| `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`: residual scores, parameter shapes, and their issued bounds |
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
 | `conformal/calibrators/base.py` | `Calibrator` and `QuantileCalibrator` contracts, `Feedback`, `State`, `Level`, `check_level` |
-| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: rank, window, pooling |
-| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl` |
+| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_interval`: shortest empirical residual interval |
+| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
@@ -72,7 +72,8 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 | `bench/vn2_conformal.py` | The VN2 run: forecasts, four calibrators, and the played cost |
 
 Forecast adapters can depend on vendor libraries, but not on calibration.
-Each vendor library is an extra: `libcalibre[stats]`, `libcalibre[ml]`, `libcalibre[neural]`.
+Each vendor library is an extra: `libcalibre[stats]`, `libcalibre[ml]`, `libcalibre[neural]`,
+and `libcalibre[bootstrap]` (scikit-learn).
 `import calibre` needs none of them.
 
 ## Array contracts
@@ -88,6 +89,7 @@ O origins, and H forecast steps.
 | `Window.y` | `[S, t]` read-only | History of the S forecast series through the origin |
 | `Window.x` | `[S or 1, 1 or t or t + H]` read-only | Covariates. Only `known_ahead` ones reach t + H |
 | `Fitted.predict` output | `[S, H]` | Base point forecasts |
+| `FitResiduals.values` | `[K, S, H]`, or `[K, N, H]` after reconciliation | Fit-time OOB signed errors, with issuing indexes `origins[K]`. NaN means missing |
 | Reconciler | `shape = (N, S)`, called on `[S, H]` | `BottomUp` (S = B), `Identity` or `WlsStruct` (S = N) |
 | Origins | `[O]` int | Increasing period indexes, each the last observed period |
 | Points | `[O, N, H]` | Reconciled points, owned by the caller |
@@ -97,8 +99,8 @@ O origins, and H forecast steps.
 | `Feedback.point`, `Feedback.target` | `[K, N]` | Column sums, one row per newly known (issuing origin, column), in origin order. `scores` and the bounds of any threshold derive from them through `Feedback.score` |
 | Loss grid | `[G]` or `[N, G]` | Increasing candidate thresholds of `RiskControl`, in score units. Losses are evaluated as `[K, N, G]` |
 | Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
-| Threshold | `[N, C]` float32 | Issued per origin. inf means not ready |
-| `Replay` arrays | `[O, N, C]` | Points, thresholds, bounds, targets, scores, and censored flags per column |
+| Threshold | `[N, C]` float32, or `[N, C, 2]` for `Asymmetric` | Scalar threshold or lower/upper residual corrections. An empty history gives inf, or [-inf, inf] for a pair |
+| `Replay` arrays | `[O, N, C]`, except paired thresholds `[O, N, C, 2]` | Points, bounds, targets, scores, censored flags, and issued parameters |
 | State | nested dict of arrays | `flatten` gives one named array per key |
 
 `online.step` gives the periods since the last origin to the ledger, scores the
@@ -119,6 +121,28 @@ slicing, so a value after the origin cannot reach a model, except a covariate ma
 The model is fitted at the first origin and again every `refit_every` origins.
 Aggregate nodes get covariates by the declared `aggregate` rule, sum or mean of their
 bottom series. There is no default rule.
+
+`Score.parameter_shape()` is `()` for scalar thresholds and `(2,)` for asymmetric
+corrections. Online initialization allocates the ledger from the calibrator output;
+the first step rejects an incompatible score/parameter shape. The ledger archives
+both corrections unchanged. Paired coverage and feedback misses use the issued
+endpoints; scalar scores retain the score-versus-threshold comparison. Only scalar scores index the nested
+families required by quantile and risk calibrators.
+
+`BootstrapEnsemble` fits one local scikit-learn row-regression ensemble per series,
+with shared chronological row resamples across series. It implements only one-step
+lag prediction, rejects covariates, and exposes aligned OOB errors through
+`FittedResiduals.residuals()`. Fitted learners never enter calibration state.
+
+`rolling_forecasts(initial_residuals=True)` collects those errors and applies the
+same linear reconciler to them, without another origin loop. All error targets must
+be known at the first forecast origin. Refitting is rejected in this mode because
+a seed must belong to one frozen model generation. The returned
+`Forecasts.initial_residuals` is caller-owned initialization data, not automatically
+fed to adaptive controllers as if bounds had been issued in the training period.
+For `EnbPI`, the caller seeds the calibration state explicitly with signed errors
+and passes that online state to `replay(state=...)`. The same argument continues a
+saved ledger and calibrator state at later origins.
 
 Model adapters that need long frames build them inside `fit` and `predict`, from the
 last periods the model reads. At full M5 a long frame of the whole history is 58
@@ -152,7 +176,9 @@ These are approved directions for the library. None of them exist yet:
 - Exact decimal levels with integer or rational rank arithmetic.
 - Declared target support and conservative projection of bounds onto it.
 - Normalized, weighted, and adaptive calibration.
-- Model lifecycle beyond fit and refit: incremental update, native quantiles, and fitted residuals.
+- Model lifecycle beyond fit and refit: incremental update and native quantiles.
+  Fit-time OOB residuals now have an explicit contract; automatic model-generation
+  changes and calibration resets are still not implemented.
 - A target transform pair for adapters other than mlforecast.
 - Diagonal residual-variance reconciliation and a memory preflight for `WlsStruct`.
 

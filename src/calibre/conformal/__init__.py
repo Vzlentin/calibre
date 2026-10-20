@@ -9,6 +9,7 @@ threshold per node and column.
 from calibre.conformal.calibrators import (
     ACI,
     Calibrator,
+    EnbPI,
     Feedback,
     Level,
     QuantileCalibrator,
@@ -18,13 +19,15 @@ from calibre.conformal.calibrators import (
     State,
 )
 from calibre.conformal.losses import Loss, Miss
-from calibre.conformal.scores import Absolute, Score, Signed
+from calibre.conformal.scores import Absolute, Asymmetric, Score, Signed
 from calibre.conformal.targets import LeadTime, Step, Target
 
 __all__ = [
     "ACI",
     "Absolute",
+    "Asymmetric",
     "Calibrator",
+    "EnbPI",
     "Feedback",
     "LeadTime",
     "Level",
