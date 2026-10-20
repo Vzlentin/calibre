@@ -2,8 +2,10 @@
 
 Each metric averages over the cells whose target is known. A NaN target is not known
 and does not count. `axis` keeps the other axes, for example `axis=(0, 2)` gives one
-value per node of `[O, N, C]` arrays. An infinite bound, which means not ready, gives
-an infinite width or score: slice the warm-up away instead of hiding it.
+value per node of `[O, N, C]` arrays. Infinite bounds can mean warm-up or intentional
+controller saturation. Width and interval score assume ordered endpoints and have
+no empty-set convention. Coverage also handles empty sets. Exclude warm-up explicitly,
+not saturation dates selected by whether the issued threshold is finite.
 """
 
 import numpy as np

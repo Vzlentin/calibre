@@ -8,6 +8,9 @@ All notable changes are listed here. The format follows
 
 ### Added
 
+- `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
+  tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
+  Controller state is NumPy-only and resumes through the existing online/replay API.
 - Local one-step `BootstrapEnsemble` with OOB-weighted points and a `bootstrap`
   extra for scikit-learn. Fit-time residuals have explicit `FitResiduals` and
   `FittedResiduals` contracts; rolling forecasts can collect reconciled initial

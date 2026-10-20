@@ -76,6 +76,73 @@ refactor.
   adapter implements no multi-horizon, simultaneous-path, or conditional-coverage
   guarantee. Reconciled residual intervals likewise carry no new such claim.
 
+## Conformal PID: explicit semantic additions
+
+- **Scope and variant.** `ConformalPID(level, ...)` calibrates nonnegative scalar
+  scores, normally `Absolute`, independently per node and column, without pooling.
+  Negative finite scores and paired parameters are rejected on update. Its
+  anticipation is a causal regularized AR(1), not the paper's Theta model or a
+  finite-difference derivative. A signed-score extension is not implemented.
+- **Explicit initialization.** `seed(state, scores)` takes [K, N, C] nonnegative
+  scores in time order, with NaN holes; infinity is rejected. Every cell needs at
+  least one finite score. Keep the last `window` finite scores per cell. Seeds
+  must already be known at the first issuing origin, from predictions appropriate
+  to the same model and target configuration. No historical thresholds or misses
+  are invented. Seeding requires an empty state; seed every cell before feedback.
+  An empty state issues inf, but update before seed raises instead of silently
+  choosing a scale from warm-up feedback.
+- **Initial rank and scale.** The initial quantile is the empirical inverse CDF
+  at `level`: rank ceil(n * level), clamped to 1 through n, with no n+1 correction.
+  Any nonempty seed suffices. Set
+  `scale = max(std(seed), 0.1 * mean(seed), 1e-8)`, with population standard
+  deviation, using only retained seed scores. The scale stays fixed. Initialize
+  P to this quantile minus the initial scorecast, so the first threshold is the
+  empirical quantile. These floors and the fixed rate scaling are explicit
+  algorithm choices, not issuance-time normalization.
+- **Feedback and P.** A finite revealed score misses iff it is strictly above
+  its archived issued threshold, including thresholds below zero or infinite.
+  Equality is a hit. Let `e = miss - (1 - level)`. Update
+  `P += learning_rate * scale * e`, `E += e`, and `t += 1`.
+  Append the score to its cell's ring. Missing or nonfinite constructed scores
+  change none of these arrays. Censored feedback is scored as observed, as for
+  other controllers; this is not latent-demand calibration.
+- **Integrator and issued threshold.** After t valid updates, set
+  `z = E * log(t + 1) / (saturation_scale * (t + 1))`.
+  I is zero at t=0 or when `integral_gain=0`; otherwise it is
+  `integral_gain * scale * tan(z)` for `-pi/2 < z < pi/2`,
+  and signed infinity outside that range, including the endpoints.
+  Never multiply zero gain by infinity. Issue `P + I + scorecast`, as float32;
+  P, E, scale, and score history are float64.
+- **AR(1) scorecasting.** Use the last min(window, scorecast_window) retained
+  scores in chronological order. Fewer than three scores give their mean.
+  Otherwise regress successive scores with an intercept, adding
+  `max(scale**2 * 1e-6, 1e-12)` to the centered sum-of-squares denominator.
+  Clip the slope to [-0.99, 0.99] and the next-score forecast below at zero.
+  Disabled scorecasting is exactly zero. Neither rate scales nor fitted AR objects
+  are updated or hidden on the calibrator instance.
+- **Time and continuation.** Feedback rows are consumed in ledger order,
+  vectorized over nodes. The integrator clock counts valid updates per cell,
+  not calendar periods or calls to step. Step and lead-time columns learn only
+  when their last covered target is known, and use their own archived parameters.
+  Threshold evaluation does not mutate state. Save the NumPy state and pending
+  ledger together; resume with the same target, score, model, and configuration.
+- **Empty and unbounded sets; evaluation limitation.** With `Absolute`, a
+  negative threshold gives an empty set, +inf the whole line, and -inf an empty
+  set. These are intentional controller decisions, not necessarily warm-up.
+  `Feedback.misses`, `Replay.covered`, and `metrics.coverage` count them correctly.
+  Do not mask saturation dates or clip thresholds to make intervals look finite.
+  Generic `metrics.width` and `interval_score` currently assume ordered endpoints:
+  they have no empty-set convention and can return negative widths or NaN.
+  `bench/compare.py` treats every infinite threshold as unready and cannot
+  evaluate PID without a separately specified evaluation change.
+- **Claims.** This implementation variant makes no distribution-free
+  finite-sample, conditional, or simultaneous-path coverage claim. Frequency
+  control requires the controller's assumptions; it does not follow solely from
+  these recursions, especially when feedback is delayed, targets overlap, or
+  integral control is disabled. AR(1) does not reproduce the authors' numerical
+  results. Reference: Angelopoulos, Candès and Tibshirani,
+  [Conformal PID Control](https://arxiv.org/abs/2307.16895).
+
 ## Approved, not implemented
 
 | Topic | Default | Consequence |

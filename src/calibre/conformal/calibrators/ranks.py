@@ -75,6 +75,32 @@ def retained_quantile(
     return out
 
 
+def empirical_quantile(scores: np.ndarray, level: float | np.ndarray) -> np.ndarray:
+    """Empirical inverse CDF per column [N] of scores [K, N], with NaN holes.
+
+    Use ceil(n * level), clamped to ranks 1 through n, without interpolation or
+    an n+1 correction. Levels include 0 and 1; an empty column returns inf.
+    Computation and output are float64 for controller initialization.
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    levels = np.asarray(level, dtype=np.float64)
+    if scores.ndim != 2 or levels.ndim > 1:
+        raise ValueError("scores must be [K, N] and level a scalar or vector")
+    if not np.isfinite(levels).all() or ((levels < 0) | (levels > 1)).any():
+        raise ValueError("level must be between zero and one inclusive")
+    if np.isinf(scores).any():
+        raise ValueError("scores must be finite or NaN")
+    levels = np.broadcast_to(levels, (scores.shape[1],))
+    counts = np.isfinite(scores).sum(axis=0)
+    out = np.full(scores.shape[1], np.inf, dtype=np.float64)
+    ready = counts > 0
+    if ready.any():
+        ordered = np.sort(scores[:, ready], axis=0)
+        ranks = np.clip(np.ceil(counts[ready] * levels[ready]).astype(np.int64), 1, counts[ready])
+        out[ready] = ordered[ranks - 1, np.arange(ready.sum())]
+    return out
+
+
 def empirical_interval(
     scores: np.ndarray, level: float | np.ndarray, beta_grid_size: int = 21
 ) -> np.ndarray:
