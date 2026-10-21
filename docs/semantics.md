@@ -79,10 +79,12 @@ refactor.
 ## Conformal PID: explicit semantic additions
 
 - **Scope and variant.** `ConformalPID(level, ...)` calibrates nonnegative scalar
-  scores, normally `Absolute`, independently per node and column, without pooling.
-  Negative finite scores and paired parameters are rejected on update. Its
-  anticipation is a causal regularized AR(1), not the paper's Theta model or a
-  finite-difference derivative. A signed-score extension is not implemented.
+  scores, normally `Absolute`. P/I updates, initial ranks, and scales are per node
+  and column, without score pooling. Negative finite scores and paired parameters
+  are rejected on update. Its anticipation comes from an explicitly injected
+  `Scorecaster`, not a finite-difference derivative. `scorecaster` is a required
+  constructor choice: None disables anticipation. AR(1), Theta, and other forecasters are composed through
+  `ForecastScorecaster`, outside calibration. A signed-score extension is not implemented.
 - **Explicit initialization.** `seed(state, scores)` takes [K, N, C] nonnegative
   scores in time order, with NaN holes; infinity is rejected. Every cell needs at
   least one finite score. Keep the last `window` finite scores per cell. Seeds
@@ -115,19 +117,52 @@ refactor.
   and signed infinity outside that range, including the endpoints.
   Never multiply zero gain by infinity. Issue `P + I + scorecast`, as float32;
   P, E, scale, and score history are float64.
-- **AR(1) scorecasting.** Use the last min(window, scorecast_window) retained
-  scores in chronological order. Fewer than three scores give their mean.
-  Otherwise regress successive scores with an intercept, adding
-  `max(scale**2 * 1e-6, 1e-12)` to the centered sum-of-squares denominator.
-  Clip the slope phi to [-0.99, 0.99]. With paired means mean_x and mean_y, set
-  `mu = (mean_y - phi * mean_x) / (1 - phi)` and forecast
-  `max(0, mu + phi**ahead * (last - mu))`, propagating the fitted intercept.
-  The constructor's `ahead` is a positive integer scalar or [C] array, default 1.
-  Set it to each target column's last covered step: `np.arange(1, H + 1)` for
-  `Step()` and `steps` for `LeadTime(steps)`. It is fixed configuration, not a
-  learned clock; delayed releases and gaps do not change it.
-  Disabled scorecasting is exactly zero. Neither rate scales nor fitted AR objects
-  are updated or hidden on the calibrator instance.
+- **Injected scorecasting (structural refactor).** The PID supplies the last
+  min(window, scorecast_window) retained scores in chronological order, right-
+  aligned with leading NaN, counts and fixed seed scales, all read-only.
+  `Scorecaster.predict` returns finite [N, C] predictions; wrong shapes or nonfinite
+  values raise. The PID floors predictions at zero. None produces exactly zero.
+  `ahead` remains a positive integer scalar or [C] array, default 1: choose
+  `np.arange(1, H + 1)` for `Step()` and `steps` for `LeadTime(steps)`.
+  This is fixed configuration, not a learned clock; delayed releases and gaps do
+  not change it. No fitted objects or learned instance state are retained.
+- **Finite scorecast output (boundary hardening).** Both the scorecaster adapter
+  and PID require finite predictions. The adapter also checks the final score
+  units after mean fallback or reversing optional scaling. Overflow raises rather
+  than leaking infinity, silently falling back, or changing the chosen model.
+  This is separate from intentional infinity in the PID integrator and thresholds.
+- **Forecaster adapter and model choice (explicit API change).**
+  `ForecastScorecaster` groups nodes with equal retained counts per column, fits
+  the configured `Forecaster`, and selects its `ahead`-th prediction. It supplies
+  no covariates and uses positional daily dates; histories follow retained-score
+  time, not calendar time. Calendar-aware features and calendar seasonality across
+  gaps are not reconstructed. Controller updates stay per cell; a global
+  forecaster may share parameters across nodes in a batch. Empty cells predict
+  zero. Below `min_history` (default 3) use the retained mean; otherwise fitting
+  errors propagate, with no silent model fallback. To ever fit a model,
+  `min_history` must not exceed min(window, scorecast_window). Configure at least
+  4 values for StatsForecast Theta and suitable warm-up for seasonal models. By default
+  scores are passed in their original units. An explicit `scale_floor` divides
+  each history by max(fixed seed scale, scale_floor) and undoes that scale on the
+  predictions; it changes no issued-score units or P/I rate scale.
+  Choose the scorecaster before seeding and keep it unchanged on continuation;
+  choosing a different model requires fresh initialization, since P subtracts the
+  initial prediction. There is no boolean scorecast alias or default model.
+- **AR(1) numerical preservation.** Use
+  `ForecastScorecaster(AR1(), scale_floor=1e-3)` to preserve the former PID variant.
+  Generic AR1 adds ridge=1e-6 in normalized units, equivalent to
+  `max(scale**2 * 1e-6, 1e-12)` in score units. Fewer than three values use their
+  mean. Otherwise regress successive scores with an intercept, clip slope phi
+  to [-0.99, 0.99], set `mu = (mean_y - phi * mean_x) / (1 - phi)`, and forecast
+  `mu + phi**ahead * (last - mu)`. Generic forecasts may be negative; only the PID
+  applies the nonnegative scorecast floor. Neither the fixed rate scale nor the
+  numerical AR(1) rule changes in this extraction.
+- **Theta alternative (new model choice).**
+  `ForecastScorecaster(StatsForecastModel(Theta(season_length=p)), min_history=m)`
+  uses StatsForecast Theta on the retained history, optionally with score scaling.
+  It is not the authors' Statsmodels Theta implementation, expanding training
+  history, or precomputed scorecasts; selecting it does not claim reproduction
+  of the paper's experiments.
 - **Time and continuation.** Feedback rows are consumed in ledger order,
   vectorized over nodes. The integrator clock counts valid updates per cell,
   not calendar periods or calls to step. Step and lead-time columns learn only
@@ -147,8 +182,9 @@ refactor.
   finite-sample, conditional, or simultaneous-path coverage claim. Frequency
   control requires the controller's assumptions; it does not follow solely from
   these recursions, especially when feedback is delayed, targets overlap, or
-  integral control is disabled. AR(1) does not reproduce the authors' numerical
-  results. Reference: Angelopoulos, Candès and Tibshirani,
+  integral control is disabled. Choosing a scorecaster does not establish the
+  assumptions or reproduce the authors' numerical results.
+  Reference: Angelopoulos, Candès and Tibshirani,
   [Conformal PID Control](https://arxiv.org/abs/2307.16895).
 
 ## Approved, not implemented

@@ -23,6 +23,22 @@ Level = float | np.ndarray
 """Target level: a scalar, or `[N, C]` per node and column. `[N, 1]` is one per node."""
 
 
+class Scorecaster(ABC):
+    """Stateless anticipation from revealed score histories, with no forecast dependency."""
+
+    @abstractmethod
+    def predict(
+        self, scores: np.ndarray, counts: np.ndarray, scale: np.ndarray, ahead: np.ndarray
+    ) -> np.ndarray:
+        """Return finite predictions [N, C] without changing the read-only inputs.
+
+        scores [N, C, K] are chronological and right-aligned, with leading NaN;
+        counts [N, C] give retained lengths, scale [N, C] the fixed seed scale,
+        and ahead [C] positive forecast horizons in the retained-score clock.
+        Empty cells predict zero. Recompute fits; retain no learned instance state.
+        """
+
+
 @dataclass(frozen=True)
 class Feedback:
     """Targets that became known at one origin. Each row `[K]` is one target column of
