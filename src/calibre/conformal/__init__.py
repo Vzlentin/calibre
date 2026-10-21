@@ -9,6 +9,7 @@ threshold per node and column.
 from calibre.conformal.calibrators import (
     ACI,
     Calibrator,
+    ConformalPID,
     EnbPI,
     Feedback,
     Level,
@@ -27,6 +28,7 @@ __all__ = [
     "Absolute",
     "Asymmetric",
     "Calibrator",
+    "ConformalPID",
     "EnbPI",
     "Feedback",
     "LeadTime",

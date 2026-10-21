@@ -65,7 +65,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `RiskControl`, `EnbPI`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -189,6 +189,48 @@ This does not establish distribution-free conditional coverage for dependent ser
 See [Semantics](docs/semantics.md#enbpi-explicit-semantic-additions) for the precise
 center, ranks, missing-data policy, and scope. A saved online state can be passed
 back to `replay(state=...)` to continue, without retraining the point model.
+
+## Conformal PID
+
+`ConformalPID` combines quantile tracking, a log-scaled tangent integrator, and
+rolling regularized AR(1) scorecasting. The anticipation term is a baseline
+substitute for the paper's Theta model, not a finite-difference derivative.
+It uses nonnegative scalar scores, normally `Absolute()`, independently per node
+and target column.
+
+Using the seven-step `run`, `panel`, `hierarchy`, and `actuals` from the quick start:
+
+```python
+from calibre import ConformalPID, initial_state
+
+calibration = rolling_forecasts(
+    panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), np.arange(28, 54), 7
+)
+# Last calibration target: origin 53 + step 7 = 60, known at the first run origin.
+known_actuals = actuals[:, : int(run.origins[0]) + 1]
+scores = np.abs(calibration.residuals(known_actuals))
+calibrator = ConformalPID(level=0.9, window=256, scorecast_window=64, ahead=np.arange(1, 8))
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7)
+state["calibrator"] = calibrator.seed(state["calibrator"], scores)
+intervals = replay(
+    run, actuals, target=Step(), score=Absolute(), calibrator=calibrator, state=state
+)
+print(coverage(intervals.target, intervals.lower, intervals.upper))
+```
+
+Seed every node/column with at least one already revealed score. Only the last
+`window` finite scores initialize its empirical quantile and fixed learning-rate
+scale; seeding invents no past misses. Set `ahead` to the last covered step per
+column: 1 through H for `Step()`, or `steps` for `LeadTime(steps)`; the default is 1.
+Saved state resumes through `replay(state=...)` with the same configuration.
+
+Negative thresholds give empty sets; `+inf` gives the whole line and `-inf` an
+empty set. Do not clip these outputs or exclude saturation dates from coverage.
+Use `Replay.covered` or `coverage` on all known targets. The current generic width
+and interval-score metrics have no empty-set convention, and `bench/compare.py`
+masks infinite thresholds as unready: it is not a PID evaluator.
+See [Semantics](docs/semantics.md#conformal-pid-explicit-semantic-additions) for the
+exact variant and the limits of its coverage claims.
 
 ## Benchmarks
 

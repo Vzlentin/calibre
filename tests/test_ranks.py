@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from calibre.conformal.calibrators.ranks import retained_quantile, score_quantile
+from calibre.conformal.calibrators.ranks import (
+    empirical_quantile,
+    retained_quantile,
+    score_quantile,
+)
 
 
 def step_thresholds(resid, rows, level, window=None, groups=None):
@@ -17,6 +21,35 @@ def window_upper(point, resid, rows, level, steps, window=None, groups=None):
     """Point total plus the quantile of signed window sums over the first rows."""
     sums = resid[:rows, : point.shape[0], :steps].sum(axis=2)
     return point[:, :steps].sum(axis=1) + retained_quantile(sums, level, window, groups)
+
+
+def test_empirical_quantile_uses_n_not_n_plus_one_and_finite_endpoints():
+    scores = np.array([[4, 9, np.nan], [1, np.nan, np.nan], [2, np.nan, np.nan]])
+    np.testing.assert_array_equal(
+        empirical_quantile(scores, np.array([0.9, 0.99, 0.5])), [4, 9, np.inf]
+    )
+    np.testing.assert_array_equal(empirical_quantile(scores, 0), [1, 9, np.inf])
+    np.testing.assert_array_equal(empirical_quantile(scores, 1), [4, 9, np.inf])
+    assert empirical_quantile(scores, 0.5)[0] == 2
+    assert empirical_quantile(scores, 0.5).dtype == np.float64
+    np.testing.assert_array_equal(empirical_quantile(np.empty((0, 2)), 0.9), [np.inf, np.inf])
+
+
+@pytest.mark.parametrize(
+    ("scores", "level"),
+    [
+        ([1, 2], 0.5),
+        ([[np.inf]], 0.5),
+        ([[1]], -0.1),
+        ([[1]], 1.1),
+        ([[1]], np.nan),
+        ([[1]], [[0.5]]),
+        ([[1]], [0.5, 0.6]),
+    ],
+)
+def test_empirical_quantile_rejects_invalid_inputs(scores, level):
+    with pytest.raises(ValueError):
+        empirical_quantile(np.asarray(scores), level)
 
 
 def test_score_quantile_uses_the_same_rank_for_pooled_and_per_series_scores():

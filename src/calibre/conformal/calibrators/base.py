@@ -75,7 +75,8 @@ class Calibrator(ABC):
     def threshold(self, state: State) -> np.ndarray:
         """Return scalar `[N, C]` or paired `[N, C, 2]` bound parameters.
 
-        A scalar inf or the pair [-inf, inf] represents an unready cell.
+        An unready cell returns scalar inf or the pair [-inf, inf]. Adaptive
+        controllers can also intentionally issue signed infinity after initialization.
         """
 
 

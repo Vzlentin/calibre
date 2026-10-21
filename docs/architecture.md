@@ -31,8 +31,8 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`: residual scores, parameter shapes, and their issued bounds |
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
 | `conformal/calibrators/base.py` | `Calibrator` and `QuantileCalibrator` contracts, `Feedback`, `State`, `Level`, `check_level` |
-| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_interval`: shortest empirical residual interval |
-| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI` |
+| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
+| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `pid.ConformalPID` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
@@ -143,6 +143,17 @@ fed to adaptive controllers as if bounds had been issued in the training period.
 For `EnbPI`, the caller seeds the calibration state explicitly with signed errors
 and passes that online state to `replay(state=...)`. The same argument continues a
 saved ledger and calibrator state at later origins.
+
+`ConformalPID` also takes an explicit seed, this time nonnegative calibration
+scores [K, N, C] known at the first issuing origin. Every cell needs a finite seed.
+It keeps a fixed-size chronological score ring and per-cell P state, fixed scale,
+cumulative coverage error, and update count. Its fixed `ahead` constructor argument
+specifies each target column's last covered step. AR(1) forecasts are recomputed from
+the ring, never stored as fitted objects. Controller arrays are float64; counts
+and insertion positions are int64, each with the node axis first. Issued scalar
+thresholds are [N, C] float32. The existing ledger, step, and replay need no PID
+special case. See [Semantics](semantics.md#conformal-pid-explicit-semantic-additions)
+for seeding, delayed feedback, and intentional empty/unbounded outputs.
 
 Model adapters that need long frames build them inside `fit` and `predict`, from the
 last periods the model reads. At full M5 a long frame of the whole history is 58
