@@ -3,7 +3,7 @@
 Vendor model adapters live in `calibre.forecast.models` and need their extra installed.
 """
 
-from calibre.backtest import Forecasts, Replay, replay, rolling_forecasts
+from calibre.backtest import Forecasts, ForecastScorecaster, Replay, replay, rolling_forecasts
 from calibre.conformal import (
     ACI,
     Absolute,
@@ -20,6 +20,7 @@ from calibre.conformal import (
     QuantileTracker,
     RiskControl,
     Score,
+    Scorecaster,
     Signed,
     SplitQuantile,
     State,
@@ -29,6 +30,7 @@ from calibre.conformal import (
 from calibre.data import Hierarchy, Panel
 from calibre.decision import Settlement, critical_ratio, order_up_to, settle
 from calibre.forecast import (
+    AR1,
     BottomUp,
     Covariate,
     FitResiduals,
@@ -45,6 +47,7 @@ from calibre.online import Issue, initial_state, step
 
 __all__ = [
     "ACI",
+    "AR1",
     "Absolute",
     "Asymmetric",
     "BottomUp",
@@ -58,6 +61,7 @@ __all__ = [
     "FittedResiduals",
     "Forecaster",
     "Forecasts",
+    "ForecastScorecaster",
     "Hierarchy",
     "Identity",
     "Issue",
@@ -72,6 +76,7 @@ __all__ = [
     "Reconciler",
     "Replay",
     "Score",
+    "Scorecaster",
     "SeasonalNaive",
     "Settlement",
     "Signed",
