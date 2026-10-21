@@ -152,15 +152,49 @@ def test_pid_scorecast_short_or_constant_history_uses_its_mean(scores):
     assert np.isfinite(method.threshold(state)).all()
 
 
-def test_pid_scorecast_regularized_ar1_matches_an_independent_calculation():
-    method = ConformalPID(0.75, window=3)
+@pytest.mark.parametrize("ahead", [1, 2, 3])
+def test_pid_scorecast_regularized_ar1_matches_an_independent_calculation(ahead):
+    method = ConformalPID(0.75, window=3, ahead=ahead)
     state = seeded(method, [1, 2, 1])
     # x=[1,2], y=[2,1], covariance=-.5, variance=.5, seed variance=2/9.
     slope = max(-0.99, -0.5 / (0.5 + (2 / 9) * 1e-6))
-    expected = 1.5 + slope * (1 - 1.5)
+    expected = 1.5 + slope**ahead * (1 - 1.5)
     np.testing.assert_allclose(method._scorecast(state), [[expected]], rtol=1e-14)
     np.testing.assert_allclose(state["proportional"], [[2 - expected]])
     np.testing.assert_array_equal(method.threshold(state), [[2]])
+
+
+@pytest.mark.parametrize(("target", "ahead"), [(Step(), np.arange(1, 4)), (LeadTime(3), 3)])
+def test_pid_scorecast_respects_step_and_lead_time_horizons(target, ahead):
+    history = np.concatenate([np.arange(10, 21), np.arange(19, 9, -1)])
+    scales = np.array([1.0, 2.5])[:, None]
+    method = ConformalPID(0.75, window=len(history), ahead=ahead)
+    state = initial_state(target, method, 2, 3)
+    n_columns = len(target.cover(3))
+    scores = np.broadcast_to(history[:, None, None] * scales, (len(history), 2, n_columns))
+    method.seed(state["calibrator"], scores)
+    # Paired means are both 15; centered covariance=160, sum of squares=170.
+    slope = 160 / (170 + np.var(history) * 1e-6)
+    expected = scales * (15 + slope ** np.atleast_1d(ahead) * (10 - 15))
+    np.testing.assert_allclose(method._scorecast(state["calibrator"]), expected, rtol=1e-14)
+    # Horizon-aware seeding still starts at the empirical quantile, rank 16 of 21.
+    np.testing.assert_array_equal(
+        method.threshold(state["calibrator"]), np.broadcast_to(17 * scales, (2, n_columns))
+    )
+
+
+def test_pid_scorecast_multi_step_propagates_the_fitted_intercept():
+    history = np.array([2, 4, 5.5, 6.625, 7.46875])  # y = 2 + 0.75 * x
+    method = ConformalPID(0.75, ahead=3)
+    state = seeded(method, history)
+    # Independently fit the ridge regression, leaving the intercept unpenalized.
+    design = np.column_stack([np.ones(4), history[:-1]])
+    design = np.vstack([design, [0, np.sqrt(np.var(history) * 1e-6)]])
+    intercept, slope = np.linalg.lstsq(design, np.append(history[1:], 0), rcond=None)[0]
+    expected = history[-1]
+    for _ in range(3):
+        expected = intercept + slope * expected
+    np.testing.assert_allclose(method._scorecast(state), [[expected]], rtol=1e-14)
 
 
 def test_pid_scorecast_ring_wrap_preserves_time_order_and_its_own_window():
@@ -212,14 +246,17 @@ def test_pid_batched_feedback_matches_sequential_updates_without_cross_cell_pool
 
 def test_pid_multi_cell_scorecasting_matches_independent_single_cell_runs():
     levels = np.array([[0.5, 0.9], [0.8, 0.75]])
-    method = ConformalPID(levels, window=3, scorecast_window=3)
+    ahead = np.array([1, 3])
+    method = ConformalPID(levels, window=3, scorecast_window=3, ahead=ahead)
     seed = np.array([[[1, 10], [100, 2]], [[2, np.nan], [50, 2]], [[4, np.nan], [25, 2]]])
     state = seeded(method, seed)
     rows = feedback([[5, 20], [3, np.nan], [6, 10]], [[4, 25], [5, 3], [1, 100]], [0, 1, 0])
     method.update(state, rows)
     for node in range(2):
         for column in range(2):
-            alone = ConformalPID(float(levels[node, column]), window=3, scorecast_window=3)
+            alone = ConformalPID(
+                float(levels[node, column]), window=3, scorecast_window=3, ahead=int(ahead[column])
+            )
             single = seeded(alone, seed[:, node : node + 1, column : column + 1])
             selected = rows.column == column
             alone.update(
@@ -272,6 +309,16 @@ def test_pid_threshold_is_read_only_and_instances_do_not_hide_learned_state():
         {"scorecast_window": 0},
         {"scorecast_window": np.bool_(True)},
         {"scorecast": "yes"},
+        {"ahead": 0},
+        {"ahead": -1},
+        {"ahead": True},
+        {"ahead": 1.5},
+        {"ahead": np.nan},
+        {"ahead": np.inf},
+        {"ahead": [1, 0]},
+        {"ahead": []},
+        {"ahead": np.ones((1, 2), dtype=np.int64)},
+        {"ahead": np.array([2**63], dtype=np.uint64)},
     ],
 )
 def test_pid_rejects_invalid_settings(kwargs):
@@ -283,6 +330,12 @@ def test_pid_validates_level_shape_against_the_state():
     method = ConformalPID(np.full((2, 2), 0.9))
     with pytest.raises(ValueError):
         method.initial_state(3, 1)
+
+
+def test_pid_validates_ahead_shape_against_the_state():
+    method = ConformalPID(0.9, ahead=np.array([1, 3]))
+    with pytest.raises(ValueError):
+        method.initial_state(2, 3)
 
 
 @pytest.mark.parametrize(
@@ -310,12 +363,12 @@ def test_pid_cannot_seed_twice_and_rejects_negative_or_paired_scores():
         np.testing.assert_array_equal(state[key], before[key])
 
 
-@pytest.mark.parametrize("target", [Step(), LeadTime(3)])
-def test_pid_replay_is_causal_with_delayed_targets_and_gapped_origins(target):
+@pytest.mark.parametrize(("target", "ahead"), [(Step(), np.arange(1, 4)), (LeadTime(3), 3)])
+def test_pid_replay_is_causal_with_delayed_targets_and_gapped_origins(target, ahead):
     origins = np.array([10, 11, 14, 16, 20, 21])
     points = np.zeros((len(origins), 2, 3), dtype=np.float32)
     actuals = np.tile(np.arange(30, dtype=np.float32), (2, 1))
-    method = ConformalPID(0.9, window=4)
+    method = ConformalPID(0.9, window=4, ahead=ahead)
     setup: dict[str, Any] = {"target": target, "score": Absolute(), "calibrator": method}
 
     def run(values):
@@ -359,7 +412,7 @@ def test_pid_saved_state_resumes_exactly_with_pending_multi_step_targets():
     origins = np.array([10, 11, 14, 16, 20, 23, 25, 29, 32, 36, 40, 45, 50, 55])
     points = rng.normal(size=(len(origins), 2, 4)).astype(np.float32)
     seed = np.abs(rng.normal(size=(5, 2, 4)))
-    method = ConformalPID(np.array([[0.8], [0.9]]), window=4)
+    method = ConformalPID(np.array([[0.8], [0.9]]), window=4, ahead=np.arange(1, 5))
     setup: dict[str, Any] = {"target": Step(), "score": Absolute(), "calibrator": method}
 
     def start():

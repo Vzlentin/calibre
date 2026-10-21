@@ -98,7 +98,9 @@ refactor.
   deviation, using only retained seed scores. The scale stays fixed. Initialize
   P to this quantile minus the initial scorecast, so the first threshold is the
   empirical quantile. These floors and the fixed rate scaling are explicit
-  algorithm choices, not issuance-time normalization.
+  algorithm choices, not issuance-time normalization. Unlike the reference code's
+  raw KI and P rate `lr * (max - min)` recomputed over a trailing `T_burnin` window,
+  both gains here use the fixed seed scale, including `integral_gain * scale`.
 - **Feedback and P.** A finite revealed score misses iff it is strictly above
   its archived issued threshold, including thresholds below zero or infinite.
   Equality is a hit. Let `e = miss - (1 - level)`. Update
@@ -117,7 +119,13 @@ refactor.
   scores in chronological order. Fewer than three scores give their mean.
   Otherwise regress successive scores with an intercept, adding
   `max(scale**2 * 1e-6, 1e-12)` to the centered sum-of-squares denominator.
-  Clip the slope to [-0.99, 0.99] and the next-score forecast below at zero.
+  Clip the slope phi to [-0.99, 0.99]. With paired means mean_x and mean_y, set
+  `mu = (mean_y - phi * mean_x) / (1 - phi)` and forecast
+  `max(0, mu + phi**ahead * (last - mu))`, propagating the fitted intercept.
+  The constructor's `ahead` is a positive integer scalar or [C] array, default 1.
+  Set it to each target column's last covered step: `np.arange(1, H + 1)` for
+  `Step()` and `steps` for `LeadTime(steps)`. It is fixed configuration, not a
+  learned clock; delayed releases and gaps do not change it.
   Disabled scorecasting is exactly zero. Neither rate scales nor fitted AR objects
   are updated or hidden on the calibrator instance.
 - **Time and continuation.** Feedback rows are consumed in ledger order,

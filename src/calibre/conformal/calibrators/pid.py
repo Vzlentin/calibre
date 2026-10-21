@@ -12,6 +12,8 @@ class ConformalPID(Calibrator):
     Seed explicitly with revealed calibration scores before learning from feedback.
     P tracks the quantile, I integrates coverage error, and anticipation forecasts
     scores with AR(1), not the paper's Theta model. Rates use a fixed seed scale.
+    Set ahead to each target column's last covered step: 1..H for Step, or the
+    lead time for LeadTime. The default is one step for every column.
     Negative thresholds and signed-infinity saturation are intentional outputs.
     """
 
@@ -24,6 +26,8 @@ class ConformalPID(Calibrator):
         window: int = 256,
         scorecast_window: int = 64,
         scorecast: bool = True,
+        *,
+        ahead: int | np.ndarray = 1,
     ) -> None:
         self.level = check_level(level)
         for name, value in (
@@ -47,6 +51,16 @@ class ConformalPID(Calibrator):
                 raise ValueError(f"{name} must be a positive integer")
         if not isinstance(scorecast, (bool, np.bool_)):
             raise ValueError("scorecast must be a boolean")
+        steps_ahead = np.asarray(ahead)
+        if (
+            steps_ahead.ndim not in (0, 1)
+            or steps_ahead.size == 0
+            or steps_ahead.dtype.kind not in "iu"
+            or (steps_ahead < 1).any()
+            or (steps_ahead > np.iinfo(np.int64).max).any()
+        ):
+            raise ValueError("ahead must be a positive int64 scalar or [C] array")
+        self.ahead = steps_ahead.astype(np.int64, copy=True)
         self.learning_rate = float(learning_rate)
         self.integral_gain = float(integral_gain)
         self.saturation_scale = float(saturation_scale)
@@ -56,6 +70,7 @@ class ConformalPID(Calibrator):
 
     def initial_state(self, n_nodes: int, n_columns: int) -> State:
         np.broadcast_to(self.level, (n_nodes, n_columns))
+        np.broadcast_to(self.ahead, (n_columns,))
         return {
             "scores": np.full((n_nodes, n_columns, self.window), np.nan, dtype=np.float64),
             "count": np.zeros((n_nodes, n_columns), dtype=np.int64),
@@ -153,7 +168,11 @@ class ConformalPID(Calibrator):
         ridge = np.maximum(state["scale"] ** 2 * 1e-6, 1e-12)
         slope = np.sum(centered_x * centered_y, axis=-1) / (denominator + ridge)
         slope = np.clip(slope, -0.99, 0.99)
-        forecast = np.maximum(0.0, mean_y + slope * (scores[..., -1] - mean_x))
+        # Mean reversion must propagate the fitted intercept over all ahead steps.
+        equilibrium = (mean_y - slope * mean_x) / (1 - slope)
+        forecast = np.maximum(
+            0.0, equilibrium + slope**self.ahead * (scores[..., -1] - equilibrium)
+        )
         return np.where(counts < 3, mean, forecast)
 
     def _integrator(self, state: State) -> np.ndarray:

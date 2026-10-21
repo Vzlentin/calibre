@@ -209,7 +209,7 @@ calibration = rolling_forecasts(
 # Last calibration target: origin 53 + step 7 = 60, known at the first run origin.
 known_actuals = actuals[:, : int(run.origins[0]) + 1]
 scores = np.abs(calibration.residuals(known_actuals))
-calibrator = ConformalPID(level=0.9, window=256, scorecast_window=64)
+calibrator = ConformalPID(level=0.9, window=256, scorecast_window=64, ahead=np.arange(1, 8))
 state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7)
 state["calibrator"] = calibrator.seed(state["calibrator"], scores)
 intervals = replay(
@@ -220,7 +220,9 @@ print(coverage(intervals.target, intervals.lower, intervals.upper))
 
 Seed every node/column with at least one already revealed score. Only the last
 `window` finite scores initialize its empirical quantile and fixed learning-rate
-scale; seeding invents no past misses. Saved state resumes through `replay(state=...)`.
+scale; seeding invents no past misses. Set `ahead` to the last covered step per
+column: 1 through H for `Step()`, or `steps` for `LeadTime(steps)`; the default is 1.
+Saved state resumes through `replay(state=...)` with the same configuration.
 
 Negative thresholds give empty sets; `+inf` gives the whole line and `-inf` an
 empty set. Do not clip these outputs or exclude saturation dates from coverage.

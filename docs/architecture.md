@@ -147,7 +147,8 @@ saved ledger and calibrator state at later origins.
 `ConformalPID` also takes an explicit seed, this time nonnegative calibration
 scores [K, N, C] known at the first issuing origin. Every cell needs a finite seed.
 It keeps a fixed-size chronological score ring and per-cell P state, fixed scale,
-cumulative coverage error, and update count. AR(1) forecasts are recomputed from
+cumulative coverage error, and update count. Its fixed `ahead` constructor argument
+specifies each target column's last covered step. AR(1) forecasts are recomputed from
 the ring, never stored as fitted objects. Controller arrays are float64; counts
 and insertion positions are int64, each with the node axis first. Issued scalar
 thresholds are [N, C] float32. The existing ledger, step, and replay need no PID
