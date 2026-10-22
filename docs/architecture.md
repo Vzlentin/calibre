@@ -65,6 +65,8 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 
 | Script | Responsibility |
 |---|---|
+| `bench/download_benchmarks.py` | Pinned, hash-verified downloads and optional preparation under ignored `data/`; no M5/VN2 downloads |
+| `bench/load_benchmarks.py` | Nine additional datasets to `Panel`, hierarchy, attributes and observation masks; explicit imputation and positional-time policies. See [guide](../bench/README.md) |
 | `bench/vn2.py` | VN2 files to `Panel` with the out-of-stock mask, hierarchy, and stock. `play`: the six-decision protocol |
 | `bench/m5.py` | M5 files to `Panel`, the 12-level hierarchy, and the price covariate |
 | `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method |
