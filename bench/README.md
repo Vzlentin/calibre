@@ -148,7 +148,7 @@ CSV content. URLs and full expected hashes are in `download_benchmarks.py`.
 
 | Name | Variant and target | Original shape | Access / attribution / caveat |
 |---|---|---|---|
-| `etth1` | ETT-small ETTh1, `OT` | 17,420 hours, 7 source variables; 1 selected target | [ETT / Informer](https://github.com/zhouhaoyi/ETDataset); data licence not explicit in audited repository |
+| `etth1` | ETT-small ETTh1, `OT` | 17,420 hours, 7 source variables; 1 selected target | [ETT / Informer](https://github.com/zhouhaoyi/ETDataset), [CC BY-ND 4.0](https://github.com/zhouhaoyi/ETDataset/blob/1d16c8f4f943005d613b5bc962e9eeb06058cf07/LICENSE); private adaptations permitted, but the licence does not permit sharing adapted data; retain attribution |
 | `electricity` | LSTNet ECL hourly charge | 26,304 × 321 | [UCI](https://archive.ics.uci.edu/dataset/321/electricityloaddiagrams20112014), CC BY 4.0; cite [LSTNet processing](https://github.com/laiguokun/multivariate-time-series-data); not the raw 370-client, 15-minute file; processed units not asserted |
 | `traffic` | LSTNet PeMS occupancy proportions | 17,544 × 862 | [PeMS](https://pems.dot.ca.gov/) / LSTNet; data licence not explicit; not METR-LA/PEMS-BAY or vehicle counts |
 | `solar` | LSTNet Solar-AL, published PV values | 52,560 × 137 at 10 min | NREL provenance via LSTNet; data licence/physical units not explicit; not Solar Atlanta; nighttime zeros retained |
