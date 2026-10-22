@@ -236,10 +236,18 @@ exact variant and the limits of its coverage claims.
 
 `bench/` is a folder of scripts. They load benchmark data from a directory, run
 benchmark protocols, and compare calibrators. They import the installed `calibre`.
-Raw data is not in Git.
+Raw data is not in Git. [Download and preparation guide](bench/README.md) covers
+nine additional datasets, their versions, data-use conditions, and a runnable
+forecaster example. All downloaded files and prepared outputs stay in ignored `data/`.
+
+```sh
+uv run --no-dev python bench/download_benchmarks.py etth1 --prepare
+```
 
 | Script | Content |
 |---|---|
+| `download_benchmarks.py` | Verified downloads for ETTh1, Electricity, Traffic, Solar-AL, Exchange, Beijing, Bike, Favorita and FreshRetailNet; optional preparation |
+| `load_benchmarks.py` | Raw files or prepared arrays to `Panel`, hierarchy, attributes and original-target masks; explicit gap and positional-time handling |
 | `vn2.py` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
 | `m5.py` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
 | `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready |
