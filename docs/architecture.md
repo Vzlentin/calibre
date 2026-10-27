@@ -65,8 +65,15 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 
 | Script | Responsibility |
 |---|---|
-| `bench/download_benchmarks.py` | Pinned, hash-verified downloads and optional preparation under ignored `data/`; no M5/VN2 downloads |
-| `bench/load_benchmarks.py` | Nine additional datasets to `Panel`, hierarchy, attributes and observation masks; explicit imputation and positional-time policies. See [guide](../bench/README.md) |
+| `bench/download_benchmarks.py` | Downloads and verifies sources owned by dataset modules under ignored `data/`; no preparation, cache or M5/VN2 downloads |
+| `bench/sources.py` | Pinned source descriptors and SHA-256 verification, shared by downloads and loaders |
+| `bench/imputation.py` | Calendar reindex, causal forward-fill, leading warm-up trim and original-target mask |
+| `bench/lstnet.py` | Four pinned LSTNet matrices to positional-date panels and flat hierarchies |
+| `bench/ett.py` | ETTh1 oil temperature to an hourly panel and flat hierarchy |
+| `bench/beijing.py` | Beijing station PM2.5 to an hourly panel, causal fill and observation mask |
+| `bench/bike.py` | Bike Sharing rentals to an hourly panel, causal fill and observation mask |
+| `bench/favorita.py` | Store-family sales to a daily panel, causal fill, attributes and hierarchy |
+| `bench/freshretail.py` | Store-product sales to a daily panel, censoring, attributes and hierarchy; train/eval dates are module constants |
 | `bench/vn2.py` | VN2 files to `Panel` with the out-of-stock mask, hierarchy, and stock. `play`: the six-decision protocol |
 | `bench/m5.py` | M5 files to `Panel`, the 12-level hierarchy, and the price covariate |
 | `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method |

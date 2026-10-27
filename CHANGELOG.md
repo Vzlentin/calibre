@@ -8,9 +8,6 @@ All notable changes are listed here. The format follows
 
 ### Added
 
-- Download and prepare nine additional forecasting benchmarks in ignored `data/`,
-  with pinned SHA-256 checks, explicit missing-data/time-axis policies, and ready
-  Calibre panels, hierarchies and observation masks. M5/VN2 loaders are unchanged.
 - `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
   tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
   Controller state is NumPy-only and resumes through the existing online/replay API.
