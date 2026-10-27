@@ -163,13 +163,9 @@ class ConformalPID(Calibrator):
         scores = np.take_along_axis(state["scores"], slots, axis=-1)
         valid = offsets >= -counts[..., None]
         scores = np.where(valid, scores, np.nan)
-        scale = state["scale"].view()
-        for array in (scores, counts, scale):
-            array.flags.writeable = False
+        scores.flags.writeable = False
         ahead = np.broadcast_to(self.ahead, (counts.shape[1],))
-        forecast = np.asarray(
-            self.scorecaster.predict(scores, counts, scale, ahead), dtype=np.float64
-        )
+        forecast = np.asarray(self.scorecaster.predict(scores, ahead), dtype=np.float64)
         if forecast.shape != counts.shape or not np.isfinite(forecast).all():
             raise ValueError("scorecaster must return finite predictions [N, C]")
         return np.maximum(0.0, forecast)

@@ -27,15 +27,12 @@ class Scorecaster(ABC):
     """Stateless anticipation from revealed score histories, with no forecast dependency."""
 
     @abstractmethod
-    def predict(
-        self, scores: np.ndarray, counts: np.ndarray, scale: np.ndarray, ahead: np.ndarray
-    ) -> np.ndarray:
-        """Return finite predictions [N, C] without changing the read-only inputs.
+    def predict(self, history: np.ndarray, ahead: np.ndarray) -> np.ndarray:
+        """Predict [N, C] from read-only history [N, C, K] and horizons [C].
 
-        scores [N, C, K] are chronological and right-aligned, with leading NaN;
-        counts [N, C] give retained lengths, scale [N, C] the fixed seed scale,
-        and ahead [C] positive forecast horizons in the retained-score clock.
-        Empty cells predict zero. Recompute fits; retain no learned instance state.
+        History is chronological, right-aligned with leading NaN; horizons are
+        positive integers in retained-score time. Return finite values, zero for
+        empty cells. Do not change inputs or retain learned instance state.
         """
 
 

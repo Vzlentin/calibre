@@ -193,12 +193,8 @@ back to `replay(state=...)` to continue, without retraining the point model.
 
 ## Conformal PID
 
-`ConformalPID` combines quantile tracking, a log-scaled tangent integrator, and
-an explicitly chosen scorecaster. `ForecastScorecaster` adapts a `Forecaster` to
-revealed score histories: use `AR1`, Theta, or another configured model, not a
-finite-difference derivative. Pass `scorecaster=None` to use P+I only.
-The controller uses nonnegative scalar scores, normally `Absolute()`, per node
-and target column.
+`ConformalPID` combines quantile tracking, a tangent integrator, and an explicit
+scorecaster. Pass `scorecaster=None` for P+I only.
 
 Using the seven-step `run`, `panel`, `hierarchy`, and `actuals` from the quick start:
 
@@ -211,7 +207,7 @@ calibration = rolling_forecasts(
 # Last calibration target: origin 53 + step 7 = 60, known at the first run origin.
 known_actuals = actuals[:, : int(run.origins[0]) + 1]
 scores = np.abs(calibration.residuals(known_actuals))
-scorecaster = ForecastScorecaster(AR1(), scale_floor=1e-3)
+scorecaster = ForecastScorecaster(AR1())
 calibrator = ConformalPID(
     level=0.9,
     scorecaster=scorecaster,
@@ -227,14 +223,6 @@ intervals = replay(
 print(coverage(intervals.target, intervals.lower, intervals.upper))
 ```
 
-Seed every node/column with at least one already revealed score. Only the last
-`window` finite scores initialize its empirical quantile and fixed learning-rate
-scale; seeding invents no past misses. Set `ahead` to the last covered step per
-column: 1 through H for `Step()`, or `steps` for `LeadTime(steps)`; the default is 1.
-Saved state resumes through `replay(state=...)` with the same configuration.
-The AR(1) adapter's `scale_floor=1e-3` preserves the fixed seed-scaled ridge:
-normalize before fitting, then convert predictions back to score units.
-
 For Theta, install `libcalibre[stats]` and choose this scorecaster before seeding:
 
 ```python
@@ -246,28 +234,8 @@ theta_pid = ConformalPID(level=0.9, scorecaster=theta_scorecaster, ahead=np.aran
 # Seed a fresh state for theta_pid before using it.
 ```
 
-`min_history` defaults to 3; shorter histories use their mean. Theta needs at least
-4 values; increase the minimum for seasonal models as appropriate. For example,
-`Theta(season_length=7)` with `min_history=14` uses two retained-score seasons;
-keep both `window` and `scorecast_window` at least that large. Otherwise the
-adapter can only use its mean fallback. The adapter uses retained-score positions,
-not the original calendar, and refits from arrays without retaining fitted models.
-It lives in `backtest`, the composition layer
-allowed to import both forecasting and calibration. Theta here is StatsForecast's
-implementation, not the reference code's Statsmodels implementation.
-
-The design for [issue #520](https://github.com/Vzlentin/calibre/issues/520) is
-option 2: keep the calibration contract array-only and compose it with forecasting
-in `backtest`. The independent threshold tests cover AR(1), Theta, seasonal naive,
-and disabled scorecasting, including delayed multi-step targets and ring wraps.
-
-Negative thresholds give empty sets; `+inf` gives the whole line and `-inf` an
-empty set. Do not clip these outputs or exclude saturation dates from coverage.
-Use `Replay.covered` or `coverage` on all known targets. The current generic width
-and interval-score metrics have no empty-set convention, and `bench/compare.py`
-masks infinite thresholds as unready: it is not a PID evaluator.
-See [Semantics](docs/semantics.md#conformal-pid-explicit-semantic-additions) for the
-exact variant and the limits of its coverage claims.
+See [Semantics](docs/semantics.md#conformal-pid) for initialization, model warm-up,
+continuation, and coverage limits.
 
 ## Benchmarks
 

@@ -58,15 +58,8 @@ Each package imports only these Calibre packages.
 A calibration method is one file in `conformal/calibrators/`. It imports only
 `calibrators.base`, `calibrators.ranks`, and `conformal.losses`.
 
-For [issue #520](https://github.com/Vzlentin/calibre/issues/520), the chosen design
-is option 2: a small `Scorecaster` contract inside `conformal`, with a forecaster
-adapter in `backtest`. The dependency table and `Calibrator.threshold(state)`
-signature stay unchanged. This is dependency inversion, not a dependency exception.
-The PID imports its abstract array contract only from `calibrators.base`; the caller
-injects an implementation. `ForecastScorecaster` lives in `backtest`, which already
-imports both `forecast` and `conformal`. It has no origin loop and can also be
-injected into an online caller. Neither `conformal` nor `online` imports forecast
-models or this adapter. `forecast` does not import calibration.
+`Scorecaster` is an array-only contract in `calibrators.base`;
+`backtest.scorecasting` adapts a `Forecaster` to it.
 
 `conformal` and `online` do not depend on hierarchy code. They need points and actuals.
 
@@ -112,8 +105,10 @@ O origins, and H forecast steps.
 | Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
 | Threshold | `[N, C]` float32, or `[N, C, 2]` for `Asymmetric` | Scalar threshold or lower/upper residual corrections. An empty history gives inf, or [-inf, inf] for a pair |
 | `Replay` arrays | `[O, N, C]`, except paired thresholds `[O, N, C, 2]` | Points, bounds, targets, scores, censored flags, and issued parameters |
-| Scorecaster history | `[N, C, K]` float64, read-only | Chronological, right-aligned scores with leading NaN; retained counts and fixed seed scales are `[N, C]`, horizons `[C]` positive int64 |
-| Scorecast | `[N, C]` finite float64 | Anticipation, not an issued threshold: PID floors it at zero; disabling it gives exactly zero |
+| PID seed | `[K, N, C]` float64 | Nonnegative calibration scores; NaN means missing |
+| `Scorecaster.predict(history, ahead)` inputs | History `[N, C, K]` float64 and horizons `[C]` positive int64, read-only | Scores in original units, chronological and right-aligned with leading NaN |
+| Scorecast | `[N, C]` finite float64 | Anticipation in score units, not an issued threshold |
+| PID state | `[N, C, window]` score ring; other arrays `[N, C]` | Scores, P, fixed scale, cumulative error are float64; retained counts, insertion positions, update counts are int64 |
 | State | nested dict of arrays | `flatten` gives one named array per key |
 
 `online.step` gives the periods since the last origin to the ledger, scores the
@@ -157,23 +152,10 @@ For `EnbPI`, the caller seeds the calibration state explicitly with signed error
 and passes that online state to `replay(state=...)`. The same argument continues a
 saved ledger and calibrator state at later origins.
 
-`ConformalPID` also takes an explicit seed, this time nonnegative calibration
-scores [K, N, C] known at the first issuing origin. Every cell needs a finite seed.
-It keeps a fixed-size chronological score ring and per-cell P state, fixed scale,
-cumulative coverage error, and update count. Its fixed `ahead` constructor argument
-specifies each target column's last covered step. An explicitly injected `Scorecaster`
-receives chronological, right-aligned read-only scores [N, C, K], counts and fixed
-seed scales [N, C], and horizons [C], and returns finite predictions [N, C]. Passing
-None disables anticipation; there is no implicit AR(1) implementation in the PID.
-`ForecastScorecaster` batches nodes of equal history length per column, refits a
-`Forecaster` on each batch, and discards fitted objects. Its `Window` has no
-covariates and positional daily dates, not original calendar timestamps. The
-scorecaster and forecaster instances hold configuration only. Generic `AR1` stays
-in `forecast/models/ar1.py`; optional vendor models stay behind their adapters.
-Controller arrays are float64; counts and insertion positions are int64, each
-with the node axis first. Issued scalar thresholds are [N, C] float32. The existing
-ledger, step, and replay need no PID special case. See [Semantics](semantics.md#conformal-pid-explicit-semantic-additions)
-for seeding, delayed feedback, and intentional empty/unbounded outputs.
+`ForecastScorecaster` refits from arrays and discards fitted objects; scorecaster
+and forecaster instances hold configuration only. The ledger, step, and replay
+need no PID special case. See [Semantics](semantics.md#conformal-pid) for the
+controller and scorecasting rules.
 
 Model adapters that need long frames build them inside `fit` and `predict`, from the
 last periods the model reads. At full M5 a long frame of the whole history is 58
