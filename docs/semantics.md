@@ -76,6 +76,89 @@ refactor.
   adapter implements no multi-horizon, simultaneous-path, or conditional-coverage
   guarantee. Reconciled residual intervals likewise carry no new such claim.
 
+## SPCI
+
+- **Scope and explicit horizon.** `SPCI(level, window, n_lags, ahead=...)`
+  returns paired residual corrections, normally with `Asymmetric`. Each node and
+  target column has its own history and forest, with no pooling. `ahead` is required:
+  use `np.arange(1, H + 1)` for `Step()` or `steps` for `LeadTime(steps)`. It must
+  equal each column's last covered step, in the same calendar-index units as
+  `Feedback.origin`. The caller owns this configuration; the generic calibrator
+  contract does not receive the target cover and cannot verify that match.
+- **Causal direct-horizon pairs.** Let e[o,h] be actual minus the archived point
+  for a forecast issued at o, revealed at o+h. The context of training label
+  e[o,h] consists of the last `n_lags` finite errors e[u,h] with u+h <= o,
+  in issuing-origin order. This is not the immediately preceding retained label
+  when feedback is delayed. Fit the conditional distribution of e[o,h] from these
+  contexts, then query it with the latest revealed `n_lags` errors. Historical
+  contexts cannot use errors that were revealed after the historical emission,
+  even if they are known when fitting today. Each column learns directly; there
+  is no recursive substitution of predicted residuals or future observations.
+- **Window, gaps, and missing errors.** Keep the last `window` finite signed
+  errors and their original issuing indexes per cell. NaN and nonfinite constructed
+  errors occupy no slots; censored feedback is treated as observed, not as latent
+  demand. Even missing feedback advances the last-consumed origin, preventing
+  duplicate consumption. Origins must increase within each column. Build pairs
+  entirely from the retained window, excluding labels without a complete historical
+  context. Gaps do not become zeros, equally spaced retained-score time, or extra
+  training labels. Contexts use the last available finite errors, not necessarily
+  consecutive calendar periods; gap length itself is not a predictor.
+- **Quantile forest.** Fit scikit-learn `RandomForestRegressor` to lag rows and
+  signed residual labels. For a query, each tree gives total mass one, shared
+  equally among all training rows in its query leaf. Average these per-tree masses
+  to obtain QRF weights as in equations 15–17 of Xu and Xie (2023). All training
+  rows are evaluated in each fitted tree, including rows outside its bootstrap
+  sample; these are quantile-distribution weights, not OOB calibration errors.
+  Keep only positive-weight support and invert its weighted empirical CDF without
+  interpolation or a split-conformal n+1 correction. Quantiles at 0 and 1 use the
+  finite minimum and maximum of that support. No third-party quantile-estimator
+  package, mean-of-tree-predictions quantile, or model fallback is used.
+- **Tails.** Search `beta_grid_size` (default 21) equally spaced beta values on
+  [0, 1-level], inclusive. Choose the shortest [Q(beta), Q(level+beta)]; width ties
+  choose the first beta. Parameters are [N, C, 2] float32; level can be scalar or
+  [N, C]. These are residual endpoints, not scalar nonconformity thresholds, and
+  cannot be wrapped by `ACI` as a `QuantileCalibrator`.
+- **Readiness.** Require at least `min_train_samples` complete pairs per cell,
+  default 20, an operational warm-up choice rather than a coverage theorem.
+  Otherwise issue [-inf, inf], without silently switching to empirical EnbPI.
+  On consecutive origins with m retained errors and horizon h, the pair count is
+  max(0, m - n_lags - h + 1). Thus choose a window of at least
+  n_lags + h - 1 + min_train_samples to ever become ready on that schedule.
+  Irregular schedules use actual origin comparisons instead of this count formula.
+- **Initialization.** `seed(state, residuals, origins=...)` accepts [K, N, C]
+  signed errors and strictly increasing nonnegative int64 issuing origins [K].
+  All seed targets must already be known at the first issuing origin; this timing
+  and the suitability of the historical point forecasts are caller obligations.
+  Do not use in-sample fitted values as forecast errors. Seeds require an empty
+  state, including no consumed missing feedback. No issued intervals or misses
+  are fabricated. Without a seed, ordinary feedback accumulates the same history.
+  `BootstrapEnsemble` is unchanged and remains limited to one-step prediction.
+- **State, continuation, and cost.** State contains only fixed-size NumPy residual
+  and origin rings, counts, insertion positions and last-consumed origins, all
+  retaining the node axis. `threshold` changes neither arrays nor instance state.
+  Forests are refitted per ready node/column and discarded. Defaults are 100 trees,
+  depth 5, minimum leaf size 5, bootstrap sampling, `random_state=0`, and `n_jobs=1`.
+  A fixed integer random state is required so saved arrays reproduce continuation
+  with a new identically configured calibrator. Save the pending ledger as well,
+  and preserve model generation, target, score, horizons and configuration.
+  Model-generation changes require caller-managed fresh initialization. For Step,
+  up to N × H forest fits are needed per origin; no full-panel scalability claim
+  is made. The optional `spci` extra installs scikit-learn; importing `calibre`
+  and evaluating unready cells load no forest library.
+- **Claims and relation to the paper.** This is the conditional-residual-quantile
+  construction of SPCI adapted to Calibre's direct per-column residual streams and
+  caller-owned rolling or block origins, not a reproduction of Algorithm 3's
+  bootstrap point ensembles, block-residual protocol or experimental results.
+  Asymptotic conditional validity in the paper requires consistency and dependence
+  assumptions, not merely selecting a QRF. This implementation does not establish
+  those assumptions or offer distribution-free finite-sample conditional coverage,
+  simultaneous-path coverage, or joint coverage across nodes. Reconciled points
+  do not make the independently calibrated endpoints hierarchically coherent.
+  Lead-time calibration is a direct interval for the total, not a sum of step
+  endpoints. Reference: Xu and Xie,
+  [Sequential Predictive Conformal Inference for Time Series](https://arxiv.org/abs/2212.03463v3),
+  equations 10–17 and Appendix B.3.
+
 ## Conformal PID: explicit semantic additions
 
 - **Scope and variant.** `ConformalPID(level, ...)` calibrates nonnegative scalar

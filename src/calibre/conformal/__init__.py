@@ -1,4 +1,4 @@
-"""Conformal calibration: targets, scores, and calibration methods. No time, no origins.
+"""Conformal calibration: targets, scores, and array-only calibration methods.
 
 A `Target` says which quantity each column bounds, a `Score` which bound each threshold
 issues, a `Loss` what a bound cost, and a `Calibrator` turns the known targets into a
@@ -8,6 +8,7 @@ threshold per node and column.
 
 from calibre.conformal.calibrators import (
     ACI,
+    SPCI,
     Calibrator,
     ConformalPID,
     EnbPI,
@@ -38,6 +39,7 @@ __all__ = [
     "QuantileCalibrator",
     "QuantileTracker",
     "RiskControl",
+    "SPCI",
     "Score",
     "Signed",
     "SplitQuantile",

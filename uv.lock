@@ -983,6 +983,9 @@ ml = [
 neural = [
     { name = "neuralforecast" },
 ]
+spci = [
+    { name = "scikit-learn" },
+]
 stats = [
     { name = "statsforecast" },
 ]
@@ -1006,10 +1009,11 @@ requires-dist = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "scikit-learn", marker = "extra == 'bootstrap'" },
+    { name = "scikit-learn", marker = "extra == 'spci'" },
     { name = "scipy" },
     { name = "statsforecast", marker = "extra == 'stats'" },
 ]
-provides-extras = ["bootstrap", "stats", "ml", "neural"]
+provides-extras = ["bootstrap", "spci", "stats", "ml", "neural"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -8,6 +8,10 @@ All notable changes are listed here. The format follows
 
 ### Added
 
+- `SPCI` multi-horizon asymmetric calibration with causal calendar-aligned residual
+  contexts, quantile-forest leaf weights, shortest-interval beta search, explicit
+  dated seeding, and deterministic NumPy-only continuation. The optional `spci`
+  extra uses scikit-learn; point models and origin loops are unchanged.
 - `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
   tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
   Controller state is NumPy-only and resumes through the existing online/replay API.

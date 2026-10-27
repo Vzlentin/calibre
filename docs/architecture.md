@@ -32,7 +32,7 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
 | `conformal/calibrators/base.py` | `Calibrator` and `QuantileCalibrator` contracts, `Feedback`, `State`, `Level`, `check_level` |
 | `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
-| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `pid.ConformalPID` |
+| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `spci.SPCI`, `pid.ConformalPID` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
@@ -74,7 +74,9 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 Forecast adapters can depend on vendor libraries, but not on calibration.
 Each vendor library is an extra: `libcalibre[stats]`, `libcalibre[ml]`, `libcalibre[neural]`,
 and `libcalibre[bootstrap]` (scikit-learn).
-`import calibre` needs none of them.
+`SPCI` uses `libcalibre[spci]` (also scikit-learn), imported only when fitting a
+ready cell. Its quantile forest weights are calculated from regression-tree leaves.
+`import calibre` needs none of these optional libraries.
 
 ## Array contracts
 
@@ -101,6 +103,8 @@ O origins, and H forecast steps.
 | Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
 | Threshold | `[N, C]` float32, or `[N, C, 2]` for `Asymmetric` | Scalar threshold or lower/upper residual corrections. An empty history gives inf, or [-inf, inf] for a pair |
 | `Replay` arrays | `[O, N, C]`, except paired thresholds `[O, N, C, 2]` | Points, bounds, targets, scores, censored flags, and issued parameters |
+| SPCI seed | Signed errors `[K, N, C]` float32, issuing origins `[K]` int64 | All targets already known at first issuance; NaN errors are missing |
+| SPCI state | Residual and issuing-origin rings `[N, C, window]`; counts, positions, last consumed origins `[N, C]` | All arrays keep the node axis; origins preserve calendar alignment across gaps |
 | State | nested dict of arrays | `flatten` gives one named array per key |
 
 `online.step` gives the periods since the last origin to the ledger, scores the
@@ -144,6 +148,14 @@ For `EnbPI`, the caller seeds the calibration state explicitly with signed error
 and passes that online state to `replay(state=...)`. The same argument continues a
 saved ledger and calibrator state at later origins.
 
+`SPCI` retains signed errors with their issuing origins per node and column.
+Its required `ahead` configuration is each target column's last covered step. For a
+historical error at origin o, a context can use only errors issued at u with
+u + ahead <= o. A threshold uses the latest revealed context, fits one local
+quantile forest per ready cell, and discards the fitted object. No origin-loop or
+ledger special case is needed. Seeds carry explicit origins; without seeds, the
+ordinary feedback loop warms up the calibrator. See [Semantics](semantics.md#spci).
+
 `ConformalPID` also takes an explicit seed, this time nonnegative calibration
 scores [K, N, C] known at the first issuing origin. Every cell needs a finite seed.
 It keeps a fixed-size chronological score ring and per-cell P state, fixed scale,
@@ -168,6 +180,7 @@ paths work on typed arrays, with no per-cell objects, hashes, or serialization.
 
 | Operation | Cost |
 |---|---|
+| `SPCI` threshold | Up to N × C forest fits per origin; transient lag rows and tree-leaf memberships per cell, no saved fitted learners. Full-panel scalability is not established |
 | `SplitQuantile` threshold | One sort of a contiguous `[K, N]` slice per column, `O(C * N * K log K)` |
 | `replay` at M5 | 42,840 nodes, 64 origins, 28 steps, window 28: 3.5 s, 7.6 GB peak, against 2.5 s and 9.9 GB for the earlier stateless functions, with identical thresholds |
 | Saved state at M5 | `LeadTime(7)` with `SplitQuantile(window=28, capacity=40)`: 26 MB |

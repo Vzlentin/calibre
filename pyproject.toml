@@ -41,6 +41,7 @@ Changelog = "https://github.com/Vzlentin/calibre/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 bootstrap = ["scikit-learn"]
+spci = ["scikit-learn"]
 stats = ["statsforecast"]
 ml = ["mlforecast"]
 neural = ["neuralforecast"]
