@@ -241,10 +241,23 @@ continuation, and coverage limits.
 
 `bench/` is a folder of scripts. They load benchmark data from a directory, run
 benchmark protocols, and compare calibrators. They import the installed `calibre`.
-Raw data is not in Git.
+Raw data is not in Git. The [benchmark guide](bench/README.md) covers nine additional
+datasets, their versions, data-use conditions, and a runnable forecaster example.
+All downloaded files and forecast outputs stay in ignored `data/`.
+
+```sh
+uv run --no-dev python bench/download_benchmarks.py etth1
+```
 
 | Script | Content |
 |---|---|
+| `download_benchmarks.py` | Pinned, hash-verified downloads for nine datasets; no preparation or cache |
+| `lstnet.py` | `load(path)`: Electricity, Traffic, Solar-AL or Exchange matrix with positional dates |
+| `ett.py` | `load(path)`: hourly ETTh1 oil temperature |
+| `beijing.py` | `load(path)`: station PM2.5, causal forward-fill and original-target mask |
+| `bike.py` | `load(path)`: hourly rentals, causal forward-fill and original-target mask |
+| `favorita.py` | `load(path)`: store-family sales, causal forward-fill, attributes and hierarchy |
+| `freshretail.py` | `load(path)`: store-product sales, censoring, attributes and hierarchy; needs pyarrow |
 | `vn2.py` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
 | `m5.py` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
 | `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready |
