@@ -55,11 +55,8 @@ def reference_scorecast(name, history, ahead):
         return max(0.0, float(np.float32(prediction)))
     if name == "seasonal":
         return float(values[-2 + (int(ahead) - 1) % 2])
-    # Solve the augmented ridge system, then iterate its one-step recurrence.
     design = np.column_stack([np.ones(len(values) - 1), values[:-1]])
-    penalty = math.sqrt(1e-6 * float(np.var(values[:-1])))
-    design = np.vstack([design, [0, penalty]])
-    _, slope = np.linalg.lstsq(design, np.append(values[1:], 0), rcond=None)[0]
+    _, slope = np.linalg.lstsq(design, values[1:], rcond=None)[0]
     slope = float(np.clip(slope, -0.99, 0.99))
     intercept = float(np.mean(values[1:]) - slope * np.mean(values[:-1]))
     prediction = float(values[-1])

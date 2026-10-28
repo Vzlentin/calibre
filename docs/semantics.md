@@ -140,12 +140,9 @@ refactor.
   min(window, scorecast_window). StatsForecast Theta needs at least four values;
   for seasonal models choose suitable warm-up, for example min_history=14 for
   `Theta(season_length=7)`.
-- **AR(1).** Regress successive scores with an unpenalized intercept.
-  Add `ridge * mean((x - mean_x)**2)` to the centered sum-of-squares
-  denominator, with ridge=1e-6 by default. This regularization is relative to
-  centered variance, independent of the PID seed scale and score units, with no
-  absolute floor. A zero centered variance gives slope zero. Clip slope phi
-  to [-slope_limit, slope_limit], with slope_limit=0.99 by default, set
+- **AR(1).** Regress successive scores by ordinary least squares with an
+  intercept and no regularization. A zero centered variance gives slope zero.
+  Clip slope phi to [-slope_limit, slope_limit], with slope_limit=0.99 by default, set
   `mu = (mean_y - phi * mean_x) / (1 - phi)`, and forecast
   `mu + phi**ahead * (last - mu)`. Generic forecasts may be negative.
 - **Theta.** `StatsForecastModel(Theta(season_length=p))` uses StatsForecast
