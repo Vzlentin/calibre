@@ -1,15 +1,14 @@
 import io
 import math
-import subprocess
-import sys
 from typing import Any
 
 import numpy as np
 import pytest
 from sklearn.ensemble import RandomForestRegressor
 
-from calibre import SPCI, Absolute, Asymmetric, Feedback, Forecasts, LeadTime, Step
+from calibre import Absolute, Asymmetric, Feedback, Forecasts, LeadTime, Step
 from calibre.backtest import replay
+from calibre.conformal.calibrators.spci import SPCI
 from calibre.online import initial_state, step
 from calibre.online.state import flatten, unflatten
 
@@ -444,18 +443,3 @@ def test_scalar_scores_are_rejected_by_both_update_and_online_initialization():
             score=Absolute(),
             calibrator=calibrator,
         )
-
-
-def test_importing_spci_does_not_import_the_optional_forest_library():
-    script = """
-import sys
-from calibre import SPCI
-from calibre.conformal import SPCI as conformal_spci
-from calibre.conformal.calibrators import SPCI as calibrator_spci
-assert SPCI is conformal_spci is calibrator_spci
-assert 'sklearn' not in sys.modules
-method = SPCI(.9, 32, 2, ahead=1)
-assert method.threshold(method.initial_state(1, 1)).shape == (1, 1, 2)
-assert 'sklearn' not in sys.modules
-"""
-    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)

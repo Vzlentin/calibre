@@ -67,15 +67,15 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 |---|---|
 | `bench/vn2.py` | VN2 files to `Panel` with the out-of-stock mask, hierarchy, and stock. `play`: the six-decision protocol |
 | `bench/m5.py` | M5 files to `Panel`, the 12-level hierarchy, and the price covariate |
-| `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method |
+| `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method. As a script, EnbPI and SPCI intervals on VN2 bottom series |
 | `bench/selective_imagenet.py` | `RiskControl` with a non-monotone loss against the ImageNet selective classification of Angelopoulos (2026) |
 | `bench/vn2_conformal.py` | The VN2 run: forecasts, four calibrators, and the played cost |
 
 Forecast adapters can depend on vendor libraries, but not on calibration.
 Each vendor library is an extra: `libcalibre[stats]`, `libcalibre[ml]`, `libcalibre[neural]`,
 and `libcalibre[bootstrap]` (scikit-learn).
-`SPCI` uses `libcalibre[spci]` (also scikit-learn), imported only when fitting a
-ready cell. Its quantile forest weights are calculated from regression-tree leaves.
+`SPCI` shares the `bootstrap` extra. Like `BootstrapEnsemble`, it imports scikit-learn
+at module level and is imported from its implementation module, not re-exported.
 `import calibre` needs none of these optional libraries.
 
 ## Array contracts
@@ -98,6 +98,7 @@ O origins, and H forecast steps.
 | Residuals | `[O, N, H]` | `actual - point`, NaN until the actual is known |
 | `Panel.censored` | `[B, T]` bool, optional | True where a value is a lower bound of the target |
 | `Target.cover` | `[C, H]` bool | Steps that each target column sums. C = H for `Step`, 1 for `LeadTime` |
+| `Feedback.origin` | `[K]` int | Issuing calendar-period index of each feedback row |
 | `Feedback.point`, `Feedback.target` | `[K, N]` | Column sums, one row per newly known (issuing origin, column), in origin order. `scores` and the bounds of any threshold derive from them through `Feedback.score` |
 | Loss grid | `[G]` or `[N, G]` | Increasing candidate thresholds of `RiskControl`, in score units. Losses are evaluated as `[K, N, G]` |
 | Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
@@ -148,13 +149,15 @@ For `EnbPI`, the caller seeds the calibration state explicitly with signed error
 and passes that online state to `replay(state=...)`. The same argument continues a
 saved ledger and calibrator state at later origins.
 
-`SPCI` retains signed errors with their issuing origins per node and column.
-Its required `ahead` configuration is each target column's last covered step. For a
-historical error at origin o, a context can use only errors issued at u with
-u + ahead <= o. A threshold uses the latest revealed context, fits one local
-quantile forest per ready cell, and discards the fitted object. No origin-loop or
-ledger special case is needed. Seeds carry explicit origins; without seeds, the
-ordinary feedback loop warms up the calibrator. See [Semantics](semantics.md#spci).
+`SPCI` explicitly changes the former "No time, no origins" rule for `conformal`:
+it reads `Feedback.origin` as calendar-period indexes to align historical residual
+contexts, including across gaps. Its required `ahead` configuration is each target
+column's last covered step, in those same units. The caller sets it from the target;
+the calibrator contract does not receive the target cover. `online` still owns the
+current origin, target release, and pending ledger; `backtest` owns the origin loops.
+No clock, origin loop, or ledger special case is added to `conformal`. SPCI retains
+residual and origin arrays, rebuilds a local quantile forest per ready cell, and
+discards it. See [Semantics](semantics.md#spci) for context alignment and seeding.
 
 `ConformalPID` also takes an explicit seed, this time nonnegative calibration
 scores [K, N, C] known at the first issuing origin. Every cell needs a finite seed.
@@ -180,7 +183,7 @@ paths work on typed arrays, with no per-cell objects, hashes, or serialization.
 
 | Operation | Cost |
 |---|---|
-| `SPCI` threshold | Up to N × C forest fits per origin; transient lag rows and tree-leaf memberships per cell, no saved fitted learners. Full-panel scalability is not established |
+| `SPCI` threshold | About 36 ms per ready cell with 100 trees, depth 5, window 128, n_lags 7, n_jobs 1. Up to N × C fits per origin. At that rate: about 21 s for VN2 (599 series, one column), 8.5 h for M5 bottoms (30,490 × 28 `Step()` columns), or 12 h for the full M5 hierarchy (42,840 × 28). Panel times are extrapolated, not full-panel measurements. No fitted learners are saved |
 | `SplitQuantile` threshold | One sort of a contiguous `[K, N]` slice per column, `O(C * N * K log K)` |
 | `replay` at M5 | 42,840 nodes, 64 origins, 28 steps, window 28: 3.5 s, 7.6 GB peak, against 2.5 s and 9.9 GB for the earlier stateless functions, with identical thresholds |
 | Saved state at M5 | `LeadTime(7)` with `SplitQuantile(window=28, capacity=40)`: 26 MB |

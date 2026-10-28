@@ -19,8 +19,8 @@ uv add libcalibre
 ```
 
 The vendor model adapters need an extra: `stats` (statsforecast), `ml` (mlforecast), or
-`neural` (neuralforecast). `bootstrap` and `spci` both install scikit-learn for their
-respective methods; importing `calibre` loads none of these optional libraries.
+`neural` (neuralforecast). `bootstrap` installs scikit-learn for `BootstrapEnsemble`
+and `SPCI`; importing `calibre` loads none of these optional libraries.
 
 ```sh
 pip install "libcalibre[stats]"
@@ -193,65 +193,26 @@ back to `replay(state=...)` to continue, without retraining the point model.
 
 ## SPCI
 
-Install `libcalibre[spci]` for scikit-learn. `SPCI` learns conditional quantiles of
-signed forecast errors from their recent history, using a separate quantile forest
-per node and target column. It searches both tails for the shortest estimated interval.
-Point forecasting stays separate; any existing multi-horizon forecaster can supply
-points. `BootstrapEnsemble` remains one-step only.
-
-Using `run` and `actuals` from the quick start:
+Install `libcalibre[bootstrap]`. Using `run` and `actuals` from the quick start:
 
 ```python
-from calibre import SPCI, Asymmetric
+from calibre import Asymmetric
+from calibre.conformal.calibrators.spci import SPCI
 
 calibrator = SPCI(
     level=0.9,
     window=128,
     n_lags=7,
-    ahead=np.arange(1, 8),  # last covered step: 1..H for Step()
-    random_state=42,
+    ahead=np.arange(1, 8),  # last covered step of each Step() column
 )
 intervals = replay(run, actuals, target=Step(), score=Asymmetric(), calibrator=calibrator)
 ready = np.isfinite(intervals.threshold).all(axis=-1)
-print(ready.sum())  # keep warm-up visible when assessing coverage and width
+print(ready.sum())
 ```
 
-For `LeadTime(7)`, use `ahead=7`: SPCI then learns the signed error of the total,
-not a sum of independently calibrated endpoints. `ahead` is required and must match
-each target column; it is measured in calendar periods, including when origins have gaps.
-Each historical context contains only residuals whose targets were already known at
-that historical issuing origin. At prediction time, only revealed residuals are used.
-
-Without a seed, the existing replay collects errors online. Until at least
-`min_train_samples` (default 20) complete training pairs exist, a cell returns
-`[-inf, inf]`, with no empirical EnbPI fallback. An optional initialization is explicit:
-
-```python
-from calibre import initial_state
-
-# calibration is a historical Forecasts from the same point-model generation.
-# Every retained target must be known before the first evaluation origin.
-known = calibration.origins + run.points.shape[-1] <= run.origins[0]
-state = initial_state(Step(), calibrator, actuals.shape[0], run.points.shape[-1])
-state["calibrator"] = calibrator.seed(
-    state["calibrator"],
-    calibration.residuals(actuals)[known],
-    origins=calibration.origins[known],
-)
-intervals = replay(
-    run, actuals, target=Step(), score=Asymmetric(), calibrator=calibrator, state=state
-)
-```
-
-The seed example assumes the caller has separately produced historical `calibration`
-forecasts; it never substitutes in-sample fitted errors. Save and resume both the
-calibrator and ledger arrays via `replay(state=...)`. Forests are refitted from arrays
-at every ready emission and discarded; a fixed random seed makes continuation exact.
-This costs up to N × H forest fits per origin for `Step()`; full-panel scalability is
-not established. See [Semantics](docs/semantics.md#spci) for weighted ranks, readiness,
-and scope. This is an adaptation of [Xu and Xie (2023)](https://arxiv.org/abs/2212.03463v3),
-not a reproduction of their block-emission experiments or an automatic finite-sample,
-conditional, or simultaneous-path coverage guarantee.
+See [Semantics](docs/semantics.md#spci) for horizon alignment, seeds, readiness,
+quantile weights, and coverage claims, and [Architecture](docs/architecture.md#costs)
+for fitting costs.
 
 ## Conformal PID
 
@@ -305,12 +266,19 @@ Raw data is not in Git.
 |---|---|
 | `vn2.py` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
 | `m5.py` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
-| `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready |
+| `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready. As a script, compares EnbPI and SPCI intervals on VN2 bottom series |
 
 `vn2_conformal.py` runs the whole VN2 path in about one second:
 
 ```sh
 uv run python bench/vn2_conformal.py data/vn2
+```
+
+Compare EnbPI and SPCI coverage and width on VN2's six decisions, with the same
+three-week forecasts and known historical errors:
+
+```sh
+uv run python bench/compare.py data/vn2
 ```
 
 ## Documents

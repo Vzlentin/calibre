@@ -133,7 +133,7 @@ refactor.
   state, including no consumed missing feedback. No issued intervals or misses
   are fabricated. Without a seed, ordinary feedback accumulates the same history.
   `BootstrapEnsemble` is unchanged and remains limited to one-step prediction.
-- **State, continuation, and cost.** State contains only fixed-size NumPy residual
+- **State and continuation.** State contains only fixed-size NumPy residual
   and origin rings, counts, insertion positions and last-consumed origins, all
   retaining the node axis. `threshold` changes neither arrays nor instance state.
   Forests are refitted per ready node/column and discarded. Defaults are 100 trees,
@@ -141,10 +141,8 @@ refactor.
   A fixed integer random state is required so saved arrays reproduce continuation
   with a new identically configured calibrator. Save the pending ledger as well,
   and preserve model generation, target, score, horizons and configuration.
-  Model-generation changes require caller-managed fresh initialization. For Step,
-  up to N × H forest fits are needed per origin; no full-panel scalability claim
-  is made. The optional `spci` extra installs scikit-learn; importing `calibre`
-  and evaluating unready cells load no forest library.
+  Model-generation changes require caller-managed fresh initialization. See
+  [Architecture](architecture.md#costs) for fitting costs.
 - **Claims and relation to the paper.** This is the conditional-residual-quantile
   construction of SPCI adapted to Calibre's direct per-column residual streams and
   caller-owned rolling or block origins, not a reproduction of Algorithm 3's

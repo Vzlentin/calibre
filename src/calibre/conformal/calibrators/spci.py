@@ -1,6 +1,7 @@
 """Sequential predictive conformal intervals from conditional residual quantiles."""
 
 import numpy as np
+from sklearn.ensemble import RandomForestRegressor
 
 from calibre.conformal.calibrators.base import Calibrator, Feedback, Level, State, check_level
 
@@ -12,7 +13,7 @@ class SPCI(Calibrator):
     1..H for Step, or the lead time for LeadTime. Origins are calendar indexes,
     not retained-score positions. Each historical context contains only errors
     revealed by that forecast's origin. No fitted forest is retained.
-    Requires the spci extra (scikit-learn) when a cell becomes ready.
+    Requires the bootstrap extra (scikit-learn).
     """
 
     def __init__(
@@ -182,8 +183,6 @@ class SPCI(Calibrator):
     def _interval(
         self, features: np.ndarray, targets: np.ndarray, context: np.ndarray, level: float
     ) -> np.ndarray:
-        from sklearn.ensemble import RandomForestRegressor
-
         forest = RandomForestRegressor(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,

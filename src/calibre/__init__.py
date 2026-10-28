@@ -6,7 +6,6 @@ Vendor model adapters live in `calibre.forecast.models` and need their extra ins
 from calibre.backtest import Forecasts, Replay, replay, rolling_forecasts
 from calibre.conformal import (
     ACI,
-    SPCI,
     Absolute,
     Asymmetric,
     Calibrator,
@@ -72,7 +71,6 @@ __all__ = [
     "RiskControl",
     "Reconciler",
     "Replay",
-    "SPCI",
     "Score",
     "SeasonalNaive",
     "Settlement",

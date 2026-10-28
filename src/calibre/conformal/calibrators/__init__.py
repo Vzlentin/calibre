@@ -11,7 +11,6 @@ from calibre.conformal.calibrators.base import (
 from calibre.conformal.calibrators.enbpi import EnbPI
 from calibre.conformal.calibrators.pid import ConformalPID
 from calibre.conformal.calibrators.risk import RiskControl
-from calibre.conformal.calibrators.spci import SPCI
 from calibre.conformal.calibrators.split import SplitQuantile
 from calibre.conformal.calibrators.tracker import QuantileTracker
 
@@ -25,7 +24,6 @@ __all__ = [
     "QuantileCalibrator",
     "QuantileTracker",
     "RiskControl",
-    "SPCI",
     "SplitQuantile",
     "State",
 ]
