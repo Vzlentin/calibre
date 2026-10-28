@@ -8,6 +8,8 @@ All notable changes are listed here. The format follows
 
 ### Added
 
+- An electricity forecasting notebook with rolling backtests and comparisons of
+  EnbPI residual calibration, ACI, Conformal PID, and native SARIMA intervals.
 - `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
   tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
   Controller state is NumPy-only and resumes through the existing online/replay API.
