@@ -1,8 +1,15 @@
-"""Conformal PID with a tangent integrator and causal rolling AR(1) scorecasting."""
+"""Conformal PID with a tangent integrator and an injected causal scorecaster."""
 
 import numpy as np
 
-from calibre.conformal.calibrators.base import Calibrator, Feedback, Level, State, check_level
+from calibre.conformal.calibrators.base import (
+    Calibrator,
+    Feedback,
+    Level,
+    Scorecaster,
+    State,
+    check_level,
+)
 from calibre.conformal.calibrators.ranks import empirical_quantile
 
 
@@ -10,8 +17,8 @@ class ConformalPID(Calibrator):
     """Track nonnegative scalar scores, normally from Absolute, per node and column.
 
     Seed explicitly with revealed calibration scores before learning from feedback.
-    P tracks the quantile, I integrates coverage error, and anticipation forecasts
-    scores with AR(1), not the paper's Theta model. Rates use a fixed seed scale.
+    P tracks the quantile, I integrates coverage error, and scorecaster anticipates
+    scores. Choose a Scorecaster explicitly, or None for P+I. Rates use a fixed seed scale.
     Set ahead to each target column's last covered step: 1..H for Step, or the
     lead time for LeadTime. The default is one step for every column.
     Negative thresholds and signed-infinity saturation are intentional outputs.
@@ -25,8 +32,8 @@ class ConformalPID(Calibrator):
         saturation_scale: float = 5.0,
         window: int = 256,
         scorecast_window: int = 64,
-        scorecast: bool = True,
         *,
+        scorecaster: Scorecaster | None,
         ahead: int | np.ndarray = 1,
     ) -> None:
         self.level = check_level(level)
@@ -49,8 +56,8 @@ class ConformalPID(Calibrator):
                 or value < 1
             ):
                 raise ValueError(f"{name} must be a positive integer")
-        if not isinstance(scorecast, (bool, np.bool_)):
-            raise ValueError("scorecast must be a boolean")
+        if scorecaster is not None and not isinstance(scorecaster, Scorecaster):
+            raise ValueError("scorecaster must implement Scorecaster or be None")
         steps_ahead = np.asarray(ahead)
         if (
             steps_ahead.ndim not in (0, 1)
@@ -66,7 +73,7 @@ class ConformalPID(Calibrator):
         self.saturation_scale = float(saturation_scale)
         self.window = int(window)
         self.scorecast_window = int(scorecast_window)
-        self.scorecast = bool(scorecast)
+        self.scorecaster = scorecaster
 
     def initial_state(self, n_nodes: int, n_columns: int) -> State:
         np.broadcast_to(self.level, (n_nodes, n_columns))
@@ -146,7 +153,7 @@ class ConformalPID(Calibrator):
         return np.where(state["count"] > 0, threshold, np.inf).astype(np.float32)
 
     def _scorecast(self, state: State) -> np.ndarray:
-        if not self.scorecast:
+        if self.scorecaster is None:
             return np.zeros_like(state["scale"])
         length = min(self.window, self.scorecast_window)
         counts = np.minimum(state["count"], length)
@@ -155,25 +162,13 @@ class ConformalPID(Calibrator):
         slots = (state["next"][..., None] + offsets) % self.window
         scores = np.take_along_axis(state["scores"], slots, axis=-1)
         valid = offsets >= -counts[..., None]
-        scores = np.where(valid, scores, 0.0)
-        mean = scores.sum(axis=-1) / np.maximum(counts, 1)
-        pairs = np.maximum(counts - 1, 1)
-        paired = valid[..., :-1] & valid[..., 1:]
-        x, y = scores[..., :-1], scores[..., 1:]
-        mean_x = np.where(paired, x, 0).sum(axis=-1) / pairs
-        mean_y = np.where(paired, y, 0).sum(axis=-1) / pairs
-        centered_x = np.where(paired, x - mean_x[..., None], 0)
-        centered_y = np.where(paired, y - mean_y[..., None], 0)
-        denominator = np.sum(centered_x**2, axis=-1)
-        ridge = np.maximum(state["scale"] ** 2 * 1e-6, 1e-12)
-        slope = np.sum(centered_x * centered_y, axis=-1) / (denominator + ridge)
-        slope = np.clip(slope, -0.99, 0.99)
-        # Mean reversion must propagate the fitted intercept over all ahead steps.
-        equilibrium = (mean_y - slope * mean_x) / (1 - slope)
-        forecast = np.maximum(
-            0.0, equilibrium + slope**self.ahead * (scores[..., -1] - equilibrium)
-        )
-        return np.where(counts < 3, mean, forecast)
+        scores = np.where(valid, scores, np.nan)
+        scores.flags.writeable = False
+        ahead = np.broadcast_to(self.ahead, (counts.shape[1],))
+        forecast = np.asarray(self.scorecaster.predict(scores, ahead), dtype=np.float64)
+        if forecast.shape != counts.shape or not np.isfinite(forecast).all():
+            raise ValueError("scorecaster must return finite predictions [N, C]")
+        return np.maximum(0.0, forecast)
 
     def _integrator(self, state: State) -> np.ndarray:
         if self.integral_gain == 0:
