@@ -116,6 +116,7 @@ Keep the state in numpy arrays. Then a product can save it after each origin wit
 | Model | Kind | Install |
 |---|---|---|
 | `calibre.forecast.models.naive.SeasonalNaive` | local | core |
+| `calibre.forecast.models.ar1.AR1` | local, regularized autoregression with an intercept | core |
 | `calibre.forecast.models.bootstrap.BootstrapEnsemble` | local, frozen one-step lag-row ensembles with OOB errors | `libcalibre[bootstrap]` |
 | `calibre.forecast.models.statsforecast.StatsForecastModel` | local, any `statsforecast.models` model | `libcalibre[stats]` |
 | `calibre.forecast.models.mlforecast.MLForecast` | global regressor with lags and covariates | `libcalibre[ml]` |
@@ -216,16 +217,13 @@ for fitting costs.
 
 ## Conformal PID
 
-`ConformalPID` combines quantile tracking, a log-scaled tangent integrator, and
-rolling regularized AR(1) scorecasting. The anticipation term is a baseline
-substitute for the paper's Theta model, not a finite-difference derivative.
-It uses nonnegative scalar scores, normally `Absolute()`, independently per node
-and target column.
+`ConformalPID` combines quantile tracking, a tangent integrator, and an explicit
+scorecaster. Pass `scorecaster=None` for P+I only.
 
 Using the seven-step `run`, `panel`, `hierarchy`, and `actuals` from the quick start:
 
 ```python
-from calibre import ConformalPID, initial_state
+from calibre import AR1, ConformalPID, ForecastScorecaster, initial_state
 
 calibration = rolling_forecasts(
     panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), np.arange(28, 54), 7
@@ -233,7 +231,14 @@ calibration = rolling_forecasts(
 # Last calibration target: origin 53 + step 7 = 60, known at the first run origin.
 known_actuals = actuals[:, : int(run.origins[0]) + 1]
 scores = np.abs(calibration.residuals(known_actuals))
-calibrator = ConformalPID(level=0.9, window=256, scorecast_window=64, ahead=np.arange(1, 8))
+scorecaster = ForecastScorecaster(AR1())
+calibrator = ConformalPID(
+    level=0.9,
+    scorecaster=scorecaster,
+    window=256,
+    scorecast_window=64,
+    ahead=np.arange(1, 8),
+)
 state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7)
 state["calibrator"] = calibrator.seed(state["calibrator"], scores)
 intervals = replay(
@@ -242,19 +247,19 @@ intervals = replay(
 print(coverage(intervals.target, intervals.lower, intervals.upper))
 ```
 
-Seed every node/column with at least one already revealed score. Only the last
-`window` finite scores initialize its empirical quantile and fixed learning-rate
-scale; seeding invents no past misses. Set `ahead` to the last covered step per
-column: 1 through H for `Step()`, or `steps` for `LeadTime(steps)`; the default is 1.
-Saved state resumes through `replay(state=...)` with the same configuration.
+For Theta, install `libcalibre[stats]` and choose this scorecaster before seeding:
 
-Negative thresholds give empty sets; `+inf` gives the whole line and `-inf` an
-empty set. Do not clip these outputs or exclude saturation dates from coverage.
-Use `Replay.covered` or `coverage` on all known targets. The current generic width
-and interval-score metrics have no empty-set convention, and `bench/compare.py`
-masks infinite thresholds as unready: it is not a PID evaluator.
-See [Semantics](docs/semantics.md#conformal-pid-explicit-semantic-additions) for the
-exact variant and the limits of its coverage claims.
+```python
+from statsforecast.models import Theta
+from calibre.forecast.models.statsforecast import StatsForecastModel
+
+theta_scorecaster = ForecastScorecaster(StatsForecastModel(Theta(season_length=1)), min_history=4)
+theta_pid = ConformalPID(level=0.9, scorecaster=theta_scorecaster, ahead=np.arange(1, 8))
+# Seed a fresh state for theta_pid before using it.
+```
+
+See [Semantics](docs/semantics.md#conformal-pid) for initialization, model warm-up,
+continuation, and coverage limits.
 
 ## Benchmarks
 

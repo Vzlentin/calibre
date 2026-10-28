@@ -6,6 +6,7 @@ from calibre.conformal.calibrators.base import (
     Feedback,
     Level,
     QuantileCalibrator,
+    Scorecaster,
     State,
 )
 from calibre.conformal.calibrators.enbpi import EnbPI
@@ -24,6 +25,7 @@ __all__ = [
     "QuantileCalibrator",
     "QuantileTracker",
     "RiskControl",
+    "Scorecaster",
     "SplitQuantile",
     "State",
 ]

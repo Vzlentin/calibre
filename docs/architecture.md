@@ -24,13 +24,13 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `data/panel.py` | `Panel`, validated once |
 | `data/hierarchy.py` | `Hierarchy`, node labels and the summing matrix |
 | `forecast/models/base.py` | `Window`, `Covariate`, `Forecaster`, `Fitted`, `FittedResiduals` contracts, and `FitResiduals` arrays |
-| `forecast/models/` | `naive.SeasonalNaive`, `bootstrap.BootstrapEnsemble`, `statsforecast.StatsForecastModel`, `mlforecast.MLForecast`, `neuralforecast.NeuralForecast` |
+| `forecast/models/` | `naive.SeasonalNaive`, `ar1.AR1`, `bootstrap.BootstrapEnsemble`, `statsforecast.StatsForecastModel`, `mlforecast.MLForecast`, `neuralforecast.NeuralForecast` |
 | `forecast/models/frames.py` | Long frames for the mlforecast and neuralforecast adapters |
 | `forecast/reconcile.py` | `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
 | `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`: residual scores, parameter shapes, and their issued bounds |
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
-| `conformal/calibrators/base.py` | `Calibrator` and `QuantileCalibrator` contracts, `Feedback`, `State`, `Level`, `check_level` |
+| `conformal/calibrators/base.py` | `Calibrator`, `QuantileCalibrator`, and array-only `Scorecaster` contracts, `Feedback`, `State`, `Level`, `check_level` |
 | `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
 | `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `spci.SPCI`, `pid.ConformalPID` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
@@ -38,6 +38,7 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `online/state.py` | `flatten`, `unflatten` for storage |
 | `backtest/forecasts.py` | `rolling_forecasts`, `Forecasts.residuals` |
 | `backtest/replay.py` | `replay`, `Replay` |
+| `backtest/scorecasting.py` | `ForecastScorecaster`: compose a `Forecaster` with the array-only calibration contract |
 | `decision/policy.py` | `critical_ratio`: the newsvendor level from costs. `order_up_to`: an order from a bound |
 | `decision/lost_sales.py` | `settle`, `Settlement`: one period of lost-sales inventory and its cost |
 | `metrics.py` | coverage, width, interval score, pinball, newsvendor cost |
@@ -56,6 +57,9 @@ Each package imports only these Calibre packages.
 
 A calibration method is one file in `conformal/calibrators/`. It imports only
 `calibrators.base`, `calibrators.ranks`, and `conformal.losses`.
+
+`Scorecaster` is an array-only contract in `calibrators.base`;
+`backtest.scorecasting` adapts a `Forecaster` to it.
 
 `conformal` and `online` do not depend on hierarchy code. They need points and actuals.
 
@@ -106,6 +110,10 @@ O origins, and H forecast steps.
 | `Replay` arrays | `[O, N, C]`, except paired thresholds `[O, N, C, 2]` | Points, bounds, targets, scores, censored flags, and issued parameters |
 | SPCI seed | Signed errors `[K, N, C]` float32, issuing origins `[K]` int64 | All targets already known at first issuance; NaN errors are missing |
 | SPCI state | Residual and issuing-origin rings `[N, C, window]`; counts, positions, last consumed origins `[N, C]` | All arrays keep the node axis; origins preserve calendar alignment across gaps |
+| PID seed | `[K, N, C]` float64 | Nonnegative calibration scores; NaN means missing |
+| `Scorecaster.predict(history, ahead)` inputs | History `[N, C, K]` float64 and horizons `[C]` positive int64, read-only | Scores in original units, chronological and right-aligned with leading NaN |
+| Scorecast | `[N, C]` finite float64 | Anticipation in score units, not an issued threshold |
+| PID state | `[N, C, window]` score ring; other arrays `[N, C]` | Scores, P, fixed scale, cumulative error are float64; retained counts, insertion positions, update counts are int64 |
 | State | nested dict of arrays | `flatten` gives one named array per key |
 
 `online.step` gives the periods since the last origin to the ledger, scores the
@@ -159,16 +167,10 @@ No clock, origin loop, or ledger special case is added to `conformal`. SPCI reta
 residual and origin arrays, rebuilds a local quantile forest per ready cell, and
 discards it. See [Semantics](semantics.md#spci) for context alignment and seeding.
 
-`ConformalPID` also takes an explicit seed, this time nonnegative calibration
-scores [K, N, C] known at the first issuing origin. Every cell needs a finite seed.
-It keeps a fixed-size chronological score ring and per-cell P state, fixed scale,
-cumulative coverage error, and update count. Its fixed `ahead` constructor argument
-specifies each target column's last covered step. AR(1) forecasts are recomputed from
-the ring, never stored as fitted objects. Controller arrays are float64; counts
-and insertion positions are int64, each with the node axis first. Issued scalar
-thresholds are [N, C] float32. The existing ledger, step, and replay need no PID
-special case. See [Semantics](semantics.md#conformal-pid-explicit-semantic-additions)
-for seeding, delayed feedback, and intentional empty/unbounded outputs.
+`ForecastScorecaster` refits from arrays and discards fitted objects; scorecaster
+and forecaster instances hold configuration only. The ledger, step, and replay
+need no PID special case. See [Semantics](semantics.md#conformal-pid) for the
+controller and scorecasting rules.
 
 Model adapters that need long frames build them inside `fit` and `predict`, from the
 last periods the model reads. At full M5 a long frame of the whole history is 58

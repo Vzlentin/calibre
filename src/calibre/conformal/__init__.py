@@ -16,6 +16,7 @@ from calibre.conformal.calibrators import (
     QuantileCalibrator,
     QuantileTracker,
     RiskControl,
+    Scorecaster,
     SplitQuantile,
     State,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "QuantileTracker",
     "RiskControl",
     "Score",
+    "Scorecaster",
     "Signed",
     "SplitQuantile",
     "State",
