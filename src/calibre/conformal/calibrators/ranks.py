@@ -6,6 +6,8 @@ scores they keep.
 
 import numpy as np
 
+from calibre.conformal.calibrators.base import check_integer
+
 
 def score_quantile(scores: np.ndarray, level: float | np.ndarray) -> np.ndarray:
     """Finite-sample quantile of finite scores along axis 0, without interpolation.
@@ -111,37 +113,81 @@ def empirical_interval(
     grid from zero to 1-level; ties choose the first beta. No scores gives [-inf, inf].
     """
     scores = np.asarray(scores)
+    levels = _interval_levels(scores, level, beta_grid_size)
+    counts = np.isfinite(scores).sum(axis=0)
+    out = np.tile([-np.inf, np.inf], (scores.shape[1], 1)).astype(np.float32)
+    ready = counts > 0
+    if ready.any():
+        ordered = np.sort(scores[:, ready].astype(np.float64), axis=0)
+        out[ready] = _shortest_interval(ordered, counts[ready], levels[ready], beta_grid_size)
+    return out
+
+
+def weighted_interval(
+    scores: np.ndarray, weights: np.ndarray, level: float, beta_grid_size: int = 21
+) -> np.ndarray:
+    """Shortest weighted empirical interval [2] from signed scores and weights [K].
+
+    Weights must be finite and nonnegative. NaN scores and zero weights supply
+    no mass. Invert the positive support's CDF without interpolation or an n+1
+    correction. Empty support gives [-inf, inf]; width ties choose the first beta.
+    """
+    scores = np.asarray(scores)
+    weights = np.asarray(weights, dtype=np.float64)
+    if scores.ndim != 1 or weights.shape != scores.shape:
+        raise ValueError("scores and weights must be matching [K] vectors")
+    levels = _interval_levels(scores[:, None], level, beta_grid_size)
+    if not np.isfinite(weights).all() or (weights < 0).any():
+        raise ValueError("weights must be finite and nonnegative")
+    support = np.isfinite(scores) & (weights > 0)
+    if not support.any():
+        return np.array([-np.inf, np.inf], dtype=np.float32)
+    values, masses = scores[support].astype(np.float64), weights[support]
+    order = np.argsort(values, kind="stable")
+    ordered, masses = values[order, None], masses[order]
+    cumulative = None
+    # Equal mass uses counts to preserve ceil(n*q) at floating-point boundaries.
+    if not (masses == masses[0]).all():
+        with np.errstate(over="ignore"):
+            cumulative = np.cumsum(masses)
+        if not np.isfinite(cumulative[-1]):
+            cumulative = np.cumsum(masses / masses.max())
+        cumulative /= cumulative[-1]
+    counts = np.array([len(masses)])
+    return _shortest_interval(ordered, counts, levels, beta_grid_size, cumulative)[0]
+
+
+def _interval_levels(
+    scores: np.ndarray, level: float | np.ndarray, beta_grid_size: int
+) -> np.ndarray:
     levels = np.asarray(level, dtype=np.float64)
     if scores.ndim != 2 or levels.ndim > 1:
         raise ValueError("scores must be [K, N] and level a scalar or vector")
     if not np.isfinite(levels).all() or ((levels <= 0) | (levels >= 1)).any():
         raise ValueError("level must be strictly between zero and one")
-    if (
-        isinstance(beta_grid_size, (bool, np.bool_))
-        or not isinstance(beta_grid_size, (int, np.integer))
-        or beta_grid_size < 2
-    ):
-        raise ValueError("beta_grid_size must be an integer of at least 2")
+    check_integer("beta_grid_size", beta_grid_size, 2)
     if np.isinf(scores).any():
         raise ValueError("scores must be finite or NaN")
-    levels = np.broadcast_to(levels, (scores.shape[1],))
-    counts = np.isfinite(scores).sum(axis=0)
-    out = np.tile([-np.inf, np.inf], (scores.shape[1], 1))
-    ready = counts > 0
-    if not ready.any():
-        return out.astype(np.float32)
-    ordered = np.sort(scores[:, ready].astype(np.float64), axis=0)
-    counts = counts[ready]
-    levels = levels[ready]
+    return np.broadcast_to(levels, (scores.shape[1],))
+
+
+def _shortest_interval(
+    ordered: np.ndarray,
+    counts: np.ndarray,
+    levels: np.ndarray,
+    beta_grid_size: int,
+    cumulative: np.ndarray | None = None,
+) -> np.ndarray:
     beta = np.linspace(0, 1, beta_grid_size)[:, None] * (1 - levels)
-    low = np.clip(np.ceil(counts * beta).astype(np.int64) - 1, 0, counts - 1)
-    high = np.clip(np.ceil(counts * (levels + beta)).astype(np.int64) - 1, 0, counts - 1)
+    quantiles = np.clip(np.stack([beta, levels + beta]), 0, 1)
+    if cumulative is None:
+        ranks = np.clip(np.ceil(counts * quantiles).astype(np.int64) - 1, 0, counts - 1)
+    else:
+        ranks = np.minimum(np.searchsorted(cumulative, quantiles), counts - 1)
     columns = np.arange(len(counts))
-    lower, upper = ordered[low, columns], ordered[high, columns]
+    lower, upper = ordered[ranks, columns]
     best = np.argmin(upper - lower, axis=0)
-    out[ready, 0] = lower[best, columns]
-    out[ready, 1] = upper[best, columns]
-    return out.astype(np.float32)
+    return np.stack([lower[best, columns], upper[best, columns]], axis=-1).astype(np.float32)
 
 
 def _finite_quantile(scores: np.ndarray, level: float | np.ndarray) -> np.ndarray:

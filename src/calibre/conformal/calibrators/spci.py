@@ -3,7 +3,16 @@
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 
-from calibre.conformal.calibrators.base import Calibrator, Feedback, Level, State, check_level
+from calibre.conformal.calibrators.base import (
+    Calibrator,
+    Feedback,
+    Level,
+    State,
+    check_ahead,
+    check_integer,
+    check_level,
+)
+from calibre.conformal.calibrators.ranks import weighted_interval
 
 
 class SPCI(Calibrator):
@@ -33,62 +42,21 @@ class SPCI(Calibrator):
         n_jobs: int | None = 1,
     ) -> None:
         self.level = check_level(level)
-        for name, value, minimum in (
-            ("window", window, 2),
-            ("n_lags", n_lags, 1),
-            ("min_train_samples", min_train_samples, 1),
-            ("beta_grid_size", beta_grid_size, 2),
-            ("n_estimators", n_estimators, 1),
-            ("min_samples_leaf", min_samples_leaf, 1),
-        ):
-            if (
-                isinstance(value, (bool, np.bool_))
-                or not isinstance(value, (int, np.integer))
-                or value < minimum
-            ):
-                raise ValueError(f"{name} must be an integer of at least {minimum}")
-        if n_lags + min_train_samples > window:
+        self.window = check_integer("window", window, 2)
+        self.n_lags = check_integer("n_lags", n_lags, 1)
+        self.min_train_samples = check_integer("min_train_samples", min_train_samples, 1)
+        self.beta_grid_size = check_integer("beta_grid_size", beta_grid_size, 2)
+        self.n_estimators = check_integer("n_estimators", n_estimators, 1)
+        self.min_samples_leaf = check_integer("min_samples_leaf", min_samples_leaf, 1)
+        if self.n_lags + self.min_train_samples > self.window:
             raise ValueError("window must be at least n_lags + min_train_samples")
-        if max_depth is not None and (
-            isinstance(max_depth, (bool, np.bool_))
-            or not isinstance(max_depth, (int, np.integer))
-            or max_depth < 1
-        ):
-            raise ValueError("max_depth must be a positive integer or None")
+        self.max_depth = None if max_depth is None else check_integer("max_depth", max_depth, 1)
         if not isinstance(bootstrap, (bool, np.bool_)):
             raise ValueError("bootstrap must be boolean")
-        if (
-            isinstance(random_state, (bool, np.bool_))
-            or not isinstance(random_state, (int, np.integer))
-            or not 0 <= random_state <= np.iinfo(np.uint32).max
-        ):
-            raise ValueError("random_state must be an integer in [0, 2**32 - 1]")
-        if n_jobs is not None and (
-            isinstance(n_jobs, (bool, np.bool_))
-            or not isinstance(n_jobs, (int, np.integer))
-            or n_jobs == 0
-        ):
-            raise ValueError("n_jobs must be a nonzero integer or None")
-        steps = np.asarray(ahead)
-        if (
-            steps.ndim not in (0, 1)
-            or steps.size == 0
-            or steps.dtype.kind not in "iu"
-            or (steps < 1).any()
-            or (steps > np.iinfo(np.int64).max).any()
-        ):
-            raise ValueError("ahead must be a positive int64 scalar or [C] array")
-        self.ahead = steps.astype(np.int64, copy=True)
-        self.window = int(window)
-        self.n_lags = int(n_lags)
-        self.min_train_samples = int(min_train_samples)
-        self.beta_grid_size = int(beta_grid_size)
-        self.n_estimators = int(n_estimators)
-        self.max_depth = None if max_depth is None else int(max_depth)
-        self.min_samples_leaf = int(min_samples_leaf)
         self.bootstrap = bool(bootstrap)
-        self.random_state = int(random_state)
-        self.n_jobs = None if n_jobs is None else int(n_jobs)
+        self.random_state = check_integer("random_state", random_state, 0, 2**32 - 1)
+        self.n_jobs = None if n_jobs is None else check_integer("n_jobs", n_jobs, nonzero=True)
+        self.ahead = check_ahead(ahead)
 
     def initial_state(self, n_nodes: int, n_columns: int) -> State:
         np.broadcast_to(self.level, (n_nodes, n_columns))
@@ -194,13 +162,4 @@ class SPCI(Calibrator):
         leaves = forest.apply(features) == forest.apply(context[None, :])[0]
         # QRF: each tree gives unit total mass, shared equally by its leaf's rows.
         weights = (leaves / leaves.sum(axis=0)).mean(axis=1)
-        support = np.flatnonzero(weights > 0)
-        order = support[np.argsort(targets[support], kind="stable")]
-        cumulative = np.cumsum(weights[order])
-        cumulative /= cumulative[-1]
-        beta = np.linspace(0, 1 - level, self.beta_grid_size)
-        quantiles = np.clip(np.concatenate([beta, level + beta]), 0, 1)
-        ranks = np.minimum(np.searchsorted(cumulative, quantiles), len(order) - 1)
-        bounds = targets[order[ranks]].astype(np.float64).reshape(2, self.beta_grid_size)
-        best = np.argmin(bounds[1] - bounds[0])
-        return bounds[:, best].astype(np.float32)
+        return weighted_interval(targets, weights, level, self.beta_grid_size)

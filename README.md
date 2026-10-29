@@ -66,7 +66,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`, `SPCI`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -271,7 +271,8 @@ Raw data is not in Git.
 |---|---|
 | `vn2.py` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
 | `m5.py` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
-| `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready. As a script, compares EnbPI and SPCI intervals on VN2 bottom series |
+| `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready |
+| `vn2_intervals.py` | EnbPI and SPCI intervals on the same six VN2 decisions, with shared forecasts and seed errors |
 
 `vn2_conformal.py` runs the whole VN2 path in about one second:
 
@@ -283,8 +284,18 @@ Compare EnbPI and SPCI coverage and width on VN2's six decisions, with the same
 three-week forecasts and known historical errors:
 
 ```sh
-uv run python bench/compare.py data/vn2
+uv run python bench/vn2_intervals.py data/vn2
 ```
+
+Reported on real VN2 data (6 decisions, 599 series), at target coverage 0.9:
+
+| Method | Coverage | Mean width | Interval score |
+|---|---|---|---|
+| EnbPI | 0.855 | 20.7 | 33.8 |
+| SPCI | 0.820 | 18.1 | 32.7 |
+
+SPCI gives narrower intervals and a lower interval score, but both methods fall
+below the 0.9 coverage target. SPCI has lower coverage than EnbPI on this run.
 
 ## Documents
 

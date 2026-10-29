@@ -1,10 +1,14 @@
+import math
+
 import numpy as np
 import pytest
 
 from calibre.conformal.calibrators.ranks import (
+    empirical_interval,
     empirical_quantile,
     retained_quantile,
     score_quantile,
+    weighted_interval,
 )
 
 
@@ -270,3 +274,107 @@ def test_window_must_keep_at_least_one_row():
         step_thresholds(resid, np.array([5]), 0.5, window=0)
     with pytest.raises(ValueError, match="window"):
         window_upper(np.zeros((1, 1)), resid, 5, 0.5, 1, window=0)
+
+
+def test_weighted_interval_uses_positive_mass_not_marginal_ranks():
+    scores = np.array([-10, 0, 1, 2], dtype=np.float32)
+    weights = np.array([1, 1, 6, 0], dtype=np.float64)
+    result = weighted_interval(scores, weights, 0.5, 3)
+    np.testing.assert_array_equal(result, [1, 1])
+    np.testing.assert_array_equal(scores, [-10, 0, 1, 2])
+    np.testing.assert_array_equal(weights, [1, 1, 6, 0])
+    assert result.dtype == np.float32
+
+
+@pytest.mark.parametrize("scale", [1e-300, 1.0, 1e300])
+def test_weighted_interval_does_not_depend_on_total_mass(scale):
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([-10, 0, 1, 2]), scale * np.array([1, 1, 6, 0]), 0.5, 3),
+        [1, 1],
+    )
+
+
+def test_weighted_interval_handles_finite_masses_whose_sum_overflows():
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([-10, 0, 1, 2]), np.array([1e308, 1e308, 1.5e308, 0]), 0.5, 3),
+        [0, 1],
+    )
+
+
+def test_weighted_interval_uses_finite_positive_support_at_both_endpoints():
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([-999, 4, 7, 999, np.nan]), np.array([0, 1, 1, 0, 3]), 0.9),
+        [4, 7],
+    )
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([np.nan, 7, 999]), np.array([1, 4, 0]), 0.99), [7, 7]
+    )
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([1, 2]), np.zeros(2), 0.9), [-np.inf, np.inf]
+    )
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([np.nan]), np.ones(1), 0.9), [-np.inf, np.inf]
+    )
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([]), np.array([]), 0.9), [-np.inf, np.inf]
+    )
+
+
+def test_weighted_interval_cdf_boundaries_and_width_ties_choose_the_first_beta():
+    # Masses [1, 2, 1] give [0, 2], [0, 2], [2, 4], all of width two.
+    np.testing.assert_array_equal(
+        weighted_interval(np.array([0, 2, 4]), np.array([1, 2, 1]), 0.5, 3), [0, 2]
+    )
+    np.testing.assert_array_equal(
+        weighted_interval(np.arange(10), np.full(10, 0.1), 0.7, 3), [0, 6]
+    )
+
+
+def test_equal_weights_match_unweighted_ranks_and_an_independent_reference_on_200_cases():
+    rng = np.random.default_rng(523)
+    for case in range(200):
+        scores = rng.normal(size=int(rng.integers(1, 130)))
+        scores[rng.random(len(scores)) < 0.2] = np.nan
+        level = [0.5, 0.7, 0.9, float(rng.uniform(0.01, 0.99))][case % 4]
+        ordered = sorted(float(value) for value in scores if np.isfinite(value))
+        grid = [3, 5, 21][case % 3]
+        if ordered:
+            n = len(ordered)
+            candidates = [
+                [
+                    ordered[max(0, min(n - 1, math.ceil(n * beta) - 1))],
+                    ordered[max(0, min(n - 1, math.ceil(n * (level + beta)) - 1))],
+                ]
+                for beta in np.linspace(0, 1, grid) * (1 - level)
+            ]
+            expected = min(candidates, key=lambda pair: pair[1] - pair[0])
+        else:
+            expected = [-np.inf, np.inf]
+        expected = np.asarray(expected, dtype=np.float32)
+        weights = np.full(len(scores), rng.uniform(0.1, 100))
+        np.testing.assert_array_equal(weighted_interval(scores, weights, level, grid), expected)
+        np.testing.assert_array_equal(empirical_interval(scores[:, None], level, grid)[0], expected)
+
+
+@pytest.mark.parametrize(
+    ("scores", "weights", "level", "grid", "match"),
+    [
+        ([[1, 2]], [1, 1], 0.5, 3, "vectors"),
+        ([1, 2], [[1, 1]], 0.5, 3, "vectors"),
+        ([1, 2], [1], 0.5, 3, "vectors"),
+        ([1, 2], [1, -1], 0.5, 3, "weights"),
+        ([1, 2], [1, np.nan], 0.5, 3, "weights"),
+        ([1, 2], [1, np.inf], 0.5, 3, "weights"),
+        ([1, np.inf], [1, 0], 0.5, 3, "scores"),
+        ([1, 2], [1, 1], 0, 3, "level"),
+        ([1, 2], [1, 1], 1, 3, "level"),
+        ([1, 2], [1, 1], np.nan, 3, "level"),
+        ([1, 2], [1, 1], [[0.5]], 3, "level"),
+        ([1, 2], [1, 1], 0.5, True, "beta_grid_size"),
+        ([1, 2], [1, 1], 0.5, 1, "beta_grid_size"),
+        ([1, 2], [1, 1], 0.5, 2.5, "beta_grid_size"),
+    ],
+)
+def test_weighted_interval_rejects_invalid_inputs(scores, weights, level, grid, match):
+    with pytest.raises(ValueError, match=match):
+        weighted_interval(np.asarray(scores), np.asarray(weights), level, grid)

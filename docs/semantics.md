@@ -113,9 +113,14 @@ refactor.
   interpolation or a split-conformal n+1 correction. Quantiles at 0 and 1 use the
   finite minimum and maximum of that support. No third-party quantile-estimator
   package, mean-of-tree-predictions quantile, or model fallback is used.
-- **Tails.** Search `beta_grid_size` (default 21) equally spaced beta values on
-  [0, 1-level], inclusive. Choose the shortest [Q(beta), Q(level+beta)]; width ties
-  choose the first beta. Parameters are [N, C, 2] float32; level can be scalar or
+- **Shared empirical ranks and tails.** `weighted_interval` and EnbPI's
+  `empirical_interval` use the same interval search. Equal positive weights use
+  the unweighted ceil(n*q) ranks, including floating-point boundaries;
+  zero weights and NaN residuals carry no mass. This is an empirical residual
+  distribution, not weighted split-conformal calibration. Search `beta_grid_size`
+  (default 21) equally spaced beta values on [0, 1-level], inclusive. Choose the
+  shortest [Q(beta), Q(level+beta)]; width ties choose the first beta.
+  Parameters are [N, C, 2] float32; level can be scalar or
   [N, C]. These are residual endpoints, not scalar nonconformity thresholds, and
   cannot be wrapped by `ACI` as a `QuantileCalibrator`.
 - **Readiness.** Require at least `min_train_samples` complete pairs per cell,

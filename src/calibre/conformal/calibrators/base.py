@@ -114,3 +114,38 @@ def check_level(level: Level) -> Level:
     if not np.isfinite(values).all() or ((values <= 0) | (values >= 1)).any():
         raise ValueError("level must be strictly between zero and one")
     return float(values) if values.ndim == 0 else values
+
+
+def check_integer(
+    name: str,
+    value: int | np.integer,
+    minimum: int | None = None,
+    maximum: int | None = None,
+    *,
+    nonzero: bool = False,
+) -> int:
+    """Validate an integer configuration value, excluding booleans."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer")
+    value = int(value)
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be an integer of at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be an integer of at most {maximum}")
+    if nonzero and value == 0:
+        raise ValueError(f"{name} must be a nonzero integer")
+    return value
+
+
+def check_ahead(ahead: int | np.integer | np.ndarray) -> np.ndarray:
+    """Copy positive int64 horizons from a scalar or nonempty [C] array."""
+    steps = np.asarray(ahead)
+    if (
+        steps.ndim not in (0, 1)
+        or steps.size == 0
+        or steps.dtype.kind not in "iu"
+        or (steps < 1).any()
+        or (steps > np.iinfo(np.int64).max).any()
+    ):
+        raise ValueError("ahead must be a positive int64 scalar or [C] array")
+    return steps.astype(np.int64, copy=True)

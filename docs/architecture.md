@@ -30,8 +30,8 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
 | `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`: residual scores, parameter shapes, and their issued bounds |
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
-| `conformal/calibrators/base.py` | `Calibrator`, `QuantileCalibrator`, and array-only `Scorecaster` contracts, `Feedback`, `State`, `Level`, `check_level` |
-| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
+| `conformal/calibrators/base.py` | `Calibrator`, `QuantileCalibrator`, and array-only `Scorecaster` contracts, `Feedback`, `State`, `Level`, `check_level`, `check_integer`, `check_ahead` |
+| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`, `weighted_interval`: shared empirical residual interval search |
 | `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `spci.SPCI`, `pid.ConformalPID` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
@@ -71,9 +71,10 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 |---|---|
 | `bench/vn2.py` | VN2 files to `Panel` with the out-of-stock mask, hierarchy, and stock. `play`: the six-decision protocol |
 | `bench/m5.py` | M5 files to `Panel`, the 12-level hierarchy, and the price covariate |
-| `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method. As a script, EnbPI and SPCI intervals on VN2 bottom series |
+| `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method |
 | `bench/selective_imagenet.py` | `RiskControl` with a non-monotone loss against the ImageNet selective classification of Angelopoulos (2026) |
 | `bench/vn2_conformal.py` | The VN2 run: forecasts, four calibrators, and the played cost |
+| `bench/vn2_intervals.py` | EnbPI and SPCI intervals on VN2 bottom series, with shared forecasts and seed errors |
 
 Forecast adapters can depend on vendor libraries, but not on calibration.
 Each vendor library is an extra: `libcalibre[stats]`, `libcalibre[ml]`, `libcalibre[neural]`,
@@ -157,14 +158,13 @@ For `EnbPI`, the caller seeds the calibration state explicitly with signed error
 and passes that online state to `replay(state=...)`. The same argument continues a
 saved ledger and calibrator state at later origins.
 
-`SPCI` explicitly changes the former "No time, no origins" rule for `conformal`:
-it reads `Feedback.origin` as calendar-period indexes to align historical residual
+`SPCI` reads `Feedback.origin` as a calendar-period index to align residual
 contexts, including across gaps. Its required `ahead` configuration is each target
 column's last covered step, in those same units. The caller sets it from the target;
-the calibrator contract does not receive the target cover. `online` still owns the
+the calibrator contract does not receive the target cover. `online` owns the
 current origin, target release, and pending ledger; `backtest` owns the origin loops.
-No clock, origin loop, or ledger special case is added to `conformal`. SPCI retains
-residual and origin arrays, rebuilds a local quantile forest per ready cell, and
+`conformal` has no clock or origin loop. SPCI retains residual and origin arrays,
+rebuilds a local quantile forest per ready cell, and
 discards it. See [Semantics](semantics.md#spci) for context alignment and seeding.
 
 `ForecastScorecaster` refits from arrays and discards fitted objects; scorecaster

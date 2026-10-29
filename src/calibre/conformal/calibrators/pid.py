@@ -8,6 +8,8 @@ from calibre.conformal.calibrators.base import (
     Level,
     Scorecaster,
     State,
+    check_ahead,
+    check_integer,
     check_level,
 )
 from calibre.conformal.calibrators.ranks import empirical_quantile
@@ -49,30 +51,14 @@ class ConformalPID(Calibrator):
                 raise ValueError(
                     f"{name} must be {'nonnegative' if name == 'integral_gain' else 'positive'}"
                 )
-        for name, value in (("window", window), ("scorecast_window", scorecast_window)):
-            if (
-                isinstance(value, (bool, np.bool_))
-                or not isinstance(value, (int, np.integer))
-                or value < 1
-            ):
-                raise ValueError(f"{name} must be a positive integer")
+        self.window = check_integer("window", window, 1)
+        self.scorecast_window = check_integer("scorecast_window", scorecast_window, 1)
         if scorecaster is not None and not isinstance(scorecaster, Scorecaster):
             raise ValueError("scorecaster must implement Scorecaster or be None")
-        steps_ahead = np.asarray(ahead)
-        if (
-            steps_ahead.ndim not in (0, 1)
-            or steps_ahead.size == 0
-            or steps_ahead.dtype.kind not in "iu"
-            or (steps_ahead < 1).any()
-            or (steps_ahead > np.iinfo(np.int64).max).any()
-        ):
-            raise ValueError("ahead must be a positive int64 scalar or [C] array")
-        self.ahead = steps_ahead.astype(np.int64, copy=True)
+        self.ahead = check_ahead(ahead)
         self.learning_rate = float(learning_rate)
         self.integral_gain = float(integral_gain)
         self.saturation_scale = float(saturation_scale)
-        self.window = int(window)
-        self.scorecast_window = int(scorecast_window)
         self.scorecaster = scorecaster
 
     def initial_state(self, n_nodes: int, n_columns: int) -> State:

@@ -8,6 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 from calibre import Absolute, Asymmetric, Feedback, Forecasts, LeadTime, Step
 from calibre.backtest import replay
+from calibre.conformal.calibrators.ranks import weighted_interval
 from calibre.conformal.calibrators.spci import SPCI
 from calibre.online import initial_state, step
 from calibre.online.state import flatten, unflatten
@@ -100,19 +101,35 @@ def test_training_contexts_respect_calendar_origins_including_gaps():
     calibrator = method(n_lags=2, ahead=3)
     values = np.array([10, 20, 30, 40, 50, 60], dtype=np.float32)
     origins = np.array([0, 1, 4, 7, 8, 11])
-    features, targets = calibrator._training_pairs(values, origins, 3)
-    np.testing.assert_array_equal(features, [[10, 20], [20, 30], [20, 30], [40, 50]])
-    np.testing.assert_array_equal(targets, [30, 40, 50, 60])
-    # At issuing origin 8, error at origin 7 is not known until period 10.
-    assert 40 not in features[2]
+    state = seeded(calibrator, values, origins)
+    # Gaps admit four training labels [30, 40, 50, 60], not just the final two.
+    np.testing.assert_array_equal(calibrator.threshold(state), [[[30, 40]]])
+    consecutive = seeded(calibrator, values)
+    np.testing.assert_array_equal(calibrator.threshold(consecutive), [[[50, 50]]])
+
+
+def test_contexts_across_gaps_exclude_errors_revealed_after_the_historical_origin():
+    calibrator = method(n_lags=2, ahead=3, n_estimators=1, min_samples_leaf=1, max_depth=2)
+    history = [-10, -10, 10, -10, 10, 10]
+    state = seeded(calibrator, history, [0, 1, 4, 7, 8, 11])
+    # At origin 8, the error issued at 7 is still unknown: its context is [-10, 10].
+    # Immediate retained lags would instead produce the interval [-10, -10].
+    np.testing.assert_array_equal(calibrator.threshold(state), [[[10, 10]]])
 
 
 def test_quantile_forest_matches_independent_leaf_mass_calculation():
-    features = np.arange(12, dtype=np.float32).reshape(6, 2)
+    history = [-7, 3, -10, 4, -2, 9, 1, 20]
+    features = np.array([[-7, 3], [3, -10], [-10, 4], [4, -2], [-2, 9], [9, 1]], dtype=np.float32)
     targets = np.array([-10, 4, -2, 9, 1, 20], dtype=np.float32)
-    context = np.array([5, 6], dtype=np.float32)
+    context = np.array([1, 20], dtype=np.float32)
     calibrator = method(
-        level=0.6, beta_grid_size=5, n_estimators=7, min_samples_leaf=1, max_depth=2, bootstrap=True
+        level=0.6,
+        n_lags=2,
+        beta_grid_size=5,
+        n_estimators=7,
+        min_samples_leaf=1,
+        max_depth=2,
+        bootstrap=True,
     )
     forest = RandomForestRegressor(
         n_estimators=7, min_samples_leaf=1, max_depth=2, bootstrap=True, random_state=0, n_jobs=1
@@ -127,17 +144,16 @@ def test_quantile_forest_matches_independent_leaf_mass_calculation():
         (float(value), mass) for value, mass in zip(targets, masses, strict=True) if mass > 0
     )
 
-    def quantile(q):
-        cumulative = 0.0
-        for value, mass in support:
-            cumulative += mass
-            if cumulative >= q * sum(masses):
-                return value
-        return support[-1][0]
-
-    candidates = [(quantile(beta), quantile(0.6 + beta)) for beta in [0, 0.1, 0.2, 0.3, 0.4]]
+    candidates = [
+        (
+            reference_weighted_quantile(support, beta),
+            reference_weighted_quantile(support, 0.6 + beta),
+        )
+        for beta in [0, 0.1, 0.2, 0.3, 0.4]
+    ]
     expected = min(candidates, key=lambda pair: pair[1] - pair[0])
-    np.testing.assert_array_equal(calibrator._interval(features, targets, context, 0.6), expected)
+    np.testing.assert_array_equal(weighted_interval(targets, np.array(masses), 0.6, 5), expected)
+    np.testing.assert_array_equal(calibrator.threshold(seeded(calibrator, history)), [[expected]])
 
 
 def test_seed_retains_last_finite_errors_and_their_original_dates_per_cell():
@@ -211,6 +227,20 @@ def test_nodes_and_horizons_are_independent_including_levels_and_ring_wrap():
             np.testing.assert_array_equal(result[node, column], single.threshold(alone)[0, 0])
 
 
+def reference_weighted_quantile(support, q):
+    cumulative = 0.0
+    total = sum(mass for _, mass in support)
+    for value, mass in support:
+        cumulative += mass
+        if cumulative >= q * total:
+            return value
+    return support[-1][0]
+
+
+def reference_empirical_quantile(labels, q):
+    return labels[max(0, min(len(labels) - 1, math.ceil(len(labels) * q) - 1))]
+
+
 def reference_interval(history, *, ahead, n_lags, level, minimum):
     labels = []
     for origin, value in history:
@@ -221,13 +251,25 @@ def reference_interval(history, *, ahead, n_lags, level, minimum):
         return [-np.inf, np.inf]
     labels.sort()
 
-    def quantile(q):
-        return labels[max(0, min(len(labels) - 1, math.ceil(len(labels) * q) - 1))]
-
     candidates = [
-        [quantile(beta), quantile(level + beta)] for beta in [0, (1 - level) / 2, 1 - level]
+        [
+            reference_empirical_quantile(labels, beta),
+            reference_empirical_quantile(labels, level + beta),
+        ]
+        for beta in [0, (1 - level) / 2, 1 - level]
     ]
     return min(candidates, key=lambda pair: pair[1] - pair[0])
+
+
+def continuation_replay(origins, points, actuals, state=None):
+    return replay(
+        Forecasts(origins, points),
+        actuals,
+        target=Step(),
+        score=Asymmetric(),
+        calibrator=method(ahead=np.arange(1, 4), min_samples_leaf=1, bootstrap=True, window=5),
+        state=state,
+    )
 
 
 @pytest.mark.parametrize("target", [Step(), LeadTime(3)])
@@ -318,25 +360,15 @@ def test_numpy_state_resumes_exactly_with_a_new_calibrator_and_pending_horizons(
     origins = np.array([10, 11, 14, 17, 18, 21, 24, 25, 29, 31, 34, 38, 40, 44, 47, 50])
     points = rng.normal(size=(len(origins), 2, 3)).astype(np.float32)
 
-    def run(dates, forecasts, state=None):
-        return replay(
-            Forecasts(dates, forecasts),
-            actuals,
-            target=Step(),
-            score=Asymmetric(),
-            calibrator=method(ahead=np.arange(1, 4), min_samples_leaf=1, bootstrap=True, window=5),
-            state=state,
-        )
-
-    whole = run(origins, points)
-    left = run(origins[:8], points[:8])
+    whole = continuation_replay(origins, points, actuals)
+    left = continuation_replay(origins[:8], points[:8], actuals)
     buffer = io.BytesIO()
     flat: dict[str, Any] = flatten(left.state)
     np.savez(buffer, **flat)
     buffer.seek(0)
     with np.load(buffer, allow_pickle=False) as saved:
         state = unflatten(dict(saved))
-    right = run(origins[8:], points[8:], state)
+    right = continuation_replay(origins[8:], points[8:], actuals, state)
     np.testing.assert_array_equal(
         np.concatenate([left.threshold, right.threshold]), whole.threshold
     )
