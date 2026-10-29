@@ -14,7 +14,7 @@ refactor.
 | Bands | `Absolute` on a `Step` target scores absolute residuals of reconciled points, per node and step, for a two-sided band. Steps never share scores. | An upper endpoint does not have one-sided coverage at the nominal level. |
 | Lead-time bounds | `Signed` on a `LeadTime(steps)` target scores signed residual sums over the first `steps` steps, one score per origin and node. The bound is the point total plus the threshold. | It is not a sum of band endpoints. It is not projected onto target support. The caller applies support and business floors. |
 | Causality | `online.step` gives a calibrator a score only when the last step it covers is at or before the current origin, and before that origin issues. A model reads only its `Window`: history and covariates through the origin, and `known_ahead` covariates through the last step. | A later actual cannot change an issued threshold. A later value cannot change a point, except through a covariate declared known ahead. |
-| Feedback | Each feedback row is one score column of one issuing origin, in origin order, with its issued scalar or paired parameters and a censored flag. A column is censored when any step it covers is censored. Scalar scores are compared with their issued threshold; paired corrections use archived endpoints. | ACI and quantile tracking react to issued thresholds, not thresholds recomputed later. Paired corrections cannot be tested by comparing one score with one scalar threshold. |
+| Feedback | Each feedback row is one score column of one issuing origin, in origin order, with its issued scalar or paired parameters and a censored flag. A column is censored when any step it covers is censored. Scalar residual scores are compared with their issued threshold; paired corrections and CQR use issued endpoints. | ACI and quantile tracking react to issued thresholds, not thresholds recomputed later. Paired corrections cannot be tested by comparing one score with one scalar threshold. |
 | Missing values | `Panel` rejects NaN and infinity. In residuals, NaN means not yet known. It is never zero and never a score. | A lead-time score needs every step. A nonfinite constructed score, including an overflowed sum, is excluded before retention. |
 | Rolling window | `window` keeps the last K resolved origin rows per pool and step, before pooling. A row is resolved for a pool when it has at least one finite score. | Holes do not consume rows. n counts finite retained scores, so n can differ from K. |
 | Pooling | Equal integer labels in `groups` pool raw residual scores. Every member gets the pool quantile. A level per node stays per node within a pool. | Pool coverage does not establish per-node coverage. Pool only scores with comparable meaning. |
@@ -22,6 +22,68 @@ refactor.
 | Loss | A `Loss` is the cost of issued bounds against a known target, any shape in the threshold, with a declared finite `maximum`. The caller passes only known targets. `Miss` is 1 outside the bounds, maximum 1. A loss does not see the censored flag, so a censored target is scored as observed. | A loss of sales targets is a risk on sales, not on demand. |
 | Risk control | `RiskControl(loss, grid, alpha)` issues the smallest grid threshold with `(loss sum + B) / (n + 1) <= alpha`, where n counts known targets and B is the loss maximum, per node and column. No feasible threshold gives inf. `alpha` is between 0 and B. No window and no pooling. | With `Miss` it is the `SplitQuantile(1 - alpha)` threshold, rounded up to the grid. |
 | Claims | A `SplitQuantile` band or bound is a marginal, finite-sample claim under exchangeable scores, at the stated level, column, and pool. `ACI` and `QuantileTracker` give only long-run marginal coverage, with no finite-sample claim. `RiskControl` with a loss nonincreasing in the threshold controls the expected loss at `alpha` under exchangeable targets (Angelopoulos et al. 2024). For other losses the excess over `alpha` is bounded by the stability of the chosen threshold (Angelopoulos 2026), which Calibre does not estimate. Overlapping lead-time targets are not exchangeable. | It is not conditional coverage. A sales history gives sales coverage, not demand coverage, also when targets are flagged as censored. |
+
+## CQR: explicit semantic additions
+
+- **Composition.** `CQR()` is a `Score`, not a new calibrator. With native quantiles
+  `[lo, hi]`, its scalar score is `max(lo - target, target - hi)`. Compose it with
+  `SplitQuantile(level)` to use the existing one-based `ceil((n+1)*level)` rank,
+  retention, pooling, and readiness rules. Raw quantile levels and calibrated
+  coverage are distinct configuration. Negative scores are valid.
+- **Native prediction contracts.** `FittedQuantiles.predict_quantiles` returns a
+  `QuantileForecast` with points `[S, H]`, intervals `[S, H, 2]`, and two levels
+  satisfying `0 < low < high < 1`. `Forecasts.interval` is `[O, N, H, 2]` float32;
+  it and `quantile_levels` must be supplied together. Intervals must be finite.
+  `Forecasts` orders a copy of crossed raw endpoints without changing the source.
+- **MLForecast.** `quantile_models` maps exactly two levels to unfitted estimators.
+  The caller configures each estimator's quantile objective; the adapter does not
+  infer or rewrite it from a label. It clones and fits two direct regressors per
+  horizon, alongside the unchanged recursive point regressor. One-step prediction
+  uses one regressor per quantile. Target transforms are rejected in quantile mode:
+  arbitrary inverse transforms do not establish quantile preservation.
+- **NeuralForecast.** `quantiles=(low, high)` configures `MQLoss` with those levels
+  and 0.5. Its point is the predicted median. One model learns the horizons and
+  quantiles jointly. Explicit `loss` or `valid_loss` settings are rejected in this
+  mode, not silently replaced. Indexed output labels avoid collisions from rounded
+  vendor probability names, including when one requested endpoint is the median.
+- **Training, targets, and hierarchy.** Native rolling forecasts fit once at the
+  first origin. `refit_every` and fit-time OOB initialization are rejected. Only
+  `Identity` is accepted: each node is forecast directly, without summing or
+  reconciling native quantiles. CQR with `LeadTime` is rejected even for one step;
+  the implemented target contract is `Step`. There is no implicit quantile of a
+  sum or coherent quantile trajectory. Callers constructing `Forecasts` manually
+  own the same causal, frozen-model, and node/step alignment obligations.
+- **Issued inputs and delayed feedback.** `Score.requires_interval()` declares
+  whether native intervals are required. Its `score` and `bound` methods accept
+  an optional keyword `interval`. Initialize online CQR state with
+  `initial_state(..., score=CQR())`; `replay` does this automatically. Every
+  `step(interval=...)` validates and orders the new `[N, H, 2]` input before
+  observing or updating state. The ledger archives those native endpoints until
+  each step's target is revealed. `Feedback.interval` is `[K, N, 2]`, so scoring
+  never substitutes a newer forecast. Risk-control candidate bounds use these
+  archived inputs too. Point-only state has no extra interval array.
+- **Correction and empty sets.** Issue `[lo - correction, hi + correction]`.
+  Keep negative corrections; never clip to zero or reorder corrected endpoints.
+  An insufficient rank gives correction `+inf` and the whole real line. A finite
+  sufficiently negative correction can give an empty set. Coverage and feedback
+  misses use membership in these issued bounds, including boundaries and empty
+  sets. CQR endpoint membership also avoids discrepancies caused by float32
+  subtraction at a boundary; scalar residual-score comparisons are unchanged.
+  `Replay.interval` retains the raw inputs used for this evaluation. Generic width and interval-score metrics still have no empty-set
+  convention. Use endpoint coverage and report such cases explicitly.
+- **State and continuation.** The native-interval ledger ring has a fixed shape
+  and contains NumPy arrays only. Save it with the calibrator state through
+  `flatten`/`unflatten`. Resume with the same frozen model, raw quantile levels,
+  target, score, and calibration configuration. Fitted vendor models are not
+  serialized into calibration state.
+- **Claims.** Split CQR gives marginal finite-sample coverage under the required
+  exchangeability of calibration/test scores with quantile models trained on
+  separate data. Merely freezing a model does not make lagged time-series scores
+  exchangeable. Rolling windows, pooled nodes, overlapping horizons, or adaptive
+  wrappers establish no new conditional or simultaneous-path guarantee. Censored
+  feedback remains observed-target calibration, not latent-demand coverage.
+  Reference: Romano, Patterson and Candès,
+  [Conformalized Quantile Regression](https://arxiv.org/abs/1905.03222).
 
 ## EnbPI: explicit semantic additions
 

@@ -25,10 +25,16 @@ def reach(cover: np.ndarray) -> int:
     return int(last_step(cover).max())
 
 
-def initial_state(n_nodes: int, cover: np.ndarray, parameter_shape: tuple[int, ...] = ()) -> State:
+def initial_state(
+    n_nodes: int,
+    cover: np.ndarray,
+    parameter_shape: tuple[int, ...] = (),
+    *,
+    interval: bool = False,
+) -> State:
     """Empty ledger for `n_nodes` nodes and the columns of `cover` `[C, H]`."""
     slots = reach(cover)
-    return {
+    state = {
         "last": np.array(-1, dtype=np.int64),
         "origin": np.full(slots, -1, dtype=np.int64),
         "point": np.zeros((slots, n_nodes, slots), dtype=np.float32),
@@ -37,6 +43,9 @@ def initial_state(n_nodes: int, cover: np.ndarray, parameter_shape: tuple[int, .
         "issued": np.zeros((slots, n_nodes, len(cover)) + parameter_shape, dtype=np.float32),
         "released": np.zeros((slots, len(cover)), dtype=bool),
     }
+    if interval:
+        state["interval"] = np.zeros((slots, n_nodes, slots, 2), dtype=np.float32)
+    return state
 
 
 def observe(
@@ -65,7 +74,13 @@ def observe(
     return state, feedback
 
 
-def issue(state: State, origin: int, points: np.ndarray, threshold: np.ndarray) -> State:
+def issue(
+    state: State,
+    origin: int,
+    points: np.ndarray,
+    threshold: np.ndarray,
+    interval: np.ndarray | None = None,
+) -> State:
     """Archive points and scalar or paired parameters issued at `origin`."""
     slot = origin % len(state["origin"])
     if state["origin"][slot] >= 0:
@@ -77,6 +92,8 @@ def issue(state: State, origin: int, points: np.ndarray, threshold: np.ndarray) 
     state["actual"][slot] = np.nan
     state["censored"][slot] = False
     state["issued"][slot] = threshold
+    if interval is not None:
+        state["interval"][slot] = interval[:, : state["point"].shape[2]]
     state["released"][slot] = False
     return state
 
@@ -116,4 +133,5 @@ def _feedback(
         issued=state["issued"][rows, :, columns],
         censored=(covered & state["censored"][rows]).any(axis=-1),
         score=score,
+        interval=state["interval"][rows, :, columns] if "interval" in state else None,
     )

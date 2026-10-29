@@ -6,6 +6,7 @@ Vendor model adapters live in `calibre.forecast.models` and need their extra ins
 from calibre.backtest import Forecasts, ForecastScorecaster, Replay, replay, rolling_forecasts
 from calibre.conformal import (
     ACI,
+    CQR,
     Absolute,
     Asymmetric,
     Calibrator,
@@ -35,9 +36,11 @@ from calibre.forecast import (
     Covariate,
     FitResiduals,
     Fitted,
+    FittedQuantiles,
     FittedResiduals,
     Forecaster,
     Identity,
+    QuantileForecast,
     Reconciler,
     SeasonalNaive,
     Window,
@@ -48,6 +51,7 @@ from calibre.online import Issue, initial_state, step
 __all__ = [
     "ACI",
     "AR1",
+    "CQR",
     "Absolute",
     "Asymmetric",
     "BottomUp",
@@ -58,8 +62,10 @@ __all__ = [
     "Feedback",
     "FitResiduals",
     "Fitted",
+    "FittedQuantiles",
     "FittedResiduals",
     "Forecaster",
+    "QuantileForecast",
     "Forecasts",
     "ForecastScorecaster",
     "Hierarchy",

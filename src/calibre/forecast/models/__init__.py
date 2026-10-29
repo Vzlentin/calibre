@@ -9,8 +9,10 @@ from calibre.forecast.models.base import (
     Covariate,
     FitResiduals,
     Fitted,
+    FittedQuantiles,
     FittedResiduals,
     Forecaster,
+    QuantileForecast,
     Window,
 )
 from calibre.forecast.models.naive import SeasonalNaive
@@ -20,8 +22,10 @@ __all__ = [
     "Covariate",
     "FitResiduals",
     "Fitted",
+    "FittedQuantiles",
     "FittedResiduals",
     "Forecaster",
+    "QuantileForecast",
     "SeasonalNaive",
     "Window",
 ]

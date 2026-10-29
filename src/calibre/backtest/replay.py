@@ -16,6 +16,8 @@ class Replay:
     """Calibration over origins `[O]`. Arrays are `[O, N, C]`.
 
     Asymmetric thresholds have an additional trailing lower/upper axis of size two.
+    `interval` optionally retains native inputs `[O, N, H, 2]`. Native and paired
+    coverage uses issued endpoints, including floating-point boundary hits.
 
     `target` and `score` are NaN when the target is not known at the end of the data.
     `state` continues the run with `calibre.online.step`.
@@ -30,12 +32,13 @@ class Replay:
     score: np.ndarray
     censored: np.ndarray
     state: State
+    interval: np.ndarray | None = None
 
     @property
     def covered(self) -> np.ndarray:
         """Coverage against issued scalar thresholds or paired bounds; NaN if unknown."""
         known = np.isfinite(self.score)
-        if self.threshold.ndim == self.score.ndim:
+        if self.interval is None and self.threshold.ndim == self.score.ndim:
             inside = self.score <= self.threshold
         else:
             inside = (self.lower <= self.target) & (self.target <= self.upper)
@@ -57,8 +60,11 @@ def replay(
     n_origins, n_nodes, horizon = forecasts.points.shape
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
+    native = forecasts.interval if score.requires_interval() else None
+    if score.requires_interval() and native is None:
+        raise ValueError("this score requires forecasts with native intervals")
     if state is None:
-        state = initial_state(target, calibrator, n_nodes, horizon)
+        state = initial_state(target, calibrator, n_nodes, horizon, score=score)
     issued = []
     previous = int(state["ledger"]["last"])
     for index, origin in enumerate(origins):
@@ -72,6 +78,7 @@ def replay(
             score=score,
             calibrator=calibrator,
             censored=censored[:, seen],
+            interval=None if native is None else native[index],
         )
         issued.append(out)
         previous = int(origin)
@@ -85,9 +92,10 @@ def replay(
         lower=np.stack([out.lower for out in issued]),
         upper=np.stack([out.upper for out in issued]),
         target=targets,
-        score=score.score(targets, point),
+        score=score.score(targets, point, interval=native),
         censored=target_censored,
         state=state,
+        interval=native,
     )
 
 

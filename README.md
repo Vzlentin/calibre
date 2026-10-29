@@ -65,7 +65,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`, `CQR`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -141,6 +141,59 @@ run = rolling_forecasts(
     covariates={"price": price},
 )
 ```
+
+## CQR
+
+Conformalized quantile regression corrects native lower/upper quantiles instead of
+putting a residual band around a point. `CQR()` supplies the score;
+`SplitQuantile(level)` supplies the conformal correction.
+
+Using the quick-start `panel`, `hierarchy`, and `origins`, with `libcalibre[ml]`:
+
+```python
+from sklearn.linear_model import QuantileRegressor, Ridge
+
+from calibre import CQR, Identity
+from calibre.forecast.models.mlforecast import MLForecast
+
+model = MLForecast(
+    Ridge(),
+    lags=[1, 7],
+    quantile_models={
+        0.05: QuantileRegressor(quantile=0.05, alpha=0.1),
+        0.95: QuantileRegressor(quantile=0.95, alpha=0.1),
+    },
+)
+forecasts = rolling_forecasts(panel, hierarchy, model, Identity(hierarchy), origins, 7)
+intervals = replay(
+    forecasts,
+    hierarchy.aggregate(panel.values),
+    target=Step(),
+    score=CQR(),
+    calibrator=SplitQuantile(0.9, window=28),
+)
+```
+
+For `libcalibre[neural]`, replace `model` with a multi-quantile network:
+
+```python
+from neuralforecast.models import MLP
+from calibre.forecast.models.neuralforecast import NeuralForecast
+
+model = NeuralForecast(
+    MLP,
+    {"input_size": 14, "max_steps": 50, "random_seed": 0},
+    quantiles=(0.05, 0.95),
+)
+```
+
+Both modes fit once. Use `Identity` and `Step`, not a sum or reconciliation of
+quantiles. Calibration starts with targets revealed after fitting; warm-up stays
+unbounded. Negative corrections can shrink an interval or make it empty.
+Exchangeability is still required for a finite-sample claim; time-series use does
+not automatically satisfy it. See the [CQR guide](docs/cqr.md) for a complete example
+and the online API, and [Semantics](docs/semantics.md#cqr-explicit-semantic-additions)
+for the exact rules.
 
 ## EnbPI
 

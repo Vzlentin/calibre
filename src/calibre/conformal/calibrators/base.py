@@ -45,6 +45,7 @@ class Feedback:
     where the actual is missing. `issued` is `[K, N]`, or `[K, N, 2]` for paired
     corrections. `censored` marks targets that are lower bounds, and `score` defines
     bounds the thresholds index, so a calibrator can find the bounds of any threshold.
+    `interval`, when present, holds the native quantiles `[K, N, 2]` issued with the point.
     """
 
     origin: np.ndarray
@@ -54,18 +55,19 @@ class Feedback:
     issued: np.ndarray
     censored: np.ndarray
     score: Score
+    interval: np.ndarray | None = None
 
     @property
     def scores(self) -> np.ndarray:
         """Scores `[K, N]` float32, signed residuals for asymmetric intervals."""
-        return self.score.score(self.target, self.point).astype(np.float32)
+        return self.score.score(self.target, self.point, interval=self.interval).astype(np.float32)
 
     def misses(self, n_columns: int) -> tuple[np.ndarray, np.ndarray]:
         """Counts `[N, C]` of misses against issued parameters and known scores."""
         scores = self.scores
         known = np.isfinite(scores)
-        if self.score.parameter_shape():
-            lower, upper = self.score.bound(self.point, self.issued)
+        if self.score.parameter_shape() or self.score.requires_interval():
+            lower, upper = self.score.bound(self.point, self.issued, interval=self.interval)
             miss = ((self.target < lower) | (self.target > upper)) & known
         else:
             miss = (scores > self.issued) & known

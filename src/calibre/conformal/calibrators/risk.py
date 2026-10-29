@@ -43,7 +43,8 @@ class RiskControl(Calibrator):
 
     def update(self, state: State, feedback: Feedback) -> State:
         """Add the loss that each grid threshold would have had on the known targets."""
-        lower, upper = feedback.score.bound(feedback.point[..., None], self.grid)
+        interval = None if feedback.interval is None else feedback.interval[..., None, :]
+        lower, upper = feedback.score.bound(feedback.point[..., None], self.grid, interval=interval)
         known = np.isfinite(feedback.target)  # [K, N]
         losses = self.loss.loss(lower, upper, feedback.target[..., None])
         losses = np.where(known[..., None], losses, 0)  # [K, N, G]

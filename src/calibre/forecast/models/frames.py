@@ -74,10 +74,19 @@ def points(out: pd.DataFrame, window: Window) -> np.ndarray:
 
     The column is found by elimination: neuralforecast renames model aliases.
     """
-    shape = (window.y.shape[0], window.horizon)
-    out = out.reset_index(drop=out.index.name is None)
     values = [column for column in out.columns if column not in ("unique_id", "ds")]
-    if len(values) != 1 or len(out) != shape[0] * shape[1]:
-        raise ValueError(f"model returned columns {values} and {len(out)} rows for shape {shape}")
+    if len(values) != 1:
+        raise ValueError(f"model returned columns {values}, expected one point column")
+    return predictions(out, window, values)[..., 0]
+
+
+def predictions(out: pd.DataFrame, window: Window, names: list[str]) -> np.ndarray:
+    """Named output columns to `[S, H, Q]` float32 in series and time order."""
+    shape = (window.y.shape[0], window.horizon, len(names))
+    out = out.reset_index(drop=out.index.name is None)
+    if not set(names).issubset(out.columns) or len(out) != shape[0] * shape[1]:
+        raise ValueError(
+            f"model returned columns {list(out.columns)} and {len(out)} rows for {shape}"
+        )
     out = out.sort_values(["unique_id", "ds"])
-    return out[values[0]].to_numpy(np.float32).reshape(shape)
+    return out[names].to_numpy(np.float32).reshape(shape)

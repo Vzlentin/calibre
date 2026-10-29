@@ -6,6 +6,7 @@ values after the origin, except covariates that are known ahead.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -62,6 +63,23 @@ class Fitted(ABC):
 
 
 @dataclass(frozen=True)
+class QuantileForecast:
+    """Points `[S, H]`, raw quantiles `[S, H, 2]` (possibly crossed), and their levels."""
+
+    point: np.ndarray
+    interval: np.ndarray
+    levels: tuple[float, float]
+
+
+class FittedQuantiles(Fitted):
+    """A fitted model that issues points and native quantiles in one prediction call."""
+
+    @abstractmethod
+    def predict_quantiles(self, window: Window) -> QuantileForecast:
+        """Return point forecasts and the native lower/upper quantile predictions."""
+
+
+@dataclass(frozen=True)
 class FitResiduals:
     """Out-of-sample signed errors [K, S, H] and their issuing origin indexes.
 
@@ -100,6 +118,14 @@ class FittedResiduals(Fitted):
     @abstractmethod
     def residuals(self) -> FitResiduals:
         """Return signed errors known by the fitting origin."""
+
+
+def check_quantiles(levels: Sequence[float]) -> tuple[float, float]:
+    """Two ordered finite quantile levels strictly between zero and one."""
+    values = np.asarray(levels, dtype=np.float64)
+    if values.shape != (2,) or not np.isfinite(values).all() or not 0 < values[0] < values[1] < 1:
+        raise ValueError("quantiles must be two levels with 0 < lower < upper < 1")
+    return float(values[0]), float(values[1])
 
 
 class Forecaster(ABC):

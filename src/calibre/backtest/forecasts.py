@@ -16,20 +16,43 @@ from calibre.forecast.models.base import (
     Covariate,
     FitResiduals,
     Fitted,
+    FittedQuantiles,
     FittedResiduals,
     Forecaster,
     Window,
+    check_quantiles,
 )
-from calibre.forecast.reconcile import Reconciler
+from calibre.forecast.reconcile import Identity, Reconciler
 
 
 @dataclass(frozen=True)
 class Forecasts:
-    """Reconciled points `[O, N, H]` for increasing origins `[O]`."""
+    """Points `[O, N, H]` and optional native intervals for increasing origins `[O]`.
+
+    Native intervals add a final pair axis and require two `quantile_levels`.
+    Crossed raw endpoints are ordered on a copy, never on the caller's array.
+    """
 
     origins: np.ndarray
     points: np.ndarray
     initial_residuals: FitResiduals | None = None
+    interval: np.ndarray | None = None
+    quantile_levels: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.interval is None and self.quantile_levels is None:
+            return
+        if self.interval is None or self.quantile_levels is None:
+            raise ValueError("native intervals and quantile_levels must be supplied together")
+        object.__setattr__(self, "quantile_levels", check_quantiles(self.quantile_levels))
+        if self.points.ndim != 3 or self.points.shape[0] != len(self.origins):
+            raise ValueError("native forecast points must be [O, N, H] matching origins")
+        if np.shape(self.interval) != self.points.shape + (2,):
+            raise ValueError("native intervals must have shape points.shape + (2,)")
+        interval = np.sort(np.asarray(self.interval, dtype=np.float32), axis=-1)
+        if not np.isfinite(interval).all():
+            raise ValueError("native intervals must be finite")
+        object.__setattr__(self, "interval", interval)
 
     def residuals(self, actuals: np.ndarray) -> np.ndarray:
         """Return `actual - point` `[O, N, H]` from node actuals `[N, T]`.
@@ -61,6 +84,7 @@ def rolling_forecasts(
     is fitted at the first origin and again every `refit_every` origins. None fits once.
     initial_residuals collects fit-time OOB errors, reconciled to the node axis.
     It requires FittedResiduals and no refit, so seeds never mix model generations.
+    FittedQuantiles also returns native intervals and requires Identity and no refit.
     """
     if initial_residuals and refit_every is not None:
         raise ValueError("initial residuals require a frozen model, without refit_every")
@@ -84,6 +108,8 @@ def rolling_forecasts(
     points = np.empty((len(origins), n_nodes, horizon), dtype=np.float32)
     fitted: Fitted | None = None
     seed: FitResiduals | None = None
+    intervals: np.ndarray | None = None
+    quantile_levels: tuple[float, float] | None = None
     for index, origin in enumerate(origins):
         seen = int(origin) + 1
         window = Window(
@@ -94,17 +120,45 @@ def rolling_forecasts(
         )
         if fitted is None or (refit_every is not None and index % refit_every == 0):
             fitted = model.fit(window)
+            if isinstance(fitted, FittedQuantiles):
+                if refit_every is not None or initial_residuals:
+                    raise ValueError(
+                        "native quantiles require a frozen model without initial_residuals"
+                    )
+                if not isinstance(reconciler, Identity):
+                    raise ValueError(
+                        "native quantiles require Identity; quantiles cannot be reconciled"
+                    )
             if initial_residuals:
                 if not isinstance(fitted, FittedResiduals):
                     raise TypeError("model does not expose FittedResiduals")
                 seed = _reconciled_residuals(fitted.residuals(), reconciler, int(origin), horizon)
-        base = np.asarray(fitted.predict(window))
+        if isinstance(fitted, FittedQuantiles):
+            prediction = fitted.predict_quantiles(window)
+            base = np.asarray(prediction.point)
+            levels = check_quantiles(prediction.levels)
+            if intervals is None:
+                intervals = np.empty(points.shape + (2,), dtype=np.float32)
+                quantile_levels = levels
+            if levels != quantile_levels:
+                raise ValueError("native quantile levels changed between origins")
+            if np.shape(prediction.interval) != (n_series, horizon, 2):
+                raise ValueError("model native intervals must be [S, H, 2]")
+            intervals[index] = prediction.interval
+        else:
+            base = np.asarray(fitted.predict(window))
         if base.shape != (n_series, horizon):
             raise ValueError(f"model returned shape {base.shape}, expected {(n_series, horizon)}")
         if not np.isfinite(base).all():
             raise ValueError(f"model returned nonfinite points at origin {origin}")
         points[index] = reconciler(base)
-    return Forecasts(origins=origins, points=points, initial_residuals=seed)
+    return Forecasts(
+        origins=origins,
+        points=points,
+        initial_residuals=seed,
+        interval=intervals,
+        quantile_levels=quantile_levels,
+    )
 
 
 def _reconciled_residuals(
