@@ -31,8 +31,8 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`: residual scores, parameter shapes, and their issued bounds |
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
 | `conformal/calibrators/base.py` | `Calibrator`, `QuantileCalibrator`, and array-only `Scorecaster` contracts, `Feedback`, `State`, `Level`, `check_level` |
-| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
-| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `pid.ConformalPID` |
+| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`, `weighted_score_quantile`: conformal ranks, retention, pooling, and weighted ranks with a unit test mass; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
+| `conformal/calibrators/` | `split.SplitQuantile`, `nexcp.NexCP`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `pid.ConformalPID` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
@@ -109,6 +109,7 @@ O origins, and H forecast steps.
 | `Scorecaster.predict(history, ahead)` inputs | History `[N, C, K]` float64 and horizons `[C]` positive int64, read-only | Scores in original units, chronological and right-aligned with leading NaN |
 | Scorecast | `[N, C]` finite float64 | Anticipation in score units, not an issued threshold |
 | PID state | `[N, C, window]` score ring; other arrays `[N, C]` | Scores, P, fixed scale, cumulative error are float64; retained counts, insertion positions, update counts are int64 |
+| NexCP state | `[N, C, K]` float32 score storage; counts and insertion positions `[N, C]` int64 | Grows by doubling, optionally bounded by `window`; every array keeps the node axis |
 | State | nested dict of arrays | `flatten` gives one named array per key |
 
 `online.step` gives the periods since the last origin to the ledger, scores the
@@ -122,6 +123,13 @@ continues with the returned state. A calibrator keeps its state in numpy arrays 
 never fitted objects. Anything else it needs is recomputed from those arrays. Every
 state array keeps the node axis, so a product can shard state by node ranges unless
 `groups` pools nodes across shards.
+
+`NexCP` is a `QuantileCalibrator` with geometric calibration weights, independent
+per node and target column. It reconstructs chronological scores from its NumPy
+storage, including after a window wraps, and delegates weighted ranks to `ranks`.
+Its clock counts finite scores, not calendar periods. It needs no changes in the
+ledger, step, forecaster, or replay. See [Semantics](semantics.md#nexcp) for the
+unit test-point mass, readiness, and split coverage assumptions.
 
 A model sees data only through `Window`. `rolling_forecasts` builds each window by
 slicing, so a value after the origin cannot reach a model, except a covariate marked
@@ -188,7 +196,8 @@ These are approved directions for the library. None of them exist yet:
 - Issuance at the start of the first forecast period instead of a last-observed index.
 - Exact decimal levels with integer or rational rank arithmetic.
 - Declared target support and conservative projection of bounds onto it.
-- Normalized, weighted, and adaptive calibration.
+- Normalized and adaptive calibration beyond existing methods, and weighting
+  beyond the fixed geometric NexCP schedule.
 - Model lifecycle beyond fit and refit: incremental update and native quantiles.
   Fit-time OOB residuals now have an explicit contract; automatic model-generation
   changes and calibration resets are still not implemented.

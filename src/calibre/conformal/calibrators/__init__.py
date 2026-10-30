@@ -10,6 +10,7 @@ from calibre.conformal.calibrators.base import (
     State,
 )
 from calibre.conformal.calibrators.enbpi import EnbPI
+from calibre.conformal.calibrators.nexcp import NexCP
 from calibre.conformal.calibrators.pid import ConformalPID
 from calibre.conformal.calibrators.risk import RiskControl
 from calibre.conformal.calibrators.split import SplitQuantile
@@ -22,6 +23,7 @@ __all__ = [
     "EnbPI",
     "Feedback",
     "Level",
+    "NexCP",
     "QuantileCalibrator",
     "QuantileTracker",
     "RiskControl",

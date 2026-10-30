@@ -65,7 +65,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `NexCP`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -141,6 +141,40 @@ run = rolling_forecasts(
     covariates={"price": price},
 )
 ```
+
+## NexCP
+
+`NexCP` implements weighted split conformal from
+[Conformal prediction beyond exchangeability](https://arxiv.org/abs/2202.13415).
+It weights retained scores from oldest to newest by `rho**n, ..., rho`, with an
+additional weight of 1 at `+inf` for the test point. It changes calibration, not
+forecaster training. Using the quick-start forecasts:
+
+```python
+from calibre import NexCP
+
+bands = replay(
+    run,
+    actuals,
+    target=Step(),
+    score=Absolute(),
+    calibrator=NexCP(0.9, rho=0.99, window=200),
+)
+```
+
+Nodes and target columns calibrate independently. `window=None` retains every
+finite score; an integer keeps the last finite scores per cell. Missing scores and
+calendar gaps do not advance the decay clock. `rho=1` recovers ordinary split
+conformal. The quantile includes the test-point mass and stays infinite until the
+finite mass is sufficient. In particular, `level >= rho` never becomes ready.
+`seed(state, scores)` accepts held-out scores `[K, N, C]` known before issuance.
+
+The split guarantee needs a model trained independently of calibration data and
+fixed weights. Under nonexchangeability, the paper bounds marginal coverage loss
+by a generally unknown total-variation term. Online residuals, refits, or overlapping
+targets do not automatically satisfy the split assumptions. There is no conditional
+or simultaneous multi-horizon guarantee. Full conformal randomization and weighted
+forecaster training are not implemented by this calibrator.
 
 ## EnbPI
 

@@ -175,6 +175,66 @@ refactor.
   Reference: Angelopoulos, Candès and Tibshirani,
   [Conformal PID Control](https://arxiv.org/abs/2307.16895).
 
+## NexCP
+
+- **Scope and score.** `NexCP(level, rho=0.99, window=None)` implements the split
+  method in equation (11) of Barber, Candès, Ramdas and Tibshirani,
+  [Conformal prediction beyond exchangeability](https://arxiv.org/abs/2202.13415).
+  It is a `QuantileCalibrator` for scalar scores. `Absolute` gives symmetric bands;
+  `Signed` gives one-sided bounds. Paired scores such as `Asymmetric` are rejected.
+  This is calibration weighting, not weighted model training or the randomized
+  full conformal algorithm for nonsymmetric learners.
+- **Weight origin and clock.** Fix `0 < rho <= 1` before calibration. Each node
+  and target column retains its own finite scores in issuing-origin order. For
+  n retained scores, give score i the unnormalized weight `rho**(n+1-i)`, for
+  i=1,...,n. The newest score has weight rho, not 1. Missing and nonfinite
+  constructed scores are excluded and do not advance recency; calendar gaps and
+  calls with no feedback do not age scores. This is retained-score time, not
+  elapsed-calendar time or an extrapolation across unresolved forecast steps.
+  `window=None` retains all finite scores. A positive integer keeps the last
+  `window` finite scores per cell and assigns zero weight to discarded scores.
+  There is no node pooling or sharing across horizons.
+- **Test-point mass and rank.** Keep an additional unnormalized weight of 1 at
+  +inf. With `S = sum(weights)`, select the first observed score in increasing
+  score order whose cumulative weight is at least `level * (1 + S)`. Return
+  +inf if no finite score reaches it. Do not interpolate, renormalize only the
+  finite scores, clip an infeasible rank, or drop the test mass. Empty cells
+  issue +inf. `rho=1` recovers rank `ceil((n+1)*level)` and ordinary split
+  conformal for the same retained scores.
+- **Readiness and precision.** A finite quantile requires
+  `level <= S / (1 + S)`. For any finite geometric history with rho < 1, this
+  ratio is strictly below rho. Levels at least rho therefore never become ready,
+  regardless of history length; enforce that bound analytically even if floating
+  accumulation rounds the limiting mass upward. Smaller windows can also prevent
+  readiness. Scores and thresholds are float32, weights and accumulation float64.
+  There is no epsilon or empirical-quantile fallback.
+- **Initialization and state.** `seed(state, scores)` accepts already computed
+  held-out scores `[K, N, C]` in chronological order, with NaN holes and no
+  infinities, into an empty state. Scores must already be known at the first
+  issuing origin, from the same model and score configuration. Feedback instead
+  scores the archived point once the target is known. Every cell has NumPy score
+  storage, a retained count and an insertion position; storage grows by doubling,
+  up to window when bounded. Threshold evaluation is read-only. Save the ledger
+  and calibrator arrays together and resume with the same model, score, target,
+  level, rho and window. Changing them requires fresh initialization.
+- **Claims.** The paper's split construction uses a predictor trained separately
+  from calibration data and weights fixed independently of those data. Under the
+  relevant exchangeability assumptions its marginal coverage is at least level,
+  including fixed nonuniform weights. More generally, coverage is at least
+  `level - Delta`, where `Delta = sum_i normalized_weight_i *
+  d_TV(R(Z), R(Z_swapped_i))`. Here TV compares laws of residual vectors, not
+  distances between realized residuals. It is not estimated by Calibre. The
+  theorem does not require general independence or stationarity, but its bound
+  can be uninformative. Under independent observations with TV drift bounded by
+  `epsilon * age` on this same clock, the paper bounds Delta by
+  `2 * epsilon / (1 - rho)` for rho < 1. No such drift bound is inferred from
+  observed time-series scores.
+  Causal online feedback alone, refits, score-dependent retention or tuning rho
+  on calibration data do not establish these assumptions. Delayed or overlapping
+  targets retain separate marginal columns, not conditional-on-history or
+  simultaneous-path guarantees. Strong decay trades reduced influence of older
+  data for less calibration mass and potentially infinite or wider intervals.
+
 ## Approved, not implemented
 
 | Topic | Default | Consequence |
@@ -183,5 +243,5 @@ refactor.
 | Level precision | Levels are canonical decimals at input. Ranks use exact integer or rational arithmetic. | Float32 describes score storage, not probability. Adjacent levels stay distinct. No epsilon. |
 | Target support | Callers declare support. Real-valued targets are allowed. Bounds are projected conservatively onto support. | Support is not inferred from samples. Clipping points breaks hierarchy coherence. |
 | Normalization | A positive, causal issuance-time scale is stored with each forecast. Zero or invalid scales need a named rule. | No division by an epsilon. No scale recomputed with later data. |
-| Weighted calibration | Declare weight origin, time decay, test-point mass, and weighted rank and readiness. | Weighting does not inherit the unweighted finite-sample claim. |
+| Weighting beyond NexCP | Declare weight origin, time decay, test-point mass, and weighted rank and readiness for other weight schedules. | Other weighting does not inherit the unweighted finite-sample claim. |
 | Model generations | A changed model, feature transform, or calibration method resets calibration by default. | Reset warmup stays visible. No silent transfer of old scores. |
