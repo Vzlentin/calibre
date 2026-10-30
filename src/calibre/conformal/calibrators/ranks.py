@@ -75,6 +75,46 @@ def retained_quantile(
     return out
 
 
+def weighted_score_quantile(
+    scores: np.ndarray, weights: np.ndarray, level: float | np.ndarray
+) -> np.ndarray:
+    """Weighted inverse CDF per column [N], with a unit test mass at +inf.
+
+    Scores are [K, N], finite or NaN. Weights are [K] or [K, N], fixed in [0, 1];
+    missing scores carry no mass. Select the first score with cumulative weight
+    >= level * (1 + total weight), without interpolation. Otherwise return +inf.
+    Accumulate weights and levels in float64; do not renormalize the finite scores.
+    """
+    scores = np.asarray(scores)
+    weights = np.asarray(weights, dtype=np.float64)
+    levels = np.asarray(level, dtype=np.float64)
+    if scores.ndim != 2 or levels.ndim > 1:
+        raise ValueError("scores must be [K, N] and level a scalar or vector")
+    if not np.isfinite(levels).all() or ((levels <= 0) | (levels >= 1)).any():
+        raise ValueError("level must be strictly between zero and one")
+    if np.isinf(scores).any():
+        raise ValueError("scores must be finite or NaN")
+    if weights.shape not in ((len(scores),), scores.shape):
+        raise ValueError("weights must be [K] or [K, N] matching scores")
+    if not np.isfinite(weights).all() or ((weights < 0) | (weights > 1)).any():
+        raise ValueError("weights must be finite and between zero and one")
+    levels = np.broadcast_to(levels, (scores.shape[1],))
+    out = np.full(scores.shape[1], np.inf, dtype=np.result_type(scores.dtype, np.float32))
+    if len(scores) == 0:
+        return out
+    if weights.ndim == 1:
+        weights = weights[:, None]
+    weights = np.where(np.isfinite(scores), weights, 0.0)
+    order = np.argsort(scores, axis=0, kind="stable")
+    ordered = np.take_along_axis(scores, order, axis=0)
+    cumulative = np.cumsum(np.take_along_axis(weights, order, axis=0), axis=0)
+    reached = cumulative >= levels * (1.0 + cumulative[-1])
+    ready = reached.any(axis=0)
+    columns = np.flatnonzero(ready)
+    out[columns] = ordered[np.argmax(reached[:, ready], axis=0), columns]
+    return out
+
+
 def empirical_quantile(scores: np.ndarray, level: float | np.ndarray) -> np.ndarray:
     """Empirical inverse CDF per column [N] of scores [K, N], with NaN holes.
 
