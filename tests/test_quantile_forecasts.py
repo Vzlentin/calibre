@@ -15,6 +15,7 @@ from calibre import (
     Hierarchy,
     Identity,
     Panel,
+    Quantiles,
     SplitQuantile,
     Step,
     Window,
@@ -107,14 +108,15 @@ def test_mlforecast_direct_quantiles_match_independently_fitted_regressions():
         for j, q in enumerate([0.1, 0.9]):
             independent = QuantileRegressor(quantile=q, alpha=0.1).fit(x, y)
             expected[:, h, j] = independent.predict(panel.values[:, 20:21])
-    np.testing.assert_allclose(got.interval, expected, atol=1e-6)
-    assert got.levels == (0.1, 0.9)
+    np.testing.assert_allclose(got.quantiles.values, expected, atol=1e-6)
+    assert got.quantiles.levels == (0.1, 0.9)
     np.testing.assert_array_equal(got.point, fitted.predict(first))
     assert fitted.quantile_engine.ts.max_horizon == 3
     assert len(fitted.quantile_engine.models_["lower"]) == 3
     assert len(fitted.quantile_engine.models_["upper"]) == 3
     assert not hasattr(model.model, "coef_")
-    assert all(not hasattr(estimator, "coef_") for estimator in model.quantile_models.values())
+    assert [q for q, _ in model.quantile_models] == [0.1, 0.9]
+    assert all(not hasattr(estimator, "coef_") for _, estimator in model.quantile_models)
 
 
 def test_mlforecast_each_horizon_has_its_own_training_targets_and_keeps_point_behavior():
@@ -134,10 +136,12 @@ def test_mlforecast_each_horizon_has_its_own_training_targets_and_keeps_point_be
         [np.quantile(panel.values[:, 1 + h : 21].ravel(), [0.1, 0.9]) for h in range(3)]
     )
     output = fitted.predict_quantiles(first)
-    np.testing.assert_allclose(output.interval, np.broadcast_to(expected, (2, 3, 2)), atol=1e-6)
+    np.testing.assert_allclose(
+        output.quantiles.values, np.broadcast_to(expected, (2, 3, 2)), atol=1e-6
+    )
     np.testing.assert_allclose(output.point, panel.values[:, 1:21].mean(), atol=1e-6)
     np.testing.assert_array_equal(
-        fitted.predict_quantiles(window(panel, 25)).interval, output.interval
+        fitted.predict_quantiles(window(panel, 25)).quantiles.values, output.quantiles.values
     )
 
 
@@ -160,10 +164,10 @@ def test_mlforecast_quantiles_use_known_ahead_features_at_prediction():
         1,
         covariates={"promo": Covariate(promo, True, "sum")},
     )
-    assert forecasts.interval is not None
+    assert forecasts.quantiles is not None
     expected = np.stack([3 * promo[:, o + 1 : o + 2] for o in [20, 25]])
-    np.testing.assert_allclose(forecasts.interval[..., 0], expected, atol=1e-5)
-    np.testing.assert_allclose(forecasts.interval[..., 1], expected, atol=1e-5)
+    np.testing.assert_allclose(forecasts.quantiles.values[..., 0], expected, atol=1e-5)
+    np.testing.assert_allclose(forecasts.quantiles.values[..., 1], expected, atol=1e-5)
 
 
 def test_mlforecast_native_quantiles_reject_arbitrary_target_transforms():
@@ -177,7 +181,13 @@ def test_mlforecast_native_quantiles_reject_arbitrary_target_transforms():
 
 
 @pytest.mark.parametrize(
-    "levels,alias", [((0.1, 0.9), "named-network"), ((0.5, 0.9), None), ((0.10001, 0.10002), None)]
+    "levels,alias",
+    [
+        ((0.1, 0.9), "named-network"),
+        ((0.5, 0.9), None),
+        ((0.1, 0.5), None),
+        ((0.10001, 0.10002), None),
+    ],
 )
 def test_neural_quantiles_and_median_match_vendor_outputs_without_rounded_label_collisions(
     levels, alias
@@ -192,7 +202,10 @@ def test_neural_quantiles_and_median_match_vendor_outputs_without_rounded_label_
     qs = sorted({0.5, *levels})
     np.testing.assert_allclose(fitted.engine.models[0].loss.quantiles.detach().numpy(), qs)
     assert "loss" not in model.config
-    assert got.levels == levels
+    assert got.quantiles.levels == levels
+    from neuralforecast.losses.pytorch import MQLoss
+
+    assert fitted.engine.models[0].loss.output_names == MQLoss(quantiles=qs).output_names
     frame = pd.DataFrame(
         {
             "unique_id": np.repeat(np.arange(2), 5),
@@ -201,12 +214,10 @@ def test_neural_quantiles_and_median_match_vendor_outputs_without_rounded_label_
         }
     )
     raw = fitted.engine.predict(df=frame).sort_values(["unique_id", "ds"])
-    prefix = alias if alias is not None else "MLP"
-    expected = np.stack(
-        [raw[prefix + f"-q{qs.index(q)}"].to_numpy().reshape(2, 3) for q in (0.5, *levels)], axis=-1
-    )
+    values = raw.drop(columns=["unique_id", "ds"]).to_numpy().reshape(2, 3, len(qs))
+    expected = values[..., [qs.index(q) for q in (0.5, *levels)]]
     np.testing.assert_array_equal(got.point, expected[..., 0])
-    np.testing.assert_array_equal(got.interval, expected[..., 1:])
+    np.testing.assert_array_equal(got.quantiles.values, expected[..., 1:])
     np.testing.assert_array_equal(fitted.predict(first), got.point)
 
 
@@ -225,16 +236,15 @@ def test_native_forecasts_flow_through_cqr_and_never_use_later_training_data(fac
     model = factory()
     forecasts = rolling_forecasts(panel, hierarchy, model, Identity(hierarchy), origins, 3)
     assert forecasts.points.shape == (11, 2, 3)
-    assert forecasts.interval is not None
-    assert forecasts.interval.shape == (11, 2, 3, 2)
-    assert forecasts.interval.dtype == np.float32
-    assert forecasts.quantile_levels == (0.1, 0.9)
-    assert (forecasts.interval[..., 0] <= forecasts.interval[..., 1]).all()
+    assert forecasts.quantiles is not None
+    assert forecasts.quantiles.values.shape == (11, 2, 3, 2)
+    assert forecasts.quantiles.values.dtype == np.float32
+    assert forecasts.quantiles.levels == (0.1, 0.9)
     actuals = hierarchy.summing @ panel.values
     run = replay(forecasts, actuals, target=Step(), score=CQR(), calibrator=SplitQuantile(0.5))
-    expected = np.maximum(
-        forecasts.interval[..., 0] - run.target, run.target - forecasts.interval[..., 1]
-    )
+    ordered = np.sort(forecasts.quantiles.values, axis=-1)
+    np.testing.assert_array_equal(run.point, ordered)
+    expected = np.maximum(ordered[..., 0] - run.target, run.target - ordered[..., 1])
     np.testing.assert_array_equal(run.score, expected)
     assert np.isfinite(run.threshold[3:]).all()
     changed = panel.values.copy()
@@ -247,8 +257,10 @@ def test_native_forecasts_flow_through_cqr_and_never_use_later_training_data(fac
         origins,
         3,
     )
-    assert other.interval is not None
-    np.testing.assert_array_equal(forecasts.interval[origins < 27], other.interval[origins < 27])
+    assert other.quantiles is not None
+    np.testing.assert_array_equal(
+        forecasts.quantiles.values[origins < 27], other.quantiles.values[origins < 27]
+    )
     np.testing.assert_array_equal(forecasts.points[origins < 27], other.points[origins < 27])
 
 
@@ -279,39 +291,39 @@ def test_native_quantiles_forecast_aggregate_nodes_directly_not_by_summing_quant
         quantile_models={q: DummyRegressor(strategy="quantile", quantile=q) for q in [0.1, 0.9]},
     )
     forecasts = rolling_forecasts(panel, hierarchy, model, Identity(hierarchy), np.array([20]), 2)
-    assert forecasts.interval is not None
+    assert forecasts.quantiles is not None
     actuals = hierarchy.aggregate(panel.values)
     assert actuals.shape[0] == 3
     for h in range(2):
         expected = np.quantile(actuals[:, 1 + h : 21].ravel(), [0.1, 0.9])
         np.testing.assert_allclose(
-            forecasts.interval[0, :, h], np.broadcast_to(expected, (3, 2)), atol=1e-6
+            forecasts.quantiles.values[0, :, h], np.broadcast_to(expected, (3, 2)), atol=1e-6
         )
     run = replay(forecasts, actuals, target=Step(), score=CQR(), calibrator=SplitQuantile(0.5))
     assert run.score.shape == (1, 3, 2)
 
 
-def test_forecasts_orders_a_copy_of_native_intervals_and_keeps_metadata():
+def test_forecasts_keeps_native_values_and_levels_together_without_ordering():
     raw = np.array([[[[9, -1], [2, 0]]]])
-    forecasts = Forecasts(
-        np.array([0]), np.zeros((1, 1, 2)), interval=raw, quantile_levels=(0.1, 0.9)
-    )
-    assert forecasts.interval is not None
-    np.testing.assert_array_equal(forecasts.interval, [[[[-1, 9], [0, 2]]]])
-    np.testing.assert_array_equal(raw, [[[[9, -1], [2, 0]]]])
-    assert forecasts.interval.dtype == np.float32
+    quantiles = Quantiles(raw, (0.1, 0.9))
+    forecasts = Forecasts(np.array([0]), np.zeros((1, 1, 2)), quantiles=quantiles)
+    assert forecasts.quantiles is quantiles
+    np.testing.assert_array_equal(quantiles.values, [[[[9, -1], [2, 0]]]])
+    assert quantiles.levels == (0.1, 0.9)
 
 
 @pytest.mark.parametrize(
-    "kwargs,match",
+    "quantiles,match",
     [
-        ({"interval": np.zeros((1, 1, 1, 2))}, "supplied together"),
-        ({"quantile_levels": (0.1, 0.9)}, "supplied together"),
-        ({"interval": np.zeros((1, 1, 2)), "quantile_levels": (0.1, 0.9)}, "shape"),
-        ({"interval": np.full((1, 1, 1, 2), np.nan), "quantile_levels": (0.1, 0.9)}, "finite"),
-        ({"interval": np.full((1, 1, 1, 2), np.inf), "quantile_levels": (0.1, 0.9)}, "finite"),
+        (Quantiles(np.zeros((1, 1, 1, 2)), (0.9, 0.1)), "quantiles"),
+        (Quantiles(np.zeros((1, 1, 2)), (0.1, 0.9)), "match"),
+        (Quantiles(np.full((1, 1, 1, 2), np.nan), (0.1, 0.9)), "finite"),
+        (Quantiles(np.full((1, 1, 1, 2), np.inf), (0.1, 0.9)), "finite"),
     ],
 )
-def test_forecasts_rejects_invalid_native_data(kwargs, match):
+def test_replay_rejects_invalid_native_data(quantiles, match):
+    forecasts = Forecasts(np.array([0]), np.zeros((1, 1, 1)), quantiles=quantiles)
     with pytest.raises(ValueError, match=match):
-        Forecasts(np.array([0]), np.zeros((1, 1, 1)), **kwargs)
+        replay(
+            forecasts, np.zeros((1, 2)), target=Step(), score=CQR(), calibrator=SplitQuantile(0.5)
+        )

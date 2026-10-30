@@ -63,12 +63,19 @@ class Fitted(ABC):
 
 
 @dataclass(frozen=True)
+class Quantiles:
+    """Native quantile values [..., 2] and their lower/upper probability levels."""
+
+    values: np.ndarray
+    levels: tuple[float, float]
+
+
+@dataclass(frozen=True)
 class QuantileForecast:
-    """Points `[S, H]`, raw quantiles `[S, H, 2]` (possibly crossed), and their levels."""
+    """Point forecasts [S, H] and their native quantiles."""
 
     point: np.ndarray
-    interval: np.ndarray
-    levels: tuple[float, float]
+    quantiles: Quantiles
 
 
 class FittedQuantiles(Fitted):

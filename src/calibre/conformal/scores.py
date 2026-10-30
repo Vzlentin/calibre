@@ -1,8 +1,4 @@
-"""Nonconformity scores and the bounds indexed by their calibration parameters.
-
-Scalar scores index nested bounds. Asymmetric residual corrections instead take a
-pair of parameters. CQR takes a scalar correction and the forecast's native interval.
-"""
+"""Nonconformity scores and the bounds indexed by their calibration parameters."""
 
 from abc import ABC, abstractmethod
 
@@ -11,126 +7,84 @@ import numpy as np
 
 class Score(ABC):
     @abstractmethod
+    def input_shape(self) -> tuple[int, ...]:
+        """Trailing forecast axes: () for points, (2,) for native quantiles."""
+
+    @abstractmethod
     def parameter_shape(self) -> tuple[int, ...]:
         """Trailing parameter axes: () for a scalar, (2,) for paired corrections."""
 
     @abstractmethod
-    def requires_interval(self) -> bool:
-        """Whether scoring and bounding require an archived native interval."""
+    def score(self, target: np.ndarray, point: np.ndarray) -> np.ndarray:
+        """Nonconformity with the target shape from forecasts with input_shape()."""
 
     @abstractmethod
-    def score(
-        self, target: np.ndarray, point: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> np.ndarray:
-        """Nonconformity with the target shape. Native intervals add a final pair axis."""
-
-    @abstractmethod
-    def bound(
-        self, point: np.ndarray, threshold: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Bounds from points, issued parameters, and optional native intervals."""
+    def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Lower and upper bounds from the forecast and issued parameters."""
 
 
 class Absolute(Score):
-    """`|target - point|`. The bound is a two-sided band."""
+    """Absolute residual for a two-sided band."""
+
+    def input_shape(self) -> tuple[int, ...]:
+        return ()
 
     def parameter_shape(self) -> tuple[int, ...]:
         return ()
 
-    def requires_interval(self) -> bool:
-        return False
-
-    def score(
-        self, target: np.ndarray, point: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> np.ndarray:
+    def score(self, target: np.ndarray, point: np.ndarray) -> np.ndarray:
         return np.abs(target - point)
 
-    def bound(
-        self, point: np.ndarray, threshold: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return point - threshold, point + threshold
 
 
 class Signed(Score):
-    """`target - point`. The bound is a one-sided upper bound.
+    """Signed residual for an upper bound."""
 
-    On a `LeadTime` target, it bounds the total. It is not a sum of per-step bounds.
-    """
+    def input_shape(self) -> tuple[int, ...]:
+        return ()
 
     def parameter_shape(self) -> tuple[int, ...]:
         return ()
 
-    def requires_interval(self) -> bool:
-        return False
-
-    def score(
-        self, target: np.ndarray, point: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> np.ndarray:
+    def score(self, target: np.ndarray, point: np.ndarray) -> np.ndarray:
         return target - point
 
-    def bound(
-        self, point: np.ndarray, threshold: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         upper = point + threshold
         return np.full_like(upper, -np.inf), upper
 
 
 class Asymmetric(Score):
-    """Signed residuals with independently calibrated lower/upper corrections.
+    """Signed residuals with independently calibrated lower/upper corrections."""
 
-    Parameters have shape point.shape + (2,). Scalar quantile and risk calibrators
-    cannot consume this parameterization.
-    """
+    def input_shape(self) -> tuple[int, ...]:
+        return ()
 
     def parameter_shape(self) -> tuple[int, ...]:
         return (2,)
 
-    def requires_interval(self) -> bool:
-        return False
-
-    def score(
-        self, target: np.ndarray, point: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> np.ndarray:
+    def score(self, target: np.ndarray, point: np.ndarray) -> np.ndarray:
         return target - point
 
-    def bound(
-        self, point: np.ndarray, threshold: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if threshold.shape != point.shape + (2,):
             raise ValueError("asymmetric parameters must have shape point.shape + (2,)")
         return point + threshold[..., 0], point + threshold[..., 1]
 
 
 class CQR(Score):
-    """Conformalized quantile regression: `max(lower - target, target - upper)`.
+    """Conformalized quantile regression from ordered native quantiles."""
 
-    Use with `SplitQuantile(level)`. Native quantiles are ordered before scoring.
-    Negative scores and corrections are retained. Corrected endpoints are never
-    reordered: a sufficiently negative correction can intentionally give an empty set.
-    """
+    def input_shape(self) -> tuple[int, ...]:
+        return (2,)
 
     def parameter_shape(self) -> tuple[int, ...]:
         return ()
 
-    def requires_interval(self) -> bool:
-        return True
+    def score(self, target: np.ndarray, point: np.ndarray) -> np.ndarray:
+        return np.maximum(point[..., 0] - target, target - point[..., 1])
 
-    def score(
-        self, target: np.ndarray, point: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> np.ndarray:
-        lower, upper = _endpoints(point, interval)
-        return np.maximum(lower - target, target - upper)
-
-    def bound(
-        self, point: np.ndarray, threshold: np.ndarray, *, interval: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray]:
-        lower, upper = _endpoints(point, interval)
-        return lower - threshold, upper + threshold
-
-
-def _endpoints(point: np.ndarray, interval: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
-    if interval is None or interval.shape != point.shape + (2,):
-        raise ValueError("CQR needs native intervals with shape point.shape + (2,)")
-    return np.minimum(interval[..., 0], interval[..., 1]), np.maximum(
-        interval[..., 0], interval[..., 1]
-    )
+    def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return point[..., 0] - threshold, point[..., 1] + threshold

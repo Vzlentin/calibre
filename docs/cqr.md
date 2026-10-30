@@ -1,19 +1,12 @@
-# Conformalized quantile regression
+# Conformalized quantile regression examples
 
-CQR calibrates an interval predicted by quantile models. `CQR()` is a score;
-`SplitQuantile(level)` computes the correction. There is no separate CQR rank or
-calibrator state. [Semantics](semantics.md#cqr-explicit-semantic-additions) defines
-the numerical rules and coverage claims.
+[Semantics](semantics.md#cqr) defines the CQR score, fitting constraints, validation,
+empty sets and coverage assumptions. This guide shows the array API.
 
 ## Train either backend
 
 Install `libcalibre[ml,neural]` to run both examples. From this repository,
-`uv sync --group dev` supplies the two backends and the test tools.
-
-The following example trains each model at origin 49 using only periods 0 through
-49, then calibrates on subsequently revealed targets. `Identity` forecasts every
-node directly, including aggregates when a hierarchy has them. The quantiles need
-not be coherent across nodes.
+`uv sync --group dev` supplies the two backends and development tools.
 
 ```python
 import numpy as np
@@ -62,6 +55,7 @@ models = {
 
 for name, model in models.items():
     forecasts = rolling_forecasts(panel, hierarchy, model, Identity(hierarchy), origins, horizon)
+    assert forecasts.quantiles is not None
     intervals = replay(
         forecasts,
         actuals,
@@ -71,33 +65,29 @@ for name, model in models.items():
     )
     ready = np.isfinite(intervals.threshold)
     empty = ready & (intervals.lower > intervals.upper)
-    print(name, forecasts.interval.shape, intervals.covered[ready].mean(), empty.sum())
+    print(name, forecasts.quantiles.values.shape, intervals.covered[ready].mean(), empty.sum())
 ```
-
-MLForecast clones the two unfitted estimators and fits a direct regressor for each
-horizon. Configure their quantile objectives yourself: the mapping keys label the
-models, but do not rewrite estimator parameters. The separate point model retains
-its recursive behavior. LightGBM quantile estimators can replace `QuantileRegressor`
-when installed and configured with matching quantile objectives.
-
-NeuralForecast configures `MQLoss` for the two requested quantiles and the median.
-Its point forecast is that median. Do not also supply `loss` or `valid_loss`.
-`import calibre` itself imports neither backend.
 
 ## Use precomputed quantiles
 
-`Forecasts(origins, points, interval=raw, quantile_levels=(low, high))` accepts
-caller-owned points `[O, N, H]` and finite raw quantiles `[O, N, H, 2]`. It orders a
-copy of crossed endpoints. Use the same `replay` call as above. The caller owns
-causal fitting, fixed model identity, and alignment of series, horizons, and levels.
+Replace the model forecasts above with caller-owned arrays:
 
-`CQR` ignores the point values in its score, but points remain available in the
-forecast and replay output. Raw levels such as `(0.05, 0.95)` describe the learned
-quantiles; the calibrator's `level=0.9` is the requested calibrated coverage.
+```python
+from calibre import Forecasts, Quantiles
+
+forecasts = Forecasts(
+    origins,
+    points,
+    quantiles=Quantiles(raw_quantiles, (0.05, 0.95)),
+)
+```
+
+Use the same `replay` call. The array shapes are listed in
+[Architecture](architecture.md#array-contracts).
 
 ## One online origin and saved state
 
-Using `forecasts` and `actuals` from the complete example:
+Using `forecasts` and `actuals` from the training example:
 
 ```python
 import io
@@ -111,12 +101,11 @@ origin = int(forecasts.origins[0])
 state, issued = step(
     state,
     origin,
-    forecasts.points[0],
+    forecasts.quantiles.values[0],
     actuals[:, : origin + 1],
     target=Step(),
     score=CQR(),
     calibrator=calibrator,
-    interval=forecasts.interval[0],
 )
 
 buffer = io.BytesIO()
@@ -129,32 +118,10 @@ next_origin = int(forecasts.origins[1])
 restored, next_issued = step(
     restored,
     next_origin,
-    forecasts.points[1],
+    forecasts.quantiles.values[1],
     actuals[:, origin + 1 : next_origin + 1],
     target=Step(),
     score=CQR(),
     calibrator=calibrator,
-    interval=forecasts.interval[1],
 )
 ```
-
-The state includes native intervals pending their delayed targets. It contains no
-fitted vendor models. Continue with the same frozen model and configuration. You
-can also pass the restored state to `replay` with only later forecast origins.
-
-## Limits
-
-- Native rolling forecasts reject `refit_every`, fit-time OOB seeding, `BottomUp`,
-  and `WlsStruct`. MLForecast quantile mode also rejects target transforms.
-- CQR accepts `Step` only. A sum of per-step quantiles is not the quantile of a
-  lead-time total. Train a model for that total before defining such an extension.
-- Scores and corrections can be negative. Only raw quantile crossings are ordered;
-  corrected endpoints are not. Empty prediction sets count as misses, not missing
-  data. Generic width and interval-score metrics have no empty-set convention.
-- Insufficient conformal history issues `[-inf, inf]`. With `SplitQuantile(0.9)`,
-  nine finite scores are necessary per node/step without pooling. In this example,
-  `ready` excludes only this warm-up, not finite empty sets.
-- The finite-sample split-CQR claim requires exchangeable calibration/test scores
-  and separate model training. A frozen model and causal code alone do not provide
-  exchangeability for lagged time series. No conditional, simultaneous-path, or
-  hierarchical-coherence guarantee is added.

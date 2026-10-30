@@ -216,7 +216,7 @@ def test_bootstrap_and_enbpi_work_end_to_end_through_existing_origin_loops():
     assert forecasts.initial_residuals is not None
     errors = forecasts.initial_residuals.values
     method = EnbPI(0.9, window=len(errors))
-    state = initial_state(Step(), method, len(hierarchy.nodes), 1)
+    state = initial_state(Step(), method, len(hierarchy.nodes), 1, score=Asymmetric())
     state["calibrator"] = method.seed(state["calibrator"], errors)
     run = replay(
         forecasts,

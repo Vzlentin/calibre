@@ -74,19 +74,17 @@ def points(out: pd.DataFrame, window: Window) -> np.ndarray:
 
     The column is found by elimination: neuralforecast renames model aliases.
     """
-    values = [column for column in out.columns if column not in ("unique_id", "ds")]
-    if len(values) != 1:
-        raise ValueError(f"model returned columns {values}, expected one point column")
-    return predictions(out, window, values)[..., 0]
+    values = predictions(out, window)
+    if values.shape[-1] != 1:
+        raise ValueError("model returned multiple columns, expected one point column")
+    return values[..., 0]
 
 
-def predictions(out: pd.DataFrame, window: Window, names: list[str]) -> np.ndarray:
-    """Named output columns to `[S, H, Q]` float32 in series and time order."""
-    shape = (window.y.shape[0], window.horizon, len(names))
+def predictions(out: pd.DataFrame, window: Window) -> np.ndarray:
+    """Value columns in vendor order to [S, H, Q], including duplicate labels."""
     out = out.reset_index(drop=out.index.name is None)
-    if not set(names).issubset(out.columns) or len(out) != shape[0] * shape[1]:
-        raise ValueError(
-            f"model returned columns {list(out.columns)} and {len(out)} rows for {shape}"
-        )
-    out = out.sort_values(["unique_id", "ds"])
-    return out[names].to_numpy(np.float32).reshape(shape)
+    shape = (window.y.shape[0], window.horizon)
+    if len(out) != shape[0] * shape[1]:
+        raise ValueError(f"model returned {len(out)} rows for shape {shape}")
+    values = out.sort_values(["unique_id", "ds"]).drop(columns=["unique_id", "ds"])
+    return values.to_numpy(np.float32).reshape(*shape, values.shape[1])

@@ -8,6 +8,7 @@ from calibre.backtest.forecasts import Forecasts
 from calibre.conformal.calibrators.base import Calibrator, State
 from calibre.conformal.scores import Score
 from calibre.conformal.targets import Target, columns
+from calibre.forecast.models.base import check_quantiles
 from calibre.online.step import initial_state, step
 
 
@@ -15,9 +16,8 @@ from calibre.online.step import initial_state, step
 class Replay:
     """Calibration over origins `[O]`. Arrays are `[O, N, C]`.
 
-    Asymmetric thresholds have an additional trailing lower/upper axis of size two.
-    `interval` optionally retains native inputs `[O, N, H, 2]`. Native and paired
-    coverage uses issued endpoints, including floating-point boundary hits.
+    Forecasts in `point` have the score's trailing input shape. Asymmetric
+    thresholds have a trailing pair axis. Other arrays are scalar per target.
 
     `target` and `score` are NaN when the target is not known at the end of the data.
     `state` continues the run with `calibre.online.step`.
@@ -32,13 +32,12 @@ class Replay:
     score: np.ndarray
     censored: np.ndarray
     state: State
-    interval: np.ndarray | None = None
 
     @property
     def covered(self) -> np.ndarray:
         """Coverage against issued scalar thresholds or paired bounds; NaN if unknown."""
         known = np.isfinite(self.score)
-        if self.interval is None and self.threshold.ndim == self.score.ndim:
+        if self.point.ndim == self.score.ndim == self.threshold.ndim:
             inside = self.score <= self.threshold
         else:
             inside = (self.lower <= self.target) & (self.target <= self.upper)
@@ -60,9 +59,14 @@ def replay(
     n_origins, n_nodes, horizon = forecasts.points.shape
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
-    native = forecasts.interval if score.requires_interval() else None
-    if score.requires_interval() and native is None:
-        raise ValueError("this score requires forecasts with native intervals")
+    inputs = forecasts.points
+    if score.input_shape():
+        if forecasts.quantiles is None:
+            raise ValueError("this score requires forecasts with native quantiles")
+        check_quantiles(forecasts.quantiles.levels)
+        inputs = forecasts.quantiles.values
+        if inputs.shape != forecasts.points.shape + score.input_shape():
+            raise ValueError("native quantiles must match the forecast origins, nodes and horizon")
     if state is None:
         state = initial_state(target, calibrator, n_nodes, horizon, score=score)
     issued = []
@@ -72,13 +76,12 @@ def replay(
         state, out = step(
             state,
             int(origin),
-            forecasts.points[index],
+            inputs[index],
             actuals[:, seen],
             target=target,
             score=score,
             calibrator=calibrator,
             censored=censored[:, seen],
-            interval=None if native is None else native[index],
         )
         issued.append(out)
         previous = int(origin)
@@ -92,10 +95,9 @@ def replay(
         lower=np.stack([out.lower for out in issued]),
         upper=np.stack([out.upper for out in issued]),
         target=targets,
-        score=score.score(targets, point, interval=native),
+        score=score.score(targets, point),
         censored=target_censored,
         state=state,
-        interval=native,
     )
 
 

@@ -23,17 +23,17 @@ a package, the contract is in `base.py` and each implementation is one file.
 |---|---|
 | `data/panel.py` | `Panel`, validated once |
 | `data/hierarchy.py` | `Hierarchy`, node labels and the summing matrix |
-| `forecast/models/base.py` | `Window`, `Covariate`, `Forecaster`, `Fitted`, `FittedResiduals`, `FittedQuantiles` contracts; `FitResiduals`, `QuantileForecast` arrays; `check_quantiles` |
+| `forecast/models/base.py` | `Window`, `Covariate`, `Forecaster`, `Fitted`, `FittedResiduals`, `FittedQuantiles` contracts; `FitResiduals`, `Quantiles`, `QuantileForecast` arrays; `check_quantiles` |
 | `forecast/models/` | `naive.SeasonalNaive`, `ar1.AR1`, `bootstrap.BootstrapEnsemble`, `statsforecast.StatsForecastModel`, `mlforecast.MLForecast`, `neuralforecast.NeuralForecast` |
 | `forecast/models/frames.py` | Long frames for the mlforecast and neuralforecast adapters |
 | `forecast/reconcile.py` | `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
-| `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`, `CQR`: scores, native-interval requirements, parameter shapes, and issued bounds |
+| `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`, `CQR`: scores, forecast-input shapes, parameter shapes, and issued bounds |
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
 | `conformal/calibrators/base.py` | `Calibrator`, `QuantileCalibrator`, and array-only `Scorecaster` contracts, `Feedback`, `State`, `Level`, `check_level` |
 | `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
 | `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `pid.ConformalPID` |
-| `online/ledger.py` | Issued points, thresholds, and optional native intervals waiting for their targets, released as `Feedback` |
+| `online/ledger.py` | Issued forecasts and thresholds waiting for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
 | `backtest/forecasts.py` | `rolling_forecasts`, `Forecasts.residuals` |
@@ -61,9 +61,9 @@ A calibration method is one file in `conformal/calibrators/`. It imports only
 `Scorecaster` is an array-only contract in `calibrators.base`;
 `backtest.scorecasting` adapts a `Forecaster` to it.
 
-`conformal` and `online` do not depend on hierarchy or model code. They receive points,
-actuals, and optional native interval arrays. CQR is a score composed with
-`SplitQuantile`, not another implementation of the conformal rank.
+`conformal` and `online` do not depend on hierarchy or model code. They receive
+forecast and actual arrays. CQR composes a score with the existing calibrator;
+[Semantics](semantics.md#cqr) defines its rules.
 
 `bench/` is a folder of scripts at the repository root, not a package and not in the
 wheel. Its scripts may name datasets and reproduce benchmark protocols. They import the
@@ -95,8 +95,9 @@ O origins, and H forecast steps.
 | `Window.y` | `[S, t]` read-only | History of the S forecast series through the origin |
 | `Window.x` | `[S or 1, 1 or t or t + H]` read-only | Covariates. Only `known_ahead` ones reach t + H |
 | `Fitted.predict` output | `[S, H]` | Base point forecasts |
-| `FittedQuantiles.predict_quantiles` | `QuantileForecast` | Points `[S, H]`, native interval `[S, H, 2]`, and two quantile levels |
-| `Forecasts.interval` | `[O, N, H, 2]` float32, optional | Finite native quantiles, ordered per cell; `quantile_levels` labels their raw levels, not calibrated coverage |
+| `FittedQuantiles.predict_quantiles` | `QuantileForecast` | Points `[S, H]` and a `Quantiles` value |
+| `Quantiles` | `values[..., 2]`, `levels[2]` | Raw lower/upper predictions and their probability levels |
+| `Forecasts.quantiles` | `Quantiles` or None | Native values `[O, N, H, 2]` alongside points |
 | `FitResiduals.values` | `[K, S, H]`, or `[K, N, H]` after reconciliation | Fit-time OOB signed errors, with issuing indexes `origins[K]`. NaN means missing |
 | Reconciler | `shape = (N, S)`, called on `[S, H]` | `BottomUp` (S = B), `Identity` or `WlsStruct` (S = N) |
 | Origins | `[O]` int | Increasing period indexes, each the last observed period |
@@ -104,12 +105,14 @@ O origins, and H forecast steps.
 | Residuals | `[O, N, H]` | `actual - point`, NaN until the actual is known |
 | `Panel.censored` | `[B, T]` bool, optional | True where a value is a lower bound of the target |
 | `Target.cover` | `[C, H]` bool | Steps that each target column sums. C = H for `Step`, 1 for `LeadTime` |
-| `Feedback.point`, `Feedback.target` | `[K, N]` | Column sums, one row per newly known (issuing origin, column), in origin order. `scores` and the bounds of any threshold derive from them through `Feedback.score` |
-| `Feedback.interval` | `[K, N, 2]`, optional | Native quantiles archived at the issuing origin, not corrected endpoints |
+| `Feedback.point` | `[K, N, *input_shape]` | Issued forecast for each newly known (origin, column), in origin order |
+| `Feedback.target` | `[K, N]` | Revealed target column sums; `Feedback.score` derives scores and bounds |
 | Loss grid | `[G]` or `[N, G]` | Increasing candidate thresholds of `RiskControl`, in score units. Losses are evaluated as `[K, N, G]` |
 | Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
 | Threshold | `[N, C]` float32, or `[N, C, 2]` for `Asymmetric` | Scalar threshold or lower/upper residual corrections. An empty history gives inf, or [-inf, inf] for a pair |
-| `Replay` arrays | `[O, N, C]`, except paired thresholds `[O, N, C, 2]` and native intervals `[O, N, H, 2]` | Points, bounds, targets, scores, censored flags, issued parameters, and optional raw inputs |
+| `Issue.point`, `Replay.point` | `[N, C, *input_shape]`, `[O, N, C, *input_shape]` | Forecast inputs used to issue bounds |
+| `Replay` other arrays | `[O, N, C]`, threshold adds `parameter_shape` | Bounds, targets, scores, censored flags and issued parameters |
+| Ledger forecast ring | `[L, N, L, *input_shape]` | One forecast per slot and step, with L the last covered step |
 | PID seed | `[K, N, C]` float64 | Nonnegative calibration scores; NaN means missing |
 | `Scorecaster.predict(history, ahead)` inputs | History `[N, C, K]` float64 and horizons `[C]` positive int64, read-only | Scores in original units, chronological and right-aligned with leading NaN |
 | Scorecast | `[N, C]` finite float64 | Anticipation in score units, not an issued threshold |
@@ -135,27 +138,12 @@ The model is fitted at the first origin and again every `refit_every` origins.
 Aggregate nodes get covariates by the declared `aggregate` rule, sum or mean of their
 bottom series. There is no default rule.
 
-`Score.parameter_shape()` is `()` for scalar thresholds and `(2,)` for asymmetric
-corrections. Online initialization allocates the ledger from the calibrator output;
-the first step rejects an incompatible score/parameter shape. The ledger archives
-both corrections unchanged. Paired and native-interval coverage and feedback misses use the issued
-endpoints; scalar scores retain the score-versus-threshold comparison. Only scalar scores index the nested
-families required by quantile and risk calibrators.
-
-`FittedQuantiles` adds native lower/upper predictions without changing the point-only
-`Fitted.predict` contract. `MLForecast(quantile_models={low: estimator, high: estimator})`
-fits a separate direct model per quantile and horizon alongside its recursive point
-model. `NeuralForecast(quantiles=(low, high))` fits one network with `MQLoss`, including
-the median used as its point. Output columns use distinct indexed names rather than
-rounded probability labels. Neither adapter imports calibration code.
-
-Native quantile rolling forecasts require `Identity`, no refit, and no fit-time OOB
-seed. Forecast every node directly; quantiles are not summed or linearly reconciled.
-`Forecasts` retains raw levels and orders a copy of native endpoints. The CQR score
-requires `Step`; `online.initial_state(..., score=CQR())` allocates a fixed-size
-native-interval ring alongside the existing ledger. `step(interval=...)` archives
-those inputs and releases them unchanged in feedback. The scalar rank calculation
-and state of `SplitQuantile` do not change. See [CQR](cqr.md) for both adapters.
+`Score.input_shape()` describes each forecast value; `parameter_shape()` describes
+its issued correction. Online initialization uses both to allocate the ledger.
+`FittedQuantiles` extends point prediction with a `QuantileForecast`; the backtest
+retains its native values in `Forecasts.quantiles`. See [CQR examples](cqr.md) for
+the adapter and online APIs, and [Semantics](semantics.md#cqr) for validation,
+training and coverage rules.
 
 `BootstrapEnsemble` fits one local scikit-learn row-regression ensemble per series,
 with shared chronological row resamples across series. It implements only one-step
@@ -173,8 +161,8 @@ and passes that online state to `replay(state=...)`. The same argument continues
 saved ledger and calibrator state at later origins.
 
 `ForecastScorecaster` refits from arrays and discards fitted objects; scorecaster
-and forecaster instances hold configuration only. The ledger, step, and replay
-need no PID special case. See [Semantics](semantics.md#conformal-pid) for the
+and forecaster instances hold configuration only. Scorecasting uses the existing
+ledger, step and replay. See [Semantics](semantics.md#conformal-pid) for the
 controller and scorecasting rules.
 
 Model adapters that need long frames build them inside `fit` and `predict`, from the
@@ -200,7 +188,7 @@ paths work on typed arrays, with no per-cell objects, hashes, or serialization.
 | `NeuralForecast` | Two frames per fit, one per predict. Predict reads `input_size` periods. M5 NHITS, 1,000 steps on CPU, 365 fit periods, price feature: one fit and 4 predicts in 25 s, 4.7 GB peak |
 | `MLForecast` | Two frames per fit or predict. M5 with LightGBM, 365 fit periods, price feature: about 5 s per fit, 8 origins with 2 fits in 12 s |
 | Native quantile models | MLForecast fits 2H additional regressors for two quantiles and H steps; NeuralForecast fits one multi-quantile network |
-| Native quantile arrays | `Forecasts.interval` adds `8 * O * N * H` bytes; the Step ledger interval ring adds `8 * N * H * H` bytes |
+| Native quantile arrays | `Forecasts.quantiles.values` uses `8 * O * N * H` bytes; the CQR ledger forecast ring uses `8 * N * H * H` bytes |
 | Dynamic covariate | `[B, T + H]` float32, 229 MB at M5. With every node for `WlsStruct`, 252 MB more |
 
 ## Not implemented
@@ -212,8 +200,7 @@ These are approved directions for the library. None of them exist yet:
 - Declared target support and conservative projection of bounds onto it.
 - Normalized, weighted, and adaptive calibration.
 - Model lifecycle beyond fit and refit: incremental update, automatic model-generation
-  changes, and calibration resets. Native two-quantile forecasting and fit-time OOB
-  residuals now have explicit contracts, each restricted to a frozen model.
+  changes, and calibration resets.
 - Quantiles for summed targets or hierarchy reconciliation of quantiles.
 - A target transform pair for adapters other than mlforecast.
 - Diagonal residual-variance reconciliation and a memory preflight for `WlsStruct`.

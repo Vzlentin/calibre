@@ -144,56 +144,22 @@ run = rolling_forecasts(
 
 ## CQR
 
-Conformalized quantile regression corrects native lower/upper quantiles instead of
-putting a residual band around a point. `CQR()` supplies the score;
-`SplitQuantile(level)` supplies the conformal correction.
-
-Using the quick-start `panel`, `hierarchy`, and `origins`, with `libcalibre[ml]`:
+Use native quantile forecasts with `CQR()` and `SplitQuantile`:
 
 ```python
-from sklearn.linear_model import QuantileRegressor, Ridge
+from calibre import CQR
 
-from calibre import CQR, Identity
-from calibre.forecast.models.mlforecast import MLForecast
-
-model = MLForecast(
-    Ridge(),
-    lags=[1, 7],
-    quantile_models={
-        0.05: QuantileRegressor(quantile=0.05, alpha=0.1),
-        0.95: QuantileRegressor(quantile=0.95, alpha=0.1),
-    },
-)
-forecasts = rolling_forecasts(panel, hierarchy, model, Identity(hierarchy), origins, 7)
 intervals = replay(
-    forecasts,
-    hierarchy.aggregate(panel.values),
+    forecasts, actuals,
     target=Step(),
     score=CQR(),
     calibrator=SplitQuantile(0.9, window=28),
 )
 ```
 
-For `libcalibre[neural]`, replace `model` with a multi-quantile network:
-
-```python
-from neuralforecast.models import MLP
-from calibre.forecast.models.neuralforecast import NeuralForecast
-
-model = NeuralForecast(
-    MLP,
-    {"input_size": 14, "max_steps": 50, "random_seed": 0},
-    quantiles=(0.05, 0.95),
-)
-```
-
-Both modes fit once. Use `Identity` and `Step`, not a sum or reconciliation of
-quantiles. Calibration starts with targets revealed after fitting; warm-up stays
-unbounded. Negative corrections can shrink an interval or make it empty.
-Exchangeability is still required for a finite-sample claim; time-series use does
-not automatically satisfy it. See the [CQR guide](docs/cqr.md) for a complete example
-and the online API, and [Semantics](docs/semantics.md#cqr-explicit-semantic-additions)
-for the exact rules.
+The [CQR guide](docs/cqr.md) shows both MLForecast and NeuralForecast, precomputed
+quantiles, and online save/resume. [Semantics](docs/semantics.md#cqr) defines the
+training, numerical and coverage rules.
 
 ## EnbPI
 
@@ -221,7 +187,7 @@ forecasts = rolling_forecasts(
 seed = forecasts.initial_residuals
 assert seed is not None
 calibrator = EnbPI(level=0.9, window=len(seed.values))
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1)
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1, score=Asymmetric())
 state["calibrator"] = calibrator.seed(state["calibrator"], seed.values)
 intervals = replay(
     forecasts,
@@ -268,7 +234,7 @@ calibrator = ConformalPID(
     scorecast_window=64,
     ahead=np.arange(1, 8),
 )
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7)
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7, score=Absolute())
 state["calibrator"] = calibrator.seed(state["calibrator"], scores)
 intervals = replay(
     run, actuals, target=Step(), score=Absolute(), calibrator=calibrator, state=state

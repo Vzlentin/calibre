@@ -21,6 +21,7 @@ from calibre.forecast.models.base import (
     FittedQuantiles,
     Forecaster,
     QuantileForecast,
+    Quantiles,
     Window,
     check_quantiles,
 )
@@ -66,10 +67,7 @@ class NeuralForecast(Forecaster):
         config = copy.deepcopy(self.config)
         quantiles = [] if self.quantiles is None else sorted({0.5, *self.quantiles})
         if quantiles:
-            loss = MQLoss(quantiles=quantiles)
-            # Vendor probability labels are rounded and can collide for nearby levels.
-            loss.output_names = [f"-q{i}" for i in range(len(quantiles))]
-            config["loss"] = loss
+            config["loss"] = MQLoss(quantiles=quantiles)
         model = self.model_cls(
             **_QUIET,
             **config,
@@ -86,11 +84,9 @@ class NeuralForecast(Forecaster):
         input_size = self.config["input_size"]
         lookback = input_size if input_size > 0 else None
         if self.quantiles is not None:
-            names = [
-                repr(engine.models[0]) + f"-q{quantiles.index(q)}" for q in (0.5, *self.quantiles)
-            ]
+            positions = [quantiles.index(q) for q in (0.5, *self.quantiles)]
             return FittedQuantileNeuralForecast(
-                engine, self.features, lookback, self.quantiles, names
+                engine, self.features, lookback, self.quantiles, positions
             )
         return FittedNeuralForecast(engine, self.features, lookback)
 
@@ -120,15 +116,15 @@ class FittedQuantileNeuralForecast(FittedNeuralForecast, FittedQuantiles):
         features: list[str],
         lookback: int | None,
         levels: tuple[float, float],
-        names: list[str],
+        positions: list[int],
     ) -> None:
         super().__init__(engine, features, lookback)
         self.levels = levels
-        self.names = names
+        self.positions = positions
 
     def predict(self, window: Window) -> np.ndarray:
         return self.predict_quantiles(window).point
 
     def predict_quantiles(self, window: Window) -> QuantileForecast:
-        values = frames.predictions(self._frame(window), window, self.names)
-        return QuantileForecast(values[..., 0], values[..., 1:], self.levels)
+        values = frames.predictions(self._frame(window), window)[..., self.positions]
+        return QuantileForecast(values[..., 0], Quantiles(values[..., 1:], self.levels))

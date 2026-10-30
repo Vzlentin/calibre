@@ -41,11 +41,10 @@ class Feedback:
     """Targets that became known at one origin. Each row `[K]` is one target column of
     one issuing origin, for all nodes.
 
-    Rows are in origin order. `point` and `target` are column sums `[K, N]`, NaN
-    where the actual is missing. `issued` is `[K, N]`, or `[K, N, 2]` for paired
+    Rows are in origin order. `point` is `[K, N, *score.input_shape()]`.
+    `target` is `[K, N]`, NaN where missing. `issued` is `[K, N]`, or `[K, N, 2]` for paired
     corrections. `censored` marks targets that are lower bounds, and `score` defines
     bounds the thresholds index, so a calibrator can find the bounds of any threshold.
-    `interval`, when present, holds the native quantiles `[K, N, 2]` issued with the point.
     """
 
     origin: np.ndarray
@@ -55,22 +54,21 @@ class Feedback:
     issued: np.ndarray
     censored: np.ndarray
     score: Score
-    interval: np.ndarray | None = None
 
     @property
     def scores(self) -> np.ndarray:
         """Scores `[K, N]` float32, signed residuals for asymmetric intervals."""
-        return self.score.score(self.target, self.point, interval=self.interval).astype(np.float32)
+        return self.score.score(self.target, self.point).astype(np.float32)
 
     def misses(self, n_columns: int) -> tuple[np.ndarray, np.ndarray]:
         """Counts `[N, C]` of misses against issued parameters and known scores."""
         scores = self.scores
         known = np.isfinite(scores)
-        if self.score.parameter_shape() or self.score.requires_interval():
-            lower, upper = self.score.bound(self.point, self.issued, interval=self.interval)
-            miss = ((self.target < lower) | (self.target > upper)) & known
-        else:
+        if self.point.ndim == scores.ndim == self.issued.ndim:
             miss = (scores > self.issued) & known
+        else:
+            lower, upper = self.score.bound(self.point, self.issued)
+            miss = ((self.target < lower) | (self.target > upper)) & known
         columns = np.eye(n_columns)[self.column]  # [K, C]
         return miss.T @ columns, known.T @ columns
 

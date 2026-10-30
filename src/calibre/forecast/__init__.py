@@ -9,6 +9,7 @@ from calibre.forecast.models import (
     FittedResiduals,
     Forecaster,
     QuantileForecast,
+    Quantiles,
     SeasonalNaive,
     Window,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "FittedResiduals",
     "Forecaster",
     "QuantileForecast",
+    "Quantiles",
     "Identity",
     "Reconciler",
     "SeasonalNaive",

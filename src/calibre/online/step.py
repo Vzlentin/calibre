@@ -1,29 +1,24 @@
-"""One origin of online calibration: learn from the targets now known, then issue.
-
-`step` is the production call. It takes the state, the periods observed since the
-last call, and the new points, and returns the new state and the issued bounds. The
-caller owns the origins and stores the state between calls.
-"""
+"""One origin of online calibration: learn from known targets, then issue bounds."""
 
 from dataclasses import dataclass
 
 import numpy as np
 
 from calibre.conformal.calibrators.base import Calibrator, State
-from calibre.conformal.scores import Score
+from calibre.conformal.calibrators.pid import ConformalPID
+from calibre.conformal.scores import CQR, Score
 from calibre.conformal.targets import Step, Target, columns
 from calibre.online import ledger
 
 
 @dataclass(frozen=True)
 class Issue:
-    """Issued points/bounds `[N, C]`; threshold may also have a trailing pair axis."""
+    """Forecasts [N, C, *input_shape] and bounds [N, C] with issued parameters."""
 
     point: np.ndarray
     threshold: np.ndarray
     lower: np.ndarray
     upper: np.ndarray
-    interval: np.ndarray | None = None
 
 
 def initial_state(
@@ -32,19 +27,21 @@ def initial_state(
     n_nodes: int,
     horizon: int,
     *,
-    score: Score | None = None,
+    score: Score,
 ) -> State:
-    """Empty state. Pass `score=CQR()` to allocate storage for native intervals."""
+    """Empty ledger and calibrator state shaped by the score and target."""
     cover = target.cover(horizon)
-    native = score is not None and score.requires_interval()
-    if native and not isinstance(target, Step):
-        raise ValueError("native intervals require a Step target; quantiles cannot be summed")
+    if score.input_shape() and not isinstance(target, Step):
+        raise ValueError("native quantiles require a Step target; quantiles cannot be summed")
+    if isinstance(score, CQR) and isinstance(calibrator, ConformalPID):
+        raise ValueError("CQR scores can be negative; ConformalPID requires nonnegative scores")
     calibration = calibrator.initial_state(n_nodes, len(cover))
-    shape = calibrator.threshold(calibration).shape
-    if shape[:2] != (n_nodes, len(cover)) or shape[2:] not in ((), (2,)):
-        raise ValueError("calibrator parameters must be [N, C] or [N, C, 2]")
+    if calibrator.threshold(calibration).shape != (n_nodes, len(cover)) + score.parameter_shape():
+        raise ValueError("score parameter shape does not match the calibrator")
     return {
-        "ledger": ledger.initial_state(n_nodes, cover, shape[2:], interval=native),
+        "ledger": ledger.initial_state(
+            n_nodes, cover, score.input_shape(), score.parameter_shape()
+        ),
         "calibrator": calibration,
     }
 
@@ -59,35 +56,37 @@ def step(
     score: Score,
     calibrator: Calibrator,
     censored: np.ndarray | None = None,
-    interval: np.ndarray | None = None,
 ) -> tuple[State, Issue]:
-    """Observe the periods up to `origin`, update the calibrator, and issue for `points`.
+    """Observe [N, k] actuals, then issue from [N, H, *score.input_shape()] forecasts.
 
-    `actuals` is `[N, k]`, the node values of the k periods that end at `origin` and
-    follow the previous origin. On the first call, k can be any length. `points` is
-    `[N, H]`, the forecast issued at `origin`. The calibrator sees a score only when
-    the last step of its column is known, and before `origin` issues. Native
-    `interval` inputs are `[N, H, 2]`, finite, and supported only for `Step`.
+    k periods end at origin and follow the previous origin. On the first call, k
+    can be any length. Native quantiles are validated and ordered here, on a copy,
+    before any state is changed.
     """
-    if score.requires_interval():
-        if not isinstance(target, Step):
-            raise ValueError("native intervals require a Step target; quantiles cannot be summed")
-        if "interval" not in state["ledger"]:
-            raise ValueError("initialize native interval state with score=CQR()")
-        if interval is None or np.shape(interval) != points.shape + (2,):
-            raise ValueError("native intervals must have shape points.shape + (2,)")
-        interval = np.sort(np.asarray(interval, dtype=np.float32), axis=-1)
-        if not np.isfinite(interval).all():
-            raise ValueError("native intervals must be finite")
-    elif interval is not None or "interval" in state["ledger"]:
-        raise ValueError("native interval state and inputs require an interval score")
+    points = np.asarray(points, dtype=np.float32)
+    shape = score.input_shape()
+    if (
+        points.ndim != 2 + len(shape)
+        or points.shape[2:] != shape
+        or points.shape[0] != state["ledger"]["point"].shape[1]
+    ):
+        raise ValueError("forecasts must have shape [N, H] + score.input_shape()")
+    if state["ledger"]["point"].shape[3:] != shape:
+        raise ValueError("score input shape does not match the saved state")
+    if state["ledger"]["issued"].shape[3:] != score.parameter_shape():
+        raise ValueError("score parameter shape does not match the saved state")
+    if shape:
+        if not np.isfinite(points).all():
+            raise ValueError("native quantiles must be finite")
+        points = np.sort(points, axis=-1)
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
     cover = target.cover(points.shape[1])
-    if int(state["ledger"]["last"]) == -1:
-        parameters = state["ledger"]["issued"].shape[3:]
-        if parameters != score.parameter_shape():
-            raise ValueError("score parameter shape does not match the calibrator")
+    if (
+        len(cover) != state["ledger"]["issued"].shape[2]
+        or ledger.reach(cover) != state["ledger"]["point"].shape[2]
+    ):
+        raise ValueError("forecast horizon and target do not match the saved state")
     ledger_state, feedback = ledger.observe(
         state["ledger"], cover, score, origin, actuals, censored
     )
@@ -95,9 +94,9 @@ def step(
     if feedback is not None:
         calibrator_state = calibrator.update(calibrator_state, feedback)
     threshold = calibrator.threshold(calibrator_state)
-    point = columns(points.astype(np.float32), cover)
-    lower, upper = score.bound(point, threshold, interval=interval)
-    ledger_state = ledger.issue(ledger_state, origin, points, threshold, interval)
+    point = np.moveaxis(columns(np.moveaxis(points, 1, -1), cover), -1, 1)
+    lower, upper = score.bound(point, threshold)
+    ledger_state = ledger.issue(ledger_state, origin, points, threshold)
     return {"ledger": ledger_state, "calibrator": calibrator_state}, Issue(
-        point, threshold, lower, upper, interval
+        point, threshold, lower, upper
     )

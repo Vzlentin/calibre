@@ -23,6 +23,7 @@ from calibre.forecast.models.base import (
     FittedQuantiles,
     Forecaster,
     QuantileForecast,
+    Quantiles,
     Window,
     check_quantiles,
 )
@@ -56,12 +57,13 @@ class MLForecast(Forecaster):
                 raise ValueError(f"{name} must be at least 1, got {value}")
         if lookback is not None and lags and lookback < max(lags):
             raise ValueError(f"lookback {lookback} is shorter than the longest lag {max(lags)}")
-        self.quantile_levels = (
-            None if quantile_models is None else check_quantiles(sorted(quantile_models))
-        )
         if quantile_models is not None and target_transforms:
             raise ValueError("native quantiles do not support target_transforms")
-        self.quantile_models = None if quantile_models is None else dict(quantile_models)
+        self.quantile_models = (
+            None
+            if quantile_models is None
+            else tuple((q, quantile_models[q]) for q in check_quantiles(sorted(quantile_models)))
+        )
         self.model = model
         self.lags = list(lags)
         self.lag_transforms = lag_transforms
@@ -77,12 +79,12 @@ class MLForecast(Forecaster):
         data = frames.history(window, self.fit_periods, static + future)
         engine = self._engine([copy.deepcopy(self.model)], frames.freq(window))
         engine.fit(data, static_features=static)
-        if self.quantile_models is not None and self.quantile_levels is not None:
-            lower, upper = self.quantile_levels
+        if self.quantile_models is not None:
+            (lower, lower_model), (upper, upper_model) = self.quantile_models
             quantile_engine = self._engine(
                 {
-                    "lower": copy.deepcopy(self.quantile_models[lower]),
-                    "upper": copy.deepcopy(self.quantile_models[upper]),
+                    "lower": copy.deepcopy(lower_model),
+                    "upper": copy.deepcopy(upper_model),
                 },
                 frames.freq(window),
             )
@@ -92,7 +94,7 @@ class MLForecast(Forecaster):
                 max_horizon=window.horizon if window.horizon > 1 else None,
             )
             return FittedQuantileMLForecast(
-                engine, self.features, self.lookback, quantile_engine, self.quantile_levels
+                engine, self.features, self.lookback, quantile_engine, (lower, upper)
             )
         return FittedMLForecast(engine, self.features, self.lookback)
 
@@ -141,10 +143,8 @@ class FittedQuantileMLForecast(FittedMLForecast, FittedQuantiles):
         self.levels = levels
 
     def predict_quantiles(self, window: Window) -> QuantileForecast:
-        interval = frames.predictions(
-            self._frame(window, self.quantile_engine), window, ["lower", "upper"]
-        )
-        return QuantileForecast(self.predict(window), interval, self.levels)
+        interval = frames.predictions(self._frame(window, self.quantile_engine), window)
+        return QuantileForecast(self.predict(window), Quantiles(interval, self.levels))
 
 
 def _features(window: Window, names: list[str]) -> tuple[list[str], list[str]]:
