@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from sklearn.ensemble import RandomForestRegressor
 
-from calibre import Absolute, Asymmetric, Feedback, Forecasts, LeadTime, Step
+from calibre import Absolute, Asymmetric, Feedback, Forecasts, LeadTime, Signed, Step
 from calibre.backtest import replay
 from calibre.conformal.calibrators.ranks import weighted_interval
 from calibre.conformal.calibrators.spci import SPCI
@@ -414,6 +414,11 @@ def test_invalid_configuration_is_rejected(kwargs, match):
         method(**kwargs)
 
 
+@pytest.mark.parametrize("n_jobs", [None, -1, 1, np.int64(2)])
+def test_n_jobs_accepts_none_and_nonzero_integers(n_jobs):
+    assert method(n_jobs=n_jobs).n_jobs == n_jobs
+
+
 def test_configuration_broadcasts_are_checked_on_initialization():
     with pytest.raises(ValueError):
         method(ahead=np.array([1, 2])).initial_state(2, 3)
@@ -461,10 +466,9 @@ def test_duplicate_and_reordered_feedback_is_rejected():
             calibrator.update(state, feedback([0], origin=origin))
 
 
-def test_scalar_scores_are_rejected_by_both_update_and_online_initialization():
+@pytest.mark.parametrize("score", [Absolute(), Signed()])
+def test_scalar_scores_are_rejected_at_the_first_online_step(score):
     calibrator = method()
-    with pytest.raises(ValueError, match="paired"):
-        calibrator.update(calibrator.initial_state(1, 1), feedback([1], origin=0, score=Absolute()))
     with pytest.raises(ValueError, match="parameter shape"):
         step(
             initial_state(Step(), calibrator, 1, 1),
@@ -472,6 +476,6 @@ def test_scalar_scores_are_rejected_by_both_update_and_online_initialization():
             np.zeros((1, 1)),
             np.zeros((1, 4)),
             target=Step(),
-            score=Absolute(),
+            score=score,
             calibrator=calibrator,
         )

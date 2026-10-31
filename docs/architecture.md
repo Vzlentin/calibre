@@ -159,13 +159,7 @@ and passes that online state to `replay(state=...)`. The same argument continues
 saved ledger and calibrator state at later origins.
 
 `SPCI` reads `Feedback.origin` as a calendar-period index to align residual
-contexts, including across gaps. Its required `ahead` configuration is each target
-column's last covered step, in those same units. The caller sets it from the target;
-the calibrator contract does not receive the target cover. `online` owns the
-current origin, target release, and pending ledger; `backtest` owns the origin loops.
-`conformal` has no clock or origin loop. SPCI retains residual and origin arrays,
-rebuilds a local quantile forest per ready cell, and
-discards it. See [Semantics](semantics.md#spci) for context alignment and seeding.
+contexts, including across gaps. See [Semantics](semantics.md#spci).
 
 `ForecastScorecaster` refits from arrays and discards fitted objects; scorecaster
 and forecaster instances hold configuration only. The ledger, step, and replay

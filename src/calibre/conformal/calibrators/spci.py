@@ -55,7 +55,9 @@ class SPCI(Calibrator):
             raise ValueError("bootstrap must be boolean")
         self.bootstrap = bool(bootstrap)
         self.random_state = check_integer("random_state", random_state, 0, 2**32 - 1)
-        self.n_jobs = None if n_jobs is None else check_integer("n_jobs", n_jobs, nonzero=True)
+        self.n_jobs = None if n_jobs is None else check_integer("n_jobs", n_jobs)
+        if self.n_jobs == 0:
+            raise ValueError("n_jobs must be a nonzero integer or None")
         self.ahead = check_ahead(ahead)
 
     def initial_state(self, n_nodes: int, n_columns: int) -> State:
@@ -101,8 +103,6 @@ class SPCI(Calibrator):
         return state
 
     def update(self, state: State, feedback: Feedback) -> State:
-        if feedback.score.parameter_shape() != (2,):
-            raise ValueError("SPCI requires paired corrections, normally Asymmetric")
         with np.errstate(over="ignore", invalid="ignore"):
             residuals = feedback.target - feedback.point
         for row, (origin, column) in enumerate(zip(feedback.origin, feedback.column, strict=True)):

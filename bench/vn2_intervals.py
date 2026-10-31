@@ -22,6 +22,7 @@ from calibre import (
     rolling_forecasts,
 )
 from calibre.conformal.calibrators.spci import SPCI
+from calibre.conformal.targets import columns
 from compare import compare
 
 parser = ArgumentParser(description=__doc__)
@@ -47,7 +48,7 @@ spci = SPCI(level, window, n_lags=7, ahead=vn2.PROTECTION)
 
 # Seed only errors whose full target is known at the first decision.
 known = forecasts.origins + vn2.PROTECTION <= data.decisions[0]
-residuals = forecasts.residuals(data.panel.values)[known].sum(axis=-1, keepdims=True)
+residuals = columns(forecasts.residuals(data.panel.values)[known], target.cover(vn2.PROTECTION))
 enbpi_state = initial_state(target, enbpi, n_series, vn2.PROTECTION)
 enbpi_state["calibrator"] = enbpi.seed(enbpi_state["calibrator"], residuals)
 spci_state = initial_state(target, spci, n_series, vn2.PROTECTION)

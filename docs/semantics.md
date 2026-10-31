@@ -85,6 +85,8 @@ refactor.
   equal each column's last covered step, in the same calendar-index units as
   `Feedback.origin`. The caller owns this configuration; the generic calibrator
   contract does not receive the target cover and cannot verify that match.
+  Score/parameter shape compatibility is checked at the first online step,
+  not repeated in calibration updates.
 - **Causal direct-horizon pairs.** Let e[o,h] be actual minus the archived point
   for a forecast issued at o, revealed at o+h. The context of training label
   e[o,h] consists of the last `n_lags` finite errors e[u,h] with u+h <= o,

@@ -17,11 +17,12 @@ def test_check_integer_rejects_noninteger_values(value):
         check_integer("window", value, 1)
 
 
-def test_check_integer_accepts_inclusive_bounds_and_negative_nonzero_values():
+def test_check_integer_accepts_inclusive_bounds_and_unbounded_integers():
     assert check_integer("random_state", 0, 0, 2**32 - 1) == 0
     assert check_integer("random_state", np.uint32(2**32 - 1), 0, 2**32 - 1) == 2**32 - 1
-    assert check_integer("n_jobs", -1, nonzero=True) == -1
-    assert check_integer("n_jobs", 1, nonzero=True) == 1
+    assert check_integer("offset", -1) == -1
+    assert check_integer("offset", 0) == 0
+    assert check_integer("offset", 1) == 1
 
 
 @pytest.mark.parametrize(
@@ -30,7 +31,6 @@ def test_check_integer_accepts_inclusive_bounds_and_negative_nonzero_values():
         (0, {"minimum": 1}),
         (-1, {"minimum": 0}),
         (2**32, {"minimum": 0, "maximum": 2**32 - 1}),
-        (0, {"nonzero": True}),
     ],
 )
 def test_check_integer_rejects_out_of_range_values(value, limits):

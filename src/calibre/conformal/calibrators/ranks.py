@@ -148,10 +148,7 @@ def weighted_interval(
     cumulative = None
     # Equal mass uses counts to preserve ceil(n*q) at floating-point boundaries.
     if not (masses == masses[0]).all():
-        with np.errstate(over="ignore"):
-            cumulative = np.cumsum(masses)
-        if not np.isfinite(cumulative[-1]):
-            cumulative = np.cumsum(masses / masses.max())
+        cumulative = np.cumsum(masses / masses.max())
         cumulative /= cumulative[-1]
     counts = np.array([len(masses)])
     return _shortest_interval(ordered, counts, levels, beta_grid_size, cumulative)[0]

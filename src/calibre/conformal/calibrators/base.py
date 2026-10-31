@@ -121,8 +121,6 @@ def check_integer(
     value: int | np.integer,
     minimum: int | None = None,
     maximum: int | None = None,
-    *,
-    nonzero: bool = False,
 ) -> int:
     """Validate an integer configuration value, excluding booleans."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
@@ -132,8 +130,6 @@ def check_integer(
         raise ValueError(f"{name} must be an integer of at least {minimum}")
     if maximum is not None and value > maximum:
         raise ValueError(f"{name} must be an integer of at most {maximum}")
-    if nonzero and value == 0:
-        raise ValueError(f"{name} must be a nonzero integer")
     return value
 
 
