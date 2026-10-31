@@ -30,9 +30,9 @@ a package, the contract is in `base.py` and each implementation is one file.
 | `conformal/targets.py` | `Target` contract, `Step`, `LeadTime`, and `columns`: steps to target columns |
 | `conformal/scores.py` | `Score` contract, `Absolute`, `Signed`, `Asymmetric`: residual scores, parameter shapes, and their issued bounds |
 | `conformal/losses.py` | `Loss` contract, `Miss`: the cost of issued bounds once their target is known |
-| `conformal/calibrators/base.py` | `Calibrator`, `QuantileCalibrator`, and array-only `Scorecaster` contracts, `Feedback`, `State`, `Level`, `check_level` |
-| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`: shortest empirical residual interval |
-| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `pid.ConformalPID` |
+| `conformal/calibrators/base.py` | `Calibrator`, `QuantileCalibrator`, and array-only `Scorecaster` contracts, `Feedback`, `State`, `Level`, `check_level`, `check_integer`, `check_ahead` |
+| `conformal/calibrators/ranks.py` | `score_quantile`, `retained_quantile`: conformal ranks, retention, pooling; `empirical_quantile`: empirical initialization; `empirical_interval`, `weighted_interval`: shared empirical residual interval search |
+| `conformal/calibrators/` | `split.SplitQuantile`, `aci.ACI`, `tracker.QuantileTracker`, `risk.RiskControl`, `enbpi.EnbPI`, `spci.SPCI`, `pid.ConformalPID` |
 | `online/ledger.py` | Issued points and thresholds that wait for their targets, released as `Feedback` |
 | `online/step.py` | `initial_state`, `step`, `Issue` |
 | `online/state.py` | `flatten`, `unflatten` for storage |
@@ -74,11 +74,14 @@ installed `calibre` and each other. `calibre` never imports from `bench/`.
 | `bench/compare.py` | Many calibrators on the same forecasts, one metrics row per method |
 | `bench/selective_imagenet.py` | `RiskControl` with a non-monotone loss against the ImageNet selective classification of Angelopoulos (2026) |
 | `bench/vn2_conformal.py` | The VN2 run: forecasts, four calibrators, and the played cost |
+| `bench/vn2_intervals.py` | EnbPI and SPCI intervals on VN2 bottom series, with shared forecasts and seed errors |
 
 Forecast adapters can depend on vendor libraries, but not on calibration.
 Each vendor library is an extra: `libcalibre[stats]`, `libcalibre[ml]`, `libcalibre[neural]`,
 and `libcalibre[bootstrap]` (scikit-learn).
-`import calibre` needs none of them.
+`SPCI` shares the `bootstrap` extra. Like `BootstrapEnsemble`, it imports scikit-learn
+at module level and is imported from its implementation module, not re-exported.
+`import calibre` needs none of these optional libraries.
 
 ## Array contracts
 
@@ -100,11 +103,14 @@ O origins, and H forecast steps.
 | Residuals | `[O, N, H]` | `actual - point`, NaN until the actual is known |
 | `Panel.censored` | `[B, T]` bool, optional | True where a value is a lower bound of the target |
 | `Target.cover` | `[C, H]` bool | Steps that each target column sums. C = H for `Step`, 1 for `LeadTime` |
+| `Feedback.origin` | `[K]` int | Issuing calendar-period index of each feedback row |
 | `Feedback.point`, `Feedback.target` | `[K, N]` | Column sums, one row per newly known (issuing origin, column), in origin order. `scores` and the bounds of any threshold derive from them through `Feedback.score` |
 | Loss grid | `[G]` or `[N, G]` | Increasing candidate thresholds of `RiskControl`, in score units. Losses are evaluated as `[K, N, G]` |
 | Level | scalar or `[N, C]` | Owned by the calibrator. `[N, 1]` is one level per node, for example from `critical_ratio` |
 | Threshold | `[N, C]` float32, or `[N, C, 2]` for `Asymmetric` | Scalar threshold or lower/upper residual corrections. An empty history gives inf, or [-inf, inf] for a pair |
 | `Replay` arrays | `[O, N, C]`, except paired thresholds `[O, N, C, 2]` | Points, bounds, targets, scores, censored flags, and issued parameters |
+| SPCI seed | Signed errors `[K, N, C]` float32, issuing origins `[K]` int64 | All targets already known at first issuance; NaN errors are missing |
+| SPCI state | Residual and issuing-origin rings `[N, C, window]`; counts, positions, last consumed origins `[N, C]` | All arrays keep the node axis; origins preserve calendar alignment across gaps |
 | PID seed | `[K, N, C]` float64 | Nonnegative calibration scores; NaN means missing |
 | `Scorecaster.predict(history, ahead)` inputs | History `[N, C, K]` float64 and horizons `[C]` positive int64, read-only | Scores in original units, chronological and right-aligned with leading NaN |
 | Scorecast | `[N, C]` finite float64 | Anticipation in score units, not an issued threshold |
@@ -152,6 +158,9 @@ For `EnbPI`, the caller seeds the calibration state explicitly with signed error
 and passes that online state to `replay(state=...)`. The same argument continues a
 saved ledger and calibrator state at later origins.
 
+`SPCI` reads `Feedback.origin` as a calendar-period index to align residual
+contexts, including across gaps. See [Semantics](semantics.md#spci).
+
 `ForecastScorecaster` refits from arrays and discards fitted objects; scorecaster
 and forecaster instances hold configuration only. The ledger, step, and replay
 need no PID special case. See [Semantics](semantics.md#conformal-pid) for the
@@ -170,6 +179,7 @@ paths work on typed arrays, with no per-cell objects, hashes, or serialization.
 
 | Operation | Cost |
 |---|---|
+| `SPCI` threshold | About 36 ms per ready cell with 100 trees, depth 5, window 128, n_lags 7, n_jobs 1. Up to N × C fits per origin. At that rate: about 21 s for VN2 (599 series, one column), 8.5 h for M5 bottoms (30,490 × 28 `Step()` columns), or 12 h for the full M5 hierarchy (42,840 × 28). Panel times are extrapolated, not full-panel measurements. No fitted learners are saved |
 | `SplitQuantile` threshold | One sort of a contiguous `[K, N]` slice per column, `O(C * N * K log K)` |
 | `replay` at M5 | 42,840 nodes, 64 origins, 28 steps, window 28: 3.5 s, 7.6 GB peak, against 2.5 s and 9.9 GB for the earlier stateless functions, with identical thresholds |
 | Saved state at M5 | `LeadTime(7)` with `SplitQuantile(window=28, capacity=40)`: 26 MB |

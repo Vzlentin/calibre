@@ -19,7 +19,8 @@ uv add libcalibre
 ```
 
 The vendor model adapters need an extra: `stats` (statsforecast), `ml` (mlforecast), or
-`neural` (neuralforecast).
+`neural` (neuralforecast). `bootstrap` installs scikit-learn for `BootstrapEnsemble`
+and `SPCI`; importing `calibre` loads none of these optional libraries.
 
 ```sh
 pip install "libcalibre[stats]"
@@ -191,6 +192,29 @@ See [Semantics](docs/semantics.md#enbpi-explicit-semantic-additions) for the pre
 center, ranks, missing-data policy, and scope. A saved online state can be passed
 back to `replay(state=...)` to continue, without retraining the point model.
 
+## SPCI
+
+Install `libcalibre[bootstrap]`. Using `run` and `actuals` from the quick start:
+
+```python
+from calibre import Asymmetric
+from calibre.conformal.calibrators.spci import SPCI
+
+calibrator = SPCI(
+    level=0.9,
+    window=128,
+    n_lags=7,
+    ahead=np.arange(1, 8),  # last covered step of each Step() column
+)
+intervals = replay(run, actuals, target=Step(), score=Asymmetric(), calibrator=calibrator)
+ready = np.isfinite(intervals.threshold).all(axis=-1)
+print(ready.sum())
+```
+
+See [Semantics](docs/semantics.md#spci) for horizon alignment, seeds, readiness,
+quantile weights, and coverage claims, and [Architecture](docs/architecture.md#costs)
+for fitting costs.
+
 ## Conformal PID
 
 `ConformalPID` combines quantile tracking, a tangent integrator, and an explicit
@@ -248,12 +272,30 @@ Raw data is not in Git.
 | `vn2.py` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
 | `m5.py` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
 | `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready |
+| `vn2_intervals.py` | EnbPI and SPCI intervals on the same six VN2 decisions, with shared forecasts and seed errors |
 
 `vn2_conformal.py` runs the whole VN2 path in about one second:
 
 ```sh
 uv run python bench/vn2_conformal.py data/vn2
 ```
+
+Compare EnbPI and SPCI coverage and width on VN2's six decisions, with the same
+three-week forecasts and known historical errors:
+
+```sh
+uv run python bench/vn2_intervals.py data/vn2
+```
+
+Reported on real VN2 data (6 decisions, 599 series), at target coverage 0.9:
+
+| Method | Coverage | Mean width | Interval score |
+|---|---|---|---|
+| EnbPI | 0.855 | 20.7 | 33.8 |
+| SPCI | 0.820 | 18.1 | 32.7 |
+
+SPCI gives narrower intervals and a lower interval score, but both methods fall
+below the 0.9 coverage target. SPCI has lower coverage than EnbPI on this run.
 
 ## Documents
 
