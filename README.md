@@ -150,7 +150,8 @@ Use native quantile forecasts with `CQR()` and `SplitQuantile`:
 from calibre import CQR
 
 intervals = replay(
-    forecasts, actuals,
+    forecasts,
+    actuals,
     target=Step(),
     score=CQR(),
     calibrator=SplitQuantile(0.9, window=28),
