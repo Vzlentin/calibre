@@ -16,7 +16,7 @@ from calibre import (
 from calibre.backtest import ForecastScorecaster, replay
 from calibre.conformal.calibrators import QuantileTracker
 from calibre.conformal.scores import Signed
-from calibre.online import initial_state, step
+from calibre.online import initial_state
 from calibre.online.state import flatten
 
 
@@ -163,7 +163,7 @@ def test_pid_scorecast_respects_step_and_lead_time_horizons(target, ahead):
     method = ConformalPID(
         0.75, window=len(history), ahead=ahead, scorecaster=seasonal_scorecaster()
     )
-    state = initial_state(target, method, 2, 3)
+    state = initial_state(target, method, 2, 3, score=Absolute())
     n_columns = len(target.cover(3))
     scores = np.broadcast_to(history[:, None, None] * scales, (len(history), 2, n_columns))
     method.seed(state["calibrator"], scores)
@@ -354,7 +354,7 @@ def test_pid_cannot_seed_twice_and_rejects_negative_or_paired_scores():
 
 def test_pid_replay_uses_archived_points_and_thresholds_end_to_end():
     method = ConformalPID(0.9, integral_gain=0, scorecaster=None)
-    state = initial_state(Step(), method, 1, 1)
+    state = initial_state(Step(), method, 1, 1, score=Absolute())
     state["calibrator"] = method.seed(state["calibrator"], np.array([0, 2]).reshape(2, 1, 1))
     result = replay(
         Forecasts(np.array([1, 2, 3]), np.array([[[10]], [[100]], [[0]]], dtype=np.float32)),
@@ -388,16 +388,7 @@ def test_pid_rejects_nonfinite_scorecaster_output_after_the_mean_fallback():
         method._scorecast(state)
 
 
-def test_pid_online_rejects_asymmetric_parameters_before_updating():
+def test_pid_setup_rejects_asymmetric_parameters():
     method = ConformalPID(0.9, scorecaster=None)
-    state = initial_state(Step(), method, 1, 1)
     with pytest.raises(ValueError, match="parameter shape"):
-        step(
-            state,
-            0,
-            np.zeros((1, 1)),
-            np.zeros((1, 1)),
-            target=Step(),
-            score=Asymmetric(),
-            calibrator=method,
-        )
+        initial_state(Step(), method, 1, 1, score=Asymmetric())

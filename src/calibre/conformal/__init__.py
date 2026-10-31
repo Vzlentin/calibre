@@ -21,11 +21,12 @@ from calibre.conformal.calibrators import (
     State,
 )
 from calibre.conformal.losses import Loss, Miss
-from calibre.conformal.scores import Absolute, Asymmetric, Score, Signed
+from calibre.conformal.scores import CQR, Absolute, Asymmetric, Score, Signed
 from calibre.conformal.targets import LeadTime, Step, Target
 
 __all__ = [
     "ACI",
+    "CQR",
     "Absolute",
     "Asymmetric",
     "Calibrator",

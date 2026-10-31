@@ -25,13 +25,18 @@ def reach(cover: np.ndarray) -> int:
     return int(last_step(cover).max())
 
 
-def initial_state(n_nodes: int, cover: np.ndarray, parameter_shape: tuple[int, ...] = ()) -> State:
+def initial_state(
+    n_nodes: int,
+    cover: np.ndarray,
+    input_shape: tuple[int, ...],
+    parameter_shape: tuple[int, ...],
+) -> State:
     """Empty ledger for `n_nodes` nodes and the columns of `cover` `[C, H]`."""
     slots = reach(cover)
     return {
         "last": np.array(-1, dtype=np.int64),
         "origin": np.full(slots, -1, dtype=np.int64),
-        "point": np.zeros((slots, n_nodes, slots), dtype=np.float32),
+        "point": np.zeros((slots, n_nodes, slots) + input_shape, dtype=np.float32),
         "actual": np.full((slots, n_nodes, slots), np.nan, dtype=np.float32),
         "censored": np.zeros((slots, n_nodes, slots), dtype=bool),
         "issued": np.zeros((slots, n_nodes, len(cover)) + parameter_shape, dtype=np.float32),
@@ -65,7 +70,12 @@ def observe(
     return state, feedback
 
 
-def issue(state: State, origin: int, points: np.ndarray, threshold: np.ndarray) -> State:
+def issue(
+    state: State,
+    origin: int,
+    points: np.ndarray,
+    threshold: np.ndarray,
+) -> State:
     """Archive points and scalar or paired parameters issued at `origin`."""
     slot = origin % len(state["origin"])
     if state["origin"][slot] >= 0:
@@ -107,7 +117,8 @@ def _feedback(
     """Column sums of the given slots, with their issued thresholds."""
     covered = cover[columns][:, None, :]
     target = np.where(covered, state["actual"][rows], 0).sum(axis=-1)
-    point = np.where(covered, state["point"][rows], 0).sum(axis=-1)
+    mask = covered.reshape(covered.shape + (1,) * (state["point"].ndim - 3))
+    point = np.where(mask, state["point"][rows], 0).sum(axis=2)
     return Feedback(
         origin=state["origin"][rows],
         column=columns,

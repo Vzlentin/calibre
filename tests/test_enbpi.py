@@ -8,7 +8,7 @@ from calibre import Asymmetric, EnbPI, Feedback, Forecasts, LeadTime, SplitQuant
 from calibre.backtest import replay
 from calibre.conformal.calibrators.ranks import empirical_interval
 from calibre.conformal.scores import Absolute, Signed
-from calibre.online import initial_state, step
+from calibre.online import initial_state
 from calibre.online.state import flatten, unflatten
 
 
@@ -183,17 +183,8 @@ def test_asymmetric_bounds_and_feedback_count_both_tails():
     [(Absolute(), EnbPI(0.9, 3)), (Signed(), EnbPI(0.9, 3)), (Asymmetric(), SplitQuantile(0.9))],
 )
 def test_online_rejects_incompatible_score_and_calibrator(score, calibrator):
-    state = initial_state(Step(), calibrator, 2, 1)
     with pytest.raises(ValueError, match="parameter shape"):
-        step(
-            state,
-            3,
-            np.zeros((2, 1)),
-            np.zeros((2, 4)),
-            target=Step(),
-            score=score,
-            calibrator=calibrator,
-        )
+        initial_state(Step(), calibrator, 2, 1, score=score)
 
 
 def test_replay_keeps_paired_parameters_and_updates_archived_centers():
@@ -201,7 +192,7 @@ def test_replay_keeps_paired_parameters_and_updates_archived_centers():
     forecasts = Forecasts(origins, np.array([[[5.0]], [[100.0]], [[0.0]]]))
     actuals = np.array([[0, 0, 8, 103, 0]], dtype=np.float32)
     method = EnbPI(0.5, 4, 3)
-    state = initial_state(Step(), method, 1, 1)
+    state = initial_state(Step(), method, 1, 1, score=Asymmetric())
     state["calibrator"] = method.seed(
         state["calibrator"], np.array([-4, -1, 0, 2], dtype=np.float32).reshape(4, 1, 1)
     )

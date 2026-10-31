@@ -115,7 +115,9 @@ def test_a_saved_and_reloaded_state_continues_exactly():
     }
     whole = replay(Forecasts(origins, points), actuals, **setup)
 
-    state = initial_state(setup["target"], setup["calibrator"], n_nodes=4, horizon=3)
+    state = initial_state(
+        setup["target"], setup["calibrator"], n_nodes=4, horizon=3, score=setup["score"]
+    )
     previous, issued = -1, []
     for index, origin in enumerate(origins):
         if index == 30:
@@ -133,7 +135,7 @@ def test_a_saved_and_reloaded_state_continues_exactly():
 
 def test_step_needs_every_period_since_the_last_origin():
     setup: dict[str, Any] = {"target": Step(), "score": Signed(), "calibrator": SplitQuantile(0.5)}
-    state = initial_state(setup["target"], setup["calibrator"], 1, 2)
+    state = initial_state(setup["target"], setup["calibrator"], 1, 2, score=setup["score"])
     state, _ = step(state, 10, np.zeros((1, 2)), np.zeros((1, 11)), **setup)
     with pytest.raises(ValueError, match="needs 3 new periods"):
         step(state, 13, np.zeros((1, 2)), np.zeros((1, 2)), **setup)

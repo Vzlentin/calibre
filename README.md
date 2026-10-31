@@ -65,7 +65,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`, `CQR`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -142,6 +142,26 @@ run = rolling_forecasts(
 )
 ```
 
+## CQR
+
+Use native quantile forecasts with `CQR()` and `SplitQuantile`:
+
+```python
+from calibre import CQR
+
+intervals = replay(
+    forecasts,
+    actuals,
+    target=Step(),
+    score=CQR(),
+    calibrator=SplitQuantile(0.9, window=28),
+)
+```
+
+The [CQR guide](docs/cqr.md) shows both MLForecast and NeuralForecast, precomputed
+quantiles, and online save/resume. [Semantics](docs/semantics.md#cqr) defines the
+training, numerical and coverage rules.
+
 ## EnbPI
 
 Install `libcalibre[bootstrap]` for the scikit-learn bootstrap adapter. Forecasting
@@ -168,7 +188,7 @@ forecasts = rolling_forecasts(
 seed = forecasts.initial_residuals
 assert seed is not None
 calibrator = EnbPI(level=0.9, window=len(seed.values))
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1)
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1, score=Asymmetric())
 state["calibrator"] = calibrator.seed(state["calibrator"], seed.values)
 intervals = replay(
     forecasts,
@@ -215,7 +235,7 @@ calibrator = ConformalPID(
     scorecast_window=64,
     ahead=np.arange(1, 8),
 )
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7)
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7, score=Absolute())
 state["calibrator"] = calibrator.seed(state["calibrator"], scores)
 intervals = replay(
     run, actuals, target=Step(), score=Absolute(), calibrator=calibrator, state=state

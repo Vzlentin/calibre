@@ -8,6 +8,9 @@ All notable changes are listed here. The format follows
 
 ### Added
 
+- CQR scores composed with `SplitQuantile`, with native quantiles trained by
+  MLForecast or NeuralForecast. `FittedQuantiles`, `QuantileForecast` and `Quantiles`
+  expose native predictions. See [CQR semantics](docs/semantics.md#cqr).
 - `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
   tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
   Controller state is NumPy-only and resumes through the existing online/replay API.
@@ -20,6 +23,9 @@ All notable changes are listed here. The format follows
 
 ### Changed
 
+- `Score.input_shape()` describes its forecast input. The ledger, feedback, issue
+  and replay carry one shaped forecast array. Online `initial_state` requires the
+  score and rejects CQR with `ConformalPID` at setup.
 - The `Score` contract declares its parameter shape. `Asymmetric` uses two
   residual corrections; the ledger archives them and asymmetric feedback/replay
   coverage evaluates issued endpoints rather than assuming a scalar threshold.
