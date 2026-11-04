@@ -2,7 +2,14 @@
 
 import numpy as np
 
-from calibre.conformal.calibrators.base import Calibrator, Feedback, Level, State, check_level
+from calibre.conformal.calibrators.base import (
+    Calibrator,
+    Feedback,
+    Level,
+    State,
+    check_integer,
+    check_level,
+)
 from calibre.conformal.calibrators.ranks import empirical_interval
 
 
@@ -16,19 +23,9 @@ class EnbPI(Calibrator):
     """
 
     def __init__(self, level: Level, window: int, beta_grid_size: int = 21) -> None:
-        for name, value, minimum in (
-            ("window", window, 1),
-            ("beta_grid_size", beta_grid_size, 2),
-        ):
-            if (
-                isinstance(value, (bool, np.bool_))
-                or not isinstance(value, (int, np.integer))
-                or value < minimum
-            ):
-                raise ValueError(f"{name} must be an integer of at least {minimum}")
         self.level = check_level(level)
-        self.window = window
-        self.beta_grid_size = beta_grid_size
+        self.window = check_integer("window", window, 1)
+        self.beta_grid_size = check_integer("beta_grid_size", beta_grid_size, 2)
 
     def initial_state(self, n_nodes: int, n_columns: int) -> State:
         np.broadcast_to(self.level, (n_nodes, n_columns))

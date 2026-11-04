@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from calibre.backtest import Forecasts, Replay, replay
-from calibre.conformal import Calibrator, Score, Target
+from calibre.conformal import Calibrator, Score, State, Target
 from calibre.metrics import coverage, interval_score, pinball, width
 
 
@@ -19,6 +19,7 @@ def compare(
     level: float,
     censored: np.ndarray | None = None,
     by: np.ndarray | None = None,
+    states: Mapping[str, State] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Replay]]:
     """Replay each calibrator and measure it on the cells where it was ready.
 
@@ -26,8 +27,14 @@ def compare(
     label. A two-sided score reports coverage, width, and interval score. A one-sided
     upper bound reports coverage and the pinball loss of the bound at `level`, the level
     that the calibrators target.
+    `states` supplies seeded or saved online states by method name. Unknown names
+    are rejected; omitted methods start unseeded.
     `ready` is the share of cells with a finite threshold. The runs are returned too.
     """
+    if states is not None:
+        unknown = states.keys() - calibrators.keys()
+        if unknown:
+            raise ValueError(f"unknown calibrators in states: {sorted(unknown)}")
     rows, runs = [], {}
     labels = np.zeros(actuals.shape[0], dtype=int) if by is None else np.asarray(by)
     for name, calibrator in calibrators.items():
@@ -38,6 +45,7 @@ def compare(
             score=score,
             calibrator=calibrator,
             censored=censored,
+            state=None if states is None else states.get(name),
         )
         runs[name] = run
         for label in np.unique(labels):
