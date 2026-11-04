@@ -6,4 +6,5 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# Downloaded datasets and generated benchmark artifacts must stay local.
 /data/

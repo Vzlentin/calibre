@@ -23,6 +23,23 @@ refactor.
 | Risk control | `RiskControl(loss, grid, alpha)` issues the smallest grid threshold with `(loss sum + B) / (n + 1) <= alpha`, where n counts known targets and B is the loss maximum, per node and column. No feasible threshold gives inf. `alpha` is between 0 and B. No window and no pooling. | With `Miss` it is the `SplitQuantile(1 - alpha)` threshold, rounded up to the grid. |
 | Claims | A `SplitQuantile` band or bound is a marginal, finite-sample claim under exchangeable scores, at the stated level, column, and pool. `ACI` and `QuantileTracker` give only long-run marginal coverage, with no finite-sample claim. `RiskControl` with a loss nonincreasing in the threshold controls the expected loss at `alpha` under exchangeable targets (Angelopoulos et al. 2024). For other losses the excess over `alpha` is bounded by the stability of the chosen threshold (Angelopoulos 2026), which Calibre does not estimate. Overlapping lead-time targets are not exchangeable. | It is not conditional coverage. A sales history gives sales coverage, not demand coverage, also when targets are flagged as censored. |
 
+## Benchmark input preprocessing
+
+These policies live only in `bench/`; the library's missing-value and calibration
+rules above are unchanged. The additional loaders verify pinned raw-file hashes
+before parsing. Beijing, Bike and Favorita always reindex their calendar, forward-fill
+causally, and trim the leading prefix until every series has an observation.
+They return the original-target mask and the number of trimmed periods. There is
+no global missing-data switch or pre-trimming series limit. ETTh1, LSTNet and
+FreshRetailNet do not impute targets; M5/VN2 are unchanged. Callers exclude imputed
+targets, including aggregates and lead times containing one, from calibration
+and evaluation.
+
+LSTNet dates are positional labels, not a recovered calendar; no consent flag
+changes those labels. FreshRetailNet's train/eval dates are module constants, and
+its stockout mask marks sales as lower bounds rather than revealing demand.
+See the [benchmark guide](../bench/README.md) for dataset-specific details.
+
 ## EnbPI: explicit semantic additions
 
 - **Bootstrap point model.** `BootstrapEnsemble` is a local one-step lag regressor,
