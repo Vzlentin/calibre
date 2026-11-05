@@ -48,12 +48,12 @@ None of these is part of M1. Each one comes with the contract PR of its mileston
 
 | Topic | Rule when it comes |
 |---|---|
-| Production (M2) | `step` takes a state and returns the next one. It issues for the last origin with the same kernels as `replay`, and its output equals the last origin of `replay`. The ledger keeps the order and the stock in force at each origin, with the forecast that waits for its truth. |
-| Pools | Equal labels pool scores, and each member gets the pool threshold. A run that splits nodes into ranges cuts only at pool edges. Pool coverage is not node coverage. |
+| Production (on a measured need) | `step` takes a state and returns the next one. It issues for the last origin with the same kernels as `replay`, and its output equals the last origin of `replay`. The ledger keeps the order and the stock in force at each origin, with the forecast that waits for its truth. |
+| Pools (M2) | Equal labels pool scores, and each member gets the pool threshold. A run that splits nodes into ranges cuts only at pool edges. Pool coverage is not node coverage. |
 | Decisions on more than one quantile | They read `Replay.score` under the same visibility rule: the scores beyond the bound, or the whole window. |
 | Censored scores | A correction for censored scores reads the flag and the record of orders and stock. |
 | Imputed values | A mask of observed values. A value that is not observed is a missing truth. |
-| Online methods | ACI, the quantile tracker and PID compare each score with the threshold issued for it. |
+| Online methods (M4) | ACI, the quantile tracker and PID are scans over origins inside `replay`. Each one compares a score with the threshold issued for it. No object keeps state between calls. |
 
 ## Approved directions
 
