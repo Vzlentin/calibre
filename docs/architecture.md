@@ -68,8 +68,8 @@ M0 does for M1. After 0.1 freezes, `v2` merges into `main`, and 0.1 stays as its
 |---|---|
 | M0 | These documents and `AGENTS.md`. The checks of [Checks](#checks). The baselines of G2, measured with 0.1 first. The M5 and VN2 loaders, rewritten as raw readers that import no `calibre`: they give arrays and frames, and the VN2 loader holds the VN2 protocol, with the decision files loaded by path. The dependencies of v2 in `pyproject.toml` and `uv.lock`. CI on the `v2` branch, with the frozen-path check. Its CI fails by design, because the v2 code does not exist yet, and the owners approve it by review. Before M0 merges, its author runs every frozen file once against a throwaway prototype of the M1 functions, to find defects in the checks. The prototype is not committed. A defect that M1 finds in a frozen file goes to a contract PR |
 | M1 | The backtest on the new layout: every module in [Modules](#modules). Every check passes |
-| M2 | `Forecasts.concat`, which joins forecasts by label over models, series and origins. Metrics on `Replay`: accuracy, bias, coverage and width, by level. Pooled scores |
-| M3 | The `Forecaster` contract and `Window` with covariates, and the mlforecast engine |
+| M2 | `Forecasts.concat`, which joins forecasts by label over models, series and origins, and refuses two values for one cell. Metrics on `Replay`: accuracy, bias, coverage and width, by level. Pooled scores. A decision backtest: `order_up_to`, then `settle`, week by week from a starting stock, with its cost |
+| M3 | The `Forecaster` contract, which says whether a model is local, fitted on each series alone, or global, fitted on all series at once. `Window` with covariates, and the mlforecast engine |
 | M4 | ACI, the quantile tracker and PID, as scans over origins inside `replay` |
 | M5 | `combine` with inverse-MAE weights over models and origins |
 | Later | Each one only on a measured need: `step` and its state, and a ledger of the order and the stock at each origin. `fitted_through`, which reuses a fitted model across runs. `AR1` and `BootstrapEnsemble` on coreforecast. The neuralforecast engine. Decisions that read more than one quantile. A correction for censored scores. `RiskControl` |
@@ -138,6 +138,14 @@ comments and guarantees state, and converts arrays to the stated dtypes. Pydanti
 use strict mode and forbid extra fields: they raise pydantic's `ValidationError`, which is a
 `ValueError`.
 
+A caller can split the work and run the parts in other processes, as the rule Splits of
+[Semantics](semantics.md) says. The objects move between processes by pickle, and a process
+that shares memory with others receives their arrays read-only.
+
+| Id | Guarantee | Check |
+|---|---|---|
+| A4 | Each public class pickles with protocol 5 and loads to an object of the same type, whose arrays have the same dtype, shape and bits, and whose other fields are equal. A `Panel` loaded by pickle, with any protocol, has read-only arrays, as P3 says. Each public function gives the same result, bit for bit, on inputs loaded from read-only buffers | `test_splits.py` |
+
 ### Data
 
 #### Panel
@@ -164,16 +172,20 @@ class Panel:
         target_col: str = "y",
         censored_col: str | None = None,
     ) -> "Panel": ...
+
+    def take(self, index: np.ndarray) -> "Panel": ...
 ```
 
 The constructor keeps the order of the series. It copies its inputs and converts them to
-the stated dtypes.
+the stated dtypes. `take` reads `index`: a 1-d numpy array of integers, with at least one
+value, which holds positions from 0 to S - 1 in strictly increasing order.
 
 | Id | Guarantee | Check |
 |---|---|---|
-| P1 | The series ids are unique. The calendar is complete at `freq`, and runs from the earliest first period of the series to the latest last period. `indptr` has S + 1 values, starts at 0 and increases, and its last value is the length of `data`. `starts` has S values. Series s holds `data[indptr[s]:indptr[s + 1]]`: one finite value for each period from `periods[starts[s]]` on, with no gap. Each series has at least one value, and its last period is on the calendar. `censored`, when present, has the length of `data` | `test_panel.py` |
-| P2 | `from_frame` sorts the series by id, and keeps the values of each series in time order. It rejects a duplicate id and time, a time off the calendar, a gap inside a series, a value that is not finite, and a censored column that is not boolean | `test_panel.py` |
+| P1 | The series ids are unique. The calendar is complete at `freq`, and holds every period of every series. `indptr` has S + 1 values, starts at 0 and increases, and its last value is the length of `data`. `starts` has S values. Series s holds `data[indptr[s]:indptr[s + 1]]`: one finite value for each period from `periods[starts[s]]` on, with no gap. Each series has at least one value, and its last period is on the calendar. `censored`, when present, has the length of `data` | `test_panel.py` |
+| P2 | `from_frame` sorts the series by id, keeps the values of each series in time order, and builds the calendar from the earliest first period of the series to the latest last period. It rejects a duplicate id and time, a time off the calendar, a gap inside a series, a value that is not finite, and a censored column that is not boolean | `test_panel.py` |
 | P3 | The constructor raises when P1 fails. A change of its input arrays after construction does not change the panel, and the arrays of the panel are read-only | `test_panel.py` |
+| P4 | `take(index)` gives the series at `index`, in that order, with their values, on the same calendar and `freq`. It gives their censored values when the panel has a censored array, and none when it has none | `test_panel.py` |
 
 #### Hierarchy
 
@@ -291,6 +303,7 @@ order. A row is named by the alias of its model.
 | F3 | No point issued at origin o changes when a value after o changes, or when the data after o is removed | `test_visibility.py` |
 | F4 | A series whose first period is after o, or whose last period is before o, has NaN points at o. A model that gives NaN gives NaN points | `test_forecasts.py` |
 | F5 | Two models with the same alias in different engines raise. An engine whose `freq` is not the panel `freq` raises. A model that raises in an engine with no fallback model stops the call with its exception | `test_forecasts.py` |
+| F7 | When the whole call returns, a call on `panel.take(index)` gives the rows `index` of the call on `panel`, and a call on some of the `origins` gives the columns of those origins, bit for bit | `test_splits.py` |
 
 #### reconcile
 
@@ -326,6 +339,7 @@ of the whole input array of points.
 | R3 | `WlsStruct` gives the projection of MinT with structural scaling, `S (S' W^-1 S)^-1 S' W^-1 y`, where W is diagonal with the number of bottoms under each node. Its bottoms are within 1e-5 times the scale of that projection, computed in float64. Its aggregates are `BottomUp` of its bottoms. It raises on a NaN point | `test_reconcile.py` |
 | R4 | On points with no NaN, `BottomUp` equals hierarchicalforecast's `BottomUpSparse`, and `WlsStruct` equals `MinTrace(method="wls_struct")`, within 1e-5 times the scale. hierarchicalforecast takes the bottoms last, so the check moves them | `test_reconcile.py` |
 | R5 | `reconcile` raises `TypeError` when its input is not a `Forecasts` | `test_totals.py` |
+| R6 | When the whole call returns, a call on the forecasts of some of the models, or of some of the origins, gives that part of the whole call, bit for bit | `test_splits.py` |
 
 ### Conformal
 
@@ -423,6 +437,7 @@ conformalforecast's ceiling, which rounds to 9 decimals first. That is 10 scores
 | C5 | A band is `lower = point - threshold`, `upper = point + threshold`. A bound is `upper = point + threshold`, `lower = -inf`. Where the point is NaN, `lower` and `upper` are NaN | `test_split.py` |
 | C6 | Each threshold comes from the scores of its own node and column. A change of one point changes only thresholds of its node and column, at later origins. The bound of an aggregate is not the sum of the bounds of its members | `test_totals.py` |
 | C7 | A cell is censored when one value of its truth is censored, and is not censored when its truth is NaN. Censored scores enter score windows as observed: the thresholds equal those of the same truth with no censored array | `test_censoring.py` |
+| C8 | When the whole call returns, a call on some of the nodes gives the rows of those nodes in each array of the whole call, bit for bit. The call takes their forecasts, `truth.take` of their positions, and their values of `level` and of the arrays of a `Span` | `test_splits.py` |
 
 ### Decision
 
@@ -454,7 +469,7 @@ numba. A pin changes only in a contract PR, with the checks run again.
 | Check | Proves |
 |---|---|
 | `tests/contract/test_imports.py` | A1, A2, A3 |
-| `tests/contract/test_panel.py` | P1, P2, P3 |
+| `tests/contract/test_panel.py` | P1, P2, P3, P4 |
 | `tests/contract/test_hierarchy.py` | H1, H2 |
 | `tests/contract/test_forecasts.py` | F1, F2, F4, F5, F6 |
 | `tests/contract/test_reconcile.py` | R1, R2, R3, R4 |
@@ -463,6 +478,7 @@ numba. A pin changes only in a contract PR, with the checks run again.
 | `tests/contract/test_visibility.py` | F3, C1 |
 | `tests/contract/test_totals.py` | R5, C6 |
 | `tests/contract/test_censoring.py` | H2 for censored values, C7 |
+| `tests/contract/test_splits.py` | A4, F7, R6, C8 |
 | `bench/gate_m5.py`, with its run `bench/gate_m5_run.py` | G1 |
 | `bench/gate_vn2.py`, with its run `bench/gate_vn2_run.py` | G2 |
 

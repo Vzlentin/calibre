@@ -1,4 +1,5 @@
-"""P1, P2, P3: the layout of `Panel`, `Panel.from_frame`, and the checks of the constructor."""
+"""P1, P2, P3, P4: the layout of `Panel`, `Panel.from_frame`, the checks of the constructor,
+and `Panel.take`."""
 
 import dataclasses
 from typing import Any, cast
@@ -50,8 +51,6 @@ def check_layout(panel: Panel) -> None:
     lengths = np.diff(panel.indptr)
     assert np.all(panel.starts >= 0)
     assert np.all(panel.starts + lengths <= len(panel.periods))
-    assert panel.starts.min() == 0
-    assert (panel.starts + lengths).max() == len(panel.periods)
     if panel.censored is not None:
         assert panel.censored.dtype == np.bool_
         assert panel.censored.shape == panel.data.shape
@@ -73,8 +72,9 @@ def expected_arrays(dense: Dense, order):
 
 @pytest.mark.parametrize("make", [daily, weekly])
 def test_from_frame_sorts_and_lays_out(make):
-    """P1, P2: from_frame sorts the series by id, keeps each series in time order, and lays
-    the values out as the ragged array of P1, on the complete calendar."""
+    """P1, P2: from_frame sorts the series by id, keeps each series in time order, lays the
+    values out as the ragged array of P1, and builds the calendar from the earliest first
+    period of the series to the latest last period."""
     dense = make()
     frame = to_frame(dense)
     frame = frame.iloc[np.random.default_rng(5).permutation(len(frame))].reset_index(drop=True)
@@ -246,11 +246,6 @@ def broken(name: str) -> dict:
         good["periods"] = periods.delete(20)
     elif name == "calendar at another freq":
         good["freq"] = "W-MON"
-    elif name == "calendar longer than the series":
-        good["periods"] = pd.date_range(periods[0], periods=len(periods) + 1, freq="D")
-    elif name == "calendar starting before the series":
-        good["periods"] = pd.date_range(periods[0] - np.timedelta64(1, "D"), periods[-1])
-        good["starts"] = good["starts"] + 1
     elif name == "indptr too short":
         good["indptr"] = good["indptr"][:-1]
     elif name == "indptr not starting at 0":
@@ -287,8 +282,6 @@ CASES = [
     "duplicate series",
     "calendar with a gap",
     "calendar at another freq",
-    "calendar longer than the series",
-    "calendar starting before the series",
     "indptr too short",
     "indptr not starting at 0",
     "empty series",
@@ -316,3 +309,66 @@ def test_constructor_types():
     good["freq"] = 7
     with pytest.raises(TypeError):
         Panel(**good)
+
+
+def test_constructor_keeps_a_longer_calendar():
+    """P1, P3: a calendar that starts before every series and ends after every series is
+    kept as it is."""
+    dense = daily(seed=12, censored=True)
+    good = arrays(dense)
+    periods = good["periods"]
+    good["periods"] = pd.date_range(
+        periods[0] - np.timedelta64(3, "D"), periods[-1] + np.timedelta64(2, "D"), freq="D"
+    )
+    good["starts"] = good["starts"] + 3
+    panel = Panel(**good)
+    check_layout(panel)
+    assert panel.periods.equals(good["periods"])
+    np.testing.assert_array_equal(panel.starts, dense.starts + 3)
+    np.testing.assert_array_equal(from_panel(panel)[:, 3:-2], dense.values)
+
+
+@pytest.mark.parametrize(
+    "index", [[0, 1, 2, 3], [1, 3], [2], [0, 2, 3]], ids=lambda index: "-".join(map(str, index))
+)
+def test_take(index):
+    """P4: take gives the series at the index, in that order, with their values and censored
+    values, on the same calendar and freq. A panel with no censored array gives none."""
+    dense = daily(seed=13, censored=True)
+    panel = to_panel(dense)
+    part = panel.take(np.array(index))
+    check_layout(part)
+    assert list(part.series) == [IDS[i] for i in index]
+    assert part.periods.equals(panel.periods)
+    assert part.freq == panel.freq
+    np.testing.assert_array_equal(part.starts, dense.starts[index])
+    np.testing.assert_array_equal(from_panel(part), dense.values[index])
+    assert dense.censored is not None and part.censored is not None
+    finite = np.isfinite(dense.values)
+    for k, i in enumerate(index):
+        flags = part.censored[part.indptr[k] : part.indptr[k + 1]]
+        np.testing.assert_array_equal(flags, dense.censored[i][finite[i]])
+    assert to_panel(daily(seed=13)).take(np.array(index)).censored is None
+
+
+def test_take_input_conditions():
+    """P4: take raises TypeError for an index that is not a numpy array, and ValueError for
+    one that does not hold integers, is empty, is not 1-d, holds a position outside 0 to
+    S - 1, or does not increase."""
+    panel = to_panel(daily(seed=14))
+    take: Any = panel.take  # the arguments below have wrong types on purpose
+    for index in ([0, 1], (0, 1), range(2)):
+        with pytest.raises(TypeError):
+            take(index)
+    for index in (
+        np.array([0.0, 1.0]),
+        np.array([True, False, True, False]),
+        np.array([], dtype=np.int64),
+        np.array([[0, 1]]),
+        np.array([0, 4]),
+        np.array([-1, 0]),
+        np.array([2, 1]),
+        np.array([1, 1]),
+    ):
+        with pytest.raises(ValueError):
+            take(index)
