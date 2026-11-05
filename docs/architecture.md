@@ -121,7 +121,7 @@ their 0.1 shape `[B, T]`.
 | Id | Guarantee | Check |
 |---|---|---|
 | A1 | `import calibre` loads neither statsforecast nor hierarchicalforecast. The engine file loads only when a `StatsForecast` object is passed | `test_imports.py` |
-| A2 | The import statements of each module of `src/calibre` follow the table above, plus the standard library. `calibre/__init__.py` imports only Calibre packages. Imports in the `if` branch of `if TYPE_CHECKING:` do not count. No module uses `importlib`, `runpy`, `__import__`, `exec`, `eval`, `sys.modules` or `os._exit`, except the engine dispatch of `backtest/rolling.py`, which loads `calibre.forecast.engines.statsforecast` with `importlib.import_module`. No line of `src/calibre` holds `# noqa`, `# ruff: noqa`, `# type: ignore`, `# ty: ignore` or `# pyright: ignore` | `test_imports.py`, by a scan of the source |
+| A2 | The import statements of each module of `src/calibre` follow the table above, plus the standard library. `calibre/__init__.py` imports only Calibre packages. Imports in the `if` branch of `if TYPE_CHECKING:` do not count. No module uses `importlib`, `runpy`, `__import__`, `exec`, `eval`, `sys.modules` or `os._exit`, except `backtest/rolling.py`, which loads the engine file with `importlib.import_module("calibre.forecast.engines.statsforecast")`, the module name as a string literal, and uses `importlib` for nothing else. No line of `src/calibre` holds `# noqa`, `# ruff: noqa`, `# type: ignore`, `# ty: ignore` or `# pyright: ignore` | `test_imports.py`, by a scan of the source |
 | A3 | `calibre.__all__` is exactly `Panel`, `Hierarchy`, `rolling_forecasts`, `Forecasts`, `reconcile`, `Reconciler`, `BottomUp`, `Identity`, `WlsStruct`, `Target`, `Step`, `Span`, `Split`, `replay`, `Replay`, `critical_ratio`, `order_up_to`, `settle` and `Settlement` | `test_imports.py` |
 
 `Window` and the engine file stay internal until M3.
@@ -130,7 +130,9 @@ their 0.1 shape `[B, T]`.
 
 Each function checks the conditions that this section states for its inputs, once. It
 raises `TypeError` when an input has the wrong type, and `ValueError` when another condition
-fails. Each data class checks, when it is built, the shapes, dtypes and conditions that its
+fails. The type is that of the argument itself: a frame with a missing column or a column of
+the wrong dtype, and a level that names no column, raise `ValueError`. A subclass of either
+error is allowed, such as a named error of Calibre. Each data class checks, when it is built, the shapes, dtypes and conditions that its
 comments and guarantees state, and converts arrays to the stated dtypes. Pydantic settings
 use strict mode and forbid extra fields: they raise pydantic's `ValidationError`, which is a
 `ValueError`.
@@ -142,13 +144,13 @@ use strict mode and forbid extra fields: they raise pydantic's `ValidationError`
 ```python
 @dataclass(frozen=True)
 class Panel:
-    series: np.ndarray                    # [S] str, unique
-    periods: pd.DatetimeIndex             # [T] the calendar, complete at freq
+    series: np.ndarray  # [S] str, unique
+    periods: pd.DatetimeIndex  # [T] the calendar, complete at freq
     freq: str
-    data: np.ndarray                      # [n] float32
-    indptr: np.ndarray                    # [S + 1] int64
-    starts: np.ndarray                    # [S] int64: index of the first period of each series
-    censored: np.ndarray | None = None    # [n] bool
+    data: np.ndarray  # [n] float32
+    indptr: np.ndarray  # [S + 1] int64
+    starts: np.ndarray  # [S] int64: index of the first period of each series
+    censored: np.ndarray | None = None  # [n] bool
 
     @classmethod
     def from_frame(
@@ -177,9 +179,9 @@ the stated dtypes.
 ```python
 @dataclass(frozen=True)
 class Hierarchy:
-    nodes: np.ndarray        # [N] str
-    summing: sp.csr_array    # [N, B] float32
-    level: np.ndarray        # [N] int32
+    nodes: np.ndarray  # [N] str
+    summing: sp.csr_array  # [N, B] float32
+    level: np.ndarray  # [N] int32
 
     @classmethod
     def from_attributes(
@@ -214,10 +216,10 @@ columns to cross. None makes one level per column.
 ```python
 @dataclass(frozen=True)
 class Forecasts:
-    points: np.ndarray           # [M, S, H, O] float32
-    models: np.ndarray           # [M] str
-    series: np.ndarray           # [S] str: series, or node labels after reconcile
-    origins: pd.DatetimeIndex    # [O] strictly increasing
+    points: np.ndarray  # [M, S, H, O] float32
+    models: np.ndarray  # [M] str
+    series: np.ndarray  # [S] str: series, or node labels after reconcile
+    origins: pd.DatetimeIndex  # [O] strictly increasing
 
     @classmethod
     def from_cv(
@@ -273,9 +275,9 @@ the engine file when it meets the first such object.
 The engine reads the models, the `fallback_model`, the `freq` and the `n_jobs` of each
 `StatsForecast` object. For each series window, it calls `model.forecast(y=values, h=horizon)`
 of each model, as statsforecast's cross-validation does with `refit=True`. When a model
-raises, the engine calls the fallback model in the same way, or stops the call when there is
-none. With `n_jobs` other than 1, the engine keeps its own pool of worker processes for the
-whole call. Each worker gets a chunk of series once and runs every origin for it: this is
+raises, the engine calls the fallback model in the same way, or raises the exception of the
+model again when there is none. With `n_jobs` other than 1, the engine keeps its own pool of
+worker processes for the whole call, and ends it before the call returns. Each worker gets a chunk of series once and runs every origin for it: this is
 the origin loop of `rolling_forecasts`. G1 binds its cost.
 
 The result has one row per model: the engines in order, and the models of each engine in
@@ -284,23 +286,29 @@ order. A row is named by the alias of its model.
 | Id | Guarantee | Check |
 |---|---|---|
 | F1 | Take a panel whose series end on the last period. Let `df` be the long frame that built the panel, with `y` as float32. Take `cv = sf.cross_validation(df=df, h=horizon, step_size=step_size, n_windows=n_windows, input_size=input_size)`, with `refit=True` and no `level`, `test_size` or prediction intervals, for any settings that statsforecast accepts. With the cutoffs of `cv` as `origins`, `rolling_forecasts(panel, [sf], origins, horizon, lookback=input_size)` equals `Forecasts.from_cv(cv, series=panel.series, horizon=horizon)`: the points bit for bit, NaN included, the models, the series, and the values of the origins | `test_forecasts.py` |
-| F2 | The points are the same, bit for bit, for any `n_jobs` | `test_forecasts.py` |
+| F2 | The points are the same, bit for bit, for any `n_jobs`. No worker process outlives the call | `test_forecasts.py` |
 | F3 | No point issued at origin o changes when a value after o changes, or when the data after o is removed | `test_visibility.py` |
 | F4 | A series whose first period is after o, or whose last period is before o, has NaN points at o. A model that gives NaN gives NaN points | `test_forecasts.py` |
-| F5 | Two models with the same alias in different engines raise. An engine whose `freq` is not the panel `freq` raises | `test_forecasts.py` |
+| F5 | Two models with the same alias in different engines raise. An engine whose `freq` is not the panel `freq` raises. A model that raises in an engine with no fallback model stops the call with its exception | `test_forecasts.py` |
 
 #### reconcile
 
 ```python
 def reconcile(forecasts: Forecasts, hierarchy: Hierarchy, method: Reconciler) -> Forecasts: ...
 
+
 class Reconciler(BaseModel, ABC):
+    # points [M, S, H, O] float32 to node points [M, N, H, O] float32
     @abstractmethod
     def project(self, points: np.ndarray, hierarchy: Hierarchy) -> np.ndarray: ...
-    # [M, S, H, O] float32 to [M, N, H, O] float32
+
 
 class BottomUp(Reconciler): ...
+
+
 class Identity(Reconciler): ...
+
+
 class WlsStruct(Reconciler): ...
 ```
 
@@ -335,15 +343,17 @@ methods come later, as [Milestones](#milestones) says.
 ```python
 class Target(ABC):
     @abstractmethod
-    def cover(self, n_nodes: int, horizon: int) -> np.ndarray: ...   # [N, C, H] bool
+    def cover(self, n_nodes: int, horizon: int) -> np.ndarray: ...  # [N, C, H] bool
+
 
 @dataclass(frozen=True)
 class Step(Target): ...
 
+
 @dataclass(frozen=True)
 class Span(Target):
-    first: int | np.ndarray    # the first step, 1-based, or one per node: [N] int64
-    last: int | np.ndarray     # the last step, 1-based, or one per node: [N] int64
+    first: int | np.ndarray  # the first step, 1-based, or one per node: [N] int64
+    last: int | np.ndarray  # the last step, 1-based, or one per node: [N] int64
 ```
 
 Targets are frozen dataclasses, not Pydantic settings, because a `Span` per node holds
@@ -353,14 +363,14 @@ per node.
 | Id | Guarantee | Check |
 |---|---|---|
 | T1 | `Step` has H columns: column c covers step c + 1. `Span(first, last)` has one column, which covers the steps from `first` to `last` of each node | `test_targets.py` |
-| T2 | The point and the truth of a column are the sums over its steps, in float64, stored as float32. Either is NaN when one of its step values is NaN | `test_targets.py` |
+| T2 | The point and the truth of a column are the sums over its steps, in float64, stored as float32. Either is NaN when one of its step values is NaN. The score is conformalforecast's score of the stored point and truth, in float32 | `test_targets.py` |
 
 #### Split
 
 ```python
 class Split(BaseModel):
-    score: AbsoluteResidual | SignedResidual    # from conformalforecast.nonconformity
-    window: int                                 # at least 1
+    score: AbsoluteResidual | SignedResidual  # from conformalforecast.nonconformity
+    window: int  # at least 1
 ```
 
 `AbsoluteResidual` gives bands. `SignedResidual` gives bounds. `Split` holds settings only:
@@ -379,16 +389,17 @@ def replay(
     level: float | np.ndarray,
 ) -> Replay: ...
 
+
 @dataclass(frozen=True)
 class Replay:
-    origins: pd.DatetimeIndex    # [O]: the origins of the forecasts
-    point: np.ndarray            # [N, C, O] float32
-    truth: np.ndarray            # [N, C, O] float32
-    score: np.ndarray            # [N, C, O] float32
-    threshold: np.ndarray        # [N, C, O] float32
-    lower: np.ndarray            # [N, C, O] float32
-    upper: np.ndarray            # [N, C, O] float32
-    censored: np.ndarray         # [N, C, O] bool
+    origins: pd.DatetimeIndex  # [O]: the origins of the forecasts
+    point: np.ndarray  # [N, C, O] float32
+    truth: np.ndarray  # [N, C, O] float32
+    score: np.ndarray  # [N, C, O] float32
+    threshold: np.ndarray  # [N, C, O] float32
+    lower: np.ndarray  # [N, C, O] float32
+    upper: np.ndarray  # [N, C, O] float32
+    censored: np.ndarray  # [N, C, O] bool
 ```
 
 `forecasts` holds one model. Its series are the series of `truth`, in order, and each of its
@@ -451,8 +462,8 @@ numba. A pin changes only in a contract PR, with the checks run again.
 | `tests/contract/test_visibility.py` | F3, C1 |
 | `tests/contract/test_totals.py` | R5, C6 |
 | `tests/contract/test_censoring.py` | H2 for censored values, C7 |
-| `bench/gate_m5.py` | G1 |
-| `bench/gate_vn2.py` | G2 |
+| `bench/gate_m5.py`, with its run `bench/gate_m5_run.py` | G1 |
+| `bench/gate_vn2.py`, with its run `bench/gate_vn2_run.py` | G2 |
 
 The checks catch mistakes and drift. They cannot stop deliberate sabotage: the owners' review
 of each milestone diff is the last barrier.
@@ -469,12 +480,12 @@ other tests, with the root `pyproject.toml` as its only configuration. A skip or
 failure there fails CI, and so does a test id of `tests/contract/ids.txt` that did not pass.
 
 The visibility probes of F3 and C1 run at three origins: the second, the middle one and the
-one before the last. One probe replaces every value after the origin with seeded noise for
+one before the last. C1 also probes the first origin that has a ready cell. One probe replaces every value after the origin with seeded noise for
 points, and with 1e6 for `truth`. A second probe removes the data after the origin. In both,
 every output named in F3 and C1 that is issued at or before the origin stays the same, bit
 for bit. The probe panels start every series before the first probe origin.
 
-Each gate runs Calibre in a child process, in a new session, with a new temporary directory
+`bench/gate.py` holds the harness of both gates. Each gate runs Calibre in a child process, in a new session, with a new temporary directory
 as its `HOME`, `TMPDIR` and `XDG_CACHE_HOME`. A parent process that does not import `calibre` measures it. Another process
 that does not import `calibre` checks its outputs and computes the cost: it reads the raw
 data with the frozen readers of the M5 and VN2 loaders, and loads the frozen decision files by
@@ -488,8 +499,9 @@ three timed runs. The owners run it for each milestone PR on the gate machine, a
 Pro with 18 cores and 48 GB, with no other load. A campaign runs it too.
 
 - Data: M5 as 0.1 reads it, each bottom series over all 1,941 days, with the 12 standard
-  levels. Before it times anything, the gate checks the shape of the panel, the sum of its
-  values, the number of nodes, 42,840, and the sum of the values of the `total` node.
+  levels. Before it times anything, the gate checks the shape of the raw data and the sum of
+  its values. Its checker then checks the number of nodes, 42,840, and the sum of the values
+  of the `total` node.
 - Run: `StatsForecast(models=[SeasonalNaive(season_length=7)], freq="D", n_jobs=12)`, 64
   daily origins from 2016-02-21 to 2016-04-24, horizon 28, and `BottomUp`. Then `replay`
   with `Step()` and `Split(score=AbsoluteResidual(), window=28)` at level 0.9, and `replay`
@@ -532,8 +544,9 @@ Pro with 18 cores and 48 GB, with no other load. A campaign runs it too.
   where the truth is at or below the bound.
 
 **Frozen paths.** `docs/architecture.md`, `docs/semantics.md`, `AGENTS.md`,
-`tests/__init__.py`, `tests/contract/`, `bench/m5.py`, `bench/vn2.py`, `bench/gate_m5.py`,
-`bench/gate_vn2.py`, `bench/baselines/`, `src/calibre/decision/`, `pyproject.toml`,
+`tests/__init__.py`, `tests/contract/`, `bench/m5.py`, `bench/vn2.py`, `bench/gate.py`,
+`bench/gate_m5.py`, `bench/gate_m5_run.py`, `bench/gate_vn2.py`, `bench/gate_vn2_run.py`,
+`bench/baselines/`, `src/calibre/decision/`, `pyproject.toml`,
 `uv.lock`, `.python-version`, `CODEOWNERS` and `.github/`. A milestone PR changes none of them. It adds no
 file or directory at the root of the repository, in `bench/`, or in `src/` outside
 `src/calibre/`. It adds no `conftest.py`, `sitecustomize.py`, `usercustomize.py`, `.pth` or

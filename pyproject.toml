@@ -27,9 +27,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "numpy",
+    "numpy>=2.0",
     "pandas",
-    "scipy",
+    "scipy>=1.13",
+    "pydantic>=2.7",
+    "narwhals>=2.9",
+    "coreforecast==0.0.20",
+    "utilsforecast==0.2.17",
+    "conformalforecast==0.1.0",
 ]
 
 [project.urls]
@@ -40,20 +45,16 @@ Documentation = "https://github.com/Vzlentin/calibre/tree/main/docs"
 Changelog = "https://github.com/Vzlentin/calibre/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-bootstrap = ["scikit-learn"]
-stats = ["statsforecast"]
-ml = ["mlforecast"]
-neural = ["neuralforecast"]
+stats = ["statsforecast>=2.1,<2.2"]
 
 [dependency-groups]
 dev = [
+    "hierarchicalforecast>=1.5.3,<1.6",
     "ipykernel>=7.3.0",
-    "mlforecast",
-    "neuralforecast",
+    "psutil",
     "pytest",
-    "statsforecast",
     "ruff",
-    "scikit-learn",
+    "statsforecast>=2.1,<2.2",
     "ty",
 ]
 
