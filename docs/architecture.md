@@ -66,7 +66,7 @@ M0 does for M1. After 0.1 freezes, `v2` merges into `main`, and 0.1 stays as its
 
 | Milestone | Delivers |
 |---|---|
-| M0 | These documents and `AGENTS.md`. The checks of [Checks](#checks). The baselines of G2, measured with 0.1 first. The M5 and VN2 loaders, rewritten as raw readers that import no `calibre`: they give arrays and frames, and the VN2 loader holds the VN2 protocol, with the decision files loaded by path. `CODEOWNERS`, which makes the owners review each change of a frozen path. The dependencies of v2 in `pyproject.toml` and `uv.lock`. CI on the `v2` branch, with the frozen-path check. Its CI fails by design, because the v2 code does not exist yet, and the owners approve it by review. Before M0 merges, its author runs every frozen file once against a throwaway prototype of the M1 functions, to find defects in the checks. The prototype is not committed. A defect that M1 finds in a frozen file goes to a contract PR |
+| M0 | These documents and `AGENTS.md`. The checks of [Checks](#checks). The baselines of G2, measured with 0.1 first. The M5 and VN2 loaders, rewritten as raw readers that import no `calibre`: they give arrays and frames, and the VN2 loader holds the VN2 protocol, with the decision files loaded by path. The dependencies of v2 in `pyproject.toml` and `uv.lock`. CI on the `v2` branch, with the frozen-path check. Its CI fails by design, because the v2 code does not exist yet, and the owners approve it by review. Before M0 merges, its author runs every frozen file once against a throwaway prototype of the M1 functions, to find defects in the checks. The prototype is not committed. A defect that M1 finds in a frozen file goes to a contract PR |
 | M1 | The backtest on the new layout: every module in [Modules](#modules). Every check passes |
 | M2 | Production: `step` and its state, and a ledger that records the order and the stock in force at each origin |
 | M3 | The `Forecaster` contract and `Window` with covariates, `AR1` and `BootstrapEnsemble` on coreforecast, the mlforecast and neuralforecast engines |
@@ -547,13 +547,13 @@ Pro with 18 cores and 48 GB, with no other load. A campaign runs it too.
 `tests/__init__.py`, `tests/contract/`, `bench/m5.py`, `bench/vn2.py`, `bench/gate.py`,
 `bench/gate_m5.py`, `bench/gate_m5_run.py`, `bench/gate_vn2.py`, `bench/gate_vn2_run.py`,
 `bench/baselines/`, `src/calibre/decision/`, `pyproject.toml`,
-`uv.lock`, `.python-version`, `CODEOWNERS` and `.github/`. A milestone PR changes none of them. It adds no
+`uv.lock`, `.python-version` and `.github/`. A milestone PR changes none of them. It adds no
 file or directory at the root of the repository, in `bench/`, or in `src/` outside
 `src/calibre/`. It adds no `conftest.py`, `sitecustomize.py`, `usercustomize.py`, `.pth` or
 `pyproject.toml` file at any depth, and none of `pytest.ini`, `.pytest.ini`, `pytest.toml`,
 `.pytest.toml`, `tox.ini`, `setup.cfg`, `ruff.toml`, `.ruff.toml` and `ty.toml`. CI fails a PR into `v2` that does any of this, unless
-it has the label `contract`. `CODEOWNERS` and the protection of the `v2` branch make the owners
-approve each change of a frozen path, with or without the label.
+it has the label `contract`. The protection of the `v2` branch makes the owners approve each
+PR, with or without the label.
 
 **Done.** M1 and each later milestone are done when CI passes, with `ruff check`,
 `ruff format --check`, `ty check`, `pytest` and the frozen-path check, and when the owners

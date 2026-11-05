@@ -28,7 +28,6 @@ FROZEN = [
     "pyproject.toml",
     "uv.lock",
     ".python-version",
-    "CODEOWNERS",
     ".github/*",
 ]
 BANNED_NAMES = {
