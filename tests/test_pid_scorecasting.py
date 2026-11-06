@@ -91,7 +91,7 @@ def test_pid_thresholds_match_independent_delayed_feedback_calculation(model, ta
         np.array([2, 5, 3, 6, 4, 7, 5, 8])[:, None, None] * np.array([1, 2])[None, :, None]
         + np.arange(n_columns)[None, None, :]
     )
-    state = initial_state(target, method, n_nodes, 3)
+    state = initial_state(target, method, n_nodes, 3, score=Absolute())
     method.seed(state["calibrator"], seed)
     history = [
         [list(seed[-window:, node, column]) for column in range(n_columns)]
@@ -189,7 +189,7 @@ def test_pid_replay_is_causal_with_delayed_targets_and_gapped_origins(target, ah
     setup: dict[str, Any] = {"target": target, "score": Absolute(), "calibrator": method}
 
     def run(values):
-        state = initial_state(target, method, 2, 3)
+        state = initial_state(target, method, 2, 3, score=Absolute())
         shape = state["calibrator"]["count"].shape
         state["calibrator"] = method.seed(state["calibrator"], np.ones((3, *shape)))
         return replay(Forecasts(origins, points), values, state=state, **setup)
@@ -220,7 +220,7 @@ def test_pid_saved_state_resumes_exactly_with_pending_multi_step_targets(model):
     setup: dict[str, Any] = {"target": Step(), "score": Absolute(), "calibrator": method}
 
     def start():
-        state = initial_state(Step(), method, 2, 4)
+        state = initial_state(Step(), method, 2, 4, score=Absolute())
         state["calibrator"] = method.seed(state["calibrator"], seed)
         return state
 

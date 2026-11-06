@@ -10,7 +10,7 @@ from calibre import Absolute, Asymmetric, Feedback, Forecasts, LeadTime, Signed,
 from calibre.backtest import replay
 from calibre.conformal.calibrators.ranks import weighted_interval
 from calibre.conformal.calibrators.spci import SPCI
-from calibre.online import initial_state, step
+from calibre.online import initial_state
 from calibre.online.state import flatten, unflatten
 
 
@@ -284,7 +284,7 @@ def test_replay_matches_independent_delayed_origin_reference(target):
     calibrator = method(level=levels, ahead=ahead, n_lags=2, min_train_samples=2, window=7)
     seed = rng.normal(size=(6, 2, len(covered))).astype(np.float32)
     seed[2, 0, 0] = np.nan
-    state = initial_state(target, calibrator, 2, 3)
+    state = initial_state(target, calibrator, 2, 3, score=Asymmetric())
     state["calibrator"] = calibrator.seed(state["calibrator"], seed, origins=np.arange(6))
     result = replay(
         Forecasts(origins, points),
@@ -467,15 +467,6 @@ def test_duplicate_and_reordered_feedback_is_rejected():
 
 
 @pytest.mark.parametrize("score", [Absolute(), Signed()])
-def test_scalar_scores_are_rejected_at_the_first_online_step(score):
-    calibrator = method()
+def test_scalar_scores_are_rejected_at_setup(score):
     with pytest.raises(ValueError, match="parameter shape"):
-        step(
-            initial_state(Step(), calibrator, 1, 1),
-            3,
-            np.zeros((1, 1)),
-            np.zeros((1, 4)),
-            target=Step(),
-            score=score,
-            calibrator=calibrator,
-        )
+        initial_state(Step(), method(), 1, 1, score=score)

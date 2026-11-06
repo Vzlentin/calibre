@@ -15,7 +15,8 @@ from calibre.online.step import initial_state, step
 class Replay:
     """Calibration over origins `[O]`. Arrays are `[O, N, C]`.
 
-    Asymmetric thresholds have an additional trailing lower/upper axis of size two.
+    Forecasts in `point` have the score's trailing input shape. Asymmetric
+    thresholds have a trailing pair axis. Other arrays are scalar per target.
 
     `target` and `score` are NaN when the target is not known at the end of the data.
     `state` continues the run with `calibre.online.step`.
@@ -33,12 +34,9 @@ class Replay:
 
     @property
     def covered(self) -> np.ndarray:
-        """Coverage against issued scalar thresholds or paired bounds; NaN if unknown."""
+        """Membership in issued endpoints, including equality; NaN if unknown."""
         known = np.isfinite(self.score)
-        if self.threshold.ndim == self.score.ndim:
-            inside = self.score <= self.threshold
-        else:
-            inside = (self.lower <= self.target) & (self.target <= self.upper)
+        inside = (self.lower <= self.target) & (self.target <= self.upper)
         return np.where(known, inside.astype(np.float32), np.nan)
 
 
@@ -57,8 +55,15 @@ def replay(
     n_origins, n_nodes, horizon = forecasts.points.shape
     if censored is None:
         censored = np.zeros(actuals.shape, dtype=bool)
+    inputs = forecasts.points
+    if score.input_shape():
+        if forecasts.quantiles is None:
+            raise ValueError("this score requires forecasts with native quantiles")
+        inputs = forecasts.quantiles.values
+        if inputs.shape != forecasts.points.shape + score.input_shape():
+            raise ValueError("native quantiles must match the forecast origins, nodes and horizon")
     if state is None:
-        state = initial_state(target, calibrator, n_nodes, horizon)
+        state = initial_state(target, calibrator, n_nodes, horizon, score=score)
     issued = []
     previous = int(state["ledger"]["last"])
     for index, origin in enumerate(origins):
@@ -66,7 +71,7 @@ def replay(
         state, out = step(
             state,
             int(origin),
-            forecasts.points[index],
+            inputs[index],
             actuals[:, seen],
             target=target,
             score=score,

@@ -115,12 +115,13 @@ class ConformalPID(Calibrator):
             raise ValueError("ConformalPID requires seed before feedback")
         with np.errstate(over="ignore", invalid="ignore"):
             scores = feedback.scores
+            misses = feedback.miss
         if (scores[np.isfinite(scores)] < 0).any():
             raise ValueError("ConformalPID requires nonnegative scalar scores, normally Absolute")
         levels = np.broadcast_to(self.level, state["count"].shape)
         for row, column in enumerate(feedback.column):
             nodes = np.flatnonzero(np.isfinite(scores[row]))
-            error = (scores[row, nodes] > feedback.issued[row, nodes]) - (1 - levels[nodes, column])
+            error = misses[row, nodes] - (1 - levels[nodes, column])
             state["proportional"][nodes, column] += (
                 self.learning_rate * state["scale"][nodes, column] * error
             )

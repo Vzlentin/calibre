@@ -115,7 +115,9 @@ def test_a_saved_and_reloaded_state_continues_exactly():
     }
     whole = replay(Forecasts(origins, points), actuals, **setup)
 
-    state = initial_state(setup["target"], setup["calibrator"], n_nodes=4, horizon=3)
+    state = initial_state(
+        setup["target"], setup["calibrator"], n_nodes=4, horizon=3, score=setup["score"]
+    )
     previous, issued = -1, []
     for index, origin in enumerate(origins):
         if index == 30:
@@ -133,10 +135,51 @@ def test_a_saved_and_reloaded_state_continues_exactly():
 
 def test_step_needs_every_period_since_the_last_origin():
     setup: dict[str, Any] = {"target": Step(), "score": Signed(), "calibrator": SplitQuantile(0.5)}
-    state = initial_state(setup["target"], setup["calibrator"], 1, 2)
+    state = initial_state(setup["target"], setup["calibrator"], 1, 2, score=setup["score"])
     state, _ = step(state, 10, np.zeros((1, 2)), np.zeros((1, 11)), **setup)
     with pytest.raises(ValueError, match="needs 3 new periods"):
         step(state, 13, np.zeros((1, 2)), np.zeros((1, 2)), **setup)
+
+
+@pytest.mark.parametrize("score", [Absolute(), Signed()])
+@pytest.mark.parametrize(
+    "initial_target,target,horizon",
+    [
+        (Step(), LeadTime(2), 2),  # Same reach, different number of columns.
+        (LeadTime(2), LeadTime(1), 2),  # Same column count, different reach.
+        (Step(), Step(), 3),  # Changed forecast horizon.
+    ],
+)
+def test_saved_state_rejects_incompatible_target_or_horizon_without_mutation(
+    score, initial_target, target, horizon
+):
+    method = SplitQuantile(0.5)
+    state = initial_state(initial_target, method, 1, 2, score=score)
+    state, _ = step(
+        state,
+        0,
+        np.zeros((1, 2)),
+        np.zeros((1, 1)),
+        target=initial_target,
+        score=score,
+        calibrator=method,
+    )
+    before = {key: value.copy() for key, value in flatten(state).items()}
+    restored = unflatten({key: value.copy() for key, value in before.items()})
+    with pytest.raises(
+        ValueError, match="forecast horizon and target do not match the saved state"
+    ):
+        step(
+            restored,
+            1,
+            np.zeros((1, horizon)),
+            np.ones((1, 1)),
+            target=target,
+            score=score,
+            calibrator=method,
+        )
+    for key, value in flatten(restored).items():
+        np.testing.assert_array_equal(value, before[key])
 
 
 def test_covered_matches_the_issued_interval():

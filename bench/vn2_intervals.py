@@ -49,9 +49,9 @@ spci = SPCI(level, window, n_lags=7, ahead=vn2.PROTECTION)
 # Seed only errors whose full target is known at the first decision.
 known = forecasts.origins + vn2.PROTECTION <= data.decisions[0]
 residuals = columns(forecasts.residuals(data.panel.values)[known], target.cover(vn2.PROTECTION))
-enbpi_state = initial_state(target, enbpi, n_series, vn2.PROTECTION)
+enbpi_state = initial_state(target, enbpi, n_series, vn2.PROTECTION, score=Asymmetric())
 enbpi_state["calibrator"] = enbpi.seed(enbpi_state["calibrator"], residuals)
-spci_state = initial_state(target, spci, n_series, vn2.PROTECTION)
+spci_state = initial_state(target, spci, n_series, vn2.PROTECTION, score=Asymmetric())
 spci_state["calibrator"] = spci.seed(
     spci_state["calibrator"], residuals, origins=forecasts.origins[known]
 )
