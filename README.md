@@ -66,7 +66,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`, `CQR`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`, `CQR`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `NexCP`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -188,6 +188,26 @@ model = NeuralForecast(
 For precomputed arrays, replace `forecasts` with
 `Forecasts(origins, points, quantiles=Quantiles(raw_quantiles, (0.05, 0.95)))`
 (`Forecasts` and `Quantiles` are imported from `calibre`).
+
+## NexCP
+
+Using the quick-start forecasts:
+
+```python
+from calibre import NexCP
+
+bands = replay(
+    run,
+    actuals,
+    target=Step(),
+    score=Absolute(),
+    calibrator=NexCP(0.9, rho=0.99, window=200),
+)
+```
+
+`NexCP` geometrically weights finite scores per node and column, with a unit test mass at `+inf`.
+Configured levels must be below `rho`. It shares split storage and seeding;
+`window` selects scores, while `capacity` bounds stored origins.
 
 ## EnbPI
 

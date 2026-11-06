@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from calibre.backtest import Forecasts, replay
-from calibre.conformal.calibrators import ACI, Feedback, QuantileTracker, SplitQuantile
+from calibre.conformal.calibrators import ACI, Feedback, NexCP, QuantileTracker, SplitQuantile
 from calibre.conformal.scores import Signed
 from calibre.conformal.targets import Step
 from calibre.decision import critical_ratio
@@ -63,6 +63,89 @@ def test_split_quantile_capacity_keeps_the_last_origins_and_fills_late_columns()
     by_origin = state["scores"][:, :size, 0].T  # [R, C]
     assert np.nan_to_num(by_origin, nan=-1).tolist() == [[2, -1], [3, 7]]
     assert len(state["origin"]) == 2
+
+
+@pytest.mark.parametrize("method", [SplitQuantile(0.5, window=2), NexCP(0.5, rho=0.75, window=2)])
+def test_split_seed_keeps_held_out_origins_before_online_feedback(method):
+    samples = np.array(
+        [
+            [[100, 10], [200, 20]],
+            [[1, 11], [np.nan, 21]],
+            [[np.nan, 12], [3, np.nan]],
+            [[4, 13], [5, 23]],
+        ],
+        dtype=np.float32,
+    )
+    state = method.seed(method.initial_state(2, 2), samples)
+    assert sorted(state) == ["known", "origin", "scores", "size"]
+    np.testing.assert_array_equal(state["origin"], [-4, -3, -2, -1])
+    np.testing.assert_array_equal(state["known"], np.ones((4, 2), dtype=bool))
+    np.testing.assert_array_equal(method.threshold(state), [[4, 13], [5, 23]])
+    samples[:] = 999
+    np.testing.assert_array_equal(method.threshold(state), [[4, 13], [5, 23]])
+    for column, values in enumerate([[6, 7], [14, 24]]):
+        row = Feedback(
+            origin=np.array([0]),
+            column=np.array([column]),
+            point=np.zeros((1, 2), dtype=np.float32),
+            target=np.array([values], dtype=np.float32),
+            issued=np.zeros((1, 2), dtype=np.float32),
+            censored=np.zeros((1, 2), dtype=bool),
+            score=Signed(),
+        )
+        state = method.update(state, row)
+    np.testing.assert_array_equal(state["origin"][: int(state["size"])], [-4, -3, -2, -1, 0])
+    np.testing.assert_array_equal(method.threshold(state), [[6, 14], [7, 24]])
+
+
+def test_split_seed_preserves_grouped_resolved_row_retention():
+    method = SplitQuantile(0.5, window=2, groups=np.array([0, 0]))
+    samples = np.array([[[100], [200]], [[1], [np.nan]], [[np.nan], [3]], [[4], [5]]])
+    state = method.seed(method.initial_state(2, 1), samples)
+    np.testing.assert_array_equal(method.threshold(state), [[4], [4]])
+
+
+@pytest.mark.parametrize("method", [SplitQuantile(0.5), NexCP(0.5)])
+def test_split_validates_seed_and_alternative_levels(method):
+    state = method.initial_state(1, 2)
+    with pytest.raises(ValueError, match="level"):
+        method.threshold_at(state, 1)
+    with pytest.raises(ValueError, match="matching"):
+        method.seed(state, np.zeros((3, 2, 1)))
+    with pytest.raises(ValueError, match="finite"):
+        method.seed(state, np.full((3, 1, 2), np.inf))
+    state = method.seed(state, np.empty((0, 1, 2)))
+    assert np.isposinf(method.threshold(state)).all()
+    state = method.update(state, feedback(0, np.nan, 0))
+    with pytest.raises(ValueError, match="empty"):
+        method.seed(state, np.ones((1, 1, 2)))
+
+
+@pytest.mark.parametrize(
+    "method",
+    [SplitQuantile(0.5, window=2, capacity=4), NexCP(0.5, rho=0.75, window=2, capacity=4)],
+)
+def test_split_capacity_bounds_seed_and_subsequent_origins(method):
+    samples = np.arange(7, dtype=np.float32).reshape(7, 1, 1)
+    state = method.seed(method.initial_state(1, 1), samples)
+    np.testing.assert_array_equal(state["origin"], [-4, -3, -2, -1])
+    np.testing.assert_array_equal(state["scores"], [[[3], [4], [5], [6]]])
+    for origin in range(6):
+        state = method.update(state, feedback(origin, origin + 7, 0))
+        assert int(state["size"]) == len(state["origin"]) == 4
+    np.testing.assert_array_equal(state["origin"], [2, 3, 4, 5])
+    np.testing.assert_array_equal(method.threshold(state), [[12]])
+
+
+@pytest.mark.parametrize("method_type", [SplitQuantile, NexCP])
+def test_capacity_can_discard_finite_scores_across_missing_origins(method_type):
+    samples = np.array([9, np.nan, 1, np.nan]).reshape(4, 1, 1)
+    unbounded = method_type(0.6, window=2)
+    bounded = method_type(0.6, window=2, capacity=3)
+    full = unbounded.seed(unbounded.initial_state(1, 1), samples)
+    limited = bounded.seed(bounded.initial_state(1, 1), samples)
+    np.testing.assert_array_equal(unbounded.threshold(full), [[9]])
+    assert np.isposinf(bounded.threshold(limited)).all()
 
 
 def test_aci_holds_long_run_coverage_through_a_shift_where_split_does_not():

@@ -44,26 +44,21 @@ def retained_quantile(
     window: int | None = None,
     groups: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Quantile per node `[N]` from scores `[K, N]` in origin order. NaN is no score.
+    """Quantile per node [N] from scores [K, N] in origin order. NaN is no score.
 
     `window` keeps the last K resolved rows per pool, before pooling. A row is resolved
     for a pool when it has at least one finite score there, so holes do not consume
     rows. `groups` has one integer per node: equal labels pool their scores, and every
     member gets the pool quantile. `level` is a scalar or one value per node.
     """
-    if window is not None:
-        if window < 1:
-            raise ValueError(f"window must be at least 1, got {window}")
-        # Fast path: when the last K rows are complete, they are the retained rows.
-        if np.isfinite(scores[-window:]).all():
-            scores = scores[-window:]
+    if window is not None and window < 1:
+        raise ValueError(f"window must be at least 1, got {window}")
     if groups is None:
         if window is not None and len(scores) > window:
-            finite = np.isfinite(scores)
-            retained = np.cumsum(finite[::-1], axis=0)[::-1] <= window
-            scores = np.where(finite & retained, scores, np.nan)
-            scores = scores[np.isfinite(scores).any(axis=1)]
+            scores, _ = _retained_scores(scores, window)
         return _finite_quantile(scores, level)
+    if window is not None and np.isfinite(scores[-window:]).all():
+        scores = scores[-window:]
     levels = np.broadcast_to(level, (scores.shape[1],))
     out = np.full(scores.shape[1], np.inf, dtype=np.float32)
     order = np.argsort(groups)
@@ -74,6 +69,26 @@ def retained_quantile(
         if window is not None:
             pool = pool[-window:]
         out[columns] = score_quantile(pool[np.isfinite(pool)], levels[columns])
+    return out
+
+
+def recency_quantile(
+    scores: np.ndarray, level: float | np.ndarray, window: int | None, rho: float
+) -> np.ndarray:
+    """Geometric split rank per node [N], with newest weight rho and test mass 1.
+
+    Scores [K, N] are in origin order. Callers validate level, window and rho.
+    """
+    if rho == 1:
+        return retained_quantile(scores, level, window)
+    levels = np.broadcast_to(np.asarray(level, dtype=np.float64), (scores.shape[1],))
+    out = np.full(scores.shape[1], np.inf, dtype=np.float32)
+    # Finite geometric histories have finite-mass CDF strictly below rho.
+    ready = levels < rho
+    if ready.any():
+        scores, age = _retained_scores(scores[:, ready], window)
+        weights = np.where(np.isfinite(scores), np.power(rho, age), 0.0)
+        out[ready] = _weighted_quantile(scores, weights, levels[ready])
     return out
 
 
@@ -185,6 +200,41 @@ def _shortest_interval(
     lower, upper = ordered[ranks, columns]
     best = np.argmin(upper - lower, axis=0)
     return np.stack([lower[best, columns], upper[best, columns]], axis=-1).astype(np.float32)
+
+
+def _retained_scores(scores: np.ndarray, window: int | None) -> tuple[np.ndarray, np.ndarray]:
+    """Retain finite scores and their per-node ages, with empty rows removed."""
+    if window is not None and np.isfinite(scores[-window:]).all():
+        # Complete windows need neither a cumulative count nor a masked copy.
+        scores = scores[-window:]
+        age = np.broadcast_to(np.arange(len(scores), 0, -1)[:, None], scores.shape)
+        return scores, age
+    finite = np.isfinite(scores)
+    age = np.cumsum(finite[::-1], axis=0)[::-1]
+    retained = finite if window is None else finite & (age <= window)
+    rows = retained.any(axis=1)
+    return np.where(retained, scores, np.nan)[rows], age[rows]
+
+
+def _weighted_quantile(
+    scores: np.ndarray, weights: np.ndarray, level: float | np.ndarray
+) -> np.ndarray:
+    """Inverse CDF per column, with unit test mass at +inf and no interpolation.
+
+    Caller supplies masked [K, N] scores and weights, with zero mass for missing
+    scores and valid levels. Accumulate masses in float64.
+    """
+    out = np.full(scores.shape[1], np.inf, dtype=np.result_type(scores.dtype, np.float32))
+    if len(scores) == 0:
+        return out
+    order = np.argsort(scores, axis=0, kind="stable")
+    ordered = np.take_along_axis(scores, order, axis=0)
+    cumulative = np.cumsum(np.take_along_axis(weights, order, axis=0), axis=0, dtype=np.float64)
+    reached = cumulative >= level * (1.0 + cumulative[-1])
+    ready = reached.any(axis=0)
+    columns = np.flatnonzero(ready)
+    out[columns] = ordered[np.argmax(reached[:, ready], axis=0), columns]
+    return out
 
 
 def _finite_quantile(scores: np.ndarray, level: float | np.ndarray) -> np.ndarray:
