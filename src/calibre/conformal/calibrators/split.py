@@ -9,7 +9,7 @@ from calibre.conformal.calibrators.base import (
     State,
     check_level,
 )
-from calibre.conformal.calibrators.ranks import retained_quantile
+from calibre.conformal.calibrators.ranks import recency_quantile, retained_quantile
 
 
 class SplitQuantile(QuantileCalibrator):
@@ -17,8 +17,9 @@ class SplitQuantile(QuantileCalibrator):
 
     `window` keeps the last resolved origins per pool, `groups` pools nodes (one
     integer per node). `capacity` bounds the stored origins, so the saved state has a
-    fixed size. With a window, keep `capacity` above the window plus the number of
-    origins whose scores are not known yet. None keeps every origin.
+    fixed size. Capacity must retain origins while any columns can still arrive;
+    smaller capacities are unsupported. Preserving a finite-score window across
+    missing values can require more origins still. None keeps every origin.
     """
 
     def __init__(
@@ -46,6 +47,30 @@ class SplitQuantile(QuantileCalibrator):
             "scores": np.empty((n_columns, 0, n_nodes), dtype=np.float32),
         }
 
+    def seed(self, state: State, scores: np.ndarray) -> State:
+        """Seed an empty state with held-out scores [K, N, C] in time order.
+
+        Scores must be known before issuance, with NaN for missing values.
+        Negative origin indexes keep seeds before subsequent online feedback.
+        """
+        scores = np.asarray(scores, dtype=np.float32)
+        n_columns, _, n_nodes = state["scores"].shape
+        if scores.ndim != 3 or scores.shape[1:] != (n_nodes, n_columns):
+            raise ValueError("seed scores must be [K, N, C] matching the state")
+        if np.isinf(scores).any():
+            raise ValueError("seed scores must be finite or NaN")
+        if int(state["size"]):
+            raise ValueError("seed requires an empty calibration state")
+        if self.capacity is not None:
+            scores = scores[-self.capacity :]
+        size = len(scores)
+        return {
+            "size": np.array(size, dtype=np.int64),
+            "origin": np.arange(-size, 0, dtype=np.int64),
+            "known": np.ones((size, n_columns), dtype=bool),
+            "scores": scores.transpose(2, 0, 1).copy(),
+        }
+
     def update(self, state: State, feedback: Feedback) -> State:
         for origin in np.unique(feedback.origin):
             state, _ = _row(state, int(origin), self.capacity)
@@ -61,7 +86,7 @@ class SplitQuantile(QuantileCalibrator):
     def threshold_at(self, state: State, level: Level) -> np.ndarray:
         size = int(state["size"])
         n_columns, _, n_nodes = state["scores"].shape
-        levels = np.broadcast_to(np.asarray(level, dtype=np.float64), (n_nodes, n_columns))
+        levels = np.broadcast_to(check_level(level), (n_nodes, n_columns))
         out = np.empty((n_nodes, n_columns), dtype=np.float32)
         for column in range(n_columns):
             column_level = levels[:, column]
@@ -69,13 +94,41 @@ class SplitQuantile(QuantileCalibrator):
             # Known rows come first: origins of one column become known in origin order.
             known = state["known"][:size, column]
             stop = size - int(np.argmax(known[::-1])) if known.any() else 0
-            out[:, column] = retained_quantile(
-                state["scores"][column, :stop],
-                column_level[0] if same else column_level,
-                self.window,
-                self.groups,
+            out[:, column] = self._rank(
+                state["scores"][column, :stop], column_level[0] if same else column_level
             )
         return out
+
+    def _rank(self, scores: np.ndarray, level: Level) -> np.ndarray:
+        return retained_quantile(scores, level, self.window, self.groups)
+
+
+class NexCP(SplitQuantile):
+    """Split conformal with geometric calibration weights, independently per cell.
+
+    Retained scores have chronological weights rho**n, ..., rho, with unit test
+    mass at +inf. Missing scores do not age the history. `rho=1` recovers split.
+    Configured levels must be strictly below rho. State, held-out seeding, updates
+    and capacity are shared with SplitQuantile.
+    Reference: Barber et al., https://arxiv.org/abs/2202.13415, equation (11).
+    """
+
+    def __init__(
+        self,
+        level: Level,
+        rho: float = 0.99,
+        window: int | None = None,
+        capacity: int | None = None,
+    ) -> None:
+        if not 0 < rho <= 1:
+            raise ValueError("rho must be strictly above zero and at most one")
+        super().__init__(level, window=window, capacity=capacity)
+        if np.any(self.level >= rho):
+            raise ValueError("level must be strictly below rho")
+        self.rho = rho
+
+    def _rank(self, scores: np.ndarray, level: Level) -> np.ndarray:
+        return recency_quantile(scores, level, self.window, self.rho)
 
 
 def _row(state: State, origin: int, capacity: int | None) -> tuple[State, int]:

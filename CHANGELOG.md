@@ -15,6 +15,10 @@ All notable changes are listed here. The format follows
 - CQR scores composed with `SplitQuantile`, with native quantiles trained by
   MLForecast or NeuralForecast. `FittedQuantiles`, `QuantileForecast` and `Quantiles`
   expose native predictions.
+- `NexCP` split calibration with geometric recency weights, a unit test-point mass
+  at infinity, optional per-node/column score windows, explicit held-out seeding,
+  and NumPy-only state continuation with optional origin capacity. Held-out seeding
+  is also available on plain `SplitQuantile`.
 - `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
   tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
   Controller state is NumPy-only and resumes through the existing online/replay API.

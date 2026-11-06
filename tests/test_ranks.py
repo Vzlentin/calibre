@@ -6,6 +6,7 @@ import pytest
 from calibre.conformal.calibrators.ranks import (
     empirical_interval,
     empirical_quantile,
+    recency_quantile,
     retained_quantile,
     score_quantile,
     weighted_interval,
@@ -266,6 +267,33 @@ def test_step_thresholds_is_inf_until_ready_and_ignores_unresolved_rows():
     ready = step_thresholds(resid, rows=np.array([9]), level=0.9)
     assert ready.tolist() == [[0.0], [0.0], [0.0]]
     assert np.isinf(step_thresholds(resid, rows=np.array([0]), level=0.9)).all()
+
+
+def test_recency_weights_use_finite_score_age_and_guard_each_node():
+    scores = np.array([[1, np.inf, 1], [np.nan, 2, 2], [9, 4, 3]], dtype=np.float32)
+    level = np.array([0.5, 0.75, 0.1])
+    np.testing.assert_array_equal(recency_quantile(scores, level, None, 0.75), [9, np.inf, 1])
+    np.testing.assert_array_equal(
+        recency_quantile(scores, level, window=2, rho=0.75), [9, np.inf, 2]
+    )
+    assert np.isposinf(recency_quantile(np.empty((0, 3)), level, None, 0.75)).all()
+
+
+def test_split_and_recency_share_the_finite_score_window():
+    scores = np.array(
+        [
+            [100, 200, np.nan],
+            [1, np.nan, np.nan],
+            [np.nan, np.nan, np.nan],
+            [np.nan, 10, np.nan],
+            [2, 20, np.nan],
+            [9, 30, np.nan],
+        ],
+        dtype=np.float32,
+    )
+    scores.flags.writeable = False
+    np.testing.assert_array_equal(retained_quantile(scores, 0.5, window=3), [2, 20, np.inf])
+    np.testing.assert_array_equal(recency_quantile(scores, 0.5, 3, 0.75), [9, 30, np.inf])
 
 
 def test_window_must_keep_at_least_one_row():
