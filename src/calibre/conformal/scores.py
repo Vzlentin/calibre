@@ -1,4 +1,4 @@
-"""Residual scores and the bounds issued from their calibration parameters.
+"""Nonconformity scores and the bounds indexed by their calibration parameters.
 
 Scalar parameters index nested bounds: a score is the smallest threshold that holds
 the target. Asymmetric intervals instead take a pair of signed residual quantiles;
@@ -12,20 +12,27 @@ import numpy as np
 
 class Score(ABC):
     @abstractmethod
+    def input_shape(self) -> tuple[int, ...]:
+        """Trailing forecast axes: () for points, (2,) for native quantiles."""
+
+    @abstractmethod
     def parameter_shape(self) -> tuple[int, ...]:
-        """Trailing parameter axes: () for a scalar, (2,) for lower/upper corrections."""
+        """Trailing parameter axes: () for a scalar, (2,) for paired corrections."""
 
     @abstractmethod
     def score(self, target: np.ndarray, point: np.ndarray) -> np.ndarray:
-        """Nonconformity from targets and points of the same shape."""
+        """Nonconformity with the target shape from forecasts with input_shape()."""
 
     @abstractmethod
     def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Lower and upper bounds with the point shape, from the issued parameters."""
+        """Lower and upper bounds from the forecast and issued parameters."""
 
 
 class Absolute(Score):
     """`|target - point|`. The bound is a two-sided band."""
+
+    def input_shape(self) -> tuple[int, ...]:
+        return ()
 
     def parameter_shape(self) -> tuple[int, ...]:
         return ()
@@ -42,6 +49,9 @@ class Signed(Score):
 
     On a `LeadTime` target, it bounds the total. It is not a sum of per-step bounds.
     """
+
+    def input_shape(self) -> tuple[int, ...]:
+        return ()
 
     def parameter_shape(self) -> tuple[int, ...]:
         return ()
@@ -61,6 +71,9 @@ class Asymmetric(Score):
     threshold and must not be used with scalar quantile or risk calibrators.
     """
 
+    def input_shape(self) -> tuple[int, ...]:
+        return ()
+
     def parameter_shape(self) -> tuple[int, ...]:
         return (2,)
 
@@ -71,3 +84,19 @@ class Asymmetric(Score):
         if threshold.shape != point.shape + (2,):
             raise ValueError("asymmetric parameters must have shape point.shape + (2,)")
         return point + threshold[..., 0], point + threshold[..., 1]
+
+
+class CQR(Score):
+    """Conformalized quantile regression from ordered native quantiles."""
+
+    def input_shape(self) -> tuple[int, ...]:
+        return (2,)
+
+    def parameter_shape(self) -> tuple[int, ...]:
+        return ()
+
+    def score(self, target: np.ndarray, point: np.ndarray) -> np.ndarray:
+        return np.maximum(point[..., 0] - target, target - point[..., 1])
+
+    def bound(self, point: np.ndarray, threshold: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return point[..., 0] - threshold, point[..., 1] + threshold

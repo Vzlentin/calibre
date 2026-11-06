@@ -9,7 +9,7 @@ class ACI(Calibrator):
     """Adaptive conformal inference (Gibbs and Candès 2021), per node and column.
 
     After each known score, the working level moves by `gamma * (miss - (1 - level))`,
-    where a miss is a score above the threshold that was issued for it. The base
+    where a miss is a target outside the bounds that were issued for it. The base
     calibrator gives the threshold at the working level. The target level is the level
     of the base. A working level at or above one gives an infinite threshold, at or
     below zero an empty interval.
