@@ -12,6 +12,9 @@ All notable changes are listed here. The format follows
   contexts, quantile-forest leaf weights, shortest-interval beta search, explicit
   dated seeding, and deterministic NumPy-only continuation. It shares the `bootstrap`
   extra for scikit-learn; point models and origin loops are unchanged.
+- CQR scores composed with `SplitQuantile`, with native quantiles trained by
+  MLForecast or NeuralForecast. `FittedQuantiles`, `QuantileForecast` and `Quantiles`
+  expose native predictions.
 - `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
   tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
   Controller state is NumPy-only and resumes through the existing online/replay API.
@@ -24,6 +27,11 @@ All notable changes are listed here. The format follows
 
 ### Changed
 
+- Feedback misses and replay coverage use issued endpoints for every score,
+  including equality at float32 boundaries.
+- `Score.input_shape()` describes its forecast input. The ledger, feedback, issue
+  and replay carry one shaped forecast array. Online `initial_state` requires the
+  score to allocate the ledger and check parameter compatibility.
 - The `Score` contract declares its parameter shape. `Asymmetric` uses two
   residual corrections; the ledger archives them and asymmetric feedback/replay
   coverage evaluates issued endpoints rather than assuming a scalar threshold.

@@ -66,7 +66,7 @@ C target columns (H for `Step`, 1 for `LeadTime`).
 |---|---|
 | Data | `Panel`, `Hierarchy`, `Covariate` |
 | Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
+| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`, `CQR`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle` |
 | Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
 
@@ -98,10 +98,8 @@ class Tracker(Calibrator):
         return {"q": np.zeros((n_nodes, n_columns))}
 
     def update(self, state, feedback):
-        q = state["q"].copy()
-        for row, column in enumerate(feedback.column):  # one row = one origin, one column
-            miss = feedback.scores[row] > feedback.issued[row]
-            q[:, column] += self.lr * (miss - (1 - self.level))
+        misses, known = feedback.misses(state["q"].shape[1])
+        q = state["q"] + self.lr * (misses - (1 - self.level) * known)
         return {"q": q}
 
     def threshold(self, state):
@@ -143,6 +141,54 @@ run = rolling_forecasts(
 )
 ```
 
+## CQR
+
+Install `libcalibre[ml]`. Using `panel`, `hierarchy` and `actuals` from the quick start:
+
+```python
+from sklearn.linear_model import QuantileRegressor, Ridge
+
+from calibre import CQR, Identity
+from calibre.forecast.models.mlforecast import MLForecast
+
+model = MLForecast(
+    Ridge(),
+    lags=[1, 7],
+    quantile_models={
+        0.05: QuantileRegressor(quantile=0.05, alpha=0.1),
+        0.95: QuantileRegressor(quantile=0.95, alpha=0.1),
+    },
+)
+forecasts = rolling_forecasts(
+    panel, hierarchy, model, Identity(hierarchy), np.arange(60, 113), 7, refit_every=14
+)
+intervals = replay(
+    forecasts,
+    actuals,
+    target=Step(),
+    score=CQR(),
+    calibrator=SplitQuantile(0.9, window=28),
+)
+print(intervals.covered.mean())
+```
+
+With `libcalibre[neural]`, replace `model` above with a NeuralForecast model:
+
+```python
+from neuralforecast.models import MLP
+from calibre.forecast.models.neuralforecast import NeuralForecast
+
+model = NeuralForecast(
+    MLP,
+    {"input_size": 7, "max_steps": 20, "val_check_steps": 20, "accelerator": "cpu"},
+    quantiles=(0.05, 0.95),
+)
+```
+
+For precomputed arrays, replace `forecasts` with
+`Forecasts(origins, points, quantiles=Quantiles(raw_quantiles, (0.05, 0.95)))`
+(`Forecasts` and `Quantiles` are imported from `calibre`).
+
 ## EnbPI
 
 Install `libcalibre[bootstrap]` for the scikit-learn bootstrap adapter. Forecasting
@@ -169,7 +215,7 @@ forecasts = rolling_forecasts(
 seed = forecasts.initial_residuals
 assert seed is not None
 calibrator = EnbPI(level=0.9, window=len(seed.values))
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1)
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1, score=Asymmetric())
 state["calibrator"] = calibrator.seed(state["calibrator"], seed.values)
 intervals = replay(
     forecasts,
@@ -239,7 +285,7 @@ calibrator = ConformalPID(
     scorecast_window=64,
     ahead=np.arange(1, 8),
 )
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7)
+state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7, score=Absolute())
 state["calibrator"] = calibrator.seed(state["calibrator"], scores)
 intervals = replay(
     run, actuals, target=Step(), score=Absolute(), calibrator=calibrator, state=state
