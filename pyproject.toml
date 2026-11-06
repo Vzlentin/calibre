@@ -56,6 +56,17 @@ dev = [
     "scikit-learn",
     "ty",
 ]
+notebook = [
+    "ipykernel",
+    "ipython",
+    "jupyterlab",
+    "matplotlib",
+    "mlforecast",
+    "scikit-learn",
+    "seaborn",
+    "statsmodels",
+    "threadpoolctl",
+]
 
 [tool.uv.build-backend]
 # The distribution is libcalibre because PyPI already has calibre; the import name stays calibre.
@@ -87,3 +98,6 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.ty.environment]
 python-version = "3.12"
+
+[tool.ty.src]
+exclude = ["notebooks/"]
