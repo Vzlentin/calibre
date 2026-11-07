@@ -1,6 +1,7 @@
 """F1, F2, F4, F5, F6: `rolling_forecasts`, `Forecasts`, `Forecasts.from_cv` and `select`."""
 
 import dataclasses
+from collections.abc import Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -10,7 +11,7 @@ import pytest
 from statsforecast import StatsForecast
 from statsforecast.models import Naive
 
-from calibre import Forecasts, Panel, rolling_forecasts
+from calibre import Forecaster, Forecasts, Panel, Window, rolling_forecasts
 
 from . import _reference
 from ._engines import engine
@@ -424,6 +425,8 @@ def test_from_cv_input_conditions():
         (cv, np.array(["a", "b"]), None),
         (short, series, None),
         (duplicated, series, None),
+        (cv.drop(columns="unique_id"), series, None),
+        (cv.drop(columns="ds"), series, None),
         (cv.drop(columns="cutoff"), series, None),
         (as_text, series, None),
         (cv, series, ["m3"]),
@@ -431,6 +434,17 @@ def test_from_cv_input_conditions():
     for frame, ids, models in cases:
         with pytest.raises(ValueError):
             Forecasts.from_cv(frame, series=ids, horizon=3, models=models)
+    renamed = cv.rename(columns={"unique_id": "item", "ds": "date", "y": "sales"})
+    for col in ("item", "date", "cutoff"):
+        with pytest.raises(ValueError):
+            Forecasts.from_cv(
+                renamed.drop(columns=col),
+                series=series,
+                horizon=3,
+                id_col="item",
+                time_col="date",
+                target_col="sales",
+            )
 
 
 def test_select():
@@ -474,3 +488,50 @@ def test_forecasts_constructor():
             make(**{**good, **change})
     with pytest.raises(TypeError):
         make(**{**good, "origins": list(origins)})
+
+
+class _LastMeanForecaster(Forecaster):
+    local = True
+
+    def __init__(self, alias: str = "last_mean") -> None:
+        self._alias = alias
+
+    @property
+    def models(self) -> list[str]:
+        return [self._alias]
+
+    def forecast(self, panel: Panel, windows: Sequence[Window], horizon: int) -> np.ndarray:
+        out = np.full((1, len(panel.series), horizon, len(windows)), np.nan, np.float32)
+        for o, win in enumerate(windows):
+            for s in range(len(panel.series)):
+                lo, hi = int(win.start[s]), int(win.stop[s])
+                if lo < hi:
+                    out[0, s, :, o] = np.float32(panel.data[lo:hi].mean(dtype=np.float64))
+        return out
+
+
+def test_window_and_forecaster():
+    """F1, F4, F5: Window.at slices each series through the origin, and rolling_forecasts runs
+    Forecaster engines alongside StatsForecast engines."""
+    panel = to_panel(ragged_dense())
+    win = Window.at(panel, 25, lookback=10)
+    assert win.origin == 25
+    assert win.start.dtype == np.int64 and win.stop.dtype == np.int64
+    assert not win.start.flags.writeable and not win.stop.flags.writeable
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cast(Any, win).origin = 0
+    make_win: Any = Window
+    for bad in (
+        {"origin": -1, "start": win.start, "stop": win.stop},
+        {"origin": 1, "start": win.start[:2], "stop": win.stop},
+        {"origin": 1, "start": win.stop + 1, "stop": win.stop},
+    ):
+        with pytest.raises(ValueError):
+            make_win(**bad)
+    origins = panel.periods[[25, 35, 45]]
+    sf = engine([("Naive", {})], "D")
+    custom = _LastMeanForecaster("custom_mean")
+    got = rolling_forecasts(panel, [sf, custom], origins, 3, lookback=10)
+    assert list(got.models) == ["Naive", "custom_mean"]
+    with pytest.raises(ValueError):
+        rolling_forecasts(panel, [sf, _LastMeanForecaster("Naive")], origins, 3)

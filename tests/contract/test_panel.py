@@ -167,6 +167,29 @@ def test_from_frame_rejects_time_off_weekly_calendar():
         Panel.from_frame(frame, freq="W-MON")
 
 
+def test_from_frame_missing_columns():
+    """P2: from_frame raises ValueError when a required default or renamed column is missing."""
+    frame = to_frame(daily(seed=5, censored=True), censored_col="cens")
+    for col in ("unique_id", "ds", "y"):
+        with pytest.raises(ValueError):
+            Panel.from_frame(frame.drop(columns=col), freq="D")
+    with pytest.raises(ValueError):
+        Panel.from_frame(frame.drop(columns="cens"), freq="D", censored_col="cens")
+    renamed = frame.rename(
+        columns={"unique_id": "item", "ds": "date", "y": "sales", "cens": "flag"}
+    )
+    for col in ("item", "date", "sales", "flag"):
+        with pytest.raises(ValueError):
+            Panel.from_frame(
+                renamed.drop(columns=col),
+                freq="D",
+                id_col="item",
+                time_col="date",
+                target_col="sales",
+                censored_col="flag",
+            )
+
+
 def test_from_frame_types():
     """P2: from_frame raises TypeError for a frame that is not a DataFrame, or a freq that is
     not a str."""

@@ -68,6 +68,11 @@ def checker(data: Path, out: Path) -> None:
     )
 
     upper = np.load(out / "upper.npy")  # [N, 1, O]
+    gate.require(
+        upper.shape == (len(nodes), 1, len(origins)),
+        f"upper shape {upper.shape} != {(len(nodes), 1, len(origins))}",
+    )
+    gate.require(upper.dtype == np.float32, "upper is not float32")
     decisions = np.array([column[date] for date in baseline["decisions"]])
     bounds = upper[rows][:, 0, decisions]  # [S, 6]
     gate.require(bool(np.isfinite(bounds).all()), "a decision bound is not ready")
@@ -87,9 +92,21 @@ def checker(data: Path, out: Path) -> None:
     steps = np.arange(1, vn2.PROTECTION + 1)
     targets = index[None, :] + steps[:, None]  # [3, O]
     known = targets[-1] < truth.shape[1]
+    known_before = np.searchsorted(index + vn2.PROTECTION, index, side="right")
+    n_scores = np.minimum(known_before, WINDOW)
+    need = int(np.ceil(np.round(1.0 / (1.0 - tau), 9)))
+    ready = np.broadcast_to((n_scores >= need)[None, :], (len(nodes), len(origins)))
+    gate.require(
+        np.array_equal(np.isfinite(upper[:, 0, :]), ready),
+        "ready cells of upper differ from the expected readiness",
+    )
+    gate.require(
+        bool(np.all(upper[:, 0, :][~ready] == np.float32(np.inf))),
+        "a cell that is not ready is not +inf",
+    )
     total = truth[:, np.minimum(targets, truth.shape[1] - 1)].astype(np.float64).sum(axis=1)
     total = total.astype(np.float32)  # [N, O]
-    cells = np.isfinite(upper[:, 0, :]) & known[None, :]
+    cells = ready & known[None, :]
     coverage = float((total[cells] <= upper[:, 0, :][cells]).mean())
     low, high = tau - COVERAGE_MARGIN, tau + 1 / (WINDOW + 1) + COVERAGE_MARGIN
     gate.require(low <= coverage <= high, f"coverage {coverage:.4f} not in [{low:.4f}, {high:.4f}]")

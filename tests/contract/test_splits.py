@@ -2,6 +2,7 @@
 
 import dataclasses
 import pickle
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -11,12 +12,14 @@ import scipy.sparse as sp
 
 from calibre import (
     BottomUp,
+    Forecaster,
     Forecasts,
     Hierarchy,
     Identity,
     Panel,
     Span,
     Step,
+    Window,
     WlsStruct,
     critical_ratio,
     order_up_to,
@@ -91,6 +94,40 @@ def test_rolling_forecasts_split_by_series_and_origins(lookback):
         assert part.origins.equals(whole.origins)
     for columns in ([0, 1, 2], [3, 4, 5, 6, 7, 8], [4], [8]):
         part = rolling_forecasts(panel, engines, origins[columns], 6, lookback=lookback)
+        assert_bits(part.points, whole.points[..., columns])
+        assert part.origins.equals(origins[columns])
+
+
+class _GlobalForecaster(Forecaster):
+    local = False
+
+    @property
+    def models(self) -> list[str]:
+        return ["global_mean"]
+
+    def forecast(self, panel: Panel, windows: Sequence[Window], horizon: int) -> np.ndarray:
+        out = np.full((1, len(panel.series), horizon, len(windows)), np.nan, np.float32)
+        for o, win in enumerate(windows):
+            totals = [
+                panel.data[int(win.start[s]) : int(win.stop[s])].sum(dtype=np.float64)
+                for s in range(len(panel.series))
+                if int(win.start[s]) < int(win.stop[s])
+            ]
+            cross = np.float32(sum(totals) / max(len(totals), 1))
+            for s in range(len(panel.series)):
+                if int(win.start[s]) < int(win.stop[s]):
+                    out[0, s, :, o] = cross
+        return out
+
+
+def test_global_forecaster_splits_by_origins():
+    """F7: a Forecaster with local=False splits by origins bit for bit."""
+    panel = to_panel(ragged_dense())
+    origins = panel.periods[[8, 15, 23, 30, 41, 60]]
+    eng = _GlobalForecaster()
+    whole = rolling_forecasts(panel, [eng], origins, 4, lookback=10)
+    for columns in ([0, 1, 2], [3, 4, 5], [2]):
+        part = rolling_forecasts(panel, [eng], origins[columns], 4, lookback=10)
         assert_bits(part.points, whole.points[..., columns])
         assert part.origins.equals(origins[columns])
 
@@ -177,9 +214,11 @@ def public_objects() -> dict[str, Any]:
     case = _cases.make("irregular-span-signed")
     on_hand, in_transit, demand, order = settlement()
     _, _, settled = settle(on_hand, in_transit, demand, order, 0.2, 1.0)
+    panel = to_panel(ragged_dense())
     return {
-        "Panel": to_panel(ragged_dense()),
+        "Panel": panel,
         "Hierarchy": hierarchy(),
+        "Window": Window.at(panel, 20, lookback=8),
         "Forecasts": case.forecasts(),
         "Replay": case.run(),
         "Step": Step(),
@@ -195,6 +234,7 @@ def public_objects() -> dict[str, Any]:
 NAMES = [
     "Panel",
     "Hierarchy",
+    "Window",
     "Forecasts",
     "Replay",
     "Step",

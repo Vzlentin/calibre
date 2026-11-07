@@ -19,8 +19,8 @@ the decision functions. The rest comes from Nixtla.
 |---|---|---|
 | Frames to arrays | utilsforecast | inside `Panel.from_frame` |
 | Kernels | coreforecast | `GroupedArray` holds each window. `replay` may use its rolling statistics |
-| Models that Nixtla has | their engines, passed as they are | statsforecast from M1. mlforecast from M3. neuralforecast later |
-| Models that Nixtla does not have | Calibre's `Forecaster`, on coreforecast | from M3 |
+| Models that Nixtla has | their engines, passed as they are | statsforecast from M1. mlforecast from M2. neuralforecast later |
+| Models that Nixtla does not have | Calibre's `Forecaster`, on coreforecast or a foundation model | `Forecaster` and `Window` from M1. A foundation model from M2 |
 | Scores and the exact rank | conformalforecast | `AbsoluteResidual`, `SignedResidual`, `conformal_quantile` |
 | Cross-validation frames | conformalforecast | `reshape_cv_many`, inside `Forecasts.from_cv` |
 | Coverage, width, Winkler score | conformalforecast diagnostics | called by the user on `Replay` arrays moved to `[N, O, C]`. Calibre has no metrics function |
@@ -67,11 +67,10 @@ M0 does for M1. After 0.1 freezes, `v2` merges into `main`, and 0.1 stays as its
 | Milestone | Delivers |
 |---|---|
 | M0 | These documents and `AGENTS.md`. The checks of [Checks](#checks). The baselines of G2, measured with 0.1 first. The M5 and VN2 loaders, rewritten as raw readers that import no `calibre`: they give arrays and frames, and the VN2 loader holds the VN2 protocol, with the decision files loaded by path. The dependencies of v2 in `pyproject.toml` and `uv.lock`. CI on the `v2` branch, with the frozen-path check. Its CI fails by design, because the v2 code does not exist yet, and the owners approve it by review. Before M0 merges, its author runs every frozen file once against a throwaway prototype of the M1 functions, to find defects in the checks. The prototype is not committed. A defect that M1 finds in a frozen file goes to a contract PR |
-| M1 | The backtest on the new layout: every module in [Modules](#modules). Every check passes |
-| M2 | `Forecasts.concat`, which joins forecasts by label over models, series and origins, and refuses two values for one cell. Metrics on `Replay`: accuracy, bias, coverage and width, by level. Pooled scores. A decision backtest: `order_up_to`, then `settle`, week by week from a starting stock, with its cost |
-| M3 | The `Forecaster` contract, which says whether a model is local, fitted on each series alone, or global, fitted on all series at once. `Window` with covariates, and the mlforecast engine |
+| M1 | The backtest on the new layout: every module in [Modules](#modules), with `Window`, the `Forecaster` contract and the statsforecast engine. Every check passes |
+| M2 | `combine` with weights fitted on tuning origins. The mlforecast global engine and a foundation model engine on `Forecaster`. `Forecasts.concat`, which joins forecasts by label over models, series and origins, and refuses two values for one cell. Metrics on `Replay`: accuracy, bias, coverage and width, by level. Pooled scores. A decision backtest: `order_up_to`, then `settle`, week by week from a starting stock, with its cost |
+| M3 | `Window` with covariates, and local `Forecaster` models on coreforecast |
 | M4 | ACI, the quantile tracker and PID, as scans over origins inside `replay` |
-| M5 | `combine` with inverse-MAE weights over models and origins |
 | Later | Each one only on a measured need: `step` and its state, and a ledger of the order and the stock at each origin. `fitted_through`, which reuses a fitted model across runs. `AR1` and `BootstrapEnsemble` on coreforecast. The neuralforecast engine. Decisions that read more than one quantile. A correction for censored scores. `RiskControl` |
 
 M1 deletes each 0.1 module that it does not rewrite, with the bench scripts that import it.
@@ -80,7 +79,7 @@ with its milestone. 0.1 keeps it as a release.
 
 | 0.1 | v2 |
 |---|---|
-| `forecast/models/` | the statsforecast engine in M1, the rest in M3 |
+| `forecast/models/` | `Forecaster`, `Window` and the statsforecast engine in M1, the mlforecast and foundation engines in M2, covariates in M3 |
 | `conformal/scores.py` | conformalforecast's scores |
 | `conformal/calibrators/` | `conformal/split.py` in M1, the online methods in M4 |
 | `conformal/losses.py` | with `RiskControl`, later |
@@ -100,7 +99,7 @@ their 0.1 shape `[B, T]`.
 |---|---|
 | `data/panel.py` | `Panel`: the ragged grouped array on one calendar, validated once |
 | `data/hierarchy.py` | `Hierarchy`: node labels, the summing matrix, `aggregate` |
-| `forecast/window.py` | `Window`: what one origin lets a model read |
+| `forecast/window.py` | `Window`: what one origin lets a model read, and the `Forecaster` contract |
 | `forecast/engines/statsforecast.py` | Runs the models of a `StatsForecast` object on windows |
 | `forecast/forecasts.py` | `Forecasts`, `Forecasts.from_cv` |
 | `forecast/reconcile.py` | `reconcile`, the `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
@@ -123,9 +122,9 @@ their 0.1 shape `[B, T]`.
 |---|---|---|
 | A1 | `import calibre` loads neither statsforecast nor hierarchicalforecast. The engine file loads only when a `StatsForecast` object is passed | `test_imports.py` |
 | A2 | The import statements of each module of `src/calibre` follow the table above, plus the standard library. `calibre/__init__.py` imports only Calibre packages. Imports in the `if` branch of `if TYPE_CHECKING:` do not count. No module uses `importlib`, `runpy`, `__import__`, `exec`, `eval`, `sys.modules` or `os._exit`, except `backtest/rolling.py`, which loads the engine file with `importlib.import_module("calibre.forecast.engines.statsforecast")`, the module name as a string literal, and uses `importlib` for nothing else. No line of `src/calibre` holds `# noqa`, `# ruff: noqa`, `# type: ignore`, `# ty: ignore` or `# pyright: ignore` | `test_imports.py`, by a scan of the source |
-| A3 | `calibre.__all__` is exactly `Panel`, `Hierarchy`, `rolling_forecasts`, `Forecasts`, `reconcile`, `Reconciler`, `BottomUp`, `Identity`, `WlsStruct`, `Target`, `Step`, `Span`, `Split`, `replay`, `Replay`, `critical_ratio`, `order_up_to`, `settle` and `Settlement` | `test_imports.py` |
+| A3 | `calibre.__all__` is exactly `Panel`, `Hierarchy`, `Window`, `Forecaster`, `rolling_forecasts`, `Forecasts`, `reconcile`, `Reconciler`, `BottomUp`, `Identity`, `WlsStruct`, `Target`, `Step`, `Span`, `Split`, `replay`, `Replay`, `critical_ratio`, `order_up_to`, `settle` and `Settlement` | `test_imports.py` |
 
-`Window` and the engine file stay internal until M3.
+The statsforecast engine file stays internal.
 
 ## Public functions
 
@@ -192,7 +191,7 @@ value, which holds positions from 0 to S - 1 in strictly increasing order.
 ```python
 @dataclass(frozen=True)
 class Hierarchy:
-    nodes: np.ndarray  # [N] str
+    nodes: np.ndarray  # [N] str, unique
     summing: sp.csr_array  # [N, B] float32
     level: np.ndarray  # [N] int32
 
@@ -219,7 +218,7 @@ columns to cross. None makes one level per column.
 
 | Id | Guarantee | Check |
 |---|---|---|
-| H1 | `from_attributes` puts the bottoms first, labeled with their series ids, in the order of `series`. Then it adds one aggregate per distinct value of each level, level by level, with the values of a level in the order of pandas `groupby(sort=True)`, and the total last, labeled `total`. An aggregate is labeled `column=value`, with `str` of the value, and a crossed level joins these labels with `/`, as in `state_id=CA/cat_id=FOODS`. It is dropped when it has the same bottoms as a bottom, the total, or an earlier aggregate. `level` is 0 for bottoms, the position of the level from 1 for aggregates, and the number of levels plus 1 for the total. The bottom rows of `summing` are the identity. `flat` gives the bottoms only, with no aggregate | `test_hierarchy.py` |
+| H1 | `from_attributes` puts the bottoms first, labeled with their series ids, in the order of `series`. Then it adds one aggregate per distinct value of each level, level by level, with the values of a level in the order of pandas `groupby(sort=True)`, and the total last, labeled `total`. An aggregate is labeled `column=value`, with `str` of the value, and a crossed level joins these labels with `/`, as in `state_id=CA/cat_id=FOODS`. It is dropped when it has the same bottoms as a bottom, the total, or an earlier aggregate. `nodes` are unique: `from_attributes` and the constructor raise `ValueError` when two nodes have the same label, such as a bottom series named `total` or named like a kept aggregate, or two kept aggregates with the same label. `level` is 0 for bottoms, the position of the level from 1 for aggregates, and the number of levels plus 1 for the total. The bottom rows of `summing` are the identity. `flat` gives the bottoms only, with no aggregate | `test_hierarchy.py` |
 | H2 | `aggregate` takes a panel whose series are the bottoms, in order. It gives a panel whose series are the nodes, in order, on the same calendar. A node runs from the earliest first period of its members to their latest last period. Its value at a period is the sum of the member values at that period, in float64, stored as float32. A member adds zero before its first period and after its last. When the panel has a censored array, a node value is censored when one member value at that period is censored. When it has none, the result has none | `test_hierarchy.py`, `test_censoring.py` |
 
 ### Forecast
@@ -262,12 +261,49 @@ raises for an unknown model.
 |---|---|---|
 | F6 | `from_cv` puts the value of model m, series s, cutoff o and step h at `points[m, s, h - 1, o]`, as float32. The origins are the sorted cutoffs. The rows follow `series`. A series that is absent at a cutoff has NaN points there | `test_forecasts.py` |
 
+#### Window and Forecaster
+
+```python
+@dataclass(frozen=True)
+class Window:
+    origin: int  # period index in panel.periods, non-negative
+    start: np.ndarray  # [S] int64
+    stop: np.ndarray  # [S] int64
+
+    @classmethod
+    def at(cls, panel: Panel, origin: int, lookback: int | None = None) -> "Window": ...
+
+
+class Forecaster(ABC):
+    local: bool = True
+
+    @property
+    @abstractmethod
+    def models(self) -> Sequence[str]: ...
+
+    @abstractmethod
+    def forecast(
+        self, panel: Panel, windows: Sequence[Window], horizon: int
+    ) -> np.ndarray: ...  # [M, S, H, O] float32
+```
+
+At `origin`, series `s` reads `panel.data[start[s]:stop[s]]`: its values through
+`panel.periods[origin]`, at most the last `lookback`. A series whose first period is after
+`origin`, or whose last period is before `origin`, has `start[s] == stop[s]`. `start` and
+`stop` are read-only 1-d `int64` arrays of the same non-empty length with `0 <= start <= stop`.
+
+`Forecaster` is the contract of a model engine. `local` is `True` when the forecast of each
+series reads only that series' own values (such as a local model or a zero-shot foundation
+model), and `False` when the engine fits or predicts across series at once (such as a global
+model). `models` holds at least one non-empty model name, with no duplicate. `forecast`
+returns a numeric numpy array of shape `[len(models), S, horizon, O]`, stored as float32.
+
 #### rolling_forecasts
 
 ```python
 def rolling_forecasts(
     panel: Panel,
-    engines: Sequence[StatsForecast],
+    engines: Sequence[StatsForecast | Forecaster],
     origins: pd.DatetimeIndex,
     horizon: int,
     *,
@@ -276,22 +312,23 @@ def rolling_forecasts(
 ```
 
 `origins` are periods of the panel, strictly increasing, at any spacing. `horizon` is at
-least 1. `lookback` is at least 1, or None for the whole history. The `freq` of each engine
-is the `freq` of the panel, compared as pandas offsets. The window of origin o holds each
-series whose first period is at or before o and whose last period is at or after o, with its
-values through o, at most the last `lookback`.
+least 1. `lookback` is at least 1, or None for the whole history. The `freq` of each
+`StatsForecast` engine is the `freq` of the panel, compared as pandas offsets. The window of
+origin o holds each series whose first period is at or before o and whose last period is at
+or after o, with its values through o, at most the last `lookback`.
 
-`engines` holds at least one `StatsForecast` object: an object whose type is `StatsForecast`
-from the `statsforecast` package. Another type raises `TypeError`. `rolling_forecasts` loads
-the engine file when it meets the first such object.
+`engines` holds at least one `StatsForecast` or `Forecaster` object. Another type raises
+`TypeError`. `rolling_forecasts` loads the statsforecast engine file when it meets the first
+`StatsForecast` object.
 
-The engine reads the models, the `fallback_model`, the `freq` and the `n_jobs` of each
-`StatsForecast` object. For each series window, it calls `model.forecast(y=values, h=horizon)`
+For a `StatsForecast` object, the engine reads the models, the `fallback_model`, the `freq`
+and the `n_jobs`. For each series window, it calls `model.forecast(y=values, h=horizon)`
 of each model, as statsforecast's cross-validation does with `refit=True`. When a model
 raises, the engine calls the fallback model in the same way, or raises the exception of the
 model again when there is none. With `n_jobs` other than 1, the engine keeps its own pool of
 worker processes for the whole call, and ends it before the call returns. Each worker gets a chunk of series once and runs every origin for it: this is
-the origin loop of `rolling_forecasts`. G1 binds its cost.
+the origin loop of `rolling_forecasts`. G1 binds its cost. For a `Forecaster` object,
+`rolling_forecasts` calls `engine.forecast(panel, windows, horizon)`.
 
 The result has one row per model: the engines in order, and the models of each engine in
 order. A row is named by the alias of its model.
@@ -303,7 +340,7 @@ order. A row is named by the alias of its model.
 | F3 | No point issued at origin o changes when a value after o changes, or when the data after o is removed | `test_visibility.py` |
 | F4 | A series whose first period is after o, or whose last period is before o, has NaN points at o. A model that gives NaN gives NaN points | `test_forecasts.py` |
 | F5 | Two models with the same alias in different engines raise. An engine whose `freq` is not the panel `freq` raises. A model that raises in an engine with no fallback model stops the call with its exception | `test_forecasts.py` |
-| F7 | When the whole call returns, a call on `panel.take(index)` gives the rows `index` of the call on `panel`, and a call on some of the `origins` gives the columns of those origins, bit for bit | `test_splits.py` |
+| F7 | When the whole call returns, a call on some of the `origins` gives the columns of those origins, bit for bit. When every engine is a `StatsForecast` object or a `Forecaster` with `local=True`, a call on `panel.take(index)` gives the rows `index` of the call on `panel`, bit for bit | `test_splits.py` |
 
 #### reconcile
 
@@ -420,7 +457,9 @@ class Replay:
 `forecasts` holds one model. Its series are the series of `truth`, in order, and each of its
 origins is a period of `truth`. `truth` is usually `hierarchy.aggregate(panel)`. `level` is a
 float, a 0-d array, or one value per node `[N]`, read as float64, each strictly between 0
-and 1. `alpha` is `1 - level`, computed in float64. `Replay.truth` and `Replay.score` are NaN
+and 1. `alpha` is `1 - level`, computed in float64. `Replay.origins` is non-empty and
+strictly increasing, and the arrays of `Replay` have one non-empty `[N, C, O]` shape and are
+read-only. `Replay.truth` and `Replay.score` are NaN
 where the truth is missing or is not known at the last period of `truth`. `threshold` is +inf
 where the cell is not ready.
 
@@ -508,8 +547,9 @@ that does not import `calibre` checks its outputs and computes the cost: it read
 data with the frozen readers of the M5 and VN2 loaders, and loads the frozen decision files by
 path. Besides `calibre`, the gates import only frozen files. After the timed part,
 the child writes its outputs to a directory that the parent gives it. A gate fails when a
-process of a run is still alive 5 s after the run, or when a run writes in the repository or
-leaves a file in its temporary directory.
+process of a run is still alive 5 s after the main process of the run exits, or when a run
+leaves any new, removed or modified file in the repository (including ignored and untracked
+files) or in its temporary directory.
 
 **G1, speed and memory.** `uv run python bench/gate_m5.py data/m5`: one warm-up run, then
 three timed runs. The owners run it for each milestone PR on the gate machine, an Apple M5
@@ -554,10 +594,12 @@ Pro with 18 cores and 48 GB, with no other load. A campaign runs it too.
   bottom series at the six decisions, with their series ids and dates. M0 checks that the
   baseline itself passes the coverage condition below.
 - Pass: the bottom points equal the baseline points, bit for bit, matched by series id and
-  date. The decision bounds are within 1e-5 times the larger of 1 and the absolute baseline
+  date. A cell of `upper` is finite when and only when its score window holds at least
+  `ceil(1 / (1 - τ))` known scores, and is `+inf` otherwise. The decision bounds are within
+  1e-5 times the larger of 1 and the absolute baseline
   bound. The total cost is at most the baseline cost times 1.0001. The coverage is between
   τ - 0.01 and τ + 1/53 + 0.01, with τ = 1/1.2 and 53 = window + 1. The coverage is the
-  share, over all nodes and origins, of the cells with a finite bound and a known truth,
+  share, over all nodes and origins, of the ready cells with a known truth,
   where the truth is at or below the bound.
 
 **Frozen paths.** `docs/architecture.md`, `docs/semantics.md`, `AGENTS.md`,

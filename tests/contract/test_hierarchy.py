@@ -118,7 +118,8 @@ def test_flat():
 
 def test_from_attributes_raises():
     """H1: from_attributes raises for fewer than two series, a missing series, a missing
-    value, a level that is not a column, and attributes that are not a DataFrame."""
+    value, a level that is not a column, a naming collision, and attributes that are not a
+    DataFrame."""
     frame = attributes()
     with pytest.raises(ValueError):
         Hierarchy.from_attributes(SERIES[:1], frame)
@@ -130,13 +131,36 @@ def test_from_attributes_raises():
     missing.loc["s2", "cat"] = None
     with pytest.raises(ValueError):
         Hierarchy.from_attributes(SERIES, missing)
+    with pytest.raises(ValueError):
+        Hierarchy.from_attributes(
+            np.array(["total", "x"]),
+            pd.DataFrame({"one": ["a", "a"]}, index=pd.Index(["total", "x"])),
+        )
+    with pytest.raises(ValueError):
+        Hierarchy.from_attributes(
+            np.array(["state=CA", "s1", "s2"]),
+            pd.DataFrame({"state": ["CA", "CA", "TX"]}, index=pd.Index(["state=CA", "s1", "s2"])),
+        )
+    with pytest.raises(ValueError):
+        Hierarchy.from_attributes(
+            np.array(["s1", "s2", "s3", "s4"]),
+            pd.DataFrame(
+                {
+                    "a": ["x", "x", "x/b=1", "x/b=1"],
+                    "b": ["1", "1", "2", "3"],
+                },
+                index=pd.Index(["s1", "s2", "s3", "s4"]),
+            ),
+            [["a", "b"], "a"],
+        )
     from_attributes: Any = Hierarchy.from_attributes  # a dict, not a DataFrame, on purpose
     with pytest.raises(TypeError):
         from_attributes(SERIES, frame.to_dict())
 
 
 def test_constructor_raises_on_shapes():
-    """H1: the constructor checks that nodes, summing and level agree in shape."""
+    """H1: the constructor checks that nodes, summing and level agree in shape and that node
+    labels are unique."""
     good = Hierarchy.from_attributes(SERIES, attributes())
     rows = good.summing.toarray()
     with pytest.raises(ValueError):
@@ -145,6 +169,10 @@ def test_constructor_raises_on_shapes():
         Hierarchy(nodes=good.nodes, summing=sp.csr_array(rows[:-1]), level=good.level)
     with pytest.raises(ValueError):
         Hierarchy(nodes=good.nodes, summing=good.summing, level=good.level[:-1])
+    dup = good.nodes.copy()
+    dup[-1] = dup[0]
+    with pytest.raises(ValueError):
+        Hierarchy(nodes=dup, summing=good.summing, level=good.level)
 
 
 def bottoms(seed: int):

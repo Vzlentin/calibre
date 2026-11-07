@@ -39,6 +39,7 @@ tests/contract/test_forecasts.py::test_from_cv_columns_and_models
 tests/contract/test_forecasts.py::test_from_cv_input_conditions
 tests/contract/test_forecasts.py::test_select
 tests/contract/test_forecasts.py::test_forecasts_constructor
+tests/contract/test_forecasts.py::test_window_and_forecaster
 tests/contract/test_hierarchy.py::test_from_attributes_levels
 tests/contract/test_hierarchy.py::test_crossed_level_order
 tests/contract/test_hierarchy.py::test_from_attributes_default_levels
@@ -54,6 +55,7 @@ tests/contract/test_imports.py::test_no_dynamic_code
 tests/contract/test_imports.py::test_engine_dispatch_loads_the_engine_file
 tests/contract/test_imports.py::test_no_suppression_comments
 tests/contract/test_imports.py::test_public_names
+tests/contract/test_imports.py::test_public_signatures
 tests/contract/test_panel.py::test_from_frame_sorts_and_lays_out[daily]
 tests/contract/test_panel.py::test_from_frame_sorts_and_lays_out[weekly]
 tests/contract/test_panel.py::test_from_frame_columns_and_censored
@@ -66,6 +68,7 @@ tests/contract/test_panel.py::test_from_frame_rejects[infinite value]
 tests/contract/test_panel.py::test_from_frame_rejects[integer censored column]
 tests/contract/test_panel.py::test_from_frame_rejects[object censored column]
 tests/contract/test_panel.py::test_from_frame_rejects_time_off_weekly_calendar
+tests/contract/test_panel.py::test_from_frame_missing_columns
 tests/contract/test_panel.py::test_from_frame_types
 tests/contract/test_panel.py::test_constructor_keeps_order_and_converts
 tests/contract/test_panel.py::test_constructor_copies_and_freezes
@@ -116,8 +119,10 @@ tests/contract/test_split.py::test_known_is_read_from_dates
 tests/contract/test_split.py::test_levels_per_node
 tests/contract/test_split.py::test_replay_input_conditions
 tests/contract/test_split.py::test_split_settings
+tests/contract/test_split.py::test_replay_constructor
 tests/contract/test_splits.py::test_rolling_forecasts_split_by_series_and_origins[None]
 tests/contract/test_splits.py::test_rolling_forecasts_split_by_series_and_origins[12]
+tests/contract/test_splits.py::test_global_forecaster_splits_by_origins
 tests/contract/test_splits.py::test_reconcile_split_by_models_and_origins[BottomUp]
 tests/contract/test_splits.py::test_reconcile_split_by_models_and_origins[Identity]
 tests/contract/test_splits.py::test_reconcile_split_by_models_and_origins[WlsStruct]
@@ -128,6 +133,7 @@ tests/contract/test_splits.py::test_replay_split_by_nodes[weekly-span-signed]
 tests/contract/test_splits.py::test_replay_split_by_nodes[every-second-day-span-absolute]
 tests/contract/test_splits.py::test_public_objects_pickle[Panel]
 tests/contract/test_splits.py::test_public_objects_pickle[Hierarchy]
+tests/contract/test_splits.py::test_public_objects_pickle[Window]
 tests/contract/test_splits.py::test_public_objects_pickle[Forecasts]
 tests/contract/test_splits.py::test_public_objects_pickle[Replay]
 tests/contract/test_splits.py::test_public_objects_pickle[Step]

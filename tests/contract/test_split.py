@@ -1,14 +1,16 @@
 """C2, C3, C4, C5: the score windows, thresholds, readiness, bands and bounds of `replay`, and
 the settings of `Split`."""
 
-from typing import Any
+import dataclasses
+from typing import Any, cast
 
 import numpy as np
+import pandas as pd
 import pydantic
 import pytest
 from conformalforecast.nonconformity import AbsoluteResidual, QuantileScore, SignedResidual
 
-from calibre import Forecasts, Span, Split, replay
+from calibre import Forecasts, Replay, Span, Split, replay
 
 from . import _cases, _expected, _reference
 from ._expected import assert_bits
@@ -222,3 +224,58 @@ def test_split_settings():
         with pytest.raises(pydantic.ValidationError):
             make(**settings)
     assert issubclass(pydantic.ValidationError, ValueError)
+
+
+def test_replay_constructor():
+    """C2, C5: the Replay constructor converts numeric arrays to float32, keeps censored as
+    bool, checks consistent non-empty [N, C, O] shapes aligned with strictly increasing
+    origins, makes arrays read-only, and forbids field reassignment."""
+    origins = pd.date_range("2024-01-01", periods=4, freq="D")
+    base = np.arange(3 * 2 * 4, dtype=np.float64).reshape(3, 2, 4) / 3.0
+    censored = np.arange(3 * 2 * 4).reshape(3, 2, 4) % 2 == 0
+    good = {
+        "origins": origins,
+        "point": base,
+        "truth": base + 1.0,
+        "score": base + 2.0,
+        "threshold": base + 3.0,
+        "lower": base - 1.0,
+        "upper": base + 4.0,
+        "censored": censored.copy(),
+    }
+    rep = Replay(**good)
+    for name in ("point", "truth", "score", "threshold", "lower", "upper"):
+        arr = getattr(rep, name)
+        assert arr.dtype == np.float32
+        assert_bits(arr, good[name].astype(np.float32))
+        assert not arr.flags.writeable
+    assert rep.censored.dtype == np.bool_
+    assert np.array_equal(rep.censored, censored)
+    assert not rep.censored.flags.writeable
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cast(Any, rep).point = base
+
+    make: Any = Replay
+    for bad in (
+        {"origins": origins[:3]},
+        {"origins": origins[[0, 2, 1, 3]]},
+        {"origins": origins[[0, 1, 1, 3]]},
+        {"origins": origins[:0]},
+        {"point": base[0]},
+        {"truth": base[:2]},
+        {"score": base[:, :1, :]},
+        {"threshold": base[:, :, :3]},
+        {"lower": base[:0]},
+        {"upper": base[:, :0, :]},
+        {"censored": censored[:2]},
+    ):
+        with pytest.raises(ValueError):
+            make(**{**good, **bad})
+    for bad_type in (
+        {"origins": list(origins)},
+        {"point": base.tolist()},
+        {"point": censored},
+        {"censored": base.astype(np.int64)},
+    ):
+        with pytest.raises(TypeError):
+            make(**{**good, **bad_type})

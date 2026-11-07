@@ -8,6 +8,7 @@ the two lines with its own clock and samples the resident memory of the run ever
 `hierarchy` builds the nodes of `Hierarchy.from_attributes` again, without `calibre`.
 """
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ import scipy.sparse as sp
 
 ROOT = Path(__file__).resolve().parents[1]
 GRACE = 5.0
+DEADLINE = 120.0
 INTERVAL = 0.05
 
 
@@ -41,8 +43,14 @@ class Run:
 def run(script: str, data: Path, out: Path) -> Run:
     """Run `bench/<script>` on `data`, write its outputs to `out`, and measure it."""
     home = Path(tempfile.mkdtemp(prefix="calibre-gate-"))
-    env = dict(os.environ, HOME=str(home), TMPDIR=str(home), XDG_CACHE_HOME=str(home))
-    before = _repository_state()
+    env = dict(
+        os.environ,
+        HOME=str(home),
+        TMPDIR=str(home),
+        XDG_CACHE_HOME=str(home),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    before = _repository_state(data)
     child = subprocess.Popen(
         [sys.executable, str(ROOT / "bench" / script), str(data), str(out)],
         cwd=ROOT,
@@ -53,33 +61,41 @@ def run(script: str, data: Path, out: Path) -> Run:
     )
     session = child.pid
     peak = [0]
+    marks: list[float | None] = [None, None]
     done = threading.Event()
-    sampler = threading.Thread(target=_sample, args=(session, peak, done))
+    sampler = threading.Thread(target=_sample, args=(session, peak, done), daemon=True)
+    reader = threading.Thread(target=_read_marks, args=(child.stdout, marks), daemon=True)
     sampler.start()
-    start = end = None
-    assert child.stdout is not None
-    for line in child.stdout:
-        if line.strip() == "start" and start is None:
-            start = time.perf_counter()
-        elif line.strip() == "end" and start is not None and end is None:
-            end = time.perf_counter()
-    code = child.wait()
-    done.set()
-    sampler.join()
-    if code != 0:
-        raise GateError(f"{script} exited with code {code}")
-    if start is None or end is None:
-        raise GateError(f"{script} did not print start and end")
-    time.sleep(GRACE)
-    left = _session(session)
-    if left:
-        raise GateError(f"{script} left processes behind: {sorted(left)}")
-    if any(home.iterdir()):
-        raise GateError(f"{script} left files in its temporary directory {home}")
-    if _repository_state() != before:
-        raise GateError(f"{script} wrote in the repository")
-    shutil.rmtree(home)
-    return Run(wall=end - start, peak=peak[0])
+    reader.start()
+    try:
+        try:
+            code = child.wait(timeout=DEADLINE)
+        except subprocess.TimeoutExpired as error:
+            raise GateError(f"{script} timed out after {DEADLINE} s") from error
+        done.set()
+        sampler.join()
+        reader.join(timeout=1.0)
+        if code != 0:
+            raise GateError(f"{script} exited with code {code}")
+        if marks[0] is None or marks[1] is None:
+            raise GateError(f"{script} did not print start and end")
+        time.sleep(GRACE)
+        left = _session(session)
+        if left:
+            raise GateError(f"{script} left processes behind: {sorted(left)}")
+        if any(home.iterdir()):
+            raise GateError(f"{script} left files in its temporary directory {home}")
+        if _repository_state(data) != before:
+            raise GateError(f"{script} wrote in the repository")
+        return Run(wall=marks[1] - marks[0], peak=peak[0])
+    finally:
+        done.set()
+        _kill_session(session)
+        if child.stdout is not None:
+            child.stdout.close()
+        sampler.join(timeout=1.0)
+        reader.join(timeout=1.0)
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def check(script: str, *args: str) -> None:
@@ -129,6 +145,21 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
+def _read_marks(stream, marks: list[float | None]) -> None:
+    if stream is None:
+        return
+    try:
+        for line in stream:
+            text = line.strip()
+            if text == "start" and marks[0] is None:
+                marks[0] = time.perf_counter()
+            elif text == "end" and marks[0] is not None and marks[1] is None:
+                marks[1] = time.perf_counter()
+                return
+    except ValueError:
+        return
+
+
 def _sample(session: int, peak: list[int], done: threading.Event) -> None:
     while not done.is_set():
         peak[0] = max(peak[0], _rss(_session(session)))
@@ -152,6 +183,14 @@ def _session(session: int) -> set[int]:
     return pids
 
 
+def _kill_session(session: int) -> None:
+    for pid in _session(session):
+        try:
+            psutil.Process(pid).kill()
+        except psutil.Error:
+            continue
+
+
 def _rss(pids: set[int]) -> int:
     total = 0
     for pid in pids:
@@ -162,11 +201,35 @@ def _rss(pids: set[int]) -> int:
     return total
 
 
-def _repository_state() -> str:
-    return subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+def _snapshot_tree(base: Path, stat_only: set[str]) -> dict[str, tuple]:
+    entries: dict[str, tuple] = {}
+    root = base.resolve()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        rel_dir = Path(dirpath).relative_to(root)
+        top = rel_dir.parts[0] if rel_dir.parts else ""
+        st_dir = os.lstat(dirpath)
+        entries[str(rel_dir)] = ("d", st_dir.st_mode, st_dir.st_mtime_ns)
+        for name in sorted(dirnames):
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                st = os.lstat(path)
+                entries[str(path.relative_to(root))] = ("l", st.st_mode, os.readlink(path))
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            rel = str(path.relative_to(root))
+            st = os.lstat(path)
+            if path.is_symlink():
+                entries[rel] = ("l", st.st_mode, os.readlink(path))
+            elif top in stat_only or st.st_size > 16 * 1024 * 1024:
+                entries[rel] = ("s", st.st_mode, st.st_size, st.st_mtime_ns)
+            else:
+                digest = hashlib.blake2b(path.read_bytes(), digest_size=16).hexdigest()
+                entries[rel] = ("f", st.st_mode, st.st_size, st.st_mtime_ns, digest)
+    return entries
+
+
+def _repository_state(data: Path) -> dict[str, dict[str, tuple]]:
+    return {
+        "root": _snapshot_tree(ROOT, {".git", ".venv"}),
+        "data": _snapshot_tree(data, set()),
+    }

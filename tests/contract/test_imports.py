@@ -1,10 +1,17 @@
 """A1, A2, A3: what `import calibre` loads, the imports of each module, and the public names."""
 
 import ast
+import inspect
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from conformalforecast.nonconformity import AbsoluteResidual
+from statsforecast import StatsForecast
+from statsforecast.models import Naive
 
 import calibre
 
@@ -29,6 +36,8 @@ ROLLING_FILE = ("backtest", "rolling.py")
 PUBLIC = {
     "Panel",
     "Hierarchy",
+    "Window",
+    "Forecaster",
     "rolling_forecasts",
     "Forecasts",
     "reconcile",
@@ -336,4 +345,202 @@ def test_public_names():
     assert len(calibre.__all__) == len(PUBLIC)
     for name in PUBLIC:
         assert getattr(calibre, name) is not None
-    assert not hasattr(calibre, "Window")
+
+
+def _sig_spec(target):
+    pk = inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ko = inspect.Parameter.KEYWORD_ONLY
+    empty = inspect.Parameter.empty
+    return [
+        (
+            param.name,
+            "pk" if param.kind == pk else ("ko" if param.kind == ko else str(param.kind)),
+            None if param.default is empty else ("default", param.default),
+        )
+        for param in inspect.signature(target).parameters.values()
+    ]
+
+
+def test_public_signatures():
+    """A3: public functions, methods and constructors keep their documented parameter names,
+    positional-or-keyword vs keyword-only kinds, and defaults, and accept keyword arguments."""
+    expected = {
+        calibre.Panel: [
+            ("series", "pk", None),
+            ("periods", "pk", None),
+            ("freq", "pk", None),
+            ("data", "pk", None),
+            ("indptr", "pk", None),
+            ("starts", "pk", None),
+            ("censored", "pk", ("default", None)),
+        ],
+        calibre.Panel.from_frame: [
+            ("frame", "pk", None),
+            ("freq", "ko", None),
+            ("id_col", "ko", ("default", "unique_id")),
+            ("time_col", "ko", ("default", "ds")),
+            ("target_col", "ko", ("default", "y")),
+            ("censored_col", "ko", ("default", None)),
+        ],
+        calibre.Panel.take: [("self", "pk", None), ("index", "pk", None)],
+        calibre.Hierarchy: [
+            ("nodes", "pk", None),
+            ("summing", "pk", None),
+            ("level", "pk", None),
+        ],
+        calibre.Hierarchy.from_attributes: [
+            ("series", "pk", None),
+            ("attributes", "pk", None),
+            ("levels", "pk", ("default", None)),
+        ],
+        calibre.Hierarchy.flat: [("series", "pk", None)],
+        calibre.Hierarchy.aggregate: [("self", "pk", None), ("panel", "pk", None)],
+        calibre.Window: [
+            ("origin", "pk", None),
+            ("start", "pk", None),
+            ("stop", "pk", None),
+        ],
+        calibre.Window.at: [
+            ("panel", "pk", None),
+            ("origin", "pk", None),
+            ("lookback", "pk", ("default", None)),
+        ],
+        calibre.Forecaster.forecast: [
+            ("self", "pk", None),
+            ("panel", "pk", None),
+            ("windows", "pk", None),
+            ("horizon", "pk", None),
+        ],
+        calibre.Forecasts: [
+            ("points", "pk", None),
+            ("models", "pk", None),
+            ("series", "pk", None),
+            ("origins", "pk", None),
+        ],
+        calibre.Forecasts.from_cv: [
+            ("cv", "pk", None),
+            ("series", "ko", None),
+            ("horizon", "ko", None),
+            ("models", "ko", ("default", None)),
+            ("id_col", "ko", ("default", "unique_id")),
+            ("time_col", "ko", ("default", "ds")),
+            ("target_col", "ko", ("default", "y")),
+        ],
+        calibre.Forecasts.select: [("self", "pk", None), ("model", "pk", None)],
+        calibre.rolling_forecasts: [
+            ("panel", "pk", None),
+            ("engines", "pk", None),
+            ("origins", "pk", None),
+            ("horizon", "pk", None),
+            ("lookback", "ko", ("default", None)),
+        ],
+        calibre.reconcile: [
+            ("forecasts", "pk", None),
+            ("hierarchy", "pk", None),
+            ("method", "pk", None),
+        ],
+        calibre.Reconciler.project: [
+            ("self", "pk", None),
+            ("points", "pk", None),
+            ("hierarchy", "pk", None),
+        ],
+        calibre.Target.cover: [
+            ("self", "pk", None),
+            ("n_nodes", "pk", None),
+            ("horizon", "pk", None),
+        ],
+        calibre.Step: [],
+        calibre.Span: [("first", "pk", None), ("last", "pk", None)],
+        calibre.replay: [
+            ("forecasts", "pk", None),
+            ("truth", "pk", None),
+            ("target", "ko", None),
+            ("method", "ko", None),
+            ("level", "ko", None),
+        ],
+        calibre.Replay: [
+            ("origins", "pk", None),
+            ("point", "pk", None),
+            ("truth", "pk", None),
+            ("score", "pk", None),
+            ("threshold", "pk", None),
+            ("lower", "pk", None),
+            ("upper", "pk", None),
+            ("censored", "pk", None),
+        ],
+        calibre.critical_ratio: [("holding", "pk", None), ("shortage", "pk", None)],
+        calibre.order_up_to: [
+            ("bound", "pk", None),
+            ("on_hand", "pk", None),
+            ("in_transit", "pk", None),
+        ],
+        calibre.settle: [
+            ("on_hand", "pk", None),
+            ("in_transit", "pk", None),
+            ("demand", "pk", None),
+            ("order", "pk", None),
+            ("holding", "pk", None),
+            ("shortage", "pk", None),
+        ],
+    }
+    for target, spec in expected.items():
+        assert _sig_spec(target) == spec, target
+
+    periods = pd.date_range("2024-01-01", periods=10, freq="D")
+    frame = pd.DataFrame(
+        {
+            "unique_id": np.repeat(["a", "b"], 10),
+            "ds": np.tile(periods, 2),
+            "y": np.arange(20, dtype=np.float32),
+        }
+    )
+    panel = calibre.Panel.from_frame(frame=frame, freq="D")
+    assert len(panel.take(index=np.array([0])).series) == 1
+    hierarchy = calibre.Hierarchy.from_attributes(
+        series=panel.series,
+        attributes=pd.DataFrame({"g": ["x", "y"]}, index=pd.Index(["a", "b"])),
+        levels=["g"],
+    )
+    assert calibre.Hierarchy.flat(series=panel.series).n_bottom == 2
+    truth = hierarchy.aggregate(panel=panel)
+    win = calibre.Window.at(panel=panel, origin=4, lookback=3)
+    assert win.origin == 4
+    sf = StatsForecast(models=[Naive()], freq="D")
+    fc = calibre.rolling_forecasts(
+        panel=panel, engines=[sf], origins=periods[3:7], horizon=2, lookback=3
+    )
+    selected = fc.select(model="Naive")
+    rec = calibre.reconcile(forecasts=selected, hierarchy=hierarchy, method=calibre.BottomUp())
+    rep = calibre.replay(
+        forecasts=rec,
+        truth=truth,
+        target=calibre.Span(first=1, last=2),
+        method=calibre.Split(score=AbsoluteResidual(), window=2),
+        level=0.5,
+    )
+    assert rep.origins.equals(periods[3:7])
+    cv = pd.DataFrame(
+        {
+            "unique_id": ["a", "a", "b", "b"],
+            "ds": [periods[4], periods[5], periods[4], periods[5]],
+            "cutoff": [periods[3]] * 4,
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "Naive": [1.0, 1.0, 3.0, 3.0],
+        }
+    )
+    from_cv = calibre.Forecasts.from_cv(cv=cv, series=panel.series, horizon=2)
+    assert list(from_cv.models) == ["Naive"]
+    tau = calibre.critical_ratio(holding=0.2, shortage=1.0)
+    orders = calibre.order_up_to(
+        bound=np.array([5.0], np.float32),
+        on_hand=np.array([1.0], np.float32),
+        in_transit=np.array([[1.0]], np.float32),
+    )
+    calibre.settle(
+        on_hand=np.array([1.0], np.float32),
+        in_transit=np.array([[1.0]], np.float32),
+        demand=np.array([2.0], np.float32),
+        order=orders,
+        holding=0.2,
+        shortage=float(tau),
+    )
