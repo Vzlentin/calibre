@@ -20,7 +20,7 @@ the decision functions. The rest comes from Nixtla.
 | Frames to arrays | utilsforecast | inside `Panel.from_frame` |
 | Kernels | coreforecast | `GroupedArray` holds each window. `replay` may use its rolling statistics |
 | Models that Nixtla has | their engines, passed as they are | statsforecast from M1. mlforecast from M2. neuralforecast later |
-| Models that Nixtla does not have | Calibre's `Forecaster`, on coreforecast or a foundation model | `Forecaster` and `Window` from M1. A foundation model from M2 |
+| Models that Nixtla does not have | Calibre's `Forecaster` | `Forecaster` and `Window` from M1. Local models on coreforecast from M3 |
 | Scores and the exact rank | conformalforecast | `AbsoluteResidual`, `SignedResidual`, `conformal_quantile` |
 | Cross-validation frames | conformalforecast | `reshape_cv_many`, inside `Forecasts.from_cv` |
 | Coverage, width, Winkler score | conformalforecast diagnostics | called by the user on `Replay` arrays moved to `[N, O, C]`. Calibre has no metrics function |
@@ -68,7 +68,7 @@ M0 does for M1. After 0.1 freezes, `v2` merges into `main`, and 0.1 stays as its
 |---|---|
 | M0 | These documents and `AGENTS.md`. The checks of [Checks](#checks). The baselines of G2, measured with 0.1 first. The M5 and VN2 loaders, rewritten as raw readers that import no `calibre`: they give arrays and frames, and the VN2 loader holds the VN2 protocol, with the decision files loaded by path. The dependencies of v2 in `pyproject.toml` and `uv.lock`. CI on the `v2` branch, with the frozen-path check. Its CI fails by design, because the v2 code does not exist yet, and the owners approve it by review. Before M0 merges, its author runs every frozen file once against a throwaway prototype of the M1 functions, to find defects in the checks. The prototype is not committed. A defect that M1 finds in a frozen file goes to a contract PR |
 | M1 | The backtest on the new layout: every module in [Modules](#modules), with `Window`, the `Forecaster` contract and the statsforecast engine. Every check passes |
-| M2 | `combine` with weights fitted on tuning origins. The mlforecast global engine and a foundation model engine on `Forecaster`. `Forecasts.concat`, which joins forecasts by label over models, series and origins, and refuses two values for one cell. Metrics on `Replay`: accuracy, bias, coverage and width, by level. Pooled scores. A decision backtest: `order_up_to`, then `settle`, week by week from a starting stock, with its cost |
+| M2 | `combine`, from the losses known at each origin. The mlforecast global engine. `Forecasts.concat`, which joins forecasts by label over models, series and origins, and refuses two values for one cell. Pooled scores |
 | M3 | `Window` with covariates, and local `Forecaster` models on coreforecast |
 | M4 | ACI, the quantile tracker and PID, as scans over origins inside `replay` |
 | Later | Each one only on a measured need: `step` and its state, and a ledger of the order and the stock at each origin. `fitted_through`, which reuses a fitted model across runs. `AR1` and `BootstrapEnsemble` on coreforecast. The neuralforecast engine. Decisions that read more than one quantile. A correction for censored scores. `RiskControl` |
@@ -79,13 +79,13 @@ with its milestone. 0.1 keeps it as a release.
 
 | 0.1 | v2 |
 |---|---|
-| `forecast/models/` | `Forecaster`, `Window` and the statsforecast engine in M1, the mlforecast and foundation engines in M2, covariates in M3 |
+| `forecast/models/` | `Forecaster`, `Window` and the statsforecast engine in M1, the mlforecast engine in M2, covariates in M3 |
 | `conformal/scores.py` | conformalforecast's scores |
 | `conformal/calibrators/` | `conformal/split.py` in M1, the online methods in M4 |
 | `conformal/losses.py` | with `RiskControl`, later |
 | `online/` | the online methods in M4, as scans inside `replay`. `step` and its state only on a measured need |
 | `backtest/scorecasting.py` | with PID, in M4 |
-| `metrics.py` | metrics on `Replay`, in M2 |
+| `metrics.py` | conformalforecast's diagnostics |
 | `bench/compare.py`, `bench/vn2_conformal.py`, `bench/vn2_intervals.py`, `bench/selective_imagenet.py` | `bench/gate_vn2.py` takes the place of `bench/vn2_conformal.py` |
 
 `decision/` stays as it is. The other bench loaders stay, and M1 changes each one to return
