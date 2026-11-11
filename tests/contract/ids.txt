@@ -1,0 +1,171 @@
+tests/contract/test_censoring.py::test_aggregate_flags
+tests/contract/test_censoring.py::test_censored_cells[daily-step-absolute]
+tests/contract/test_censoring.py::test_censored_cells[weekly-origins-on-daily-step-signed]
+tests/contract/test_censoring.py::test_censored_cells[irregular-span-signed]
+tests/contract/test_censoring.py::test_censored_cells[weekly-span-signed]
+tests/contract/test_censoring.py::test_censored_cells[every-second-day-span-absolute]
+tests/contract/test_censoring.py::test_cases_hold_censored_values_under_nan_truth
+tests/contract/test_censoring.py::test_censored_scores_enter_as_observed[daily-step-absolute]
+tests/contract/test_censoring.py::test_censored_scores_enter_as_observed[weekly-origins-on-daily-step-signed]
+tests/contract/test_censoring.py::test_censored_scores_enter_as_observed[irregular-span-signed]
+tests/contract/test_censoring.py::test_censored_scores_enter_as_observed[weekly-span-signed]
+tests/contract/test_censoring.py::test_censored_scores_enter_as_observed[every-second-day-span-absolute]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[0]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[1]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[2]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[3]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[4]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[5]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[6]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[7]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[8]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[9]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[10]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[11]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[12]
+tests/contract/test_forecasts.py::test_rolling_forecasts_equal_cross_validation[13]
+tests/contract/test_forecasts.py::test_cross_validation_jobs_hold_nan_points
+tests/contract/test_forecasts.py::test_points_do_not_depend_on_n_jobs[None]
+tests/contract/test_forecasts.py::test_points_do_not_depend_on_n_jobs[12]
+tests/contract/test_forecasts.py::test_points_outside_spans_and_model_nan[None]
+tests/contract/test_forecasts.py::test_points_outside_spans_and_model_nan[9]
+tests/contract/test_forecasts.py::test_model_error_without_fallback_stops_the_call[1]
+tests/contract/test_forecasts.py::test_model_error_without_fallback_stops_the_call[2]
+tests/contract/test_forecasts.py::test_duplicate_alias_raises
+tests/contract/test_forecasts.py::test_engine_freq_must_be_the_panel_freq
+tests/contract/test_forecasts.py::test_rolling_forecasts_input_conditions
+tests/contract/test_forecasts.py::test_from_cv_layout
+tests/contract/test_forecasts.py::test_from_cv_columns_and_models
+tests/contract/test_forecasts.py::test_from_cv_input_conditions
+tests/contract/test_forecasts.py::test_select
+tests/contract/test_forecasts.py::test_forecasts_constructor
+tests/contract/test_forecasts.py::test_window_and_forecaster
+tests/contract/test_hierarchy.py::test_from_attributes_levels
+tests/contract/test_hierarchy.py::test_crossed_level_order
+tests/contract/test_hierarchy.py::test_from_attributes_default_levels
+tests/contract/test_hierarchy.py::test_flat
+tests/contract/test_hierarchy.py::test_from_attributes_raises
+tests/contract/test_hierarchy.py::test_constructor_raises_on_shapes
+tests/contract/test_hierarchy.py::test_aggregate_values
+tests/contract/test_hierarchy.py::test_aggregate_flat_is_the_panel
+tests/contract/test_hierarchy.py::test_aggregate_raises
+tests/contract/test_imports.py::test_import_loads_no_engine
+tests/contract/test_imports.py::test_imports_follow_the_table
+tests/contract/test_imports.py::test_no_dynamic_code
+tests/contract/test_imports.py::test_engine_dispatch_loads_the_engine_file
+tests/contract/test_imports.py::test_no_suppression_comments
+tests/contract/test_imports.py::test_public_names
+tests/contract/test_imports.py::test_public_signatures
+tests/contract/test_panel.py::test_from_frame_sorts_and_lays_out[daily]
+tests/contract/test_panel.py::test_from_frame_sorts_and_lays_out[weekly]
+tests/contract/test_panel.py::test_from_frame_columns_and_censored
+tests/contract/test_panel.py::test_from_frame_float64_values
+tests/contract/test_panel.py::test_from_frame_rejects[duplicate id and time]
+tests/contract/test_panel.py::test_from_frame_rejects[time off the daily calendar]
+tests/contract/test_panel.py::test_from_frame_rejects[gap inside a series]
+tests/contract/test_panel.py::test_from_frame_rejects[NaN value]
+tests/contract/test_panel.py::test_from_frame_rejects[infinite value]
+tests/contract/test_panel.py::test_from_frame_rejects[integer censored column]
+tests/contract/test_panel.py::test_from_frame_rejects[object censored column]
+tests/contract/test_panel.py::test_from_frame_rejects_time_off_weekly_calendar
+tests/contract/test_panel.py::test_from_frame_missing_columns
+tests/contract/test_panel.py::test_from_frame_types
+tests/contract/test_panel.py::test_constructor_keeps_order_and_converts
+tests/contract/test_panel.py::test_constructor_copies_and_freezes
+tests/contract/test_panel.py::test_constructor_raises[duplicate series]
+tests/contract/test_panel.py::test_constructor_raises[calendar with a gap]
+tests/contract/test_panel.py::test_constructor_raises[calendar at another freq]
+tests/contract/test_panel.py::test_constructor_raises[indptr too short]
+tests/contract/test_panel.py::test_constructor_raises[indptr not starting at 0]
+tests/contract/test_panel.py::test_constructor_raises[empty series]
+tests/contract/test_panel.py::test_constructor_raises[indptr decreasing]
+tests/contract/test_panel.py::test_constructor_raises[indptr end not the data length]
+tests/contract/test_panel.py::test_constructor_raises[starts too short]
+tests/contract/test_panel.py::test_constructor_raises[negative start]
+tests/contract/test_panel.py::test_constructor_raises[series past the calendar]
+tests/contract/test_panel.py::test_constructor_raises[NaN value]
+tests/contract/test_panel.py::test_constructor_raises[infinite value]
+tests/contract/test_panel.py::test_constructor_raises[censored of another length]
+tests/contract/test_panel.py::test_constructor_types
+tests/contract/test_panel.py::test_constructor_keeps_a_longer_calendar
+tests/contract/test_panel.py::test_take[0-1-2-3]
+tests/contract/test_panel.py::test_take[1-3]
+tests/contract/test_panel.py::test_take[2]
+tests/contract/test_panel.py::test_take[0-2-3]
+tests/contract/test_panel.py::test_take_input_conditions
+tests/contract/test_reconcile.py::test_bottom_up_sums_in_float64
+tests/contract/test_reconcile.py::test_identity_returns_its_input
+tests/contract/test_reconcile.py::test_wls_struct_projection
+tests/contract/test_reconcile.py::test_bottom_up_equals_hierarchicalforecast
+tests/contract/test_reconcile.py::test_wls_struct_equals_hierarchicalforecast
+tests/contract/test_reconcile.py::test_reconcile_input_conditions
+tests/contract/test_split.py::test_thresholds_equal_conformal_quantile[daily-step-absolute]
+tests/contract/test_split.py::test_thresholds_equal_conformal_quantile[weekly-origins-on-daily-step-signed]
+tests/contract/test_split.py::test_thresholds_equal_conformal_quantile[irregular-span-signed]
+tests/contract/test_split.py::test_thresholds_equal_conformal_quantile[weekly-span-signed]
+tests/contract/test_split.py::test_thresholds_equal_conformal_quantile[every-second-day-span-absolute]
+tests/contract/test_split.py::test_not_ready_is_inf[daily-step-absolute]
+tests/contract/test_split.py::test_not_ready_is_inf[weekly-origins-on-daily-step-signed]
+tests/contract/test_split.py::test_not_ready_is_inf[irregular-span-signed]
+tests/contract/test_split.py::test_not_ready_is_inf[weekly-span-signed]
+tests/contract/test_split.py::test_not_ready_is_inf[every-second-day-span-absolute]
+tests/contract/test_split.py::test_bands_and_bounds[daily-step-absolute]
+tests/contract/test_split.py::test_bands_and_bounds[weekly-origins-on-daily-step-signed]
+tests/contract/test_split.py::test_bands_and_bounds[irregular-span-signed]
+tests/contract/test_split.py::test_bands_and_bounds[weekly-span-signed]
+tests/contract/test_split.py::test_bands_and_bounds[every-second-day-span-absolute]
+tests/contract/test_split.py::test_missing_scores_keep_their_place
+tests/contract/test_split.py::test_known_is_read_from_dates
+tests/contract/test_split.py::test_levels_per_node
+tests/contract/test_split.py::test_replay_input_conditions
+tests/contract/test_split.py::test_split_settings
+tests/contract/test_split.py::test_replay_constructor
+tests/contract/test_splits.py::test_rolling_forecasts_split_by_series_and_origins[None]
+tests/contract/test_splits.py::test_rolling_forecasts_split_by_series_and_origins[12]
+tests/contract/test_splits.py::test_global_forecaster_splits_by_origins
+tests/contract/test_splits.py::test_reconcile_split_by_models_and_origins[BottomUp]
+tests/contract/test_splits.py::test_reconcile_split_by_models_and_origins[Identity]
+tests/contract/test_splits.py::test_reconcile_split_by_models_and_origins[WlsStruct]
+tests/contract/test_splits.py::test_replay_split_by_nodes[daily-step-absolute]
+tests/contract/test_splits.py::test_replay_split_by_nodes[weekly-origins-on-daily-step-signed]
+tests/contract/test_splits.py::test_replay_split_by_nodes[irregular-span-signed]
+tests/contract/test_splits.py::test_replay_split_by_nodes[weekly-span-signed]
+tests/contract/test_splits.py::test_replay_split_by_nodes[every-second-day-span-absolute]
+tests/contract/test_splits.py::test_public_objects_pickle[Panel]
+tests/contract/test_splits.py::test_public_objects_pickle[Hierarchy]
+tests/contract/test_splits.py::test_public_objects_pickle[Window]
+tests/contract/test_splits.py::test_public_objects_pickle[Forecasts]
+tests/contract/test_splits.py::test_public_objects_pickle[Replay]
+tests/contract/test_splits.py::test_public_objects_pickle[Step]
+tests/contract/test_splits.py::test_public_objects_pickle[Span]
+tests/contract/test_splits.py::test_public_objects_pickle[Split]
+tests/contract/test_splits.py::test_public_objects_pickle[BottomUp]
+tests/contract/test_splits.py::test_public_objects_pickle[Identity]
+tests/contract/test_splits.py::test_public_objects_pickle[WlsStruct]
+tests/contract/test_splits.py::test_public_objects_pickle[Settlement]
+tests/contract/test_splits.py::test_loaded_panel_is_read_only[2]
+tests/contract/test_splits.py::test_loaded_panel_is_read_only[3]
+tests/contract/test_splits.py::test_loaded_panel_is_read_only[4]
+tests/contract/test_splits.py::test_loaded_panel_is_read_only[5]
+tests/contract/test_splits.py::test_functions_run_on_read_only_inputs
+tests/contract/test_targets.py::test_step_cover
+tests/contract/test_targets.py::test_span_cover
+tests/contract/test_targets.py::test_cover_conditions
+tests/contract/test_targets.py::test_point_and_truth_of_columns[daily-step-absolute]
+tests/contract/test_targets.py::test_point_and_truth_of_columns[weekly-origins-on-daily-step-signed]
+tests/contract/test_targets.py::test_point_and_truth_of_columns[irregular-span-signed]
+tests/contract/test_targets.py::test_point_and_truth_of_columns[weekly-span-signed]
+tests/contract/test_targets.py::test_point_and_truth_of_columns[every-second-day-span-absolute]
+tests/contract/test_targets.py::test_column_sums_need_float64
+tests/contract/test_totals.py::test_reconcile_takes_only_forecasts
+tests/contract/test_totals.py::test_one_point_changes_only_its_own_thresholds[step]
+tests/contract/test_totals.py::test_one_point_changes_only_its_own_thresholds[span]
+tests/contract/test_totals.py::test_aggregate_bound_is_its_own
+tests/contract/test_visibility.py::test_points_ignore_later_values[None]
+tests/contract/test_visibility.py::test_points_ignore_later_values[10]
+tests/contract/test_visibility.py::test_calibration_ignores_later_truth[daily-step-absolute]
+tests/contract/test_visibility.py::test_calibration_ignores_later_truth[weekly-origins-on-daily-step-signed]
+tests/contract/test_visibility.py::test_calibration_ignores_later_truth[irregular-span-signed]
+tests/contract/test_visibility.py::test_calibration_ignores_later_truth[weekly-span-signed]
+tests/contract/test_visibility.py::test_calibration_ignores_later_truth[every-second-day-span-absolute]
+tests/contract/test_visibility.py::test_probe_changes_truth

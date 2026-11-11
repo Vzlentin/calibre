@@ -47,8 +47,9 @@ Results are dataset-specific dataclasses with `panel`, `hierarchy`, and
 return static `attributes`. FreshRetailNet reads only needed Parquet columns,
 but the full panel can still require a few GB of RAM.
 
-M5 and VN2 are unchanged and deliberately **not** downloaded here: use
-`m5.load("data/m5")` and `vn2.load("data/vn2")` with the official releases.
+M5 and VN2 are deliberately **not** downloaded here. With the official releases,
+`m5.read("data/m5")` and `vn2.read("data/vn2")` give their raw arrays, and the gates
+read them the same way.
 
 ### Preprocessing and evaluation
 

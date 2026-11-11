@@ -1,0 +1,28 @@
+{
+  "measured_with": {
+    "libcalibre": "0.1.0",
+    "commit": "7a03376d3e407d97bda1d01a17bec6c49ffe0666",
+    "statsforecast": "2.0.1",
+    "numpy": "2.5.2",
+    "pandas": "3.0.5"
+  },
+  "method": "Calibre 0.1 on VN2: StatsForecastModel(WindowAverage(window_size=13)), weekly origins at week indexes 60 to the last decision, horizon 3, BottomUp, then replay with LeadTime(3), Signed and SplitQuantile(level, window=52), not pooled, at level = critical_ratio(0.2, 1.0). The upper bounds of the bottom series at the six decisions go to the VN2 protocol of bench/vn2.py, which computes the costs.",
+  "level": 0.8333333333333334,
+  "window": 52,
+  "horizon": 3,
+  "first_origin": "2022-06-06",
+  "last_origin": "2024-05-13",
+  "n_origins": 102,
+  "n_nodes": 740,
+  "n_series": 599,
+  "total_cost": 5947.123210906982,
+  "holding_cost": 4477.661651611328,
+  "shortage_cost": 1469.4615592956543,
+  "coverage": 0.837027027027027,
+  "coverage_cells": 70300,
+  "coverage_band": [
+    0.8233333333333334,
+    0.8622012578616353
+  ],
+  "ready_share": 0.9313725490196079
+}
