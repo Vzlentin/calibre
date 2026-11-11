@@ -1,28 +1,16 @@
-"""Point forecasts: models that see one window at a time, and hierarchy reconciliation."""
+"""Forecast: point forecasts and their reconciliation over a hierarchy."""
 
-from calibre.forecast.models import (
-    AR1,
-    Covariate,
-    FitResiduals,
-    Fitted,
-    FittedResiduals,
-    Forecaster,
-    SeasonalNaive,
-    Window,
-)
-from calibre.forecast.reconcile import BottomUp, Identity, Reconciler, WlsStruct
+from calibre.forecast.forecasts import Forecasts
+from calibre.forecast.reconcile import BottomUp, Identity, Reconciler, WlsStruct, reconcile
+from calibre.forecast.window import Forecaster, Window
 
 __all__ = [
-    "AR1",
     "BottomUp",
-    "Covariate",
-    "FitResiduals",
-    "Fitted",
-    "FittedResiduals",
     "Forecaster",
+    "Forecasts",
     "Identity",
     "Reconciler",
-    "SeasonalNaive",
     "Window",
     "WlsStruct",
+    "reconcile",
 ]

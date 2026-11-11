@@ -1,49 +1,6 @@
-"""Conformal calibration: targets, scores, and calibration methods.
+"""Conformal: the targets and the settings of calibration."""
 
-A `Target` says which quantity each column bounds, a `Score` which bound each threshold
-issues, a `Loss` what a bound cost, and a `Calibrator` turns the known targets into a
-threshold per node and column.
-`calibre.online` owns feedback release; `calibre.backtest` owns origin loops.
-"""
+from calibre.conformal.split import Split
+from calibre.conformal.targets import Span, Step, Target
 
-from calibre.conformal.calibrators import (
-    ACI,
-    Calibrator,
-    ConformalPID,
-    EnbPI,
-    Feedback,
-    Level,
-    QuantileCalibrator,
-    QuantileTracker,
-    RiskControl,
-    Scorecaster,
-    SplitQuantile,
-    State,
-)
-from calibre.conformal.losses import Loss, Miss
-from calibre.conformal.scores import Absolute, Asymmetric, Score, Signed
-from calibre.conformal.targets import LeadTime, Step, Target
-
-__all__ = [
-    "ACI",
-    "Absolute",
-    "Asymmetric",
-    "Calibrator",
-    "ConformalPID",
-    "EnbPI",
-    "Feedback",
-    "LeadTime",
-    "Level",
-    "Loss",
-    "Miss",
-    "QuantileCalibrator",
-    "QuantileTracker",
-    "RiskControl",
-    "Score",
-    "Scorecaster",
-    "Signed",
-    "SplitQuantile",
-    "State",
-    "Step",
-    "Target",
-]
+__all__ = ["Span", "Split", "Step", "Target"]

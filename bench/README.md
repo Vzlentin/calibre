@@ -31,21 +31,23 @@ import beijing
 
 data = beijing.load("data/beijing")
 panel, hierarchy = data.panel, data.hierarchy
-print(panel.values.shape)
+print(len(panel.series), len(panel.periods))
 PY
 
 # Optional Parquet reader for FreshRetailNet only; not needed to download it:
 PYTHONPATH=bench uv run --no-dev --with pyarrow python - <<'PY'
 import freshretail
 data = freshretail.load("data/freshretail")
-print(data.panel.values.shape)  # (50000, 97)
+print(data.observed.shape)  # (50000, 97)
 PY
 ```
 
-Results are dataset-specific dataclasses with `panel`, `hierarchy`, and
-`observed[B, T]` (False on imputed targets). Favorita and FreshRetailNet also
-return static `attributes`. FreshRetailNet reads only needed Parquet columns,
-but the full panel can still require a few GB of RAM.
+Results are dataset-specific dataclasses with a Calibre `Panel` and
+`observed[B, T]` (False on imputed targets). Each series of the panel covers the
+whole calendar. All but Bike and ETTh1, which have one series, also return a
+`hierarchy`. Favorita and FreshRetailNet also return static `attributes`.
+FreshRetailNet gives its censoring mask as `panel.censored`. It reads only needed
+Parquet columns, but the full panel can still require a few GB of RAM.
 
 M5 and VN2 are deliberately **not** downloaded here. With the official releases,
 `m5.read("data/m5")` and `vn2.read("data/vn2")` give their raw arrays, and the gates
@@ -65,49 +67,53 @@ read them the same way.
 - No future covariates are supplied. Bike's `casual + registered` reveals `cnt`,
   not a usable predictor of that same target.
 - Favorita and FreshRetailNet construct hierarchies from static attributes, not
-  official scoring hierarchies. Other datasets have flat hierarchies, without
-  invented sums of temperature, occupancy or exchange rates.
+  official scoring hierarchies. Beijing and LSTNet have flat hierarchies, without
+  invented sums of occupancy or exchange rates.
 - Subset series after loading if needed; loaders always use the full panel to
   determine warm-up trimming. Rebuild a matching hierarchy for any subset.
 
 ## 3. Forecast, calibrate and evaluate
 
-Use `rolling_forecasts(...)` to generate forecasts, `replay(...)` to apply
-calibrators to those forecasts, and `calibre.metrics` to compare coverage, width
-and other metrics.
+Use `rolling_forecasts(...)` to make forecasts, `reconcile(...)` to sum them over
+the hierarchy, and `replay(...)` to calibrate them at each origin.
 
-This complete example continues with Beijing; change the loader, season and
-horizon for other datasets. Imputed and annotated-censored targets are excluded
-from calibration/evaluation. On retail data, this does not establish latent-demand
-coverage.
+This example continues with Beijing. Change the loader, season and horizon for other
+datasets. M1 has no mask for imputed values. The example gives the imputed cells as
+the censored flag of the truth panel, so that `Replay.censored` marks the cells to
+leave out of the evaluation. Their scores still enter the score windows. On retail
+data, this does not establish latent-demand coverage.
 
 ```sh
-PYTHONPATH=bench uv run --no-dev python - <<'PY'
+PYTHONPATH=bench uv run python - <<'PY'
+import dataclasses
+
 import numpy as np
 import beijing
-from calibre import Absolute, BottomUp, SeasonalNaive, SplitQuantile, Step
-from calibre import replay, rolling_forecasts
-from calibre.metrics import coverage
+from conformalforecast.nonconformity import AbsoluteResidual
+from statsforecast import StatsForecast
+from statsforecast.models import SeasonalNaive
+from calibre import BottomUp, Split, Step, reconcile, replay, rolling_forecasts
 
-folder = "data/beijing"
-data = beijing.load(folder)
+data = beijing.load("data/beijing")
 panel, hierarchy = data.panel, data.hierarchy
 horizon, season = 24, 24  # hourly; use e.g. 7, 7 for daily retail
-origins = np.arange(len(panel.periods) - horizon - 48, len(panel.periods) - horizon)
-assert origins[0] + 1 >= season
-run = rolling_forecasts(panel, hierarchy, SeasonalNaive(season),
-                        BottomUp(hierarchy), origins, horizon)
-actuals = hierarchy.aggregate(panel.values).copy()
-invalid = ~data.observed
+invalid = ~data.observed.ravel()
 if panel.censored is not None:
     invalid = invalid | panel.censored
-actuals[hierarchy.any_bottom(invalid)] = np.nan
-bands = replay(run, actuals, target=Step(), score=Absolute(),
-               calibrator=SplitQuantile(0.9, window=28))
-print(run.points.shape)  # [origins, nodes, horizon]
-print(coverage(bands.target, bands.lower, bands.upper))
-np.savez_compressed(f"{folder}/forecasts.npz", origins=run.origins, points=run.points,
-                    nodes=hierarchy.nodes)
+flagged = dataclasses.replace(panel, censored=invalid)
+truth = hierarchy.aggregate(flagged)
+
+origins = panel.periods[-horizon - 48 : -horizon]
+engine = StatsForecast(models=[SeasonalNaive(season_length=season)], freq=panel.freq)
+forecasts = rolling_forecasts(panel, [engine], origins, horizon, lookback=4 * season)
+nodes = reconcile(forecasts, hierarchy, BottomUp())
+bands = replay(
+    nodes, truth, target=Step(), method=Split(score=AbsoluteResidual(), window=28), level=0.9
+)
+ready = np.isfinite(bands.upper) & np.isfinite(bands.truth) & ~bands.censored
+covered = (bands.truth >= bands.lower) & (bands.truth <= bands.upper)
+print(bands.upper.shape)  # [nodes, horizon, origins]
+print(covered[ready].mean())
 PY
 ```
 

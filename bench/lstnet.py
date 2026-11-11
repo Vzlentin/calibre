@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from calibre.data import Hierarchy, Panel
+from imputation import dense_panel
 from sources import Source
 
 BASE_URL = (
@@ -79,5 +80,5 @@ def load(path: str | Path) -> LSTNet:
     values = np.loadtxt(path / source.name, delimiter=",", dtype=np.float32, ndmin=2)
     periods = pd.date_range("2000-01-01", periods=values.shape[0], freq=source.freq)
     series = np.array([f"column_{i + 1:03d}" for i in range(values.shape[1])])
-    panel = Panel(series, periods, values.T, source.freq)
-    return LSTNet(panel, Hierarchy.flat(panel.series), np.ones(panel.values.shape, dtype=bool))
+    panel = dense_panel(series, periods, values.T, source.freq)
+    return LSTNet(panel, Hierarchy.flat(panel.series), np.ones(values.T.shape, dtype=bool))

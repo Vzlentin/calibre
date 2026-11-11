@@ -27,8 +27,8 @@ uv run pytest
 
 ## Layout
 
-- `src/calibre` is the library: forecasting, reconciliation, calibration, decisions, and
-  metrics over arrays. It has no dataset names, column layouts, or benchmark protocols.
+- `src/calibre` is the library: forecasting, reconciliation, calibration, and decisions
+  over arrays. It has no dataset names, column layouts, or benchmark protocols.
 - `bench/` is a folder of scripts for datasets and benchmark comparisons. `calibre` never
   imports from it, and it has no tests.
 - Raw data stays out of Git. Loaders take a directory.
@@ -38,9 +38,6 @@ uv run pytest
 - A concept is one module or one package. A contract is an `abc.ABC` with only abstract
   methods, and each implementation subclasses it. No `utils`, `common`, or `helpers`
   modules.
-- A new calibrator is one file in `src/calibre/conformal/calibrators/` that imports only
-  `calibrators.base`, `calibrators.ranks`, and `conformal.losses`. Its state is a nested
-  dict of numpy arrays with the node axis kept. See "Write a calibrator" in the README.
 - Hot paths work on typed arrays. Validate inputs once at the boundary.
 - Numerical tests use real implementations and independent expected values, not mocks.
 - Keep files below 1000 lines.

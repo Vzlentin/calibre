@@ -6,29 +6,22 @@ All notable changes are listed here. The format follows
 
 ## Unreleased
 
-### Added
-
-- `SPCI` multi-horizon asymmetric calibration with causal calendar-aligned residual
-  contexts, quantile-forest leaf weights, shortest-interval beta search, explicit
-  dated seeding, and deterministic NumPy-only continuation. It shares the `bootstrap`
-  extra for scikit-learn; point models and origin loops are unchanged.
-- `ConformalPID` with explicit nonnegative-score seeding, per-node/column quantile
-  tracking, a saturating tangent integrator, and causal rolling AR(1) scorecasting.
-  Controller state is NumPy-only and resumes through the existing online/replay API.
-- Local one-step `BootstrapEnsemble` with OOB-weighted points and a `bootstrap`
-  extra for scikit-learn. Fit-time residuals have explicit `FitResiduals` and
-  `FittedResiduals` contracts; rolling forecasts can collect reconciled initial
-  errors from one frozen model.
-- `EnbPI` signed empirical residual calibration with explicit seeding, finite
-  per-node/column windows, and shortest-interval beta search.
-
 ### Changed
 
-- The `Score` contract declares its parameter shape. `Asymmetric` uses two
-  residual corrections; the ledger archives them and asymmetric feedback/replay
-  coverage evaluates issued endpoints rather than assuming a scalar threshold.
-- `replay` accepts a seeded or saved online state for continuation.
-- Removed the nonfunctional mixed-case EnbPI scaffold.
+- The backtest runs on the v2 layout of `docs/architecture.md`. `Panel` is a ragged
+  grouped array, and `rolling_forecasts` runs `StatsForecast` objects and `Forecaster`
+  subclasses at each origin. `Forecasts`, `reconcile`, `replay` with `Step`, `Span` and
+  `Split`, and the decision functions are the public API.
+- The bench loaders return the v2 `Panel`. FreshRetailNet gives its censoring mask as
+  `Panel.censored`. Bike and ETTh1 have one series and no `hierarchy`.
+
+### Removed
+
+- The 0.1 model adapters, scores, losses, calibrators, `calibre.online`,
+  scorecasting and `calibre.metrics`. Scores and diagnostics come from
+  conformalforecast.
+- `bench/compare.py`, `bench/vn2_conformal.py`, `bench/vn2_intervals.py` and
+  `bench/selective_imagenet.py`. `bench/gate_vn2.py` runs the VN2 path.
 
 ## 0.1.0
 

@@ -1,47 +1,69 @@
-"""Targets: which quantity a score column bounds, as a set of forecast steps."""
+"""Targets: the steps that each column sums."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import numpy as np
 
 
+def _size(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be an int")
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return value
+
+
+def _steps(value: object, name: str) -> int | np.ndarray:
+    if isinstance(value, np.ndarray):
+        if value.dtype.kind not in "iu":
+            raise TypeError(f"{name} must be an int or an array of int")
+        if value.ndim != 1:
+            raise ValueError(f"{name} must be one value per node")
+        array = np.array(value, dtype=np.int64)
+        array.flags.writeable = False
+        return array
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be an int or an array of int")
+    return value
+
+
 class Target(ABC):
+    """Which steps each column sums: `cover` is `[N, C, H]` bool."""
+
     @abstractmethod
-    def cover(self, horizon: int) -> np.ndarray:
-        """`[C, H]` bool: the forecast steps that each column sums."""
+    def cover(self, n_nodes: int, horizon: int) -> np.ndarray: ...
 
 
+@dataclass(frozen=True)
 class Step(Target):
-    """One column per forecast step."""
+    """H columns: column c covers step c + 1."""
 
-    def cover(self, horizon: int) -> np.ndarray:
-        return np.eye(horizon, dtype=bool)
-
-
-class LeadTime(Target):
-    """One column: the total over the first `steps` steps, for example lead-time demand.
-
-    A column is known only when every step it covers is known.
-    """
-
-    def __init__(self, steps: int) -> None:
-        if steps < 1:
-            raise ValueError(f"steps must be at least 1, got {steps}")
-        self.steps = steps
-
-    def cover(self, horizon: int) -> np.ndarray:
-        if self.steps > horizon:
-            raise ValueError(f"lead time of {self.steps} steps is longer than horizon {horizon}")
-        return (np.arange(horizon) < self.steps)[None, :]
+    def cover(self, n_nodes: int, horizon: int) -> np.ndarray:
+        n_nodes, horizon = _size(n_nodes, "n_nodes"), _size(horizon, "horizon")
+        return np.broadcast_to(np.eye(horizon, dtype=bool), (n_nodes, horizon, horizon)).copy()
 
 
-def columns(values: np.ndarray, cover: np.ndarray) -> np.ndarray:
-    """Steps `[..., H]` to columns `[..., C]`: a sum, or any for flags.
+@dataclass(frozen=True)
+class Span(Target):
+    """One column: the steps from `first` to `last` of each node, 1-based."""
 
-    A missing covered step makes the column missing. Uncovered steps are ignored.
-    """
-    if cover.shape[0] == cover.shape[1] and (cover == np.eye(len(cover), dtype=bool)).all():
-        return values
-    reduce = np.any if values.dtype == bool else np.sum
-    out = [reduce(values[..., steps], axis=-1) for steps in cover]
-    return np.stack(out, axis=-1)
+    first: int | np.ndarray  # [N] int64 when per node
+    last: int | np.ndarray  # [N] int64 when per node
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "first", _steps(self.first, "first"))
+        object.__setattr__(self, "last", _steps(self.last, "last"))
+
+    def cover(self, n_nodes: int, horizon: int) -> np.ndarray:
+        n_nodes, horizon = _size(n_nodes, "n_nodes"), _size(horizon, "horizon")
+        first = np.broadcast_to(np.asarray(self.first, dtype=np.int64), (n_nodes,))
+        last = np.broadcast_to(np.asarray(self.last, dtype=np.int64), (n_nodes,))
+        for value in (self.first, self.last):
+            if isinstance(value, np.ndarray) and len(value) != n_nodes:
+                raise ValueError("a Span array needs one value per node")
+        if (first < 1).any() or (first > last).any() or (last > horizon).any():
+            raise ValueError("a Span needs 1 <= first <= last <= horizon")
+        step = np.arange(1, horizon + 1)
+        inside = (step >= first[:, None]) & (step <= last[:, None])
+        return inside[:, None, :]

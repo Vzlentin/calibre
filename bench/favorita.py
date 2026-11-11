@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from calibre.data import Hierarchy, Panel
-from imputation import forward_fill
+from imputation import dense_panel, forward_fill
 from sources import Source
 
 BASE_URL = (
@@ -56,14 +56,15 @@ def load(path: str | Path) -> Favorita:
     path = Path(path)
     for source in SOURCES:
         source.verify(path / source.name)
-    frame = pd.read_csv(path / "train.csv", usecols=["date", "store_nbr", "family", "sales"])
+    columns = pd.Index(["date", "store_nbr", "family", "sales"])
+    frame = pd.read_csv(path / "train.csv", usecols=columns)
     frame["series"] = frame["store_nbr"].astype(str) + ":" + frame["family"]
     frame["period"] = pd.to_datetime(frame["date"])
     frame = frame.merge(pd.read_csv(path / "stores.csv"), on="store_nbr", how="left")
     attributes = frame[["series", *ATTRIBUTES]].drop_duplicates().set_index("series")
     wide = frame.pivot(index="period", columns="series", values="sales")
     wide, observed, dropped = forward_fill(wide, "D")
-    panel = Panel(
+    panel = dense_panel(
         wide.columns.to_numpy(), pd.DatetimeIndex(wide.index), wide.to_numpy(np.float32).T, "D"
     )
     attributes = attributes.loc[panel.series]

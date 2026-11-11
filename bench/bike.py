@@ -10,8 +10,8 @@ from zipfile import ZipFile
 import numpy as np
 import pandas as pd
 
-from calibre.data import Hierarchy, Panel
-from imputation import forward_fill
+from calibre.data import Panel
+from imputation import dense_panel, forward_fill
 from sources import Source
 
 SOURCES = (
@@ -25,10 +25,9 @@ SOURCES = (
 
 @dataclass(frozen=True)
 class Bike:
-    """Rental panel and flat hierarchy; observed [B, T] excludes imputed targets."""
+    """Rental panel of one series; observed [B, T] excludes imputed targets."""
 
     panel: Panel
-    hierarchy: Hierarchy
     observed: np.ndarray
     warmup_periods_dropped: int
 
@@ -46,7 +45,7 @@ def load(path: str | Path) -> Bike:
         frame = pd.read_csv(stream)
     periods = pd.to_datetime(frame["dteday"]) + pd.to_timedelta(frame["hr"], unit="h")
     wide, observed, dropped = forward_fill(frame[["cnt"]].set_axis(periods), "h")
-    panel = Panel(
+    panel = dense_panel(
         wide.columns.to_numpy(), pd.DatetimeIndex(wide.index), wide.to_numpy(np.float32).T, "h"
     )
-    return Bike(panel, Hierarchy.flat(panel.series), observed, dropped)
+    return Bike(panel, observed, dropped)

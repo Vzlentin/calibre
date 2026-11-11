@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from calibre.data import Hierarchy, Panel
+from imputation import dense_panel
 from sources import Source
 
 BASE_URL = (
@@ -79,13 +80,14 @@ def load(path: str | Path) -> FreshRetail:
     wide = frame.pivot(index="period", columns="series", values="sale_amount").sort_index()
     frame["censored"] = frame["stock_hour6_22_cnt"] > 0
     censored = frame.pivot(index="period", columns="series", values="censored")
-    panel = Panel(
+    values = wide.to_numpy(np.float32).T
+    panel = dense_panel(
         wide.columns.to_numpy(),
         pd.DatetimeIndex(wide.index),
-        wide.to_numpy(np.float32).T,
+        values,
         "D",
         censored.loc[wide.index, wide.columns].to_numpy(dtype=bool).T,
     )
     attributes = attributes.loc[panel.series]
     hierarchy = Hierarchy.from_attributes(panel.series, attributes, LEVELS)
-    return FreshRetail(panel, hierarchy, attributes, np.ones(panel.values.shape, dtype=bool))
+    return FreshRetail(panel, hierarchy, attributes, np.ones(values.shape, dtype=bool))

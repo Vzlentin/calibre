@@ -1,70 +1,97 @@
-"""Reconcilers: linear maps from base forecasts `[S, H]` to coherent node points `[N, H]`.
-
-S is B for `BottomUp` and N for `Identity` and `WlsStruct`. Nodes are ordered bottoms
-first, so the forecast series are always the first S nodes.
-"""
+"""Reconcilers: maps from forecast series to the nodes of a hierarchy."""
 
 from abc import ABC, abstractmethod
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.linalg import cho_factor, cho_solve
+from pydantic import BaseModel, ConfigDict
+from scipy.sparse.linalg import splu
 
 from calibre.data.hierarchy import Hierarchy
+from calibre.forecast.forecasts import Forecasts
 
 
-class Reconciler(ABC):
-    """A linear map from S forecast series to N nodes. Set `shape` to `(N, S)`."""
+class Reconciler(BaseModel, ABC):
+    """Maps points `[M, S, H, O]` float32 to node points `[M, N, H, O]` float32."""
 
-    shape: tuple[int, int]
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     @abstractmethod
-    def __call__(self, base: np.ndarray) -> np.ndarray:
-        """Return node points `[N, H]` float32 from base forecasts `[S, H]`."""
+    def project(self, points: np.ndarray, hierarchy: Hierarchy) -> np.ndarray: ...
+
+
+def _columns(points: np.ndarray) -> np.ndarray:
+    """`[S, M * H * O]`: one row per series."""
+    return np.moveaxis(points, 1, 0).reshape(points.shape[1], -1)
+
+
+def _nodes(columns: np.ndarray, shape: tuple[int, int, int, int]) -> np.ndarray:
+    """`[M, N, H, O]` from `[N, M * H * O]`."""
+    n_models, _, horizon, n_origins = shape
+    return np.moveaxis(columns.reshape(-1, n_models, horizon, n_origins), 0, 1)
+
+
+def _bottom_up(points: np.ndarray, hierarchy: Hierarchy) -> np.ndarray:
+    bottoms = _columns(points)
+    missing = np.isnan(bottoms)
+    summing = hierarchy.summing.astype(np.float64)
+    nodes = summing @ np.where(missing, 0.0, bottoms.astype(np.float64))
+    if missing.any():
+        present = hierarchy.summing @ (~missing).astype(np.float32)
+        nodes[present == 0] = np.nan
+    return np.ascontiguousarray(_nodes(nodes.astype(np.float32), points.shape))
+
+
+def _shape(points: np.ndarray, n_series: int) -> None:
+    if points.ndim != 4 or points.shape[1] != n_series:
+        raise ValueError(f"points must be [M, {n_series}, H, O], got shape {points.shape}")
 
 
 class BottomUp(Reconciler):
-    """Forecast the bottom series and sum them."""
+    """Each node is the sum of its bottoms. A NaN bottom adds zero."""
 
-    def __init__(self, hierarchy: Hierarchy) -> None:
-        self.summing = hierarchy.summing
-        self.shape = self.summing.shape
-
-    def __call__(self, base: np.ndarray) -> np.ndarray:
-        return np.asarray(self.summing @ base, dtype=np.float32)
+    def project(self, points: np.ndarray, hierarchy: Hierarchy) -> np.ndarray:
+        _shape(points, hierarchy.n_bottom)
+        return _bottom_up(points, hierarchy)
 
 
 class Identity(Reconciler):
-    """Forecast every node and keep the base forecasts. They are not coherent."""
+    """The forecasts of every node, as they are. They are not coherent."""
 
-    def __init__(self, hierarchy: Hierarchy) -> None:
-        n_nodes = len(hierarchy.nodes)
-        self.shape = (n_nodes, n_nodes)
-
-    def __call__(self, base: np.ndarray) -> np.ndarray:
-        return np.asarray(base, dtype=np.float32)
+    def project(self, points: np.ndarray, hierarchy: Hierarchy) -> np.ndarray:
+        _shape(points, len(hierarchy.nodes))
+        return np.array(points, dtype=np.float32)
 
 
 class WlsStruct(Reconciler):
-    """MinT with structural weights, solved through the aggregation constraints.
+    """MinT with structural scaling: `S (S' W^-1 S)^-1 S' W^-1 y`, W the bottom counts."""
 
-    Coherent points `y` satisfy `J y = 0` with `J = [A, -I]`, `A` the aggregate rows of
-    the summing matrix. With `W = diag(S 1)`, the leaf count per node, the projection of
-    base forecasts `b` is `y = b - W J^T (J W J^T)^-1 J b`, the same estimate as
-    `S (S^T W^-1 S)^-1 S^T W^-1 b`. It factors only the `[A, A]` aggregate system, once.
-    """
+    def project(self, points: np.ndarray, hierarchy: Hierarchy) -> np.ndarray:
+        _shape(points, len(hierarchy.nodes))
+        if np.isnan(points).any():
+            raise ValueError("WlsStruct needs points with no NaN")
+        summing = hierarchy.summing.astype(np.float64)
+        inverse = sp.diags_array(1.0 / np.asarray(summing.sum(axis=1)).ravel())
+        weighted = summing.T @ inverse
+        normal = (weighted @ summing).tocsc()
+        rhs = weighted @ _columns(points).astype(np.float64)
+        bottoms = splu(normal).solve(np.asarray(rhs))
+        bottoms = bottoms.astype(np.float32)
+        n_models, _, horizon, n_origins = points.shape
+        shape = (n_models, hierarchy.n_bottom, horizon, n_origins)
+        return _bottom_up(np.ascontiguousarray(_nodes(bottoms, shape)), hierarchy)
 
-    def __init__(self, hierarchy: Hierarchy) -> None:
-        n_nodes, n_bottom = hierarchy.summing.shape
-        aggregate = hierarchy.summing[n_bottom:].astype(np.float64)
-        identity = sp.eye_array(n_nodes - n_bottom, format="csr")
-        self.shape = (n_nodes, n_nodes)
-        self.constraint = sp.hstack([aggregate, -identity], format="csr")
-        self.weights = np.asarray(hierarchy.summing.sum(axis=1), dtype=np.float64)
-        system = self.constraint @ sp.diags_array(self.weights) @ self.constraint.T
-        self.factor = cho_factor(system.toarray(), overwrite_a=True)
 
-    def __call__(self, base: np.ndarray) -> np.ndarray:
-        base = np.asarray(base, dtype=np.float64)
-        multiplier = cho_solve(self.factor, self.constraint @ base)
-        return (base - self.weights[:, None] * (self.constraint.T @ multiplier)).astype(np.float32)
+def reconcile(forecasts: Forecasts, hierarchy: Hierarchy, method: Reconciler) -> Forecasts:
+    """Node points from forecasts by `method`. The result has the nodes as its series."""
+    if not isinstance(forecasts, Forecasts):
+        raise TypeError("reconcile takes a Forecasts")
+    if not isinstance(hierarchy, Hierarchy):
+        raise TypeError("hierarchy must be a Hierarchy")
+    if not isinstance(method, Reconciler):
+        raise TypeError("method must be a Reconciler")
+    n_series = len(forecasts.series)
+    if not np.array_equal(forecasts.series, hierarchy.nodes[:n_series]):
+        raise ValueError("the forecast series must be the first nodes of the hierarchy, in order")
+    points = method.project(forecasts.points, hierarchy)
+    return Forecasts(points, forecasts.models, hierarchy.nodes, forecasts.origins)

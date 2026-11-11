@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from calibre.data import Hierarchy, Panel
+from calibre.data import Panel
+from imputation import dense_panel
 from sources import Source
 
 SOURCES = (
@@ -21,10 +22,9 @@ SOURCES = (
 
 @dataclass(frozen=True)
 class ETT:
-    """Temperature panel, flat hierarchy, and original-target mask [B, T]."""
+    """Temperature panel of one series, and original-target mask [B, T]."""
 
     panel: Panel
-    hierarchy: Hierarchy
     observed: np.ndarray
 
 
@@ -35,7 +35,6 @@ def load(path: str | Path) -> ETT:
     source.verify(path / source.name)
     frame = pd.read_csv(path / source.name, parse_dates=["date"])
     wide = frame.set_index("date")[["OT"]].sort_index()
-    panel = Panel(
-        wide.columns.to_numpy(), pd.DatetimeIndex(wide.index), wide.to_numpy(np.float32).T, "h"
-    )
-    return ETT(panel, Hierarchy.flat(panel.series), np.ones(panel.values.shape, dtype=bool))
+    values = wide.to_numpy(np.float32).T
+    panel = dense_panel(wide.columns.to_numpy(), pd.DatetimeIndex(wide.index), values, "h")
+    return ETT(panel, np.ones(values.shape, dtype=bool))

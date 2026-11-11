@@ -18,9 +18,8 @@ pip install libcalibre
 uv add libcalibre
 ```
 
-The vendor model adapters need an extra: `stats` (statsforecast), `ml` (mlforecast), or
-`neural` (neuralforecast). `bootstrap` installs scikit-learn for `BootstrapEnsemble`
-and `SPCI`; importing `calibre` loads none of these optional libraries.
+The `stats` extra installs statsforecast, the engine that `rolling_forecasts` runs.
+Importing `calibre` does not load it.
 
 ```sh
 pip install "libcalibre[stats]"
@@ -31,240 +30,72 @@ pip install "libcalibre[stats]"
 ```python
 import numpy as np
 import pandas as pd
+from conformalforecast.nonconformity import AbsoluteResidual, SignedResidual
+from statsforecast import StatsForecast
+from statsforecast.models import SeasonalNaive
 
-from calibre import Absolute, BottomUp, Hierarchy, LeadTime, Panel, SeasonalNaive, Signed
-from calibre import SplitQuantile, Step, replay, rolling_forecasts
-from calibre.metrics import coverage
+from calibre import BottomUp, Hierarchy, Panel, Span, Split, Step
+from calibre import critical_ratio, reconcile, replay, rolling_forecasts
 
 rng = np.random.default_rng(0)
-series = np.array(["a", "b", "c"])
-periods = pd.date_range("2024-01-01", periods=120, freq="D")
-panel = Panel(series, periods, rng.poisson(5.0, (3, 120)), "D")
-hierarchy = Hierarchy.from_attributes(
-    series, pd.DataFrame({"group": ["x", "x", "y"]}, index=series)
+frame = pd.DataFrame(
+    {
+        "unique_id": np.repeat(["a", "b", "c"], 120),
+        "ds": np.tile(pd.date_range("2024-01-01", periods=120, freq="D"), 3),
+        "y": rng.poisson(5.0, 360).astype(float),
+    }
 )
+panel = Panel.from_frame(frame, freq="D")
+attributes = pd.DataFrame({"group": ["x", "x", "y"]}, index=panel.series)
+hierarchy = Hierarchy.from_attributes(panel.series, attributes, ["group"])
 
-origins = np.arange(60, 113)  # each origin is the index of the last observed period
-run = rolling_forecasts(panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), origins, 7)
-actuals = hierarchy.aggregate(panel.values)
+engine = StatsForecast(models=[SeasonalNaive(season_length=7)], freq="D")
+origins = panel.periods[60:113]  # each origin is the last period that a forecast reads
+forecasts = rolling_forecasts(panel, [engine], origins, 7)
+nodes = reconcile(forecasts, hierarchy, BottomUp())
+truth = hierarchy.aggregate(panel)
 
-calibrator = SplitQuantile(0.9, window=28)
-bands = replay(run, actuals, target=Step(), score=Absolute(), calibrator=calibrator)
-bound = replay(run, actuals, target=LeadTime(7), score=Signed(), calibrator=calibrator)
-print(coverage(bands.target, bands.lower, bands.upper))
+bands = replay(
+    nodes, truth, target=Step(), method=Split(score=AbsoluteResidual(), window=28), level=0.9
+)
+bound = replay(
+    nodes,
+    truth,
+    target=Span(1, 7),
+    method=Split(score=SignedResidual(), window=28),
+    level=critical_ratio(0.2, 1.0),
+)
 ```
+
+`bands.lower` and `bands.upper` are `[N, C, O]`: one band per node, step and origin.
+`bound.upper` is the bound of the 7-day sum, at the cost-calibrated level.
 
 ## Concepts
 
-Shapes use these axes: B bottom series, T periods, N nodes with bottoms first,
-S forecast series (B for `BottomUp`, N otherwise), O origins, H forecast steps, and
-C target columns (H for `Step`, 1 for `LeadTime`).
-
-![Panel and Hierarchy go to the Forecaster, base forecasts to the Reconciler, points to the Calibrator, bounds to order_up_to and settle](https://raw.githubusercontent.com/Vzlentin/calibre/main/docs/pipeline.png)
+Shapes use these axes: N nodes with the bottoms first, S series, B bottom series,
+M models, T periods, O origins, H steps, and C target columns (H for `Step`, 1 for
+`Span`).
 
 | Stage | Names |
 |---|---|
-| Data | `Panel`, `Hierarchy`, `Covariate` |
-| Forecast | `Forecaster`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`), `rolling_forecasts` |
-| Calibrate | `Target` (`Step`, `LeadTime`), `Score` (`Absolute`, `Signed`, `Asymmetric`), `Loss` (`Miss`), `Calibrator` (`SplitQuantile`, `ACI`, `QuantileTracker`, `ConformalPID`, `RiskControl`, `EnbPI`), `step`, `replay` |
-| Decide | `critical_ratio`, `order_up_to`, `settle` |
-| Measure | `calibre.metrics`: coverage, width, interval score, pinball, cost |
+| Data | `Panel`, `Hierarchy` |
+| Forecast | `rolling_forecasts`, `Forecasts`, `Window`, `Forecaster`, `reconcile`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`) |
+| Calibrate | `Target` (`Step`, `Span`), `Split`, `replay`, `Replay` |
+| Decide | `critical_ratio`, `order_up_to`, `settle`, `Settlement` |
 
-Two rules hold everywhere. A model reads only its window, so a later value cannot
-change a point unless a covariate declares it known ahead. A calibrator sees a score
-only once its target is known, and before the origin that knows it issues.
+A model reads only its window, so a later value cannot change a point. A threshold reads
+only the scores that are known at its origin. Scores, quantiles and diagnostics come from
+conformalforecast.
+
+`rolling_forecasts` runs `StatsForecast` objects as they are, and any subclass of
+`Forecaster`. `Forecasts.from_cv` reads the cross-validation frame of a Nixtla library.
 
 [Architecture](https://github.com/Vzlentin/calibre/blob/main/docs/architecture.md) has the shapes and the modules.
 
-## Write a calibrator
-
-A calibrator owns its target, a level or a loss, and is three functions of an explicit
-state. `calibre.online` handles the origins, the delays, and the indexing. A new method
-is one file in `calibre/conformal/calibrators/` that imports only `calibrators.base`,
-`calibrators.ranks`, and `conformal.losses`. This is the whole of a quantile tracker:
-
-```python
-import numpy as np
-
-from calibre.conformal.calibrators.base import Calibrator
-
-
-class Tracker(Calibrator):
-    def __init__(self, level, lr):
-        self.level = level
-        self.lr = lr
-
-    def initial_state(self, n_nodes, n_columns):
-        return {"q": np.zeros((n_nodes, n_columns))}
-
-    def update(self, state, feedback):
-        q = state["q"].copy()
-        for row, column in enumerate(feedback.column):  # one row = one origin, one column
-            miss = feedback.scores[row] > feedback.issued[row]
-            q[:, column] += self.lr * (miss - (1 - self.level))
-        return {"q": q}
-
-    def threshold(self, state):
-        return state["q"].astype(np.float32)
-```
-
-Keep the state in numpy arrays. Then a product can save it after each origin with
-`calibre.online.state.flatten` and continue from it.
-
-## Models
-
-| Model | Kind | Install |
-|---|---|---|
-| `calibre.forecast.models.naive.SeasonalNaive` | local | core |
-| `calibre.forecast.models.ar1.AR1` | local, regularized autoregression with an intercept | core |
-| `calibre.forecast.models.bootstrap.BootstrapEnsemble` | local, frozen one-step lag-row ensembles with OOB errors | `libcalibre[bootstrap]` |
-| `calibre.forecast.models.statsforecast.StatsForecastModel` | local, any `statsforecast.models` model | `libcalibre[stats]` |
-| `calibre.forecast.models.mlforecast.MLForecast` | global regressor with lags and covariates | `libcalibre[ml]` |
-| `calibre.forecast.models.neuralforecast.NeuralForecast` | global network from `neuralforecast.models` | `libcalibre[neural]` |
-
-```python
-from lightgbm import LGBMRegressor
-from calibre import BottomUp, Covariate, rolling_forecasts
-from calibre.forecast.models.mlforecast import MLForecast
-
-model = MLForecast(
-    LGBMRegressor(), lags=[7, 14, 28], features=["price"], fit_periods=365, lookback=84
-)
-price = Covariate(prices, known_ahead=True, aggregate="mean")  # [B, T + H]
-run = rolling_forecasts(
-    panel,
-    hierarchy,
-    model,
-    BottomUp(hierarchy),
-    origins,
-    28,
-    refit_every=7,
-    covariates={"price": price},
-)
-```
-
-## EnbPI
-
-Install `libcalibre[bootstrap]` for the scikit-learn bootstrap adapter. Forecasting
-and residual calibration are separate: `BootstrapEnsemble` trains frozen learners;
-`EnbPI` maintains signed errors; `Asymmetric` turns the two quantiles into bounds.
-
-Using the `panel` and `hierarchy` from the quick start:
-
-```python
-from sklearn.linear_model import Ridge
-
-from calibre import Asymmetric, EnbPI, initial_state
-from calibre.forecast.models.bootstrap import BootstrapEnsemble
-
-forecasts = rolling_forecasts(
-    panel,
-    hierarchy,
-    BootstrapEnsemble(Ridge(), n_lags=7, random_state=42),
-    BottomUp(hierarchy),
-    np.arange(60, 113),
-    1,
-    initial_residuals=True,
-)
-seed = forecasts.initial_residuals
-assert seed is not None
-calibrator = EnbPI(level=0.9, window=len(seed.values))
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=1)
-state["calibrator"] = calibrator.seed(state["calibrator"], seed.values)
-intervals = replay(
-    forecasts,
-    hierarchy.aggregate(panel.values),
-    target=Step(),
-    score=Asymmetric(),
-    calibrator=calibrator,
-    state=state,
-)
-print(coverage(intervals.target, intervals.lower, intervals.upper))
-```
-
-The adapter supports one-step lag regression only and rejects covariates.
-OOB errors are initialization data, not chronological forecast errors. Only their
-known initial training prefix may seed calibration; no refits are allowed when
-collecting these errors. The empirical interval searches both residual tails, with
-no split-conformal n+1 correction. Its parameters are [N, C, 2]; bounds remain [N, C].
-This does not establish distribution-free conditional coverage for dependent series.
-See [Semantics](docs/semantics.md#enbpi-explicit-semantic-additions) for the precise
-center, ranks, missing-data policy, and scope. A saved online state can be passed
-back to `replay(state=...)` to continue, without retraining the point model.
-
-## SPCI
-
-Install `libcalibre[bootstrap]`. Using `run` and `actuals` from the quick start:
-
-```python
-from calibre import Asymmetric
-from calibre.conformal.calibrators.spci import SPCI
-
-calibrator = SPCI(
-    level=0.9,
-    window=128,
-    n_lags=7,
-    ahead=np.arange(1, 8),  # last covered step of each Step() column
-)
-intervals = replay(run, actuals, target=Step(), score=Asymmetric(), calibrator=calibrator)
-ready = np.isfinite(intervals.threshold).all(axis=-1)
-print(ready.sum())
-```
-
-See [Semantics](docs/semantics.md#spci) for horizon alignment, seeds, readiness,
-quantile weights, and coverage claims, and [Architecture](docs/architecture.md#costs)
-for fitting costs.
-
-## Conformal PID
-
-`ConformalPID` combines quantile tracking, a tangent integrator, and an explicit
-scorecaster. Pass `scorecaster=None` for P+I only.
-
-Using the seven-step `run`, `panel`, `hierarchy`, and `actuals` from the quick start:
-
-```python
-from calibre import AR1, ConformalPID, ForecastScorecaster, initial_state
-
-calibration = rolling_forecasts(
-    panel, hierarchy, SeasonalNaive(7), BottomUp(hierarchy), np.arange(28, 54), 7
-)
-# Last calibration target: origin 53 + step 7 = 60, known at the first run origin.
-known_actuals = actuals[:, : int(run.origins[0]) + 1]
-scores = np.abs(calibration.residuals(known_actuals))
-scorecaster = ForecastScorecaster(AR1())
-calibrator = ConformalPID(
-    level=0.9,
-    scorecaster=scorecaster,
-    window=256,
-    scorecast_window=64,
-    ahead=np.arange(1, 8),
-)
-state = initial_state(Step(), calibrator, len(hierarchy.nodes), horizon=7)
-state["calibrator"] = calibrator.seed(state["calibrator"], scores)
-intervals = replay(
-    run, actuals, target=Step(), score=Absolute(), calibrator=calibrator, state=state
-)
-print(coverage(intervals.target, intervals.lower, intervals.upper))
-```
-
-For Theta, install `libcalibre[stats]` and choose this scorecaster before seeding:
-
-```python
-from statsforecast.models import Theta
-from calibre.forecast.models.statsforecast import StatsForecastModel
-
-theta_scorecaster = ForecastScorecaster(StatsForecastModel(Theta(season_length=1)), min_history=4)
-theta_pid = ConformalPID(level=0.9, scorecaster=theta_scorecaster, ahead=np.arange(1, 8))
-# Seed a fresh state for theta_pid before using it.
-```
-
-See [Semantics](docs/semantics.md#conformal-pid) for initialization, model warm-up,
-continuation, and coverage limits.
-
 ## Benchmarks
 
-`bench/` is a folder of scripts. They load benchmark data from a directory, run
-benchmark protocols, and compare calibrators. They import the installed `calibre`.
+`bench/` is a folder of scripts. They load benchmark data from a directory and run
+benchmark protocols. They import the installed `calibre`.
 Raw data is not in Git. The [benchmark guide](bench/README.md) covers nine additional
 datasets, their versions, data-use conditions, and a runnable forecaster example.
 All downloaded files and forecast outputs stay in ignored `data/`.
@@ -282,33 +113,9 @@ uv run --no-dev python bench/download_benchmarks.py etth1
 | `bike.py` | `load(path)`: hourly rentals, causal forward-fill and original-target mask |
 | `favorita.py` | `load(path)`: store-family sales, causal forward-fill, attributes and hierarchy |
 | `freshretail.py` | `load(path)`: store-product sales, censoring, attributes and hierarchy; needs pyarrow |
-| `vn2.py` | `load(path)`: weekly VN2 sales with the out-of-stock mask, hierarchy, and starting stock. `play(data, bounds)`: six orders up to the bounds, eight settled weeks, holding 0.2 and shortage 1.0 |
-| `m5.py` | `load(path)`: daily M5 sales and the 12-level hierarchy (42,840 nodes). `prices(horizon)`: the sell price covariate |
-| `compare.py` | `compare(forecasts, actuals, calibrators, target, score, level)`: one row of metrics per method, on the cells where each method was ready |
-| `vn2_intervals.py` | EnbPI and SPCI intervals on the same six VN2 decisions, with shared forecasts and seed errors |
-
-`vn2_conformal.py` runs the whole VN2 path in about one second:
-
-```sh
-uv run python bench/vn2_conformal.py data/vn2
-```
-
-Compare EnbPI and SPCI coverage and width on VN2's six decisions, with the same
-three-week forecasts and known historical errors:
-
-```sh
-uv run python bench/vn2_intervals.py data/vn2
-```
-
-Reported on real VN2 data (6 decisions, 599 series), at target coverage 0.9:
-
-| Method | Coverage | Mean width | Interval score |
-|---|---|---|---|
-| EnbPI | 0.855 | 20.7 | 33.8 |
-| SPCI | 0.820 | 18.1 | 32.7 |
-
-SPCI gives narrower intervals and a lower interval score, but both methods fall
-below the 0.9 coverage target. SPCI has lower coverage than EnbPI on this run.
+| `vn2.py` | `read(path)`: weekly VN2 sales with the out-of-stock mask, attributes, starting stock and the VN2 protocol |
+| `m5.py` | `read(path)`: daily M5 sales and their attributes. `LEVELS` gives the 42,840 standard series |
+| `gate_m5.py`, `gate_vn2.py` | The speed and cost gates of the architecture document |
 
 ## Documents
 
@@ -322,7 +129,7 @@ uv sync --group dev
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
-uv run ty check src/
+uv run ty check
 uv build --no-sources
 ```
 

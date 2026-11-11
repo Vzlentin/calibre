@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from calibre.data import Hierarchy, Panel
-from imputation import forward_fill
+from imputation import dense_panel, forward_fill
 from sources import Source
 
 SOURCES = (
@@ -51,7 +51,7 @@ def load(path: str | Path) -> Beijing:
         index="period", columns="series", values="value"
     )
     wide, observed, dropped = forward_fill(wide, "h")
-    panel = Panel(
+    panel = dense_panel(
         wide.columns.to_numpy(), pd.DatetimeIndex(wide.index), wide.to_numpy(np.float32).T, "h"
     )
     return Beijing(panel, Hierarchy.flat(panel.series), observed, dropped)
