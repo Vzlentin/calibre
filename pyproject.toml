@@ -46,11 +46,13 @@ Changelog = "https://github.com/Vzlentin/calibre/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 stats = ["statsforecast>=2.1,<2.2"]
+ml = ["mlforecast>=1.1,<1.2"]
 
 [dependency-groups]
 dev = [
     "hierarchicalforecast>=1.5.3,<1.6",
     "ipykernel>=7.3.0",
+    "mlforecast>=1.1,<1.2",
     "psutil",
     "pytest",
     "ruff",
@@ -88,3 +90,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.ty.environment]
 python-version = "3.12"
+
+[tool.ty.rules]
+# A contract test suppresses the names that only the code PR of its milestone adds. After
+# that PR the suppression is unused, and the frozen test keeps it.
+unused-ignore-comment = "ignore"

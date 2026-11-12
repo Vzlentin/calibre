@@ -1,8 +1,42 @@
-"""Direct numpy computations of the expected values of `replay`, from the rules of the contract."""
+"""Direct numpy computations of expected values, from the rules of the contract."""
 
 import numpy as np
+import pandas as pd
 
 NOISE_DECIMALS = 9  # conformalforecast rounds to 9 decimals before each ceiling
+
+
+RESERVED = ("unique_id", "ds", "cutoff", "y")  # the columns of a frame that are not models
+
+
+def window_bounds(dense, origin_idx, lookback: int | None) -> tuple[np.ndarray, np.ndarray]:
+    """inside [S, O] bool: the origin is in the span of the series. first [S, O]: the period
+    of the first value that the series reads at the origin, at most the last `lookback`
+    through the origin. The window of series s at origin o is `values[s, first : t + 1]`."""
+    origin_idx = np.asarray(origin_idx)
+    starts = dense.starts[:, None]
+    inside = (starts <= origin_idx) & (origin_idx < dense.ends[:, None])
+    first = np.broadcast_to(starts, inside.shape)
+    if lookback is not None:
+        first = np.maximum(first, origin_idx - lookback + 1)
+    return inside, first
+
+
+def layout(cv: pd.DataFrame, series, periods, models, horizon: int, cutoffs=None) -> np.ndarray:
+    """points[m, s, h - 1, o] from a cross-validation frame, by a direct computation. The
+    origins are `cutoffs`, by default the sorted cutoffs of the frame."""
+    if cutoffs is None:
+        cutoffs = np.unique(cv["cutoff"].to_numpy())
+    rows = pd.Index(series).get_indexer(cv["unique_id"].astype(str))
+    origin = pd.DatetimeIndex(cutoffs).get_indexer(cv["cutoff"])
+    step = periods.get_indexer(cv["ds"]) - periods.get_indexer(cv["cutoff"])
+    assert (rows >= 0).all() and (origin >= 0).all()
+    assert ((step >= 1) & (step <= horizon)).all()
+    assert len(set(zip(rows, step, origin, strict=True))) == len(cv)
+    points = np.full((len(models), len(series), horizon, len(cutoffs)), np.nan, np.float32)
+    for m, name in enumerate(models):
+        points[m, rows, step - 1, origin] = cv[name].to_numpy().astype(np.float32)
+    return points
 
 
 def cover_step(n_nodes: int, horizon: int) -> np.ndarray:

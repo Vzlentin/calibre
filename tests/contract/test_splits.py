@@ -29,8 +29,8 @@ from calibre import (
     settle,
 )
 
-from . import _cases
-from ._engines import engine
+from . import _cases, _checks, _m2
+from ._engines import LastMeanForecaster, engine
 from ._expected import assert_bits
 from ._panels import grid, make_dense, to_frame, to_panel
 from .test_forecasts import FALLBACK, SIMPLE, WITH_FALLBACK, ragged_dense
@@ -73,29 +73,20 @@ def same(actual: Any, expected: Any) -> None:
 
 
 def rolling_engines():
-    return [engine(SIMPLE, "D"), engine(WITH_FALLBACK, "D", FALLBACK)]
+    return [engine(SIMPLE, "D"), engine(WITH_FALLBACK, "D", FALLBACK), LastMeanForecaster()]
 
 
 @pytest.mark.parametrize("lookback", [None, 12])
 def test_rolling_forecasts_split_by_series_and_origins(lookback):
-    """F7: a call on `panel.take(index)` gives the rows `index` of the whole call, and a call
-    on some of the origins gives the columns of those origins, bit for bit."""
+    """F7: with StatsForecast engines and a local Forecaster, a call on `panel.take(index)`
+    gives the rows `index` of the whole call, and a call on some of the origins gives the
+    columns of those origins, bit for bit."""
     panel = to_panel(ragged_dense())
     origins = panel.periods[[8, 9, 15, 22, 23, 30, 41, 52, 60]]
     engines = rolling_engines()
-    whole = rolling_forecasts(panel, engines, origins, 6, lookback=lookback)
-    for index in ([0, 1, 2, 3], [4, 5, 6, 7], [1, 4, 6], [0, 2, 3, 5, 7], [6]):
-        part = rolling_forecasts(
-            panel.take(np.array(index)), engines, origins, 6, lookback=lookback
-        )
-        assert_bits(part.points, whole.points[:, index])
-        assert list(part.series) == list(whole.series[index])
-        assert list(part.models) == list(whole.models)
-        assert part.origins.equals(whole.origins)
-    for columns in ([0, 1, 2], [3, 4, 5, 6, 7, 8], [4], [8]):
-        part = rolling_forecasts(panel, engines, origins[columns], 6, lookback=lookback)
-        assert_bits(part.points, whole.points[..., columns])
-        assert part.origins.equals(origins[columns])
+    rows = ([0, 1, 2, 3], [4, 5, 6, 7], [1, 4, 6], [0, 2, 3, 5, 7], [6])
+    columns = ([0, 1, 2], [3, 4, 5, 6, 7, 8], [4], [8])
+    _checks.assert_splits(panel, engines, origins, 6, lookback, rows, columns)
 
 
 class _GlobalForecaster(Forecaster):
@@ -124,20 +115,16 @@ def test_global_forecaster_splits_by_origins():
     """F7: a Forecaster with local=False splits by origins bit for bit."""
     panel = to_panel(ragged_dense())
     origins = panel.periods[[8, 15, 23, 30, 41, 60]]
-    eng = _GlobalForecaster()
-    whole = rolling_forecasts(panel, [eng], origins, 4, lookback=10)
-    for columns in ([0, 1, 2], [3, 4, 5], [2]):
-        part = rolling_forecasts(panel, [eng], origins[columns], 4, lookback=10)
-        assert_bits(part.points, whole.points[..., columns])
-        assert part.origins.equals(origins[columns])
+    columns = ([0, 1, 2], [3, 4, 5], [2])
+    _checks.assert_splits(panel, [_GlobalForecaster()], origins, 4, 10, (), columns)
 
 
 @pytest.mark.parametrize(
     "method", [BottomUp(), Identity(), WlsStruct()], ids=lambda m: type(m).__name__
 )
 def test_reconcile_split_by_models_and_origins(method):
-    """R6: a call on some of the models, or on some of the origins, gives that part of the
-    whole call, bit for bit."""
+    """R6: a call on some of the models, or on some of the origins, each origin alone
+    included, gives that part of the whole call, bit for bit."""
     tree = hierarchy()
     series = tree.nodes[: tree.n_bottom] if isinstance(method, BottomUp) else tree.nodes
     rng = np.random.default_rng(91)
@@ -147,7 +134,8 @@ def test_reconcile_split_by_models_and_origins(method):
     if not isinstance(method, WlsStruct):
         points[rng.random(points.shape) < 0.1] = np.nan
     whole = reconcile(Forecasts(points, MODELS, series, ORIGINS), tree, method)
-    for columns in ([0, 1, 2], [3, 4, 5, 6, 7, 8], [5], [8]):
+    alone = [[o] for o in range(len(ORIGINS))]
+    for columns in ([0, 1, 2], [3, 4, 5, 6, 7, 8], [2, 7], *alone):
         part = reconcile(
             Forecasts(points[..., columns], MODELS, series, ORIGINS[columns]), tree, method
         )
@@ -217,6 +205,7 @@ def public_objects() -> dict[str, Any]:
     panel = to_panel(ragged_dense())
     return {
         "Panel": panel,
+        "CensoredPanel": censored_panel(),
         "Hierarchy": hierarchy(),
         "Window": Window.at(panel, 20, lookback=8),
         "Forecasts": case.forecasts(),
@@ -231,8 +220,19 @@ def public_objects() -> dict[str, Any]:
     }
 
 
+def censored_panel() -> Panel:
+    periods = pd.date_range("2024-01-01", periods=30, freq="D")
+    spans = [(0, 30), (4, 30), (0, 22), (10, 30)]
+    rng = np.random.default_rng(94)
+    dense = make_dense(rng, ("c0", "c1", "c2", "c3"), periods, "D", spans, censored_share=0.3)
+    panel = to_panel(dense)
+    assert panel.censored is not None and panel.censored.any()
+    return panel
+
+
 NAMES = [
     "Panel",
+    "CensoredPanel",
     "Hierarchy",
     "Window",
     "Forecasts",
@@ -256,15 +256,25 @@ def test_public_objects_pickle(public_objects, name):
     same(pickle.loads(pickle.dumps(obj, protocol=5)), obj)
 
 
-@pytest.mark.parametrize("protocol", range(2, pickle.HIGHEST_PROTOCOL + 1))
-def test_loaded_panel_is_read_only(public_objects, protocol):
-    """A4, P3: a panel loaded by pickle has read-only arrays, with any protocol."""
-    loaded = pickle.loads(pickle.dumps(public_objects["Panel"], protocol=protocol))
-    for name in ("series", "data", "indptr", "starts"):
-        array = getattr(loaded, name)
-        assert not array.flags.writeable, name
-        with pytest.raises(ValueError):
-            array[0] = array[-1]
+@pytest.mark.parametrize("name", ["Panel", "CensoredPanel"])
+def test_loaded_panel_is_read_only(public_objects, name):
+    """A4, P3: a panel loaded by pickle with protocol 5 has read-only arrays, its censored
+    mask included: in band, and out of band from read-only or writable buffers."""
+    panel = public_objects[name]
+    fields = ["series", "data", "indptr", "starts"]
+    if panel.censored is not None:
+        fields.append("censored")
+    buffers: list[pickle.PickleBuffer] = []
+    data = pickle.dumps(panel, protocol=5, buffer_callback=buffers.append)
+    # Buffers that a receiving process wrote into memory of its own are writable.
+    copies = [bytearray(buffer.raw()) for buffer in buffers]
+    received = pickle.loads(data, buffers=copies)
+    for loaded in (pickle.loads(pickle.dumps(panel, protocol=5)), shared(panel), received):
+        for field in fields:
+            array = getattr(loaded, field)
+            assert not array.flags.writeable, field
+            with pytest.raises(ValueError):
+                array[0] = array[-1]
 
 
 def cv_frame() -> pd.DataFrame:
@@ -296,7 +306,11 @@ def test_functions_run_on_read_only_inputs():
         rolling_forecasts(stored, shared(engines), shared(origins), 6),
         rolling_forecasts(panel, engines, origins, 6),
     )
-    pooled = [engine(SIMPLE, "D", n_jobs=2), engine(WITH_FALLBACK, "D", FALLBACK, n_jobs=2)]
+    pooled = [
+        engine(SIMPLE, "D", n_jobs=2),
+        engine(WITH_FALLBACK, "D", FALLBACK, n_jobs=2),
+        LastMeanForecaster(),
+    ]
     same(
         rolling_forecasts(stored, shared(pooled), shared(origins), 6, lookback=12),
         rolling_forecasts(panel, engines, origins, 6, lookback=12),
@@ -357,3 +371,48 @@ def test_functions_run_on_read_only_inputs():
     want = settle(on_hand, in_transit, demand, order, 0.2, 1.0)
     for got_part, want_part in zip(got, want, strict=True):
         same(got_part, want_part)
+
+
+@pytest.mark.parametrize("lookback", [None, 12])
+def test_split_rolling_forecasts_join_with_concat(lookback):
+    """F9: the parts of an F7 split, joined with `Forecasts.concat`, give the whole call, bit
+    for bit: by series in the order of the parts, and by origins in any order."""
+    panel = to_panel(ragged_dense())
+    origins = panel.periods[[8, 9, 15, 22, 23, 30, 41, 52, 60]]
+    engines = rolling_engines()
+    whole = rolling_forecasts(panel, engines, origins, 6, lookback=lookback)
+    rows = [[0, 1, 2], [3], [4, 5, 6, 7]]
+    parts = [
+        rolling_forecasts(panel.take(np.array(index)), engines, origins, 6, lookback=lookback)
+        for index in rows
+    ]
+    same(_m2.concat(parts), whole)
+    columns = [[5, 6, 7, 8], [0, 2], [1, 3, 4]]
+    parts = [
+        rolling_forecasts(panel, engines, origins[index], 6, lookback=lookback) for index in columns
+    ]
+    same(_m2.concat(parts), whole)
+
+
+@pytest.mark.parametrize(
+    "method", [BottomUp(), Identity(), WlsStruct()], ids=lambda m: type(m).__name__
+)
+def test_split_reconcile_joins_with_concat(method):
+    """F9: the parts of an R6 split, by models or by origins, joined with
+    `Forecasts.concat`, give the whole call, bit for bit."""
+    tree = hierarchy()
+    series = tree.nodes[: tree.n_bottom] if isinstance(method, BottomUp) else tree.nodes
+    rng = np.random.default_rng(95)
+    points = rng.lognormal(4.0, 2.0, (len(MODELS), len(series), 4, len(ORIGINS)))
+    points = points.astype(np.float32)
+    whole = reconcile(Forecasts(points, MODELS, series, ORIGINS), tree, method)
+    by_origins = [
+        reconcile(Forecasts(points[..., index], MODELS, series, ORIGINS[index]), tree, method)
+        for index in ([4, 5, 6, 7, 8], [0], [1, 2, 3])
+    ]
+    same(_m2.concat(by_origins), whole)
+    by_models = [
+        reconcile(Forecasts(points[index], MODELS[index], series, ORIGINS), tree, method)
+        for index in ([0, 1], [2])
+    ]
+    same(_m2.concat(by_models), whole)

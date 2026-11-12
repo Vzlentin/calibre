@@ -9,19 +9,25 @@ Tasks:
 - quantile: `conformal_quantile` of the scores of each cell, one cell at a time, +inf for a
   cell below its minimum.
 - reconcile: `BottomUpSparse` and `MinTrace(method="wls_struct")`, bottoms last.
+- mlcv: `MLForecast.cross_validation` with `refit=True`, one result per job, on the rows at
+  or before the `last` date of the job when it sets one.
 """
 
 import json
 import sys
 from typing import Any, cast
 
+import mlforecast.lag_transforms
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+import sklearn.ensemble
+import sklearn.linear_model
 import statsforecast.models
 from conformalforecast._quantiles import conformal_quantile
 from conformalforecast.base import InsufficientCalibrationSamples
 from hierarchicalforecast.methods import BottomUpSparse, MinTrace
+from mlforecast import MLForecast
 from statsforecast import StatsForecast
 
 
@@ -59,17 +65,24 @@ def cv(arrays):
             input_size=job["input_size"],
             refit=True,
         )
-        assert isinstance(result, pd.DataFrame)
-        if "unique_id" not in result.columns:
-            result = result.reset_index()
-        out[f"{k}/columns"] = np.array([str(c) for c in result.columns])
-        for column in result.columns:
-            values = result[column].to_numpy()
-            if column in ("ds", "cutoff"):
-                values = values.astype("datetime64[ns]")
-            elif column == "unique_id":
-                values = values.astype(str)
-            out[f"{k}/col/{column}"] = values
+        out.update(columns(result, k))
+    return out
+
+
+def columns(result, k):
+    """The columns of the cross-validation frame of job k, as the arrays `k/columns` and
+    `k/col/<column>`."""
+    assert isinstance(result, pd.DataFrame)
+    if "unique_id" not in result.columns:
+        result = result.reset_index()
+    out = {f"{k}/columns": np.array([str(c) for c in result.columns])}
+    for column in result.columns:
+        values = result[column].to_numpy()
+        if column in ("ds", "cutoff"):
+            values = values.astype("datetime64[ns]")
+        elif column == "unique_id":
+            values = values.astype(str)
+        out[f"{k}/col/{column}"] = values
     return out
 
 
@@ -123,7 +136,53 @@ def reconcile(arrays):
     return {"bottom_up": np.asarray(bottom_up), "wls_struct": np.asarray(wls)}
 
 
-TASKS = {"cv": cv, "windows": windows, "quantile": quantile, "reconcile": reconcile}
+SKLEARN = {"ensemble": sklearn.ensemble, "linear_model": sklearn.linear_model}
+
+
+def estimator(path, kwargs):
+    module, name = path.split(".")
+    return getattr(SKLEARN[module], name)(**kwargs)
+
+
+def ml_engine(spec):
+    transforms = {
+        int(lag): [getattr(mlforecast.lag_transforms, name)(**kw) for name, kw in specs]
+        for lag, specs in spec.get("lag_transforms", {}).items()
+    }
+    return MLForecast(
+        models={alias: estimator(path, kwargs) for alias, path, kwargs in spec["models"]},
+        freq=spec["freq"],
+        lags=spec.get("lags"),
+        lag_transforms=transforms or None,
+        date_features=spec.get("date_features"),
+    )
+
+
+def mlcv(arrays):
+    out = {}
+    for k, job in enumerate(json.loads(str(arrays["jobs"]))):
+        df = frame(arrays, job["frame"])
+        if job.get("last") is not None:
+            df = df[df["ds"] <= pd.Timestamp(job["last"])].reset_index(drop=True)
+        result = ml_engine(job["engine"]).cross_validation(
+            df=df,
+            h=job["h"],
+            n_windows=job["n_windows"],
+            step_size=job["step_size"],
+            input_size=job["input_size"],
+            refit=True,
+        )
+        out.update(columns(result, k))
+    return out
+
+
+TASKS = {
+    "cv": cv,
+    "windows": windows,
+    "quantile": quantile,
+    "reconcile": reconcile,
+    "mlcv": mlcv,
+}
 
 
 def main():

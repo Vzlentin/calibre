@@ -6,17 +6,17 @@ truth. A second probe removes the data after the origin. Outputs are compared by
 """
 
 from dataclasses import replace
+from functools import partial
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from calibre import rolling_forecasts
-
-from . import _cases, _expected
-from ._engines import engine
+from . import _cases, _checks, _expected
+from ._checks import probe_positions
+from ._engines import LastMeanForecaster, engine
 from ._expected import assert_bits
-from ._panels import grid, make_dense, to_panel, truncated, with_values_after
+from ._panels import probe_dense, truncated, with_values_after
 
 MODELS = [
     ("Naive", {}),
@@ -27,18 +27,6 @@ MODELS = [
 WITH_FALLBACK = [("AutoETS", {"model": "MNN", "alias": "ets_mnn"})]
 
 
-def probe_positions(n_origins: int) -> list[int]:
-    return [1, n_origins // 2, n_origins - 2]
-
-
-def panel_dense():
-    """Every series starts before the first probe origin. Some end early."""
-    periods = pd.date_range("2024-01-01", periods=80, freq="D")
-    ids = ("p2", "p0", "p1", "p3", "p5", "p4")
-    spans = [(0, 80), (2, 80), (0, 60), (5, 80), (0, 35), (1, 80)]
-    return make_dense(np.random.default_rng(41), ids, periods, "D", spans, coarse={2})
-
-
 def at_or_before(origins: pd.DatetimeIndex, origin) -> np.ndarray:
     return np.flatnonzero(origins <= origin)
 
@@ -46,24 +34,16 @@ def at_or_before(origins: pd.DatetimeIndex, origin) -> np.ndarray:
 @pytest.mark.parametrize("lookback", [None, 10])
 def test_points_ignore_later_values(lookback):
     """F3: no point issued at origin o changes when a value after o changes, or when the data
-    after o is removed."""
-    dense = panel_dense()
+    after o is removed, with StatsForecast engines and a local Forecaster."""
+    engines = [
+        engine(MODELS, "D"),
+        engine(WITH_FALLBACK, "D", ("Naive", {})),
+        LastMeanForecaster(),
+    ]
+    run = partial(_checks.rolling, engines=engines, horizon=5, lookback=lookback)
     origin_idx = np.array([12, 13, 19, 26, 30, 31, 40, 47, 50, 58, 66, 70])
-    origins = dense.periods[origin_idx]
-    engines = [engine(MODELS, "D"), engine(WITH_FALLBACK, "D", ("Naive", {}))]
-    base = rolling_forecasts(to_panel(dense), engines, origins, 5, lookback=lookback)
     rng = np.random.default_rng(42)
-    for position in probe_positions(len(origins)):
-        origin, t = origins[position], int(origin_idx[position])
-        keep = at_or_before(origins, origin)
-        noisy = with_values_after(dense, t, grid(rng, dense.values.shape))
-        changed = rolling_forecasts(to_panel(noisy), engines, origins, 5, lookback=lookback)
-        assert not np.array_equal(noisy.values, dense.values, equal_nan=True)
-        assert_bits(changed.points[..., keep], base.points[..., keep])
-        cut = truncated(dense, t)
-        removed = rolling_forecasts(to_panel(cut), engines, origins[keep], 5, lookback=lookback)
-        assert removed.origins.equals(origins[keep])
-        assert_bits(removed.points, base.points[..., keep])
+    _checks.assert_ignores_later_values(run, probe_dense(41, 80), origin_idx, rng)
 
 
 def first_ready(case) -> int:

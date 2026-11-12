@@ -1,7 +1,6 @@
 """F1, F2, F4, F5, F6: `rolling_forecasts`, `Forecasts`, `Forecasts.from_cv` and `select`."""
 
 import dataclasses
-from collections.abc import Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -11,11 +10,11 @@ import pytest
 from statsforecast import StatsForecast
 from statsforecast.models import Naive
 
-from calibre import Forecaster, Forecasts, Panel, Window, rolling_forecasts
+from calibre import Forecasts, Panel, Window, rolling_forecasts
 
-from . import _reference
-from ._engines import engine
-from ._expected import assert_bits
+from . import _checks, _m2, _reference
+from ._engines import LastMeanForecaster, engine
+from ._expected import RESERVED, assert_bits, window_bounds
 from ._panels import make_dense, to_frame, to_panel
 
 SIMPLE = [
@@ -32,7 +31,6 @@ WITH_FALLBACK = [
     ("SimpleExponentialSmoothing", {"alpha": 0.3}),
 ]
 FALLBACK = ("Naive", {})
-RESERVED = ("unique_id", "ds", "cutoff", "y")
 
 # (horizon, step_size, n_windows, input_size): every series is longer than the test size.
 SETTINGS = {
@@ -88,33 +86,8 @@ JOBS = [
 @pytest.fixture(scope="module")
 def cv_frames(tmp_path_factory):
     """The cross-validation frame of each job, computed by statsforecast without calibre."""
-    arrays = {"jobs": _reference.text(JOBS)}
-    for name, make in DENSE.items():
-        frame = to_frame(make())
-        arrays[f"{name}/unique_id"] = frame["unique_id"].to_numpy(dtype=str)
-        arrays[f"{name}/ds"] = frame["ds"].to_numpy(dtype="datetime64[ns]")
-        arrays[f"{name}/y"] = frame["y"].to_numpy()
-    out = _reference.run("cv", arrays, tmp_path_factory.mktemp("cv"))
-    frames = []
-    for k in range(len(JOBS)):
-        columns = [str(column) for column in out[f"{k}/columns"]]
-        frames.append(pd.DataFrame({column: out[f"{k}/col/{column}"] for column in columns}))
-    return frames
-
-
-def layout(cv: pd.DataFrame, series, periods, models, horizon: int) -> np.ndarray:
-    """points[m, s, h - 1, o] from a cross-validation frame, by a direct computation."""
-    cutoffs = np.unique(cv["cutoff"].to_numpy())
-    rows = pd.Index(series).get_indexer(cv["unique_id"].astype(str))
-    origin = np.searchsorted(cutoffs, cv["cutoff"].to_numpy())
-    step = periods.get_indexer(cv["ds"]) - periods.get_indexer(cv["cutoff"])
-    assert (rows >= 0).all()
-    assert ((step >= 1) & (step <= horizon)).all()
-    assert len(set(zip(rows, step, origin, strict=True))) == len(cv)
-    points = np.full((len(models), len(series), horizon, len(cutoffs)), np.nan, np.float32)
-    for m, name in enumerate(models):
-        points[m, rows, step - 1, origin] = cv[name].to_numpy().astype(np.float32)
-    return points
+    panels = {name: make() for name, make in DENSE.items()}
+    return _reference.cv_frames("cv", JOBS, panels, tmp_path_factory.mktemp("cv"))
 
 
 @pytest.mark.parametrize("index", range(len(JOBS)))
@@ -128,14 +101,7 @@ def test_rolling_forecasts_equal_cross_validation(cv_frames, index):
     sf = engine(job["models"], job["freq"], job["fallback"])
     origins = pd.DatetimeIndex(np.unique(cv["cutoff"].to_numpy()))
     got = rolling_forecasts(panel, [sf], origins, job["h"], lookback=job["input_size"])
-    models = [column for column in cv.columns if column not in RESERVED]
-    assert_bits(got.points, layout(cv, panel.series, panel.periods, models, job["h"]))
-    assert list(got.models) == models
-    assert list(got.series) == list(panel.series)
-    assert np.array_equal(got.origins.values, origins.values)
-    from_cv = Forecasts.from_cv(cv, series=panel.series, horizon=job["h"])
-    assert_bits(got.points, from_cv.points)
-    assert list(from_cv.models) == models
+    _checks.assert_equals_cross_validation(got, cv, panel, job["h"])
 
 
 def test_cross_validation_jobs_hold_nan_points(cv_frames):
@@ -191,14 +157,11 @@ def test_points_do_not_depend_on_n_jobs(lookback):
 def window_points(dense, origin_idx, horizon, lookback, models, fallback, directory):
     """[M, S, H, O] float32: each model on the window of each series inside its span, from
     statsforecast without calibre, and NaN outside the spans."""
-    starts, ends = dense.starts, dense.ends
-    cells, windows = [], []
-    for s in range(len(dense.ids)):
-        for o, t in enumerate(origin_idx):
-            if starts[s] <= t < ends[s]:
-                first = starts[s] if lookback is None else max(starts[s], t - lookback + 1)
-                cells.append((s, o))
-                windows.append(dense.values[s, first : t + 1].astype(np.float32))
+    inside, first = window_bounds(dense, origin_idx, lookback)
+    cells = [(int(s), int(o)) for s, o in np.argwhere(inside)]
+    windows = [
+        dense.values[s, first[s, o] : origin_idx[o] + 1].astype(np.float32) for s, o in cells
+    ]
     offsets = np.concatenate([[0], np.cumsum([len(w) for w in windows])])
     arrays = {
         "jobs": _reference.text([{"model": m, "fallback": fallback, "h": horizon} for m in models])
@@ -490,32 +453,31 @@ def test_forecasts_constructor():
         make(**{**good, "origins": list(origins)})
 
 
-class _LastMeanForecaster(Forecaster):
-    local = True
-
-    def __init__(self, alias: str = "last_mean") -> None:
-        self._alias = alias
-
-    @property
-    def models(self) -> list[str]:
-        return [self._alias]
-
-    def forecast(self, panel: Panel, windows: Sequence[Window], horizon: int) -> np.ndarray:
-        out = np.full((1, len(panel.series), horizon, len(windows)), np.nan, np.float32)
-        for o, win in enumerate(windows):
-            for s in range(len(panel.series)):
-                lo, hi = int(win.start[s]), int(win.stop[s])
-                if lo < hi:
-                    out[0, s, :, o] = np.float32(panel.data[lo:hi].mean(dtype=np.float64))
-        return out
+def last_mean_points(dense, origin_idx, horizon: int, lookback: int | None) -> np.ndarray:
+    """[1, S, H, O] float32: the float64 mean of the values of each series through each origin,
+    at most the last `lookback`, by a direct computation. NaN outside the spans."""
+    points = np.full((1, len(dense.ids), horizon, len(origin_idx)), np.nan, np.float32)
+    inside, first = window_bounds(dense, origin_idx, lookback)
+    for s, o in np.argwhere(inside):
+        points[0, s, :, o] = np.float32(dense.values[s, first[s, o] : origin_idx[o] + 1].mean())
+    return points
 
 
 def test_window_and_forecaster():
-    """F1, F4, F5: Window.at slices each series through the origin, and rolling_forecasts runs
-    Forecaster engines alongside StatsForecast engines."""
-    panel = to_panel(ragged_dense())
+    """F1, F4, F5: Window.at slices each series through the origin, at most the last
+    `lookback` values, and rolling_forecasts runs Forecaster engines alongside StatsForecast
+    engines, with the points that each Forecaster computes from its windows."""
+    dense = ragged_dense()
+    panel = to_panel(dense)
     win = Window.at(panel, 25, lookback=10)
     assert win.origin == 25
+    inside, first = window_bounds(dense, [25], 10)
+    for s in range(len(dense.ids)):
+        if inside[s, 0]:
+            offset = panel.indptr[s] - dense.starts[s]
+            assert (win.start[s], win.stop[s]) == (offset + first[s, 0], offset + 26)
+        else:
+            assert win.start[s] == win.stop[s]
     assert win.start.dtype == np.int64 and win.stop.dtype == np.int64
     assert not win.start.flags.writeable and not win.stop.flags.writeable
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -530,8 +492,88 @@ def test_window_and_forecaster():
             make_win(**bad)
     origins = panel.periods[[25, 35, 45]]
     sf = engine([("Naive", {})], "D")
-    custom = _LastMeanForecaster("custom_mean")
+    custom = LastMeanForecaster("custom_mean")
     got = rolling_forecasts(panel, [sf, custom], origins, 3, lookback=10)
     assert list(got.models) == ["Naive", "custom_mean"]
+    expected = last_mean_points(dense, [25, 35, 45], 3, 10)
+    assert np.isnan(expected).any() and np.isfinite(expected).any()
+    assert_bits(got.points[1:], expected)
     with pytest.raises(ValueError):
-        rolling_forecasts(panel, [sf, _LastMeanForecaster("Naive")], origins, 3)
+        rolling_forecasts(panel, [sf, LastMeanForecaster("Naive")], origins, 3)
+
+
+def whole_forecasts(seed: int = 35) -> Forecasts:
+    rng = np.random.default_rng(seed)
+    points = rng.lognormal(3.0, 2.0, (3, 5, 2, 6)).astype(np.float32)
+    points[rng.random(points.shape) < 0.1] = np.nan
+    return Forecasts(
+        points,
+        np.array(["m1", "m2", "m3"]),
+        np.array(["a", "b", "c", "d", "e"]),
+        pd.date_range("2024-01-07", periods=6, freq="W-SUN"),
+    )
+
+
+def part(whole: Forecasts, models=None, series=None, origins=None) -> Forecasts:
+    """The cells of `whole` at the given positions, built with the constructor."""
+    m = list(range(len(whole.models))) if models is None else models
+    s = list(range(len(whole.series))) if series is None else series
+    o = list(range(len(whole.origins))) if origins is None else origins
+    points = whole.points[np.ix_(m, s, range(whole.points.shape[2]), o)]
+    return Forecasts(points, whole.models[m], whole.series[s], whole.origins[o])
+
+
+def test_concat_joins_by_label():
+    """F8: concat joins parts along the one axis whose labels differ. The origins of the
+    result are sorted, and the models and the series follow the order of the parts. Each
+    value stays at its labels, bit for bit."""
+    whole = whole_forecasts()
+    cases = [
+        ([part(whole, models=[2]), part(whole, models=[0, 1])], [2, 0, 1], None, None),
+        ([part(whole, series=[3, 4]), part(whole, series=[0, 1, 2])], None, [3, 4, 0, 1, 2], None),
+        ([part(whole, origins=[3, 4, 5]), part(whole, origins=[0, 1, 2])], None, None, None),
+        (
+            [part(whole, origins=[0, 3]), part(whole, origins=[5]), part(whole, origins=[1, 2, 4])],
+            None,
+            None,
+            None,
+        ),
+        ([whole], None, None, None),
+    ]
+    for parts, models, series, origins in cases:
+        got = _m2.concat(parts)
+        want = part(whole, models, series, origins)
+        assert_bits(got.points, want.points)
+        assert list(got.models) == list(want.models)
+        assert list(got.series) == list(want.series)
+        assert got.origins.equals(want.origins)
+    assert _m2.concat((part(whole, origins=[1]), part(whole, origins=[0]))).origins.equals(
+        whole.origins[:2]
+    )
+
+
+def test_concat_input_conditions():
+    """F8: concat raises TypeError when `parts` is not a sequence of Forecasts, and ValueError
+    for no part, two values for one cell, parts that differ on more than one axis, and parts
+    with other numbers of steps."""
+    whole = whole_forecasts(seed=36)
+    for parts in (whole, "parts", [whole, whole.points], None):
+        with pytest.raises(TypeError):
+            _m2.concat(parts)
+    shorter = Forecasts(whole.points[:, :, :1], whole.models, whole.series, whole.origins)
+    early = part(whole, origins=[0, 1, 2])
+    wrong_values = [
+        [],
+        [whole, whole],
+        [early, part(whole, origins=[2, 3])],
+        [part(whole, models=[0, 1]), part(whole, models=[1, 2])],
+        [part(whole, series=[0, 1]), part(whole, series=[1, 2])],
+        [early, part(whole, series=[0, 1], origins=[3, 4])],
+        [part(whole, models=[0], origins=[0, 1]), part(whole, models=[1], origins=[2, 3])],
+        [early, part(whole, series=[4, 3, 2, 1, 0], origins=[3, 4])],
+        [part(whole, models=[0]), part(whole, models=[1]), part(whole, origins=[0])],
+        [early, Forecasts(shorter.points[..., 3:], whole.models, whole.series, whole.origins[3:])],
+    ]
+    for parts in wrong_values:
+        with pytest.raises(ValueError):
+            _m2.concat(parts)

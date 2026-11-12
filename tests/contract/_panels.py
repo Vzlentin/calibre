@@ -132,3 +132,13 @@ def nan_outside(points: np.ndarray, dense: Dense, origin_idx: np.ndarray) -> np.
     )
     out[np.broadcast_to(~inside[:, None, :], out.shape)] = np.nan
     return out
+
+
+def probe_dense(seed: int, length: int) -> Dense:
+    """A daily panel for the visibility probes: every series starts by period 5, and two
+    series end early."""
+    periods = pd.date_range("2024-01-01", periods=length, freq="D")
+    ids = ("p2", "p0", "p1", "p3", "p5", "p4")
+    spans = [(0, length), (2, length), (0, length * 3 // 4), (5, length), (0, length * 7 // 16)]
+    spans.append((1, length))
+    return make_dense(np.random.default_rng(seed), ids, periods, "D", spans, coarse={2})

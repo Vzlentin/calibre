@@ -15,8 +15,12 @@ from statsforecast.models import Naive
 
 import calibre
 
+from . import _m2
+
 ROOT = Path(calibre.__file__).parent
 ENGINE = "calibre.forecast.engines.statsforecast"
+ML_ENGINE = "calibre.forecast.engines.mlforecast"
+HEAVY = ("statsforecast", "hierarchicalforecast", "mlforecast")
 
 PACKAGES = {
     "data": (set(), {"numpy", "pandas", "scipy", "utilsforecast"}),
@@ -31,15 +35,23 @@ PACKAGES = {
     ),
     "decision": (set(), {"numpy"}),
 }
-ENGINE_FILE = ("forecast", "engines", "statsforecast.py")
+# The engine files, and the packages that only they import.
+ENGINE_FILES = {
+    ("forecast", "engines", "statsforecast.py"): {"statsforecast"},
+    ("forecast", "engines", "mlforecast.py"): {"mlforecast"},
+}
 ROLLING_FILE = ("backtest", "rolling.py")
+DISPATCHED = (ENGINE, ML_ENGINE)
 PUBLIC = {
     "Panel",
     "Hierarchy",
     "Window",
     "Forecaster",
+    "WindowAverage",
+    "SeasonalNaive",
     "rolling_forecasts",
     "Forecasts",
+    "combine",
     "reconcile",
     "Reconciler",
     "BottomUp",
@@ -64,17 +76,29 @@ FORBIDDEN_NAMES = {"__import__", "exec", "eval"}
 FORBIDDEN_ATTRIBUTES = {("sys", "modules"), ("os", "_exit")}
 FORBIDDEN_MODULES = {"importlib", "runpy"}
 
-A1_SCRIPT = f"""
+# The setup of the A1 scripts: `loaded` gives the modules of some libraries, and `engines`
+# the engine files, that the interpreter holds.
+PRELUDE = f"""
 import sys
 import numpy as np
 import pandas as pd
 
+HEAVY = {HEAVY!r}
+ENGINES = ("{ENGINE}", "{ML_ENGINE}")
+
 def loaded(*roots):
     return sorted(m for m in sys.modules if m.split(".")[0] in roots)
 
+def engines():
+    return [name for name in ENGINES if name in sys.modules]
+"""
+
+A1_SCRIPT = (
+    PRELUDE
+    + f"""
 import calibre
-assert loaded("statsforecast", "hierarchicalforecast") == [], loaded("statsforecast")
-assert "{ENGINE}" not in sys.modules
+assert loaded(*HEAVY) == [], loaded(*HEAVY)
+assert engines() == [], engines()
 
 from conformalforecast import AbsoluteResidual
 periods = pd.date_range("2024-01-01", periods=30, freq="D")
@@ -109,28 +133,77 @@ try:
 except TypeError:
     pass
 else:
-    raise AssertionError("an engine that is not a StatsForecast object did not raise")
-assert loaded("statsforecast", "hierarchicalforecast") == [], loaded("statsforecast")
-assert "{ENGINE}" not in sys.modules
+    raise AssertionError("an engine that is not an engine object did not raise")
+assert loaded(*HEAVY) == [], loaded(*HEAVY)
+assert engines() == [], engines()
 
 from statsforecast import StatsForecast
 from statsforecast.models import Naive
-assert "{ENGINE}" not in sys.modules
+assert engines() == [], engines()
 calibre.rolling_forecasts(panel, [StatsForecast(models=[Naive()], freq="D")], origins, 2)
-assert "{ENGINE}" in sys.modules
-assert loaded("hierarchicalforecast") == []
+assert engines() == ["{ENGINE}"], engines()
+assert loaded("hierarchicalforecast", "mlforecast") == []
 print("ok")
 """
+)
+
+A1_MODELS_SCRIPT = (
+    PRELUDE
+    + f"""
+import calibre
+periods = pd.date_range("2024-01-01", periods=30, freq="D")
+panel = calibre.Panel(
+    series=np.array(["a", "b"]),
+    periods=periods,
+    freq="D",
+    data=(np.arange(60, dtype=np.float32) % 7),
+    indptr=np.array([0, 30, 60]),
+    starts=np.array([0, 0]),
+)
+origins = periods[10:25]
+kernel = calibre.rolling_forecasts(
+    panel, [calibre.WindowAverage(3), calibre.SeasonalNaive(7)], origins, 2
+)
+calibre.combine(kernel, panel, window=3)
+early = calibre.Forecasts(kernel.points[..., :5], kernel.models, panel.series, origins[:5])
+late = calibre.Forecasts(kernel.points[..., 5:], kernel.models, panel.series, origins[5:])
+calibre.Forecasts.concat([late, early])
+assert loaded(*HEAVY) == [], loaded(*HEAVY)
+assert engines() == [], engines()
+
+from mlforecast import MLForecast
+from sklearn.linear_model import LinearRegression
+assert engines() == [], engines()
+calibre.rolling_forecasts(
+    panel, [MLForecast(models=[LinearRegression()], freq="D", lags=[1])], origins, 2
+)
+assert engines() == ["{ML_ENGINE}"], engines()
+assert loaded("statsforecast", "hierarchicalforecast") == []
+print("ok")
+"""
+)
 
 
 def test_import_loads_no_engine(tmp_path):
-    """A1: `import calibre` and every function without an engine load neither statsforecast
-    nor hierarchicalforecast. The engine file loads when a StatsForecast object is passed."""
+    """A1: `import calibre` and every function without an engine load none of statsforecast,
+    hierarchicalforecast and mlforecast. The statsforecast engine file loads when a
+    StatsForecast object is passed."""
+    run_alone(A1_SCRIPT, tmp_path)
+
+
+def test_models_load_no_engine(tmp_path):
+    """A1: combine, concat and the kernel models load none of the engine libraries. The
+    mlforecast engine file loads when an MLForecast object is passed."""
+    run_alone(A1_MODELS_SCRIPT, tmp_path)
+
+
+def run_alone(script: str, directory: Path) -> None:
+    """Run `script` in a new interpreter, which must print ok."""
     done = subprocess.run(
-        [sys.executable, "-c", A1_SCRIPT],
+        [sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        cwd=tmp_path,
+        cwd=directory,
         check=False,
     )
     assert done.returncode == 0, done.stderr
@@ -203,7 +276,7 @@ def allowed(parts: tuple[str, ...], module: str) -> str | None:
         if names[1] == parts[0] or names[1] in calibre_packages:
             return None
         return f"package {parts[0]} does not import calibre.{names[1]}"
-    if root == "statsforecast" and parts == ENGINE_FILE:
+    if root in ENGINE_FILES.get(parts, set()):
         return None
     if root in others:
         return None
@@ -260,33 +333,31 @@ def dynamic_uses(tree: ast.AST) -> list[str]:
     return found
 
 
-def is_dispatch(call: ast.AST) -> bool:
-    """A call `importlib.import_module(ENGINE)` or `import_module(ENGINE)`."""
-    return (
-        isinstance(call, ast.Call)
-        and len(call.args) == 1
-        and not call.keywords
-        and isinstance(call.args[0], ast.Constant)
-        and call.args[0].value == ENGINE
-    )
+def dispatched(call: ast.Call) -> str | None:
+    """The engine file of DISPATCHED that a call with one argument, its name as a string
+    literal, loads. None for any other call."""
+    if len(call.args) != 1 or call.keywords or not isinstance(call.args[0], ast.Constant):
+        return None
+    name = call.args[0].value
+    return name if isinstance(name, str) and name in DISPATCHED else None
 
 
-def rolling_dynamic_uses(tree: ast.AST) -> tuple[list[str], int]:
-    """The forbidden uses of backtest/rolling.py beyond the engine dispatch, and the number
-    of dispatch calls."""
+def rolling_dynamic_uses(tree: ast.AST) -> tuple[list[str], set[str]]:
+    """The forbidden uses of backtest/rolling.py beyond the engine dispatch, and the engine
+    names that its dispatch calls load."""
     dispatch_funcs = set()
-    dispatches = 0
+    names = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not is_dispatch(node):
+        if not isinstance(node, ast.Call) or (name := dispatched(node)) is None:
             continue
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr == "import_module":
             if isinstance(func.value, ast.Name) and func.value.id == "importlib":
                 dispatch_funcs.add(id(func.value))
-                dispatches += 1
+                names.add(name)
         elif isinstance(func, ast.Name) and func.id == "import_module":
             dispatch_funcs.add(id(func))
-            dispatches += 1
+            names.add(name)
     allowed_imports = {"import importlib", "from importlib import import_module"}
     found = []
     for item in dynamic_uses(tree):
@@ -299,12 +370,12 @@ def rolling_dynamic_uses(tree: ast.AST) -> tuple[list[str], int]:
             and id(node) not in dispatch_funcs
         ):
             found.append(f"{node.lineno}: {node.id} outside the engine dispatch")
-    return found, dispatches
+    return found, names
 
 
 def test_no_dynamic_code():
     """A2: no module uses importlib, runpy, __import__, exec, eval, sys.modules or os._exit,
-    except the engine dispatch of backtest/rolling.py."""
+    except the engine dispatches of backtest/rolling.py."""
     problems = []
     for path in modules():
         parts = path.relative_to(ROOT).parts
@@ -317,13 +388,14 @@ def test_no_dynamic_code():
     assert problems == []
 
 
-def test_engine_dispatch_loads_the_engine_file():
-    """A2: backtest/rolling.py loads calibre.forecast.engines.statsforecast with
-    `importlib.import_module`, and uses importlib for nothing else."""
+def test_each_engine_file_has_a_dispatch():
+    """A2: backtest/rolling.py loads each engine file of DISPATCHED with
+    `importlib.import_module` and its name as a string literal, and uses importlib for
+    nothing else."""
     tree = ast.parse(ROOT.joinpath(*ROLLING_FILE).read_text())
-    found, dispatches = rolling_dynamic_uses(tree)
+    found, names = rolling_dynamic_uses(tree)
     assert found == []
-    assert dispatches >= 1
+    assert names == set(DISPATCHED)
 
 
 def test_no_suppression_comments():
@@ -530,6 +602,7 @@ def test_public_signatures():
     )
     from_cv = calibre.Forecasts.from_cv(cv=cv, series=panel.series, horizon=2)
     assert list(from_cv.models) == ["Naive"]
+
     tau = calibre.critical_ratio(holding=0.2, shortage=1.0)
     orders = calibre.order_up_to(
         bound=np.array([5.0], np.float32),
@@ -544,3 +617,54 @@ def test_public_signatures():
         holding=0.2,
         shortage=float(tau),
     )
+
+
+def test_model_signatures():
+    """A3: `combine`, `Forecasts.concat` and the kernel models keep their
+    documented parameter names, kinds and defaults, and accept keyword arguments. The names
+    are read at run time, because they are M2 code."""
+    combine = _m2.combine
+    concat = _m2.concat
+    window_average = _m2.WindowAverage
+    seasonal_naive = _m2.SeasonalNaive
+    expected = {
+        combine: [
+            ("forecasts", "pk", None),
+            ("truth", "pk", None),
+            ("window", "ko", None),
+            ("best", "ko", ("default", False)),
+        ],
+        concat: [("parts", "pk", None)],
+        window_average: [
+            ("window_size", "pk", None),
+            ("num_threads", "pk", ("default", 1)),
+        ],
+        seasonal_naive: [("season_length", "pk", None)],
+    }
+    for target, spec in expected.items():
+        assert _sig_spec(target) == spec, target
+
+    periods = pd.date_range("2024-01-01", periods=10, freq="D")
+    panel = calibre.Panel(
+        series=np.array(["a", "b"]),
+        periods=periods,
+        freq="D",
+        data=np.arange(20, dtype=np.float32),
+        indptr=np.array([0, 10, 20]),
+        starts=np.array([0, 0]),
+    )
+    sf = StatsForecast(models=[Naive()], freq="D")
+    naive = calibre.rolling_forecasts(panel, [sf], periods[3:7], 2)
+    kernel = calibre.rolling_forecasts(
+        panel=panel,
+        engines=[
+            window_average(window_size=2, num_threads=1),
+            seasonal_naive(season_length=2),
+        ],
+        origins=periods[3:7],
+        horizon=2,
+    )
+    joined = concat(parts=[naive, kernel])
+    assert list(joined.models) == ["Naive", "WindowAverage", "SeasonalNaive"]
+    combined = combine(forecasts=kernel, truth=panel, window=2, best=True)
+    assert list(combined.models) == ["combined"]
