@@ -20,7 +20,7 @@ the decision functions. The rest comes from Nixtla.
 | Frames to arrays | utilsforecast | inside `Panel.from_frame` |
 | Kernels | coreforecast | `GroupedArray` holds each window. `replay` may use its rolling statistics |
 | Models that Nixtla has | their engines, passed as they are | statsforecast from M1. mlforecast from M2. neuralforecast later |
-| Models that Nixtla does not have | Calibre's `Forecaster` | `Forecaster` and `Window` from M1. Local models on coreforecast from M3 |
+| Models that Nixtla does not have | Calibre's `Forecaster` | `Forecaster` and `Window` from M1. Local models on coreforecast from M2 |
 | Scores and the exact rank | conformalforecast | `AbsoluteResidual`, `SignedResidual`, `conformal_quantile` |
 | Cross-validation frames | conformalforecast | `reshape_cv_many`, inside `Forecasts.from_cv` |
 | Coverage, width, Winkler score | conformalforecast diagnostics | called by the user on `Replay` arrays moved to `[N, O, C]`. Calibre has no metrics function |
@@ -68,10 +68,10 @@ M0 does for M1. After 0.1 freezes, `v2` merges into `main`, and 0.1 stays as its
 |---|---|
 | M0 | These documents and `AGENTS.md`. The checks of [Checks](#checks). The baselines of G2, measured with 0.1 first. The M5 and VN2 loaders, rewritten as raw readers that import no `calibre`: they give arrays and frames, and the VN2 loader holds the VN2 protocol, with the decision files loaded by path. The dependencies of v2 in `pyproject.toml` and `uv.lock`. CI on the `v2` branch, with the frozen-path check. Its CI fails by design, because the v2 code does not exist yet, and the owners approve it by review. Before M0 merges, its author runs every frozen file once against a throwaway prototype of the M1 functions, to find defects in the checks. The prototype is not committed. A defect that M1 finds in a frozen file goes to a contract PR |
 | M1 | The backtest on the new layout: every module in [Modules](#modules), with `Window`, the `Forecaster` contract and the statsforecast engine. Every check passes |
-| M2 | `combine`, from the losses known at each origin. The mlforecast global engine. `Forecasts.concat`, which joins forecasts by label over models, series and origins, and refuses two values for one cell. Pooled scores |
-| M3 | `Window` with covariates, and local `Forecaster` models on coreforecast |
+| M2 | `combine`, from the losses known at each origin. `Forecasts.concat`, which joins forecasts by label over models, series or origins, and refuses two values for one cell. The local `Forecaster` models on coreforecast: `WindowAverage` and `SeasonalNaive`. The mlforecast global engine |
+| M3 | `Window` with covariates. Pooled scores |
 | M4 | ACI, the quantile tracker and PID, as scans over origins inside `replay` |
-| Later | Each one only on a measured need: `step` and its state, and a ledger of the order and the stock at each origin. `fitted_through`, which reuses a fitted model across runs. `AR1` and `BootstrapEnsemble` on coreforecast. The neuralforecast engine. Decisions that read more than one quantile. A correction for censored scores. `RiskControl` |
+| Later | Each one only on a measured need: `step` and its state, and a ledger of the order and the stock at each origin. `fitted_through`, which reuses a fitted model across runs. `AR1` and `BootstrapEnsemble` on coreforecast. A fit of the mlforecast engine less often than at each origin, as `refit=k` does: it does not split by origins. The neuralforecast engine. Decisions that read more than one quantile. A correction for censored scores. `RiskControl` |
 
 M1 deletes each 0.1 module that it does not rewrite, with the bench scripts that import it.
 It deletes or rewrites each 0.1 test, so that `pytest` passes. A deleted part comes back
@@ -79,7 +79,7 @@ with its milestone. 0.1 keeps it as a release.
 
 | 0.1 | v2 |
 |---|---|
-| `forecast/models/` | `Forecaster`, `Window` and the statsforecast engine in M1, the mlforecast engine in M2, covariates in M3 |
+| `forecast/models/` | `Forecaster`, `Window` and the statsforecast engine in M1, the kernel models and the mlforecast engine in M2, covariates in M3 |
 | `conformal/scores.py` | conformalforecast's scores |
 | `conformal/calibrators/` | `conformal/split.py` in M1, the online methods in M4 |
 | `conformal/losses.py` | with `RiskControl`, later |
@@ -101,9 +101,12 @@ their 0.1 shape `[B, T]`.
 | `data/hierarchy.py` | `Hierarchy`: node labels, the summing matrix, `aggregate` |
 | `forecast/window.py` | `Window`: what one origin lets a model read, and the `Forecaster` contract |
 | `forecast/engines/statsforecast.py` | Runs the models of a `StatsForecast` object on windows |
-| `forecast/forecasts.py` | `Forecasts`, `Forecasts.from_cv` |
+| `forecast/engines/mlforecast.py` | Fits and predicts the models of an `MLForecast` object at each window |
+| `forecast/kernel.py` | `WindowAverage`, `SeasonalNaive`: local models on the panel arrays |
+| `forecast/forecasts.py` | `Forecasts`, `Forecasts.from_cv`, `Forecasts.concat` |
 | `forecast/reconcile.py` | `reconcile`, the `Reconciler` contract, `BottomUp`, `Identity`, `WlsStruct` |
 | `backtest/rolling.py` | `rolling_forecasts` |
+| `backtest/combine.py` | `combine`: one row of points from the losses known at each origin |
 | `backtest/replay.py` | `replay`, `Replay`: the thresholds and their bands and bounds |
 | `conformal/targets.py` | the `Target` contract, `Step`, `Span` |
 | `conformal/split.py` | `Split`: the settings of split calibration |
@@ -113,18 +116,18 @@ their 0.1 shape `[B, T]`.
 | Package | Calibre packages it imports | Other packages it imports |
 |---|---|---|
 | `data` | none | numpy, pandas, scipy, utilsforecast |
-| `forecast` | `data` | numpy, pandas, scipy, pydantic, coreforecast, conformalforecast, narwhals. statsforecast only in the engine file |
+| `forecast` | `data` | numpy, pandas, scipy, pydantic, coreforecast, conformalforecast, narwhals. statsforecast only in `engines/statsforecast.py` and mlforecast only in `engines/mlforecast.py` |
 | `conformal` | none | numpy, pydantic, conformalforecast |
 | `backtest` | `data`, `forecast`, `conformal` | numpy, pandas, coreforecast, conformalforecast |
 | `decision` | none | numpy |
 
 | Id | Guarantee | Check |
 |---|---|---|
-| A1 | `import calibre` loads neither statsforecast nor hierarchicalforecast. The engine file loads only when a `StatsForecast` object is passed | `test_imports.py` |
-| A2 | The import statements of each module of `src/calibre` follow the table above, plus the standard library. `calibre/__init__.py` imports only Calibre packages. Imports in the `if` branch of `if TYPE_CHECKING:` do not count. No module uses `importlib`, `runpy`, `__import__`, `exec`, `eval`, `sys.modules` or `os._exit`, except `backtest/rolling.py`, which loads the engine file with `importlib.import_module("calibre.forecast.engines.statsforecast")`, the module name as a string literal, and uses `importlib` for nothing else. No line of `src/calibre` holds `# noqa`, `# ruff: noqa`, `# type: ignore`, `# ty: ignore` or `# pyright: ignore` | `test_imports.py`, by a scan of the source |
-| A3 | `calibre.__all__` is exactly `Panel`, `Hierarchy`, `Window`, `Forecaster`, `rolling_forecasts`, `Forecasts`, `reconcile`, `Reconciler`, `BottomUp`, `Identity`, `WlsStruct`, `Target`, `Step`, `Span`, `Split`, `replay`, `Replay`, `critical_ratio`, `order_up_to`, `settle` and `Settlement` | `test_imports.py` |
+| A1 | `import calibre` loads none of statsforecast, hierarchicalforecast and mlforecast, and neither do `combine`, `Forecasts.concat` and the kernel models. The statsforecast engine file loads only when a `StatsForecast` object is passed, and the mlforecast engine file only when an `MLForecast` object is passed | `test_imports.py` |
+| A2 | The import statements of each module of `src/calibre` follow the table above, plus the standard library. `calibre/__init__.py` imports only Calibre packages. Imports in the `if` branch of `if TYPE_CHECKING:` do not count. No module uses `importlib`, `runpy`, `__import__`, `exec`, `eval`, `sys.modules` or `os._exit`, except `backtest/rolling.py`, which loads the engine files with `importlib.import_module("calibre.forecast.engines.statsforecast")` and `importlib.import_module("calibre.forecast.engines.mlforecast")`, the module names as string literals, and uses `importlib` for nothing else. No line of `src/calibre` holds `# noqa`, `# ruff: noqa`, `# type: ignore`, `# ty: ignore` or `# pyright: ignore` | `test_imports.py`, by a scan of the source |
+| A3 | `calibre.__all__` is exactly `Panel`, `Hierarchy`, `Window`, `Forecaster`, `WindowAverage`, `SeasonalNaive`, `rolling_forecasts`, `Forecasts`, `combine`, `reconcile`, `Reconciler`, `BottomUp`, `Identity`, `WlsStruct`, `Target`, `Step`, `Span`, `Split`, `replay`, `Replay`, `critical_ratio`, `order_up_to`, `settle` and `Settlement` | `test_imports.py` |
 
-The statsforecast engine file stays internal.
+The statsforecast and mlforecast engine files stay internal.
 
 ## Public functions
 
@@ -143,7 +146,7 @@ that shares memory with others receives their arrays read-only.
 
 | Id | Guarantee | Check |
 |---|---|---|
-| A4 | Each public class pickles with protocol 5 and loads to an object of the same type, whose arrays have the same dtype, shape and bits, and whose other fields are equal. A `Panel` loaded by pickle, with any protocol, has read-only arrays, as P3 says. Each public function gives the same result, bit for bit, on inputs loaded from read-only buffers | `test_splits.py` |
+| A4 | Each public class pickles with protocol 5 and loads to an object of the same type, whose arrays have the same dtype, shape and bits, and whose other fields are equal. A `Panel` loaded by pickle with protocol 5 has read-only arrays, its censored array included, as P3 says. Each public function gives the same result, bit for bit, on inputs loaded from read-only buffers | `test_splits.py` |
 
 ### Data
 
@@ -247,6 +250,9 @@ class Forecasts:
     ) -> "Forecasts": ...
 
     def select(self, model: str) -> "Forecasts": ...
+
+    @classmethod
+    def concat(cls, forecasts: Sequence["Forecasts"]) -> "Forecasts": ...
 ```
 
 `from_cv` reads a Nixtla cross-validation frame: one row per series, cutoff and step, with a
@@ -257,9 +263,17 @@ columns, whose names hold `-lo-` or `-hi-`. A frame carries no time rule, so Cal
 check that its points did not read the future. `select` returns one model, with M = 1, and
 raises for an unknown model.
 
+`concat` reads `forecasts`: a sequence of at least one `Forecasts`. The parts join along one
+axis, the models, the series or the origins: the one axis whose labels differ between the
+parts. On the other two axes, every part has the same labels, in the same order, and every
+part has the same number of steps. A label of the joined axis is in one part only, so no
+cell gets two values.
+
 | Id | Guarantee | Check |
 |---|---|---|
 | F6 | `from_cv` puts the value of model m, series s, cutoff o and step h at `points[m, s, h - 1, o]`, as float32. The origins are the sorted cutoffs. The rows follow `series`. A series that is absent at a cutoff has NaN points there | `test_forecasts.py` |
+| F8 | `concat` keeps each value at its labels, bit for bit. The origins of the result are sorted. The models and the series follow the order of the parts, and the labels of each part keep their order. One part gives forecasts equal to it. It raises `ValueError` for no part, for two parts that hold one cell, for parts that differ on more than one axis, and for parts with other numbers of steps | `test_forecasts.py` |
+| F9 | The parts of a split call of F7 or R6, joined with `concat`, give the whole call, bit for bit: by series in the order of `panel.series`, by models in the order of the models, and by origins in any order | `test_splits.py` |
 
 #### Window and Forecaster
 
@@ -303,7 +317,7 @@ returns a numeric numpy array of shape `[len(models), S, horizon, O]`, stored as
 ```python
 def rolling_forecasts(
     panel: Panel,
-    engines: Sequence[StatsForecast | Forecaster],
+    engines: Sequence[StatsForecast | MLForecast | Forecaster],
     origins: pd.DatetimeIndex,
     horizon: int,
     *,
@@ -313,13 +327,15 @@ def rolling_forecasts(
 
 `origins` are periods of the panel, strictly increasing, at any spacing. `horizon` is at
 least 1. `lookback` is at least 1, or None for the whole history. The `freq` of each
-`StatsForecast` engine is the `freq` of the panel, compared as pandas offsets. The window of
+`StatsForecast` or `MLForecast` engine is the `freq` of the panel, compared as pandas offsets. The window of
 origin o holds each series whose first period is at or before o and whose last period is at
 or after o, with its values through o, at most the last `lookback`.
 
-`engines` holds at least one `StatsForecast` or `Forecaster` object. Another type raises
-`TypeError`. `rolling_forecasts` loads the statsforecast engine file when it meets the first
-`StatsForecast` object.
+`engines` holds at least one `StatsForecast`, `MLForecast` or `Forecaster` object. Another
+type, a subclass of `StatsForecast` or `MLForecast` included, raises `TypeError`.
+`rolling_forecasts` loads the statsforecast engine file when it meets the first
+`StatsForecast` object, and the mlforecast engine file when it meets the first `MLForecast`
+object.
 
 For a `StatsForecast` object, the engine reads the models, the `fallback_model`, the `freq`
 and the `n_jobs`. For each series window, it calls `model.forecast(y=values, h=horizon)`
@@ -327,8 +343,18 @@ of each model, as statsforecast's cross-validation does with `refit=True`. When 
 raises, the engine calls the fallback model in the same way, or raises the exception of the
 model again when there is none. With `n_jobs` other than 1, the engine keeps its own pool of
 worker processes for the whole call, and ends it before the call returns. Each worker gets a chunk of series once and runs every origin for it: this is
-the origin loop of `rolling_forecasts`. G1 binds its cost. For a `Forecaster` object,
-`rolling_forecasts` calls `engine.forecast(panel, windows, horizon)`.
+the origin loop of `rolling_forecasts`. G1 binds its cost.
+
+For an `MLForecast` object, the engine works on a deep copy of the object, because `fit`
+sets attributes. At each origin, it calls `fit` on the long frame of the series of the
+window, `unique_id`, `ds` and `y` as float32, with the values of each series through the
+origin, at most the last `lookback`, then `predict(h=horizon)`. So it fits at each origin,
+on every series of the window at once, as mlforecast's cross-validation does with
+`refit=True`. The engine has `local=False`. A model of the object names its row as
+mlforecast names its column.
+
+For a `Forecaster` object, `rolling_forecasts` calls `engine.forecast(panel, windows,
+horizon)`.
 
 The result has one row per model: the engines in order, and the models of each engine in
 order. A row is named by the alias of its model.
@@ -341,6 +367,33 @@ order. A row is named by the alias of its model.
 | F4 | A series whose first period is after o, or whose last period is before o, has NaN points at o. A model that gives NaN gives NaN points | `test_forecasts.py` |
 | F5 | Two models with the same alias in different engines raise. An engine whose `freq` is not the panel `freq` raises. A model that raises in an engine with no fallback model stops the call with its exception | `test_forecasts.py` |
 | F7 | When the whole call returns, a call on some of the `origins` gives the columns of those origins, bit for bit. When every engine is a `StatsForecast` object or a `Forecaster` with `local=True`, a call on `panel.take(index)` gives the rows `index` of the call on `panel`, bit for bit | `test_splits.py` |
+| L1 | F1 holds for an `MLForecast` object `mlf`: with `cv = mlf.cross_validation(df=df, h=horizon, step_size=step_size, n_windows=n_windows, input_size=input_size, refit=True)`, with no `level`, prediction intervals, static or exogenous features, `rolling_forecasts(panel, [mlf], origins, horizon, lookback=input_size)` equals `Forecasts.from_cv(cv, series=panel.series, horizon=horizon)` on the cutoffs of `cv`: the points stored as float32, bit for bit, NaN included, the models, the series and the origins | `test_mlforecast.py` |
+| L2 | Origins at any spacing work: the points of each origin are those of a fit on every series of its window, through the origin and at most the last `lookback` values, then a prediction of `horizon` steps | `test_mlforecast.py` |
+| L3 | The `MLForecast` object passed keeps its attributes: a call changes none of them, and two calls with one object give the same bits | `test_mlforecast.py` |
+| L4 | F3, F4, F5 and the split by origins of F7 hold for the mlforecast engine. It does not split by series | `test_mlforecast.py` |
+
+#### Kernel models
+
+```python
+class WindowAverage(Forecaster):
+    def __init__(self, window_size: int, num_threads: int = 1) -> None: ...
+
+
+class SeasonalNaive(Forecaster):
+    def __init__(self, season_length: int) -> None: ...
+```
+
+`window_size`, `num_threads` and `season_length` are ints of at least 1. Each model is a
+`Forecaster` with `local=True` and one row, named `WindowAverage` or `SeasonalNaive`. It reads
+the panel arrays for all origins at once, with coreforecast, and gives the same point at each
+step for `WindowAverage`, and the value one season before each step for `SeasonalNaive`.
+
+| Id | Guarantee | Check |
+|---|---|---|
+| K1 | On a window of at least `season_length` values, `SeasonalNaive` gives the points of statsforecast's `SeasonalNaive(season_length)`, bit for bit | `test_kernel.py` |
+| K2 | On a window of at least `window_size` values, `WindowAverage` gives the mean of the last `window_size` values of the window, computed in float64 and stored as float32. It is within 2 units in the last place of statsforecast's `WindowAverage(window_size)`, and a run of zeros gives 0 | `test_kernel.py` |
+| K3 | A window shorter than `season_length` or `window_size` gives NaN, where statsforecast's `SeasonalNaive` gives some values. F3, F4 and F7 hold for both models | `test_kernel.py` |
+| K4 | `WindowAverage` gives the same bits for any `num_threads` | `test_kernel.py` |
 
 #### reconcile
 
@@ -377,6 +430,29 @@ of the whole input array of points.
 | R4 | On points with no NaN, `BottomUp` equals hierarchicalforecast's `BottomUpSparse`, and `WlsStruct` equals `MinTrace(method="wls_struct")`, within 1e-5 times the scale. hierarchicalforecast takes the bottoms last, so the check moves them | `test_reconcile.py` |
 | R5 | `reconcile` raises `TypeError` when its input is not a `Forecasts` | `test_totals.py` |
 | R6 | When the whole call returns, a call on the forecasts of some of the models, or of some of the origins, gives that part of the whole call, bit for bit | `test_splits.py` |
+
+#### combine
+
+```python
+def combine(
+    forecasts: Forecasts, truth: Panel, *, window: int, best: bool = False
+) -> Forecasts: ...
+```
+
+`combine` reduces the models of `forecasts` to one row, before `reconcile`. The series of
+`forecasts` are the series of `truth`, in order, and each of its origins is a period of
+`truth`. `window` is an int of at least 1, and a bool raises `TypeError`. `best` is a bool.
+It keeps no fitted state, so it runs on every origin.
+
+| Id | Guarantee | Check |
+|---|---|---|
+| E1 | The result has one model, named `combined`, with the series, the steps and the origins of `forecasts`, as float32 | `test_combine.py` |
+| E2 | The loss of a point is its absolute error against the truth of its step, read by date in `truth`, in float64. At a cell of origin o, the known loss of a model is the mean of its finite losses, for the same series and step, at the last `window` origins of `forecasts.origins` whose truth is known at o: the truth of step h of origin k is known at o when the period h steps after k is at or before o, as C2. A missing loss keeps its place. The cell is the mean of the points of the models, weighted by the inverse of their known losses, within one float32 step of that mean in float64 | `test_combine.py` |
+| E3 | A model with no point at a cell has no weight there, and a model with no known loss has none when another model has one. When no model with a point has a known loss, the models with a point have equal weights. A cell where no model has a point is NaN | `test_combine.py` |
+| E4 | With `best=True`, or when the lowest known loss is 0, the models with the lowest known loss share all the weight equally | `test_combine.py` |
+| E5 | With one model, the result is its points, bit for bit | `test_combine.py` |
+| E6 | No cell issued at origin o changes when a value of `truth` after o changes, or when the data after o and the origins after o are removed, bit for bit | `test_combine.py` |
+| E7 | When the whole call returns, a call on the forecasts of some of the series, with `truth.take` of their positions, gives their rows, bit for bit. `combine` does not split by models or by origins: a weight reads every model, and the losses of earlier origins | `test_combine.py` |
 
 ### Conformal
 
@@ -499,9 +575,11 @@ on a `Span` that covers the lead time and the review period, at
 | utilsforecast | `==0.2.17` | a 0.x release |
 | conformalforecast | `==0.1.0` | `conformal_quantile` and `reshape_cv_many` are not public |
 
-The `stats` extra is `statsforecast>=2.1,<2.2`. The development group holds statsforecast,
-`hierarchicalforecast>=1.5.3,<1.6`, psutil, pytest, ruff and ty. No package of v2 depends on
-numba. A pin changes only in a contract PR, with the checks run again.
+The `stats` extra is `statsforecast>=2.1,<2.2`. The `ml` extra is `mlforecast>=1.1,<1.2`. The
+development group holds statsforecast, mlforecast,
+`hierarchicalforecast>=1.5.3,<1.6`, psutil, pytest, ruff and ty. Calibre does not depend on
+LightGBM: the checks of the mlforecast engine use models of scikit-learn, which mlforecast
+installs. No package of v2 depends on numba. A pin changes only in a contract PR, with the checks run again.
 
 ## Checks
 
@@ -510,14 +588,17 @@ numba. A pin changes only in a contract PR, with the checks run again.
 | `tests/contract/test_imports.py` | A1, A2, A3 |
 | `tests/contract/test_panel.py` | P1, P2, P3, P4 |
 | `tests/contract/test_hierarchy.py` | H1, H2 |
-| `tests/contract/test_forecasts.py` | F1, F2, F4, F5, F6 |
+| `tests/contract/test_forecasts.py` | F1, F2, F4, F5, F6, F8 |
 | `tests/contract/test_reconcile.py` | R1, R2, R3, R4 |
 | `tests/contract/test_targets.py` | T1, T2 |
 | `tests/contract/test_split.py` | C2, C3, C4, C5 |
 | `tests/contract/test_visibility.py` | F3, C1 |
 | `tests/contract/test_totals.py` | R5, C6 |
 | `tests/contract/test_censoring.py` | H2 for censored values, C7 |
-| `tests/contract/test_splits.py` | A4, F7, R6, C8 |
+| `tests/contract/test_splits.py` | A4, F7, F9, R6, C8 |
+| `tests/contract/test_kernel.py` | K1, K2, K3, K4 |
+| `tests/contract/test_mlforecast.py` | L1, L2, L3, L4 |
+| `tests/contract/test_combine.py` | E1, E2, E3, E4, E5, E6, E7 |
 | `bench/gate_m5.py`, with its run `bench/gate_m5_run.py` | G1 |
 | `bench/gate_vn2.py`, with its run `bench/gate_vn2_run.py` | G2 |
 
@@ -528,9 +609,9 @@ The tests run in CI on seeded synthetic panels, with helpers only from `tests/co
 The panels hold late launches, early ends, censored values, tied scores, daily, weekly and
 irregular origins, and levels and spans that differ per node. Their values are multiples of
 1/64 below 2^17, so float32 holds each of them exactly and every float64 sum is exact in any
-order. Some sums exceed 2^18, where a float32 sum would round. Expected values come from statsforecast, conformalforecast and
-hierarchicalforecast, computed in a process that does not import `calibre`, or from a direct
-computation in the test. Each test file also checks that its function raises on each input
+order. Some sums exceed 2^18, where a float32 sum would round. Expected values come from statsforecast, mlforecast,
+conformalforecast and hierarchicalforecast, computed in a process that
+does not import `calibre`, or from a direct computation in the test. Each test file also checks that its function raises on each input
 condition of this document. CI runs `tests/contract` in its own pytest process, apart from the
 other tests, with the root `pyproject.toml` as its only configuration. A skip or an expected
 failure there fails CI, and so does a test id of `tests/contract/ids.txt` that did not pass.
@@ -567,9 +648,10 @@ Pro with 18 cores and 48 GB, with no other load. A campaign runs it too.
   of the resident memory of the processes in the session of the run or under its child,
   sampled every 50 ms. Resident memory counts shared pages in each process, so the sum can only
   overstate.
-- After the timed runs, the checker recomputes from the raw data every point, as the value of
-  the same weekday in the last week of the window, every `BottomUp` sum, and the thresholds of
-  10,000 cells of each replay, drawn with a seed that it picks at run time. A ready cell must
+- After each timed run, outside its timed part, the checker recomputes from the raw data
+  every point, as the value of the same weekday in the last week of the window, every
+  `BottomUp` sum, and the thresholds of 10,000 cells of each replay, drawn with a seed that it
+  picks at run time. A ready cell must
   equal `conformal_quantile` of its recomputed scores, bit for bit, and a cell that is not ready
   must be +inf. The expected shape, sums and node count are constants of the gate, which M0
   computes from the raw files.

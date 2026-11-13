@@ -3,9 +3,9 @@
     uv run python bench/gate_m5.py data/m5
 
 One warm-up run, then three timed runs of `gate_m5_run.py`. Pass: the median wall time is
-under 19.0 s and each peak under 11.9 GB. The checker then recomputes from the raw data
-every point, every `BottomUp` sum, and the thresholds of 10,000 cells of each replay,
-drawn with a seed that it picks at run time.
+under 19.0 s and each peak under 11.9 GB. After each timed run, outside its timed part, the
+checker recomputes from the raw data every point, every `BottomUp` sum, and the thresholds
+of 10,000 cells of each replay, drawn with a seed that it picks at run time.
 """
 
 import json
@@ -45,19 +45,19 @@ def main(data: Path) -> int:
     gate.require(raw.values.shape == SHAPE, f"M5 shape {raw.values.shape} != {SHAPE}")
     total = float(raw.values.astype(np.float64).sum())
     gate.require(total == VALUE_SUM, f"M5 sum {total} != {VALUE_SUM}")
-    runs, out = [], None
+    runs = []
     for index in range(1 + TIMED_RUNS):
-        if out is not None:
-            shutil.rmtree(out)
         out = Path(tempfile.mkdtemp(prefix="calibre-gate-m5-"))
-        result = gate.run("gate_m5_run.py", data, out)
-        label = "warm-up" if index == 0 else f"run {index}"
-        print(f"{label}: {result.wall:.2f} s, peak {result.peak / 1e9:.2f} GB", flush=True)
-        if index > 0:
-            runs.append(result)
-    assert out is not None
-    gate.check("gate_m5.py", str(data), str(out))
-    shutil.rmtree(out)
+        try:
+            result = gate.run("gate_m5_run.py", data, out)
+            label = "warm-up" if index == 0 else f"run {index}"
+            print(f"{label}: {result.wall:.2f} s, peak {result.peak / 1e9:.2f} GB", flush=True)
+            if index > 0:
+                # Each timed run counts in the median, so each one must be correct.
+                gate.check("gate_m5.py", str(data), str(out))
+                runs.append(result)
+        finally:
+            shutil.rmtree(out)
     wall = statistics.median(run.wall for run in runs)
     peak = max(run.peak for run in runs)
     print(f"median {wall:.2f} s (limit {WALL_LIMIT} s), peak {peak / 1e9:.2f} GB (limit 11.9 GB)")
