@@ -1,6 +1,6 @@
 """Calibre: conformal forecasting on the Nixtla kernel layer."""
 
-from calibre.backtest import Replay, replay, rolling_forecasts
+from calibre.backtest import Replay, combine, replay, rolling_forecasts
 from calibre.conformal import Span, Split, Step, Target
 from calibre.data import Hierarchy, Panel
 from calibre.decision import Settlement, critical_ratio, order_up_to, settle
@@ -10,7 +10,9 @@ from calibre.forecast import (
     Forecasts,
     Identity,
     Reconciler,
+    SeasonalNaive,
     Window,
+    WindowAverage,
     WlsStruct,
     reconcile,
 )
@@ -20,8 +22,11 @@ __all__ = [
     "Hierarchy",
     "Window",
     "Forecaster",
+    "WindowAverage",
+    "SeasonalNaive",
     "rolling_forecasts",
     "Forecasts",
+    "combine",
     "reconcile",
     "Reconciler",
     "BottomUp",

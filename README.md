@@ -18,11 +18,12 @@ pip install libcalibre
 uv add libcalibre
 ```
 
-The `stats` extra installs statsforecast, the engine that `rolling_forecasts` runs.
-Importing `calibre` does not load it.
+The `stats` extra installs statsforecast, and the `ml` extra installs mlforecast. These are
+the engines that `rolling_forecasts` runs. Importing `calibre` does not load them.
 
 ```sh
 pip install "libcalibre[stats]"
+pip install "libcalibre[ml]"
 ```
 
 ## Quick start
@@ -79,7 +80,7 @@ M models, T periods, O origins, H steps, and C target columns (H for `Step`, 1 f
 | Stage | Names |
 |---|---|
 | Data | `Panel`, `Hierarchy` |
-| Forecast | `rolling_forecasts`, `Forecasts`, `Window`, `Forecaster`, `reconcile`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`) |
+| Forecast | `rolling_forecasts`, `Forecasts` (`Forecasts.concat`), `Window`, `Forecaster` (`WindowAverage`, `SeasonalNaive`), `combine`, `reconcile`, `Reconciler` (`BottomUp`, `Identity`, `WlsStruct`) |
 | Calibrate | `Target` (`Step`, `Span`), `Split`, `replay`, `Replay` |
 | Decide | `critical_ratio`, `order_up_to`, `settle`, `Settlement` |
 
@@ -87,8 +88,9 @@ A model reads only its window, so a later value cannot change a point. A thresho
 only the scores that are known at its origin. Scores, quantiles and diagnostics come from
 conformalforecast.
 
-`rolling_forecasts` runs `StatsForecast` objects as they are, and any subclass of
-`Forecaster`. `Forecasts.from_cv` reads the cross-validation frame of a Nixtla library.
+`rolling_forecasts` runs `StatsForecast` and `MLForecast` objects as they are, and any
+subclass of `Forecaster`. `combine` weights the models by the losses that are known at
+each origin. `Forecasts.from_cv` reads the cross-validation frame of a Nixtla library.
 
 [Architecture](https://github.com/Vzlentin/calibre/blob/main/docs/architecture.md) has the shapes and the modules.
 

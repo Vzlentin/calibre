@@ -139,3 +139,44 @@ class Forecasts:
             self.series,
             self.origins,
         )
+
+    @classmethod
+    def concat(cls, forecasts: Sequence["Forecasts"]) -> "Forecasts":
+        """Join forecasts along the one axis whose labels differ: models, series or origins.
+
+        The parts have equal labels on the other two axes and the same steps. The origins of
+        the result are sorted. The models and the series follow the order of the parts.
+        """
+        if isinstance(forecasts, str) or not isinstance(forecasts, Sequence):
+            raise TypeError("forecasts must be a sequence of Forecasts")
+        if not all(isinstance(part, Forecasts) for part in forecasts):
+            raise TypeError("forecasts must hold Forecasts")
+        if len(forecasts) == 0:
+            raise ValueError("concat needs at least one Forecasts")
+        first = forecasts[0]
+        if len(forecasts) == 1:
+            return first
+        if any(part.points.shape[2] != first.points.shape[2] for part in forecasts):
+            raise ValueError("the parts must have the same number of steps")
+        differ = [
+            name
+            for name in ("models", "series", "origins")
+            if any(
+                not np.array_equal(getattr(part, name), getattr(first, name)) for part in forecasts
+            )
+        ]
+        if len(differ) != 1:
+            raise ValueError("the parts must differ on exactly one axis")
+        name = differ[0]
+        labels = [getattr(part, name) for part in forecasts]
+        joined = labels[0].append(labels[1:]) if name == "origins" else np.concatenate(labels)
+        if pd.Index(joined).has_duplicates:
+            raise ValueError(f"two parts hold the same {name}")
+        axis = {"models": 0, "series": 1, "origins": 3}[name]
+        points = np.concatenate([part.points for part in forecasts], axis=axis)
+        if name == "origins":
+            order = np.argsort(np.asarray(joined), kind="stable")
+            points, joined = points[..., order], joined[order]
+        fields = {"models": first.models, "series": first.series, "origins": first.origins}
+        fields[name] = joined
+        return cls(points, **fields)

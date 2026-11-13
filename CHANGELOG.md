@@ -6,6 +6,15 @@ All notable changes are listed here. The format follows
 
 ## Unreleased
 
+### Added
+
+- `combine` gives one row of points: the mean of the models, weighted by the losses
+  that are known at each origin.
+- `Forecasts.concat` joins forecasts along models, series or origins.
+- `WindowAverage` and `SeasonalNaive` are `Forecaster` models that compute all origins
+  at once on the arrays of the panel.
+- `rolling_forecasts` runs `MLForecast` objects. The `ml` extra installs mlforecast.
+
 ### Changed
 
 - The backtest runs on the v2 layout of `docs/architecture.md`. `Panel` is a ragged

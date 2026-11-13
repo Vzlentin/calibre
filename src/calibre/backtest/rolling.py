@@ -2,7 +2,6 @@
 
 import importlib
 from collections.abc import Sequence
-from types import ModuleType
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -13,17 +12,30 @@ from calibre.forecast.forecasts import Forecasts
 from calibre.forecast.window import Forecaster, Window
 
 if TYPE_CHECKING:
+    from mlforecast import MLForecast
     from statsforecast import StatsForecast
 
 
-def _is_statsforecast(engine: object) -> bool:
+_ENGINES = {("statsforecast", "StatsForecast"), ("mlforecast", "MLForecast")}
+
+
+def _engine_kind(engine: object) -> tuple[str, str]:
     kind = type(engine)
-    return kind.__name__ == "StatsForecast" and kind.__module__.split(".")[0] == "statsforecast"
+    return kind.__module__.split(".")[0], kind.__name__
 
 
-def _engine_module() -> ModuleType:
-    # Loaded only when a StatsForecast object is passed, so `import calibre` stays light.
-    return importlib.import_module("calibre.forecast.engines.statsforecast")
+def _wrap(engine: object, freq: str) -> Forecaster:
+    if isinstance(engine, Forecaster):
+        return engine
+    # The engine modules load only when their engine is passed, so `import calibre` stays light.
+    kind = _engine_kind(engine)
+    if kind == ("statsforecast", "StatsForecast"):
+        module = importlib.import_module("calibre.forecast.engines.statsforecast")
+        return module.StatsForecastEngine(engine, freq)
+    if kind == ("mlforecast", "MLForecast"):
+        module = importlib.import_module("calibre.forecast.engines.mlforecast")
+        return module.MLForecastEngine(engine, freq)
+    raise TypeError(f"unknown engine {type(engine).__name__}")
 
 
 def _check_forecaster(engine: Forecaster) -> list[str]:
@@ -42,7 +54,7 @@ def _check_forecaster(engine: Forecaster) -> list[str]:
 
 def rolling_forecasts(
     panel: Panel,
-    engines: Sequence["StatsForecast | Forecaster"],
+    engines: Sequence["StatsForecast | MLForecast | Forecaster"],
     origins: pd.DatetimeIndex,
     horizon: int,
     *,
@@ -52,7 +64,7 @@ def rolling_forecasts(
     if not isinstance(panel, Panel):
         raise TypeError("panel must be a Panel")
     if isinstance(engines, str) or not isinstance(engines, Sequence):
-        raise TypeError("engines must be a sequence of StatsForecast or Forecaster objects")
+        raise TypeError("engines must be a sequence of engine objects")
     if not isinstance(origins, pd.DatetimeIndex):
         raise TypeError("origins must be a pandas DatetimeIndex")
     if not isinstance(horizon, int) or isinstance(horizon, bool):
@@ -62,9 +74,9 @@ def rolling_forecasts(
     if len(engines) == 0:
         raise ValueError("engines needs at least one engine")
     for engine in engines:
-        if not isinstance(engine, Forecaster) and not _is_statsforecast(engine):
+        if not isinstance(engine, Forecaster) and _engine_kind(engine) not in _ENGINES:
             raise TypeError(
-                "an engine must be a StatsForecast or Forecaster object, "
+                "an engine must be a StatsForecast, MLForecast or Forecaster object, "
                 f"got {type(engine).__name__}"
             )
     if horizon < 1:
@@ -78,12 +90,7 @@ def rolling_forecasts(
     position = panel.periods.get_indexer(origins)
     if (position < 0).any():
         raise ValueError("each origin must be a period of the panel")
-    forecasters = [
-        engine
-        if isinstance(engine, Forecaster)
-        else _engine_module().StatsForecastEngine(engine, panel.freq)
-        for engine in engines
-    ]
+    forecasters = [_wrap(engine, panel.freq) for engine in engines]
     names: list[str] = []
     for forecaster in forecasters:
         names.extend(_check_forecaster(forecaster))
