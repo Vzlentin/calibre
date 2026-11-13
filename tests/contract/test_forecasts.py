@@ -553,7 +553,7 @@ def test_concat_joins_by_label():
 
 
 def test_concat_input_conditions():
-    """F8: concat raises TypeError when `parts` is not a sequence of Forecasts, and ValueError
+    """F8: concat raises TypeError when `forecasts` is not a sequence of Forecasts, and ValueError
     for no part, two values for one cell, parts that differ on more than one axis, and parts
     with other numbers of steps."""
     whole = whole_forecasts(seed=36)

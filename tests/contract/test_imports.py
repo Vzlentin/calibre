@@ -634,7 +634,7 @@ def test_model_signatures():
             ("window", "ko", None),
             ("best", "ko", ("default", False)),
         ],
-        concat: [("parts", "pk", None)],
+        concat: [("forecasts", "pk", None)],
         window_average: [
             ("window_size", "pk", None),
             ("num_threads", "pk", ("default", 1)),
@@ -664,7 +664,7 @@ def test_model_signatures():
         origins=periods[3:7],
         horizon=2,
     )
-    joined = concat(parts=[naive, kernel])
+    joined = concat(forecasts=[naive, kernel])
     assert list(joined.models) == ["Naive", "WindowAverage", "SeasonalNaive"]
     combined = combine(forecasts=kernel, truth=panel, window=2, best=True)
     assert list(combined.models) == ["combined"]

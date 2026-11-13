@@ -252,7 +252,7 @@ class Forecasts:
     def select(self, model: str) -> "Forecasts": ...
 
     @classmethod
-    def concat(cls, parts: Sequence["Forecasts"]) -> "Forecasts": ...
+    def concat(cls, forecasts: Sequence["Forecasts"]) -> "Forecasts": ...
 ```
 
 `from_cv` reads a Nixtla cross-validation frame: one row per series, cutoff and step, with a
@@ -263,7 +263,7 @@ columns, whose names hold `-lo-` or `-hi-`. A frame carries no time rule, so Cal
 check that its points did not read the future. `select` returns one model, with M = 1, and
 raises for an unknown model.
 
-`concat` reads `parts`: a sequence of at least one `Forecasts`. The parts join along one
+`concat` reads `forecasts`: a sequence of at least one `Forecasts`. The parts join along one
 axis, the models, the series or the origins: the one axis whose labels differ between the
 parts. On the other two axes, every part has the same labels, in the same order, and every
 part has the same number of steps. A label of the joined axis is in one part only, so no
